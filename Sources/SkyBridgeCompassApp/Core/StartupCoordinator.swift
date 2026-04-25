@@ -178,27 +178,11 @@ public class StartupCoordinator: ObservableObject {
     
  /// 初始化安全服务
     private func initializeSecurityServices() async {
-        // 启动阶段最多触发一次交互式解锁，后续所有后台读取保持静默失败。
-        let unlocked = await KeychainManager.shared.prepareInteractiveUnlockIfNeeded()
-        if !unlocked {
-            logger.warning("🔐 Keychain 启动解锁未完成，后台读取将保持静默失败并进入冷却")
-        } else {
-            await MainActor.run {
-                AuthenticationService.shared.reloadPersistedSessionIfNeeded()
-            }
-        }
-        
-// 初始化本机强身份（用于设备发现的本机判定）
-        await SelfIdentityProvider.shared.loadOrCreate()
-        logger.debug("🆔 本机强身份初始化完成")
+        // loadAuthSession uses non-interactive Keychain access; identity material is
+        // still provisioned later from authenticated flows that actually need it.
+        AuthenticationService.shared.reloadPersistedSessionIfNeeded()
 
-        // Prewarm identity / signing / pairing KEM material up front so the first real
-        // P2P attempt does not spend its handshake window on keychain prompts or key generation.
-        await DeviceIdentityKeyManager.shared.prewarmConnectionIdentityMaterials()
-        _ = TrustSyncService.shared
-        logger.debug("🔐 P2P 身份材料与信任缓存预热完成")
-        
-        logger.debug("🔒 安全服务初始化完成")
+        logger.debug("🔒 安全服务初始化完成（登录态非交互恢复，Keychain 身份材料延迟加载）")
     }
     
  /// 初始化性能监控基础

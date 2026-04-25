@@ -26,7 +26,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 source "${ROOT_DIR}/Scripts/notarytool_helpers.sh"
 source "${ROOT_DIR}/Scripts/signing_entitlements_helpers.sh"
 APP_PATH=${APP_PATH:-"${ROOT_DIR}/dist/SkyBridge Compass Pro.app"}
-APP_ENTITLEMENTS=${APP_ENTITLEMENTS:-"${ROOT_DIR}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"}
+APP_ENTITLEMENTS=${APP_ENTITLEMENTS:-""}
 WIDGET_ENTITLEMENTS=${WIDGET_ENTITLEMENTS:-"${ROOT_DIR}/Sources/SkyBridgeCompassWidgets/SkyBridgeCompassWidgetsExtension.entitlements"}
 NOTARIZE_APP=${NOTARIZE_APP:-0}
 REQUIRE_NOTARIZATION=${REQUIRE_NOTARIZATION:-0}
@@ -65,21 +65,43 @@ else
   log "使用证书：${IDENTITY}"
 fi
 
-if [[ ! -f "${APP_ENTITLEMENTS}" ]]; then
-  echo "错误：未找到主应用打包 entitlements：${APP_ENTITLEMENTS}" >&2
-  exit 1
-fi
-
 SIGN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-sign.XXXXXX")"
 APP_INFO_PLIST="${APP_PATH}/Contents/Info.plist"
 EMBEDDED_PROFILE_PATH="${APP_PATH}/Contents/embedded.provisionprofile"
 ACTIVE_APP_ENTITLEMENTS="${SIGN_TMP_DIR}/SkyBridgeCompassApp.packaging.entitlements"
+PLUGINS_DIR="${APP_PATH}/Contents/PlugIns"
+WIDGET_APPEX_PATH="${PLUGINS_DIR}/SkyBridgeCompassWidgetsExtension.appex"
+WIDGET_INFO_PLIST="${WIDGET_APPEX_PATH}/Contents/Info.plist"
+WIDGET_PROFILE_PATH="${WIDGET_APPEX_PATH}/Contents/embedded.provisionprofile"
+ACTIVE_WIDGET_ENTITLEMENTS="${SIGN_TMP_DIR}/SkyBridgeCompassWidgetsExtension.entitlements"
 
 cleanup_sign_tmp() {
   rm -rf "${SIGN_TMP_DIR}"
 }
 
 trap cleanup_sign_tmp EXIT
+
+if [[ -z "${APP_ENTITLEMENTS}" ]]; then
+  REQUIRED_APPLE_SIGN_IN_MODE="$(skybridge_resolve_required_apple_sign_in_mode 2>/dev/null || echo auto)"
+  BUNDLED_APPLE_SIGN_IN_MODE="$(skybridge_read_plist_string "${APP_INFO_PLIST}" "SKYBRIDGE_APPLE_SIGN_IN_MODE" 2>/dev/null || true)"
+
+  if [[ "${REQUIRED_APPLE_SIGN_IN_MODE}" == "auto" && -n "${BUNDLED_APPLE_SIGN_IN_MODE}" ]]; then
+    REQUIRED_APPLE_SIGN_IN_MODE="${BUNDLED_APPLE_SIGN_IN_MODE}"
+  fi
+
+  APP_ENTITLEMENTS="$(skybridge_default_app_packaging_entitlements_path "${ROOT_DIR}" "${REQUIRED_APPLE_SIGN_IN_MODE}")"
+fi
+
+if [[ ! -f "${APP_ENTITLEMENTS}" ]]; then
+  echo "错误：未找到主应用打包 entitlements：${APP_ENTITLEMENTS}" >&2
+  exit 1
+fi
+
+if skybridge_entitlements_request_application_groups "${APP_ENTITLEMENTS}" && \
+   [[ -z "${SKYBRIDGE_REQUIRE_APP_GROUPS+x}" ]]; then
+  export SKYBRIDGE_REQUIRE_APP_GROUPS=1
+  log "正式签名默认要求 App Groups entitlement 被 provisioning profile 覆盖；如需显式允许降级，请设置 SKYBRIDGE_REQUIRE_APP_GROUPS=0"
+fi
 
 skybridge_prepare_signing_entitlements \
   "${APP_ENTITLEMENTS}" \
@@ -88,6 +110,7 @@ skybridge_prepare_signing_entitlements \
   "${EMBEDDED_PROFILE_PATH}"
 
 APPLE_SIGN_IN_FEATURE_FLAG="$(skybridge_read_plist_bool "${APP_INFO_PLIST}" "SKYBRIDGE_ENABLE_APPLE_SIGN_IN" 2>/dev/null || echo "unknown")"
+APPLE_SIGN_IN_MODE="$(skybridge_read_plist_string "${APP_INFO_PLIST}" "SKYBRIDGE_APPLE_SIGN_IN_MODE" 2>/dev/null || echo "unknown")"
 if [[ "${APPLE_SIGN_IN_FEATURE_FLAG}" == "1" ]]; then
   log "Apple 登录产品开关（SKYBRIDGE_ENABLE_APPLE_SIGN_IN）：开启"
 elif [[ "${APPLE_SIGN_IN_FEATURE_FLAG}" == "0" ]]; then
@@ -96,15 +119,78 @@ else
   log "Apple 登录产品开关（SKYBRIDGE_ENABLE_APPLE_SIGN_IN）：未配置"
 fi
 
-if [[ "${SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN:-0}" == "1" ]]; then
-  log "原生 Apple 登录可用性（SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN）：可用"
-else
-  log "原生 Apple 登录可用性（SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN）：不可用"
-fi
+case "${APPLE_SIGN_IN_MODE}" in
+  native)
+    log "Apple 登录运行模式：native（AuthenticationServices 原生授权）"
+    ;;
+  web_session)
+    log "Apple 登录运行模式：web_session（ASWebAuthenticationSession 安全网页授权）"
+    ;;
+  disabled)
+    log "Apple 登录运行模式：disabled（登录入口关闭）"
+    ;;
+  *)
+    log "Apple 登录运行模式：未知"
+    ;;
+esac
 
-if [[ "${APPLE_SIGN_IN_FEATURE_FLAG}" == "1" && "${SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN:-0}" != "1" ]]; then
-  log "Apple 登录产品功能仍保持开启，但当前签名产物不具备原生 Apple Sign In entitlement；运行时应走非原生方案"
-fi
+function prepare_widget_signing_inputs() {
+  local widget_bundle_identifier=""
+  local widget_team_identifier=""
+
+  if [[ ! -d "${WIDGET_APPEX_PATH}" ]]; then
+    if [[ "${SKYBRIDGE_REQUIRE_WIDGET_EXTENSION:-0}" == "1" ]]; then
+      echo "错误：签名前缺少必需的 Widget Extension：${WIDGET_APPEX_PATH}" >&2
+      exit 1
+    fi
+    return 0
+  fi
+
+  if [[ ! -f "${WIDGET_ENTITLEMENTS}" ]]; then
+    echo "错误：未找到 Widget Extension entitlements：${WIDGET_ENTITLEMENTS}" >&2
+    exit 1
+  fi
+
+  cp "${WIDGET_ENTITLEMENTS}" "${ACTIVE_WIDGET_ENTITLEMENTS}"
+
+  [[ -f "${WIDGET_INFO_PLIST}" ]] || {
+    echo "错误：Widget Extension 缺少 Info.plist：${WIDGET_INFO_PLIST}" >&2
+    exit 1
+  }
+
+  widget_bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${WIDGET_INFO_PLIST}" 2>/dev/null || true)
+  if [[ -z "${widget_bundle_identifier}" ]]; then
+    echo "错误：无法读取 Widget Extension bundle identifier：${WIDGET_INFO_PLIST}" >&2
+    exit 1
+  fi
+
+  widget_team_identifier="$(printf '%s' "${IDENTITY}" | sed -n 's/.*(\([^)]*\)).*/\1/p')"
+  if [[ -z "${widget_team_identifier}" ]]; then
+    echo "错误：无法从签名身份解析 Team ID：${IDENTITY}" >&2
+    exit 1
+  fi
+
+  if [[ -f "${WIDGET_PROFILE_PATH}" ]]; then
+    skybridge_validate_provisionprofile_app_identity \
+      "${WIDGET_PROFILE_PATH}" \
+      "${widget_bundle_identifier}" \
+      "${widget_team_identifier}" \
+      || {
+        echo "错误：嵌入的 Widget Extension provisioning profile 与签名团队或 bundle identifier 不匹配。" >&2
+        exit 1
+      }
+
+    if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+      "${WIDGET_PROFILE_PATH}" \
+      "${ACTIVE_WIDGET_ENTITLEMENTS}"; then
+      echo "错误：Widget Extension provisioning profile 不覆盖请求的 App Groups entitlement。" >&2
+      exit 1
+    fi
+  elif [[ "${SKYBRIDGE_REQUIRE_WIDGET_EXTENSION:-0}" == "1" || "${SKYBRIDGE_REQUIRE_APP_GROUPS:-0}" == "1" ]]; then
+    echo "错误：Widget Extension 缺少 embedded.provisionprofile：${WIDGET_PROFILE_PATH}" >&2
+    exit 1
+  fi
+}
 
 function codesign_target() {
   local target="$1"
@@ -145,8 +231,8 @@ function sign_nested_code() {
   if [[ -d "${plugins_dir}" ]]; then
     while IFS= read -r -d '' appex; do
       local appex_entitlements=""
-      if [[ -f "${WIDGET_ENTITLEMENTS}" && "$(basename "${appex}")" == "SkyBridgeCompassWidgetsExtension.appex" ]]; then
-        appex_entitlements="${WIDGET_ENTITLEMENTS}"
+      if [[ -f "${ACTIVE_WIDGET_ENTITLEMENTS}" && "$(basename "${appex}")" == "SkyBridgeCompassWidgetsExtension.appex" ]]; then
+        appex_entitlements="${ACTIVE_WIDGET_ENTITLEMENTS}"
       fi
       codesign_target "${appex}" "${appex_entitlements}"
     done < <(find "${plugins_dir}" -type d -name "*.appex" -print0)
@@ -168,6 +254,8 @@ function notarize_app_bundle() {
   skybridge_staple_artifact "${APP_PATH}"
   rm -rf "${temp_dir}"
 }
+
+prepare_widget_signing_inputs
 
 log "开始签名嵌入式代码"
 sign_nested_code

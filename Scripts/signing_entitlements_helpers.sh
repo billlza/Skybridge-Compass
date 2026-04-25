@@ -23,6 +23,15 @@ skybridge_set_plist_bool() {
   fi
 }
 
+skybridge_set_plist_string() {
+  local plist_path="$1"
+  local key="$2"
+  local value="$3"
+
+  /usr/libexec/PlistBuddy -c "Set :${key} ${value}" "${plist_path}" >/dev/null 2>&1 \
+    || /usr/libexec/PlistBuddy -c "Add :${key} string ${value}" "${plist_path}" >/dev/null 2>&1
+}
+
 skybridge_read_plist_bool() {
   local plist_path="$1"
   local key="$2"
@@ -50,8 +59,117 @@ raise SystemExit(1)
 PY
 }
 
+skybridge_read_plist_string() {
+  local plist_path="$1"
+  local key="$2"
+
+  python3 - "${plist_path}" "${key}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+plist_path = Path(sys.argv[1])
+key = sys.argv[2]
+
+if not plist_path.exists():
+    raise SystemExit(1)
+
+with plist_path.open("rb") as fh:
+    plist = plistlib.load(fh)
+
+value = plist.get(key)
+if isinstance(value, str) and value.strip():
+    print(value.strip())
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+skybridge_normalize_apple_sign_in_mode() {
+  local raw_value="${1:-}"
+  local normalized="${raw_value//-/_}"
+  normalized="${normalized// /_}"
+  normalized="$(printf '%s' "${normalized}" | tr '[:upper:]' '[:lower:]')"
+
+  case "${normalized}" in
+    native)
+      printf 'native\n'
+      ;;
+    web|browser|browser_session|web_session|aswebauthenticationsession|secure_web_session)
+      printf 'web_session\n'
+      ;;
+    disabled|off|none)
+      printf 'disabled\n'
+      ;;
+    auto|automatic|"")
+      printf 'auto\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+skybridge_resolve_required_apple_sign_in_mode() {
+  local raw_mode="${SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE:-}"
+  local normalized_mode=""
+
+  if [[ -z "${raw_mode}" && "${SKYBRIDGE_REQUIRE_APPLE_SIGN_IN:-0}" == "1" ]]; then
+    raw_mode="native"
+  fi
+
+  normalized_mode="$(skybridge_normalize_apple_sign_in_mode "${raw_mode}")" || {
+    echo "错误：未知的 SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=${raw_mode}；允许值为 native、web_session、disabled、auto。" >&2
+    return 1
+  }
+
+  printf '%s\n' "${normalized_mode}"
+}
+
+skybridge_default_app_packaging_entitlements_path() {
+  local root_dir="$1"
+  local requested_mode="${2:-auto}"
+  local normalized_mode=""
+
+  normalized_mode="$(skybridge_normalize_apple_sign_in_mode "${requested_mode}")" || return 1
+
+  case "${normalized_mode}" in
+    web_session|disabled)
+      printf '%s\n' "${root_dir}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
+      ;;
+    *)
+      printf '%s\n' "${root_dir}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.native.packaging.entitlements"
+      ;;
+  esac
+}
+
+skybridge_set_effective_apple_sign_in_mode() {
+  local info_plist_path="$1"
+  local mode="$2"
+
+  skybridge_set_plist_string "${info_plist_path}" "SKYBRIDGE_APPLE_SIGN_IN_MODE" "${mode}"
+
+  if [[ "${mode}" == "native" ]]; then
+    SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=1
+    SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=1
+    skybridge_set_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 1
+  else
+    SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=0
+    if [[ "${mode}" == "disabled" ]]; then
+      SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=0
+    else
+      SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=1
+    fi
+    skybridge_set_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 0
+  fi
+
+  SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN_MODE="${mode}"
+}
+
 skybridge_entitlements_request_applesignin() {
   local entitlements_path="$1"
+
   python3 - "${entitlements_path}" <<'PY'
 import plistlib
 import sys
@@ -72,6 +190,29 @@ raise SystemExit(1)
 PY
 }
 
+skybridge_entitlements_request_application_groups() {
+  local entitlements_path="$1"
+
+  python3 - "${entitlements_path}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+
+with path.open("rb") as fh:
+    entitlements = plistlib.load(fh)
+
+value = entitlements.get("com.apple.security.application-groups")
+if isinstance(value, list) and any(str(item).strip() for item in value):
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 skybridge_provisionprofile_supports_applesignin() {
   local profile_path="$1"
   [[ -n "${profile_path}" && -f "${profile_path}" ]] || return 1
@@ -82,19 +223,28 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+def load_profile(path: Path):
+    try:
+        with path.open("rb") as fh:
+            payload = fh.read()
+        return plistlib.loads(payload)
+    except Exception:
+        completed = subprocess.run(
+            ["security", "cms", "-D", "-i", str(path)],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode != 0 or not completed.stdout:
+            raise SystemExit(1)
+        return plistlib.loads(completed.stdout)
+
+
 profile_path = Path(sys.argv[1])
 if not profile_path.exists():
     raise SystemExit(1)
 
-completed = subprocess.run(
-    ["security", "cms", "-D", "-i", str(profile_path)],
-    check=False,
-    capture_output=True,
-)
-if completed.returncode != 0 or not completed.stdout:
-    raise SystemExit(1)
-
-profile = plistlib.loads(completed.stdout)
+profile = load_profile(profile_path)
 entitlements = profile.get("Entitlements", {})
 value = entitlements.get("com.apple.developer.applesignin")
 
@@ -105,23 +255,158 @@ raise SystemExit(1)
 PY
 }
 
-skybridge_profile_supports_requested_restricted_entitlements() {
+skybridge_profile_supports_requested_profile_backed_entitlements() {
   local profile_path="${1:-}"
   local entitlements_path="$2"
 
-  if skybridge_entitlements_request_applesignin "${entitlements_path}"; then
-    skybridge_provisionprofile_supports_applesignin "${profile_path}"
-    return $?
-  fi
+  python3 - "${profile_path}" "${entitlements_path}" <<'PY'
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
 
-  return 0
+
+def load_profile(path: Path):
+    try:
+        with path.open("rb") as fh:
+            payload = fh.read()
+        return plistlib.loads(payload)
+    except Exception:
+        completed = subprocess.run(
+            ["security", "cms", "-D", "-i", str(path)],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode != 0 or not completed.stdout:
+            raise SystemExit(1)
+        return plistlib.loads(completed.stdout)
+
+
+profile_arg = sys.argv[1].strip()
+entitlements_path = Path(sys.argv[2])
+if not entitlements_path.exists():
+    raise SystemExit(1)
+
+with entitlements_path.open("rb") as fh:
+    requested = plistlib.load(fh)
+
+requested_apple_sign_in = requested.get("com.apple.developer.applesignin") or []
+requested_app_groups = requested.get("com.apple.security.application-groups") or []
+requested_apple_sign_in = [str(item).strip() for item in requested_apple_sign_in if str(item).strip()]
+requested_app_groups = [str(item).strip() for item in requested_app_groups if str(item).strip()]
+
+if not requested_apple_sign_in and not requested_app_groups:
+    raise SystemExit(0)
+
+if not profile_arg:
+    raise SystemExit(1)
+
+profile_path = Path(profile_arg)
+if not profile_path.exists():
+    raise SystemExit(1)
+
+profile = load_profile(profile_path)
+profile_entitlements = profile.get("Entitlements", {})
+
+profile_apple_sign_in = [
+    str(item).strip()
+    for item in (profile_entitlements.get("com.apple.developer.applesignin") or [])
+    if str(item).strip()
+]
+profile_app_groups = {
+    str(item).strip()
+    for item in (profile_entitlements.get("com.apple.security.application-groups") or [])
+    if str(item).strip()
+}
+
+if requested_apple_sign_in and not set(requested_apple_sign_in).issubset(set(profile_apple_sign_in)):
+    raise SystemExit(1)
+
+if requested_app_groups and not set(requested_app_groups).issubset(profile_app_groups):
+    raise SystemExit(1)
+
+raise SystemExit(0)
+PY
+}
+
+skybridge_profile_supports_requested_application_groups() {
+  local profile_path="${1:-}"
+  local entitlements_path="$2"
+
+  python3 - "${profile_path}" "${entitlements_path}" <<'PY'
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+
+def load_profile(path: Path):
+    try:
+        with path.open("rb") as fh:
+            payload = fh.read()
+        return plistlib.loads(payload)
+    except Exception:
+        completed = subprocess.run(
+            ["security", "cms", "-D", "-i", str(path)],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode != 0 or not completed.stdout:
+            raise SystemExit(1)
+        return plistlib.loads(completed.stdout)
+
+
+profile_arg = sys.argv[1].strip()
+entitlements_path = Path(sys.argv[2])
+if not entitlements_path.exists():
+    raise SystemExit(1)
+
+with entitlements_path.open("rb") as fh:
+    requested = plistlib.load(fh)
+
+requested_app_groups = {
+    str(item).strip()
+    for item in (requested.get("com.apple.security.application-groups") or [])
+    if str(item).strip()
+}
+
+if not requested_app_groups:
+    raise SystemExit(0)
+
+if not profile_arg:
+    raise SystemExit(1)
+
+profile_path = Path(profile_arg)
+if not profile_path.exists():
+    raise SystemExit(1)
+
+profile = load_profile(profile_path)
+profile_entitlements = profile.get("Entitlements", {})
+profile_app_groups = {
+    str(item).strip()
+    for item in (profile_entitlements.get("com.apple.security.application-groups") or [])
+    if str(item).strip()
+}
+
+if not requested_app_groups.issubset(profile_app_groups):
+    raise SystemExit(1)
+
+raise SystemExit(0)
+PY
+}
+
+skybridge_profile_supports_requested_restricted_entitlements() {
+  local profile_path="${1:-}"
+  local entitlements_path="$2"
+  skybridge_profile_supports_requested_profile_backed_entitlements "${profile_path}" "${entitlements_path}"
 }
 
 skybridge_write_signed_entitlements() {
   local target_path="$1"
   local output_path="$2"
 
-  codesign -d --entitlements :- "${target_path}" >"${output_path}" 2>/dev/null
+  codesign -d --xml --entitlements - "${target_path}" 1>"${output_path}" 2>/dev/null
+  [[ -s "${output_path}" ]]
 }
 
 skybridge_validate_provisionprofile_app_identity() {
@@ -140,20 +425,29 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+def load_profile(path: Path):
+    try:
+        with path.open("rb") as fh:
+            payload = fh.read()
+        return plistlib.loads(payload)
+    except Exception:
+        completed = subprocess.run(
+            ["security", "cms", "-D", "-i", str(path)],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode != 0 or not completed.stdout:
+            print(f"无法解码 provisioning profile: {path}", file=sys.stderr)
+            raise SystemExit(1)
+        return plistlib.loads(completed.stdout)
+
+
 profile_path = Path(sys.argv[1])
 bundle_identifier = sys.argv[2].strip()
 team_identifier = sys.argv[3].strip()
 
-completed = subprocess.run(
-    ["security", "cms", "-D", "-i", str(profile_path)],
-    check=False,
-    capture_output=True,
-)
-if completed.returncode != 0 or not completed.stdout:
-    print(f"无法解码 provisioning profile: {profile_path}", file=sys.stderr)
-    raise SystemExit(1)
-
-profile = plistlib.loads(completed.stdout)
+profile = load_profile(profile_path)
 platforms = profile.get("Platform", [])
 entitlements = profile.get("Entitlements", {})
 profile_team = (profile.get("TeamIdentifier") or [""])[0]
@@ -184,6 +478,8 @@ skybridge_prepare_signing_entitlements() {
   local output_entitlements="$2"
   local info_plist_path="$3"
   local profile_path="${4:-}"
+  local apple_sign_in_feature_flag="0"
+  local required_apple_sign_in_mode=""
 
   [[ -f "${source_entitlements}" ]] || {
     echo "错误：签名 entitlements 文件不存在：${source_entitlements}" >&2
@@ -193,29 +489,59 @@ skybridge_prepare_signing_entitlements() {
   cp "${source_entitlements}" "${output_entitlements}"
   SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=0
   SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=0
+  SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN_MODE="disabled"
+  required_apple_sign_in_mode="$(skybridge_resolve_required_apple_sign_in_mode)" || return 1
+
+  if [[ "$(skybridge_read_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_APPLE_SIGN_IN" 2>/dev/null || echo "0")" == "1" ]]; then
+    apple_sign_in_feature_flag="1"
+  fi
+
+  if skybridge_entitlements_request_application_groups "${output_entitlements}" && \
+     [[ "${SKYBRIDGE_REQUIRE_APP_GROUPS:-0}" == "1" ]] && \
+     ! skybridge_profile_supports_requested_application_groups "${profile_path}" "${output_entitlements}"; then
+    echo "错误：当前 provisioning profile 不覆盖请求的 App Groups entitlement，但 SKYBRIDGE_REQUIRE_APP_GROUPS=1。" >&2
+    echo "请安装包含 com.apple.security.application-groups 的 macOS Developer ID provisioning profile。" >&2
+    return 1
+  fi
+
+  if [[ "${apple_sign_in_feature_flag}" != "1" || "${required_apple_sign_in_mode}" == "disabled" ]]; then
+    /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.applesignin' "${output_entitlements}" >/dev/null 2>&1 || true
+    skybridge_set_effective_apple_sign_in_mode "${info_plist_path}" "disabled"
+    skybridge_signing_policy_log "Apple 登录产品开关已关闭或签名策略要求禁用；已移除原生 entitlement，并将运行时模式标记为 disabled"
+    return 0
+  fi
 
   if ! skybridge_entitlements_request_applesignin "${source_entitlements}"; then
-    skybridge_set_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 0
-    skybridge_signing_policy_log "源 entitlements 未请求 Sign in with Apple；产物仅标记原生 Apple 登录不可用，并保留 SKYBRIDGE_ENABLE_APPLE_SIGN_IN 产品开关"
+    if [[ "${required_apple_sign_in_mode}" == "native" ]]; then
+      echo "错误：当前发布策略要求原生 Sign in with Apple，但源 entitlements 未请求 com.apple.developer.applesignin。" >&2
+      return 1
+    fi
+    skybridge_set_effective_apple_sign_in_mode "${info_plist_path}" "web_session"
+    skybridge_signing_policy_log "源 entitlements 未请求 Sign in with Apple；Apple 登录将以 web_session 模式交付，并保留 SKYBRIDGE_ENABLE_APPLE_SIGN_IN 产品开关"
+    return 0
+  fi
+
+  if [[ "${required_apple_sign_in_mode}" == "web_session" ]]; then
+    /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.applesignin' "${output_entitlements}" >/dev/null 2>&1 || true
+    skybridge_set_effective_apple_sign_in_mode "${info_plist_path}" "web_session"
+    skybridge_signing_policy_log "签名策略要求 Apple 登录走 web_session；已显式移除原生 entitlement，并将运行时模式标记为 web_session"
     return 0
   fi
 
   if skybridge_provisionprofile_supports_applesignin "${profile_path}"; then
-    SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=1
-    SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=1
-    skybridge_set_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 1
-    skybridge_signing_policy_log "检测到支持 Sign in with Apple 的 provisioning profile；保留原生 entitlement，并将 SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN 标记为 true（不改写 SKYBRIDGE_ENABLE_APPLE_SIGN_IN）"
+    skybridge_set_effective_apple_sign_in_mode "${info_plist_path}" "native"
+    skybridge_signing_policy_log "检测到支持 Sign in with Apple 的 provisioning profile；保留原生 entitlement，并将运行时模式标记为 native（不改写 SKYBRIDGE_ENABLE_APPLE_SIGN_IN）"
     return 0
   fi
 
-  if [[ "${SKYBRIDGE_REQUIRE_APPLE_SIGN_IN:-0}" == "1" ]]; then
-    echo "错误：当前 provisioning profile 不支持 Sign in with Apple，但 SKYBRIDGE_REQUIRE_APPLE_SIGN_IN=1。" >&2
-    echo "请安装包含 com.apple.developer.applesignin 的 macOS Developer ID provisioning profile。" >&2
+  if [[ "${required_apple_sign_in_mode}" == "native" ]]; then
+    echo "错误：当前签名上下文不支持原生 Sign in with Apple，但发布策略要求 SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=native。" >&2
+    echo "请改用支持原生 Sign in with Apple 的分发通道与 provisioning profile；Developer ID + DMG 应改用 SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session。" >&2
     return 1
   fi
 
   /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.applesignin' "${output_entitlements}" >/dev/null 2>&1 || true
-  skybridge_set_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 0
-  skybridge_signing_policy_log "当前 provisioning profile 不支持 Sign in with Apple；已移除原生受限 entitlement，并将 SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN 标记为 false（保留 SKYBRIDGE_ENABLE_APPLE_SIGN_IN 产品开关）"
+  skybridge_set_effective_apple_sign_in_mode "${info_plist_path}" "web_session"
+  skybridge_signing_policy_log "当前 provisioning profile 不支持原生 Sign in with Apple；已移除原生受限 entitlement，并将运行时模式切换为 web_session（保留 SKYBRIDGE_ENABLE_APPLE_SIGN_IN 产品开关）"
   return 0
 }

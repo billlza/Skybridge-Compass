@@ -315,6 +315,7 @@ mac_info = read_plist(project_root / "Sources/SkyBridgeCompassApp/Info.plist")
 ios_info = read_plist(project_root / "SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist")
 ios_supabase_config = read_plist(project_root / "SkyBridge Compass iOS/SkyBridgeCompassiOS/Resources/SupabaseConfig.plist")
 mac_packaging_entitlements = read_plist(project_root / "Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements")
+mac_native_packaging_entitlements = read_plist(project_root / "Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.native.packaging.entitlements")
 mac_dev_entitlements = read_plist(project_root / "Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.entitlements")
 ios_debug_entitlements = read_plist(project_root / "SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements")
 ios_release_entitlements = read_plist(project_root / "SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements")
@@ -336,13 +337,16 @@ if ios_supabase_turnstile_site_key and ios_supabase_turnstile_site_key != ios_tu
     errors.append("iOS SupabaseConfig.plist 的 TURNSTILE_SITE_KEY 与 Info.plist 不一致")
 
 for label, entitlements in [
-    ("macOS packaging entitlements", mac_packaging_entitlements),
+    ("macOS native packaging entitlements", mac_native_packaging_entitlements),
     ("macOS development entitlements", mac_dev_entitlements),
     ("iOS Debug entitlements", ios_debug_entitlements),
     ("iOS Release entitlements", ios_release_entitlements),
 ]:
     if "com.apple.developer.applesignin" not in entitlements:
         errors.append(f"{label} 缺少 com.apple.developer.applesignin")
+
+if "com.apple.developer.applesignin" in mac_packaging_entitlements:
+    errors.append("macOS Developer ID packaging entitlements 不应直接请求 com.apple.developer.applesignin；应改用 web_session 分发模式")
 
 if 'CODE_SIGN_ENTITLEMENTS = "SkyBridgeCompass-iOSDebug.entitlements";' not in pbxproj_text:
     errors.append("iOS Xcode project 未绑定 Debug entitlements")

@@ -7,6 +7,10 @@ import CoreVideo
 @preconcurrency import WebRTC
 #endif
 
+#if canImport(WebRTCAudioDeviceBridge)
+import WebRTCAudioDeviceBridge
+#endif
+
 #if canImport(WebRTC)
 /// Global SSL lifecycle guard for WebRTC.
 ///
@@ -45,10 +49,21 @@ private enum WebRTCSSL {
 private enum WebRTCPeerConnectionFactoryProvider {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var sharedFactory: RTCPeerConnectionFactory?
+    nonisolated(unsafe) private static var sharedFactoryWithCustomAudioDevice: RTCPeerConnectionFactory?
 
-    static func factory() -> RTCPeerConnectionFactory {
+    static func factory(useCustomAudioDevice: Bool) -> RTCPeerConnectionFactory {
         lock.lock()
         defer { lock.unlock() }
+        if useCustomAudioDevice {
+#if os(macOS)
+            if let sharedFactoryWithCustomAudioDevice {
+                return sharedFactoryWithCustomAudioDevice
+            }
+            let factory = SBWebRTCPeerConnectionFactoryBridge.makePeerConnectionFactoryWithSystemAudioDevice()
+            sharedFactoryWithCustomAudioDevice = factory
+            return factory
+#endif
+        }
         if let sharedFactory {
             return sharedFactory
         }
@@ -157,6 +172,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case dispatch(bufferedCount: Int)
     }
 
+    enum PendingInboundBufferLimitPlan: Equatable {
+        case append(nextPendingCount: Int, nextPendingBytes: Int)
+        case overflow
+    }
+
     enum PendingRemoteICEPlan: Equatable {
         case ignoreDuplicate
         case queueCandidate(nextPendingCount: Int)
@@ -167,6 +187,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private static let publicFallbackSTUNURL = "stun:stun.l.google.com:19302"
     private static let controlChannelLabel = "skybridge"
     private static let screenChannelLabel = "skybridge-screen"
+    private static let maxPendingInboundControlBuffers = 64
+    private static let maxPendingInboundControlBytes = 512 * 1024
+    private static let maxPendingInboundScreenBuffers = 256
+    private static let maxPendingInboundScreenBytes = 4 * 1024 * 1024
     private let stateQueue = DispatchQueue(label: "com.skybridge.webrtc.session.state.\(UUID().uuidString)")
     private let stateQueueKey = DispatchSpecificKey<String>()
     private let stateQueueID = UUID().uuidString
@@ -226,6 +250,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var localVideoTrack: RTCVideoTrack?
     private var localVideoTransceiver: RTCRtpTransceiver?
     private var localVideoCapturer: RTCVideoCapturer?
+    private var localAudioSource: RTCAudioSource?
+    private var localAudioTrack: RTCAudioTrack?
+    private var localAudioTransceiver: RTCRtpTransceiver?
     private var didLogOutgoingNativeVideoFrame = false
     private var didLogMissingOutgoingNativeVideoPipeline = false
     private var outgoingNativeVideoFrameCount: UInt64 = 0
@@ -249,11 +276,25 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private let outboundFrameGate = WebRTCOutboundFrameGate()
     private let outboundScreenFrameGate = WebRTCOutboundFrameGate()
     private var pendingInboundDataBuffers: [Data] = []
+    private var pendingInboundDataBytes: Int = 0
     private var pendingInboundScreenDataBuffers: [Data] = []
+    private var pendingInboundScreenDataBytes: Int = 0
     // Native screen video is the primary cross-network path on macOS.
     // Other platforms stay on the framed DataChannel path unless explicitly enabled.
     private let prefersNativeOutgoingScreenTrack: Bool = {
         if let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_SCREEN_TRACK"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            return raw == "1"
+        }
+#if os(macOS)
+        return true
+#else
+        return false
+#endif
+    }()
+    private let prefersNativeOutgoingAudioTrack: Bool = {
+        if let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_AUDIO_TRACK"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !raw.isEmpty {
             return raw == "1"
@@ -337,6 +378,21 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         return .dispatch(bufferedCount: pendingCount)
     }
 
+    nonisolated static func pendingInboundBufferLimitPlan(
+        pendingCount: Int,
+        pendingBytes: Int,
+        incomingBytes: Int,
+        maxCount: Int,
+        maxBytes: Int
+    ) -> PendingInboundBufferLimitPlan {
+        let nextPendingCount = pendingCount + 1
+        let nextPendingBytes = pendingBytes + incomingBytes
+        guard nextPendingCount <= maxCount, nextPendingBytes <= maxBytes else {
+            return .overflow
+        }
+        return .append(nextPendingCount: nextPendingCount, nextPendingBytes: nextPendingBytes)
+    }
+
     nonisolated static func pendingRemoteICEPlan(
         isDuplicate: Bool,
         hasRemoteDescription: Bool,
@@ -379,6 +435,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             localVideoSource = nil
             localVideoTransceiver = nil
             localVideoCapturer = nil
+            localAudioTrack = nil
+            localAudioSource = nil
+            localAudioTransceiver = nil
             didLogOutgoingNativeVideoFrame = false
             didLogMissingOutgoingNativeVideoPipeline = false
             outgoingNativeVideoFrameCount = 0
@@ -395,9 +454,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             onLocalICECandidate = nil
             inboundDataLock.lock()
             pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+            pendingInboundDataBytes = 0
             inboundDataLock.unlock()
             inboundScreenDataLock.lock()
             pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+            pendingInboundScreenDataBytes = 0
             inboundScreenDataLock.unlock()
             onData = nil
             onScreenData = nil
@@ -482,7 +543,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
             WebRTCSSL.retain()
             sslHeld = true
-            let factory = WebRTCPeerConnectionFactoryProvider.factory()
+            let factory = WebRTCPeerConnectionFactoryProvider.factory(
+                useCustomAudioDevice: prefersNativeOutgoingAudioTrack
+            )
             
             let config = RTCConfiguration()
             config.sdpSemantics = .unifiedPlan
@@ -508,6 +571,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             self.peerConnection = pc
             if prefersNativeOutgoingScreenTrack {
                 configureOutgoingScreenVideoIfNeeded(factory: factory, peerConnection: pc)
+            }
+            if prefersNativeOutgoingAudioTrack {
+                configureOutgoingSystemAudioIfNeeded(factory: factory, peerConnection: pc)
             }
             
             if role == .offerer {
@@ -566,6 +632,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case .dispatchBuffered:
             buffered = pendingInboundDataBuffers
             pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+            pendingInboundDataBytes = 0
         case .keepBuffered:
             break
         }
@@ -589,6 +656,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case .dispatchBuffered:
             buffered = pendingInboundScreenDataBuffers
             pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+            pendingInboundScreenDataBytes = 0
         case .keepBuffered:
             break
         }
@@ -603,6 +671,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private func deliverInboundData(_ data: Data) {
         let handler: (@Sendable (Data) -> Void)?
         var buffered: [Data] = []
+        var overflowReason: String?
         inboundDataLock.lock()
         let activeHandler = onData
         switch Self.pendingInboundDeliveryPlan(
@@ -614,12 +683,36 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             if !pendingInboundDataBuffers.isEmpty {
                 buffered = pendingInboundDataBuffers
                 pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+                pendingInboundDataBytes = 0
             }
         case .bufferIncoming:
-            pendingInboundDataBuffers.append(data)
+            switch Self.pendingInboundBufferLimitPlan(
+                pendingCount: pendingInboundDataBuffers.count,
+                pendingBytes: pendingInboundDataBytes,
+                incomingBytes: data.count,
+                maxCount: Self.maxPendingInboundControlBuffers,
+                maxBytes: Self.maxPendingInboundControlBytes
+            ) {
+            case .append(_, let nextPendingBytes):
+                pendingInboundDataBuffers.append(data)
+                pendingInboundDataBytes = nextPendingBytes
+            case .overflow:
+                pendingInboundDataBuffers.removeAll(keepingCapacity: false)
+                pendingInboundDataBytes = 0
+                overflowReason = "pending_inbound_control_overflow"
+            }
             handler = nil
         }
         inboundDataLock.unlock()
+
+        if let overflowReason {
+            logger.error(
+                "❌ WebRTC control inbound buffer overflow. sessionId=\(self.sessionId, privacy: .public) limitBytes=\(Self.maxPendingInboundControlBytes, privacy: .public)"
+            )
+            notifyDisconnectedIfNeeded(reason: overflowReason)
+            close()
+            return
+        }
 
         guard let handler else { return }
         dispatchCallback {
@@ -631,6 +724,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private func deliverInboundScreenData(_ data: Data) {
         let handler: (@Sendable (Data) -> Void)?
         var buffered: [Data] = []
+        var overflowReason: String?
         inboundScreenDataLock.lock()
         let activeHandler = onScreenData
         switch Self.pendingInboundDeliveryPlan(
@@ -642,12 +736,36 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             if !pendingInboundScreenDataBuffers.isEmpty {
                 buffered = pendingInboundScreenDataBuffers
                 pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+                pendingInboundScreenDataBytes = 0
             }
         case .bufferIncoming:
-            pendingInboundScreenDataBuffers.append(data)
+            switch Self.pendingInboundBufferLimitPlan(
+                pendingCount: pendingInboundScreenDataBuffers.count,
+                pendingBytes: pendingInboundScreenDataBytes,
+                incomingBytes: data.count,
+                maxCount: Self.maxPendingInboundScreenBuffers,
+                maxBytes: Self.maxPendingInboundScreenBytes
+            ) {
+            case .append(_, let nextPendingBytes):
+                pendingInboundScreenDataBuffers.append(data)
+                pendingInboundScreenDataBytes = nextPendingBytes
+            case .overflow:
+                pendingInboundScreenDataBuffers.removeAll(keepingCapacity: false)
+                pendingInboundScreenDataBytes = 0
+                overflowReason = "pending_inbound_screen_overflow"
+            }
             handler = nil
         }
         inboundScreenDataLock.unlock()
+
+        if let overflowReason {
+            logger.error(
+                "❌ WebRTC screen inbound buffer overflow. sessionId=\(self.sessionId, privacy: .public) limitBytes=\(Self.maxPendingInboundScreenBytes, privacy: .public)"
+            )
+            notifyDisconnectedIfNeeded(reason: overflowReason)
+            close()
+            return
+        }
 
         guard let handler else { return }
         dispatchCallback {
@@ -1073,6 +1191,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
+    public func setOutgoingSystemAudioTrackEnabled(_ enabled: Bool) {
+#if canImport(WebRTC)
+        withState {
+            localAudioTrack?.isEnabled = enabled
+        }
+#endif
+    }
+
     private func dataChannelBufferedAmountBytes(
         preferScreenChannel: Bool,
         fallbackToControlChannel: Bool
@@ -1251,6 +1377,83 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             }
         }
         sender.parameters = parameters
+    }
+
+    private func configureOutgoingSystemAudioIfNeeded(
+        factory: RTCPeerConnectionFactory,
+        peerConnection: RTCPeerConnection
+    ) {
+        guard localAudioTrack == nil else { return }
+
+        let audioSource = factory.audioSource(with: nil)
+        let audioTrack = factory.audioTrack(with: audioSource, trackId: "system-audio-\(sessionId)")
+        audioTrack.isEnabled = false
+        let transceiverInit = RTCRtpTransceiverInit()
+        transceiverInit.direction = .sendOnly
+        transceiverInit.streamIds = ["system-audio-\(sessionId)"]
+
+        guard let transceiver = peerConnection.addTransceiver(with: audioTrack, init: transceiverInit) else {
+            logger.warning("⚠️ failed to create native system audio transceiver. sessionId=\(self.sessionId, privacy: .public)")
+            return
+        }
+
+        preferOpusCodecIfPossible(factory: factory, transceiver: transceiver)
+        localAudioSource = audioSource
+        localAudioTrack = audioTrack
+        localAudioTransceiver = transceiver
+        logger.info("🎧 native WebRTC system audio track enabled. sessionId=\(self.sessionId, privacy: .public)")
+    }
+
+    private func preferOpusCodecIfPossible(
+        factory: RTCPeerConnectionFactory,
+        transceiver: RTCRtpTransceiver
+    ) {
+        let capabilities = factory.rtpSenderCapabilities(forKind: kRTCMediaStreamTrackKindAudio)
+        let preferred = capabilities.codecs.sorted { lhs, rhs in
+            let lhsIsOpus = lhs.name.caseInsensitiveCompare("opus") == .orderedSame
+            let rhsIsOpus = rhs.name.caseInsensitiveCompare("opus") == .orderedSame
+            if lhsIsOpus != rhsIsOpus {
+                return lhsIsOpus && !rhsIsOpus
+            }
+            let lhsChannels = lhs.numChannels?.intValue ?? 0
+            let rhsChannels = rhs.numChannels?.intValue ?? 0
+            if lhsChannels != rhsChannels {
+                return lhsChannels > rhsChannels
+            }
+            return lhs.name < rhs.name
+        }
+        guard !preferred.isEmpty else { return }
+        if let codecError = setCodecPreferences(preferred, on: transceiver) {
+            logger.debug("ℹ️ failed to set Opus-first audio codec preferences: \(codecError.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func setCodecPreferences(
+        _ codecs: [RTCRtpCodecCapability],
+        on transceiver: RTCRtpTransceiver
+    ) -> NSError? {
+        let selector = NSSelectorFromString("setCodecPreferences:error:")
+        guard transceiver.responds(to: selector) else {
+            return nil
+        }
+
+        typealias Method = @convention(c) (
+            AnyObject,
+            Selector,
+            NSArray?,
+            UnsafeMutablePointer<NSError?>?
+        ) -> Bool
+
+        let implementation = transceiver.method(for: selector)
+        let function = unsafeBitCast(implementation, to: Method.self)
+        var error: NSError?
+        let succeeded = function(transceiver, selector, codecs as NSArray, &error)
+        guard !succeeded else { return nil }
+        return error ?? NSError(
+            domain: "com.skybridge.webrtc",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Unknown codec preference error"]
+        )
     }
 
     static func offerToReceiveVideoConstraintValue(hasNegotiatedVideoTransceiver: Bool) -> String {

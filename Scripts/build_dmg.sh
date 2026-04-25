@@ -38,7 +38,8 @@ TEMP_DMG="$DIST_DIR/temp_${DMG_NAME}.dmg"
 STAGE_DIR="$DIST_DIR/dmg_stage"
 BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
 BG_NAME="background.png"
-BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_destination)}"
+BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_build_destination)}"
+BUILD_ARCH="${BUILD_ARCH:-$(skybridge_default_macos_build_arch)}"
 XCODE_WORKSPACE="$PROJECT_ROOT/.swiftpm/xcode/package.xcworkspace"
 USE_XCODE_WORKSPACE=false
 
@@ -55,6 +56,7 @@ NOTARYTOOL_KEYCHAIN_PROFILE="${NOTARYTOOL_KEYCHAIN_PROFILE:-}"
 SKIP_BUILD=false
 SKIP_SIGN=false
 USE_EXISTING_APP=false
+JUST_BUILT_RELEASE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -112,6 +114,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ ("${NOTARIZE_APP}" == "1" || "${NOTARIZE_DMG}" == "1" || "${REQUIRE_NOTARIZATION}" == "1") && -z "${SKYBRIDGE_XCODEBUILD_KEEP_NOISE+x}" ]]; then
+    export SKYBRIDGE_XCODEBUILD_KEEP_NOISE=1
+fi
+if [[ -z "${SKYBRIDGE_REQUIRE_APP_GROUPS+x}" ]]; then
+    export SKYBRIDGE_REQUIRE_APP_GROUPS=1
+fi
+if [[ -z "${SKYBRIDGE_REQUIRE_WIDGET_EXTENSION+x}" ]]; then
+    export SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1
+fi
+if [[ -z "${SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE+x}" ]]; then
+    export SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session
+fi
+
 log_info() {
     echo "ℹ️  $1"
 }
@@ -148,6 +163,11 @@ assess_and_report_gatekeeper() {
     fi
 
     printf '%s\n' "$output"
+}
+
+artifact_has_stapled_ticket() {
+    local artifact="$1"
+    xcrun stapler validate "$artifact" >/dev/null 2>&1
 }
 
 verify_app_bundle_build_source() {
@@ -194,6 +214,36 @@ verify_app_runtime_layout() {
     fi
 }
 
+verify_app_release_features() {
+    local app_bundle="$1"
+    local info_plist="$app_bundle/Contents/Info.plist"
+    local widget_appex="$app_bundle/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
+    local apple_sign_in_enabled=""
+    local apple_sign_in_mode=""
+
+    [[ -f "$info_plist" ]] || {
+        log_error "缺少主应用 Info.plist: $info_plist"
+        exit 1
+    }
+
+    if [[ ! -d "$widget_appex" ]]; then
+        log_error "发布产物缺少 Widget Extension：$widget_appex"
+        exit 1
+    fi
+
+    if [[ ! -f "$widget_appex/Contents/embedded.provisionprofile" ]]; then
+        log_error "Widget Extension 缺少 embedded.provisionprofile：$widget_appex/Contents/embedded.provisionprofile"
+        exit 1
+    fi
+
+    apple_sign_in_enabled=$(/usr/libexec/PlistBuddy -c 'Print :SKYBRIDGE_ENABLE_APPLE_SIGN_IN' "$info_plist" 2>/dev/null || true)
+    apple_sign_in_mode=$(/usr/libexec/PlistBuddy -c 'Print :SKYBRIDGE_APPLE_SIGN_IN_MODE' "$info_plist" 2>/dev/null || true)
+    if [[ "$apple_sign_in_enabled" == "true" && "$apple_sign_in_mode" != "web_session" ]]; then
+        log_error "Developer ID DMG 发布要求 Apple 登录采用 web_session，当前模式为：${apple_sign_in_mode:-missing}"
+        exit 1
+    fi
+}
+
 scrub_bundle_custom_icon() {
     local bundle_path="$1"
     local bundle_icon_path
@@ -231,6 +281,36 @@ select_identity() {
     fi
 }
 
+sign_dmg_artifact() {
+    local dmg_path="$1"
+    local identity="$2"
+
+    if [[ -z "$identity" || "$identity" == "-" ]]; then
+        if [[ "$NOTARIZE_DMG" == "1" || "$REQUIRE_NOTARIZATION" == "1" ]]; then
+            log_error "DMG notarization requires a Developer ID Application signing identity"
+            exit 1
+        fi
+
+        log_info "未检测到 DMG 签名身份，跳过 DMG 本体签名"
+        return 0
+    fi
+
+    if [[ "$identity" != Developer\ ID\ Application:* ]]; then
+        if [[ "$NOTARIZE_DMG" == "1" || "$REQUIRE_NOTARIZATION" == "1" ]]; then
+            log_error "DMG notarization requires Developer ID Application identity; got: $identity"
+            exit 1
+        fi
+
+        log_info "签名身份不是 Developer ID Application，跳过 DMG 本体签名: $identity"
+        return 0
+    fi
+
+    log_step "步骤 5: 签名 DMG"
+    codesign --force --sign "$identity" --timestamp "$dmg_path"
+    codesign --verify --verbose=2 "$dmg_path" >/dev/null
+    log_success "DMG 本体签名完成"
+}
+
 assert_existing_app_bundle_is_fresh() {
     local app_bundle_path="$1"
     local freshness_reference="$app_bundle_path"
@@ -256,9 +336,14 @@ assert_existing_app_bundle_is_fresh() {
 cleanup() {
     log_info "清理临时文件..."
     hdiutil detach "/Volumes/$VOLUME_NAME" >/dev/null 2>&1 || true
+    rm -rf "$STAGE_DIR" "$TEMP_DMG"
 }
 
 trap cleanup EXIT
+
+# 避免旧的 dmg_stage/Applications -> /Applications 符号链接污染新的 xcodebuild 扫描范围。
+# 否则 SwiftPM/Xcode 可能穿透到系统应用内的历史工程引用，产生无关 warning 并显著拖慢发布构建。
+rm -rf "$STAGE_DIR" "$TEMP_DMG"
 
 if [[ "$SKIP_BUILD" == false ]]; then
     log_step "步骤 1: 构建 Release 版本"
@@ -297,6 +382,8 @@ if [[ "$SKIP_BUILD" == false ]]; then
             -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
             -skipPackageUpdates \
             -disableAutomaticPackageResolution \
+            ARCHS="$BUILD_ARCH" \
+            ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO \
             build
@@ -308,12 +395,15 @@ if [[ "$SKIP_BUILD" == false ]]; then
             -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
             -skipPackageUpdates \
             -disableAutomaticPackageResolution \
+            ARCHS="$BUILD_ARCH" \
+            ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO \
             build
     fi
 
     log_success "Release 构建完成"
+    JUST_BUILT_RELEASE=true
 else
     log_info "跳过构建步骤"
 fi
@@ -332,14 +422,19 @@ if [[ "$USE_EXISTING_APP" == true ]]; then
         exit 1
     fi
 else
+    PACKAGE_APP_ALLOW_STALE_BUILD=0
+    if [[ "$JUST_BUILT_RELEASE" == true ]]; then
+        PACKAGE_APP_ALLOW_STALE_BUILD=1
+    fi
+
     if [[ "$SKIP_SIGN" == true ]]; then
         log_info "按 --skip-sign 要求，以 ad-hoc 模式打包 App Bundle"
-        SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="-" "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="-" "$PROJECT_ROOT/Scripts/package_app.sh"
     elif [[ -n "$SIGNING_IDENTITY" ]]; then
         log_info "使用指定签名身份执行 package_app.sh: $SIGNING_IDENTITY"
-        SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/package_app.sh"
     else
-        SKYBRIDGE_PACKAGE_CONTEXT=release_dmg "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg "$PROJECT_ROOT/Scripts/package_app.sh"
     fi
 fi
 
@@ -364,6 +459,7 @@ fi
 
 log_success "App Bundle 已就绪: $APP_BUNDLE"
 verify_app_runtime_layout "$APP_BUNDLE"
+verify_app_release_features "$APP_BUNDLE"
 
 if [[ "$SKIP_SIGN" == false ]]; then
     if [[ -z "$SIGNING_IDENTITY" ]]; then
@@ -386,6 +482,7 @@ else
 fi
 
 verify_app_runtime_layout "$APP_BUNDLE"
+verify_app_release_features "$APP_BUNDLE"
 
 log_step "步骤 4: 创建 DMG"
 
@@ -440,7 +537,18 @@ log_info "配置 DMG 窗口..."
 
 osascript <<OSA || true
 tell application "Finder"
-    tell disk "$DMG_DISPLAY_NAME"
+    set targetDisk to missing value
+    repeat with attemptIndex from 1 to 20
+        try
+            set targetDisk to disk "$DMG_DISPLAY_NAME"
+            exit repeat
+        on error
+            delay 0.25
+        end try
+    end repeat
+
+    if targetDisk is not missing value then
+    tell targetDisk
         open
         delay 1
         set current view of container window to icon view
@@ -463,6 +571,7 @@ tell application "Finder"
         delay 2
         close
     end tell
+    end if
 end tell
 OSA
 
@@ -500,8 +609,13 @@ rm -f "$TEMP_DMG"
 
 log_success "DMG 创建完成: $DMG_PATH"
 
+if [[ -z "$SIGNING_IDENTITY" ]]; then
+    SIGNING_IDENTITY="$(select_identity)"
+fi
+sign_dmg_artifact "$DMG_PATH" "$SIGNING_IDENTITY"
+
 if [[ "$NOTARIZE_DMG" == "1" ]]; then
-    log_step "步骤 5: 提交 DMG 公证"
+    log_step "步骤 6: 提交 DMG 公证"
     skybridge_notarytool_submit_and_wait "$DMG_PATH"
     skybridge_staple_artifact "$DMG_PATH"
     log_success "DMG notarization 与 stapling 完成"
@@ -522,6 +636,7 @@ echo "📊 DMG 大小: $(du -h "$DMG_PATH" | cut -f1)"
 echo ""
 echo "🔐 签名摘要:"
 codesign -dvv "$APP_BUNDLE" 2>&1 | grep -E "(Authority|Identifier|TeamIdentifier|Signature)" || true
+codesign -dvv "$DMG_PATH" 2>&1 | grep -E "(Authority|Identifier|TeamIdentifier|Signature)" || true
 
 echo ""
 echo "🛡️ Gatekeeper 摘要:"
@@ -532,11 +647,13 @@ echo ""
 log_success "所有步骤完成！"
 
 if [[ "$REQUIRE_NOTARIZATION" == "1" ]]; then
-    if ! skybridge_gatekeeper_is_notarized "$APP_GATEKEEPER_OUTPUT"; then
+    if ! skybridge_gatekeeper_is_notarized "$APP_GATEKEEPER_OUTPUT" && \
+       ! artifact_has_stapled_ticket "$APP_BUNDLE"; then
         log_error "REQUIRE_NOTARIZATION=1，但 App Bundle 尚未显示为 notarized"
         exit 1
     fi
-    if ! skybridge_gatekeeper_is_notarized "$DMG_GATEKEEPER_OUTPUT"; then
+    if ! skybridge_gatekeeper_is_notarized "$DMG_GATEKEEPER_OUTPUT" && \
+       ! artifact_has_stapled_ticket "$DMG_PATH"; then
         log_error "REQUIRE_NOTARIZATION=1，但 DMG 尚未显示为 notarized"
         exit 1
     fi

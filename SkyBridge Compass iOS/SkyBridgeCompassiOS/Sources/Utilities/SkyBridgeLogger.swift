@@ -8,6 +8,7 @@ public final class SkyBridgeLogger: @unchecked Sendable {
     private let logger: Logger
     private let category: String
     private let lock = NSLock()
+    private let timestampFormatter: DateFormatter
     private var echoToXcodeConsole: Bool
     private var consoleMinLevel: LogLevel
     
@@ -17,18 +18,22 @@ public final class SkyBridgeLogger: @unchecked Sendable {
 
         // Xcode debug console doesn't reliably show OSLog output; we optionally echo to stdout.
         // Defaults:
-        // - Debug: enabled + minLevel=debug
+        // - Debug: enabled + minLevel=info
         // - Release: enabled + minLevel=warning (to avoid spam)
         let envOn = ProcessInfo.processInfo.environment["SKYBRIDGE_CONSOLE_LOG"]
         let envLevel = (ProcessInfo.processInfo.environment["SKYBRIDGE_CONSOLE_LOG_LEVEL"] ?? "").lowercased()
 
         #if DEBUG
         let defaultOn = true
-        let defaultMin = LogLevel.debug
+        let defaultMin = LogLevel.info
         #else
         let defaultOn = true
         let defaultMin = LogLevel.warning
         #endif
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        self.timestampFormatter = formatter
 
         if let envOn {
             let v = envOn.lowercased()
@@ -82,13 +87,12 @@ public final class SkyBridgeLogger: @unchecked Sendable {
         lock.lock()
         let echoEnabled = echoToXcodeConsole
         let minLevel = consoleMinLevel
+        guard echoEnabled, level.rank >= minLevel.rank else {
+            lock.unlock()
+            return
+        }
+        let ts = timestampFormatter.string(from: Date())
         lock.unlock()
-
-        guard echoEnabled else { return }
-        guard level.rank >= minLevel.rank else { return }
-        let df = DateFormatter()
-        df.dateFormat = "HH:mm:ss.SSS"
-        let ts = df.string(from: Date())
         Swift.print("[\(ts)] [\(level.rawValue.uppercased())] [\(category)] \(message)")
     }
 }

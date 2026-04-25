@@ -4,6 +4,8 @@
 
 File transfer must consume the shared route contract instead of inventing local routing heuristics.
 
+`file_transfer` capability is not a LAN endpoint. It can make transfer UI available, but it must not synthesize `_skybridge-transfer._tcp` or a guessed host/port route.
+
 ## Route Resolution Order
 
 Primary source:
@@ -50,12 +52,15 @@ Every transfer attempt must record:
 - `transfer_address`
 - `transfer_port`
 - `fallback_invocation_count`
+- ordered LAN endpoint candidate index/count
+- per-candidate connect waiting / timeout / failure reason
 
 ## Recovery Rules
 
 - if signaling degrades after the data plane is healthy, the file transfer continues unless the data plane actually fails
 - if the route contract changes from compatibility to primary mid-session, new transfers use the primary route
 - if route metadata disappears, new transfers fail closed until a valid route is republished
+- a single stale Bonjour service or unusable address must not block the transfer indefinitely; the sender must either connect to the next equivalent candidate or fail visibly within the per-candidate timeout
 
 ## Test Gates
 
@@ -63,3 +68,5 @@ Every transfer attempt must record:
 - fallback increments observability counters
 - missing route fails closed
 - signaling loss alone does not cancel an established transfer
+- iOS -> macOS and macOS -> iOS file transfer both complete on the same trusted account/device pair
+- a stale first LAN endpoint candidate produces a timeout/failure log and then tries the next candidate

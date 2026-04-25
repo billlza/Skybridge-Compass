@@ -37,6 +37,10 @@ public actor KeychainManager {
         return context
     }
 
+    private nonisolated func forbidKeychainAuthenticationUI(_ query: inout [String: Any]) {
+        query[kSecUseAuthenticationContext as String] = makeNonInteractiveAuthContext()
+    }
+
     private nonisolated static func performInteractiveUnlockProbe() -> OSStatus {
         let context = LAContext()
         context.interactionNotAllowed = false
@@ -80,13 +84,12 @@ public actor KeychainManager {
         data: Data,
         accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     ) -> OSStatus {
-        let context = makeNonInteractiveAuthContext()
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecUseAuthenticationContext as String: context,
         ]
+        forbidKeychainAuthenticationUI(&query)
         let updateAttrs: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: accessibility
@@ -135,15 +138,14 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return data
         }
-        let context = makeNonInteractiveAuthContext()
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationContext as String: context,
         ]
+        forbidKeychainAuthenticationUI(&query)
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else {
@@ -182,15 +184,14 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return data.map { SymmetricKey(data: $0) }
         }
-        let context = makeNonInteractiveAuthContext()
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "SkyBridge.SymmetricKey",
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationContext as String: context,
         ]
+        forbidKeychainAuthenticationUI(&query)
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else {
@@ -220,12 +221,13 @@ public actor KeychainManager {
     }
 
     public nonisolated func storeEnclaveKeyReference(tag: Data, secKey: SecKey) -> Bool {
-        let addQuery: [String: Any] = [
+        var addQuery: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueRef as String: secKey
         ]
+        forbidKeychainAuthenticationUI(&addQuery)
         SecItemDelete(addQuery as CFDictionary)
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         if status != errSecSuccess { logger.error("Enclave Key 引用存储失败: \(status)") }
@@ -233,12 +235,13 @@ public actor KeychainManager {
     }
 
     public nonisolated func loadEnclaveKeyReference(tag: Data) -> SecKey? {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag,
             kSecReturnRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        forbidKeychainAuthenticationUI(&query)
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let anyItem = item, CFGetTypeID(anyItem) == SecKeyGetTypeID() else {
@@ -321,15 +324,14 @@ public actor KeychainManager {
             Self.inMemoryLock.unlock()
             return data
         }
-        let context = makeNonInteractiveAuthContext()
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationContext as String: context,
         ]
+        forbidKeychainAuthenticationUI(&query)
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else { return nil }
@@ -345,14 +347,13 @@ public actor KeychainManager {
         guard !servicePrefix.isEmpty else { return }
         if Self.useInMemoryKeychain { return }
 
-        let context = makeNonInteractiveAuthContext()
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecMatchLimit as String: kSecMatchLimitAll,
             kSecReturnAttributes as String: true,
             kSecReturnPersistentRef as String: true,
-            kSecUseAuthenticationContext as String: context,
         ]
+        forbidKeychainAuthenticationUI(&query)
         var itemsRef: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &itemsRef)
         guard status == errSecSuccess, let items = itemsRef as? [[String: Any]] else { return }
@@ -372,7 +373,8 @@ public actor KeychainManager {
             }
             for dup in sorted.dropFirst() {
                 guard let persistentRef = dup[kSecValuePersistentRef as String] as? Data else { continue }
-                let del: [String: Any] = [kSecValuePersistentRef as String: persistentRef]
+                var del: [String: Any] = [kSecValuePersistentRef as String: persistentRef]
+                forbidKeychainAuthenticationUI(&del)
                 SecItemDelete(del as CFDictionary)
             }
         }
@@ -438,13 +440,12 @@ extension KeychainManager {
             Self.inMemoryLock.unlock()
             return
         }
-        let context = makeNonInteractiveAuthContext()
-        let del: [String: Any] = [
+        var del: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "SkyBridge.Auth",
             kSecAttrAccount as String: "AppleUserID",
-            kSecUseAuthenticationContext as String: context,
         ]
+        forbidKeychainAuthenticationUI(&del)
         SecItemDelete(del as CFDictionary)
     }
 
@@ -565,11 +566,12 @@ extension KeychainManager {
             Self.inMemoryLock.unlock()
             return
         }
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
+        forbidKeychainAuthenticationUI(&query)
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound { throw NSError(domain: "Keychain", code: Int(status)) }
     }

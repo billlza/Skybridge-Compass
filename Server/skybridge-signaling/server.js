@@ -76,6 +76,10 @@ const TURN_URIS = (process.env.TURN_URIS || process.env.TURN_URLS || 'turns:54.9
   .filter((s) => Boolean(s) && /^(turn:|turns:)/i.test(s));
 
 const SIGNALING_SERVER_ORIGIN = String(process.env.SIGNALING_SERVER_ORIGIN || '').trim();
+const REQUIRE_CONFIGURED_SIGNALING_SERVER_ORIGIN = /^(1|true|yes)$/i.test(
+  process.env.REQUIRE_CONFIGURED_SIGNALING_SERVER_ORIGIN
+  || ((process.env.NODE_ENV || '').trim().toLowerCase() === 'production' ? 'true' : 'false')
+);
 const CLIENT_IP_HASH_SECRET = String(process.env.CLIENT_IP_HASH_SECRET || process.env.SIGNALING_IP_HASH_SECRET || 'skybridge-ip-hash').trim();
 const SUPABASE_SEND_SMS_HOOK_SECRET = String(
   process.env.SUPABASE_SEND_SMS_HOOK_SECRET
@@ -216,17 +220,58 @@ function canonicalizeOrigin(raw) {
   return `${scheme}://${host}:${port}`;
 }
 
-function resolvedSignalingServerOrigin(req) {
-  const configured = canonicalizeOrigin(SIGNALING_SERVER_ORIGIN);
+function resolveSignalingServerOrigin({
+  configuredOrigin = SIGNALING_SERVER_ORIGIN,
+  requireConfiguredOrigin = REQUIRE_CONFIGURED_SIGNALING_SERVER_ORIGIN,
+  forwardedProto = '',
+  requestProtocol = 'https',
+  host = ''
+} = {}) {
+  const configured = canonicalizeOrigin(configuredOrigin);
   if (configured) return configured;
-  const forwardedProto = String(req.get('X-Forwarded-Proto') || '').split(',')[0].trim().toLowerCase();
-  const scheme = forwardedProto || String(req.protocol || 'https').toLowerCase();
-  const host = String(req.get('host') || '').trim();
-  const derived = canonicalizeOrigin(`${scheme}://${host}`);
+  if (requireConfiguredOrigin) {
+    throw new Error('missing_signaling_server_origin');
+  }
+  const normalizedForwardedProto = String(forwardedProto || '').split(',')[0].trim().toLowerCase();
+  const scheme = normalizedForwardedProto || String(requestProtocol || 'https').toLowerCase();
+  const derived = canonicalizeOrigin(`${scheme}://${String(host || '').trim()}`);
   if (!derived) {
     throw new Error('invalid_signaling_server_origin');
   }
   return derived;
+}
+
+function resolvedSignalingServerOrigin(req) {
+  return resolveSignalingServerOrigin({
+    forwardedProto: req.get('X-Forwarded-Proto'),
+    requestProtocol: req.protocol,
+    host: req.get('host')
+  });
+}
+
+function redactSecretURLForLog(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return raw;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username) {
+      parsed.username = '***';
+    }
+    if (parsed.password) {
+      parsed.password = '***';
+    }
+    return parsed.toString();
+  } catch (_) {
+    return raw.replace(/\/\/([^/@]+)@/, '//***@');
+  }
+}
+
+function assertConfiguredSignalingServerOrigin() {
+  if (!REQUIRE_CONFIGURED_SIGNALING_SERVER_ORIGIN) return;
+  const configured = canonicalizeOrigin(SIGNALING_SERVER_ORIGIN);
+  if (!configured) {
+    throw new Error('missing_signaling_server_origin');
+  }
 }
 
 function normalizeVersion(value, fallback = '0') {
@@ -1445,9 +1490,47 @@ async function dropLocalClientById(clientId, reason = 'remote_reclaim') {
 
 async function revokeEphemeralIfPresent(kind, tokenHash) {
   if (!tokenHash) return;
-  await signalingState.updateEphemeral(kind, tokenHash, (record) => {
+  return signalingState.updateEphemeral(kind, tokenHash, (record) => {
     record.state = 'revoked';
     record.revokedAt = now();
+  });
+}
+
+function connectionRoleTokenHash(record, role, kind) {
+  if (!record || !role) return null;
+  if (kind === 'session_token') {
+    return role === 'initiator' ? record.initiatorSessionTokenHash : record.responderSessionTokenHash;
+  }
+  if (kind === 'turn_admission_token') {
+    return role === 'initiator' ? record.initiatorTurnAdmissionTokenHash : record.responderTurnAdmissionTokenHash;
+  }
+  return null;
+}
+
+async function isEphemeralTokenCurrent(kind, tokenRecord, tokenHash) {
+  if (!tokenRecord?.sessionId || !tokenRecord?.role || !tokenHash) {
+    return false;
+  }
+  const connection = await signalingState.getConnection(tokenRecord.sessionId);
+  if (!connection) {
+    return false;
+  }
+  return connectionRoleTokenHash(connection, tokenRecord.role, kind) === tokenHash;
+}
+
+async function revokeSupersededSessionTokenIfPresent(tokenHash, reason = 'superseded') {
+  const revoked = await revokeEphemeralIfPresent('session_token', tokenHash);
+  if (!revoked?.boundClientId || !revoked?.boundInstanceId) {
+    return;
+  }
+  if (revoked.boundInstanceId === INSTANCE_ID) {
+    await dropLocalClientById(revoked.boundClientId, reason);
+    return;
+  }
+  await signalingState.publishToInstance(revoked.boundInstanceId, {
+    kind: 'drop-client',
+    clientId: revoked.boundClientId,
+    reason
   });
 }
 
@@ -1524,6 +1607,11 @@ async function getTurnTokenRecord(req) {
     throw makeError('missing_turn_admission_token', 401);
   }
   const tokenHash = sha256Hex(rawToken);
+  const preview = await signalingState.getEphemeral('turn_admission_token', tokenHash);
+  if (!preview) throw makeError('turn_admission_token_expired', 401);
+  if (!(await isEphemeralTokenCurrent('turn_admission_token', preview, tokenHash))) {
+    throw makeError('turn_admission_token_superseded', 401);
+  }
   let consumeError = null;
   const record = await signalingState.updateEphemeral('turn_admission_token', tokenHash, (current) => {
     if (current.state !== 'issued') {
@@ -2016,6 +2104,12 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
   if (result.error) {
     throw makeError(result.error, 409);
   }
+  if (item.responderSessionTokenHash && item.responderSessionTokenHash !== artifacts.sessionTokenHash) {
+    await revokeSupersededSessionTokenIfPresent(item.responderSessionTokenHash, 'responder_token_rotated');
+  }
+  if (item.responderTurnAdmissionTokenHash && item.responderTurnAdmissionTokenHash !== artifacts.turnAdmissionTokenHash) {
+    await revokeEphemeralIfPresent('turn_admission_token', item.responderTurnAdmissionTokenHash);
+  }
   res.json({
     found: true,
     sessionId: code,
@@ -2153,6 +2247,12 @@ app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) =>
     if (!result?.item) throw makeError('session_expired', 404);
     if (result.error) {
       throw makeError(result.error === 'bootstrap_token_invalid' ? 'bootstrap_token_invalid' : result.error, result.error === 'bootstrap_token_invalid' ? 401 : 409);
+    }
+    if (item.responderSessionTokenHash && item.responderSessionTokenHash !== artifacts.sessionTokenHash) {
+      await revokeSupersededSessionTokenIfPresent(item.responderSessionTokenHash, 'responder_token_rotated');
+    }
+    if (item.responderTurnAdmissionTokenHash && item.responderTurnAdmissionTokenHash !== artifacts.turnAdmissionTokenHash) {
+      await revokeEphemeralIfPresent('turn_admission_token', item.responderTurnAdmissionTokenHash);
     }
     const responseBody = {
       sessionId,
@@ -2344,6 +2444,11 @@ wss.on('connection', (ws, req) => {
     if (!tokenPreview) {
       incrementSecurityCounter('ws_1008_expired_token');
       ws.close(1008, 'session_token_expired');
+      return;
+    }
+    if (!(await isEphemeralTokenCurrent('session_token', tokenPreview, tokenHash))) {
+      incrementSecurityCounter('ws_1008_superseded_token');
+      ws.close(1008, 'session_token_superseded');
       return;
     }
     const tenantPolicy = registryCanReadTenantPolicy()
@@ -2601,16 +2706,19 @@ const heartbeatTimer = setInterval(() => {
     try { ws.ping(); } catch (_) {}
   }
 }, WS_HEARTBEAT_INTERVAL_MS);
+heartbeatTimer.unref?.();
 
 const sweepTimer = setInterval(() => {
   void signalingState.sweepExpired().catch((error) => {
     console.error('[sweeper] failed:', error.message);
   });
 }, SWEEP_INTERVAL_MS);
+sweepTimer.unref?.();
 
 const protectionTimer = setInterval(() => {
   void refreshRuntimeProtection();
 }, 5_000);
+protectionTimer.unref?.();
 
 let shuttingDown = false;
 async function shutdown({ exitProcess = false } = {}) {
@@ -2631,6 +2739,7 @@ async function shutdown({ exitProcess = false } = {}) {
 }
 
 async function startRuntime({ port = PORT, host = HOST } = {}) {
+  assertConfiguredSignalingServerOrigin();
   await signalingState.init(handleBackendInstanceMessage);
   await refreshRuntimeProtection();
   const smsStartup = assertSMSStartupReadiness();
@@ -2647,7 +2756,7 @@ async function startRuntime({ port = PORT, host = HOST } = {}) {
       console.log(`Mode: ${USE_NODE_HTTPS ? 'HTTPS' : 'HTTP'} listening on ${host}:${port}`);
       console.log(`Instance: ${INSTANCE_ID} stateBackend=${SIGNALING_STATE_BACKEND}`);
       if (SIGNALING_STATE_BACKEND === 'redis') {
-        console.log(`Redis: ${SIGNALING_REDIS_URL} keyPrefix=${SIGNALING_REDIS_KEY_PREFIX}`);
+        console.log(`Redis: ${redactSecretURLForLog(SIGNALING_REDIS_URL)} keyPrefix=${SIGNALING_REDIS_KEY_PREFIX}`);
       } else {
         console.warn('[startup] memory state backend is single-instance only; do not deploy behind a multi-instance load balancer');
       }
@@ -2721,7 +2830,9 @@ module.exports = {
     classifySMSDeliveryFailure,
     closeSlowConsumer,
     collectSMSServiceSnapshot,
+    redactSecretURLForLog,
     evaluateServiceHealth,
+    resolveSignalingServerOrigin,
     renewRoomMembershipLease,
     wsSendRaw,
     WS_MAX_BUFFERED_BYTES

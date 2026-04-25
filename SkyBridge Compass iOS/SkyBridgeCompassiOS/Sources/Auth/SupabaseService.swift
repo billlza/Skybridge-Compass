@@ -480,31 +480,77 @@ public final class SupabaseService: ObservableObject {
         identifier: String,
         identifierType: RegistrationIdentifierType,
         deviceFingerprint: String,
-        configName: String = "default"
+        attemptType: RegistrationAttemptType = .register,
+        configName: String? = nil
     ) async throws -> RegistrationGuardDecision {
         let config = try requireConfiguration()
         let endpoint = config.url.appendingPathComponent("rest/v1/rpc/guard_registration_attempt_v1")
         let normalizedIdentifier = Self.normalizedRegistrationIdentifier(identifier, type: identifierType)
         let identifierHash = Self.normalizedRegistrationIdentifierHash(identifier, type: identifierType)
+        let resolvedConfigName = configName ?? Self.registrationRiskConfigName(for: attemptType)
 
+        do {
+            return try await submitRegistrationRiskRequest(
+                endpoint: endpoint,
+                config: config,
+                identifierHash: identifierHash,
+                identifierType: identifierType,
+                normalizedIdentifier: normalizedIdentifier,
+                deviceFingerprint: deviceFingerprint,
+                configName: resolvedConfigName,
+                attemptType: attemptType,
+                includeAttemptType: true
+            )
+        } catch let error as SupabaseError {
+            if case .httpStatus(let code, let message) = error,
+               Self.isMissingRPCError(statusCode: code, body: message, rpcName: "guard_registration_attempt_v1") {
+                SkyBridgeLogger.shared.info("ℹ️ 注册风控 RPC 仍为旧签名，回退到兼容请求")
+                return try await submitRegistrationRiskRequest(
+                    endpoint: endpoint,
+                    config: config,
+                    identifierHash: identifierHash,
+                    identifierType: identifierType,
+                    normalizedIdentifier: normalizedIdentifier,
+                    deviceFingerprint: deviceFingerprint,
+                    configName: "default",
+                    attemptType: attemptType,
+                    includeAttemptType: false
+                )
+            }
+            throw error
+        }
+    }
+
+    private func submitRegistrationRiskRequest(
+        endpoint: URL,
+        config: Configuration,
+        identifierHash: String,
+        identifierType: RegistrationIdentifierType,
+        normalizedIdentifier: String,
+        deviceFingerprint: String,
+        configName: String,
+        attemptType: RegistrationAttemptType,
+        includeAttemptType: Bool
+    ) async throws -> RegistrationGuardDecision {
         var request = makeAnonymousJSONRequest(url: endpoint, method: "POST", configuration: config)
-        request.httpBody = try JSONSerialization.data(
-            withJSONObject: [
-                "identifier_hash": identifierHash,
-                "identifier_type": identifierType.rawValue,
-                "raw_identifier": normalizedIdentifier,
-                "device_fingerprint": deviceFingerprint,
-                "config_name": configName
-            ]
-        )
+        var payload: [String: Any] = [
+            "identifier_hash": identifierHash,
+            "identifier_type": identifierType.rawValue,
+            "raw_identifier": normalizedIdentifier,
+            "device_fingerprint": deviceFingerprint,
+            "config_name": configName
+        ]
+
+        if includeAttemptType {
+            payload["attempt_type"] = attemptType.rawValue
+        }
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let (data, response) = try await urlSession.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw SupabaseError.invalidResponse }
         guard (200...299).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8)
-            if Self.isMissingRPCError(statusCode: http.statusCode, body: body, rpcName: "guard_registration_attempt_v1") {
-                throw SupabaseError.schemaMismatch("缺少注册风控 RPC，请先应用最新 Supabase migrations")
-            }
             throw SupabaseError.httpStatus(code: http.statusCode, message: body)
         }
 
@@ -518,6 +564,17 @@ public final class SupabaseService: ObservableObject {
         }
 
         throw SupabaseError.schemaMismatch("注册风控 RPC 返回格式无效")
+    }
+
+    private static func registrationRiskConfigName(for attemptType: RegistrationAttemptType) -> String {
+        switch attemptType {
+        case .register:
+            return "default"
+        case .verifyCode:
+            return "verify_code"
+        case .login:
+            return "login"
+        }
     }
 
     public func recordRegistrationAttempt(

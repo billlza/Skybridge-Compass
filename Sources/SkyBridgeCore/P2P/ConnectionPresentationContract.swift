@@ -353,7 +353,7 @@ public enum ConnectionPresentationContract {
         input: ConnectionPresentationInput
     ) -> ConnectionPresentation? {
         guard let snapshot,
-              snapshot.phase == .transportReady || snapshot.phase == .handshakeComplete else {
+              snapshot.phase == .handshakeComplete else {
             return nil
         }
 
@@ -387,7 +387,8 @@ public enum ConnectionPresentationContract {
         for snapshot: ActiveSessionSnapshot?,
         input: ConnectionPresentationInput
     ) -> ConnectionPresentation? {
-        guard let snapshot, snapshot.phase == .connecting else {
+        guard let snapshot,
+              snapshot.phase == .connecting || snapshot.phase == .transportReady else {
             return nil
         }
 

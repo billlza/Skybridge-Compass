@@ -13,6 +13,34 @@ final class BootstrapAssuranceTests: XCTestCase {
         XCTAssertFalse(P2PConnection.isBootstrapControlMessage(businessMessage))
     }
 
+    func testPairingIdentityBootstrapPayloadRejectsEmptyDeviceIdOrEmptyKEMKeys() {
+        let validKey = KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data([0xAA]))
+
+        XCTAssertNil(
+            AppMessage.PairingIdentityExchangePayload(
+                deviceId: "  ",
+                kemPublicKeys: [validKey]
+            ).normalizedBootstrapPayload
+        )
+        XCTAssertNil(
+            AppMessage.PairingIdentityExchangePayload(
+                deviceId: "peer-device",
+                kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data())]
+            ).normalizedBootstrapPayload
+        )
+
+        let normalized = AppMessage.PairingIdentityExchangePayload(
+            deviceId: " peer-device ",
+            kemPublicKeys: [
+                KEMPublicKeyInfo(suiteWireId: 258, publicKey: Data()),
+                validKey
+            ]
+        ).normalizedBootstrapPayload
+
+        XCTAssertEqual(normalized?.deviceId, "peer-device")
+        XCTAssertEqual(normalized?.kemPublicKeys, [validKey])
+    }
+
     func testAssuranceClassificationStrictPQCWithoutBootstrap() {
         let assurance = P2PConnection.classifySessionAssurance(
             policy: .strictPQC,

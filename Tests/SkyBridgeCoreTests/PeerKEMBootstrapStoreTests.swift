@@ -58,4 +58,22 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         XCTAssertEqual(merged[257], Data([0x02]))
         await store.clearForTesting()
     }
+
+    func testEmptyPublicKeyDoesNotReplaceStoredBootstrapKey() async throws {
+        let store = PeerKEMBootstrapStore.shared
+        await store.clearForTesting()
+
+        await store.upsert(
+            deviceIds: ["peer-c"],
+            kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data([0x10]))]
+        )
+        await store.upsert(
+            deviceIds: ["peer-c"],
+            kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data())]
+        )
+
+        let merged = await store.mergedKEMPublicKeys(forCandidates: ["peer-c"])
+        XCTAssertEqual(merged[257], Data([0x10]))
+        await store.clearForTesting()
+    }
 }

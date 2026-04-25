@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 
+skybridge_notarytool_maybe_source_local_env() {
+  local env_file="${SKYBRIDGE_NOTARYTOOL_ENV_FILE:-$HOME/.config/skybridge/notarytool.env}"
+
+  if [[ -n "${SKYBRIDGE_NOTARYTOOL_ENV_LOADED:-}" ]]; then
+    return 0
+  fi
+
+  export SKYBRIDGE_NOTARYTOOL_ENV_LOADED=1
+
+  if [[ -f "${env_file}" ]]; then
+    # shellcheck disable=SC1090
+    source "${env_file}"
+  fi
+}
+
 skybridge_notarytool_prepare_args() {
+  skybridge_notarytool_maybe_source_local_env
   SKYBRIDGE_NOTARYTOOL_ARGS=()
 
   if [[ -n "${NOTARYTOOL_KEYCHAIN_PROFILE:-}" ]]; then
@@ -8,11 +24,22 @@ skybridge_notarytool_prepare_args() {
     return 0
   fi
 
-  if [[ -n "${NOTARYTOOL_KEY:-}" && -n "${NOTARYTOOL_KEY_ID:-}" && -n "${NOTARYTOOL_ISSUER:-}" ]]; then
+  if [[ -n "${NOTARYTOOL_KEY:-}" && -n "${NOTARYTOOL_KEY_ID:-}" ]]; then
     SKYBRIDGE_NOTARYTOOL_ARGS=(
       --key "${NOTARYTOOL_KEY}"
       --key-id "${NOTARYTOOL_KEY_ID}"
-      --issuer "${NOTARYTOOL_ISSUER}"
+    )
+    if [[ -n "${NOTARYTOOL_ISSUER:-}" ]]; then
+      SKYBRIDGE_NOTARYTOOL_ARGS+=(--issuer "${NOTARYTOOL_ISSUER}")
+    fi
+    return 0
+  fi
+
+  if [[ -n "${NOTARYTOOL_APPLE_ID:-}" && -n "${NOTARYTOOL_PASSWORD:-}" && -n "${NOTARYTOOL_TEAM_ID:-}" ]]; then
+    SKYBRIDGE_NOTARYTOOL_ARGS=(
+      --apple-id "${NOTARYTOOL_APPLE_ID}"
+      --password "${NOTARYTOOL_PASSWORD}"
+      --team-id "${NOTARYTOOL_TEAM_ID}"
     )
     return 0
   fi
@@ -28,9 +55,27 @@ skybridge_notarytool_require_args() {
   cat >&2 <<'EOF'
 缺少 notarization 凭据。请通过以下任一方式提供：
   1. NOTARYTOOL_KEYCHAIN_PROFILE=<profile>
-  2. NOTARYTOOL_KEY=<p8-path> NOTARYTOOL_KEY_ID=<id> NOTARYTOOL_ISSUER=<issuer>
+  2. NOTARYTOOL_KEY=<p8-path> NOTARYTOOL_KEY_ID=<id> [NOTARYTOOL_ISSUER=<issuer>]
+  3. NOTARYTOOL_APPLE_ID=<apple-id> NOTARYTOOL_PASSWORD=<app-specific-password> NOTARYTOOL_TEAM_ID=<team-id>
 EOF
   return 1
+}
+
+skybridge_notarytool_history() {
+  local -a cmd=()
+
+  if ! command -v xcrun >/dev/null 2>&1 || ! xcrun -f notarytool >/dev/null 2>&1; then
+    echo "未找到 xcrun notarytool，无法执行 notarization。" >&2
+    return 1
+  fi
+
+  skybridge_notarytool_require_args || return 1
+  cmd=(xcrun notarytool history "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}")
+  "${cmd[@]}"
+}
+
+skybridge_notarytool_validate_credentials() {
+  skybridge_notarytool_history >/dev/null 2>&1
 }
 
 skybridge_notarytool_submit_and_wait() {

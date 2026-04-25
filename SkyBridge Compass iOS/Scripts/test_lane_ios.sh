@@ -14,6 +14,8 @@ if [[ "${ARTIFACT_DATE}" != "${EXPECTED_ARTIFACT_DATE}" ]]; then
   exit 2
 fi
 
+bash "${ROOT_DIR}/Scripts/check_ios_test_configuration.sh"
+
 pick_simulator_id() {
   xcrun simctl list devices available -j | python3 -c '
 import json
@@ -91,9 +93,7 @@ run_xcodebuild_with_retry() {
 xcrun simctl boot "${SIM_ID}" >/dev/null 2>&1 || true
 xcrun simctl bootstatus "${SIM_ID}" -b >/dev/null 2>&1 || true
 
-echo "[iOS test lane] A(Unit): KEMTrustStoreTests, CapabilityResolutionParityTests, CurrentPathTrustedDeviceStoreTests"
-echo "[iOS test lane] B(Integration): PolicyDecisionParityTests, FallbackSemanticsParityTests"
-echo "[iOS test lane] C(Observability): ObservabilityContractTests"
+echo "[iOS test lane] running full ${IOS_TEST_TARGET} suite"
 
 run_xcodebuild_with_retry \
   -project "${IOS_PROJECT}" \
@@ -107,12 +107,6 @@ run_xcodebuild_with_retry \
   -scheme "${IOS_SCHEME}" \
   -destination "platform=iOS Simulator,id=${SIM_ID}" \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
-  -only-testing:"${IOS_TEST_TARGET}/KEMTrustStoreTests" \
-  -only-testing:"${IOS_TEST_TARGET}/CapabilityResolutionParityTests" \
-  -only-testing:"${IOS_TEST_TARGET}/CurrentPathTrustedDeviceStoreTests" \
-  -only-testing:"${IOS_TEST_TARGET}/PolicyDecisionParityTests" \
-  -only-testing:"${IOS_TEST_TARGET}/FallbackSemanticsParityTests" \
-  -only-testing:"${IOS_TEST_TARGET}/ObservabilityContractTests" \
   test-without-building
 
-echo "[iOS test lane] all groups passed"
+echo "[iOS test lane] full suite passed"

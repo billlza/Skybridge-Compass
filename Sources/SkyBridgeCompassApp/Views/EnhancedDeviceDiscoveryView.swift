@@ -15,6 +15,11 @@ struct EnhancedDeviceDiscoveryView_Previews: PreviewProvider {
         EnhancedDeviceDiscoveryView(deviceChainViewModel: CloudDeviceListViewModel(service: PreviewCloudDeviceService()))
     }
 }
+
+private struct TrustedGroupSelection: Identifiable, Equatable {
+    let id: String
+}
+
 @MainActor
 public struct EnhancedDeviceDiscoveryView: View {
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
@@ -52,8 +57,8 @@ public struct EnhancedDeviceDiscoveryView: View {
     @State private var hoveredConnectionMode: DiscoveryMode? = nil
     @State private var connectingOnlineDeviceIds: Set<UUID> = []
 
-    @State private var selectedTrustedRecord: TrustRecord?
-    @State private var showTrustedRecordSheet: Bool = false
+    @State private var selectedTrustedGroupSelection: TrustedGroupSelection?
+    @StateObject private var trustedBonjourMetadata = TrustedBonjourMetadataStore()
 
 
 
@@ -123,11 +128,18 @@ public struct EnhancedDeviceDiscoveryView: View {
  // 🆕 使用统一设备管理器,自动整合所有发现源
             unifiedDeviceManager.startDiscovery()
         }
-        .sheet(isPresented: $showTrustedRecordSheet) {
-            if let record = selectedTrustedRecord {
+        .task(id: trustedBonjourRefreshKey) {
+            trustedBonjourMetadata.scheduleRefresh(for: trustedRecordsForUI)
+        }
+        .sheet(item: $selectedTrustedGroupSelection) { selection in
+            if let group = trustedRecordGroup(for: selection.id) {
+                let record = group.displayRecord
+                let presentationMetadata = trustedRecordPresentation(group)
                 TrustedDeviceDetailView(
                     record: record,
-                    status: trustedRecordStatus(record),
+                    relatedRecords: group.relatedRecords,
+                    presentationMetadata: presentationMetadata,
+                    status: trustedRecordStatus(group),
                     onDisconnect: { idsToDisconnect, declaredDeviceId in
                         Task { @MainActor in
                             var didDisconnect = false
@@ -167,8 +179,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                             }
 
                             if didDisconnect {
-                                selectedTrustedRecord = nil
-                                showTrustedRecordSheet = false
+                                selectedTrustedGroupSelection = nil
                             }
                         }
                     },
@@ -183,8 +194,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                 try? await TrustSyncService.shared.revokeTrustRecord(deviceId: id)
                             }
                             // Close sheet
-                            selectedTrustedRecord = nil
-                            showTrustedRecordSheet = false
+                            selectedTrustedGroupSelection = nil
                         }
                     }
                 )
@@ -407,14 +417,13 @@ public struct EnhancedDeviceDiscoveryView: View {
                     Text("已信任设备")
                         .font(.headline)
 
-                    ForEach(trustedRecords) { record in
+                    ForEach(trustedRecords) { group in
                         TrustedDeviceCard(
-                            record: record,
-                            subtitle: trustedRecordSubtitle(record),
-                            status: trustedRecordStatus(record)
+                            record: group.displayRecord,
+                            subtitle: trustedRecordSubtitle(group),
+                            status: trustedRecordStatus(group)
                         ) {
-                            selectedTrustedRecord = record
-                            showTrustedRecordSheet = true
+                            selectedTrustedGroupSelection = TrustedGroupSelection(id: group.id)
                         }
                     }
                 }
@@ -497,13 +506,16 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     // MARK: - Trusted Devices helpers
 
-    private var trustedRecordsForUI: [TrustRecord] {
-        // We prefer canonical records (not aliases) to avoid duplicates.
-        // Aliases exist to keep handshake lookups working for bonjour:<name>@local. peer ids.
-        trustSync.activeTrustRecords
-            .filter { !$0.capabilities.contains(where: { $0.lowercased().hasPrefix("alias=true") }) }
+    private var trustedRecordsForUI: [TrustRecordDisplayGroup] {
+        let activeTrustedRecords = trustSync.activeTrustRecords
             .filter { $0.capabilities.contains(where: { $0.lowercased() == "trusted" || $0.lowercased() == "pqc_bootstrap" || $0.lowercased().hasPrefix("trusted") }) }
             .sorted { $0.updatedAt > $1.updatedAt }
+
+        return TrustSyncService.buildPresentationDisplayGroups(from: activeTrustedRecords)
+    }
+
+    private func trustedRecordGroup(for id: String) -> TrustRecordDisplayGroup? {
+        trustedRecordsForUI.first { $0.id == id }
     }
 
     private func trustedRecordCaps(_ record: TrustRecord) -> [String: String] {
@@ -517,30 +529,63 @@ public struct EnhancedDeviceDiscoveryView: View {
         return dict
     }
 
-    private func trustedRecordSubtitle(_ record: TrustRecord) -> String {
-        let c = trustedRecordCaps(record)
-        let platform = c["platform"].flatMap { $0.isEmpty ? nil : $0 }
-        let osVersion = c["osVersion"].flatMap { $0.isEmpty ? nil : $0 }
-        let modelName = c["modelName"].flatMap { $0.isEmpty ? nil : $0 }
-        let chip = c["chip"].flatMap { $0.isEmpty ? nil : $0 }
+    private func trustedRecordSubtitle(_ group: TrustRecordDisplayGroup) -> String {
+        let normalized = trustedRecordPresentation(group)
 
         var parts: [String] = []
-        if let modelName { parts.append(modelName) }
-        if let chip { parts.append(chip) }
-        if let platform, let osVersion {
+        if let modelName = normalized.modelName { parts.append(modelName) }
+        if let chip = normalized.chip { parts.append(chip) }
+        if let platform = normalized.platform, let osVersion = normalized.osVersion {
             parts.append("\(platform) \(osVersion)")
-        } else if let platform {
+        } else if let platform = normalized.platform {
             parts.append(platform)
         }
-        return parts.isEmpty ? record.deviceId : parts.joined(separator: " · ")
+        return parts.isEmpty ? group.displayRecord.deviceId : parts.joined(separator: " · ")
     }
 
-    private func trustedRecordStatus(_ record: TrustRecord) -> OnlineDeviceStatus {
-        let resolvedStatus = unifiedDeviceManager.resolvedOnlineDevice(for: record)?.connectionStatus ?? .offline
-        return isCrossNetworkSessionActive(for: record) ? .connected : resolvedStatus
+    private func trustedRecordPresentation(
+        _ group: TrustRecordDisplayGroup
+    ) -> ApplePeerDeviceMetadataNormalizer.Presentation {
+        let record = group.displayRecord
+        let c = trustedRecordCaps(record)
+        let fallback = ApplePeerDeviceMetadataNormalizer.normalize(
+            modelName: c["modelName"],
+            chip: c["chip"],
+            platform: c["platform"],
+            osVersion: c["osVersion"]
+        )
+        let bonjourLive = trustedBonjourMetadata.metadataByGroupId[group.id]
+        let live = bonjourLive ?? unifiedDeviceManager.resolvedApplePeerMetadata(for: trustedLookupRecords(for: group))
+        var merged = ApplePeerDeviceMetadataNormalizer.mergedPresentation(
+            preferred: live,
+            fallback: fallback
+        )
+        if live == nil {
+            merged = ApplePeerDeviceMetadataNormalizer.normalize(
+                modelName: merged.modelName,
+                chip: merged.chip,
+                platform: merged.platform,
+                osVersion: nil
+            )
+        }
+        return merged
     }
 
-    private func isCrossNetworkSessionActive(for record: TrustRecord) -> Bool {
+    private func trustedLivePresentation(
+        _ group: TrustRecordDisplayGroup
+    ) -> ApplePeerDeviceMetadataNormalizer.Presentation? {
+        unifiedDeviceManager.resolvedApplePeerMetadata(for: trustedLookupRecords(for: group))
+    }
+
+    private func trustedRecordStatus(_ group: TrustRecordDisplayGroup) -> OnlineDeviceStatus {
+        let resolvedStatus = trustedPresentationOnlineDevices(for: group)
+            .map(\.connectionStatus)
+            .max(by: { statusPriority($0) < statusPriority($1) })
+            ?? .offline
+        return isCrossNetworkSessionActive(for: group) ? .connected : resolvedStatus
+    }
+
+    private func isCrossNetworkSessionActive(for group: TrustRecordDisplayGroup) -> Bool {
         guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return false }
         switch snapshot.phase {
         case .transportReady, .handshakeComplete, .reconnecting:
@@ -549,18 +594,6 @@ public struct EnhancedDeviceDiscoveryView: View {
             return false
         }
 
-        let caps = trustedRecordCaps(record)
-        let recordIds = Set(
-            [
-                record.deviceId,
-                record.currentDeviceId,
-                caps["declaredDeviceId"],
-                caps["peerEndpoint"]
-            ]
-            + record.knownDeviceIds
-            .compactMap(normalizedDiscoveryToken)
-        )
-
         let snapshotIds = Set(
             [
                 snapshot.deviceId
@@ -568,16 +601,228 @@ public struct EnhancedDeviceDiscoveryView: View {
             .compactMap(normalizedDiscoveryToken)
         )
 
-        if !recordIds.isDisjoint(with: snapshotIds) {
-            return true
+        for record in trustedLookupRecords(for: group) {
+            let caps = trustedRecordCaps(record)
+            let recordIds = Set(
+                [
+                    record.deviceId,
+                    record.currentDeviceId,
+                    caps["declaredDeviceId"],
+                    caps["peerEndpoint"]
+                ]
+                + record.knownDeviceIds
+            .compactMap(normalizedDiscoveryToken))
+
+            if !recordIds.isDisjoint(with: snapshotIds) {
+                return true
+            }
+
+            let recordName = normalizedDiscoveryToken(record.deviceName)
+            let snapshotName = normalizedDiscoveryToken(
+                snapshot.deviceName ?? crossNetworkManager.currentConnection?.deviceName
+            )
+            if let recordName, let snapshotName, recordName == snapshotName {
+                return true
+            }
         }
 
-        let recordName = normalizedDiscoveryToken(record.deviceName)
-        let snapshotName = normalizedDiscoveryToken(
-            snapshot.deviceName ?? crossNetworkManager.currentConnection?.deviceName
-        )
-        guard let recordName, let snapshotName else { return false }
-        return recordName == snapshotName
+        return false
+    }
+
+    private func trustedLookupRecords(for group: TrustRecordDisplayGroup) -> [TrustRecord] {
+        let records = [group.displayRecord] + group.relatedRecords
+        var ordered: [TrustRecord] = []
+        var seen = Set<String>()
+
+        for record in records {
+            let key = "\(record.deviceId)|\(record.updatedAt)"
+            if seen.insert(key).inserted {
+                ordered.append(record)
+            }
+        }
+        return ordered
+    }
+
+    private func trustedPresentationOnlineDevices(for group: TrustRecordDisplayGroup) -> [OnlineDevice] {
+        let records = trustedLookupRecords(for: group)
+        let context = trustedDeviceMatchContext(for: group)
+        let liveCandidates = unifiedDeviceManager.onlineDevices.filter { !$0.isLocalDevice }
+        let recentCandidates = groupedRecentlyConnectedDevices.filter { !$0.isLocalDevice }
+
+        var mergedByIdentity: [String: (score: Int, device: OnlineDevice)] = [:]
+        for device in liveCandidates + recentCandidates {
+            let resolvedTrustRecord = unifiedDeviceManager.resolvedTrustRecord(for: device, among: records)
+            let fallbackScore = trustedDeviceMatchScore(device, context: context)
+            let matchScore: Int
+            let mergeKey: String
+
+            if let resolvedTrustRecord {
+                matchScore = 20_000 + fallbackScore
+                mergeKey = "trusted:\(resolvedTrustRecord.deviceId)"
+            } else {
+                guard fallbackScore > 0 else { continue }
+                matchScore = fallbackScore
+                mergeKey = "device:\(device.id.uuidString)"
+            }
+
+            if let existing = mergedByIdentity[mergeKey] {
+                if existing.score == matchScore {
+                    mergedByIdentity[mergeKey] = (
+                        score: matchScore,
+                        device: preferredRecentDisplayDevice(existing.device, device)
+                    )
+                } else if existing.score < matchScore {
+                    mergedByIdentity[mergeKey] = (score: matchScore, device: device)
+                }
+            } else {
+                mergedByIdentity[mergeKey] = (score: matchScore, device: device)
+            }
+        }
+
+        return mergedByIdentity.values.sorted { lhs, rhs in
+            let lhsScore = lhs.score
+            let rhsScore = rhs.score
+            if lhsScore != rhsScore { return lhsScore > rhsScore }
+            return trustedPresentationPriority(lhs.device) > trustedPresentationPriority(rhs.device)
+        }
+        .map(\.device)
+    }
+
+    private func trustedPresentationPriority(_ device: OnlineDevice) -> Int {
+        var score = statusPriority(device.connectionStatus) * 1_000
+        if device.isConnectable { score += 150 }
+        if !(device.uniqueIdentifier.hasPrefix("recent:")) { score += 250 }
+        if device.modelName?.isEmpty == false { score += 400 }
+        if device.chip?.isEmpty == false { score += 300 }
+        if device.platformName?.isEmpty == false { score += 200 }
+        if device.osVersion?.isEmpty == false { score += 600 }
+        if device.ipv4 != nil || device.ipv6 != nil { score += 100 }
+        score += Int(device.lastSeen.timeIntervalSince1970)
+        return score
+    }
+
+    private func trustedDeviceMatchContext(
+        for group: TrustRecordDisplayGroup
+    ) -> (identityTokens: Set<String>, nameTokens: Set<String>) {
+        let records = trustedLookupRecords(for: group)
+        var identityTokens = Set<String>()
+        var nameTokens = Set<String>()
+
+        for record in records {
+            for raw in [record.deviceId, record.currentDeviceId, record.deviceName] + record.knownDeviceIds {
+                trustedDeviceTokens(from: raw).forEach { token in
+                    if token.hasPrefix("name:") {
+                        nameTokens.insert(token)
+                    } else {
+                        identityTokens.insert(token)
+                    }
+                }
+            }
+
+            let caps = trustedRecordCaps(record)
+            for raw in [caps["declaredDeviceId"], caps["peerEndpoint"]] {
+                trustedDeviceTokens(from: raw).forEach { token in
+                    if token.hasPrefix("name:") {
+                        nameTokens.insert(token)
+                    } else {
+                        identityTokens.insert(token)
+                    }
+                }
+            }
+        }
+
+        return (identityTokens, nameTokens)
+    }
+
+    private func trustedDeviceMatchScore(
+        _ device: OnlineDevice,
+        context: (identityTokens: Set<String>, nameTokens: Set<String>)
+    ) -> Int {
+        let deviceTokens = trustedDeviceTokens(for: device)
+        let identityMatches = deviceTokens.intersection(context.identityTokens)
+        if !identityMatches.isEmpty {
+            return 10_000 + identityMatches.count * 100
+        }
+
+        if context.identityTokens.isEmpty {
+            let nameMatches = deviceTokens.intersection(context.nameTokens)
+            if !nameMatches.isEmpty {
+                return 1_000 + nameMatches.count * 10
+            }
+        }
+
+        return 0
+    }
+
+    private func trustedDeviceTokens(for device: OnlineDevice) -> Set<String> {
+        var tokens = Set<String>()
+        for raw in [device.uniqueIdentifier, device.ipv4, device.ipv6, device.name] {
+            tokens.formUnion(trustedDeviceTokens(from: raw))
+        }
+        return tokens
+    }
+
+    private func trustedDeviceTokens(from raw: String?) -> Set<String> {
+        guard let raw = normalizedDiscoveryToken(raw) else { return [] }
+
+        var tokens = Set<String>()
+        tokens.insert(raw)
+
+        if raw.hasPrefix("id:") {
+            tokens.insert(String(raw.dropFirst("id:".count)))
+            return tokens
+        }
+
+        if raw.hasPrefix("bonjour:") {
+            tokens.insert("host:\(raw)")
+            if let name = raw.split(separator: "@", maxSplits: 1).first {
+                tokens.insert("name:\(String(name.dropFirst("bonjour:".count)))")
+            }
+            return tokens
+        }
+
+        if raw.hasPrefix("host:") {
+            let payload = String(raw.dropFirst("host:".count))
+            tokens.insert(payload)
+            if payload.hasPrefix("bonjour:") {
+                tokens.insert(payload)
+            }
+            if payload.hasPrefix("id:") {
+                tokens.insert(String(payload.dropFirst("id:".count)))
+            }
+            return tokens
+        }
+
+        if raw.hasPrefix("recent:") {
+            let payload = String(raw.dropFirst("recent:".count))
+            tokens.insert(payload)
+            if payload.hasPrefix("peer:") {
+                tokens.insert(String(payload.dropFirst("peer:".count)))
+            }
+            return tokens
+        }
+
+        if raw.hasPrefix("peer:") {
+            tokens.insert(String(raw.dropFirst("peer:".count)))
+            return tokens
+        }
+
+        if raw.range(
+            of: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            tokens.insert(raw)
+            tokens.insert("id:\(raw)")
+            return tokens
+        }
+
+        if raw.contains(".") || raw.contains(":") {
+            tokens.insert("host:\(raw)")
+            return tokens
+        }
+
+        tokens.insert("name:\(raw)")
+        return tokens
     }
 
     private func normalizedDiscoveryToken(_ raw: String?) -> String? {
@@ -618,7 +863,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil && $0.connectionStatus != .connected }
         guard !candidates.isEmpty else { return [] }
 
-        let trustRecords = trustedRecordsForUI
+        let trustRecords = trustedRecordsForUI.map(\.displayRecord)
         var grouped: [String: OnlineDevice] = [:]
 
         for device in candidates {
@@ -650,6 +895,25 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
             return lhs.name < rhs.name
         }
+    }
+
+    private var trustedBonjourRefreshKey: String {
+        let trustIds = trustedRecordsForUI.map(\.id).joined(separator: "|")
+        let trustEndpoints = trustedRecordsForUI
+            .flatMap { trustedLookupRecords(for: $0) }
+            .flatMap { record in
+                [record.deviceId, record.currentDeviceId] + record.knownDeviceIds + record.capabilities
+            }
+            .joined(separator: "|")
+        let onlineSummary = unifiedDeviceManager.onlineDevices
+            .filter { !$0.isLocalDevice }
+            .map {
+                "\($0.uniqueIdentifier):\($0.connectionStatus.rawValue):\($0.platformName ?? ""):\($0.osVersion ?? ""):\($0.modelName ?? ""):\($0.chip ?? "")"
+            }
+            .sorted()
+            .joined(separator: "|")
+        let discoverySummary = unifiedDeviceManager.discoveryMetadataSummary
+        return "\(selectedConnectionMode.id)|\(trustIds)|\(trustEndpoints)|\(onlineSummary)|\(discoverySummary)|scan:\(unifiedDeviceManager.isScanning)"
     }
 
     private func preferredRecentDisplayDevice(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> OnlineDevice {
@@ -1484,7 +1748,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                         _ = try await crossNetworkManager.connectToCloudDevice(cloudDevice)
                     } catch {
  // 连接失败错误提示
-                        scannerErrorMessage = "iCloud 设备连接失败：\(error.localizedDescription)"
+                        scannerErrorMessage = "iCloud 设备连接失败：\(userFacingConnectionErrorMessage(error))"
                     }
                 }
             }) {
@@ -1685,7 +1949,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                             connectionCodeErrorMessage = nil
                                             _ = try await crossNetworkManager.generateConnectionCode()
                                         } catch {
-                                            connectionCodeErrorMessage = error.localizedDescription
+                                            connectionCodeErrorMessage = userFacingConnectionErrorMessage(error)
                                             logger.error("❌ 重新生成连接码失败: \(error.localizedDescription, privacy: .public)")
                                         }
                                     }
@@ -1712,7 +1976,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                     connectionCodeErrorMessage = nil
                                     _ = try await crossNetworkManager.generateConnectionCode()
                                 } catch {
-                                    connectionCodeErrorMessage = error.localizedDescription
+                                    connectionCodeErrorMessage = userFacingConnectionErrorMessage(error)
                                     logger.error("❌ 生成连接码失败: \(error.localizedDescription, privacy: .public)")
                                 }
                             }
@@ -1782,7 +2046,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                                     connectionCodeErrorMessage = nil
                                     _ = try await crossNetworkManager.connectWithCode(connectionCodeInput)
                                 } catch {
-                                    connectionCodeErrorMessage = error.localizedDescription
+                                    connectionCodeErrorMessage = userFacingConnectionErrorMessage(error)
                                     logger.error("❌ 连接码连接失败: \(error.localizedDescription, privacy: .public)")
                                 }
                             }
@@ -1856,7 +2120,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 throw lastError ?? P2PDiscoveryError.noConnectableEndpoint
             } catch {
                 logger.error("❌ 在线设备连接失败: \(device.name, privacy: .public), \(error.localizedDescription, privacy: .public)")
-                connectionCodeErrorMessage = error.localizedDescription
+                connectionCodeErrorMessage = userFacingConnectionErrorMessage(error)
             }
         }
     }
@@ -1944,7 +2208,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             logger.error("❌ QR action failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             presentScannerError(String(
                 format: LocalizationManager.shared.localizedString("discovery.qrCode.error.connectFailed"),
-                error.localizedDescription
+                userFacingConnectionErrorMessage(error)
             ))
         }
     }
@@ -1960,7 +2224,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             logger.error("❌ QR scan connect failed: \(trigger, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             presentScannerError(String(
                 format: LocalizationManager.shared.localizedString("discovery.qrCode.error.connectFailed"),
-                error.localizedDescription
+                userFacingConnectionErrorMessage(error)
             ))
         }
     }
@@ -1983,6 +2247,16 @@ public struct EnhancedDeviceDiscoveryView: View {
         lastScannerErrorFingerprint = normalized
         lastScannerErrorAt = now
         scannerErrorMessage = normalized
+    }
+
+    private func userFacingConnectionErrorMessage(_ error: Error) -> String {
+        let message = HandshakeErrorLocalizer.localizedMessage(for: error)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !message.isEmpty {
+            return message
+        }
+        let fallback = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return fallback.isEmpty ? "连接失败" : fallback
     }
 
     private func connectToLocalDevice(_ device: DiscoveredDevice) {
@@ -2009,6 +2283,300 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 40)
+    }
+
+    @MainActor
+    private final class TrustedBonjourMetadataStore: ObservableObject {
+        @Published fileprivate var metadataByGroupId: [String: ApplePeerDeviceMetadataNormalizer.Presentation] = [:]
+        private var refreshTask: Task<Void, Never>?
+        private let logger = Logger(
+            subsystem: "com.skybridge.SkyBridgeCompassApp",
+            category: "TrustedBonjourMetadata"
+        )
+
+        func scheduleRefresh(for groups: [TrustRecordDisplayGroup]) {
+            let snapshot = groups
+            logger.debug("schedule refresh for \(snapshot.count) trusted groups")
+            refreshTask = Task { [weak self] in
+                await self?.refresh(for: snapshot)
+            }
+        }
+
+        private func refresh(for groups: [TrustRecordDisplayGroup]) async {
+            var updated: [String: ApplePeerDeviceMetadataNormalizer.Presentation] = [:]
+            for group in groups {
+                guard let endpoint = Self.bonjourEndpoint(for: group) else {
+                    logger.debug("skip group \(group.id, privacy: .public): no bonjour endpoint")
+                    continue
+                }
+                logger.debug(
+                    "resolve group \(group.id, privacy: .public) endpoint=\(endpoint.name, privacy: .public)@\(endpoint.domain, privacy: .public)"
+                )
+                guard let info = await BonjourTXTLookupResolver.resolve(
+                    name: endpoint.name,
+                    type: "_skybridge._tcp",
+                    domain: endpoint.domain,
+                    timeout: 1.5
+                ) else {
+                    logger.debug("resolve missed group \(group.id, privacy: .public)")
+                    continue
+                }
+                logger.debug(
+                    "resolved group \(group.id, privacy: .public) platform=\(info.platform ?? "", privacy: .public) os=\(info.osVersion ?? "", privacy: .public) model=\(info.model ?? "", privacy: .public)"
+                )
+
+                let normalized = ApplePeerDeviceMetadataNormalizer.normalize(
+                    modelName: info.model,
+                    chip: info.chip,
+                    platform: info.platform,
+                    osVersion: info.osVersion
+                )
+
+                if normalized.modelName != nil
+                    || normalized.chip != nil
+                    || normalized.platform != nil
+                    || normalized.osVersion != nil {
+                    updated[group.id] = normalized
+                }
+            }
+
+            applyResolvedMetadata(updated, validGroupIds: Set(groups.map(\.id)))
+        }
+
+        private func applyResolvedMetadata(
+            _ updated: [String: ApplePeerDeviceMetadataNormalizer.Presentation],
+            validGroupIds: Set<String>
+        ) {
+            var merged = metadataByGroupId.filter { validGroupIds.contains($0.key) }
+            merged.merge(updated) { _, new in new }
+            metadataByGroupId = merged
+            logger.debug("applied trusted bonjour metadata for \(updated.count) groups; retained total \(merged.count)")
+        }
+
+        private nonisolated static func bonjourEndpoint(
+            for group: TrustRecordDisplayGroup
+        ) -> (name: String, domain: String)? {
+            let records = [group.displayRecord] + group.relatedRecords
+            for record in records {
+                for token in bonjourCandidates(from: record) {
+                    if let parsed = parseBonjourToken(token) {
+                        return parsed
+                    }
+                }
+            }
+            return nil
+        }
+
+        private nonisolated static func bonjourCandidates(from record: TrustRecord) -> [String] {
+            let caps = record.capabilities.compactMap { capability -> String? in
+                let parts = capability.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2, parts[0] == "peerEndpoint" else { return nil }
+                return parts[1]
+            }
+
+            return caps
+                + [record.deviceId, record.currentDeviceId]
+                + record.knownDeviceIds
+        }
+
+        private nonisolated static func parseBonjourToken(_ raw: String?) -> (name: String, domain: String)? {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  raw.hasPrefix("bonjour:") else {
+                return nil
+            }
+
+            let payload = String(raw.dropFirst("bonjour:".count))
+            let parts = payload.split(separator: "@", maxSplits: 1).map(String.init)
+            guard let name = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty else {
+                return nil
+            }
+
+            let domain = parts.count > 1 ? parts[1] : "local."
+            return (name, domain.hasSuffix(".") ? domain : "\(domain).")
+        }
+    }
+}
+
+private final class BonjourTXTLookupResolver: NSObject, NetServiceDelegate, @unchecked Sendable {
+    private let service: NetService
+    private var continuation: CheckedContinuation<BonjourDeviceInfo?, Never>?
+    private var completed = false
+    private var selfRetain: BonjourTXTLookupResolver?
+
+    private init(name: String, type: String, domain: String) {
+        self.service = NetService(domain: domain, type: type, name: name)
+        super.init()
+        self.service.delegate = self
+    }
+
+    static func resolve(
+        name: String,
+        type: String,
+        domain: String,
+        timeout: TimeInterval = 3
+    ) async -> BonjourDeviceInfo? {
+        let resolved = await withCheckedContinuation { continuation in
+            let resolver = BonjourTXTLookupResolver(name: name, type: type, domain: domain)
+            resolver.start(timeout: timeout, continuation: continuation)
+        }
+        if let resolved {
+            return resolved
+        }
+        return await fallbackResolveViaDNSSD(
+            name: name,
+            type: type,
+            domain: domain,
+            timeout: timeout
+        )
+    }
+
+    private func start(
+        timeout: TimeInterval,
+        continuation: CheckedContinuation<BonjourDeviceInfo?, Never>
+    ) {
+        self.continuation = continuation
+        self.selfRetain = self
+        service.schedule(in: .main, forMode: .common)
+        service.resolve(withTimeout: timeout)
+
+        let resolver = self
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            resolver.finish(with: nil)
+        }
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let txtData = sender.txtRecordData() else {
+            finish(with: nil)
+            return
+        }
+
+        let dict = NetService.dictionary(fromTXTRecord: txtData).reduce(into: [String: String]()) { partialResult, item in
+            if let value = String(data: item.value, encoding: .utf8) {
+                partialResult[item.key] = value
+            }
+        }
+        finish(with: BonjourTXTParser.extractDeviceInfo(from: dict))
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
+        finish(with: nil)
+    }
+
+    private func finish(with info: BonjourDeviceInfo?) {
+        guard !completed else { return }
+        completed = true
+        service.stop()
+        service.remove(from: .main, forMode: .common)
+        continuation?.resume(returning: info)
+        continuation = nil
+        selfRetain = nil
+    }
+
+    private static func fallbackResolveViaDNSSD(
+        name: String,
+        type: String,
+        domain: String,
+        timeout: TimeInterval
+    ) async -> BonjourDeviceInfo? {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/dns-sd") else {
+            return nil
+        }
+
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/dns-sd")
+        process.arguments = ["-L", name, type, domain]
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        let timeoutTask = Task {
+            let nanos = UInt64(max(timeout, 0.5) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+
+        process.waitUntilExit()
+        timeoutTask.cancel()
+
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        for line in output.split(whereSeparator: \.isNewline).reversed() {
+            let parsed = parseDNSSDKeyValueLine(String(line))
+            if !parsed.isEmpty {
+                return BonjourTXTParser.extractDeviceInfo(from: parsed)
+            }
+        }
+
+        return nil
+    }
+
+    private static func parseDNSSDKeyValueLine(_ line: String) -> [String: String] {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains("=") else { return [:] }
+
+        let tokens = splitEscapedFields(trimmed)
+        var parsed: [String: String] = [:]
+        for token in tokens {
+            let parts = token.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = parts[1]
+                .replacingOccurrences(of: "\\ ", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, !value.isEmpty else { continue }
+            parsed[key] = value
+        }
+        return parsed
+    }
+
+    private static func splitEscapedFields(_ line: String) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var escaping = false
+
+        for scalar in line.unicodeScalars {
+            let character = Character(scalar)
+            if escaping {
+                current.append(character)
+                escaping = false
+                continue
+            }
+
+            if character == "\\" {
+                current.append(character)
+                escaping = true
+                continue
+            }
+
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                if !current.isEmpty {
+                    fields.append(current)
+                    current.removeAll(keepingCapacity: true)
+                }
+                continue
+            }
+
+            current.append(character)
+        }
+
+        if !current.isEmpty {
+            fields.append(current)
+        }
+
+        return fields
     }
 }
 

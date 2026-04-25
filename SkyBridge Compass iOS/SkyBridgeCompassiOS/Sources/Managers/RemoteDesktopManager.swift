@@ -13,7 +13,8 @@
 
 import Foundation
 import Network
-import AVFoundation
+@preconcurrency import AVFoundation
+import AudioToolbox
 import VideoToolbox
 import ImageIO
 import CoreImage
@@ -40,6 +41,9 @@ public enum RemoteDesktopConstants {
     
     /// 连接超时（秒）
     public static let connectionTimeout: TimeInterval = 30
+
+    /// 多候选端点探测时，单个候选的建立超时（秒）
+    public static let candidateConnectionTimeout: TimeInterval = 12
 }
 
 private func RemoteDesktopReleasePixelBufferBytes(
@@ -672,7 +676,6 @@ final class RemoteVideoFrameFeed: ObservableObject {
 
     func markDisplayedFrame() {
         hasDisplayedFrame = true
-        frameVersion &+= 1
     }
 
     func takePendingFrames() -> [DisplaySampleBufferFrame] {
@@ -713,7 +716,6 @@ final class RemoteMetalVideoFrameFeed: ObservableObject {
 
     func markDisplayedFrame() {
         hasDisplayedFrame = true
-        frameVersion &+= 1
     }
 
     func takeLatestFrame() -> DecodedPixelBufferFrame? {
@@ -1590,6 +1592,198 @@ struct RemoteClipboardMessagePayload: Codable, Sendable, Equatable {
     }
 }
 
+struct RemoteDesktopAudioChunkPayload: Codable, Sendable, Equatable {
+    enum Encoding: String, Codable, Sendable {
+        case pcmS16LE = "pcm_s16le"
+        case aacLC = "aac_lc"
+    }
+
+    struct PacketDescription: Codable, Sendable, Equatable {
+        let startOffset: Int
+        let variableFramesInPacket: UInt32
+        let dataByteSize: UInt32
+    }
+
+    let encoding: Encoding
+    let sampleRate: Int
+    let channelCount: Int
+    let frameCount: Int
+    let packetCount: Int?
+    let packetDescriptions: [PacketDescription]?
+    let magicCookie: Data?
+    let sequenceNumber: UInt64
+    let sentAt: TimeInterval
+    let data: Data
+
+    init(
+        encoding: Encoding = .pcmS16LE,
+        sampleRate: Int,
+        channelCount: Int,
+        frameCount: Int,
+        packetCount: Int? = nil,
+        packetDescriptions: [PacketDescription]? = nil,
+        magicCookie: Data? = nil,
+        sequenceNumber: UInt64,
+        sentAt: TimeInterval = Date().timeIntervalSince1970,
+        data: Data
+    ) {
+        self.encoding = encoding
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+        self.frameCount = frameCount
+        self.packetCount = packetCount
+        self.packetDescriptions = packetDescriptions
+        self.magicCookie = magicCookie
+        self.sequenceNumber = sequenceNumber
+        self.sentAt = sentAt
+        self.data = data
+    }
+}
+
+enum RemoteDesktopAudioChunkWire {
+    private static let magic: UInt32 = 0x53425241 // "SBRA"
+    private static let version: UInt8 = 2
+    private static let version1HeaderSize = 36
+    private static let headerSize = 48
+    private static let packetDescriptionSize = 12
+
+    private enum EncodingTag: UInt8 {
+        case pcmS16LE = 1
+        case aacLC = 2
+
+        init?(encoding: RemoteDesktopAudioChunkPayload.Encoding) {
+            switch encoding {
+            case .pcmS16LE:
+                self = .pcmS16LE
+            case .aacLC:
+                self = .aacLC
+            }
+        }
+
+        var encoding: RemoteDesktopAudioChunkPayload.Encoding {
+            switch self {
+            case .pcmS16LE:
+                return .pcmS16LE
+            case .aacLC:
+                return .aacLC
+            }
+        }
+    }
+
+    static func decodeIfPresent(_ data: Data) -> RemoteDesktopAudioChunkPayload? {
+        guard data.count >= version1HeaderSize else { return nil }
+        guard readUInt32(from: data, offset: 0) == magic else { return nil }
+        switch data[4] {
+        case 1:
+            return decodeVersion1(data)
+        case version:
+            return decodeVersion2(data)
+        default:
+            return nil
+        }
+    }
+
+    private static func decodeVersion1(_ data: Data) -> RemoteDesktopAudioChunkPayload? {
+        guard data.count >= version1HeaderSize else { return nil }
+        guard let encodingTag = EncodingTag(rawValue: data[5]) else { return nil }
+
+        let channelCount = Int(data[6])
+        let sampleRate = Int(readUInt32(from: data, offset: 8))
+        let frameCount = Int(readUInt32(from: data, offset: 12))
+        let sequenceNumber = readUInt64(from: data, offset: 16)
+        let timestampMicros = readUInt64(from: data, offset: 24)
+        let payloadLength = Int(readUInt32(from: data, offset: 32))
+
+        guard channelCount > 0, sampleRate > 0, frameCount > 0 else { return nil }
+        guard payloadLength >= 0, data.count == version1HeaderSize + payloadLength else { return nil }
+
+        return RemoteDesktopAudioChunkPayload(
+            encoding: encodingTag.encoding,
+            sampleRate: sampleRate,
+            channelCount: channelCount,
+            frameCount: frameCount,
+            sequenceNumber: sequenceNumber,
+            sentAt: TimeInterval(timestampMicros) / 1_000_000.0,
+            data: data.subdata(in: version1HeaderSize..<data.count)
+        )
+    }
+
+    private static func decodeVersion2(_ data: Data) -> RemoteDesktopAudioChunkPayload? {
+        guard data.count >= headerSize else { return nil }
+        guard let encodingTag = EncodingTag(rawValue: data[5]) else { return nil }
+
+        let channelCount = Int(data[6])
+        let sampleRate = Int(readUInt32(from: data, offset: 8))
+        let frameCount = Int(readUInt32(from: data, offset: 12))
+        let packetCount = Int(readUInt32(from: data, offset: 16))
+        let sequenceNumber = readUInt64(from: data, offset: 20)
+        let timestampMicros = readUInt64(from: data, offset: 28)
+        let magicCookieLength = Int(readUInt32(from: data, offset: 36))
+        let packetDescriptionCount = Int(readUInt32(from: data, offset: 40))
+        let payloadLength = Int(readUInt32(from: data, offset: 44))
+
+        guard channelCount > 0, sampleRate > 0, frameCount > 0 else { return nil }
+        guard magicCookieLength >= 0, packetDescriptionCount >= 0, payloadLength >= 0 else { return nil }
+
+        let packetDescriptionsByteLength = packetDescriptionCount * packetDescriptionSize
+        let metadataLength = magicCookieLength + packetDescriptionsByteLength
+        guard data.count == headerSize + metadataLength + payloadLength else { return nil }
+
+        let magicCookieRange = headerSize..<(headerSize + magicCookieLength)
+        let packetDescriptionsStart = magicCookieRange.upperBound
+        let packetDescriptionsEnd = packetDescriptionsStart + packetDescriptionsByteLength
+        let payloadStart = packetDescriptionsEnd
+
+        let magicCookie = magicCookieLength > 0 ? data.subdata(in: magicCookieRange) : nil
+        let packetDescriptions: [RemoteDesktopAudioChunkPayload.PacketDescription]? = {
+            guard packetDescriptionCount > 0 else { return nil }
+            return (0..<packetDescriptionCount).map { index in
+                let offset = packetDescriptionsStart + (index * packetDescriptionSize)
+                return RemoteDesktopAudioChunkPayload.PacketDescription(
+                    startOffset: Int(readUInt32(from: data, offset: offset)),
+                    variableFramesInPacket: readUInt32(from: data, offset: offset + 4),
+                    dataByteSize: readUInt32(from: data, offset: offset + 8)
+                )
+            }
+        }()
+
+        return RemoteDesktopAudioChunkPayload(
+            encoding: encodingTag.encoding,
+            sampleRate: sampleRate,
+            channelCount: channelCount,
+            frameCount: frameCount,
+            packetCount: packetCount > 0 ? packetCount : nil,
+            packetDescriptions: packetDescriptions,
+            magicCookie: magicCookie,
+            sequenceNumber: sequenceNumber,
+            sentAt: TimeInterval(timestampMicros) / 1_000_000.0,
+            data: data.subdata(in: payloadStart..<(payloadStart + payloadLength))
+        )
+    }
+
+    private static func readUInt32(from data: Data, offset: Int) -> UInt32 {
+        data.withUnsafeBytes { rawBuffer in
+            UInt32(
+                bigEndian: rawBuffer.loadUnaligned(
+                    fromByteOffset: offset,
+                    as: UInt32.self
+                )
+            )
+        }
+    }
+
+    private static func readUInt64(from data: Data, offset: Int) -> UInt64 {
+        data.withUnsafeBytes { rawBuffer in
+            UInt64(
+                bigEndian: rawBuffer.loadUnaligned(
+                    fromByteOffset: offset,
+                    as: UInt64.self
+                )
+            )
+        }
+    }
+}
+
 struct RemoteDesktopDamageRectPayload: Codable, Sendable, Equatable {
     let x: Double
     let y: Double
@@ -1644,6 +1838,11 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
     let screenFrameTransport: String?
     let screenDataChannelEnabled: Bool?
     let nativeVideoTrackReady: Bool?
+    let nativeAudioTrackEnabled: Bool?
+    let audioRedirectionEnabled: Bool?
+    let preferredAudioEncoding: String?
+    let audioSampleRate: Int?
+    let audioChannelCount: Int?
     let streamRefreshToken: UInt64?
     let sentAt: TimeInterval
 
@@ -1669,6 +1868,11 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         screenFrameTransport: String? = nil,
         screenDataChannelEnabled: Bool? = nil,
         nativeVideoTrackReady: Bool? = nil,
+        nativeAudioTrackEnabled: Bool? = nil,
+        audioRedirectionEnabled: Bool? = nil,
+        preferredAudioEncoding: String? = nil,
+        audioSampleRate: Int? = nil,
+        audioChannelCount: Int? = nil,
         streamRefreshToken: UInt64? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
@@ -1693,6 +1897,11 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         self.screenFrameTransport = screenFrameTransport
         self.screenDataChannelEnabled = screenDataChannelEnabled
         self.nativeVideoTrackReady = nativeVideoTrackReady
+        self.nativeAudioTrackEnabled = nativeAudioTrackEnabled
+        self.audioRedirectionEnabled = audioRedirectionEnabled
+        self.preferredAudioEncoding = preferredAudioEncoding
+        self.audioSampleRate = audioSampleRate
+        self.audioChannelCount = audioChannelCount
         self.streamRefreshToken = streamRefreshToken
         self.sentAt = sentAt
     }
@@ -1719,6 +1928,11 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
             && lhs.screenFrameTransport == rhs.screenFrameTransport
             && lhs.screenDataChannelEnabled == rhs.screenDataChannelEnabled
             && lhs.nativeVideoTrackReady == rhs.nativeVideoTrackReady
+            && lhs.nativeAudioTrackEnabled == rhs.nativeAudioTrackEnabled
+            && lhs.audioRedirectionEnabled == rhs.audioRedirectionEnabled
+            && lhs.preferredAudioEncoding == rhs.preferredAudioEncoding
+            && lhs.audioSampleRate == rhs.audioSampleRate
+            && lhs.audioChannelCount == rhs.audioChannelCount
             && lhs.streamRefreshToken == rhs.streamRefreshToken
     }
 }
@@ -2011,9 +2225,39 @@ public struct RemoteDesktopViewerSettings: Codable, Sendable, Equatable {
     public var frameRate: RemoteDesktopViewerFrameRate = .adaptive
     public var preferredCodec: RemoteDesktopViewerCodec = .automatic
     public var clipboardSyncEnabled: Bool = true
+    public var audioRedirectionEnabled: Bool = true
     public var lowLatencyMode: Bool = false
 
+    private enum CodingKeys: String, CodingKey {
+        case resolution
+        case frameRate
+        case preferredCodec
+        case clipboardSyncEnabled
+        case audioRedirectionEnabled
+        case lowLatencyMode
+    }
+
     public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        resolution = try container.decodeIfPresent(RemoteDesktopViewerResolution.self, forKey: .resolution) ?? .auto
+        frameRate = try container.decodeIfPresent(RemoteDesktopViewerFrameRate.self, forKey: .frameRate) ?? .adaptive
+        preferredCodec = try container.decodeIfPresent(RemoteDesktopViewerCodec.self, forKey: .preferredCodec) ?? .automatic
+        clipboardSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .clipboardSyncEnabled) ?? true
+        audioRedirectionEnabled = try container.decodeIfPresent(Bool.self, forKey: .audioRedirectionEnabled) ?? true
+        lowLatencyMode = try container.decodeIfPresent(Bool.self, forKey: .lowLatencyMode) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(resolution, forKey: .resolution)
+        try container.encode(frameRate, forKey: .frameRate)
+        try container.encode(preferredCodec, forKey: .preferredCodec)
+        try container.encode(clipboardSyncEnabled, forKey: .clipboardSyncEnabled)
+        try container.encode(audioRedirectionEnabled, forKey: .audioRedirectionEnabled)
+        try container.encode(lowLatencyMode, forKey: .lowLatencyMode)
+    }
 
     var targetFrameRate: Int {
         frameRate.targetFPS
@@ -2177,6 +2421,621 @@ struct RemoteDesktopCodecGovernance: Sendable, Equatable {
     }
 }
 
+@available(iOS 17.0, *)
+private struct RemoteAudioPlaybackContext: Sendable {
+    let generation: UInt64
+    let activeTransportModeIsCrossNetwork: Bool
+    let nativeAudioReceiveEnabled: Bool
+    let remoteAudioTrackHasReceivedFirstPacket: Bool
+    let lastInboundScreenTimestamp: TimeInterval?
+}
+
+@available(iOS 17.0, *)
+private final class RemoteAudioOneShotDecodeFeedState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var consumed = false
+
+    func takeIfAvailable() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !consumed else { return false }
+        consumed = true
+        return true
+    }
+}
+
+@available(iOS 17.0, *)
+private enum RemoteAudioPlaybackPolicy {
+    private static let insufficientPriorityOSStatus = 561_017_449
+
+    static func fallbackUnlockAt(
+        activeTransportModeIsCrossNetwork: Bool,
+        nativeAudioReceiveEnabled: Bool,
+        remoteAudioTrackHasReceivedFirstPacket: Bool,
+        currentUnlockAt: Date?,
+        now: Date
+    ) -> Date? {
+        guard activeTransportModeIsCrossNetwork else { return nil }
+        guard nativeAudioReceiveEnabled else { return nil }
+        guard !remoteAudioTrackHasReceivedFirstPacket else { return nil }
+        if let currentUnlockAt, now < currentUnlockAt {
+            return currentUnlockAt
+        }
+        return now.addingTimeInterval(1.25)
+    }
+
+    static func retryDelay(for error: NSError) -> TimeInterval {
+        if isInsufficientPriority(error) {
+            return 5.0
+        }
+        return 1.0
+    }
+
+    static func isInsufficientPriority(_ error: NSError) -> Bool {
+        error.domain == NSOSStatusErrorDomain && error.code == insufficientPriorityOSStatus
+    }
+}
+
+@available(iOS 17.0, *)
+private actor RemoteAudioPlaybackController {
+    private struct BufferedChunk {
+        let sequenceNumber: UInt64
+        let sentAt: TimeInterval
+        let enqueuedAt: Date
+        let frameLength: AVAudioFrameCount
+        let buffer: AVAudioPCMBuffer
+    }
+
+    private let playbackFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 48_000,
+        channels: 2,
+        interleaved: false
+    )!
+    private let maxQueuedFrames: AVAudioFrameCount = 48_000 / 2
+
+    private var minimumAcceptedGeneration: UInt64 = 0
+    private var engine: AVAudioEngine?
+    private var playerNode: AVAudioPlayerNode?
+    private var decodeConverter: AVAudioConverter?
+    private var decodeFormatSignature: String?
+    private var queuedFrames: AVAudioFrameCount = 0
+    private var bufferedChunks: [UInt64: BufferedChunk] = [:]
+    private var bufferedChunkOrder: [UInt64] = []
+    private var bufferedFrames: AVAudioFrameCount = 0
+    private var expectedSequenceNumber: UInt64?
+    private var lastArrivalAt: Date?
+    private var lastSentAt: TimeInterval?
+    private var arrivalJitter: TimeInterval = 0
+    private var lastChunkDuration: TimeInterval = 0.02
+    private var fallbackUnlockAt: Date?
+    private var playbackRetryNotBefore: Date?
+    private var lastFailureDescription: String?
+    private var lastFailureLogAt: Date?
+
+    func handle(_ payload: RemoteDesktopAudioChunkPayload, context: RemoteAudioPlaybackContext) {
+        guard context.generation >= minimumAcceptedGeneration else { return }
+        if context.activeTransportModeIsCrossNetwork,
+           context.nativeAudioReceiveEnabled,
+           context.remoteAudioTrackHasReceivedFirstPacket {
+            return
+        }
+
+        let now = Date()
+        if shouldDelayFallbackPlayback(context: context, now: now) {
+            return
+        }
+        if let retryNotBefore = playbackRetryNotBefore, now < retryNotBefore {
+            return
+        }
+        let age = now.timeIntervalSince1970 - payload.sentAt
+        if age.isFinite, age > 1.2 {
+            return
+        }
+        if isChunkTooFarBehindVideo(payload.sentAt, lastScreenTimestamp: context.lastInboundScreenTimestamp) {
+            return
+        }
+
+        do {
+            try ensurePlaybackPipeline()
+            playbackRetryNotBefore = nil
+            lastFailureDescription = nil
+            lastFailureLogAt = nil
+        } catch {
+            notePlaybackFailure(error, at: now)
+            return
+        }
+
+        guard let playerNode else { return }
+        noteArrival(payload, at: now)
+        let buffer: AVAudioPCMBuffer?
+        switch payload.encoding {
+        case .pcmS16LE:
+            buffer = makePCMPlaybackBuffer(from: payload)
+        case .aacLC:
+            buffer = decodeAACPlaybackBuffer(from: payload)
+        }
+        guard let buffer else { return }
+
+        guard insertBufferedChunk(buffer, payload: payload, at: now) else { return }
+        drainBufferedChunks(on: playerNode, now: now, lastScreenTimestamp: context.lastInboundScreenTimestamp)
+    }
+
+    func invalidate(upTo generation: UInt64, deactivateSession: Bool = true, resetFailureState: Bool = true) {
+        let nextMinimum = generation == UInt64.max ? UInt64.max : generation + 1
+        if nextMinimum > minimumAcceptedGeneration {
+            minimumAcceptedGeneration = nextMinimum
+        }
+        teardown(deactivateSession: deactivateSession, resetFailureState: resetFailureState)
+    }
+
+    private func makePCMPlaybackBuffer(from payload: RemoteDesktopAudioChunkPayload) -> AVAudioPCMBuffer? {
+        guard payload.sampleRate == Int(playbackFormat.sampleRate.rounded()),
+              payload.channelCount == Int(playbackFormat.channelCount),
+              payload.frameCount > 0 else {
+            return nil
+        }
+
+        let bytesPerFrame = payload.channelCount * MemoryLayout<Int16>.size
+        let expectedByteCount = payload.frameCount * bytesPerFrame
+        guard payload.data.count == expectedByteCount else { return nil }
+
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: playbackFormat,
+            frameCapacity: AVAudioFrameCount(payload.frameCount)
+        ) else {
+            return nil
+        }
+        buffer.frameLength = AVAudioFrameCount(payload.frameCount)
+
+        guard let channelData = buffer.floatChannelData else { return nil }
+        let leftChannel = channelData[0]
+        let rightChannel = channelData[1]
+        payload.data.withUnsafeBytes { rawBuffer in
+            let samples = rawBuffer.bindMemory(to: Int16.self)
+            guard samples.count == payload.frameCount * payload.channelCount else { return }
+            for frame in 0..<payload.frameCount {
+                let leftSample = Float(Int16(littleEndian: samples[frame * payload.channelCount]))
+                leftChannel[frame] = leftSample / Float(Int16.max)
+                let rightSample = Float(Int16(littleEndian: samples[(frame * payload.channelCount) + 1]))
+                rightChannel[frame] = rightSample / Float(Int16.max)
+            }
+        }
+        return buffer
+    }
+
+    private func decodeAACPlaybackBuffer(from payload: RemoteDesktopAudioChunkPayload) -> AVAudioPCMBuffer? {
+        guard let packetCount = payload.packetCount, packetCount > 0 else { return nil }
+        guard let inputFormat = AVAudioFormat(
+            settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: payload.sampleRate,
+                AVNumberOfChannelsKey: payload.channelCount
+            ]
+        ) else {
+            return nil
+        }
+
+        let converterSignature = "aac-\(payload.sampleRate)-\(payload.channelCount)"
+        if decodeConverter == nil || decodeFormatSignature != converterSignature {
+            decodeConverter = AVAudioConverter(from: inputFormat, to: playbackFormat)
+            decodeConverter?.primeMethod = .none
+            decodeFormatSignature = converterSignature
+        }
+        guard let decodeConverter else { return nil }
+        if let magicCookie = payload.magicCookie {
+            decodeConverter.magicCookie = magicCookie
+        }
+
+        let maximumPacketSize = max(
+            payload.packetDescriptions?.map { Int($0.dataByteSize) }.max() ?? 0,
+            payload.data.count
+        )
+        let compressedBuffer = AVAudioCompressedBuffer(
+            format: inputFormat,
+            packetCapacity: AVAudioPacketCount(packetCount),
+            maximumPacketSize: max(1, maximumPacketSize)
+        )
+        compressedBuffer.packetCount = AVAudioPacketCount(packetCount)
+        compressedBuffer.byteLength = UInt32(payload.data.count)
+        payload.data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            memcpy(compressedBuffer.data, baseAddress, payload.data.count)
+        }
+
+        if let packetDescriptions = payload.packetDescriptions,
+           let packetDescriptionsPointer = compressedBuffer.packetDescriptions,
+           packetDescriptions.count == packetCount {
+            for (index, packetDescription) in packetDescriptions.enumerated() {
+                packetDescriptionsPointer[index] = AudioStreamPacketDescription(
+                    mStartOffset: Int64(packetDescription.startOffset),
+                    mVariableFramesInPacket: packetDescription.variableFramesInPacket,
+                    mDataByteSize: packetDescription.dataByteSize
+                )
+            }
+        }
+
+        let outputCapacity = AVAudioFrameCount(max(payload.frameCount + 256, 2048))
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: playbackFormat,
+            frameCapacity: outputCapacity
+        ) else {
+            return nil
+        }
+
+        let inputState = RemoteAudioOneShotDecodeFeedState()
+        var decodeError: NSError?
+        let status = decodeConverter.convert(to: outputBuffer, error: &decodeError) { _, outStatus in
+            if !inputState.takeIfAvailable() {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            outStatus.pointee = .haveData
+            return compressedBuffer
+        }
+
+        guard decodeError == nil else {
+            SkyBridgeLogger.shared.debug("ℹ️ 远端 AAC 音频解码失败: \(decodeError?.localizedDescription ?? "unknown")")
+            return nil
+        }
+        guard status == .haveData || status == .inputRanDry else { return nil }
+        guard outputBuffer.frameLength > 0 else { return nil }
+        return outputBuffer
+    }
+
+    private func shouldDelayFallbackPlayback(context: RemoteAudioPlaybackContext, now: Date) -> Bool {
+        guard let unlockAt = RemoteAudioPlaybackPolicy.fallbackUnlockAt(
+            activeTransportModeIsCrossNetwork: context.activeTransportModeIsCrossNetwork,
+            nativeAudioReceiveEnabled: context.nativeAudioReceiveEnabled,
+            remoteAudioTrackHasReceivedFirstPacket: context.remoteAudioTrackHasReceivedFirstPacket,
+            currentUnlockAt: fallbackUnlockAt,
+            now: now
+        ) else {
+            fallbackUnlockAt = nil
+            return false
+        }
+        fallbackUnlockAt = unlockAt
+        return now < unlockAt
+    }
+
+    private func notePlaybackFailure(_ error: Error, at now: Date) {
+        let nsError = error as NSError
+        playbackRetryNotBefore = now.addingTimeInterval(Self.retryDelay(for: nsError))
+        let description = "\(error.localizedDescription) [domain=\(nsError.domain) code=\(nsError.code)]"
+        let shouldLog: Bool
+        if let lastFailureDescription,
+           let lastFailureLogAt,
+           lastFailureDescription == description,
+           now.timeIntervalSince(lastFailureLogAt) < 2.0 {
+            shouldLog = false
+        } else {
+            shouldLog = true
+        }
+
+        if shouldLog {
+            SkyBridgeLogger.shared.error("❌ 初始化远端音频播放失败: \(description)")
+            lastFailureDescription = description
+            lastFailureLogAt = now
+        }
+    }
+
+    private static func retryDelay(for error: NSError) -> TimeInterval {
+        RemoteAudioPlaybackPolicy.retryDelay(for: error)
+    }
+
+    private func setSessionPreferences(_ session: AVAudioSession) {
+        do {
+            try session.setPreferredSampleRate(playbackFormat.sampleRate)
+        } catch {
+            SkyBridgeLogger.shared.debug("ℹ️ 远端音频播放采样率偏好未生效: \(error.localizedDescription)")
+        }
+
+        do {
+            try session.setPreferredIOBufferDuration(0.02)
+        } catch {
+            SkyBridgeLogger.shared.debug("ℹ️ 远端音频播放 I/O 缓冲偏好未生效: \(error.localizedDescription)")
+        }
+    }
+
+    private func configureSession(_ session: AVAudioSession) throws {
+        do {
+            do {
+                try session.setCategory(
+                    .playback,
+                    mode: .default,
+                    options: [.mixWithOthers]
+                )
+            } catch {
+                let nsError = error as NSError
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 远端音频阶段失败 stage=playback_set_category domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+                )
+                throw error
+            }
+            setSessionPreferences(session)
+            do {
+                try session.setActive(true)
+            } catch {
+                let nsError = error as NSError
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 远端音频阶段失败 stage=playback_set_active domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+                )
+                throw error
+            }
+            return
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 远端音频 playback mixed 会话初始化失败: domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            guard RemoteAudioPlaybackPolicy.isInsufficientPriority(nsError)
+                    || (nsError.domain == NSOSStatusErrorDomain && nsError.code == -50) else {
+                throw error
+            }
+
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 远端音频尝试 ambient fallback: \(error.localizedDescription)"
+            )
+        }
+
+        do {
+            try session.setCategory(
+                .ambient,
+                mode: .default,
+                options: []
+            )
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 远端音频阶段失败 stage=ambient_set_category domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            throw error
+        }
+        setSessionPreferences(session)
+        do {
+            try session.setActive(true)
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 远端音频阶段失败 stage=ambient_set_active domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            throw error
+        }
+    }
+
+    private func ensurePlaybackPipeline() throws {
+        if let engine, engine.isRunning, playerNode != nil {
+            return
+        }
+
+        teardown(deactivateSession: false, resetFailureState: false)
+
+        let session = AVAudioSession.sharedInstance()
+        try configureSession(session)
+
+        let engine = AVAudioEngine()
+        let playerNode = AVAudioPlayerNode()
+        engine.attach(playerNode)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: playbackFormat)
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 远端音频阶段失败 stage=engine_start domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            throw error
+        }
+        playerNode.play()
+
+        self.engine = engine
+        self.playerNode = playerNode
+        decodeConverter = nil
+        decodeFormatSignature = nil
+        queuedFrames = 0
+        resetBufferedState()
+    }
+
+    private func teardown(deactivateSession: Bool, resetFailureState: Bool) {
+        let oldPlayerNode = playerNode
+        let oldEngine = engine
+
+        playerNode = nil
+        engine = nil
+        decodeConverter = nil
+        decodeFormatSignature = nil
+        queuedFrames = 0
+        fallbackUnlockAt = nil
+        if resetFailureState {
+            playbackRetryNotBefore = nil
+            lastFailureDescription = nil
+            lastFailureLogAt = nil
+        }
+        resetBufferedState()
+
+        oldPlayerNode?.stop()
+        oldPlayerNode?.reset()
+        oldEngine?.stop()
+        if deactivateSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
+    }
+
+    private func resetBufferedState() {
+        bufferedChunks.removeAll(keepingCapacity: false)
+        bufferedChunkOrder.removeAll(keepingCapacity: false)
+        bufferedFrames = 0
+        expectedSequenceNumber = nil
+        lastArrivalAt = nil
+        lastSentAt = nil
+        arrivalJitter = 0
+        lastChunkDuration = 0.02
+    }
+
+    private func noteArrival(_ payload: RemoteDesktopAudioChunkPayload, at now: Date) {
+        let chunkDuration = TimeInterval(payload.frameCount) / max(Double(payload.sampleRate), 1)
+        if let lastArrivalAt, let lastSentAt {
+            let arrivalDelta = now.timeIntervalSince(lastArrivalAt)
+            let sentDelta = max(0, payload.sentAt - lastSentAt)
+            let transitDelta = arrivalDelta - sentDelta
+            arrivalJitter = (arrivalJitter * 0.875) + (abs(transitDelta) * 0.125)
+        }
+        lastArrivalAt = now
+        lastSentAt = payload.sentAt
+        lastChunkDuration = chunkDuration.isFinite && chunkDuration > 0 ? chunkDuration : 0.02
+    }
+
+    private func insertBufferedChunk(
+        _ buffer: AVAudioPCMBuffer,
+        payload: RemoteDesktopAudioChunkPayload,
+        at now: Date
+    ) -> Bool {
+        guard bufferedChunks[payload.sequenceNumber] == nil else { return false }
+        let chunk = BufferedChunk(
+            sequenceNumber: payload.sequenceNumber,
+            sentAt: payload.sentAt,
+            enqueuedAt: now,
+            frameLength: buffer.frameLength,
+            buffer: buffer
+        )
+        bufferedChunks[payload.sequenceNumber] = chunk
+        bufferedChunkOrder.append(payload.sequenceNumber)
+        bufferedChunkOrder.sort()
+        bufferedFrames += chunk.frameLength
+        if expectedSequenceNumber == nil {
+            expectedSequenceNumber = bufferedChunkOrder.first
+        }
+        return true
+    }
+
+    private func drainBufferedChunks(
+        on playerNode: AVAudioPlayerNode,
+        now: Date,
+        lastScreenTimestamp: TimeInterval?
+    ) {
+        normalizeBufferedStateIfNeeded()
+
+        while let firstSequenceNumber = bufferedChunkOrder.first {
+            if shouldHoldBufferedAudioForStartup(firstSequenceNumber: firstSequenceNumber, now: now) {
+                break
+            }
+
+            if expectedSequenceNumber == nil {
+                expectedSequenceNumber = firstSequenceNumber
+            }
+            guard let expectedSequenceNumber else { break }
+
+            if let chunk = bufferedChunks[expectedSequenceNumber] {
+                removeBufferedChunk(sequenceNumber: expectedSequenceNumber)
+
+                if isChunkTooFarBehindVideo(chunk.sentAt, lastScreenTimestamp: lastScreenTimestamp) {
+                    continue
+                }
+
+                if queuedFrames > currentMaxQueuedFrames {
+                    resetPlayerQueue(on: playerNode, reason: "queued-audio-overflow")
+                }
+
+                scheduleBufferedChunk(chunk, on: playerNode)
+                self.expectedSequenceNumber = expectedSequenceNumber &+ 1
+                continue
+            }
+
+            if firstSequenceNumber < expectedSequenceNumber {
+                removeBufferedChunk(sequenceNumber: firstSequenceNumber)
+                continue
+            }
+
+            let oldestWait = bufferedChunks[firstSequenceNumber].map { now.timeIntervalSince($0.enqueuedAt) } ?? 0
+            if bufferedChunkOrder.count >= 10 || oldestWait >= 0.20 {
+                self.expectedSequenceNumber = firstSequenceNumber
+                continue
+            }
+            break
+        }
+    }
+
+    private func shouldHoldBufferedAudioForStartup(firstSequenceNumber: UInt64, now: Date) -> Bool {
+        guard queuedFrames == 0 else { return false }
+        guard bufferedFrames > 0 else { return false }
+        guard bufferedFrames < currentStartupQueuedFrames else { return false }
+        guard let firstChunk = bufferedChunks[firstSequenceNumber] else { return false }
+        return now.timeIntervalSince(firstChunk.enqueuedAt) < 0.22
+    }
+
+    private func scheduleBufferedChunk(_ chunk: BufferedChunk, on playerNode: AVAudioPlayerNode) {
+        let scheduledFrameLength = chunk.frameLength
+        queuedFrames += scheduledFrameLength
+        playerNode.scheduleBuffer(chunk.buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { [weak self] in
+                await self?.decrementQueuedFrames(by: scheduledFrameLength)
+            }
+        }
+        if !playerNode.isPlaying {
+            playerNode.play()
+        }
+    }
+
+    private func decrementQueuedFrames(by frameLength: AVAudioFrameCount) {
+        queuedFrames = queuedFrames > frameLength ? queuedFrames - frameLength : 0
+    }
+
+    private func removeBufferedChunk(sequenceNumber: UInt64) {
+        guard let chunk = bufferedChunks.removeValue(forKey: sequenceNumber) else { return }
+        bufferedChunkOrder.removeAll { $0 == sequenceNumber }
+        bufferedFrames = bufferedFrames > chunk.frameLength ? bufferedFrames - chunk.frameLength : 0
+    }
+
+    private func normalizeBufferedStateIfNeeded() {
+        while bufferedChunkOrder.count > 16 {
+            guard let firstSequenceNumber = bufferedChunkOrder.first else { break }
+            removeBufferedChunk(sequenceNumber: firstSequenceNumber)
+            expectedSequenceNumber = bufferedChunkOrder.first
+        }
+    }
+
+    private func resetPlayerQueue(on playerNode: AVAudioPlayerNode, reason: String) {
+        playerNode.stop()
+        playerNode.reset()
+        playerNode.play()
+        queuedFrames = 0
+        resetBufferedState()
+        SkyBridgeLogger.shared.debug("ℹ️ 已重置远端音频播放队列: \(reason)")
+    }
+
+    private func isChunkTooFarBehindVideo(_ sentAt: TimeInterval, lastScreenTimestamp: TimeInterval?) -> Bool {
+        guard let lastScreenTimestamp else { return false }
+        let allowedBehind = max(0.25, currentTargetBufferedDuration + 0.18)
+        return sentAt + allowedBehind < lastScreenTimestamp
+    }
+
+    private var currentStartupQueuedFrames: AVAudioFrameCount {
+        frames(for: min(max(currentTargetBufferedDuration, 0.20), 0.32))
+    }
+
+    private var currentMaxQueuedFrames: AVAudioFrameCount {
+        frames(for: min(0.75, currentTargetBufferedDuration + 0.35))
+    }
+
+    private var currentTargetBufferedDuration: TimeInterval {
+        let adaptive = min(0.24, max(0, arrivalJitter * 4.0))
+        return min(0.42, max(0.16, (lastChunkDuration * 6.0) + adaptive))
+    }
+
+    private func frames(for duration: TimeInterval) -> AVAudioFrameCount {
+        AVAudioFrameCount(
+            max(
+                1,
+                min(
+                    Double(maxQueuedFrames),
+                    (playbackFormat.sampleRate * max(duration, 0)).rounded()
+                )
+            )
+        )
+    }
+}
+
 // MARK: - RemoteDesktopManager
 
 /// 远程桌面管理器 - iOS 作为查看器/控制端
@@ -2185,12 +3044,33 @@ struct RemoteDesktopCodecGovernance: Sendable, Equatable {
 public class RemoteDesktopManager: ObservableObject {
     public static let instance = RemoteDesktopManager()
     public static let crossNetworkDeviceCapability = "cross_network_remote"
+    private static let crossNetworkNativeAudioReceiveEnabled = false
     private static let viewerSettingsStore = CodablePersistenceStore<RemoteDesktopViewerSettings>(
         location: .protectedApplicationSupport(
             path: "RemoteDesktop/viewer-settings.json",
             legacyUserDefaultsKey: "com.skybridge.remoteDesktop.viewerSettings.v1"
         )
     )
+
+    nonisolated static func fallbackRemoteAudioUnlockAt(
+        activeTransportModeIsCrossNetwork: Bool,
+        nativeAudioReceiveEnabled: Bool,
+        remoteAudioTrackHasReceivedFirstPacket: Bool,
+        currentUnlockAt: Date?,
+        now: Date
+    ) -> Date? {
+        RemoteAudioPlaybackPolicy.fallbackUnlockAt(
+            activeTransportModeIsCrossNetwork: activeTransportModeIsCrossNetwork,
+            nativeAudioReceiveEnabled: nativeAudioReceiveEnabled,
+            remoteAudioTrackHasReceivedFirstPacket: remoteAudioTrackHasReceivedFirstPacket,
+            currentUnlockAt: currentUnlockAt,
+            now: now
+        )
+    }
+
+    nonisolated static func remoteAudioPlaybackRetryDelay(for error: NSError) -> TimeInterval {
+        RemoteAudioPlaybackPolicy.retryDelay(for: error)
+    }
 
     private struct IncomingStreamSignature: Equatable {
         let format: String
@@ -2268,6 +3148,9 @@ public class RemoteDesktopManager: ObservableObject {
     @Published public var quality: StreamQuality = .auto
     @Published public var viewerSettings: RemoteDesktopViewerSettings = .init() {
         didSet {
+            if oldValue.audioRedirectionEnabled && !viewerSettings.audioRedirectionEnabled {
+                teardownRemoteAudioPlayback()
+            }
             persistViewerSettings()
             scheduleViewerSettingsUpdate()
         }
@@ -2286,7 +3169,7 @@ public class RemoteDesktopManager: ObservableObject {
         case sampleBuffer
         case cgImage
     }
-    
+
     private let skyBridgeCore = SkyBridgeiOSCore.shared
     private var networkConnection: NWConnection?
     private var lanHandshakeTransport: NWConnectionTransport?
@@ -2297,6 +3180,8 @@ public class RemoteDesktopManager: ObservableObject {
     private let decoder = VideoDecoder()
     private let queue = DispatchQueue(label: "com.skybridge.remotedesktop", qos: .userInteractive)
     private let fallbackImageContext = CIContext(options: [.cacheIntermediates: false])
+    private let remoteAudioPlayback = RemoteAudioPlaybackController()
+    private var remoteAudioPlaybackGeneration: UInt64 = 0
     
     private var heartbeatTimer: Timer?
     private var frameCount: Int = 0
@@ -2339,6 +3224,8 @@ public class RemoteDesktopManager: ObservableObject {
     private var lastAcceptedDecodedPresentationTimeStamp: CMTime?
     private var lastVideoRendererEnqueueAt: Date?
     private var lastDisplayedFrameTime: Date?
+    private let latencyPublishInterval: TimeInterval = 0.25
+    private var lastLatencyPublishAt: Date = .distantPast
     private var metalAwaitingFirstDisplaySince: Date?
     private var receivedFrameCountInCurrentStream: Int = 0
     private var statsWindowStartTime: Date?
@@ -2346,6 +3233,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var decodedFramesInStatsWindow: Int = 0
     private var rendererEnqueuedFramesInStatsWindow: Int = 0
     private var displayedFramesInStatsWindow: Int = 0
+    private var lastInboundScreenTimestamp: TimeInterval?
     private var lastViewerInteractionAt: Date?
     private var lastContinuityRecoveryAt: Date?
     private var streamContinuityWatchdogTask: Task<Void, Never>?
@@ -2359,6 +3247,7 @@ public class RemoteDesktopManager: ObservableObject {
     
     private init() {
         viewerSettings = Self.loadViewerSettings()
+        crossNetwork.nativeAudioReceiveEnabled = Self.crossNetworkNativeAudioReceiveEnabled
     }
 
     private func invalidateDecodePipelineState() {
@@ -2384,6 +3273,7 @@ public class RemoteDesktopManager: ObservableObject {
         decodedFramesInStatsWindow = 0
         rendererEnqueuedFramesInStatsWindow = 0
         displayedFramesInStatsWindow = 0
+        lastInboundScreenTimestamp = nil
         lastCrossNetworkNativeReadyAnnouncementAt = nil
         lastMetalFallbackAt = nil
         stableSampleBufferFramesSinceMetalFallback = 0
@@ -2434,6 +3324,8 @@ public class RemoteDesktopManager: ObservableObject {
                 currentConnection = Connection(device: resolvedDevice, status: .connected)
                 state = .connected
                 hasReceivedFrameInCurrentStream = false
+                lastLatencyPublishAt = .distantPast
+                beginRemoteAudioPlaybackSession()
                 isStreaming = true
                 state = .streaming
                 crossNetwork.startRemoteDesktopHeartbeat()
@@ -2461,10 +3353,18 @@ public class RemoteDesktopManager: ObservableObject {
             networkConnection = nil
             await clearLANSecureChannelState()
             try await ensureLANRemoteControlTrustBootstrap(for: resolvedDevice)
-            // 建立连接：优先 Bonjour service（不依赖 IP/默认端口）
-            let endpoint = try await makeRemoteDesktopEndpoint(for: resolvedDevice)
+            let refreshedLANDevice = resolveLatestRemoteDesktopDevice(from: resolvedDevice)
+            if refreshedLANDevice.id != resolvedDevice.id
+                || refreshedLANDevice.ipAddress != resolvedDevice.ipAddress
+                || refreshedLANDevice.remoteControlPort != resolvedDevice.remoteControlPort {
+                SkyBridgeLogger.shared.info(
+                    "ℹ️ LAN 远控 bootstrap 后重新解析目标: \(resolvedDevice.id) -> \(refreshedLANDevice.id)"
+                )
+            }
+            // 建立连接：优先 Bonjour service（不依赖 IP/默认端口），失败时回退到等价 IP/会话地址。
+            let endpoints = try await makeRemoteDesktopEndpointCandidates(for: refreshedLANDevice)
 
-            let connection = try await createConnection(to: endpoint)
+            let connection = try await createConnection(toAnyOf: endpoints)
             networkConnection = connection
             connection.stateUpdateHandler = { [weak self] connectionState in
                 Task { @MainActor [weak self] in
@@ -2490,14 +3390,14 @@ public class RemoteDesktopManager: ObservableObject {
             transportStatusText = currentTransportStatusText()
 
             // 创建 Connection 对象
-            currentConnection = Connection(device: resolvedDevice, status: .connected)
+            currentConnection = Connection(device: refreshedLANDevice, status: .connected)
             state = .connected
             
             // 开始接收数据
             startReceiving()
             try ensureLANBootstrapStillActive(for: connection)
 
-            try await establishLANSecureChannel(for: resolvedDevice, over: connection)
+            try await establishLANSecureChannel(for: refreshedLANDevice, over: connection)
             try ensureLANBootstrapStillActive(for: connection)
 
             // 在进入 streaming 前先主动发送一次 viewer 能力，避免 Mac 端首个会话默认退回到 JPEG。
@@ -2539,11 +3439,13 @@ public class RemoteDesktopManager: ObservableObject {
         SkyBridgeLogger.shared.info("📺 开始远程桌面流")
         
         isStreaming = true
+        beginRemoteAudioPlaybackSession()
         crossNetwork.disarmIdleConnectionReminder(clearPrompt: true)
         state = .streaming
         streamEpoch &+= 1
         consecutiveDecodeMisses = 0
         hasReceivedFrameInCurrentStream = false
+        lastLatencyPublishAt = .distantPast
         configureSessionClipboardSync()
         lastDecoderResetTime = nil
         lastIncomingStreamSignature = nil
@@ -2668,9 +3570,11 @@ public class RemoteDesktopManager: ObservableObject {
     public func stopStreaming() async {
         SkyBridgeLogger.shared.info("⏹️ 停止远程桌面流")
         
+        await sendViewerStreamStopConfigurationIfNeeded()
         isStreaming = false
         crossNetwork.stopRemoteDesktopHeartbeat()
         cancelCrossNetworkFrameSubscription()
+        teardownRemoteAudioPlayback()
         configureSessionClipboardSync()
         lastSentStreamConfiguration = nil
         lastIncomingStreamSignature = nil
@@ -2711,6 +3615,7 @@ public class RemoteDesktopManager: ObservableObject {
         )
         let wasCrossNetworkTransport = activeTransportMode == .crossNetwork
         let shouldDisconnectCrossNetworkSession = tearDownTransport && activeTransportMode == .crossNetwork
+        await sendViewerStreamStopConfigurationIfNeeded()
         crossNetwork.stopRemoteDesktopHeartbeat()
         cancelCrossNetworkFrameSubscription()
         firstFrameWatchdogTask?.cancel()
@@ -2726,6 +3631,7 @@ public class RemoteDesktopManager: ObservableObject {
         resetRefreshDiagnostics()
         codecGovernance = .init()
         isStreaming = false
+        teardownRemoteAudioPlayback()
         configureSessionClipboardSync()
 
         if !tearDownTransport {
@@ -2883,6 +3789,7 @@ public class RemoteDesktopManager: ObservableObject {
 
     func updateCrossNetworkNativeVideoResolution(_ size: CGSize) {
         guard activeTransportMode == .crossNetwork else { return }
+        guard isStreaming else { return }
         guard size.width > 0, size.height > 0 else { return }
         resolution = size
         crossNetwork.noteRemoteVideoTrackResolutionAvailable(
@@ -2894,6 +3801,7 @@ public class RemoteDesktopManager: ObservableObject {
     @MainActor
     func noteCrossNetworkNativeVideoFrame(_ size: CGSize) {
         guard activeTransportMode == .crossNetwork else { return }
+        guard isStreaming else { return }
         let now = Date()
         if size.width > 0, size.height > 0 {
             resolution = size
@@ -2940,6 +3848,7 @@ public class RemoteDesktopManager: ObservableObject {
 
     @MainActor
     private func announceCrossNetworkNativeVideoReadyIfNeeded(force: Bool, now: Date = Date()) {
+        guard isStreaming else { return }
         let hasRenderedNativeFrame = crossNetwork.remoteVideoTrackHasRenderedFrame
         let shouldAnnounce = Self.shouldAnnounceCrossNetworkNativeVideoReady(
             activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
@@ -2966,6 +3875,12 @@ public class RemoteDesktopManager: ObservableObject {
         let resolved = resolveLatestRemoteDesktopDevice(from: device)
         if hasPeerAddressBackedRemoteDesktopFallback(for: resolved)
             || hasPeerAddressBackedRemoteDesktopFallback(for: device) {
+            return true
+        }
+
+        if resolved.platform == .macOS,
+           resolved.isConnected,
+           resolved.isTrusted {
             return true
         }
 
@@ -3038,6 +3953,7 @@ public class RemoteDesktopManager: ObservableObject {
         resetRefreshDiagnostics()
         codecGovernance = .init()
         isStreaming = false
+        teardownRemoteAudioPlayback()
         configureSessionClipboardSync()
         if shouldDisconnectCrossNetworkSession {
             await crossNetwork.disconnect(clearSnapshot: true)
@@ -3098,6 +4014,39 @@ public class RemoteDesktopManager: ObservableObject {
         )
     }
 
+    func handleInboundRemoteAudioChunk(_ payload: RemoteDesktopAudioChunkPayload) {
+        guard viewerSettings.audioRedirectionEnabled, isStreaming else { return }
+        let context = RemoteAudioPlaybackContext(
+            generation: remoteAudioPlaybackGeneration,
+            activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+            nativeAudioReceiveEnabled: Self.crossNetworkNativeAudioReceiveEnabled,
+            remoteAudioTrackHasReceivedFirstPacket: crossNetwork.remoteAudioTrackHasReceivedFirstPacket,
+            lastInboundScreenTimestamp: lastInboundScreenTimestamp
+        )
+        Task.detached(priority: .userInitiated) { [remoteAudioPlayback] in
+            await remoteAudioPlayback.handle(payload, context: context)
+        }
+    }
+
+    private func beginRemoteAudioPlaybackSession() {
+        remoteAudioPlaybackGeneration &+= 1
+    }
+
+    private func teardownRemoteAudioPlayback(
+        deactivateSession: Bool = true,
+        resetFailureState: Bool = true
+    ) {
+        let generation = remoteAudioPlaybackGeneration
+        remoteAudioPlaybackGeneration &+= 1
+        Task.detached(priority: .utility) { [remoteAudioPlayback] in
+            await remoteAudioPlayback.invalidate(
+                upTo: generation,
+                deactivateSession: deactivateSession,
+                resetFailureState: resetFailureState
+            )
+        }
+    }
+
     func handleInboundDamageReport(_ report: RemoteDesktopDamageReportPayload) {
         lastDamageRectCount = report.rects.count
         lastDamageUsesFullFrameFallback = report.fullFrameFallback
@@ -3134,6 +4083,10 @@ public class RemoteDesktopManager: ObservableObject {
 
     func handleCrossNetworkNativeVideoTrackPromotionReady() {
         announceCrossNetworkNativeVideoReadyIfNeeded(force: false)
+    }
+
+    func handleCrossNetworkNativeAudioTrackReceivedFirstPacket() {
+        teardownRemoteAudioPlayback(deactivateSession: false)
     }
 
     private func configureSessionClipboardSync() {
@@ -3182,6 +4135,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func pushViewerStreamConfiguration(force: Bool, refreshStream: Bool = false) async {
+        guard isStreaming else { return }
         let canSendOverWebRTC = activeTransportMode == .crossNetwork && currentConnection != nil
         let canSendOverLAN = activeTransportMode == .lan && networkConnection != nil
         guard canSendOverWebRTC || canSendOverLAN else { return }
@@ -3216,7 +4170,55 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
-    private func makeViewerStreamConfigurationPayload(refreshStream: Bool = false) -> RemoteDesktopStreamConfigurationPayload {
+    private func sendViewerStreamStopConfigurationIfNeeded() async {
+        let canSendOverWebRTC = activeTransportMode == .crossNetwork && currentConnection != nil
+        let canSendOverLAN = activeTransportMode == .lan && networkConnection != nil
+        guard canSendOverWebRTC || canSendOverLAN else { return }
+
+        let payload = makeViewerStreamStopConfigurationPayload()
+        do {
+            let encoded = try JSONEncoder().encode(payload)
+            let message = RemoteMessage(type: .streamConfiguration, payload: encoded)
+            try await sendMessage(message)
+            lastSentStreamConfiguration = payload
+            SkyBridgeLogger.shared.info("📤 已发送远控停止流配置: transport=\(activeTransportModeLabel())")
+        } catch {
+            SkyBridgeLogger.shared.error("❌ 发送远控停止流配置失败: \(error.localizedDescription)")
+        }
+    }
+
+    private func makeViewerStreamStopConfigurationPayload() -> RemoteDesktopStreamConfigurationPayload {
+        RemoteDesktopStreamConfigurationPayload(
+            supportedVideoFormats: [],
+            targetFrameRate: 0,
+            keyFrameInterval: 0,
+            lowLatencyMode: false,
+            enableHardwareAcceleration: false,
+            enableAppleSiliconOptimization: false,
+            clipboardSyncEnabled: false,
+            damageTrackingEnabled: false,
+            separateCursorChannelEnabled: false,
+            interactionOverlayChannelEnabled: false,
+            refreshStrategy: "stop",
+            jitterBufferFrames: 0,
+            lossRecoveryMode: "stop",
+            screenFrameTransport: "stopped",
+            screenDataChannelEnabled: false,
+            nativeVideoTrackReady: false,
+            nativeAudioTrackEnabled: false,
+            audioRedirectionEnabled: false,
+            preferredAudioEncoding: nil,
+            audioSampleRate: nil,
+            audioChannelCount: nil,
+            streamRefreshToken: nil
+        )
+    }
+
+    func makeViewerStreamConfigurationPayload() -> RemoteDesktopStreamConfigurationPayload {
+        makeViewerStreamConfigurationPayload(refreshStream: false)
+    }
+
+    func makeViewerStreamConfigurationPayload(refreshStream: Bool) -> RemoteDesktopStreamConfigurationPayload {
         let now = Date()
         let supportedFormats = effectiveSupportedRemoteVideoFormats(at: now)
         let preferredCodec = codecGovernance.effectivePreferredCodec(
@@ -3248,11 +4250,22 @@ public class RemoteDesktopManager: ObservableObject {
             screenFrameTransport: activeTransportMode == .crossNetwork
                 ? "webrtc-native-main+sbrf-fallback"
                 : "sbrf-v1",
-            screenDataChannelEnabled: activeTransportMode != .crossNetwork ? true : false,
+            // Keep fallback screen frames off the control channel. The iOS
+            // screen-channel receive loop is nonisolated; the control channel
+            // also carries handshake, heartbeat, input, rekey, and file traffic.
+            screenDataChannelEnabled: true,
             nativeVideoTrackReady: Self.advertisedCrossNetworkNativeVideoReadyFlag(
                 activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
                 hasRenderedNativeFrame: crossNetwork.remoteVideoTrackHasRenderedFrame
             ),
+            // Keep iOS viewer on the transport-owned fallback audio path for now.
+            // Native WebRTC audio on iOS still competes for AVAudioSession ownership
+            // during startup and has been causing crashy/privacy-sensitive behavior.
+            nativeAudioTrackEnabled: Self.crossNetworkNativeAudioReceiveEnabled,
+            audioRedirectionEnabled: viewerSettings.audioRedirectionEnabled,
+            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.pcmS16LE.rawValue,
+            audioSampleRate: 48_000,
+            audioChannelCount: 2,
             streamRefreshToken: refreshStream ? nextStreamRefreshToken() : nil
         )
     }
@@ -3420,63 +4433,89 @@ public class RemoteDesktopManager: ObservableObject {
 
     // MARK: - Private Methods - Device Resolution
 
-    private func makeRemoteDesktopEndpoint(for device: DiscoveredDevice) async throws -> NWEndpoint {
+    private func makeRemoteDesktopEndpointCandidates(for device: DiscoveredDevice) async throws -> [NWEndpoint] {
         let remoteServiceType = DiscoveredDevice.remoteControlServiceType
-        let hasRemoteService = hasAdvertisedRemoteDesktopService(device)
-        let bonjourName = preferredRemoteDesktopServiceName(for: device)
-        let bonjourDomain = preferredRemoteDesktopServiceDomain(for: device)
+        var endpoints: [NWEndpoint] = []
+        var seen = Set<String>()
 
-        if hasRemoteService {
-            return .service(
-                name: bonjourName ?? device.name,
-                type: remoteServiceType,
-                domain: bonjourDomain,
-                interface: nil
-            )
-        }
-
-        if let inferredServiceName = bonjourName,
-           (device.supportsRemoteControl
-            || device.remoteControlPort != nil
-            || device.platform == .macOS
-            || connectionManager.activePeerHostAddress(for: device) != nil) {
-            SkyBridgeLogger.shared.info(
-                "📡 远控使用推断的 Bonjour 服务名回退连接: name=\(inferredServiceName) domain=\(bonjourDomain)"
-            )
-            return .service(
-                name: inferredServiceName,
-                type: remoteServiceType,
-                domain: bonjourDomain,
-                interface: nil
+        if let bonjour = remoteDesktopBonjourServiceIdentity(for: device) {
+            appendRemoteDesktopEndpoint(
+                .service(
+                    name: bonjour.name,
+                    type: remoteServiceType,
+                    domain: bonjour.domain,
+                    interface: nil
+                ),
+                to: &endpoints,
+                seen: &seen
             )
         }
 
         if let activePeerAddress = peerAddressBackedRemoteDesktopAddress(for: device) {
-            let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
-            SkyBridgeLogger.shared.info(
-                "📡 远控使用已建立 P2P 会话的对端地址回退连接: host=\(activePeerAddress) port=\(port)"
-            )
-            return .hostPort(host: .init(activePeerAddress), port: .init(integerLiteral: port))
+            if let port = device.remoteControlPort {
+                SkyBridgeLogger.shared.info(
+                    "📡 远控使用已建立 P2P 会话的对端地址回退连接: host=\(activePeerAddress) port=\(port)"
+                )
+                appendRemoteDesktopEndpoint(
+                    .hostPort(host: .init(activePeerAddress), port: .init(integerLiteral: port)),
+                    to: &endpoints,
+                    seen: &seen
+                )
+            } else {
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 远控目标缺少显式端口，拒绝猜测默认端口: host=\(activePeerAddress)"
+                )
+            }
         }
 
         if let ip = bestIPAddress(for: device),
-           hasReachableLANRemoteDesktopEndpoint(device) {
-            let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
-            return .hostPort(host: .init(ip), port: .init(integerLiteral: port))
+           hasReachableLANRemoteDesktopEndpoint(device),
+           let port = device.remoteControlPort {
+            appendRemoteDesktopEndpoint(
+                .hostPort(host: .init(ip), port: .init(integerLiteral: port)),
+                to: &endpoints,
+                seen: &seen
+            )
         }
 
         if let resolvedIP = await resolveRemoteDesktopIPAddress(for: device) {
             guard hasReachableLANRemoteDesktopEndpoint(device) else {
-                throw RemoteDesktopError.connectionFailed("设备未发现可用远程桌面端点")
+                if endpoints.isEmpty {
+                    throw RemoteDesktopError.connectionFailed("设备未发现可用远程桌面端点")
+                }
+                return endpoints
             }
-            let port = device.remoteControlPort ?? RemoteDesktopConstants.defaultPort
+            guard let port = device.remoteControlPort else {
+                if endpoints.isEmpty {
+                    throw RemoteDesktopError.connectionFailed("设备未声明远程桌面端口")
+                }
+                return endpoints
+            }
             SkyBridgeLogger.shared.info(
                 "📡 远控已解析到主服务地址: name=\(device.name) ip=\(resolvedIP) port=\(port)"
             )
-            return .hostPort(host: .init(resolvedIP), port: .init(integerLiteral: port))
+            appendRemoteDesktopEndpoint(
+                .hostPort(host: .init(resolvedIP), port: .init(integerLiteral: port)),
+                to: &endpoints,
+                seen: &seen
+            )
+        }
+
+        if !endpoints.isEmpty {
+            return endpoints
         }
 
         throw RemoteDesktopError.connectionFailed("设备缺少可连接地址（Bonjour/IP）")
+    }
+
+    private func appendRemoteDesktopEndpoint(
+        _ endpoint: NWEndpoint,
+        to endpoints: inout [NWEndpoint],
+        seen: inout Set<String>
+    ) {
+        let key = String(describing: endpoint)
+        guard seen.insert(key).inserted else { return }
+        endpoints.append(endpoint)
     }
 
     private func resolveLatestRemoteDesktopDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
@@ -3534,17 +4573,28 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func preferredRemoteDesktopServiceName(for device: DiscoveredDevice) -> String? {
+        remoteDesktopBonjourServiceIdentity(for: device)?.name
+    }
+
+    private func remoteDesktopBonjourServiceIdentity(for device: DiscoveredDevice) -> (name: String, domain: String)? {
         for candidate in remoteDesktopIdentityCandidates(for: device) {
+            let hasRemoteServiceEvidence = candidate.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
+                || candidate.services.contains(DiscoveredDevice.remoteControlServiceType)
+                || candidate.id.hasPrefix("bonjour:")
+
+            guard hasRemoteServiceEvidence else { continue }
+
             if let bonjourServiceName = candidate.bonjourServiceName,
                isPlausibleRemoteServiceInstanceName(bonjourServiceName) {
-                return bonjourServiceName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let domain = candidate.bonjourServiceDomain?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (
+                    name: bonjourServiceName.trimmingCharacters(in: .whitespacesAndNewlines),
+                    domain: domain?.isEmpty == false ? domain! : "local."
+                )
             }
             if let parsed = parseBonjourIdentity(from: candidate.id),
                isPlausibleRemoteServiceInstanceName(parsed.name) {
-                return parsed.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            if isPlausibleRemoteServiceInstanceName(candidate.name) {
-                return candidate.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (name: parsed.name.trimmingCharacters(in: .whitespacesAndNewlines), domain: parsed.domain)
             }
         }
         return nil
@@ -3590,6 +4640,15 @@ public class RemoteDesktopManager: ObservableObject {
         }
         let lowercased = raw.lowercased()
         if lowercased == "unknown device" || lowercased == "未知设备" {
+            return false
+        }
+        if lowercased.hasPrefix("id:")
+            || lowercased.hasPrefix("host:")
+            || lowercased.hasPrefix("peer:")
+            || lowercased.hasPrefix("recent:") {
+            return false
+        }
+        if UUID(uuidString: raw) != nil {
             return false
         }
         if let sanitized = sanitizeAddress(raw),
@@ -3663,8 +4722,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func hasAdvertisedRemoteDesktopService(_ device: DiscoveredDevice) -> Bool {
-        device.services.contains(DiscoveredDevice.remoteControlServiceType)
-            || device.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
+        remoteDesktopBonjourServiceIdentity(for: device) != nil
     }
 
     static func hasExplicitLANRemoteDesktopEndpoint(_ device: DiscoveredDevice) -> Bool {
@@ -3674,7 +4732,14 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func hasReachableLANRemoteDesktopEndpoint(_ device: DiscoveredDevice) -> Bool {
-        Self.hasExplicitLANRemoteDesktopEndpoint(device)
+        if remoteDesktopBonjourServiceIdentity(for: device) != nil {
+            return true
+        }
+        if peerAddressBackedRemoteDesktopAddress(for: device) != nil,
+           device.remoteControlPort != nil {
+            return true
+        }
+        return device.remoteControlPort != nil && bestIPAddress(for: device) != nil
     }
 
     private func canResolveLANRemoteDesktopEndpoint(for device: DiscoveredDevice) async -> Bool {
@@ -3706,7 +4771,8 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func hasPeerAddressBackedRemoteDesktopFallback(for device: DiscoveredDevice) -> Bool {
-        peerAddressBackedRemoteDesktopAddress(for: device) != nil
+        device.remoteControlPort != nil
+            && peerAddressBackedRemoteDesktopAddress(for: device) != nil
     }
 
     private func peerAddressBackedRemoteDesktopAddress(for device: DiscoveredDevice) -> String? {
@@ -4017,15 +5083,20 @@ public class RemoteDesktopManager: ObservableObject {
         let observedReply = await connectionManager.waitForPairingIdentityExchangeActivity(
             with: resolvedBootstrapPeer.id,
             since: observedAt,
-            timeout: .seconds(3)
+            timeout: .seconds(8)
         )
-        if observedReply {
+        let bootstrapReady = await connectionManager.waitForPairingIdentityExchangeBootstrapReadiness(
+            with: resolvedBootstrapPeer.id,
+            since: observedAt,
+            timeout: .seconds(8)
+        )
+        if bootstrapReady {
             SkyBridgeLogger.shared.info(
-                "🧩 LAN 远控前置 bootstrap 完成：已观察到 pairingIdentityExchange 往返 peer=\(resolvedBootstrapPeer.id)"
+                "🧩 LAN 远控前置 bootstrap 完成：reply=\(observedReply) ready=\(bootstrapReady) peer=\(resolvedBootstrapPeer.id)"
             )
         } else {
             SkyBridgeLogger.shared.info(
-                "🧩 LAN 远控前置 bootstrap：未在超时内观察到 reply，继续远控握手 peer=\(resolvedBootstrapPeer.id)"
+                "🧩 LAN 远控前置 bootstrap：未在超时内完成 metadata/KEM 就绪，继续远控握手 peer=\(resolvedBootstrapPeer.id)"
             )
             try? await Task.sleep(for: .milliseconds(600))
         }
@@ -4253,7 +5324,50 @@ public class RemoteDesktopManager: ObservableObject {
     
     // MARK: - Private Methods - Connection
     
-    private func createConnection(to endpoint: NWEndpoint) async throws -> NWConnection {
+    private func createConnection(toAnyOf endpoints: [NWEndpoint]) async throws -> NWConnection {
+        guard !endpoints.isEmpty else {
+            throw RemoteDesktopError.connectionFailed("设备缺少可连接地址（Bonjour/IP）")
+        }
+
+        var lastError: Error?
+        let perEndpointTimeout: TimeInterval
+        if endpoints.count > 1 {
+            perEndpointTimeout = RemoteDesktopConstants.candidateConnectionTimeout
+        } else {
+            perEndpointTimeout = RemoteDesktopConstants.connectionTimeout
+        }
+
+        for (index, endpoint) in endpoints.enumerated() {
+            let endpointDescription = String(describing: endpoint)
+            SkyBridgeLogger.shared.info(
+                "🔗 LAN 远控连接候选[\(index + 1)/\(endpoints.count)]: endpoint=\(endpointDescription)"
+            )
+
+            do {
+                let connection = try await createConnection(to: endpoint, timeout: perEndpointTimeout)
+                SkyBridgeLogger.shared.info(
+                    "✅ LAN 远控连接就绪: endpoint=\(endpointDescription)"
+                )
+                return connection
+            } catch {
+                lastError = error
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ LAN 远控候选连接失败[\(index + 1)/\(endpoints.count)]: endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                )
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+        throw RemoteDesktopError.connectionFailed("所有 LAN 远控端点均不可用")
+    }
+
+    private func createConnection(
+        to endpoint: NWEndpoint,
+        timeout: TimeInterval = RemoteDesktopConstants.connectionTimeout
+    ) async throws -> NWConnection {
+        let endpointDescription = String(describing: endpoint)
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
@@ -4284,6 +5398,10 @@ public class RemoteDesktopManager: ObservableObject {
                 switch state {
                 case .ready:
                     gate.runOnce { continuation.resume(returning: connection) }
+                case .waiting(let error):
+                    SkyBridgeLogger.shared.warning(
+                        "⏳ LAN 远控连接等待: endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                    )
                 case .failed(let error):
                     gate.runOnce {
                         continuation.resume(throwing: RemoteDesktopError.connectionFailed(error.localizedDescription))
@@ -4298,8 +5416,12 @@ public class RemoteDesktopManager: ObservableObject {
             connection.start(queue: queue)
             
             // 超时处理
-            queue.asyncAfter(deadline: .now() + RemoteDesktopConstants.connectionTimeout) {
+            queue.asyncAfter(deadline: .now() + timeout) {
                 gate.runOnce {
+                    connection.stateUpdateHandler = nil
+                    SkyBridgeLogger.shared.error(
+                        "❌ LAN 远控连接超时: endpoint=\(endpointDescription) timeout=\(Int(timeout))s"
+                    )
                     connection.cancel()
                     continuation.resume(throwing: RemoteDesktopError.timeout)
                 }
@@ -4423,7 +5545,9 @@ public class RemoteDesktopManager: ObservableObject {
                         return
                     }
 
-                    if let screenData = RemoteDesktopScreenFrameWire.decodeIfPresent(payload) {
+                    if let audioChunk = RemoteDesktopAudioChunkWire.decodeIfPresent(payload) {
+                        self.handleInboundRemoteAudioChunk(audioChunk)
+                    } else if let screenData = RemoteDesktopScreenFrameWire.decodeIfPresent(payload) {
                         await self.handleScreenData(screenData)
                     } else {
                         let message = try JSONDecoder().decode(RemoteMessage.self, from: payload)
@@ -4465,8 +5589,10 @@ public class RemoteDesktopManager: ObservableObject {
     
     private func handleScreenData(_ screenData: ScreenData) async {
         let now = Date()
+        let isFirstFrameInStream = !hasReceivedFrameInCurrentStream
         noteReceivedFrame(at: now)
-        if !hasReceivedFrameInCurrentStream {
+        lastInboundScreenTimestamp = screenData.timestamp
+        if isFirstFrameInStream {
             hasReceivedFrameInCurrentStream = true
             configureSessionClipboardSync()
             SkyBridgeLogger.shared.info(
@@ -4478,18 +5604,22 @@ public class RemoteDesktopManager: ObservableObject {
             firstFrameContinuityTask = nil
         }
         await handleIncomingStreamTopologyChangeIfNeeded(for: screenData)
-        // 更新分辨率
-        resolution = CGSize(width: screenData.width, height: screenData.height)
-        if activeTransportMode == .crossNetwork {
+        let frameResolution = CGSize(width: screenData.width, height: screenData.height)
+        let didChangeResolution = resolution != frameResolution
+        if didChangeResolution {
+            resolution = frameResolution
+        }
+        if activeTransportMode == .crossNetwork, isFirstFrameInStream || didChangeResolution {
             crossNetwork.noteRemoteVideoTrackResolutionAvailable(
-                resolution,
+                frameResolution,
                 source: "fallback-screen-data"
             )
         }
-        
-        // 计算延迟
-        let currentTimestamp = Date().timeIntervalSince1970
-        latency = (currentTimestamp - screenData.timestamp) * 1000 // 转换为毫秒
+
+        if isFirstFrameInStream || now.timeIntervalSince(lastLatencyPublishAt) >= latencyPublishInterval {
+            latency = (now.timeIntervalSince1970 - screenData.timestamp) * 1000
+            lastLatencyPublishAt = now
+        }
         
         enqueueFrameForDecode(screenData)
     }
@@ -4949,7 +6079,6 @@ public class RemoteDesktopManager: ObservableObject {
         lastMetalFallbackAt = nil
         stableSampleBufferFramesSinceMetalFallback = 0
         metalVideoFrameFeed.markDisplayedFrame()
-        SkyBridgeLogger.shared.debug("[Metal] frame displayed, version=\(metalVideoFrameFeed.frameVersion)")
         noteDisplayedFrame(at: Date())
     }
 
@@ -4987,13 +6116,11 @@ public class RemoteDesktopManager: ObservableObject {
             case .metal:
                 if lastDisplayedFrameTime == nil {
                     metalAwaitingFirstDisplaySince = metalAwaitingFirstDisplaySince ?? now
-                    SkyBridgeLogger.shared.debug("[Metal] 首帧等待显示，metalAwaitingFirstDisplaySince=\(metalAwaitingFirstDisplaySince!)")
                 } else {
                     metalAwaitingFirstDisplaySince = nil
                 }
                 videoFrameFeed.flush(removeDisplayedImage: false)
                 metalVideoFrameFeed.enqueue(frame: frame)
-                SkyBridgeLogger.shared.debug("[Metal] enqueue frame, version=\(metalVideoFrameFeed.frameVersion), ts=\(frame.presentationTimeStamp)")
                 updateRenderPipeline(.metalRenderer)
             case .sampleBuffer:
                 metalAwaitingFirstDisplaySince = nil

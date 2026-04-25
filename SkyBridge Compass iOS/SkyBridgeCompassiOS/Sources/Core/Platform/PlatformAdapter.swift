@@ -92,6 +92,18 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         
         isInitialized = true
     }
+
+    public func getProtocolSigningKeyHandle(
+        for algorithm: ProtocolSigningAlgorithm
+    ) async throws -> SigningKeyHandle {
+        try await getOrCreateProtocolSigningIdentity(for: algorithm).keyHandle
+    }
+
+    public func getProtocolSigningPublicKey(
+        for algorithm: ProtocolSigningAlgorithm
+    ) async throws -> Data {
+        try await getOrCreateProtocolSigningIdentity(for: algorithm).publicKey
+    }
     
     // MARK: - Identity Key Management
     
@@ -99,7 +111,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     private func loadOrCreateIdentityKey(algorithm: ProtocolSigningAlgorithm) async throws {
         // 尝试从 Keychain 加载
         if let existingKey = try? loadIdentityKeyFromKeychain(algorithm: algorithm) {
-            if await isIdentityKeyUsable(
+            if await isSigningKeyUsable(
                 keyHandle: existingKey.keyHandle,
                 publicKey: existingKey.publicKey,
                 algorithm: algorithm
@@ -143,6 +155,39 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             }.value
             return (.softwareKey(keyPair.privateKey.bytes), keyPair.publicKey.bytes)
         }
+    }
+
+    private func getOrCreateProtocolSigningIdentity(
+        for algorithm: ProtocolSigningAlgorithm
+    ) async throws -> (keyHandle: SigningKeyHandle, publicKey: Data) {
+        if let currentSignatureProvider = signatureProvider,
+           currentSignatureProvider.signatureAlgorithm == algorithm,
+           let keyHandle = identityKeyHandle,
+           let publicKey = identityPublicKey,
+           await isSigningKeyUsable(
+                keyHandle: keyHandle,
+                publicKey: publicKey,
+                algorithm: algorithm
+           ) {
+            return (keyHandle, publicKey)
+        }
+
+        if let existingKey = try? loadIdentityKeyFromKeychain(algorithm: algorithm),
+           await isSigningKeyUsable(
+                keyHandle: existingKey.keyHandle,
+                publicKey: existingKey.publicKey,
+                algorithm: algorithm
+           ) {
+            return existingKey
+        }
+
+        let newKey = try await generateIdentityKey(algorithm: algorithm)
+        try saveIdentityKeyToKeychain(
+            keyHandle: newKey.keyHandle,
+            publicKey: newKey.publicKey,
+            algorithm: algorithm
+        )
+        return newKey
     }
     
     // MARK: - Keychain Helpers
@@ -197,13 +242,12 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         return 1952
     }
 
-    private func isIdentityKeyUsable(
+    private func isSigningKeyUsable(
         keyHandle: SigningKeyHandle,
         publicKey: Data,
         algorithm: ProtocolSigningAlgorithm
     ) async -> Bool {
-        guard let signatureProvider else { return false }
-        guard signatureProvider.signatureAlgorithm == algorithm else { return false }
+        let signatureProvider = ProtocolSignatureProviderSelector.select(for: algorithm)
 
         let probe = Data("skybridge.identity.selftest.v1".utf8)
         do {

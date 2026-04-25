@@ -337,6 +337,45 @@ final class P2PTrustSyncTests: XCTestCase {
         )
         XCTAssertEqual(created?.lifecycleStateMetadata, .active)
     }
+
+    @MainActor
+    func testEvaluateCurrentPathBindingMatchesKnownAliasesBeforeDeclaringConflict() async throws {
+        let service = TrustSyncService.shared
+        let suffix = UUID().uuidString.lowercased()
+        let aliasId = "bonjour:skybridge-\(suffix)@local."
+        let stableId = "id:\(suffix)"
+
+        service.setInMemoryPersistenceForTesting(true)
+        await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
+        defer {
+            service.setInMemoryPersistenceForTesting(false)
+            Task { @MainActor in
+                await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
+            }
+        }
+
+        _ = try await service.addTrustRecord(
+            TrustRecord(
+                deviceId: aliasId,
+                pubKeyFP: String(repeating: "4", count: 64),
+                publicKey: Data([0x01]),
+                protocolPublicKey: Data([0x02]),
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                signature: Data(),
+                deviceName: "Alias Matched Device",
+                currentDeviceId: stableId,
+                knownDeviceIds: [aliasId, stableId]
+            )
+        )
+
+        let conflict = service.evaluateCurrentPathBinding(
+            deviceId: stableId,
+            protocolPublicKeyFingerprint: String(repeating: "b", count: 64)
+        )
+
+        XCTAssertEqual(conflict, .identityConflict)
+    }
     
  // MARK: - Property 12: Keychain Sync Attribute
     

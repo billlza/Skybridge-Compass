@@ -14,6 +14,7 @@
 import Foundation
 import CryptoKit
 import Security
+import LocalAuthentication
 
 // MARK: - Trust Record Type
 
@@ -359,6 +360,12 @@ public final class TrustSyncService: ObservableObject {
     private enum FallbackStorageConstants {
         static let recordsKey = "com.skybridge.p2p.trust.fallback.records.v1"
     }
+
+    private nonisolated static func forbidKeychainAuthenticationUI(_ query: inout [String: Any]) {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+    }
     
  // MARK: - Published Properties
     
@@ -508,6 +515,20 @@ public final class TrustSyncService: ObservableObject {
         }
     }
 
+    func getCurrentPathTrustRecord(
+        fingerprint: String,
+        matchingDeviceId deviceId: String
+    ) -> TrustRecord? {
+        let normalized = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        return localCache.values.first { record in
+            guard !record.isTombstone, !record.isExpired else { return false }
+            guard record.lifecycleState == .active else { return false }
+            guard record.currentPathAuthorityFingerprint == normalized else { return false }
+            return currentPathDeviceMatches(record, deviceId: deviceId)
+        }
+    }
+
     public func evaluateCurrentPathBinding(
         deviceId: String,
         protocolPublicKeyFingerprint: String
@@ -517,38 +538,87 @@ public final class TrustSyncService: ObservableObject {
             .lowercased()
         guard !normalizedFingerprint.isEmpty else { return nil }
 
-        if let byFingerprint = localCache.values.first(where: {
-            !$0.isTombstone && !$0.isExpired && $0.currentPathAuthorityFingerprint == normalizedFingerprint
-        }) {
-            switch byFingerprint.lifecycleState {
-            case .active:
-                // The authoritative signing key remains the stronger trust anchor.
-                // A deviceId rotation under the same key should heal metadata after
-                // the session succeeds instead of being treated as a hard conflict.
-                break
+        let fingerprintMatches = localCache.values.filter {
+            !$0.isTombstone &&
+            !$0.isExpired &&
+            $0.currentPathAuthorityFingerprint == normalizedFingerprint
+        }
+        if fingerprintMatches.contains(where: { $0.lifecycleState == .revoked }) {
+            return .revokedIdentity
+        }
+        if fingerprintMatches.contains(where: {
+            switch $0.lifecycleState {
             case .reverificationRequired, .quarantined:
-                return .quarantinedIdentity
-            case .revoked:
-                return .revokedIdentity
+                return true
+            case .active, .revoked:
+                return false
             }
+        }) {
+            return .quarantinedIdentity
+        }
+        if fingerprintMatches.contains(where: { $0.lifecycleState == .active }) {
+            // The authoritative signing key remains the stronger trust anchor.
+            // A deviceId rotation under the same key should heal metadata after
+            // the session succeeds instead of being treated as a hard conflict.
+            return nil
         }
 
-        if let byDevice = localCache[deviceId],
-           !byDevice.isTombstone,
-           !byDevice.isExpired,
-           let pinnedFingerprint = byDevice.currentPathAuthorityFingerprint,
-           pinnedFingerprint != normalizedFingerprint {
-            switch byDevice.lifecycleState {
-            case .active:
-                return .identityConflict
+        let deviceMatches = localCache.values.filter {
+            !$0.isTombstone &&
+            !$0.isExpired &&
+            currentPathDeviceMatches($0, deviceId: deviceId)
+        }
+        if deviceMatches.contains(where: {
+            guard let pinnedFingerprint = $0.currentPathAuthorityFingerprint else { return false }
+            return pinnedFingerprint != normalizedFingerprint && $0.lifecycleState == .revoked
+        }) {
+            return .revokedIdentity
+        }
+        if deviceMatches.contains(where: {
+            guard let pinnedFingerprint = $0.currentPathAuthorityFingerprint else { return false }
+            guard pinnedFingerprint != normalizedFingerprint else { return false }
+            switch $0.lifecycleState {
             case .reverificationRequired, .quarantined:
-                return .quarantinedIdentity
-            case .revoked:
-                return .revokedIdentity
+                return true
+            case .active, .revoked:
+                return false
             }
+        }) {
+            return .quarantinedIdentity
+        }
+        if deviceMatches.contains(where: {
+            guard let pinnedFingerprint = $0.currentPathAuthorityFingerprint else { return false }
+            return pinnedFingerprint != normalizedFingerprint && $0.lifecycleState == .active
+        }) {
+            return .identityConflict
         }
 
         return nil
+    }
+
+    private func currentPathDeviceMatches(_ record: TrustRecord, deviceId: String) -> Bool {
+        guard let lookup = currentPathLookupCandidates(for: deviceId) else { return false }
+        return PeerTrustLookup.recordMatches(
+            record,
+            candidates: lookup.candidates,
+            candidateLowercased: lookup.candidateLowercased
+        )
+    }
+
+    private func currentPathLookupCandidates(
+        for deviceId: String
+    ) -> (candidates: Set<String>, candidateLowercased: Set<String>)? {
+        let normalizedDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedDeviceId.isEmpty else { return nil }
+
+        let lookupCandidates = Set(
+            PeerTrustLookup.lookupCandidates(
+                primary: normalizedDeviceId,
+                persistent: PeerTrustLookup.persistentDeviceId(from: normalizedDeviceId)
+            )
+        )
+        guard !lookupCandidates.isEmpty else { return nil }
+        return (lookupCandidates, Set(lookupCandidates.map { $0.lowercased() }))
     }
 
     nonisolated static func resolvedAuthenticatedRemoteAuthorityRecord(
@@ -1032,21 +1102,23 @@ public final class TrustSyncService: ObservableObject {
         encoder.dateEncodingStrategy = .millisecondsSince1970
         let data = try encoder.encode(record)
         
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.recordPrefix + record.deviceId,
             kSecValueData as String: data,
             kSecAttrSynchronizable as String: synchronizable ? kCFBooleanTrue! : kCFBooleanFalse!
         ]
+        Self.forbidKeychainAuthenticationUI(&query)
         
  // 先删除旧的
-        let deleteQuery: [String: Any] = [
+        var deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.recordPrefix + record.deviceId,
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
         ]
+        Self.forbidKeychainAuthenticationUI(&deleteQuery)
         SecItemDelete(deleteQuery as CFDictionary)
         
 // 添加新的
@@ -1071,7 +1143,9 @@ public final class TrustSyncService: ObservableObject {
     
  /// 从 Keychain 加载所有记录
     private func loadAllFromKeychain() throws -> [TrustRecord] {
-        func copyItems(_ query: [String: Any]) throws -> [[String: Any]] {
+        func copyItems(_ inputQuery: [String: Any]) throws -> [[String: Any]] {
+            var query = inputQuery
+            Self.forbidKeychainAuthenticationUI(&query)
             var result: AnyObject?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
             if status == errSecItemNotFound {
@@ -1083,7 +1157,9 @@ public final class TrustSyncService: ObservableObject {
             return (result as? [[String: Any]]) ?? []
         }
         
-        func copyDataItems(_ query: [String: Any]) throws -> [Data] {
+        func copyDataItems(_ inputQuery: [String: Any]) throws -> [Data] {
+            var query = inputQuery
+            Self.forbidKeychainAuthenticationUI(&query)
             var result: AnyObject?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
             if status == errSecItemNotFound {
@@ -1184,12 +1260,13 @@ public final class TrustSyncService: ObservableObject {
     
  /// 从 Keychain 删除记录
     private func deleteFromKeychain(deviceId: String) {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.recordPrefix + deviceId,
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
         ]
+        Self.forbidKeychainAuthenticationUI(&query)
         SecItemDelete(query as CFDictionary)
         removeFallbackRecord(deviceId: deviceId)
     }

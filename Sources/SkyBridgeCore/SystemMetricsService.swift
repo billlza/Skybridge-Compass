@@ -23,6 +23,7 @@ public final class SystemMetricsService: ObservableObject {
     private let log = Logger(subsystem: "com.skybridge.compass", category: "SystemMetrics")
     private var lastMetricsLogAt: Date?
     @MainActor private var monitoringTimer: Timer?
+    private var notificationObserverTokens: [NSObjectProtocol] = []
     private let maxTimelinePoints = 30
     
  // CPU使用率计算所需的前一次采样数据
@@ -50,25 +51,48 @@ public final class SystemMetricsService: ObservableObject {
         log.info("系统指标监控已启动")
 
  // 订阅清除历史与导出数据通知，实现设置视图到服务的闭环。
-        NotificationCenter.default.addObserver(forName: .systemMonitorClearHistory, object: nil, queue: .main) { [weak self] _ in
+        registerNotificationObserversIfNeeded()
+    }
+
+    private func registerNotificationObserversIfNeeded() {
+        guard notificationObserverTokens.isEmpty else { return }
+
+        let clearHistoryToken = NotificationCenter.default.addObserver(
+            forName: .systemMonitorClearHistory,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in
                 self?.clearHistory()
             }
         }
-        NotificationCenter.default.addObserver(forName: .systemMonitorExport, object: nil, queue: .main) { [weak self] _ in
+        let exportToken = NotificationCenter.default.addObserver(
+            forName: .systemMonitorExport,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in
                 self?.exportDataToDesktop()
             }
         }
+        notificationObserverTokens = [clearHistoryToken, exportToken]
     }
     
  /// 停止监控系统指标
     public func stopMonitoring() {
         monitoringTimer?.invalidate()
         monitoringTimer = nil
+        unregisterNotificationObservers()
         log.info("系统指标监控已停止")
     }
-    
+
+    private func unregisterNotificationObservers() {
+        for token in notificationObserverTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+        notificationObserverTokens.removeAll(keepingCapacity: false)
+    }
+
  /// 更新系统指标
  /// 更新系统指标
     @MainActor
@@ -181,6 +205,12 @@ public final class SystemMetricsService: ObservableObject {
             log.error("导出监控数据失败: \(error.localizedDescription)")
         }
     }
+
+#if DEBUG
+    var notificationObserverCountForTesting: Int {
+        notificationObserverTokens.count
+    }
+#endif
     
  /// 获取CPU使用率（使用苹果系统API，改进版本）
     private func fetchCpuUsage() -> Double {
@@ -432,11 +462,6 @@ public final class SystemMetricsService: ObservableObject {
  /// 获取格式化的网络速度字符串
     public func formattedNetworkSpeed() -> String {
         return String(format: "%.1f Mbps", networkSpeed)
-    }
-    
-    deinit {
- // 在 deinit 中不访问 MainActor 隔离的属性，避免并发问题
- // Timer 会在对象销毁时自动失效
     }
 }
 

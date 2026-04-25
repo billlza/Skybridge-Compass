@@ -19,6 +19,8 @@ struct MediaPreviewView: View {
     @State private var volume: Float = 1.0
     @State private var showingControls = true
     @State private var fileInfo: FileInfo?
+    @State private var playerTimeObserverToken: Any?
+    @State private var playbackEndObserverToken: NSObjectProtocol?
     
     var body: some View {
         NavigationView {
@@ -65,8 +67,7 @@ struct MediaPreviewView: View {
             loadFileInfo()
         }
         .onDisappear {
-            player?.pause()
-            player = nil
+            cleanupPlayer()
         }
     }
     
@@ -303,38 +304,59 @@ struct MediaPreviewView: View {
     
  // MARK: - 私有方法
     
- /// 设置播放器
+    /// 设置播放器
     private func setupPlayer() {
-        player = AVPlayer(url: fileURL)
+        cleanupPlayer()
+
+        let player = AVPlayer(url: fileURL)
+        self.player = player
         
  // 监听播放状态
-        player?.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.1, preferredTimescale: 1000), queue: .main) { time in
+        playerTimeObserverToken = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.1, preferredTimescale: 1000),
+            queue: .main
+        ) { time in
             Task { @MainActor in
                 self.currentTime = time.seconds
             }
         }
         
  // 监听播放完成
-        NotificationCenter.default.addObserver(
+        playbackEndObserverToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
-            object: player?.currentItem,
+            object: player.currentItem,
             queue: .main
         ) { _ in
             Task { @MainActor in
                 isPlaying = false
                 currentTime = 0
-                player?.seek(to: .zero)
+                player.seek(to: .zero)
             }
         }
         
  // 获取时长（避免使用已废弃API）
-        if let item = player?.currentItem {
+        if let item = player.currentItem {
             Task { @MainActor in
                 if let dur = try? await item.asset.load(.duration), dur.isValid && !dur.isIndefinite {
                     self.duration = dur.seconds
                 }
             }
         }
+    }
+
+    private func cleanupPlayer() {
+        if let player, let token = playerTimeObserverToken {
+            player.removeTimeObserver(token)
+        }
+        playerTimeObserverToken = nil
+
+        if let playbackEndObserverToken {
+            NotificationCenter.default.removeObserver(playbackEndObserverToken)
+        }
+        playbackEndObserverToken = nil
+
+        player?.pause()
+        player = nil
     }
     
  /// 加载文件信息

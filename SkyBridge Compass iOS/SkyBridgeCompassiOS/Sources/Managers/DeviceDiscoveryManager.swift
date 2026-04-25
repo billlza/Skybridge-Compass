@@ -123,10 +123,25 @@ enum PeerIdentityAliasResolver {
         return raw.lowercased()
     }
 
+    private static func isPlausibleStableDeviceIdentifierPayload(_ raw: String) -> Bool {
+        guard raw.count >= 8 else { return false }
+        guard !raw.contains(where: \.isWhitespace) else { return false }
+        return raw.allSatisfy { character in
+            character.isASCII && (character.isLetter || character.isNumber || character == "-" || character == "_" || character == ".")
+        }
+    }
+
+    private static func isLiteralIPAddress(_ raw: String) -> Bool {
+        let scopedToken = raw.split(separator: "%", maxSplits: 1).first.map(String.init) ?? raw
+        return IPv4Address(scopedToken) != nil || IPv6Address(scopedToken) != nil
+    }
+
     static func persistentDeviceId(from raw: String?) -> String? {
         guard let normalized = normalizedIdentifier(raw) else { return nil }
         if normalized.hasPrefix("id:") {
-            return normalized
+            let payload = String(normalized.dropFirst("id:".count))
+            guard isPlausibleStableDeviceIdentifierPayload(payload) else { return nil }
+            return "id:\(payload)"
         }
         if normalized.hasPrefix("host:")
             || normalized.hasPrefix("peer:")
@@ -135,6 +150,7 @@ enum PeerIdentityAliasResolver {
             || normalized.contains("@") {
             return nil
         }
+        guard isPlausibleStableDeviceIdentifierPayload(normalized) else { return nil }
         return "id:\(normalized)"
     }
 
@@ -301,7 +317,7 @@ enum PeerIdentityAliasResolver {
         }
 
         let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return nil }
+        guard !normalized.isEmpty, isLiteralIPAddress(normalized) else { return nil }
         return "host:\(normalized)"
     }
 
@@ -399,6 +415,8 @@ public class DeviceDiscoveryManager: ObservableObject {
     private var periodicRefreshIntervalSeconds: TimeInterval = 0
     private var lastAlreadyRunningLogAt: Date?
     private var authorizationBlockedServiceTypes = Set<DiscoveryServiceType>()
+    private var authorizationRecoveryTasks: [DiscoveryServiceType: Task<Void, Never>] = [:]
+    private var authorizationRecoveryAttempts: [DiscoveryServiceType: Int] = [:]
     
     /// 设备超时时间（秒）
     private let deviceTimeout: TimeInterval = 60
@@ -409,7 +427,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// 本机设备名称
     private var deviceName: String {
         #if canImport(UIKit)
-        return UIDevice.current.name
+        return AppleMobileDeviceIdentity.currentSnapshot().deviceName
         #else
         return ProcessInfo.processInfo.hostName
         #endif
@@ -418,10 +436,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// 本机平台
     private var localPlatform: DevicePlatform {
         #if os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            return .iPadOS
-        }
-        return .iOS
+        return AppleMobileDeviceIdentity.currentSnapshot().platform
         #elseif os(macOS)
         return .macOS
         #else
@@ -432,7 +447,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// 本机 OS 版本
     private var localOSVersion: String {
         #if canImport(UIKit)
-        return UIDevice.current.systemVersion
+        return AppleMobileDeviceIdentity.currentSnapshot().osVersion
         #else
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
@@ -442,16 +457,28 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// 本机型号
     private var localModel: String {
         #if canImport(UIKit)
-        return UIDevice.current.model
+        return AppleMobileDeviceIdentity.currentSnapshot().modelName
         #else
         return "Mac"
+        #endif
+    }
+
+    /// 本机芯片信息（用于对端 UI 与诊断）
+    private var localChip: String? {
+        #if canImport(UIKit)
+        return AppleMobileDeviceIdentity.currentSnapshot().chip
+        #else
+        return nil
         #endif
     }
 
     /// 本机稳定设备 ID（与 stableDeviceId 生成策略对齐）
     private var localStableDeviceId: String? {
         #if canImport(UIKit)
-        guard let raw = UIDevice.current.identifierForVendor?.uuidString.lowercased() else { return nil }
+        let raw = AppleMobileDeviceIdentity.currentSnapshot().stableDeviceId
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !raw.isEmpty else { return nil }
         return "id:\(raw)"
         #else
         return nil
@@ -481,6 +508,15 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     nonisolated static func shouldAutoRecoverBrowser(after error: NWError) -> Bool {
         !isBonjourAuthorizationError(error)
+    }
+
+    nonisolated static func authorizationRecoveryDelay(forAttempt attempt: Int) -> TimeInterval? {
+        switch attempt {
+        case 1: return 2
+        case 2: return 5
+        case 3: return 10
+        default: return nil
+        }
     }
     
     // MARK: - Discovery Control
@@ -549,6 +585,8 @@ public class DeviceDiscoveryManager: ObservableObject {
         periodicRefreshTimer?.invalidate()
         periodicRefreshTimer = nil
         authorizationBlockedServiceTypes.removeAll()
+        cancelAuthorizationRecoveryTasks()
+        authorizationRecoveryAttempts.removeAll()
         
         isDiscovering = false
         SkyBridgeLogger.shared.info("⏹️ 设备发现已停止")
@@ -556,7 +594,13 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     func retryAuthorizationBlockedBrowsers() {
         guard !authorizationBlockedServiceTypes.isEmpty else { return }
+        let blockedTypes = authorizationBlockedServiceTypes
         authorizationBlockedServiceTypes.removeAll()
+        for serviceType in blockedTypes {
+            authorizationRecoveryTasks[serviceType]?.cancel()
+            authorizationRecoveryTasks.removeValue(forKey: serviceType)
+            authorizationRecoveryAttempts.removeValue(forKey: serviceType)
+        }
         if isDiscovering {
             reconcileBrowsersForCurrentMode()
         }
@@ -720,6 +764,46 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
     }
 
+    private func scheduleAuthorizationRecovery(for serviceType: DiscoveryServiceType) {
+        guard isDiscovering else { return }
+        guard discoveryMode.serviceTypes.contains(serviceType) else { return }
+        guard authorizationBlockedServiceTypes.contains(serviceType) else { return }
+        guard browsers[serviceType] == nil else { return }
+
+        let nextAttempt = (authorizationRecoveryAttempts[serviceType] ?? 0) + 1
+        guard let delay = Self.authorizationRecoveryDelay(forAttempt: nextAttempt) else {
+            SkyBridgeLogger.shared.warning(
+                "⏸️ 本地网络授权恢复重试已达上限: \(serviceType.rawValue)"
+            )
+            return
+        }
+
+        authorizationRecoveryAttempts[serviceType] = nextAttempt
+        authorizationRecoveryTasks[serviceType]?.cancel()
+        authorizationRecoveryTasks[serviceType] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            guard self.isDiscovering else { return }
+            guard self.discoveryMode.serviceTypes.contains(serviceType) else { return }
+            guard self.authorizationBlockedServiceTypes.contains(serviceType) else { return }
+            guard self.browsers[serviceType] == nil else { return }
+
+            SkyBridgeLogger.shared.info(
+                "🔁 本地网络授权恢复重试: \(serviceType.rawValue) attempt=\(nextAttempt)"
+            )
+            self.authorizationBlockedServiceTypes.remove(serviceType)
+            self.startBrowser(for: serviceType)
+        }
+    }
+
+    private func cancelAuthorizationRecoveryTasks() {
+        for task in authorizationRecoveryTasks.values {
+            task.cancel()
+        }
+        authorizationRecoveryTasks.removeAll()
+    }
+
     /// 启动特定服务类型的浏览器
     private func startBrowser(for serviceType: DiscoveryServiceType) {
         let parameters = NWParameters()
@@ -754,6 +838,9 @@ public class DeviceDiscoveryManager: ObservableObject {
         switch state {
         case .ready:
             authorizationBlockedServiceTypes.remove(serviceType)
+            authorizationRecoveryTasks[serviceType]?.cancel()
+            authorizationRecoveryTasks.removeValue(forKey: serviceType)
+            authorizationRecoveryAttempts.removeValue(forKey: serviceType)
             SkyBridgeLogger.shared.debug("✅ 浏览器就绪: \(serviceType.rawValue)")
             
         case .failed(let error):
@@ -778,10 +865,14 @@ public class DeviceDiscoveryManager: ObservableObject {
                         "❌ 浏览器失败 (\(serviceType.rawValue)): NoAuth(-65555)。本地网络权限当前未授权或已被系统策略拒绝；暂停自动重建，待用户在系统设置授权后再重试。"
                     )
                 }
+                scheduleAuthorizationRecovery(for: serviceType)
                 return
             }
 
             authorizationBlockedServiceTypes.remove(serviceType)
+            authorizationRecoveryTasks[serviceType]?.cancel()
+            authorizationRecoveryTasks.removeValue(forKey: serviceType)
+            authorizationRecoveryAttempts.removeValue(forKey: serviceType)
             SkyBridgeLogger.shared.error("❌ 浏览器失败 (\(serviceType.rawValue)): \(error.localizedDescription)")
             if Self.shouldAutoRecoverBrowser(after: error) {
                 scheduleBrowserRecovery(for: serviceType, reason: "failed")
@@ -912,15 +1003,17 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func createDevice(from result: NWBrowser.Result, serviceType: DiscoveryServiceType) async -> DiscoveredDevice {
         let endpoint = result.endpoint
         
-        // Bonjour 实例名（连接用）
-        let bonjourName = extractDeviceName(from: endpoint)
+        // Bonjour 实例名（连接用）。只接受真实服务实例名，避免 id:/host:/UUID/IP 被伪装成 SOA 身份。
+        let rawBonjourName = extractDeviceName(from: endpoint)
+        let bonjourName = BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(rawBonjourName)
+        let displayBonjourName = bonjourName ?? "Unknown Device"
         // TXT 记录（用于系统信息/能力/端口展示）
         let txtRecord = extractTXTRecord(from: result)
         // 设备主键：使用“物理身份 key”（忽略 serviceType），避免同一设备多服务重复展示
-        let id = stableDeviceId(from: endpoint, txtRecord: txtRecord)
+        let id = stableDeviceId(from: endpoint, txtRecord: txtRecord, sanitizedBonjourName: bonjourName)
         
         // 解析 TXT 记录
-        let platform = detectPlatform(from: txtRecord, serviceType: serviceType, name: bonjourName)
+        let platform = detectPlatform(from: txtRecord, serviceType: serviceType, name: displayBonjourName)
         // macOS 端的 TXT 记录字段可能不同：兼容更多常见键名
         let osVersion = txtValue(
             txtRecord,
@@ -939,10 +1032,10 @@ public class DeviceDiscoveryManager: ObservableObject {
             "hardwaremodel",
             "hwModel",
             "hwmodel"
-        ) ?? detectModelFromName(bonjourName, platform: platform)
+        ) ?? detectModelFromName(displayBonjourName, platform: platform)
 
         // 显示名称：优先 TXT 的 name，其次 Bonjour name
-        let displayName = txtValue(txtRecord, "name") ?? bonjourName
+        let displayName = txtValue(txtRecord, "name") ?? displayBonjourName
         
         // 提取 Bonjour service 信息 / IP 地址
         let ipAddress = extractIPAddress(from: endpoint)
@@ -1052,19 +1145,27 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     /// 生成尽可能稳定的设备 id：
     /// - 使用 Bonjour 实例名 + domain（忽略 serviceType），确保同一设备多个服务只展示一次
-    private func stableDeviceId(from endpoint: NWEndpoint, txtRecord: [String: String]) -> String {
+    private func stableDeviceId(
+        from endpoint: NWEndpoint,
+        txtRecord: [String: String],
+        sanitizedBonjourName: String?
+    ) -> String {
         if let strongId = txtValue(
             txtRecord,
             "deviceId", "deviceID", "device_id",
             "uniqueId", "unique_id",
             "uuid", "id"
-        ), !strongId.isEmpty {
-            return "id:\(strongId.lowercased())"
+        ), let persistent = PeerIdentityAliasResolver.persistentDeviceId(from: strongId) {
+            return persistent
         }
 
         if case .service(let name, _, let domain, _) = endpoint {
+            guard let sanitizedName = sanitizedBonjourName
+                    ?? BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(name) else {
+                return "endpoint:\(endpoint.debugDescription)"
+            }
             let d = domain.isEmpty ? "local." : domain
-            return "bonjour:\(name)@\(d)"
+            return "bonjour:\(sanitizedName)@\(d)"
         }
 
         if case .hostPort(let host, _) = endpoint {
@@ -1110,7 +1211,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         if merged.bonjourServiceName == nil || merged.bonjourServiceName?.isEmpty == true {
-            merged.bonjourServiceName = update.bonjourServiceName
+            merged.bonjourServiceName = BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(update.bonjourServiceName)
         }
 
         // platform/osVersion/model：尽量补齐（避免 Unknown 覆盖有效值）
@@ -1570,7 +1671,7 @@ public class DeviceDiscoveryManager: ObservableObject {
            let alias = PeerIdentityAliasResolver.hostAlias(fromIPAddress: ipAddress) {
             append(identityAliasToDeviceId[alias])
         }
-        if let bonjourServiceName = device.bonjourServiceName,
+        if let bonjourServiceName = BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(device.bonjourServiceName),
            let alias = PeerIdentityAliasResolver.lookupCandidates(
                 for: "bonjour:\(bonjourServiceName)@\(device.bonjourServiceDomain ?? "local.")"
            ).first {
@@ -1598,6 +1699,10 @@ public class DeviceDiscoveryManager: ObservableObject {
         record["platform"] = localPlatform.rawValue
         record["osVersion"] = localOSVersion
         record["model"] = localModel
+        record["modelName"] = localModel
+        if let localChip, !localChip.isEmpty {
+            record["chip"] = localChip
+        }
         
         // PQC 支持状态
         if #available(iOS 17.0, *) {
@@ -1624,9 +1729,13 @@ public class DeviceDiscoveryManager: ObservableObject {
         
         // 设备 ID（用于与 macOS 端对齐的稳定主键；不要截断，避免碰撞）
         #if canImport(UIKit)
-        if let uuid = UIDevice.current.identifierForVendor?.uuidString {
-            record["deviceId"] = uuid
-            record["uuid"] = uuid
+        let snapshot = AppleMobileDeviceIdentity.currentSnapshot()
+        if !snapshot.stableDeviceId.isEmpty {
+            record["deviceId"] = snapshot.stableDeviceId
+            record["uuid"] = snapshot.stableDeviceId
+        }
+        if let vendorDeviceId = snapshot.vendorDeviceId, !vendorDeviceId.isEmpty {
+            record["vendorDeviceId"] = vendorDeviceId
         }
         #endif
         
@@ -1732,6 +1841,13 @@ public class DeviceDiscoveryManager: ObservableObject {
     public func devices(for platform: DevicePlatform) -> [DiscoveredDevice] {
         devicesByPlatform[platform] ?? []
     }
+
+#if DEBUG
+    func injectDiscoveredDevicesForTesting(_ devices: [DiscoveredDevice]) {
+        discoveredDevices = devices
+        devicesByPlatform = Dictionary(grouping: devices, by: \.platform)
+    }
+#endif
     
     /// 获取 SkyBridge 兼容设备（支持 PQC 握手）
     public func skybridgeCompatibleDevices() -> [DiscoveredDevice] {
@@ -1746,6 +1862,8 @@ public class DeviceDiscoveryManager: ObservableObject {
         let liveBrowseEndpointKeysByServiceType: [DiscoveryServiceType: Set<String>]
         let deviceLastActivity: [String: Date]
         let isDiscovering: Bool
+        let authorizationBlockedServiceTypes: Set<DiscoveryServiceType>
+        let authorizationRecoveryAttempts: [DiscoveryServiceType: Int]
     }
 
     static func debugMakeIsolatedInstance() -> DeviceDiscoveryManager {
@@ -1758,7 +1876,9 @@ public class DeviceDiscoveryManager: ObservableObject {
             endpointToDeviceId: endpointToDeviceId,
             liveBrowseEndpointKeysByServiceType: liveBrowseEndpointKeysByServiceType,
             deviceLastActivity: deviceLastActivity,
-            isDiscovering: isDiscovering
+            isDiscovering: isDiscovering,
+            authorizationBlockedServiceTypes: authorizationBlockedServiceTypes,
+            authorizationRecoveryAttempts: authorizationRecoveryAttempts
         )
     }
 
@@ -1768,6 +1888,8 @@ public class DeviceDiscoveryManager: ObservableObject {
         liveBrowseEndpointKeysByServiceType = state.liveBrowseEndpointKeysByServiceType
         deviceLastActivity = state.deviceLastActivity
         isDiscovering = state.isDiscovering
+        authorizationBlockedServiceTypes = state.authorizationBlockedServiceTypes
+        authorizationRecoveryAttempts = state.authorizationRecoveryAttempts
         updateDiscoveredDevices()
     }
 
@@ -1792,6 +1914,24 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     var debugCachedDeviceIds: Set<String> {
         Set(deviceCache.keys)
+    }
+
+    func debugSeedAuthorizationRecoveryState(
+        blockedServiceTypes: Set<DiscoveryServiceType>,
+        attempts: [DiscoveryServiceType: Int],
+        isDiscovering: Bool
+    ) {
+        authorizationBlockedServiceTypes = blockedServiceTypes
+        authorizationRecoveryAttempts = attempts
+        self.isDiscovering = isDiscovering
+    }
+
+    var debugAuthorizationBlockedServiceTypes: Set<DiscoveryServiceType> {
+        authorizationBlockedServiceTypes
+    }
+
+    var debugAuthorizationRecoveryAttempts: [DiscoveryServiceType: Int] {
+        authorizationRecoveryAttempts
     }
     
     /// 解析服务端点以获取 IP 地址

@@ -13,6 +13,22 @@ private final class LocalLanInteropHostCoordinator {
     private lazy var fileTransferListener = FileTransferListenerService(manager: fileTransferManager)
     private lazy var remoteControlServer = RemoteControlServer(manager: remoteControlManager)
 
+    private var expectsFileTransferSmoke: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_FILE_TRANSFER"] == "1"
+    }
+
+    private var expectedHandshakeSuite: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? "X-Wing"
+    }
+
+    private var fileTransferRunID: String {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FILE_TRANSFER_RUN_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? "default"
+    }
+
     func start() async throws {
         reporter.reset()
         reporter.append("boot role=mac-host")
@@ -62,7 +78,9 @@ private final class LocalLanInteropHostCoordinator {
             var lastRekey = ""
             var sawClassicHandshake = false
             var sawRekey = false
-            var xwingStableSince: Date?
+            var inferredRekeyLogged = false
+            var suiteStableSince: Date?
+            let expectedNormalizedSuite = expectedHandshakeSuite.uppercased()
 
             while !Task.isCancelled {
                 let newestConnection = ConnectionPresenceService.shared.activeConnections
@@ -73,6 +91,7 @@ private final class LocalLanInteropHostCoordinator {
                     let suite = newestConnection.suite.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !suite.isEmpty, suite != lastSuite {
                         lastSuite = suite
+                        suiteStableSince = Date()
                         reporter.append(
                             "suite peer=\(sanitize(newestConnection.id)) suite=\(sanitize(suite))"
                         )
@@ -80,11 +99,12 @@ private final class LocalLanInteropHostCoordinator {
                         let normalizedSuite = suite.uppercased()
                         if normalizedSuite.contains("X25519") {
                             sawClassicHandshake = true
-                            xwingStableSince = nil
                         } else if normalizedSuite == "X-WING" {
-                            xwingStableSince = xwingStableSince ?? Date()
-                        } else {
-                            xwingStableSince = nil
+                            if expectsPQCRekey && sawClassicHandshake && !sawRekey && !inferredRekeyLogged {
+                                sawRekey = true
+                                inferredRekeyLogged = true
+                                reporter.append("rekey inferred X25519-Ed25519 -> X-Wing")
+                            }
                         }
                     }
                 }
@@ -110,18 +130,40 @@ private final class LocalLanInteropHostCoordinator {
                     let normalizedSuite = newestConnection.suite.uppercased()
                     if expectsPQCRekey {
                         if sawClassicHandshake && sawRekey && normalizedSuite == "X-WING" {
-                            reporter.append(
-                                "success peer=\(sanitize(newestConnection.id)) suite=X-Wing bootstrapRekey=1"
-                            )
+                            if expectsFileTransferSmoke {
+                                do {
+                                    try await performBidirectionalFileTransferSmoke(reporter: reporter)
+                                    reporter.append(
+                                        "success peer=\(sanitize(newestConnection.id)) suite=X-Wing bootstrapRekey=1 fileTransfer=1"
+                                    )
+                                } catch {
+                                    reporter.append("failed stage=file-transfer error=\(sanitize(error.localizedDescription))")
+                                }
+                            } else {
+                                reporter.append(
+                                    "success peer=\(sanitize(newestConnection.id)) suite=X-Wing bootstrapRekey=1"
+                                )
+                            }
                             return
                         }
-                    } else if normalizedSuite == "X-WING",
+                    } else if normalizedSuite == expectedNormalizedSuite,
                               !sawRekey,
-                              let stableSince = xwingStableSince,
+                              let stableSince = suiteStableSince,
                               Date().timeIntervalSince(stableSince) >= 1.0 {
-                        reporter.append(
-                            "success peer=\(sanitize(newestConnection.id)) suite=X-Wing handshakeOnly=1"
-                        )
+                        if expectsFileTransferSmoke {
+                            do {
+                                try await performBidirectionalFileTransferSmoke(reporter: reporter)
+                                reporter.append(
+                                    "success peer=\(sanitize(newestConnection.id)) suite=\(sanitize(newestConnection.suite)) handshakeOnly=1 fileTransfer=1"
+                                )
+                            } catch {
+                                reporter.append("failed stage=file-transfer error=\(sanitize(error.localizedDescription))")
+                            }
+                        } else {
+                            reporter.append(
+                                "success peer=\(sanitize(newestConnection.id)) suite=\(sanitize(newestConnection.suite)) handshakeOnly=1"
+                            )
+                        }
                         return
                     }
                 }
@@ -181,6 +223,74 @@ private final class LocalLanInteropHostCoordinator {
     private func sanitize(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
+
+    private func performBidirectionalFileTransferSmoke(
+        reporter: SmokeStatusReporter
+    ) async throws {
+        let inboundName = "ios-smoke-\(fileTransferRunID).txt"
+        let outboundName = "mac-smoke-\(fileTransferRunID).txt"
+
+        let inboundTransfer = try await waitForCompletedTransfer(
+            fileName: inboundName,
+            direction: .incoming,
+            timeoutSeconds: 90
+        )
+        guard let inboundPath = inboundTransfer.localPath?.path,
+              FileManager.default.fileExists(atPath: inboundPath) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 2001,
+                userInfo: [NSLocalizedDescriptionKey: "mac smoke 未找到接收到的文件 \(inboundName)"]
+            )
+        }
+        reporter.append("file-transfer inbound-complete name=\(sanitize(inboundName))")
+
+        let outboundURL = try makeSmokeTransferFile(
+            fileName: outboundName,
+            contents: """
+            role=mac
+            run=\(fileTransferRunID)
+            sentAt=\(ISO8601DateFormatter().string(from: Date()))
+            """
+        )
+        reporter.append("file-transfer outbound-start name=\(sanitize(outboundName))")
+        try await fileTransferManager.sendFileToFirstActivePeer(at: outboundURL)
+        reporter.append("file-transfer outbound-complete name=\(sanitize(outboundName))")
+    }
+
+    private func makeSmokeTransferFile(fileName: String, contents: String) throws -> URL {
+        let baseDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/SkyBridgeSmokeTransfers", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let url = baseDirectory.appendingPathComponent(fileName, isDirectory: false)
+        try Data(contents.utf8).write(to: url, options: .atomic)
+        return url
+    }
+
+    private func waitForCompletedTransfer(
+        fileName: String,
+        direction: TransferDirection,
+        timeoutSeconds: TimeInterval
+    ) async throws -> FileTransfer {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if let transfer = fileTransferManager.transferHistory.first(where: { transfer in
+                transfer.fileName == fileName
+                    && transfer.status == .completed
+                    && transfer.direction == direction
+            }) {
+                return transfer
+            }
+
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+
+        throw NSError(
+            domain: "SkyBridge.Smoke",
+            code: 2000,
+            userInfo: [NSLocalizedDescriptionKey: "等待传输完成超时: \(fileName)"]
+        )
+    }
 }
 
 private enum HostStartupError: LocalizedError {
@@ -198,6 +308,12 @@ private enum HostStartupError: LocalizedError {
 struct LocalLanInteropHostMain {
     static func main() async {
         setenv("SKYBRIDGE_SMOKE_ROLE", "mac-host", 1)
+        let enableCompatibilityBootstrap =
+            ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ENABLE_COMPATIBILITY_MODE"] == "1"
+            || ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
+        if enableCompatibilityBootstrap {
+            UserDefaults.standard.set(true, forKey: "Settings.EnableCompatibilityMode")
+        }
         let coordinator = await MainActor.run { LocalLanInteropHostCoordinator() }
 
         do {
@@ -260,5 +376,11 @@ private func writeProtectedData(_ data: Data, to url: URL) throws {
             [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
             ofItemAtPath: url.path
         )
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }

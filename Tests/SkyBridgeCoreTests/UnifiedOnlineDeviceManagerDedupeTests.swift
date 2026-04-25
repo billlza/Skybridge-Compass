@@ -95,6 +95,73 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         XCTAssertEqual(matched?.deviceId, trustRecord.deviceId)
     }
 
+    @MainActor
+    func testMarkDeviceAsConnectedUpdatesStableIdentityEvenWhenDisplayNameIsEphemeral() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let peerId = "id:550E8400-E29B-41D4-A716-446655440001"
+        let existing = makeDevice(
+            name: "Trusted iPhone",
+            uniqueIdentifier: peerId,
+            status: .offline,
+            lastConnectedAt: Date(),
+            isConnectable: true
+        )
+        manager.replaceDevicesForTesting([existing])
+        ConnectionPresenceService.shared.markConnected(
+            peerId: peerId,
+            displayName: "Trusted iPhone",
+            address: nil,
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+        defer {
+            ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.markDeviceAsConnected(
+            peerId: peerId,
+            displayName: "peer:fe80::1",
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.uniqueIdentifier, peerId)
+        XCTAssertEqual(manager.onlineDevices.first?.connectionStatus, .connected)
+        XCTAssertEqual(manager.onlineDevices.first?.lastCryptoSuite, "ML-KEM-768")
+    }
+
+    @MainActor
+    func testPresenceRecomputeKeepsStableIdentityConnectedWhenPeerIdUsesIdPrefix() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let peerId = "id:550E8400-E29B-41D4-A716-446655440000"
+        let existing = makeDevice(
+            name: "Trusted iPhone",
+            uniqueIdentifier: peerId,
+            status: .offline,
+            lastConnectedAt: Date(),
+            isConnectable: true
+        )
+        manager.replaceDevicesForTesting([existing])
+        ConnectionPresenceService.shared.markConnected(
+            peerId: peerId,
+            displayName: "Trusted iPhone",
+            address: nil,
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768"
+        )
+        defer {
+            ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.first?.connectionStatus, .connected)
+        XCTAssertEqual(manager.onlineDevices.first?.guardStatus, "守护中")
+    }
+
     private func makeDevice(
         name: String,
         uniqueIdentifier: String,

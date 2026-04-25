@@ -31,4 +31,28 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             )
         )
     }
+
+    @MainActor
+    func testScreenStreamingDoesNotRestartForViewerStopConfiguration() {
+        let config = RemoteDesktopStreamConfiguration(
+            supportedVideoFormats: [],
+            targetFrameRate: 0,
+            keyFrameInterval: 0,
+            lowLatencyMode: false,
+            enableHardwareAcceleration: false,
+            enableAppleSiliconOptimization: false,
+            clipboardSyncEnabled: false,
+            refreshStrategy: "stop",
+            screenFrameTransport: "stopped",
+            screenDataChannelEnabled: false,
+            audioRedirectionEnabled: false
+        )
+
+        XCTAssertTrue(config.isStopRequest)
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldStartWebRTCScreenStreaming(
+                remoteStreamConfiguration: config
+            )
+        )
+    }
 }

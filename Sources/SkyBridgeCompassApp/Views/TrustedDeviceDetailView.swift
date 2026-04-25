@@ -127,6 +127,8 @@ struct TrustedDeviceCard: View {
 struct TrustedDeviceDetailView: View {
     @Environment(\.dismiss) private var dismiss
     let record: TrustRecord
+    let relatedRecords: [TrustRecord]
+    let presentationMetadata: ApplePeerDeviceMetadataNormalizer.Presentation
     let status: OnlineDeviceStatus
     let onDisconnect: ((_ idsToDisconnect: [String], _ declaredDeviceId: String?) -> Void)?
     let onRemoveTrust: (_ idsToRevoke: [String], _ declaredDeviceId: String?) -> Void
@@ -167,11 +169,11 @@ struct TrustedDeviceDetailView: View {
                     value: record.pubKeyFP.isEmpty ? ui(chinese: "（未绑定/引导模式）", english: "(Bootstrap / Unbound)", japanese: "（未バインド / ブートストラップ）") : record.pubKeyFP
                 )
                 
-                let c = capsDict
-                if let v = c["platform"], !v.isEmpty { infoRow(ui(chinese: "平台", english: "Platform", japanese: "プラットフォーム"), value: v) }
-                if let v = c["osVersion"], !v.isEmpty { infoRow(ui(chinese: "系统版本", english: "OS Version", japanese: "OS バージョン"), value: v) }
-                if let v = c["modelName"], !v.isEmpty { infoRow(ui(chinese: "型号", english: "Model", japanese: "モデル"), value: v) }
-                if let v = c["chip"], !v.isEmpty { infoRow(ui(chinese: "芯片", english: "Chip", japanese: "チップ"), value: v) }
+                let normalizedMetadata = presentationMetadata
+                if let v = normalizedMetadata.platform, !v.isEmpty { infoRow(ui(chinese: "平台", english: "Platform", japanese: "プラットフォーム"), value: v) }
+                if let v = normalizedMetadata.osVersion, !v.isEmpty { infoRow(ui(chinese: "系统版本", english: "OS Version", japanese: "OS バージョン"), value: v) }
+                if let v = normalizedMetadata.modelName, !v.isEmpty { infoRow(ui(chinese: "型号", english: "Model", japanese: "モデル"), value: v) }
+                if let v = normalizedMetadata.chip, !v.isEmpty { infoRow(ui(chinese: "芯片", english: "Chip", japanese: "チップ"), value: v) }
                 infoRow(ui(chinese: "更新时间", english: "Updated At", japanese: "更新日時"), value: record.updatedAt.formatted(date: .numeric, time: .standard))
             }
             .padding(12)
@@ -223,7 +225,7 @@ struct TrustedDeviceDetailView: View {
     
     private var capsDict: [String: String] {
         var dict: [String: String] = [:]
-        for item in record.capabilities {
+        for item in mergedCapabilities {
             let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
             if parts.count == 2 {
                 dict[parts[0]] = parts[1]
@@ -231,7 +233,11 @@ struct TrustedDeviceDetailView: View {
         }
         return dict
     }
-    
+
+    private var mergedCapabilities: [String] {
+        let records = relatedRecords.isEmpty ? [record] : relatedRecords
+        return TrustSyncService.buildDisplayGroups(from: records).first?.displayRecord.capabilities ?? record.capabilities
+    }
     private var declaredDeviceId: String? {
         // If this record is an alias, it carries declaredDeviceId.
         // If this is canonical, declaredDeviceId is the record.deviceId itself.
@@ -243,18 +249,35 @@ struct TrustedDeviceDetailView: View {
     
     private var idsToRevoke: [String] {
         var ids = Set<String>()
-        ids.insert(record.deviceId)
-        let c = capsDict
-        
-        // If canonical record holds peerEndpoint=bonjour:..., revoke that alias too.
-        if let peer = c["peerEndpoint"], !peer.isEmpty {
-            ids.insert(peer)
-        }
-        // If alias record carries declaredDeviceId, revoke canonical too.
-        if let declared = c["declaredDeviceId"], !declared.isEmpty {
-            ids.insert(declared)
+        let records = relatedRecords.isEmpty ? [record] : relatedRecords
+
+        for relatedRecord in records {
+            ids.insert(relatedRecord.deviceId)
+            ids.formUnion(relatedRecord.knownDeviceIds)
+
+            let caps = capabilityDictionary(for: relatedRecord.capabilities)
+            if let peer = caps["peerEndpoint"], !peer.isEmpty {
+                ids.insert(peer)
+            }
+            if let declared = caps["declaredDeviceId"], !declared.isEmpty {
+                ids.insert(declared)
+            }
         }
         return Array(ids)
+    }
+
+    private func capabilityDictionary(for capabilities: [String]) -> [String: String] {
+        var dict: [String: String] = [:]
+        for item in capabilities {
+            let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty {
+                    dict[parts[0]] = value
+                }
+            }
+        }
+        return dict
     }
 
     private func ui(chinese: String, english: String, japanese: String) -> String {

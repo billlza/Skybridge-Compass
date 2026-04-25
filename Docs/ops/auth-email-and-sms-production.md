@@ -46,7 +46,8 @@
 ### Apple 登录
 
 - Apple 登录对外语义固定为：
-  - macOS 原生 `Sign in with Apple`
+  - macOS `Developer ID + DMG` 发布走 `ASWebAuthenticationSession` 安全网页授权
+  - macOS 原生 `Sign in with Apple` 仅用于 Apple 官方支持的分发通道
   - iOS 原生 `Sign in with Apple`
   - 服务端统一由 Supabase Auth Apple provider 完成 token exchange 与会话签发
 - Apple 登录的主 `client_id` 采用 `Services ID`
@@ -334,6 +335,6 @@ bash Scripts/check_supabase_auth_readiness.sh \
 3. 客户端不存在写入生产短信密钥的入口
 4. Supabase 默认认证邮件已关闭
 5. DirectMail 域名验证 / DNS / TLS / deliverability 验收全部完成
-6. Supabase Apple provider 已开启，且 macOS / iOS 真机原生 Apple 登录通过
+6. Supabase Apple provider 已开启，且 macOS Developer ID 发布链安全网页授权通过、iOS 真机原生 Apple 登录通过
 7. `before_user_created` hook 已开启，Apple / 邮箱 / 手机登录都不会绕过审计
 8. Apple client secret 已记录轮换日期，并确认剩余有效期充足

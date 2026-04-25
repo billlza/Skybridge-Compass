@@ -139,4 +139,91 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         let legacyResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(legacy)
         XCTAssertFalse(legacyResult.ok)
     }
+
+    func testAuthenticatedQRCodeRebindPolicyRejectsSilentCurrentPathConflicts() {
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowAuthenticatedQRRebind(for: .identityConflict)
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowAuthenticatedQRRebind(for: .deviceIdMigrationRequired)
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowAuthenticatedQRRebind(for: .quarantinedIdentity)
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldAllowAuthenticatedQRRebind(for: .revokedIdentity)
+        )
+    }
+
+    func testCrossNetworkQRCodeAllowsAuthenticatedAuthorityRekeyForExistingDeviceId() async throws {
+        let trust = TrustSyncService.shared
+        let qrData = try await makeSignedQRCode()
+        let deviceId = qrData.deviceID
+
+        trust.setInMemoryPersistenceForTesting(true)
+        await trust.removeRecordsForTesting(deviceIds: [deviceId])
+        defer {
+            trust.setInMemoryPersistenceForTesting(false)
+            Task { @MainActor in
+                await trust.removeRecordsForTesting(deviceIds: [deviceId])
+            }
+        }
+
+        _ = try await trust.addTrustRecord(
+            TrustRecord(
+                deviceId: deviceId,
+                pubKeyFP: String(repeating: "1", count: 64),
+                publicKey: Data([0x01]),
+                protocolPublicKey: Data([0x02]),
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: String(repeating: "2", count: 64),
+                signature: Data(),
+                deviceName: "Existing Device",
+                currentDeviceId: deviceId,
+                knownDeviceIds: [deviceId]
+            )
+        )
+
+        let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(qrData)
+
+        XCTAssertTrue(result.ok, result.reason ?? "")
+        XCTAssertNil(result.reason)
+    }
+
+    func testCrossNetworkQRCodeTreatsAliasMatchedPinnedAuthorityAsTrustedDevice() async throws {
+        let trust = TrustSyncService.shared
+        let suffix = UUID().uuidString.lowercased()
+        let aliasId = "bonjour:skybridge-\(suffix)@local."
+        let stableId = "id:\(suffix)"
+        let qrData = try await makeSignedQRCode(deviceId: stableId)
+
+        trust.setInMemoryPersistenceForTesting(true)
+        await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
+        defer {
+            trust.setInMemoryPersistenceForTesting(false)
+            Task { @MainActor in
+                await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
+            }
+        }
+
+        _ = try await trust.addTrustRecord(
+            TrustRecord(
+                deviceId: aliasId,
+                pubKeyFP: String(repeating: "3", count: 64),
+                publicKey: qrData.protocolPublicKeyBytes,
+                protocolPublicKey: qrData.protocolPublicKeyBytes,
+                protocolSigningAlgorithm: qrData.protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: qrData.protocolPublicKeyFingerprint,
+                signature: Data(),
+                deviceName: "Pinned Mac",
+                currentDeviceId: stableId,
+                knownDeviceIds: [aliasId, stableId]
+            )
+        )
+
+        let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(qrData)
+
+        XCTAssertTrue(result.ok, result.reason ?? "")
+        XCTAssertEqual(result.source, .trustedDevice)
+    }
 }

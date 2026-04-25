@@ -58,6 +58,29 @@ public actor RegistrationSecurityService {
             globalMaxPerSecond: 5,
             captchaTriggerThreshold: 1
         )
+
+        fileprivate func scoped(for attemptType: AttemptType) -> RateLimitConfig {
+            switch attemptType {
+            case .register:
+                return self
+            case .verifyCode:
+                return RateLimitConfig(
+                    ipMaxPerMinute: max(ipMaxPerMinute, 5),
+                    deviceMaxPerHour: max(deviceMaxPerHour, 6),
+                    identifierMaxPerDay: max(identifierMaxPerDay, 8),
+                    globalMaxPerSecond: max(globalMaxPerSecond, 15),
+                    captchaTriggerThreshold: max(captchaTriggerThreshold, 3)
+                )
+            case .login:
+                return RateLimitConfig(
+                    ipMaxPerMinute: max(ipMaxPerMinute, 10),
+                    deviceMaxPerHour: max(deviceMaxPerHour, 12),
+                    identifierMaxPerDay: max(identifierMaxPerDay, 20),
+                    globalMaxPerSecond: max(globalMaxPerSecond, 20),
+                    captchaTriggerThreshold: max(captchaTriggerThreshold, 5)
+                )
+            }
+        }
     }
     
  // MARK: - 数据模型
@@ -68,6 +91,7 @@ public actor RegistrationSecurityService {
         public let deviceFingerprint: String
         public let identifier: String  // 手机号或邮箱（哈希存储）
         public let identifierType: IdentifierType
+        public let attemptType: AttemptType?
         public let timestamp: Date
         public let userAgent: String?
         
@@ -82,6 +106,7 @@ public actor RegistrationSecurityService {
             deviceFingerprint: String,
             identifier: String,
             identifierType: IdentifierType,
+            attemptType: AttemptType = .register,
             timestamp: Date = Date(),
             userAgent: String? = nil
         ) {
@@ -89,6 +114,7 @@ public actor RegistrationSecurityService {
             self.deviceFingerprint = deviceFingerprint
             self.identifier = identifier
             self.identifierType = identifierType
+            self.attemptType = attemptType
             self.timestamp = timestamp
             self.userAgent = userAgent
         }
@@ -99,6 +125,12 @@ public actor RegistrationSecurityService {
             let hash = SHA256.hash(data: data)
             return hash.compactMap { String(format: "%02x", $0) }.joined()
         }
+    }
+
+    public enum AttemptType: String, Sendable, Codable {
+        case register
+        case verifyCode = "verify_code"
+        case login
     }
     
  /// 注册尝试记录
@@ -238,6 +270,9 @@ public actor RegistrationSecurityService {
     public func canRegister(context: RegistrationContext) async -> RateLimitResult {
  // 定期清理过期数据
         await cleanupIfNeeded()
+
+        let attemptType = context.attemptType ?? .register
+        let effectiveConfig = config.scoped(for: attemptType)
         
  // 1. 检查黑名单
         if let blacklistResult = checkBlacklist(context: context) {
@@ -246,7 +281,7 @@ public actor RegistrationSecurityService {
         }
         
  // 2. 检查一次性邮箱
-        if context.identifierType == .email {
+        if attemptType == .register, context.identifierType == .email {
             if let disposableResult = checkDisposableEmail(context.identifier) {
                 logger.warning("一次性邮箱被拦截: \(context.identifier.prefix(3))***")
                 return disposableResult
@@ -254,35 +289,51 @@ public actor RegistrationSecurityService {
         }
         
  // 3. 检查全局限流
-        if let globalResult = checkGlobalRateLimit() {
+        if let globalResult = checkGlobalRateLimit(config: effectiveConfig) {
             logger.warning("全局限流触发")
             return globalResult
         }
         
  // 4. 检查IP限流
-        let ipAttempts = countRecentAttempts(byIP: context.ip, within: 60)  // 1分钟内
-        if ipAttempts >= config.ipMaxPerMinute {
+        let loginFailuresOnly = attemptType == .login
+        let ipAttempts = countRecentAttempts(
+            byIP: context.ip,
+            attemptType: attemptType,
+            within: 60,
+            failuresOnly: loginFailuresOnly
+        )  // 1分钟内
+        if ipAttempts >= effectiveConfig.ipMaxPerMinute {
             logger.warning("IP限流触发: \(context.ip), 尝试次数: \(ipAttempts)")
             return .denied(reason: "操作过于频繁，请稍后再试", retryAfter: 60)
         }
         
  // 5. 检查设备限流
-        let deviceAttempts = countRecentAttempts(byDevice: context.deviceFingerprint, within: 3600)  // 1小时内
-        if deviceAttempts >= config.deviceMaxPerHour {
+        let deviceAttempts = countRecentAttempts(
+            byDevice: context.deviceFingerprint,
+            attemptType: attemptType,
+            within: 3600,
+            failuresOnly: loginFailuresOnly
+        )  // 1小时内
+        if deviceAttempts >= effectiveConfig.deviceMaxPerHour {
             logger.warning("设备限流触发: \(context.deviceFingerprint.prefix(8))..., 尝试次数: \(deviceAttempts)")
-            return .denied(reason: "该设备注册次数过多，请稍后再试", retryAfter: 3600)
+            return .denied(reason: deviceLimitMessage(for: attemptType), retryAfter: 3600)
         }
         
  // 6. 检查账号限流
-        let identifierAttempts = countRecentAttempts(byIdentifier: context.identifierHash, within: 86400)  // 24小时内
-        if identifierAttempts >= config.identifierMaxPerDay {
+        let identifierAttempts = countRecentAttempts(
+            byIdentifier: context.identifierHash,
+            attemptType: attemptType,
+            within: 86400,
+            failuresOnly: loginFailuresOnly
+        )  // 24小时内
+        if identifierAttempts >= effectiveConfig.identifierMaxPerDay {
             logger.warning("账号限流触发: \(context.identifierHash.prefix(8))..., 尝试次数: \(identifierAttempts)")
-            return .denied(reason: "该账号注册尝试次数过多，请明天再试", retryAfter: 86400)
+            return .denied(reason: identifierLimitMessage(for: attemptType), retryAfter: 86400)
         }
         
  // 7. 检查是否需要行为验证
         let totalAttempts = max(ipAttempts, deviceAttempts)
-        if totalAttempts >= config.captchaTriggerThreshold {
+        if totalAttempts >= effectiveConfig.captchaTriggerThreshold {
             logger.info("触发行为验证: IP尝试=\(ipAttempts), 设备尝试=\(deviceAttempts)")
             return .requireCaptcha(reason: "请完成安全验证")
         }
@@ -492,22 +543,35 @@ public actor RegistrationSecurityService {
     
  /// 检查黑名单
     private func checkBlacklist(context: RegistrationContext) -> RateLimitResult? {
+        let operation = blacklistOperationName(for: context.attemptType ?? .register)
+
  // 检查IP黑名单
         if let entry = ipBlacklist[context.ip], !entry.isExpired {
-            return .denied(reason: "您的IP已被限制注册", retryAfter: entry.expiresAt?.timeIntervalSinceNow)
+            return .denied(reason: "您的IP已被限制\(operation)", retryAfter: entry.expiresAt?.timeIntervalSinceNow)
         }
         
  // 检查设备黑名单
         if let entry = deviceBlacklist[context.deviceFingerprint], !entry.isExpired {
-            return .denied(reason: "该设备已被限制注册", retryAfter: entry.expiresAt?.timeIntervalSinceNow)
+            return .denied(reason: "该设备已被限制\(operation)", retryAfter: entry.expiresAt?.timeIntervalSinceNow)
         }
         
  // 检查账号黑名单
         if let entry = identifierBlacklist[context.identifierHash], !entry.isExpired {
-            return .denied(reason: "该账号已被限制注册", retryAfter: entry.expiresAt?.timeIntervalSinceNow)
+            return .denied(reason: "该账号已被限制\(operation)", retryAfter: entry.expiresAt?.timeIntervalSinceNow)
         }
         
         return nil
+    }
+
+    private func blacklistOperationName(for attemptType: AttemptType) -> String {
+        switch attemptType {
+        case .register:
+            return "注册"
+        case .verifyCode:
+            return "验证码请求"
+        case .login:
+            return "登录"
+        }
     }
     
  /// 检查一次性邮箱
@@ -520,7 +584,7 @@ public actor RegistrationSecurityService {
     }
     
  /// 检查全局限流
-    private func checkGlobalRateLimit() -> RateLimitResult? {
+    private func checkGlobalRateLimit(config: RateLimitConfig) -> RateLimitResult? {
         let now = Date()
         let oneSecondAgo = now.addingTimeInterval(-1)
         
@@ -535,27 +599,60 @@ public actor RegistrationSecurityService {
     }
     
  /// 统计指定IP最近的尝试次数
-    private func countRecentAttempts(byIP ip: String, within seconds: TimeInterval) -> Int {
+    private func countRecentAttempts(
+        byIP ip: String,
+        attemptType: AttemptType,
+        within seconds: TimeInterval,
+        failuresOnly: Bool
+    ) -> Int {
         let threshold = Date().addingTimeInterval(-seconds)
-        return attempts.filter { $0.context.ip == ip && $0.createdAt > threshold }.count
+        return attempts.filter {
+            $0.context.ip == ip &&
+            $0.context.attemptType == attemptType &&
+            $0.createdAt > threshold &&
+            (!failuresOnly || !$0.success)
+        }.count
     }
     
  /// 统计指定设备最近的尝试次数
-    private func countRecentAttempts(byDevice fingerprint: String, within seconds: TimeInterval) -> Int {
+    private func countRecentAttempts(
+        byDevice fingerprint: String,
+        attemptType: AttemptType,
+        within seconds: TimeInterval,
+        failuresOnly: Bool
+    ) -> Int {
         let threshold = Date().addingTimeInterval(-seconds)
-        return attempts.filter { $0.context.deviceFingerprint == fingerprint && $0.createdAt > threshold }.count
+        return attempts.filter {
+            $0.context.deviceFingerprint == fingerprint &&
+            $0.context.attemptType == attemptType &&
+            $0.createdAt > threshold &&
+            (!failuresOnly || !$0.success)
+        }.count
     }
     
  /// 统计指定账号最近的尝试次数
-    private func countRecentAttempts(byIdentifier identifierHash: String, within seconds: TimeInterval) -> Int {
+    private func countRecentAttempts(
+        byIdentifier identifierHash: String,
+        attemptType: AttemptType,
+        within seconds: TimeInterval,
+        failuresOnly: Bool
+    ) -> Int {
         let threshold = Date().addingTimeInterval(-seconds)
-        return attempts.filter { $0.context.identifierHash == identifierHash && $0.createdAt > threshold }.count
+        return attempts.filter {
+            $0.context.identifierHash == identifierHash &&
+            $0.context.attemptType == attemptType &&
+            $0.createdAt > threshold &&
+            (!failuresOnly || !$0.success)
+        }.count
     }
     
  /// 检查并自动加入黑名单（连续失败过多）
     private func checkAndAutoBlacklist(context: RegistrationContext) async {
+        guard context.attemptType == .register else { return }
+
         let recentFailures = attempts.filter {
             !$0.success &&
+            $0.context.attemptType == .register &&
             $0.context.ip == context.ip &&
             $0.createdAt > Date().addingTimeInterval(-3600)  // 1小时内
         }.count
@@ -568,12 +665,35 @@ public actor RegistrationSecurityService {
  // 连续失败20次，封禁设备24小时
         let deviceFailures = attempts.filter {
             !$0.success &&
+            $0.context.attemptType == .register &&
             $0.context.deviceFingerprint == context.deviceFingerprint &&
             $0.createdAt > Date().addingTimeInterval(-86400)
         }.count
         
         if deviceFailures >= 20 {
             addToDeviceBlacklist(fingerprint: context.deviceFingerprint, reason: "设备注册失败过多", duration: 86400)
+        }
+    }
+
+    private func deviceLimitMessage(for attemptType: AttemptType) -> String {
+        switch attemptType {
+        case .register:
+            return "该设备注册次数过多，请稍后再试"
+        case .verifyCode:
+            return "该设备验证码请求过多，请稍后再试"
+        case .login:
+            return "该设备登录尝试过多，请稍后再试"
+        }
+    }
+
+    private func identifierLimitMessage(for attemptType: AttemptType) -> String {
+        switch attemptType {
+        case .register:
+            return "该账号注册尝试次数过多，请明天再试"
+        case .verifyCode:
+            return "该账号验证码请求过多，请稍后再试"
+        case .login:
+            return "该账号登录失败次数过多，请稍后再试"
         }
     }
     

@@ -62,6 +62,8 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>SkyBridge 需要访问相机以扫描设备配对二维码。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SkyBridge 需要麦克风权限以建立远程桌面音频会话，并在你启用音频重定向或语音相关能力时安全处理音频。</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SkyBridge 需要访问本地网络以发现和连接附近设备。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

@@ -134,6 +134,10 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
     public private(set) var name: String
     public private(set) var ipv4: String?
     public private(set) var ipv6: String?
+    public var platformName: String?
+    public var osVersion: String?
+    public var modelName: String?
+    public var chip: String?
     public var services: [String]
     public var portMap: [String: Int]
     public var remoteVideoFormats: Set<String>
@@ -161,6 +165,10 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         name: String,
         ipv4: String?,
         ipv6: String?,
+        platformName: String? = nil,
+        osVersion: String? = nil,
+        modelName: String? = nil,
+        chip: String? = nil,
         services: [String],
         portMap: [String: Int],
         remoteVideoFormats: Set<String> = [],
@@ -177,6 +185,10 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         self.name = name
         self.ipv4 = ipv4
         self.ipv6 = ipv6
+        self.platformName = platformName
+        self.osVersion = osVersion
+        self.modelName = modelName
+        self.chip = chip
         self.services = services
         self.portMap = portMap
         self.remoteVideoFormats = remoteVideoFormats

@@ -68,6 +68,22 @@ struct KeychainManagerSupabaseConfigTests {
         try clearSupabaseEntries(using: keychain)
     }
 
+    @Test("Supabase fromEnvironment does not synchronously read Keychain")
+    func testSupabaseConfigurationFromEnvironmentDoesNotReadKeychain() throws {
+        guard #available(macOS 14.0, *) else { return }
+
+        let keychain = KeychainManager.shared
+        try clearSupabaseEntries(using: keychain)
+
+        let keychainURL = "https://keychain-only-startup-blocker.supabase.co"
+        try keychain.storeSupabaseConfig(url: keychainURL, anonKey: "anon-key")
+
+        #expect(SupabaseService.Configuration.fromKeychain()?.url.absoluteString == keychainURL)
+        #expect(SupabaseService.Configuration.fromEnvironment()?.url.absoluteString != keychainURL)
+
+        try clearSupabaseEntries(using: keychain)
+    }
+
     private func clearSupabaseEntries(using keychain: KeychainManager) throws {
         try keychain.deleteAPIKey(service: "SkyBridge.Supabase", account: "URL")
         try keychain.deleteAPIKey(service: "SkyBridge.Supabase", account: "AnonKey")

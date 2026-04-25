@@ -80,6 +80,7 @@ public class DashboardViewModel: ObservableObject {
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "com.skybridge.dashboard.network")
     private let crossNetworkManager = CrossNetworkWebRTCManager.instance
+    private var lastPresentedPeerDevice: DiscoveredDevice?
     
     // MARK: - Initialization
     
@@ -184,6 +185,13 @@ public class DashboardViewModel: ObservableObject {
                 self?.updateConnectionPresentation()
             }
             .store(in: &cancellables)
+
+        P2PConnectionManager.instance.$connectionStatusByDeviceId
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateConnectionPresentation()
+            }
+            .store(in: &cancellables)
         
         // 监听文件传输变化（活跃 + 历史），确保首页能看到“进行中/已完成”
         Publishers.CombineLatest(
@@ -283,6 +291,7 @@ public class DashboardViewModel: ObservableObject {
             .sorted { $0.connectedAt > $1.connectedAt }
             .first
             .map { connection in
+                lastPresentedPeerDevice = connection.device
                 if let rekey = connectionManager.resolvedRekeyStatus(for: connection.device) {
                     return ConnectionPresentationPeer(
                         displayName: connection.device.name,
@@ -297,11 +306,15 @@ public class DashboardViewModel: ObservableObject {
                 return ConnectionPresentationPeer(
                     displayName: connection.device.name,
                     cryptoKind: nil,
-                    suite: connectionManager.resolvedNegotiatedSuite(for: connection.device)?.rawValue,
+                    suite: connectionManager.getNegotiatedSuite(for: connection.device.id)?.rawValue,
                     guardStatus: RuntimeLocalization.string("守护中"),
                     connectedAt: connection.connectedAt
                 )
             }
+
+        let localFallback = latestPeerConnection == nil
+            ? localConnectionPresentationFallback(using: connectionManager)
+            : (connected: Optional<ConnectionPresentationPeer>.none, pending: Optional<ConnectionPresentationPendingPeer>.none)
 
         let disconnectedText = networkStatus == .disconnected
             ? RuntimeLocalization.string("离线")
@@ -329,11 +342,148 @@ public class DashboardViewModel: ObservableObject {
                 ),
                 fileTransferActive: !FileTransferManager.instance.activeTransfers.isEmpty,
                 latestPeerConnection: latestPeerConnection,
-                latestConnectedDevice: nil,
+                latestConnectedDevice: localFallback.connected,
+                latestPendingPeer: localFallback.pending,
                 activeSessionSnapshot: crossNetworkManager.activeSessionSnapshot,
                 defaultPQCModeLabel: defaultPQCModeLabel
             )
         )
+
+        if localFallback.connected == nil, localFallback.pending == nil, latestPeerConnection == nil {
+            lastPresentedPeerDevice = nil
+        }
+    }
+
+    private func localConnectionPresentationFallback(
+        using connectionManager: P2PConnectionManager
+    ) -> (connected: ConnectionPresentationPeer?, pending: ConnectionPresentationPendingPeer?) {
+        struct Candidate {
+            let device: DiscoveredDevice
+            let status: ConnectionStatus
+            let suite: String?
+            let rekey: P2PConnectionManager.RekeyPresentationStatus?
+            let updatedAt: Date
+        }
+
+        let candidates = localPresentationCandidateDevices(using: connectionManager)
+            .compactMap { device -> Candidate? in
+                let resolvedDevice = connectionManager.resolvedPeerDevice(for: device)
+                guard let status = connectionManager.resolvedConnectionStatus(for: resolvedDevice) else {
+                    return nil
+                }
+                switch status {
+                case .connected, .connecting, .disconnecting:
+                    break
+                case .failed, .error, .disconnected:
+                    return nil
+                }
+
+                let rekey = connectionManager.resolvedRekeyStatus(for: resolvedDevice)
+                let suite = connectionManager.getNegotiatedSuite(for: resolvedDevice.id)?.rawValue
+                let updatedAt = rekey?.startedAt ?? resolvedDevice.lastSeen
+                return Candidate(
+                    device: resolvedDevice,
+                    status: status,
+                    suite: suite,
+                    rekey: rekey,
+                    updatedAt: updatedAt
+                )
+            }
+            .sorted { lhs, rhs in
+                let lhsPriority = localPresentationPriority(for: lhs.status)
+                let rhsPriority = localPresentationPriority(for: rhs.status)
+                if lhsPriority != rhsPriority {
+                    return lhsPriority < rhsPriority
+                }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+
+        guard let candidate = candidates.first else {
+            return (nil, nil)
+        }
+
+        lastPresentedPeerDevice = candidate.device
+
+        if candidate.status == .connected {
+            if let rekey = candidate.rekey {
+                return (
+                    connected: ConnectionPresentationPeer(
+                        displayName: candidate.device.name,
+                        cryptoKind: "\(rekey.fromSuite) → \(rekey.toSuite)",
+                        suite: nil,
+                        guardStatus: RuntimeLocalization.string("Rekey 中"),
+                        isRekeying: true,
+                        connectedAt: candidate.updatedAt
+                    ),
+                    pending: nil
+                )
+            }
+
+            return (
+                connected: ConnectionPresentationPeer(
+                    displayName: candidate.device.name,
+                    cryptoKind: nil,
+                    suite: candidate.suite,
+                    guardStatus: RuntimeLocalization.string("守护中"),
+                    connectedAt: candidate.updatedAt
+                ),
+                pending: nil
+            )
+        }
+
+        let phase: ConnectionPresentationPhase =
+            (candidate.rekey != nil || candidate.suite != nil || candidate.status == .disconnecting)
+            ? .reconnecting
+            : .connecting
+
+        return (
+            connected: nil,
+            pending: ConnectionPresentationPendingPeer(
+                displayName: candidate.device.name,
+                cryptoKind: candidate.rekey.map { "\($0.fromSuite) → \($0.toSuite)" },
+                suite: candidate.rekey == nil ? candidate.suite : nil,
+                guardStatus: candidate.rekey == nil ? nil : RuntimeLocalization.string("Rekey 中"),
+                isRekeying: candidate.rekey != nil,
+                phase: phase
+            )
+        )
+    }
+
+    private func localPresentationCandidateDevices(
+        using connectionManager: P2PConnectionManager
+    ) -> [DiscoveredDevice] {
+        var devices = discoveredDevices
+        devices.append(contentsOf: activeConnections.map(\.device))
+        if let lastPresentedPeerDevice {
+            devices.append(lastPresentedPeerDevice)
+        }
+
+        var ordered: [DiscoveredDevice] = []
+        var seen = Set<String>()
+        for device in devices {
+            let resolved = connectionManager.resolvedPeerDevice(for: device)
+            if seen.insert(resolved.id).inserted {
+                ordered.append(resolved)
+            }
+        }
+        return ordered
+    }
+
+    private func localPresentationPriority(for status: ConnectionStatus) -> Int {
+        switch status {
+        case .connected:
+            return 0
+        case .connecting:
+            return 1
+        case .disconnecting:
+            return 2
+        case .failed:
+            return 3
+        case .error:
+            return 4
+        case .disconnected:
+            return 5
+        }
     }
 }
 

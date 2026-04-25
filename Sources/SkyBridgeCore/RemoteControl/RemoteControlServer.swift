@@ -25,6 +25,7 @@ public final class RemoteControlServer: ObservableObject {
     private let serviceDomain = "local."
     private var netService: NetService?
     public private(set) var activePort: UInt16?
+    public private(set) var isBonjourPublished = false
     
     public init(manager: RemoteControlManager, port: UInt16 = 5901) {
         self.manager = manager
@@ -49,10 +50,10 @@ public final class RemoteControlServer: ObservableObject {
         activePort = boundPort
         ServiceEndpointRegistry.shared.setRemoteControlPort(boundPort)
         if #available(macOS 14.0, *) {
-            let identitySnapshot = await SelfIdentityProvider.shared.snapshot()
-            publishBonjour(port: boundPort, identitySnapshot: identitySnapshot)
+            let identitySnapshot = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+            configureBonjour(on: boundListener, port: boundPort, identitySnapshot: identitySnapshot)
         } else {
-            publishBonjour(port: boundPort, identitySnapshot: nil)
+            configureBonjour(on: boundListener, port: boundPort, identitySnapshot: nil)
         }
     }
     
@@ -60,50 +61,93 @@ public final class RemoteControlServer: ObservableObject {
         listener?.cancel()
         listener = nil
         activePort = nil
+        isBonjourPublished = false
         ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
         netService?.stop()
         netService = nil
     }
-    
-    private func publishBonjour(
+
+    private func configureBonjour(
+        on listener: NWListener?,
         port: UInt16,
         identitySnapshot: SelfIdentitySnapshot?
     ) {
+        guard let listener else { return }
         netService?.stop()
 
         let serviceName = Host.current().localizedName ?? "Mac"
-        netService = NetService(domain: serviceDomain, type: serviceType, name: serviceName, port: Int32(port))
+        var txt = NWTXTRecord()
+        txt["platform"] = "macos"
+        txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
+        txt["name"] = serviceName
+        txt["model"] = "Mac"
+        txt["capabilities"] = "remote_desktop"
+        txt["remotePort"] = String(port)
+        txt["port"] = String(port)
 
-        // TXT: iOS 端用于展示“可远控(端口)”以及系统信息
-        var txt: [String: Data] = [
-            "platform": "macos".data(using: .utf8) ?? Data(),
-            "osVersion": ProcessInfo.processInfo.operatingSystemVersionString.data(using: .utf8) ?? Data(),
-            "name": serviceName.data(using: .utf8) ?? Data(),
-            "model": "Mac".data(using: .utf8) ?? Data(),
-            "capabilities": "remote_desktop".data(using: .utf8) ?? Data(),
-            "remotePort": "\(port)".data(using: .utf8) ?? Data(),
-            "port": "\(port)".data(using: .utf8) ?? Data()
-        ]
+        var txtData = makeNetServiceTXTData(
+            serviceName: serviceName,
+            deviceId: nil,
+            pubKeyFP: nil,
+            port: port
+        )
         if let identitySnapshot {
             if !identitySnapshot.deviceId.isEmpty {
-                txt["deviceId"] = identitySnapshot.deviceId.data(using: .utf8) ?? Data()
-                txt["uniqueId"] = identitySnapshot.deviceId.data(using: .utf8) ?? Data()
+                txt["deviceId"] = identitySnapshot.deviceId
+                txt["uniqueId"] = identitySnapshot.deviceId
+                txtData["deviceId"] = Data(identitySnapshot.deviceId.utf8)
+                txtData["uniqueId"] = Data(identitySnapshot.deviceId.utf8)
             } else {
-                txt["deviceId"] = serviceName.data(using: .utf8) ?? Data()
-                txt["uniqueId"] = serviceName.data(using: .utf8) ?? Data()
+                txt["deviceId"] = serviceName
+                txt["uniqueId"] = serviceName
             }
 
             if !identitySnapshot.pubKeyFP.isEmpty {
-                txt["pubKeyFP"] = identitySnapshot.pubKeyFP.data(using: .utf8) ?? Data()
+                txt["pubKeyFP"] = identitySnapshot.pubKeyFP
+                txtData["pubKeyFP"] = Data(identitySnapshot.pubKeyFP.utf8)
             }
         } else {
-            txt["deviceId"] = serviceName.data(using: .utf8) ?? Data()
-            txt["uniqueId"] = serviceName.data(using: .utf8) ?? Data()
+            txt["deviceId"] = serviceName
+            txt["uniqueId"] = serviceName
         }
 
-        netService?.setTXTRecord(NetService.data(fromTXTRecord: txt))
+        listener.service = NWListener.Service(
+            name: serviceName,
+            type: serviceType,
+            domain: serviceDomain,
+            txtRecord: txt
+        )
+        isBonjourPublished = true
+        log.info("📡 NWListener.service advertised \(self.serviceType) port=\(port)")
+
+        netService = NetService(domain: serviceDomain, type: serviceType, name: serviceName, port: Int32(port))
+        netService?.setTXTRecord(NetService.data(fromTXTRecord: txtData))
         netService?.publish()
-        log.info("📡 Bonjour published \(self.serviceType) port=\(port)")
+        log.info("📡 NetService fallback published \(self.serviceType) port=\(port)")
+    }
+
+    private func makeNetServiceTXTData(
+        serviceName: String,
+        deviceId: String?,
+        pubKeyFP: String?,
+        port: UInt16
+    ) -> [String: Data] {
+        var txt: [String: Data] = [
+            "platform": Data("macos".utf8),
+            "osVersion": Data(ProcessInfo.processInfo.operatingSystemVersionString.utf8),
+            "name": Data(serviceName.utf8),
+            "model": Data("Mac".utf8),
+            "capabilities": Data("remote_desktop".utf8),
+            "remotePort": Data(String(port).utf8),
+            "port": Data(String(port).utf8)
+        ]
+        let stableId = (deviceId?.isEmpty == false) ? deviceId! : serviceName
+        txt["deviceId"] = Data(stableId.utf8)
+        txt["uniqueId"] = Data(stableId.utf8)
+        if let pubKeyFP, !pubKeyFP.isEmpty {
+            txt["pubKeyFP"] = Data(pubKeyFP.utf8)
+        }
+        return txt
     }
 
     private func makeStartedListener(

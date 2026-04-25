@@ -44,10 +44,46 @@ public actor SelfIdentityProvider {
         logger.info("✅ 本机强身份已加载: deviceId=\(self.deviceId.prefix(8))..., pubKeyFP=\(self.pubKeyFP.prefix(16))..., MACs=\(self.macSet.count)")
     }
     
- /// 获取当前身份快照（供外部判定使用）
+    /// 获取当前身份快照（供外部判定使用）
     public func snapshot() -> SelfIdentitySnapshot {
         return SelfIdentitySnapshot(
             deviceId: deviceId,
+            pubKeyFP: pubKeyFP,
+            macSet: macSet
+        )
+    }
+
+    /// Return the protocol identity deviceId without depending on startup prewarm.
+    ///
+    /// Some transport control paths run before the full self-identity actor has
+    /// been warmed.  A blank deviceId is worse than an omitted optional field:
+    /// peers can cache it as a successful bootstrap with no stable authority.
+    public func protocolIdentityDeviceId(allowCreate: Bool) async -> String {
+        let cached = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cached.isEmpty {
+            return cached
+        }
+
+        let resolved: String?
+        if allowCreate {
+            resolved = await DeviceIdentityKeyManager.shared.getDeviceId()
+        } else {
+            resolved = await DeviceIdentityKeyManager.shared.existingDeviceId()
+        }
+
+        guard let resolved = resolved?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !resolved.isEmpty else {
+            return ""
+        }
+
+        deviceId = resolved
+        return resolved
+    }
+
+    public func snapshotEnsuringProtocolDeviceId(allowCreate: Bool) async -> SelfIdentitySnapshot {
+        let resolvedDeviceId = await protocolIdentityDeviceId(allowCreate: allowCreate)
+        return SelfIdentitySnapshot(
+            deviceId: resolvedDeviceId,
             pubKeyFP: pubKeyFP,
             macSet: macSet
         )

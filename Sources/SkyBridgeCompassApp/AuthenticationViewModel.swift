@@ -26,21 +26,23 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
         var id: String { rawValue }
 
+        @MainActor
         var title: String {
             switch self {
-            case .apple: return "Apple ID"
-            case .nebula: return "星云账号"
-            case .phone: return "手机号码"
-            case .email: return "电子邮箱"
+            case .apple: return LocalizationManager.shared.localizedString("auth.method.apple.title")
+            case .nebula: return LocalizationManager.shared.localizedString("auth.method.nebula.title")
+            case .phone: return LocalizationManager.shared.localizedString("auth.method.phone.title")
+            case .email: return LocalizationManager.shared.localizedString("auth.method.email.title")
             }
         }
 
+        @MainActor
         var subtitle: String {
             switch self {
-            case .apple: return "使用Face ID或Touch ID快速登录"
-            case .nebula: return "企业专属星云身份认证"
-            case .phone: return "短信验证码安全登录"
-            case .email: return "邮箱密码传统登录"
+            case .apple: return LocalizationManager.shared.localizedString("auth.method.apple.subtitle")
+            case .nebula: return LocalizationManager.shared.localizedString("auth.method.nebula.subtitle")
+            case .phone: return LocalizationManager.shared.localizedString("auth.method.phone.subtitle")
+            case .email: return LocalizationManager.shared.localizedString("auth.method.email.subtitle")
             }
         }
 
@@ -63,28 +65,85 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         }
     }
 
-    private static var appleSignInLaunchReady: Bool {
-        if let override = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_SIGN_IN"]?
+    enum AppleSignInMode: String {
+        case disabled
+        case native
+        case webSession = "web_session"
+
+        static func parse(_ rawValue: String) -> Self? {
+            let normalized = rawValue
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "-", with: "_")
+                .replacingOccurrences(of: " ", with: "_")
+                .lowercased()
+
+            switch normalized {
+            case "native":
+                return .native
+            case "web", "browser", "browser_session", "web_session", "aswebauthenticationsession", "secure_web_session":
+                return .webSession
+            case "disabled", "off", "none":
+                return .disabled
+            default:
+                return nil
+            }
+        }
+    }
+
+    private static func boolOverride(named key: String) -> Bool? {
+        guard let override = ProcessInfo.processInfo.environment[key]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() {
-            return override == "1" || override == "true" || override == "yes"
+            .lowercased() else {
+            return nil
         }
 
-        return (Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_ENABLE_APPLE_SIGN_IN") as? Bool) ?? false
+        switch override {
+        case "1", "true", "yes":
+            return true
+        case "0", "false", "no":
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private static var appleSignInLaunchReady: Bool {
+        appleSignInMode != .disabled
     }
 
     private static var nativeAppleSignInRuntimeReady: Bool {
-        if let override = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() {
-            return override == "1" || override == "true" || override == "yes"
+        appleSignInMode == .native
+    }
+
+    private static var appleSignInMode: AppleSignInMode {
+        if let modeOverride = ProcessInfo.processInfo.environment["SKYBRIDGE_APPLE_SIGN_IN_MODE"],
+           let parsedMode = AppleSignInMode.parse(modeOverride) {
+            return parsedMode
+        }
+
+        let appleSignInEnabled =
+            boolOverride(named: "SKYBRIDGE_ENABLE_APPLE_SIGN_IN")
+            ?? (Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_ENABLE_APPLE_SIGN_IN") as? Bool)
+            ?? false
+
+        guard appleSignInEnabled else {
+            return .disabled
+        }
+
+        if let nativeOverride = boolOverride(named: "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN") {
+            return nativeOverride ? .native : .webSession
+        }
+
+        if let bundledMode = Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_APPLE_SIGN_IN_MODE") as? String,
+           let parsedMode = AppleSignInMode.parse(bundledMode) {
+            return parsedMode
         }
 
         if let bundledValue = Bundle.main.object(forInfoDictionaryKey: "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN") as? Bool {
-            return bundledValue
+            return bundledValue ? .native : .webSession
         }
 
-        return appleSignInLaunchReady
+        return .native
     }
 
     static var availableLoginMethods: [LoginMethod] {
@@ -99,8 +158,27 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         Self.availableLoginMethods
     }
 
+    var appleSignInPresentationMode: AppleSignInMode {
+        Self.appleSignInMode
+    }
+
     var usesNativeAppleSignIn: Bool {
         Self.nativeAppleSignInRuntimeReady
+    }
+
+    private func t(_ key: String) -> String {
+        LocalizationManager.shared.localizedString(key)
+    }
+
+    private func formatted(_ key: String, _ arguments: CVarArg...) -> String {
+        let format = t(key)
+        return withVaList(arguments) { pointer in
+            NSString(
+                format: format,
+                locale: LocalizationManager.shared.locale as NSLocale,
+                arguments: pointer
+            ) as String
+        }
     }
 
  // MARK: - 发布属性
@@ -163,6 +241,10 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let auditTicket: String?
     }
 
+    private static let localLoginThrottleWindow: TimeInterval = 10
+    private static let localLoginThrottleMaxAttempts = 5
+    private var localLoginAttemptTimestamps: [String: [Date]] = [:]
+
     private struct AuthRiskContext {
         let identifier: String
         let identifierType: RegistrationSecurityService.RegistrationContext.IdentifierType
@@ -188,6 +270,24 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  /// 当前设备指纹（懒加载）
     private var deviceFingerprint: String?
+
+    private static let legacyPlaceholderDisplayNames: Set<String> = [
+        "用户",
+        "新用户",
+        "游客用户",
+        "Apple 用户",
+        "Nebula 用户",
+        "User",
+        "New User",
+        "Guest User",
+        "Apple User",
+        "Nebula User",
+        "ユーザー",
+        "新規ユーザー",
+        "ゲストユーザー",
+        "Appleユーザー",
+        "Nebulaユーザー"
+    ]
 
     /// 用于 UI 展示的“星云ID”（优先使用 Supabase user_metadata.nebula_id）
     var displayedNebulaId: String {
@@ -378,10 +478,11 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
     private func preferredSessionDisplayName(_ session: AuthSession, fallback: String) -> String {
         let trimmedDisplayName = session.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedDisplayName.isEmpty, trimmedDisplayName != "用户", trimmedDisplayName != "新用户" {
+        if !isPlaceholderDisplayName(trimmedDisplayName) {
             return trimmedDisplayName
         }
-        return fallback
+        let trimmedFallback = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedFallback.isEmpty ? t("auth.displayName.default.user") : trimmedFallback
     }
 
     private func shouldBootstrapPhoneRegistration(
@@ -395,12 +496,33 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let hasEmail = currentUserProfile.email?.isEmpty == false
         let trimmedDisplayName = currentUserProfile.displayName?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let hasMeaningfulDisplayName =
-            !trimmedDisplayName.isEmpty
-            && trimmedDisplayName != "用户"
-            && trimmedDisplayName != "新用户"
+        let hasMeaningfulDisplayName = !isPlaceholderDisplayName(trimmedDisplayName)
 
         return !hasNebulaId && !hasEmail && !hasMeaningfulDisplayName
+    }
+
+    private func isPlaceholderDisplayName(_ displayName: String?) -> Bool {
+        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return true }
+
+        let localizedPlaceholders = Set([
+            t("auth.displayName.default.user"),
+            t("auth.displayName.default.newUser"),
+            t("auth.displayName.default.guest"),
+            t("auth.displayName.default.apple"),
+            t("auth.displayName.default.nebula")
+        ].filter { !$0.isEmpty })
+
+        return localizedPlaceholders.contains(trimmed)
+            || Self.legacyPlaceholderDisplayNames.contains(trimmed)
+    }
+
+    private func emailDisplayNameFallback(from email: String) -> String {
+        let localPart = email
+            .components(separatedBy: "@")
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return localPart.isEmpty ? t("auth.displayName.default.user") : localPart
     }
 
     private func finishNebulaIdentityLookup(
@@ -490,11 +612,11 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
         if retryAfter >= 3600 {
             let hours = Int(ceil(Double(retryAfter) / 3600.0))
-            return "\(base)（约 \(hours) 小时后可重试）"
+            return formatted("auth.security.retryAfter.hours", base, hours)
         }
 
         let minutes = max(1, Int(ceil(Double(retryAfter) / 60.0)))
-        return "\(base)（约 \(minutes) 分钟后可重试）"
+        return formatted("auth.security.retryAfter.minutes", base, minutes)
     }
 
     private static func remoteIdentifierType(
@@ -510,11 +632,54 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         }
     }
 
+    private static func localAttemptType(
+        from attemptType: SupabaseService.RegistrationAttemptType
+    ) -> RegistrationSecurityService.AttemptType {
+        switch attemptType {
+        case .register:
+            return .register
+        case .verifyCode:
+            return .verifyCode
+        case .login:
+            return .login
+        }
+    }
+
     private static var allowsRemoteRiskDegrade: Bool {
         let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_ALLOW_AUTH_RISK_DEGRADE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
         return raw == "1" || raw == "true" || raw == "yes"
+    }
+
+    private func enforceLocalLoginThrottle(
+        identifier: String,
+        identifierType: RegistrationSecurityService.RegistrationContext.IdentifierType
+    ) -> Bool {
+        let normalizedIdentifier: String
+        switch identifierType {
+        case .email, .username:
+            normalizedIdentifier = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        case .phone:
+            normalizedIdentifier = identifier.filter { $0.isNumber || $0 == "+" }
+        }
+        let throttleKey = "\(identifierType.rawValue):\(normalizedIdentifier)"
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-Self.localLoginThrottleWindow)
+        var timestamps = localLoginAttemptTimestamps[throttleKey, default: []]
+            .filter { $0 > cutoff }
+
+        guard timestamps.count < Self.localLoginThrottleMaxAttempts else {
+            localLoginAttemptTimestamps[throttleKey] = timestamps
+            let message = t("auth.security.rateLimited.local")
+            SkyBridgeLogger.ui.warning("⚠️ 本地登录软限流触发: \(identifierType.rawValue)")
+            errorMessage = message
+            return false
+        }
+
+        timestamps.append(now)
+        localLoginAttemptTimestamps[throttleKey] = timestamps
+        return true
     }
 
     private static let emailConfirmationRedirectURL = URL(string: "skybridge://auth/email-callback")!
@@ -529,7 +694,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         return deviceFingerprint
     }
 
- /// 执行注册/验证码前安全检查
+ /// 执行认证前安全检查
  /// - Parameters:
  /// - identifier: 用户标识（手机号/邮箱）
  /// - identifierType: 标识类型
@@ -540,9 +705,16 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         identifierType: RegistrationSecurityService.RegistrationContext.IdentifierType,
         attemptType: SupabaseService.RegistrationAttemptType = .register
     ) async -> RiskCheckOutcome? {
+        if attemptType == .login {
+            guard enforceLocalLoginThrottle(identifier: identifier, identifierType: identifierType) else {
+                return nil
+            }
+            SkyBridgeLogger.ui.info("🔐 登录路径已通过本地短窗口软限流，继续执行服务端登录风控")
+        }
+
         guard let fingerprint = await ensureDeviceFingerprint() else {
             SkyBridgeLogger.ui.error("❌ 设备指纹获取失败")
-            errorMessage = "设备验证失败，请重试"
+            errorMessage = t("auth.security.deviceVerificationFailed")
             return nil
         }
 
@@ -550,7 +722,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             ip: "client",
             deviceFingerprint: fingerprint,
             identifier: identifier,
-            identifierType: identifierType
+            identifierType: identifierType,
+            attemptType: Self.localAttemptType(from: attemptType)
         )
 
         let localResult = await RegistrationSecurityService.shared.canRegister(context: context)
@@ -558,25 +731,18 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             let message = formattedRiskMessage(
                 reason: localResult.reason,
                 retryAfter: localResult.retryAfter.flatMap { Int($0) },
-                fallback: "请求过于频繁，请稍后再试"
+                fallback: t("auth.security.rateLimited.local")
             )
-            SkyBridgeLogger.ui.warning("⚠️ 本地注册风控拒绝请求: \(message)")
+            SkyBridgeLogger.ui.warning("⚠️ 本地认证风控拒绝请求: \(message)")
             errorMessage = message
-            await recordRegistrationAttempt(
-                identifier: identifier,
-                identifierType: identifierType,
-                attemptType: attemptType,
-                success: false,
-                failureReason: message
-            )
             return nil
         }
 
         if localResult.requiresCaptcha {
             requiresCaptcha = true
             if !captchaPassed {
-                SkyBridgeLogger.ui.info("🔒 本地注册风控要求行为验证")
-                errorMessage = localResult.reason ?? "请先完成安全验证"
+                SkyBridgeLogger.ui.info("🔒 本地认证风控要求行为验证")
+                errorMessage = localResult.reason ?? t("auth.security.captchaRequired")
                 showCaptchaView = true
                 return nil
             }
@@ -586,36 +752,29 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             let remoteResult = try await SupabaseService.shared.assessRegistrationRisk(
                 identifier: identifier,
                 identifierType: Self.remoteIdentifierType(from: identifierType),
-                deviceFingerprint: fingerprint
+                deviceFingerprint: fingerprint,
+                attemptType: attemptType
             )
 
             if !remoteResult.allowed {
                 let message = formattedRiskMessage(
                     reason: remoteResult.reason,
                     retryAfter: remoteResult.retryAfter,
-                    fallback: "当前请求已触发额外风控，请稍后再试"
+                    fallback: t("auth.security.rateLimited.remote")
                 )
-                SkyBridgeLogger.ui.warning("⚠️ 服务端注册风控拒绝请求: \(message)")
+                SkyBridgeLogger.ui.warning("⚠️ 服务端认证风控拒绝请求: \(message)")
                 requiresCaptcha = false
                 showCaptchaView = false
                 captchaPassed = false
                 errorMessage = message
-                await recordRegistrationAttempt(
-                    identifier: identifier,
-                    identifierType: identifierType,
-                    attemptType: attemptType,
-                    success: false,
-                    failureReason: message,
-                    captchaRequired: remoteResult.requiresCaptcha
-                )
                 return nil
             }
 
             if remoteResult.requiresCaptcha {
                 requiresCaptcha = true
                 if !captchaPassed {
-                    SkyBridgeLogger.ui.info("🔒 服务端注册风控要求行为验证")
-                    errorMessage = remoteResult.reason ?? "请先完成安全验证"
+                    SkyBridgeLogger.ui.info("🔒 服务端认证风控要求行为验证")
+                    errorMessage = remoteResult.reason ?? t("auth.security.captchaRequired")
                     showCaptchaView = true
                     return nil
                 }
@@ -624,21 +783,14 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             return RiskCheckOutcome(auditTicket: remoteResult.auditTicket)
         } catch {
             let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
-            if Self.allowsRemoteRiskDegrade {
-                SkyBridgeLogger.ui.warning("⚠️ 服务端注册风控不可用，按配置回退本地防护: \(message)")
+            if attemptType != .login, Self.allowsRemoteRiskDegrade {
+                SkyBridgeLogger.ui.warning("⚠️ 服务端认证风控不可用，按配置回退本地防护: \(message)")
                 return RiskCheckOutcome(auditTicket: nil)
             }
 
-            let userFacingMessage = "认证安全校验暂时不可用，请稍后重试"
-            SkyBridgeLogger.ui.error("❌ 服务端注册风控不可用，已拒绝继续请求: \(message, privacy: .private)")
+            let userFacingMessage = t("auth.security.checkUnavailable")
+            SkyBridgeLogger.ui.error("❌ 服务端认证风控不可用，已拒绝继续请求: \(message, privacy: .private)")
             errorMessage = userFacingMessage
-            await recordRegistrationAttempt(
-                identifier: identifier,
-                identifierType: identifierType,
-                attemptType: attemptType,
-                success: false,
-                failureReason: userFacingMessage
-            )
             return nil
         }
     }
@@ -648,7 +800,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         captchaPassed = success
         showCaptchaView = false
 
-        errorMessage = success ? nil : (error ?? "验证失败，请重试")
+        errorMessage = success ? nil : (error ?? t("auth.captcha.verificationFailed"))
     }
 
  /// 记录注册/验证码尝试
@@ -668,7 +820,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             ip: "client",
             deviceFingerprint: fingerprint,
             identifier: identifier,
-            identifierType: identifierType
+            identifierType: identifierType,
+            attemptType: Self.localAttemptType(from: attemptType)
         )
 
         await RegistrationSecurityService.shared.recordAttempt(
@@ -735,12 +888,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
     func loginWithApple(captchaToken: String? = nil) async {
         guard Self.appleSignInLaunchReady else {
-            errorMessage = "Apple 登录暂未开放，请先使用星云、手机号或邮箱登录"
+            errorMessage = LocalizationManager.shared.localizedString("auth.apple.unavailable")
             return
         }
 
         guard !Self.nativeAppleSignInRuntimeReady else {
-            errorMessage = "当前构建已启用原生 Apple 登录，请直接使用 Apple 登录按钮"
+            errorMessage = LocalizationManager.shared.localizedString("auth.apple.native.enabled")
             return
         }
 
@@ -768,35 +921,35 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     func handleAppleAuthorization(_ authorization: ASAuthorization, captchaToken: String? = nil) async {
         guard Self.appleSignInLaunchReady else {
             await MainActor.run {
-                self.errorMessage = "Apple 登录暂未开放，请先使用星云、手机号或邮箱登录"
+                self.errorMessage = LocalizationManager.shared.localizedString("auth.apple.unavailable")
             }
             return
         }
 
         guard Self.nativeAppleSignInRuntimeReady else {
             await MainActor.run {
-                self.errorMessage = "当前版本会通过浏览器完成 Apple 登录，请重新点击 Apple 登录按钮"
+                self.errorMessage = LocalizationManager.shared.localizedString("auth.apple.web.only")
             }
             return
         }
 
         guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential else {
             await MainActor.run {
-                self.errorMessage = "无法获取Apple ID凭证"
+                self.errorMessage = LocalizationManager.shared.localizedString("auth.apple.credential.missing")
             }
             return
         }
 
         guard let identityToken = appleIDCredential.identityToken else {
             await MainActor.run {
-                self.errorMessage = "无法获取身份令牌"
+                self.errorMessage = LocalizationManager.shared.localizedString("auth.apple.identityToken.missing")
             }
             return
         }
 
         guard let rawNonce = pendingAppleSignInNonce else {
             await MainActor.run {
-                self.errorMessage = "Apple 登录上下文已失效，请重试"
+                self.errorMessage = LocalizationManager.shared.localizedString("auth.apple.context.expired")
             }
             return
         }
@@ -843,7 +996,11 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
     private func loginWithNebulaDirectCredentials() async throws -> AuthSession {
         guard !nebulaAccount.isEmpty && !nebulaPassword.isEmpty else {
-            throw NSError(domain: "Nebula", code: -1, userInfo: [NSLocalizedDescriptionKey: "请输入完整的账号和密码"])
+            throw NSError(
+                domain: "Nebula",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: t("auth.nebula.credentials.required")]
+            )
         }
 
         return try await self.authService.authenticateWithNebula(
@@ -867,20 +1024,21 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let callbackURL = try await startBrowserAuthenticationSession(
             url: authorizationURL,
             callbackScheme: "skybridge",
-            flowName: "Apple 登录"
+            flowIdentifier: "apple_oauth",
+            flowDisplayName: t("auth.browser.flow.apple.name")
         )
 
         guard let resolution = try await resolveSupabaseAuthCallback(callbackURL) else {
             throw NSError(
                 domain: "AppleOAuth",
                 code: -8,
-                userInfo: [NSLocalizedDescriptionKey: "Apple 登录回调缺少会话信息"]
+                userInfo: [NSLocalizedDescriptionKey: t("auth.apple.browser.callbackSessionMissing")]
             )
         }
 
         let session = resolution.session
         let fallbackDisplayName = session.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Apple 用户"
+            ? t("auth.displayName.default.apple")
             : session.displayName
         let resolvedDisplayName = preferredSessionDisplayName(session, fallback: fallbackDisplayName)
         let resolvedSession = AuthSession(
@@ -908,11 +1066,16 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let callbackURL = try await startBrowserAuthenticationSession(
             url: authorizationRequest.authorizationURL,
             callbackScheme: "skybridge",
-            flowName: "Nebula"
+            flowIdentifier: "nebula_oauth",
+            flowDisplayName: t("auth.browser.flow.nebula.name")
         )
 
         guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false) else {
-            throw NSError(domain: "Nebula", code: -2, userInfo: [NSLocalizedDescriptionKey: "Nebula 回调地址无效"])
+            throw NSError(
+                domain: "Nebula",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: t("auth.nebula.browser.invalidCallback")]
+            )
         }
 
         let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
@@ -923,11 +1086,19 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
         let returnedState = queryItems["state"] ?? ""
         guard returnedState == authorizationRequest.state else {
-            throw NSError(domain: "Nebula", code: -4, userInfo: [NSLocalizedDescriptionKey: "Nebula 登录状态校验失败"])
+            throw NSError(
+                domain: "Nebula",
+                code: -4,
+                userInfo: [NSLocalizedDescriptionKey: t("auth.nebula.browser.stateMismatch")]
+            )
         }
 
         guard let code = queryItems["code"], !code.isEmpty else {
-            throw NSError(domain: "Nebula", code: -5, userInfo: [NSLocalizedDescriptionKey: "Nebula 未返回授权码"])
+            throw NSError(
+                domain: "Nebula",
+                code: -5,
+                userInfo: [NSLocalizedDescriptionKey: t("auth.nebula.browser.authorizationCodeMissing")]
+            )
         }
 
         let tokenResponse = try await NebulaPublicClientOAuth.shared.exchangeAuthorizationCode(
@@ -936,7 +1107,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         )
         let userInfo = try await NebulaPublicClientOAuth.shared.fetchUserInfo(accessToken: tokenResponse.accessToken)
 
-        let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? "Nebula User"
+        let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? t("auth.displayName.default.nebula")
         let session = AuthSession(
             accessToken: tokenResponse.accessToken,
             refreshToken: tokenResponse.refreshToken,
@@ -952,42 +1123,63 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     private func startBrowserAuthenticationSession(
         url: URL,
         callbackScheme: String,
-        flowName: String
+        flowIdentifier: String,
+        flowDisplayName: String
     ) async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
+        let cancelledMessage = formatted("auth.browser.flow.cancelled", flowDisplayName)
+        let startFailedMessage = formatted("auth.browser.flow.startFailed", flowDisplayName)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let continuationBox = BrowserAuthenticationContinuationBox(continuation)
+            let completionHandler = Self.makeBrowserAuthenticationCompletionHandler(
+                flowIdentifier: flowIdentifier,
+                cancelledMessage: cancelledMessage,
+                continuationBox: continuationBox,
+                viewModel: self
+            )
             let session = ASWebAuthenticationSession(
                 url: url,
-                callbackURLScheme: callbackScheme
-            ) { callbackURL, error in
-                Task { @MainActor in
-                    self.browserAuthenticationSession = nil
-                }
-
-                if let callbackURL {
-                    continuation.resume(returning: callbackURL)
-                } else if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(
-                        throwing: NSError(
-                            domain: flowName,
-                            code: -6,
-                            userInfo: [NSLocalizedDescriptionKey: "\(flowName)已取消"]
-                        )
-                    )
-                }
-            }
+                callbackURLScheme: callbackScheme,
+                completionHandler: completionHandler
+            )
             session.presentationContextProvider = nebulaPresentationContextProvider
             session.prefersEphemeralWebBrowserSession = false
             self.browserAuthenticationSession = session
 
             if !session.start() {
                 self.browserAuthenticationSession = nil
-                continuation.resume(
+                continuationBox.resume(
                     throwing: NSError(
-                        domain: flowName,
+                        domain: flowIdentifier,
                         code: -7,
-                        userInfo: [NSLocalizedDescriptionKey: "无法启动\(flowName)"]
+                        userInfo: [NSLocalizedDescriptionKey: startFailedMessage]
+                    )
+                )
+            }
+        }
+    }
+
+    private nonisolated static func makeBrowserAuthenticationCompletionHandler(
+        flowIdentifier: String,
+        cancelledMessage: String,
+        continuationBox: BrowserAuthenticationContinuationBox,
+        viewModel: AuthenticationViewModel?
+    ) -> (URL?, Error?) -> Void {
+        { [weak viewModel] callbackURL, error in
+            Task { @MainActor [weak viewModel] in
+                viewModel?.browserAuthenticationSession = nil
+            }
+
+            if let callbackURL {
+                continuationBox.resume(returning: callbackURL)
+            } else if let error {
+                continuationBox.resume(throwing: error)
+            } else {
+                continuationBox.resume(
+                    throwing: NSError(
+                        domain: flowIdentifier,
+                        code: -6,
+                        userInfo: [NSLocalizedDescriptionKey: cancelledMessage]
                     )
                 )
             }
@@ -998,7 +1190,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     @MainActor
     func verifyMFA() async {
         guard !mfaToken.isEmpty && !mfaCode.isEmpty else {
-            errorMessage = "请输入验证码"
+            errorMessage = t("auth.code.required")
             return
         }
 
@@ -1017,7 +1209,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             mfaToken = ""
             mfaCode = ""
         } catch {
-            errorMessage = "MFA验证失败: \(error.localizedDescription)"
+            errorMessage = formatted("auth.mfa.verificationFailedWithReason", error.localizedDescription)
         }
 
         isProcessing = false
@@ -1035,12 +1227,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let sanitizedPhone = sanitizePhoneNumber(phoneNumber)
 
         guard isValidPhoneNumber(sanitizedPhone) else {
-            errorMessage = "请输入有效的手机号码"
+            errorMessage = t("auth.phone.invalid")
             return
         }
 
         guard !phoneVerificationCode.isEmpty else {
-            errorMessage = "请输入验证码"
+            errorMessage = t("auth.code.required")
             return
         }
 
@@ -1077,7 +1269,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
  /// 通过智能通道发送验证码（含重试/降级/风控）
     private func sendPhoneCode(isResend: Bool, captchaToken: String? = nil) async {
         guard isValidPhoneNumber(phoneNumber) else {
-            await MainActor.run { errorMessage = "请输入正确的手机号码" }
+            await MainActor.run { errorMessage = t("auth.phone.invalid") }
             return
         }
 
@@ -1119,7 +1311,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 isPhoneCodeSent = true
                 startPhoneCodeCountdown()
                 captchaPassed = false
-                errorMessage = isResend ? "验证码已重新发送" : "验证码已发送"
+                errorMessage = isResend ? t("auth.phone.code.resent") : t("auth.phone.code.sent")
             }
         } catch {
             await recordRegistrationAttempt(
@@ -1133,8 +1325,8 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             await MainActor.run {
                 isProcessing = false
                 errorMessage = isResend
-                    ? "重新发送失败: \(error.localizedDescription)"
-                    : "发送验证码失败: \(error.localizedDescription)"
+                    ? self.formatted("auth.phone.code.resendFailedWithReason", error.localizedDescription)
+                    : self.formatted("auth.phone.code.sendFailedWithReason", error.localizedDescription)
             }
         }
     }
@@ -1250,12 +1442,13 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             lhs.rawValue < rhs.rawValue
         }
 
+        @MainActor
         var description: String {
             switch self {
-            case .weak: return "弱"
-            case .medium: return "中等"
-            case .strong: return "强"
-            case .veryStrong: return "非常强"
+            case .weak: return LocalizationManager.shared.localizedString("auth.password.strength.weak")
+            case .medium: return LocalizationManager.shared.localizedString("auth.password.strength.medium")
+            case .strong: return LocalizationManager.shared.localizedString("auth.password.strength.strong")
+            case .veryStrong: return LocalizationManager.shared.localizedString("auth.password.strength.veryStrong")
             }
         }
 
@@ -1305,12 +1498,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // 最小长度检查
         if sanitized.count < 8 {
-            return (false, .weak, "密码至少需要8个字符")
+            return (false, .weak, t("auth.password.tooShort"))
         }
 
  // 最大长度检查
         if sanitized.count > 128 {
-            return (false, .weak, "密码最多128个字符")
+            return (false, .weak, t("auth.password.tooLong"))
         }
 
         let strength = evaluatePasswordStrength(sanitized)
@@ -1318,20 +1511,28 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         if strength < minimumStrength {
             var requirements: [String] = []
             if !sanitized.contains(where: { $0.isUppercase }) {
-                requirements.append("大写字母")
+                requirements.append(t("auth.password.requirement.uppercase"))
             }
             if !sanitized.contains(where: { $0.isLowercase }) {
-                requirements.append("小写字母")
+                requirements.append(t("auth.password.requirement.lowercase"))
             }
             if !sanitized.contains(where: { $0.isNumber }) {
-                requirements.append("数字")
+                requirements.append(t("auth.password.requirement.number"))
             }
             if !sanitized.contains(where: { "!@#$%^&*()_+-=[]{}|;':\",./<>?".contains($0) }) {
-                requirements.append("特殊字符")
+                requirements.append(t("auth.password.requirement.specialCharacter"))
             }
 
-            let requirementText = requirements.isEmpty ? "" : "，建议添加：\(requirements.joined(separator: "、"))"
-            return (false, strength, "密码强度不足\(requirementText)")
+            if requirements.isEmpty {
+                return (false, strength, t("auth.password.strengthInsufficient"))
+            }
+
+            let joinedRequirements = requirements.joined(separator: t("auth.list.separator"))
+            return (
+                false,
+                strength,
+                formatted("auth.password.strengthInsufficientWithSuggestions", joinedRequirements)
+            )
         }
 
         return (true, strength, nil)
@@ -1345,29 +1546,29 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
  // 长度检查
         if sanitized.count < 4 {
-            return (false, "用户名至少需要4个字符")
+            return (false, t("auth.username.tooShort"))
         }
 
         if sanitized.count > 20 {
-            return (false, "用户名最多20个字符")
+            return (false, t("auth.username.tooLong"))
         }
 
  // 字符检查：只允许字母、数字和下划线
         let allowedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
         let invalidChars = sanitized.unicodeScalars.filter { !allowedCharacters.contains($0) }
         if !invalidChars.isEmpty {
-            return (false, "用户名只能包含字母、数字和下划线")
+            return (false, t("auth.username.invalidCharacters"))
         }
 
  // 保留名检查
         let reservedNames: Set<String> = ["admin", "root", "system", "support", "help", "test", "null", "undefined"]
         if reservedNames.contains(sanitized) {
-            return (false, "该用户名已被保留")
+            return (false, t("auth.username.reserved"))
         }
 
  // 不能以数字开头
         if let first = sanitized.first, first.isNumber {
-            return (false, "用户名不能以数字开头")
+            return (false, t("auth.username.cannotStartWithNumber"))
         }
 
         return (true, nil)
@@ -1396,14 +1597,14 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
  // 邮箱格式校验
         guard isValidEmail(sanitizedEmail) else {
             SkyBridgeLogger.ui.error("❌ [注册流程] 邮箱地址无效: \(self.emailAddress, privacy: .private)")
-            errorMessage = "请输入有效的邮箱地址"
+            errorMessage = t("auth.email.invalid")
             return
         }
 
  // 检查一次性邮箱
         guard !isDisposableEmail(sanitizedEmail) else {
             SkyBridgeLogger.ui.error("❌ [注册流程] 一次性邮箱被拦截: \(self.emailAddress, privacy: .private)")
-            errorMessage = "不支持使用临时邮箱注册"
+            errorMessage = t("auth.email.disposableNotSupported")
             return
         }
 
@@ -1411,14 +1612,14 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let passwordValidation = validatePasswordStrength(sanitizedPassword, minimumStrength: .medium)
         guard passwordValidation.valid else {
             SkyBridgeLogger.ui.error("❌ [注册流程] 密码强度不足: \(passwordValidation.strength.description)")
-            errorMessage = passwordValidation.error ?? "密码强度不足"
+            errorMessage = passwordValidation.error ?? t("auth.password.weakGeneric")
             return
         }
 
  // 密码确认校验
         guard sanitizedPassword == sanitizedConfirmPassword else {
             SkyBridgeLogger.ui.error("❌ [注册流程] 密码确认不匹配")
-            errorMessage = "两次输入的密码不一致"
+            errorMessage = t("auth.password.confirmationMismatch")
             return
         }
 
@@ -1447,7 +1648,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             SkyBridgeLogger.ui.debugOnly("✅ [注册流程] NebulaID 生成成功: \(nebulaId)")
         } catch {
             SkyBridgeLogger.ui.error("❌ [注册流程] NebulaID 生成失败: \(error.localizedDescription, privacy: .private)")
-            errorMessage = "ID生成失败，请重试"
+            errorMessage = t("auth.registration.identifierGenerationFailed")
             return
         }
 
@@ -1462,14 +1663,14 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             SkyBridgeLogger.ui.debugOnly("🌐 [注册流程] 调用 SupabaseService.shared.signUp")
             SkyBridgeLogger.ui.debugOnly("   邮箱: \(emailAddress)")
             SkyBridgeLogger.ui.debugOnly("   NebulaID: \(nebulaId)")
-            SkyBridgeLogger.ui.debugOnly("   元数据: display_name=\(emailAddress.components(separatedBy: "@").first ?? "用户")")
+            SkyBridgeLogger.ui.debugOnly("   元数据: display_name=\(emailDisplayNameFallback(from: emailAddress))")
 
  // 使用Supabase注册，将 nebulaid 添加到 metadata 中
             let authSession = try await SupabaseService.shared.signUp(
                 email: emailAddress,
                 password: emailPassword,
                 metadata: [
-                    "display_name": emailAddress.components(separatedBy: "@").first ?? "用户",
+                    "display_name": emailDisplayNameFallback(from: emailAddress),
                     "registration_source": "SkyBridge Compass Pro",
                     "nebula_id": nebulaId,  // 🔥 添加 nebulaid 到元数据
                     "device_fingerprint": await ensureDeviceFingerprint() ?? ""
@@ -1516,13 +1717,13 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                     self.isProcessing = false
                     self.captchaPassed = false  // 重置验证码状态
                     self.requiresCaptcha = false
-                    self.errorMessage = "注册成功！请检查邮箱并点击验证链接"
+                    self.errorMessage = self.t("auth.registration.verifyEmailSent")
                     SkyBridgeLogger.ui.debugOnly("✅ [注册流程] UI状态已更新 - emailVerificationSent=true")
                 }
             } else {
                 let resolvedDisplayName = preferredSessionDisplayName(
                     authSession,
-                    fallback: emailAddress.components(separatedBy: "@").first ?? "用户"
+                    fallback: emailDisplayNameFallback(from: emailAddress)
                 )
                 await applyAuthenticatedSupabaseSession(authSession, displayNameOverride: resolvedDisplayName)
                 await MainActor.run {
@@ -1555,7 +1756,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
             await MainActor.run {
                 let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
-                self.errorMessage = "注册失败：\(message)"
+                self.errorMessage = self.formatted("auth.registration.failedWithReason", message)
                 self.isProcessing = false
                 SkyBridgeLogger.ui.debugOnly("❌ [注册流程] UI状态已更新 - 显示错误信息")
             }
@@ -1574,12 +1775,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     func registerWithPhone() async {
  // 验证输入
         guard !phoneNumber.isEmpty else {
-            errorMessage = "请输入手机号码"
+            errorMessage = t("auth.phone.required")
             return
         }
 
         guard isValidPhoneNumber(phoneNumber) else {
-            errorMessage = "请输入有效的手机号码"
+            errorMessage = t("auth.phone.invalid")
             return
         }
 
@@ -1587,17 +1788,17 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let sanitizedEmail = sanitizeEmail(phoneEmail)
 
         guard !sanitizedDisplayName.isEmpty else {
-            errorMessage = "请输入显示名称"
+            errorMessage = t("auth.profile.displayName.required")
             return
         }
 
         guard !sanitizedEmail.isEmpty else {
-            errorMessage = "请输入邮箱地址"
+            errorMessage = t("auth.email.required")
             return
         }
 
         guard isValidEmail(sanitizedEmail) else {
-            errorMessage = "请输入有效的邮箱地址"
+            errorMessage = t("auth.email.invalid")
             return
         }
 
@@ -1617,7 +1818,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     func completePhoneRegistration() async {
  // 验证验证码
         guard !phoneVerificationCode.isEmpty else {
-            errorMessage = "请输入验证码"
+            errorMessage = t("auth.code.required")
             return
         }
 
@@ -1626,12 +1827,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let sanitizedPhone = sanitizePhoneNumber(phoneNumber)
 
         guard !sanitizedDisplayName.isEmpty else {
-            errorMessage = "请输入显示名称"
+            errorMessage = t("auth.profile.displayName.required")
             return
         }
 
         guard isValidEmail(sanitizedEmail) else {
-            errorMessage = "请输入有效的邮箱地址"
+            errorMessage = t("auth.email.invalid")
             return
         }
 
@@ -1687,7 +1888,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                     SkyBridgeLogger.ui.debugOnly("✅ [手机号注册流程] NebulaID 生成成功: \(nebulaId)")
                 } catch {
                     SkyBridgeLogger.ui.error("❌ [手机号注册流程] NebulaID 生成失败: \(error.localizedDescription, privacy: .private)")
-                    errorMessage = "ID生成失败，请重试"
+                    errorMessage = t("auth.registration.identifierGenerationFailed")
                     isProcessing = false
                     return
                 }
@@ -1750,7 +1951,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             )
             SkyBridgeLogger.ui.error("❌ [手机号注册流程] 注册失败: \(error.localizedDescription, privacy: .private)")
             let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
-            errorMessage = "注册失败: \(message)"
+            errorMessage = formatted("auth.registration.failedWithReason", message)
         }
 
         isProcessing = false
@@ -1761,12 +1962,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let sanitizedEmail = sanitizeEmail(emailAddress)
 
         guard isValidEmail(sanitizedEmail) else {
-            errorMessage = "请输入有效的邮箱地址"
+            errorMessage = t("auth.email.invalid")
             return
         }
 
         guard !emailPassword.isEmpty else {
-            errorMessage = "请输入密码"
+            errorMessage = t("auth.password.required")
             return
         }
 
@@ -1811,7 +2012,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let sanitizedEmail = sanitizeEmail(emailAddress)
 
         guard isValidEmail(sanitizedEmail) else {
-            errorMessage = "请输入有效的邮箱地址"
+            errorMessage = t("auth.email.invalid")
             return
         }
 
@@ -1846,7 +2047,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
             await MainActor.run {
                 self.isProcessing = false
-                self.errorMessage = "密码重置邮件已发送，请检查邮箱"
+                self.errorMessage = self.t("auth.passwordReset.emailSent")
             }
         } catch {
             await recordRegistrationAttempt(
@@ -1859,7 +2060,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             )
             await MainActor.run {
                 let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
-                self.errorMessage = "发送重置邮件失败：\(message)"
+                self.errorMessage = self.formatted("auth.passwordReset.emailSendFailedWithReason", message)
                 self.isProcessing = false
             }
         }
@@ -1943,17 +2144,17 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
 
         let passwordValidation = validatePasswordStrength(sanitizedPassword, minimumStrength: .medium)
         guard passwordValidation.valid else {
-            errorMessage = passwordValidation.error ?? "密码强度不足"
+            errorMessage = passwordValidation.error ?? t("auth.password.weakGeneric")
             return
         }
 
         guard sanitizedPassword == sanitizedConfirmation else {
-            errorMessage = "两次输入的密码不一致"
+            errorMessage = t("auth.password.confirmationMismatch")
             return
         }
 
         guard let session = currentSession else {
-            errorMessage = "当前没有可用于重置密码的会话，请重新打开邮件链接"
+            errorMessage = t("auth.passwordReset.sessionMissing")
             return
         }
 
@@ -2053,7 +2254,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     func enterGuestMode() {
         isGuestMode = true
         supabaseNebulaId = nil
-        authService.activateGuestSession(displayName: "游客用户")
+        authService.activateGuestSession(displayName: t("auth.displayName.default.guest"))
     }
 
  // MARK: - 登出
@@ -2268,43 +2469,43 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
  // 用户名校验
         let usernameValidation = validateUsername(sanitizedUsername)
         guard usernameValidation.valid else {
-            errorMessage = usernameValidation.error ?? "用户名格式不正确"
+            errorMessage = usernameValidation.error ?? t("auth.username.invalid")
             return
         }
 
  // 密码强度校验
         let passwordValidation = validatePasswordStrength(sanitizedPassword, minimumStrength: .medium)
         guard passwordValidation.valid else {
-            errorMessage = passwordValidation.error ?? "密码强度不足"
+            errorMessage = passwordValidation.error ?? t("auth.password.weakGeneric")
             return
         }
 
  // 密码确认校验
         guard sanitizedPassword == sanitizedConfirmPassword else {
-            errorMessage = "两次输入的密码不一致"
+            errorMessage = t("auth.password.confirmationMismatch")
             return
         }
 
  // 显示名称校验
         guard !sanitizedDisplayName.isEmpty else {
-            errorMessage = "请输入显示名称"
+            errorMessage = t("auth.profile.displayName.required")
             return
         }
 
         guard sanitizedDisplayName.count <= 50 else {
-            errorMessage = "显示名称最多50个字符"
+            errorMessage = t("auth.profile.displayName.tooLong")
             return
         }
 
  // 邮箱校验
         guard isValidEmail(sanitizedEmail) else {
-            errorMessage = "请输入有效的邮箱地址"
+            errorMessage = t("auth.email.invalid")
             return
         }
 
  // 检查一次性邮箱
         guard !isDisposableEmail(sanitizedEmail) else {
-            errorMessage = "不支持使用临时邮箱注册"
+            errorMessage = t("auth.email.disposableNotSupported")
             return
         }
 
@@ -2367,19 +2568,19 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
                 }
 
                 if result.requiresEmailVerification {
-                    errorMessage = "注册成功！请检查您的邮箱并验证账户。"
+                    errorMessage = t("auth.registration.verifyEmailSent")
                 } else if result.requiresAdminApproval {
-                    errorMessage = "注册成功！您的账户正在等待管理员审核。"
+                    errorMessage = t("auth.registration.pendingAdminApproval")
                 } else {
  // 注册成功，自动登录（已在上面处理）
                 }
             } else {
                 SkyBridgeLogger.ui.error("❌ [星云注册流程] 注册失败: \((result.message ?? "未知错误"), privacy: .private)")
-                errorMessage = result.message ?? "注册失败"
+                errorMessage = result.message ?? t("auth.registration.failed")
             }
         } catch {
             SkyBridgeLogger.ui.error("❌ [星云注册流程] 注册异常: \(error.localizedDescription, privacy: .private)")
-            errorMessage = "注册失败: \(error.localizedDescription)"
+            errorMessage = formatted("auth.registration.failedWithReason", error.localizedDescription)
         }
 
         isProcessing = false
@@ -2412,7 +2613,11 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     @MainActor
     func updateDisplayName(_ displayName: String) async throws {
         guard let session = currentSession else {
-            throw NSError(domain: "AuthenticationError", code: -1, userInfo: [NSLocalizedDescriptionKey: "用户未登录"])
+            throw NSError(
+                domain: "AuthenticationError",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: t("auth.session.notLoggedIn")]
+            )
         }
 
         SkyBridgeLogger.ui.debugOnly("🔄 [AuthenticationViewModel] 开始更新显示名称")
@@ -2491,7 +2696,11 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
     @MainActor
     func uploadAvatar(_ imageData: Data) async throws {
         guard let session = currentSession else {
-            throw NSError(domain: "AuthenticationError", code: -1, userInfo: [NSLocalizedDescriptionKey: "用户未登录"])
+            throw NSError(
+                domain: "AuthenticationError",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: t("auth.session.notLoggedIn")]
+            )
         }
 
         SkyBridgeLogger.ui.debugOnly("🔄 [AuthenticationViewModel] 开始上传头像")
@@ -2709,7 +2918,7 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
             }
         }
 
-        guard Self.shouldReplaceDisplayName(session.displayName) else {
+        guard shouldReplaceDisplayName(session.displayName) else {
             return session
         }
 
@@ -2736,9 +2945,34 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         return formatted.isEmpty ? nil : formatted
     }
 
-    private nonisolated static func shouldReplaceDisplayName(_ displayName: String) -> Bool {
-        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty || trimmed == "用户" || trimmed == "新用户"
+    private func shouldReplaceDisplayName(_ displayName: String) -> Bool {
+        isPlaceholderDisplayName(displayName)
+    }
+}
+
+private final class BrowserAuthenticationContinuationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<URL, Error>?
+
+    init(_ continuation: CheckedContinuation<URL, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning url: URL) {
+        takeContinuation()?.resume(returning: url)
+    }
+
+    func resume(throwing error: Error) {
+        takeContinuation()?.resume(throwing: error)
+    }
+
+    private func takeContinuation() -> CheckedContinuation<URL, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let continuation = continuation
+        self.continuation = nil
+        return continuation
     }
 }
 

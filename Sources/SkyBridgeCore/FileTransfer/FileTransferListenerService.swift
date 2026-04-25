@@ -13,6 +13,14 @@ public final class FileTransferListenerService: ObservableObject {
         var finished = false
     }
 
+    private enum ListenerHealthState {
+        case stopped
+        case starting
+        case ready
+        case failed
+        case cancelled
+    }
+
     private let log = Logger(subsystem: "com.skybridge.transfer", category: "Listener")
     
     private let manager: FileTransferManager
@@ -26,6 +34,8 @@ public final class FileTransferListenerService: ObservableObject {
     private let serviceDomain = "local."
     private var netService: NetService?
     public private(set) var activePort: UInt16?
+    private var listenerHealthState: ListenerHealthState = .stopped
+    private var bonjourPublished = false
     
     public init(manager: FileTransferManager, port: UInt16 = 8080) {
         self.manager = manager
@@ -34,6 +44,7 @@ public final class FileTransferListenerService: ObservableObject {
     
     public func start() async throws {
         guard listener == nil else { return }
+        listenerHealthState = .starting
         
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
@@ -51,11 +62,32 @@ public final class FileTransferListenerService: ObservableObject {
         ServiceEndpointRegistry.shared.setFileTransferPort(boundPort)
         configureBonjour(on: boundListener, port: boundPort)
     }
+
+    public func ensureHealthy() async throws {
+        let registryPort = ServiceEndpointRegistry.shared.snapshot().fileTransferPort
+        let needsRestart = listener == nil
+            || activePort == nil
+            || listenerHealthState == .failed
+            || listenerHealthState == .cancelled
+            || registryPort == nil
+            || registryPort != activePort
+            || !bonjourPublished
+
+        guard needsRestart else { return }
+
+        log.warning(
+            "⚠️ FileTransfer listener unhealthy, restarting: state=\(String(describing: self.listenerHealthState), privacy: .public) activePort=\(self.activePort.map(String.init) ?? "-", privacy: .public) registryPort=\(registryPort.map(String.init) ?? "-", privacy: .public) bonjour=\(self.bonjourPublished, privacy: .public)"
+        )
+        stop()
+        try await start()
+    }
     
     public func stop() {
         listener?.cancel()
         listener = nil
         activePort = nil
+        listenerHealthState = .stopped
+        bonjourPublished = false
         ServiceEndpointRegistry.shared.setFileTransferPort(nil)
         netService?.stop()
         netService = nil
@@ -72,7 +104,7 @@ public final class FileTransferListenerService: ObservableObject {
         txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
         txt["name"] = serviceName
         txt["model"] = "Mac"
-        txt["capabilities"] = "file_transfer"
+        txt["capabilities"] = "file_transfer,\(ClassicTransferCapability.classicResume)"
         txt["transferPort"] = String(port)
         txt["port"] = String(port)
         // Mirror TXT for NetService fallback (Bonjour TXTRecord is [String: Data])
@@ -82,7 +114,7 @@ public final class FileTransferListenerService: ObservableObject {
         if #available(macOS 14.0, *) {
             Task { [weak self] in
                 guard let self else { return }
-                let snap = await SelfIdentityProvider.shared.snapshot()
+                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
                 var updated = txt
                 if !snap.deviceId.isEmpty { updated["deviceId"] = snap.deviceId }
                 if !snap.pubKeyFP.isEmpty { updated["pubKeyFP"] = snap.pubKeyFP }
@@ -105,6 +137,7 @@ public final class FileTransferListenerService: ObservableObject {
         }
         
         listener.service = NWListener.Service(name: serviceName, type: serviceType, domain: serviceDomain, txtRecord: txt)
+        bonjourPublished = true
         log.info("📡 NWListener.service advertised \(self.serviceType) port=\(port)")
         
         // Fallback NetService (optional)
@@ -117,6 +150,7 @@ public final class FileTransferListenerService: ObservableObject {
 
         netService?.setTXTRecord(NetService.data(fromTXTRecord: txtData))
         netService?.publish()
+        bonjourPublished = true
         log.info("📡 NetService fallback published \(self.serviceType) port=\(port)")
     }
     
@@ -126,7 +160,7 @@ public final class FileTransferListenerService: ObservableObject {
             "osVersion": Data(ProcessInfo.processInfo.operatingSystemVersionString.utf8),
             "name": Data(serviceName.utf8),
             "model": Data("Mac".utf8),
-            "capabilities": Data("file_transfer".utf8),
+            "capabilities": Data("file_transfer,\(ClassicTransferCapability.classicResume)".utf8),
             "transferPort": Data(String(port).utf8),
             "port": Data(String(port).utf8)
         ]
@@ -166,6 +200,7 @@ public final class FileTransferListenerService: ObservableObject {
                 Task { @MainActor in
                     switch state {
                     case .ready:
+                        self.listenerHealthState = .ready
                         let boundPort = listener.port?.rawValue ?? 0
                         self.activePort = boundPort
                         ServiceEndpointRegistry.shared.setFileTransferPort(boundPort)
@@ -175,12 +210,20 @@ public final class FileTransferListenerService: ObservableObject {
                             continuation.resume(returning: boundPort)
                         }
                     case .failed(let error):
+                        self.listenerHealthState = .failed
+                        self.activePort = nil
+                        self.bonjourPublished = false
+                        ServiceEndpointRegistry.shared.setFileTransferPort(nil)
                         self.log.error("❌ FileTransfer listener failed: \(String(describing: error))")
                         if !startState.finished {
                             startState.finished = true
                             continuation.resume(throwing: error)
                         }
                     case .cancelled:
+                        self.listenerHealthState = .cancelled
+                        self.activePort = nil
+                        self.bonjourPublished = false
+                        ServiceEndpointRegistry.shared.setFileTransferPort(nil)
                         self.log.info("⏹️ FileTransfer listener cancelled")
                         if !startState.finished {
                             startState.finished = true
@@ -259,9 +302,19 @@ public final class FileTransferListenerService: ObservableObject {
         Task { @MainActor in
             do {
                 self.log.info("📥 FileTransfer handing connection to receiveFile: peer=\(deviceId, privacy: .public)")
-                try await self.manager.receiveFile(from: connection, fallbackDeviceId: deviceId, fallbackDeviceName: deviceName)
+                try await self.manager.receiveFile(
+                    from: connection,
+                    peerContext: FileTransferPeerContext(
+                        declaredSenderDeviceId: nil,
+                        endpointHostOrIP: deviceId,
+                        peerLabel: deviceName,
+                        transferId: "pending"
+                    )
+                )
             } catch {
                 self.log.error("❌ receiveFile failed: \(error.localizedDescription)")
+                connection.stateUpdateHandler = nil
+                connection.cancel()
             }
         }
     }

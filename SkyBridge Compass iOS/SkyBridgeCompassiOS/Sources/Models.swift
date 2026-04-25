@@ -1,5 +1,9 @@
 import Foundation
+import Network
 import SwiftUI
+#if canImport(UIKit)
+@preconcurrency import UIKit
+#endif
 
 // MARK: - Core Models
 
@@ -67,6 +71,185 @@ public enum DevicePlatform: String, Codable, Sendable, CaseIterable {
         case .windows: return .cyan
         case .unknown: return .gray
         }
+    }
+}
+
+enum AppleMobileDeviceIdentity {
+    struct Snapshot: Sendable, Equatable {
+        let stableDeviceId: String
+        let vendorDeviceId: String?
+        let deviceName: String
+        let platform: DevicePlatform
+        let platformName: String
+        let osVersion: String
+        let modelIdentifier: String
+        let modelName: String
+        let chip: String
+    }
+
+    struct ModelPresentation: Sendable, Equatable {
+        let modelName: String
+        let chip: String
+    }
+
+    static func currentSnapshot() -> Snapshot {
+        #if canImport(UIKit)
+        let values = currentDeviceValues()
+        let platform = values.userInterfaceIdiom == .pad ? DevicePlatform.iPadOS : .iOS
+        let modelIdentifier = currentModelIdentifier()
+        let presentation = presentation(forModelIdentifier: modelIdentifier, platform: platform)
+        return Snapshot(
+            stableDeviceId: KeychainManager.shared.getOrGenerateDeviceId(),
+            vendorDeviceId: values.vendorDeviceId,
+            deviceName: values.deviceName,
+            platform: platform,
+            platformName: platform.displayName,
+            osVersion: values.systemVersion,
+            modelIdentifier: modelIdentifier,
+            modelName: presentation.modelName,
+            chip: presentation.chip
+        )
+        #else
+        return Snapshot(
+            stableDeviceId: "unknown-device",
+            vendorDeviceId: nil,
+            deviceName: "Unknown Device",
+            platform: .unknown,
+            platformName: DevicePlatform.unknown.displayName,
+            osVersion: "",
+            modelIdentifier: "unknown",
+            modelName: "Unknown Device",
+            chip: "Unknown SoC"
+        )
+        #endif
+    }
+
+    static func presentation(
+        forModelIdentifier modelIdentifier: String,
+        platform: DevicePlatform
+    ) -> ModelPresentation {
+        let normalized = modelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return ModelPresentation(
+                modelName: fallbackModelName(for: platform),
+                chip: fallbackChipName(for: platform)
+            )
+        }
+
+        switch normalized {
+        case "iPhone17,1":
+            return ModelPresentation(modelName: "iPhone 16 Pro", chip: "A18 Pro")
+        case "iPhone17,2":
+            return ModelPresentation(modelName: "iPhone 16 Pro Max", chip: "A18 Pro")
+        case "iPhone17,3":
+            return ModelPresentation(modelName: "iPhone 16", chip: "A18")
+        case "iPhone17,4":
+            return ModelPresentation(modelName: "iPhone 16 Plus", chip: "A18")
+        case "iPad16,3", "iPad16,4":
+            return ModelPresentation(modelName: "iPad Pro 11-inch (M4)", chip: "M4")
+        default:
+            return ModelPresentation(
+                modelName: normalized,
+                chip: fallbackChipName(for: platform)
+            )
+        }
+    }
+
+    private static func currentModelIdentifier() -> String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        return withUnsafePointer(to: &systemInfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { ptr in
+                String(cString: ptr)
+            }
+        }
+    }
+
+    #if canImport(UIKit)
+    private static func currentDeviceValues() -> (
+        userInterfaceIdiom: UIUserInterfaceIdiom,
+        vendorDeviceId: String?,
+        deviceName: String,
+        systemVersion: String
+    ) {
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated {
+                let device = UIDevice.current
+                return (
+                    device.userInterfaceIdiom,
+                    device.identifierForVendor?.uuidString,
+                    device.name,
+                    device.systemVersion
+                )
+            }
+        }
+        return DispatchQueue.main.sync {
+            let device = UIDevice.current
+            return (
+                device.userInterfaceIdiom,
+                device.identifierForVendor?.uuidString,
+                device.name,
+                device.systemVersion
+            )
+        }
+    }
+    #endif
+
+    private static func fallbackModelName(for platform: DevicePlatform) -> String {
+        switch platform {
+        case .iPadOS:
+            return "iPad"
+        case .iOS:
+            return "iPhone"
+        default:
+            return "Apple Device"
+        }
+    }
+
+    private static func fallbackChipName(for platform: DevicePlatform) -> String {
+        switch platform {
+        case .iOS, .iPadOS:
+            return "Apple SoC"
+        default:
+            return "Apple Silicon"
+        }
+    }
+}
+
+enum BonjourServiceIdentitySanitizer {
+    static func sanitizedServiceInstanceName(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        if value.lowercased().hasPrefix("bonjour:") {
+            let payload = String(value.dropFirst("bonjour:".count))
+            let name = payload.split(separator: "@", maxSplits: 1).first.map(String.init)
+            return sanitizedServiceInstanceName(name)
+        }
+
+        if let range = value.range(of: "._") {
+            value = String(value[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let lowercased = value.lowercased()
+        guard !lowercased.hasPrefix("id:"),
+              !lowercased.hasPrefix("host:"),
+              !lowercased.hasPrefix("peer:"),
+              !lowercased.hasPrefix("recent:"),
+              !lowercased.hasPrefix("mac:") else {
+            return nil
+        }
+        guard UUID(uuidString: value.uppercased()) == nil else { return nil }
+        guard !isLiteralIPAddress(value) else { return nil }
+        guard !value.contains("/") else { return nil }
+        return value.isEmpty ? nil : value
+    }
+
+    private static func isLiteralIPAddress(_ raw: String) -> Bool {
+        let scopedToken = raw.split(separator: "%", maxSplits: 1).first.map(String.init) ?? raw
+        return IPv4Address(scopedToken) != nil || IPv6Address(scopedToken) != nil
     }
 }
 
@@ -172,9 +355,15 @@ public extension DiscoveredDevice {
     static let fileTransferServiceType = "_skybridge-transfer._tcp"
     /// SkyBridge Remote Control Bonjour service type
     static let remoteControlServiceType = "_skybridge-remote._tcp"
+    static let classicResumeCapability = ClassicTransferCapability.classicResume
 
     var supportsFileTransfer: Bool {
         capabilities.contains("file_transfer") || services.contains(Self.fileTransferServiceType)
+    }
+
+    var supportsClassicResume: Bool {
+        advertisedCapabilities.contains(Self.classicResumeCapability)
+            || capabilities.contains(Self.classicResumeCapability)
     }
 
     var supportsRemoteControl: Bool {
@@ -255,7 +444,20 @@ public enum ConnectableAddressCanonicalizer {
         }
 
         let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        return normalized.isEmpty ? nil : normalized
+        guard !normalized.isEmpty else { return nil }
+
+        let validationToken: String
+        if let percentIndex = normalized.firstIndex(of: "%") {
+            validationToken = String(normalized[..<percentIndex])
+        } else {
+            validationToken = normalized
+        }
+
+        if IPv4Address(validationToken) != nil || IPv6Address(validationToken) != nil {
+            return normalized
+        }
+
+        return nil
     }
 }
 
@@ -425,6 +627,7 @@ public struct ConnectionPresentationInput: Sendable, Equatable {
     public let fileTransferActive: Bool
     public let latestPeerConnection: ConnectionPresentationPeer?
     public let latestConnectedDevice: ConnectionPresentationPeer?
+    public let latestPendingPeer: ConnectionPresentationPendingPeer?
     public let activeSessionSnapshot: ActiveSessionSnapshot?
     public let defaultPQCModeLabel: String?
 
@@ -433,6 +636,7 @@ public struct ConnectionPresentationInput: Sendable, Equatable {
         fileTransferActive: Bool,
         latestPeerConnection: ConnectionPresentationPeer?,
         latestConnectedDevice: ConnectionPresentationPeer?,
+        latestPendingPeer: ConnectionPresentationPendingPeer? = nil,
         activeSessionSnapshot: ActiveSessionSnapshot?,
         defaultPQCModeLabel: String? = nil
     ) {
@@ -440,8 +644,34 @@ public struct ConnectionPresentationInput: Sendable, Equatable {
         self.fileTransferActive = fileTransferActive
         self.latestPeerConnection = latestPeerConnection
         self.latestConnectedDevice = latestConnectedDevice
+        self.latestPendingPeer = latestPendingPeer
         self.activeSessionSnapshot = activeSessionSnapshot
         self.defaultPQCModeLabel = defaultPQCModeLabel
+    }
+}
+
+public struct ConnectionPresentationPendingPeer: Sendable, Equatable {
+    public let displayName: String
+    public let cryptoKind: String?
+    public let suite: String?
+    public let guardStatus: String?
+    public let isRekeying: Bool
+    public let phase: ConnectionPresentationPhase
+
+    public init(
+        displayName: String,
+        cryptoKind: String? = nil,
+        suite: String? = nil,
+        guardStatus: String? = nil,
+        isRekeying: Bool = false,
+        phase: ConnectionPresentationPhase
+    ) {
+        self.displayName = displayName
+        self.cryptoKind = cryptoKind
+        self.suite = suite
+        self.guardStatus = guardStatus
+        self.isRekeying = isRekeying
+        self.phase = phase
     }
 }
 
@@ -572,7 +802,7 @@ public enum ConnectionPresentationContract {
         }
 
         if let snapshot = input.activeSessionSnapshot,
-           snapshot.phase == .transportReady || snapshot.phase == .handshakeComplete {
+           snapshot.phase == .handshakeComplete {
             let detail = detailText(
                 kind: nil,
                 suite: snapshot.negotiatedSuite,
@@ -597,6 +827,10 @@ public enum ConnectionPresentationContract {
             )
         }
 
+        if let pendingPeer = input.latestPendingPeer {
+            return pendingPresentation(peer: pendingPeer, input: input)
+        }
+
         if input.fileTransferActive {
             return ConnectionPresentation(
                 phase: .connected,
@@ -606,7 +840,8 @@ public enum ConnectionPresentationContract {
             )
         }
 
-        if let snapshot = input.activeSessionSnapshot, snapshot.phase == .connecting {
+        if let snapshot = input.activeSessionSnapshot,
+           snapshot.phase == .connecting || snapshot.phase == .transportReady {
             return ConnectionPresentation(
                 phase: .connecting,
                 isConnected: false,
@@ -620,6 +855,35 @@ public enum ConnectionPresentationContract {
             isConnected: false,
             statusText: input.labels.disconnectedText,
             detailText: nil
+        )
+    }
+
+    private static func pendingPresentation(
+        peer: ConnectionPresentationPendingPeer,
+        input: ConnectionPresentationInput
+    ) -> ConnectionPresentation {
+        let baseText = peer.phase == .reconnecting
+            ? input.labels.reconnectingText
+            : input.labels.connectingText
+        return ConnectionPresentation(
+            phase: peer.phase,
+            isConnected: peer.phase == .reconnecting,
+            statusText: modeAwareStatusText(
+                baseText: baseText,
+                kind: peer.cryptoKind,
+                suite: peer.suite,
+                defaultPQCModeLabel: input.defaultPQCModeLabel
+            ),
+            detailText: rekeyDetailText(
+                kind: peer.cryptoKind,
+                suite: peer.suite,
+                guardStatus: peer.guardStatus,
+                isRekeying: peer.isRekeying
+            ) ?? detailText(
+                kind: peer.cryptoKind,
+                suite: peer.suite,
+                guardStatus: peer.guardStatus
+            ) ?? normalized(peer.displayName)
         )
     }
 
@@ -647,14 +911,28 @@ public enum ConnectionPresentationContract {
         isRekeying: Bool,
         input: ConnectionPresentationInput
     ) -> String {
-        let base = input.labels.connectedText
-        if isRekeying {
-            return base
+        modeAwareStatusText(
+            baseText: input.labels.connectedText,
+            kind: kind,
+            suite: suite,
+            defaultPQCModeLabel: input.defaultPQCModeLabel
+        )
+    }
+
+    public static func modeAwareStatusText(
+        baseText: String,
+        kind: String?,
+        suite: String?,
+        defaultPQCModeLabel: String? = nil
+    ) -> String {
+        guard let mode = modeLabel(
+            kind: kind,
+            suite: suite,
+            defaultPQCModeLabel: defaultPQCModeLabel
+        ) else {
+            return baseText
         }
-        if let mode = modeLabel(kind: kind, suite: suite, defaultPQCModeLabel: input.defaultPQCModeLabel) {
-            return "\(mode)\(base)"
-        }
-        return base
+        return "\(mode) \(baseText)"
     }
 
     private static func rekeyDetailText(
@@ -706,9 +984,12 @@ public enum ConnectionPresentationContract {
             return "Classic"
         }
 
-        let kindToken = normalizedToken(kind)
+        let kindToken = normalizedToken(currentModeComponent(from: kind))
         if kindToken.contains("xwing") {
             return "X-Wing"
+        }
+        if kindToken.contains("x25519") || kindToken.contains("p256") {
+            return "Classic"
         }
         if kindToken.contains("liboqs") || kindToken.contains("oqs") {
             return "liboqs"
@@ -725,6 +1006,16 @@ public enum ConnectionPresentationContract {
         }
 
         return nil
+    }
+
+    private static func currentModeComponent(from kind: String?) -> String? {
+        guard let normalizedKind = normalized(kind) else { return nil }
+        for separator in ["→", "->"] {
+            if let range = normalizedKind.range(of: separator) {
+                return normalized(String(normalizedKind[..<range.lowerBound]))
+            }
+        }
+        return normalizedKind
     }
 
     private static func shouldSuppressSuite(mode: String?, suite: String) -> Bool {

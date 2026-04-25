@@ -594,7 +594,7 @@ public final class QRCodeScanner: NSObject {
     }
 
     private func stopSession(_ box: CaptureSessionBox, wait: Bool) {
-        let stopWork = {
+        let stopWork: @Sendable () -> Void = { [box] in
             if box.session.isRunning {
                 box.session.stopRunning()
             }

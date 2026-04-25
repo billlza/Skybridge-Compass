@@ -68,4 +68,38 @@ final class KEMTrustStoreTests: XCTestCase {
         XCTAssertEqual(fromRawId[.mlkem768], keyInfo.publicKey)
         XCTAssertEqual(fromEndpointAlias[.mlkem768], keyInfo.publicKey)
     }
+
+    func testRebindCanonicalDeviceIdPrefersNewestKeyMaterial() async throws {
+        let suiteName = "KEMTrustStoreRebindTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let storageKey = "kem_trust_store.rebind.tests.v1"
+        let canonicalId = "id:\(UUID().uuidString.lowercased())"
+        let legacyAlias = "bonjour:lza的macbook pro@local."
+        let oldKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768.wireId,
+            publicKey: Data(repeating: 0x11, count: 32)
+        )
+        let newKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768.wireId,
+            publicKey: Data(repeating: 0x22, count: 32)
+        )
+
+        let store = KEMTrustStore(storageKey: storageKey, userDefaults: defaults)
+        await store.upsert(deviceId: canonicalId, kemPublicKeys: [oldKey])
+        try await Task.sleep(for: .milliseconds(20))
+        await store.upsert(deviceId: legacyAlias, kemPublicKeys: [newKey])
+
+        await store.rebindCanonicalDeviceId(canonicalId, legacyIdentifiers: [legacyAlias])
+
+        let rebound = await store.kemPublicKeys(for: canonicalId)
+        let legacy = await store.kemPublicKeys(for: legacyAlias)
+
+        XCTAssertEqual(rebound[.mlkem768], newKey.publicKey)
+        XCTAssertTrue(legacy.isEmpty)
+    }
 }

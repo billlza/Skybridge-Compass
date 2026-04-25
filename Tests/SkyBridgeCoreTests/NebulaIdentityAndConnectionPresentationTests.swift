@@ -167,16 +167,16 @@ final class NebulaIdentityAndConnectionPresentationTests: XCTestCase {
                     phase: .transportReady,
                     deviceId: "peer-3",
                     deviceName: "Mac mini",
-                    negotiatedSuite: "ML-KEM-768",
+                    negotiatedSuite: nil,
                     updatedAt: now
                 ),
                 defaultPQCModeLabel: "Apple PQC",
                 compatibilityModeEnabled: false
             )
         )
-        XCTAssertEqual(crossNetworkPresentation.phase, .connected)
-        XCTAssertEqual(crossNetworkPresentation.statusText, "Apple PQC已连接")
-        XCTAssertEqual(crossNetworkPresentation.detailText, "Apple PQC · ML-KEM-768 · 跨网已连接")
+        XCTAssertEqual(crossNetworkPresentation.phase, .connecting)
+        XCTAssertEqual(crossNetworkPresentation.statusText, "连接中")
+        XCTAssertEqual(crossNetworkPresentation.detailText, "Mac mini")
 
         let transferFallbackPresentation = ConnectionPresentationContract.evaluate(
             ConnectionPresentationInput(
@@ -255,16 +255,16 @@ final class NebulaIdentityAndConnectionPresentationTests: XCTestCase {
                     phase: .transportReady,
                     deviceId: nil,
                     deviceName: "Mac mini",
-                    negotiatedSuite: "ML-KEM-768"
+                    negotiatedSuite: nil
                 ),
                 defaultPQCModeLabel: "Apple PQC",
                 compatibilityModeEnabled: false
             )
         )
 
-        XCTAssertEqual(fallbackConnected.phase, .connected)
-        XCTAssertEqual(fallbackConnected.statusText, "Apple PQC已连接")
-        XCTAssertEqual(fallbackConnected.detailText, "Apple PQC · ML-KEM-768 · 跨网已连接")
+        XCTAssertEqual(fallbackConnected.phase, .connecting)
+        XCTAssertEqual(fallbackConnected.statusText, "连接中")
+        XCTAssertEqual(fallbackConnected.detailText, "Mac mini")
 
         let fallbackConnecting = ConnectionPresentationContract.evaluate(
             ConnectionPresentationInput(

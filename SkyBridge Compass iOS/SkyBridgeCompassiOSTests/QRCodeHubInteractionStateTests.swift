@@ -15,6 +15,18 @@ final class QRCodeHubInteractionStateTests: XCTestCase {
         XCTAssertEqual(state.sheetErrorMessage, "missing authentication")
     }
 
+    func testScannedConnectLinkFailureClearsSubmittingAndCapturesSheetError() {
+        var state = QRCodeHubInteractionState()
+        state.startScannedConnectLinkSubmission()
+
+        state.handleCrossNetworkState(.failed("identity conflict"))
+
+        XCTAssertFalse(state.isSubmittingScannedConnectLink)
+        XCTAssertFalse(state.isSubmittingCode)
+        XCTAssertFalse(state.isConnecting)
+        XCTAssertEqual(state.sheetErrorMessage, "identity conflict")
+    }
+
     func testIPadRegressionModeChangeAfterConnectionCodeFailureClearsBlockingSheetState() {
         var state = QRCodeHubInteractionState()
         state.startConnectionCodeSubmission()
@@ -29,10 +41,22 @@ final class QRCodeHubInteractionStateTests: XCTestCase {
 
     func testHandshakeCompletionRequestsSheetDismissal() {
         var state = QRCodeHubInteractionState()
+        state.startScannedConnectLinkSubmission()
 
         let shouldDismiss = state.handleReadiness(.handshakeComplete(sessionId: "session-1", negotiatedSuite: "X-Wing"))
 
         XCTAssertTrue(shouldDismiss)
+        XCTAssertFalse(state.isSubmittingScannedConnectLink)
+    }
+
+    func testIdleReadinessClearsScannedConnectLinkSubmissionState() {
+        var state = QRCodeHubInteractionState()
+        state.startScannedConnectLinkSubmission()
+
+        let shouldDismiss = state.handleReadiness(.idle)
+
+        XCTAssertFalse(shouldDismiss)
+        XCTAssertFalse(state.isSubmittingScannedConnectLink)
     }
 
     func testLegacyUnsignedPairingQRCodeIsMarkedAsUnsignedLegacy() {

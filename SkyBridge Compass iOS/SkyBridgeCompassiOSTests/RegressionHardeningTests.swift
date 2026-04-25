@@ -5,6 +5,21 @@ import Network
 
 @available(iOS 17.0, *)
 final class RegressionHardeningTests: XCTestCase {
+    @MainActor
+    func testRemoteAudioInsufficientPriorityUsesLongerRetryBackoff() {
+        let insufficientPriority = NSError(domain: NSOSStatusErrorDomain, code: 561_017_449)
+        let genericFailure = NSError(domain: NSOSStatusErrorDomain, code: -50)
+
+        XCTAssertGreaterThanOrEqual(
+            RemoteDesktopManager.remoteAudioPlaybackRetryDelay(for: insufficientPriority),
+            5.0
+        )
+        XCTAssertEqual(
+            RemoteDesktopManager.remoteAudioPlaybackRetryDelay(for: genericFailure),
+            1.0
+        )
+    }
+
     func testLANRemoteControlTrustResolverCollapsesEquivalentDuplicateRecords() {
         let device = DiscoveredDevice(
             id: "bonjour:Lza的MacBook Pro@local.",
@@ -175,6 +190,13 @@ final class RegressionHardeningTests: XCTestCase {
 
         XCTAssertFalse(DeviceDiscoveryManager.isBonjourAuthorizationError(error))
         XCTAssertTrue(DeviceDiscoveryManager.shouldAutoRecoverBrowser(after: error))
+    }
+
+    func testAuthorizationRecoveryDelayUsesBoundedBackoff() {
+        XCTAssertEqual(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 1), 2)
+        XCTAssertEqual(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 2), 5)
+        XCTAssertEqual(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 3), 10)
+        XCTAssertNil(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 4))
     }
 
     @MainActor
@@ -391,6 +413,21 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     @MainActor
+    func testRetryAuthorizationBlockedBrowsersClearsBlockedStateAndAttempts() {
+        let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+        manager.debugSeedAuthorizationRecoveryState(
+            blockedServiceTypes: [.skybridge, .skybridgeTransfer],
+            attempts: [.skybridge: 2, .skybridgeTransfer: 1],
+            isDiscovering: true
+        )
+
+        manager.retryAuthorizationBlockedBrowsers()
+
+        XCTAssertTrue(manager.debugAuthorizationBlockedServiceTypes.isEmpty)
+        XCTAssertTrue(manager.debugAuthorizationRecoveryAttempts.isEmpty)
+    }
+
+    @MainActor
     func testRemoteDesktopBootstrapGuardRejectsFailedLANSession() {
         XCTAssertFalse(
             RemoteDesktopManager.shouldContinueLANBootstrap(
@@ -437,6 +474,80 @@ final class RegressionHardeningTests: XCTestCase {
 
         XCTAssertFalse(manager.unregisterPresentationOwner(UUID()))
         XCTAssertTrue(manager.unregisterPresentationOwner(activeOwner))
+    }
+
+    @MainActor
+    func testViewerStreamConfigurationRespectsAudioRedirectionPreference() {
+        let manager = RemoteDesktopManager.instance
+        let originalSettings = manager.viewerSettings
+        defer { manager.viewerSettings = originalSettings }
+
+        var disabledSettings = originalSettings
+        disabledSettings.audioRedirectionEnabled = false
+        manager.viewerSettings = disabledSettings
+
+        XCTAssertEqual(manager.makeViewerStreamConfigurationPayload().audioRedirectionEnabled, false)
+
+        var enabledSettings = originalSettings
+        enabledSettings.audioRedirectionEnabled = true
+        manager.viewerSettings = enabledSettings
+
+        XCTAssertEqual(manager.makeViewerStreamConfigurationPayload().audioRedirectionEnabled, true)
+    }
+
+    func testLegacyViewerSettingsDecodeDefaultsAudioRedirectionToEnabled() throws {
+        let data = Data(
+            """
+            {
+              "resolution": "auto",
+              "frameRate": "adaptive",
+              "preferredCodec": "automatic",
+              "clipboardSyncEnabled": true,
+              "lowLatencyMode": false
+            }
+            """.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(RemoteDesktopViewerSettings.self, from: data)
+
+        XCTAssertTrue(decoded.audioRedirectionEnabled)
+    }
+
+    func testFallbackRemoteAudioDelayBypassesWaitingWhenNativeReceiveDisabled() {
+        XCTAssertNil(
+            RemoteDesktopManager.fallbackRemoteAudioUnlockAt(
+                activeTransportModeIsCrossNetwork: true,
+                nativeAudioReceiveEnabled: false,
+                remoteAudioTrackHasReceivedFirstPacket: false,
+                currentUnlockAt: nil,
+                now: Date(timeIntervalSince1970: 100)
+            )
+        )
+    }
+
+    func testFallbackRemoteAudioDelayWaitsForNativeFirstPacketOnlyWhenNativeReceiveEnabled() {
+        let now = Date(timeIntervalSince1970: 100)
+        let unlockAt = RemoteDesktopManager.fallbackRemoteAudioUnlockAt(
+            activeTransportModeIsCrossNetwork: true,
+            nativeAudioReceiveEnabled: true,
+            remoteAudioTrackHasReceivedFirstPacket: false,
+            currentUnlockAt: nil,
+            now: now
+        )
+
+        XCTAssertNotNil(unlockAt)
+        XCTAssertEqual(unlockAt!.timeIntervalSince1970, 101.25, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testViewerStreamConfigurationKeepsAudioOnStableFallbackPath() {
+        let payload = RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
+
+        XCTAssertEqual(payload.nativeAudioTrackEnabled, false)
+        XCTAssertEqual(payload.audioRedirectionEnabled, RemoteDesktopManager.instance.viewerSettings.audioRedirectionEnabled)
+        XCTAssertEqual(payload.preferredAudioEncoding, RemoteDesktopAudioChunkPayload.Encoding.pcmS16LE.rawValue)
+        XCTAssertEqual(payload.audioSampleRate, 48_000)
+        XCTAssertEqual(payload.audioChannelCount, 2)
     }
 
     func testCrossNetworkFrameNotificationRequiresActiveStreamingSession() {
@@ -695,10 +806,47 @@ final class RegressionHardeningTests: XCTestCase {
         manager.testInstallNegotiatedSuite(.x25519Ed25519, for: runtimePeerId)
 
         await Task.yield()
-        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic\(connectedText)")
+        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic \(connectedText)")
 
         manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
         XCTAssertNil(manager.negotiatedSuiteByDeviceId[stablePeerId])
+    }
+
+    @MainActor
+    func testDashboardViewModelPreservesClassicPresentationWhenActiveConnectionsTemporarilyClear() async {
+        let manager = P2PConnectionManager.instance
+        let viewModel = DashboardViewModel.shared
+        let runtimePeerId = "host:192.168.1.58"
+        let declaredDeviceId = UUID().uuidString.lowercased()
+        let connectedText = RuntimeLocalization.string("已连接")
+
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "Classic Peer",
+            ipAddress: "192.168.1.58"
+        )
+        _ = manager.testPromotePeerPresentationIdentity(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: declaredDeviceId,
+            deviceName: "Stable Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "15.0"
+        )
+        manager.testInstallNegotiatedSuite(.x25519Ed25519, for: runtimePeerId)
+
+        await Task.yield()
+        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic \(connectedText)")
+
+        manager.testClearActiveConnectionsPreservingState()
+
+        await Task.yield()
+        XCTAssertEqual(viewModel.topConnectionPresentation.phase, .connected)
+        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic \(connectedText)")
+        XCTAssertNotEqual(viewModel.topConnectionPresentation.statusText, RuntimeLocalization.string("在线"))
+
+        manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
     }
 
     @MainActor
@@ -732,7 +880,7 @@ final class RegressionHardeningTests: XCTestCase {
 
         await Task.yield()
 
-        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, connectedText)
+        XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic \(connectedText)")
         XCTAssertEqual(viewModel.topConnectionPresentation.detailText, "Classic → X-Wing · Rekey 中")
         XCTAssertFalse(viewModel.topConnectionPresentation.statusText.contains("X-Wing"))
 
@@ -941,6 +1089,115 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
+    func testClassicTransferSenderDeviceIdPrefersStableKeychainIdentity() {
+        let resolved = FileTransferManager.preferredClassicTransferSenderDeviceId(
+            stableDeviceId: "keychain-device-id",
+            vendorDeviceId: "vendor-id"
+        )
+
+        XCTAssertEqual(resolved, "keychain-device-id")
+    }
+
+    func testClassicTransferSenderDeviceIdFallsBackToVendorWhenStableIdentityMissing() {
+        let resolved = FileTransferManager.preferredClassicTransferSenderDeviceId(
+            stableDeviceId: "   ",
+            vendorDeviceId: "vendor-id"
+        )
+
+        XCTAssertEqual(resolved, "vendor-id")
+    }
+
+    func testSinglePeerTransferSecurityFallbackUsesOnlyAuthenticatedPeer() {
+        let fallback = FileTransferManager.singlePeerFallbackTransferDeviceId(
+            requestedCandidates: ["host:stale-peer"],
+            activeConnectionDeviceIDs: ["id:trusted-peer"]
+        )
+
+        XCTAssertEqual(fallback, "id:trusted-peer")
+    }
+
+    func testSinglePeerTransferSecurityFallbackDoesNotGuessWhenMultiplePeersExist() {
+        let fallback = FileTransferManager.singlePeerFallbackTransferDeviceId(
+            requestedCandidates: ["host:stale-peer"],
+            activeConnectionDeviceIDs: ["id:trusted-peer", "id:other-peer"]
+        )
+
+        XCTAssertNil(fallback)
+    }
+
+    func testClassicTransferPeerResolutionUsesEndpointHostOrIPWhenDeclaredIdIsStale() {
+        let peerContext = FileTransferPeerContext(
+            declaredSenderDeviceId: "host:stale-peer",
+            endpointHostOrIP: "192.168.31.20",
+            peerLabel: "Lza的MacBook Pro",
+            transferId: "transfer-1"
+        )
+        let peers = [
+            FileTransferManager.ClassicTransferAuthenticatedPeerCandidate(
+                matchDeviceId: "id:trusted-peer",
+                resolvedPeerDeviceId: "id:trusted-peer",
+                aliases: ["id:trusted-peer", "trusted-peer", "host:192.168.31.20", "192.168.31.20"],
+                endpointHostOrIP: "192.168.31.20",
+                capabilities: []
+            )
+        ]
+
+        let resolved = FileTransferManager.resolveClassicTransferPeer(
+            peerContext: peerContext,
+            authenticatedPeers: peers
+        )
+
+        XCTAssertEqual(resolved?.matchDeviceId, "id:trusted-peer")
+        XCTAssertEqual(resolved?.matchedBy, .endpointHostOrIP)
+    }
+
+    func testClassicTransferPeerResolutionDoesNotGuessWhenMultiplePeersMatchEndpoint() {
+        let peerContext = FileTransferPeerContext(
+            declaredSenderDeviceId: nil,
+            endpointHostOrIP: "192.168.31.20",
+            peerLabel: "Lza的MacBook Pro",
+            transferId: "transfer-2"
+        )
+        let peers = [
+            FileTransferManager.ClassicTransferAuthenticatedPeerCandidate(
+                matchDeviceId: "id:peer-a",
+                resolvedPeerDeviceId: "id:peer-a",
+                aliases: ["id:peer-a", "host:192.168.31.20", "192.168.31.20"],
+                endpointHostOrIP: "192.168.31.20",
+                capabilities: []
+            ),
+            FileTransferManager.ClassicTransferAuthenticatedPeerCandidate(
+                matchDeviceId: "id:peer-b",
+                resolvedPeerDeviceId: "id:peer-b",
+                aliases: ["id:peer-b", "host:192.168.31.20", "192.168.31.20"],
+                endpointHostOrIP: "192.168.31.20",
+                capabilities: []
+            )
+        ]
+
+        let resolved = FileTransferManager.resolveClassicTransferPeer(
+            peerContext: peerContext,
+            authenticatedPeers: peers
+        )
+
+        XCTAssertNil(resolved)
+    }
+
+    func testDiscoveredDeviceClassicResumeCapabilityDefaultsToDisabledWithoutCapabilityBit() {
+        let device = DiscoveredDevice(
+            id: "id:peer-transfer",
+            name: "MacBook Pro",
+            modelName: "Mac",
+            platform: .macOS,
+            osVersion: "26.3.1",
+            ipAddress: "192.168.31.20",
+            advertisedCapabilities: ["file_transfer"],
+            capabilities: ["file_transfer"]
+        )
+
+        XCTAssertFalse(device.supportsClassicResume)
+    }
+
     func testIOSWebRTCSessionStateAndCallbackPlansReflectQueueAffinity() {
         XCTAssertEqual(WebRTCSession.stateAccessPlan(isOnStateQueue: true), .executeInline)
         XCTAssertEqual(WebRTCSession.stateAccessPlan(isOnStateQueue: false), .syncOnStateQueue)
@@ -1011,6 +1268,39 @@ final class RegressionHardeningTests: XCTestCase {
                 pendingCount: 2
             ),
             .dispatch(bufferedCount: 2)
+        )
+    }
+
+    func testIOSWebRTCSessionPendingInboundBufferLimitPlanRejectsOverflow() {
+        XCTAssertEqual(
+            WebRTCSession.pendingInboundBufferLimitPlan(
+                pendingCount: 2,
+                pendingBytes: 8_000,
+                incomingBytes: 2_000,
+                maxCount: 8,
+                maxBytes: 16_000
+            ),
+            .append(nextPendingCount: 3, nextPendingBytes: 10_000)
+        )
+        XCTAssertEqual(
+            WebRTCSession.pendingInboundBufferLimitPlan(
+                pendingCount: 8,
+                pendingBytes: 8_000,
+                incomingBytes: 1_000,
+                maxCount: 8,
+                maxBytes: 16_000
+            ),
+            .overflow
+        )
+        XCTAssertEqual(
+            WebRTCSession.pendingInboundBufferLimitPlan(
+                pendingCount: 2,
+                pendingBytes: 15_500,
+                incomingBytes: 600,
+                maxCount: 8,
+                maxBytes: 16_000
+            ),
+            .overflow
         )
     }
 
@@ -1609,6 +1899,39 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     @MainActor
+    func testP2PPairingCapabilitiesDoNotSynthesizeLANServiceEndpointsWithoutPorts() throws {
+        let manager = P2PConnectionManager.instance
+        manager.installUITestActiveConnections([])
+
+        let runtimePeerId = "id:p2p-capability-only"
+        manager.installTestPeerRuntimeState(
+            runtimePeerId: runtimePeerId,
+            status: .connected,
+            name: "MacBook Pro",
+            ipAddress: "fe80::1%en0"
+        )
+
+        manager.testMergePeerServiceMetadata(
+            runtimePeerId: runtimePeerId,
+            declaredDeviceId: runtimePeerId,
+            capabilities: ["file_transfer", "remote_desktop", "remote_control"],
+            fileTransferPort: nil,
+            remoteControlPort: nil
+        )
+
+        let merged = try XCTUnwrap(manager.activeConnections.first?.device)
+        XCTAssertTrue(merged.capabilities.contains("file_transfer"))
+        XCTAssertTrue(merged.capabilities.contains("remote_desktop"))
+        XCTAssertTrue(merged.capabilities.contains("remote_control"))
+        XCTAssertFalse(merged.services.contains(DiscoveredDevice.fileTransferServiceType))
+        XCTAssertFalse(merged.services.contains(DiscoveredDevice.remoteControlServiceType))
+        XCTAssertNil(merged.fileTransferPort)
+        XCTAssertNil(merged.remoteControlPort)
+
+        manager.installUITestActiveConnections([])
+    }
+
+    @MainActor
     func testProtectedDiscoveryIdentifiersDoNotKeepDisconnectedRuntimePeerAlive() {
         let manager = P2PConnectionManager.instance
         manager.installUITestActiveConnections([])
@@ -1689,7 +2012,7 @@ final class RegressionHardeningTests: XCTestCase {
         }
     }
 
-    func testConnectionPresentationContractTreatsTransportReadyAsConnected() {
+    func testConnectionPresentationContractTreatsTransportReadyAsConnecting() {
         let presentation = ConnectionPresentationContract.evaluate(
             ConnectionPresentationInput(
                 labels: ConnectionPresentationLabels(
@@ -1710,14 +2033,15 @@ final class RegressionHardeningTests: XCTestCase {
                     phase: .transportReady,
                     deviceId: "peer-1",
                     deviceName: "Mac mini",
-                    negotiatedSuite: "ML-KEM-768"
+                    negotiatedSuite: nil
                 ),
                 defaultPQCModeLabel: "Apple PQC"
             )
         )
 
-        XCTAssertEqual(presentation.phase, .connected)
-        XCTAssertEqual(presentation.statusText, "Apple PQC已连接")
+        XCTAssertEqual(presentation.phase, .connecting)
+        XCTAssertEqual(presentation.statusText, "连接中")
+        XCTAssertEqual(presentation.detailText, "Mac mini")
     }
 
     func testConnectionPresentationContractPrioritizesPeerOverCrossNetworkSnapshot() {
@@ -1752,7 +2076,7 @@ final class RegressionHardeningTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(presentation.statusText, "Classic已连接")
+        XCTAssertEqual(presentation.statusText, "Classic 已连接")
     }
 
     func testConnectionPresentationContractDoesNotClaimTargetSuiteWhileRekeying() {
@@ -1780,8 +2104,92 @@ final class RegressionHardeningTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(presentation.statusText, "已连接")
+        XCTAssertEqual(presentation.statusText, "Classic 已连接")
         XCTAssertEqual(presentation.detailText, "X25519 → X-Wing · Rekey 中")
+    }
+
+    func testConnectionPresentationContractFormatsAllCryptoModeLabelsWithSpacing() {
+        let labels = ConnectionPresentationLabels(
+            connectedText: "已连接",
+            disconnectedText: "离线",
+            connectingText: "连接中",
+            reconnectingText: "重连中",
+            defaultGuardStatus: "守护中",
+            crossNetworkGuardStatus: "跨网已连接"
+        )
+
+        let classic = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "Classic Peer",
+                    suite: "X25519",
+                    guardStatus: "守护中"
+                ),
+                latestConnectedDevice: nil,
+                latestPendingPeer: nil,
+                activeSessionSnapshot: nil,
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+        XCTAssertEqual(classic.statusText, "Classic 已连接")
+
+        let xwing = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "Hybrid Peer",
+                    suite: "X-Wing",
+                    guardStatus: "守护中"
+                ),
+                latestConnectedDevice: nil,
+                latestPendingPeer: nil,
+                activeSessionSnapshot: nil,
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+        XCTAssertEqual(xwing.statusText, "X-Wing 已连接")
+
+        let apple = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: nil,
+                latestConnectedDevice: nil,
+                latestPendingPeer: nil,
+                activeSessionSnapshot: ActiveSessionSnapshot(
+                    snapshotToken: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+                    sessionId: "session-apple",
+                    source: .code,
+                    phase: .handshakeComplete,
+                    deviceId: "peer-apple",
+                    deviceName: "Apple Peer",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+        XCTAssertEqual(apple.statusText, "Apple PQC 已连接")
+
+        let liboqs = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "liboqs Peer",
+                    cryptoKind: "liboqs",
+                    suite: "ML-KEM-768",
+                    guardStatus: "守护中"
+                ),
+                latestConnectedDevice: nil,
+                latestPendingPeer: nil,
+                activeSessionSnapshot: nil,
+                defaultPQCModeLabel: "Apple PQC"
+            )
+        )
+        XCTAssertEqual(liboqs.statusText, "liboqs 已连接")
     }
 
     func testLateCleanupTokenDoesNotClearNewSnapshot() {

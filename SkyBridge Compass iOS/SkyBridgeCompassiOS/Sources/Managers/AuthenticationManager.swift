@@ -23,6 +23,10 @@ public class AuthenticationManager: ObservableObject {
     private var captchaPassed = false
     private var captchaChallengeRequired = false
     private var pendingAppleSignInNonce: String?
+    private var localLoginAttemptTimestamps: [String: [Date]] = [:]
+
+    private static let localLoginThrottleWindow: TimeInterval = 10
+    private static let localLoginThrottleMaxAttempts = 5
 
     private struct RiskCheckOutcome {
         let auditTicket: String?
@@ -119,13 +123,19 @@ public class AuthenticationManager: ObservableObject {
         identifierType: SupabaseService.RegistrationIdentifierType,
         attemptType: SupabaseService.RegistrationAttemptType
     ) async throws -> RiskCheckOutcome {
+        if attemptType == .login {
+            try enforceLocalLoginThrottle(identifier: identifier, identifierType: identifierType)
+            SkyBridgeLogger.shared.info("🔐 登录路径已通过本地短窗口软限流，继续执行服务端登录风控")
+        }
+
         let fingerprint = registrationDeviceFingerprint()
 
         do {
             let decision = try await SupabaseService.shared.assessRegistrationRisk(
                 identifier: identifier,
                 identifierType: identifierType,
-                deviceFingerprint: fingerprint
+                deviceFingerprint: fingerprint,
+                attemptType: attemptType
             )
 
             if !decision.allowed {
@@ -168,10 +178,37 @@ public class AuthenticationManager: ObservableObject {
         } catch {
             let message = SupabaseService.userMessage(for: error) ?? error.localizedDescription
             captchaChallengeRequired = false
-            SkyBridgeLogger.shared.warning("⚠️ 服务端认证风控不可用，继续沿用 Supabase 上游限制: \(message)")
+            captchaPassed = false
+            showCaptchaChallenge = false
+            SkyBridgeLogger.shared.error("❌ 服务端认证风控不可用，已拒绝继续请求: \(message)")
+            throw AuthFlowError.registrationBlocked("认证风控暂时不可用，请稍后再试")
+        }
+    }
+
+    private func enforceLocalLoginThrottle(
+        identifier: String,
+        identifierType: SupabaseService.RegistrationIdentifierType
+    ) throws {
+        let normalizedIdentifier = SupabaseService.normalizedRegistrationIdentifier(
+            identifier,
+            type: identifierType
+        )
+        let throttleKey = "\(identifierType.rawValue):\(normalizedIdentifier)"
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-Self.localLoginThrottleWindow)
+        var timestamps = localLoginAttemptTimestamps[throttleKey, default: []]
+            .filter { $0 > cutoff }
+
+        guard timestamps.count < Self.localLoginThrottleMaxAttempts else {
+            localLoginAttemptTimestamps[throttleKey] = timestamps
+            captchaChallengeRequired = false
+            captchaPassed = false
+            showCaptchaChallenge = false
+            throw AuthFlowError.registrationBlocked("登录操作过于频繁，请稍后再试")
         }
 
-        return RiskCheckOutcome(auditTicket: nil)
+        timestamps.append(now)
+        localLoginAttemptTimestamps[throttleKey] = timestamps
     }
 
     private func recordRegistrationAttempt(

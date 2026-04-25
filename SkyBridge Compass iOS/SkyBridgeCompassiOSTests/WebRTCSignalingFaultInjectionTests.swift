@@ -1,3 +1,4 @@
+import CFNetwork
 import XCTest
 @testable import SkyBridgeCompass_iOS
 
@@ -183,6 +184,58 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         }.value
     }
 
+    func testNoProxyConfigurationDisablesSystemProxyMechanisms() {
+        let dictionary = WebSocketSignalingClient.testOnlyNoProxyConnectionProxyDictionary()
+
+        XCTAssertEqual(dictionary[kCFProxyTypeKey as String] as? String, kCFProxyTypeNone as String)
+        XCTAssertEqual(dictionary["HTTPEnable"] as? Bool, false)
+        XCTAssertEqual(dictionary["HTTPSEnable"] as? Bool, false)
+        XCTAssertEqual(dictionary["SOCKSEnable"] as? Bool, false)
+        XCTAssertEqual(dictionary["ProxyAutoConfigEnable"] as? Bool, false)
+        XCTAssertEqual(dictionary["ProxyAutoDiscoveryEnable"] as? Bool, false)
+    }
+
+    @MainActor
+    func testConnectingSessionCanScheduleSignalingRecoveryBeforeTransportReady() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
+                isTransportEstablished: false,
+                isSessionConnecting: true,
+                suppressRecovery: false
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
+                isTransportEstablished: true,
+                isSessionConnecting: false,
+                suppressRecovery: false
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
+                isTransportEstablished: false,
+                isSessionConnecting: false,
+                suppressRecovery: false
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
+                isTransportEstablished: true,
+                isSessionConnecting: true,
+                suppressRecovery: true
+            )
+        )
+    }
+
+    func testInitialWebRTCHandshakeStartsFromOffererOnly() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyShouldInitiateInitialWebRTCHandshake(role: .offerer)
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyShouldInitiateInitialWebRTCHandshake(role: .answerer)
+        )
+    }
+
     @MainActor
     func testRedeemedQRSessionArtifactsReuseRequiresMatchingOriginAndAuthority() {
         XCTAssertTrue(
@@ -282,18 +335,21 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         XCTAssertTrue(
             CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
                 isTransportEstablished: true,
+                isSessionConnecting: false,
                 suppressRecovery: false
             )
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
                 isTransportEstablished: true,
+                isSessionConnecting: false,
                 suppressRecovery: true
             )
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.shouldScheduleSignalingRecovery(
                 isTransportEstablished: false,
+                isSessionConnecting: false,
                 suppressRecovery: false
             )
         )
@@ -303,28 +359,28 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     func testPostTransportICEFailuresDeferToSharedRecovery() {
         XCTAssertTrue(
             CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
-                isTransportEstablished: true,
+                isHandshakeComplete: true,
                 suppressRecovery: false,
                 messageType: .iceCandidate
             )
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
-                isTransportEstablished: true,
+                isHandshakeComplete: true,
                 suppressRecovery: false,
                 messageType: .offer
             )
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
-                isTransportEstablished: true,
+                isHandshakeComplete: true,
                 suppressRecovery: true,
                 messageType: .iceCandidate
             )
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
-                isTransportEstablished: false,
+                isHandshakeComplete: false,
                 suppressRecovery: false,
                 messageType: .iceCandidate
             )

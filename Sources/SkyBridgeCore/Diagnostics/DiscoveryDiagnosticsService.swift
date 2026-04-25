@@ -508,6 +508,21 @@ public final class DiscoveryDiagnosticsService: ObservableObject {
 // MARK: - 握手错误本地化
 /// 将握手失败原因映射为用户可读的消息
 public enum HandshakeErrorLocalizer {
+    public static func localizedMessage(for error: Error) -> String {
+        if let reason = handshakeFailureReason(from: error) {
+            return localizedMessage(for: reason)
+        }
+
+        if isCryptoKitAEADFailure(error) {
+            return localizedMessage(for: .cryptoError(error.localizedDescription))
+        }
+
+        let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !detail.isEmpty else {
+            return "连接失败"
+        }
+        return simplifyTechnicalMessage(detail)
+    }
     
     /// 获取用户可读的错误消息
     public static func localizedMessage(for reason: HandshakeFailureReason) -> String {
@@ -522,8 +537,7 @@ public enum HandshakeErrorLocalizer {
             return "对方拒绝连接：\(message)"
             
         case .cryptoError(let detail):
-            let lowered = detail.lowercased()
-            if lowered.contains("cryptokiterror error 3") || lowered.contains("cryptokit.cryptokiterror error 3") {
+            if isAEADFailureDetail(detail) {
                 // CryptoKitError(3) is most commonly an AEAD authentication failure (wrong key / wrong transcript binding).
                 // In our PQC handshake, this can happen if one side uses Apple CryptoKit PQC and the other side uses liboqs.
                 return "安全验证失败：解密认证失败（可能是两端后量子加密实现不兼容或应用构建未启用 Apple PQC）"
@@ -580,8 +594,7 @@ public enum HandshakeErrorLocalizer {
     public static func suggestedFix(for reason: HandshakeFailureReason) -> String? {
         switch reason {
         case .cryptoError(let detail):
-            let lowered = detail.lowercased()
-            if lowered.contains("cryptokiterror error 3") || lowered.contains("cryptokit.cryptokiterror error 3") {
+            if isAEADFailureDetail(detail) {
                 return "请更新两台设备的应用到同一版本，并确保 macOS 端是用 Xcode 26+ 构建且已启用 Apple PQC（HAS_APPLE_PQC_SDK）。"
             }
             return "请更新两台设备的应用，并重试连接；如仍失败可在诊断面板查看详细原因"
@@ -616,6 +629,16 @@ public enum HandshakeErrorLocalizer {
             return nil
         }
     }
+
+    public static func suggestedFix(for error: Error) -> String? {
+        if let reason = handshakeFailureReason(from: error) {
+            return suggestedFix(for: reason)
+        }
+        if isCryptoKitAEADFailure(error) {
+            return suggestedFix(for: .cryptoError(error.localizedDescription))
+        }
+        return nil
+    }
     
     /// 简化技术性消息
     private static func simplifyTechnicalMessage(_ message: String) -> String {
@@ -646,5 +669,49 @@ public enum HandshakeErrorLocalizer {
         }
         
         return simplified.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func handshakeFailureReason(from error: Error) -> HandshakeFailureReason? {
+        if let reason = error as? HandshakeFailureReason {
+            return reason
+        }
+        if let handshakeError = error as? HandshakeError,
+           case .failed(let reason) = handshakeError {
+            return reason
+        }
+        return nil
+    }
+
+    private static func isCryptoKitAEADFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        let haystack = [
+            nsError.domain,
+            nsError.localizedDescription,
+            nsError.userInfo[NSDebugDescriptionErrorKey] as? String,
+            String(describing: error),
+            String(reflecting: type(of: error))
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+
+        guard haystack.contains("cryptokit") else {
+            return false
+        }
+
+        return haystack.contains("error 3")
+            || haystack.contains("错误3")
+            || haystack.contains("错误 3")
+    }
+
+    private static func isAEADFailureDetail(_ detail: String) -> Bool {
+        let lowered = detail.lowercased()
+        if lowered.contains("cryptokiterror error 3")
+            || lowered.contains("cryptokit.cryptokiterror error 3") {
+            return true
+        }
+
+        return (detail.contains("错误3") || detail.contains("错误 3"))
+            && detail.contains("未能完成操作")
     }
 }

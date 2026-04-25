@@ -92,6 +92,16 @@ Any future upgrade must preserve all of these:
     any delayed compatibility fallback start must be cancelled when the peer closes, is superseded, or sends `streamConfiguration`
     every async capture start/restart path must be generation-guarded so a stale task cannot revive screen capture after teardown
 
+11. Remote-control capability must never be treated as a concrete LAN endpoint.
+    Required behavior:
+    `remote_desktop` / `remote_control` capability may enable UI affordances, but only a real Bonjour remote service, an explicit `remoteControlPort`, or an authenticated active peer route with an explicit remote-control port may produce an `NWEndpoint`.
+    A bootstrap `ready=true` log only proves identity/KEM metadata readiness; the later LAN endpoint connection must log candidate index/count, waiting, timeout, and failure reason.
+
+12. LAN remote-control endpoint connection must be bounded and fail over.
+    Required behavior:
+    stale Bonjour service records or unusable host addresses must not leave the viewer stuck after bootstrap.
+    multiple equivalent endpoint candidates must be tried in order with a per-candidate timeout, and the final failure must be visible to the caller/UI.
+
 ## Best Practice
 
 Treat identity normalization and SOA binding as protocol infrastructure, not feature glue.
@@ -121,6 +131,7 @@ swift test --filter RemoteControl
 xcodebuild -project 'SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj' -scheme 'SkyBridgeCompassiOSTests' -destination 'platform=iOS Simulator,id=<simulator-id>' -only-testing:'SkyBridgeCompassiOSTests/RegressionHardeningTests/testHandshakeDriverRetainsAuthenticatedAuthorityAfterOutboundHandshakeEstablishes' test
 xcodebuild -project 'SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj' -scheme 'SkyBridgeCompassiOSTests' -destination 'platform=iOS Simulator,id=<simulator-id>' -only-testing:'SkyBridgeCompassiOSTests/RegressionHardeningTests/testHandshakeDriverClearsAuthenticatedAuthorityAfterCancellation' test
 xcodebuild -project 'SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj' -scheme 'SkyBridgeCompassiOSTests' -destination 'platform=iOS Simulator,id=<simulator-id>' -only-testing:'SkyBridgeCompassiOSTests/RegressionHardeningTests/testLANRemoteControlTrustResolverPrefersRecordWithAuthorityWhenDuplicatesAreEquivalent' test
+xcodebuild -project 'SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj' -scheme 'SkyBridgeCompassiOSTests' -destination 'platform=iOS Simulator,id=<simulator-id>' -only-testing:'SkyBridgeCompassiOSTests/RegressionHardeningTests/testP2PPairingCapabilitiesDoNotSynthesizeLANServiceEndpointsWithoutPorts' test
 bash "SkyBridge Compass iOS/Scripts/test_lane_ios.sh"
 ```
 

@@ -38,9 +38,9 @@ enum SupabaseTurnstileConfig {
 @available(macOS 14.0, *)
 struct SupabaseTurnstileSheet: View {
     let context: SupabaseTurnstileChallengeContext
-    let onToken: (String) -> Void
-    let onCancel: () -> Void
-    let onError: (String) -> Void
+    let onToken: @MainActor (String) -> Void
+    let onCancel: @MainActor () -> Void
+    let onError: @MainActor (String) -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -82,8 +82,8 @@ private struct MacTurnstileWebView: NSViewRepresentable {
     let siteKey: String
     let originURL: URL
     let action: String
-    let onToken: (String) -> Void
-    let onError: (String) -> Void
+    let onToken: @MainActor (String) -> Void
+    let onError: @MainActor (String) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onToken: onToken, onError: onError)
@@ -187,10 +187,13 @@ private struct MacTurnstileWebView: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler {
-        private let onToken: (String) -> Void
-        private let onError: (String) -> Void
+        private let onToken: @MainActor (String) -> Void
+        private let onError: @MainActor (String) -> Void
 
-        init(onToken: @escaping (String) -> Void, onError: @escaping (String) -> Void) {
+        init(
+            onToken: @escaping @MainActor (String) -> Void,
+            onError: @escaping @MainActor (String) -> Void
+        ) {
             self.onToken = onToken
             self.onError = onError
         }
@@ -199,19 +202,25 @@ private struct MacTurnstileWebView: NSViewRepresentable {
             guard message.name == "turnstile",
                   let payload = message.body as? [String: Any],
                   let type = payload["type"] as? String else {
-                onError("turnstile_message_invalid")
+                Task { @MainActor [onError] in
+                    onError("turnstile_message_invalid")
+                }
                 return
             }
 
             if type == "success",
                let token = payload["token"] as? String,
                !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                onToken(token)
+                Task { @MainActor [onToken] in
+                    onToken(token)
+                }
                 return
             }
 
             let message = (payload["message"] as? String) ?? "turnstile_failed"
-            onError(message)
+            Task { @MainActor [onError] in
+                onError(message)
+            }
         }
     }
 }

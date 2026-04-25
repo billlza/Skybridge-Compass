@@ -9,6 +9,7 @@ public struct BonjourDeviceInfo: Sendable, Equatable {
     public let deviceId: String?
     public let hostname: String?
     public let model: String?
+    public let chip: String?
     public let type: String?
     public let version: String?
     /// 操作系统版本（优先用于 UI 展示；例如 "macOS 26.2" / "iOS 26.0"）
@@ -22,6 +23,7 @@ public struct BonjourDeviceInfo: Sendable, Equatable {
         deviceId: String? = nil,
         hostname: String? = nil,
         model: String? = nil,
+        chip: String? = nil,
         type: String? = nil,
         version: String? = nil,
         osVersion: String? = nil,
@@ -33,6 +35,7 @@ public struct BonjourDeviceInfo: Sendable, Equatable {
         self.deviceId = deviceId
         self.hostname = hostname
         self.model = model
+        self.chip = chip
         self.type = type
         self.version = version
         self.osVersion = osVersion
@@ -71,6 +74,7 @@ public enum BonjourTXTParser: Sendable {
         ("bssid", ["bssid"]),
         ("hostname", ["hostname", "host"]),
         ("model", ["model", "modelName", "md"]),
+        ("chip", ["chip", "soc", "cpu"]),
         ("type", ["type", "deviceType"]),
         ("name", ["name", "device", "fn"]),
         ("manufacturer", ["manufacturer", "brand", "mf"]),
@@ -91,6 +95,7 @@ public enum BonjourTXTParser: Sendable {
         ("hostname", "hostname=([^,\\]]+)"),
         ("model", "model=([^,\\]]+)"),
         ("modelName", "modelName=([^,\\]]+)"),
+        ("chip", "chip=([^,\\]]+)"),
         ("brand", "brand=([^,\\]]+)"),
         ("manufacturer", "manufacturer=([^,\\]]+)"),
         ("name", "name=([^,\\]]+)"),
@@ -220,6 +225,7 @@ public enum BonjourTXTParser: Sendable {
             deviceId: deviceId,
             hostname: dict["hostname"] ?? dict["host"],
             model: dict["model"] ?? dict["modelName"],
+            chip: dict["chip"] ?? dict["soc"] ?? dict["cpu"],
             type: dict["type"] ?? dict["deviceType"],
             version: dict["version"] ?? dict["ver"],
             osVersion: dict["osVersion"] ?? dict["os_version"] ?? dict["osver"] ?? dict["osVer"] ?? dict["osv"],

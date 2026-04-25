@@ -36,6 +36,33 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         XCTAssertNil(decrypted)
     }
 
+    func testHighThroughputRemoteDesktopScreenPayloadDecodesOffMainActor() async throws {
+        let screen = ScreenData(
+            width: 2,
+            height: 2,
+            imageData: Data([0x01, 0x02, 0x03]),
+            timestamp: 1_700_000_000,
+            format: "jpeg",
+            isSyncFrame: true
+        )
+        let inner = try JSONEncoder().encode(screen)
+        let message = RemoteMessage(type: .screenData, payload: inner)
+        let plaintext = try JSONEncoder().encode(message)
+
+        let kind = await Task.detached {
+            CrossNetworkWebRTCManager.testOnlyDecodeHighThroughputRemoteDesktopPayloadKind(plaintext)
+        }.value
+
+        XCTAssertEqual(kind, "screen")
+    }
+
+    @MainActor
+    func testViewerStreamConfigurationKeepsCrossNetworkFallbackOnDedicatedScreenChannel() {
+        let payload = RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
+
+        XCTAssertEqual(payload.screenDataChannelEnabled, true)
+    }
+
     private func makeSessionKeys() -> SessionKeys {
         let keyBytes = Data(repeating: 0x42, count: 32)
         return SessionKeys(

@@ -227,6 +227,99 @@ final class RegistrationSecurityServiceTests: XCTestCase {
         let result2 = await service.canRegister(context: context)
         XCTAssertTrue(result2.allowed || result2.requiresCaptcha)
     }
+
+    func testLoginAttemptsDoNotShareRegistrationDeviceQuota() async {
+        let service = RegistrationSecurityService.shared
+
+        let testIP = "scoped_ip_\(UUID().uuidString)"
+        let testFingerprint = "scoped_fp_\(UUID().uuidString)"
+        let testIdentifier = "scoped-\(UUID().uuidString)@example.com"
+
+        let registerContext = RegistrationSecurityService.RegistrationContext(
+            ip: testIP,
+            deviceFingerprint: testFingerprint,
+            identifier: testIdentifier,
+            identifierType: .email,
+            attemptType: .register
+        )
+
+        await service.recordAttempt(context: registerContext, success: false)
+        await service.recordAttempt(context: registerContext, success: false)
+        await service.recordAttempt(context: registerContext, success: false)
+
+        let blockedRegistration = await service.canRegister(context: registerContext)
+        XCTAssertFalse(blockedRegistration.allowed)
+
+        let loginContext = RegistrationSecurityService.RegistrationContext(
+            ip: testIP,
+            deviceFingerprint: testFingerprint,
+            identifier: testIdentifier,
+            identifierType: .email,
+            attemptType: .login
+        )
+
+        let loginResult = await service.canRegister(context: loginContext)
+        XCTAssertTrue(loginResult.allowed)
+    }
+
+    func testLoginAttemptsAreRecordedInSeparateLoginPool() async {
+        let service = RegistrationSecurityService.shared
+
+        let testIP = "login_scoped_ip_\(UUID().uuidString)"
+        let testFingerprint = "login_scoped_fp_\(UUID().uuidString)"
+        let testIdentifier = "login-scoped-\(UUID().uuidString)@example.com"
+
+        let loginContext = RegistrationSecurityService.RegistrationContext(
+            ip: testIP,
+            deviceFingerprint: testFingerprint,
+            identifier: testIdentifier,
+            identifierType: .email,
+            attemptType: .login
+        )
+
+        for _ in 0..<30 {
+            await service.recordAttempt(context: loginContext, success: false)
+        }
+        try? await Task.sleep(nanoseconds: 1_100_000_000)
+
+        let registerContext = RegistrationSecurityService.RegistrationContext(
+            ip: testIP,
+            deviceFingerprint: testFingerprint,
+            identifier: testIdentifier,
+            identifierType: .email,
+            attemptType: .register
+        )
+
+        let registerResult = await service.canRegister(context: registerContext)
+        XCTAssertTrue(registerResult.allowed)
+
+        let loginResult = await service.canRegister(context: loginContext)
+        XCTAssertFalse(loginResult.allowed)
+    }
+
+    func testSuccessfulLoginAttemptsDoNotCountTowardLoginFailureLimit() async {
+        let service = RegistrationSecurityService.shared
+
+        let testIP = "login_success_ip_\(UUID().uuidString)"
+        let testFingerprint = "login_success_fp_\(UUID().uuidString)"
+        let testIdentifier = "login-success-\(UUID().uuidString)@example.com"
+
+        let loginContext = RegistrationSecurityService.RegistrationContext(
+            ip: testIP,
+            deviceFingerprint: testFingerprint,
+            identifier: testIdentifier,
+            identifierType: .email,
+            attemptType: .login
+        )
+
+        for _ in 0..<15 {
+            await service.recordAttempt(context: loginContext, success: true)
+        }
+        try? await Task.sleep(nanoseconds: 1_100_000_000)
+
+        let loginResult = await service.canRegister(context: loginContext)
+        XCTAssertTrue(loginResult.allowed)
+    }
     
  // MARK: - 黑名单测试
     
@@ -447,4 +540,3 @@ final class InputValidationTests: XCTestCase {
         }
     }
 }
-

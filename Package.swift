@@ -165,11 +165,26 @@ let package = Package(
             ]
         ),
         .target(
+            name: "WebRTCAudioDeviceBridge",
+            dependencies: [
+                .product(name: "WebRTC", package: "WebRTC")
+            ],
+            path: "Sources/WebRTCAudioDeviceBridge",
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(["-I", webRTCHeadersIncludePath])
+            ],
+            linkerSettings: [
+                .linkedFramework("AudioToolbox")
+            ]
+        ),
+        .target(
             name: "SkyBridgeCore",
             dependencies: [
                 "SkyBridgeProtocolCore",
                 "SkyBridgeAppleTransport",
                 "FreeRDPBridge",
+                "WebRTCAudioDeviceBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
                 .product(name: "SwiftASN1", package: "swift-asn1"),
@@ -325,7 +340,8 @@ let package = Package(
             exclude: [
                 "Info.plist",
                 "SkyBridgeCompassApp.entitlements",
-                "SkyBridgeCompassApp.packaging.entitlements"
+                "SkyBridgeCompassApp.packaging.entitlements",
+                "SkyBridgeCompassApp.native.packaging.entitlements"
             ],
             resources: [
                 // 处理并打包目标内的 Resources 目录（例如 AppIcon.icns / AppIcon.png）

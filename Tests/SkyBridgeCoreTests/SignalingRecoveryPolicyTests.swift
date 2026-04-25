@@ -6,7 +6,7 @@ final class SignalingRecoveryPolicyTests: XCTestCase {
     func testPostTransportIceCandidateFailuresDeferToSharedRecoveryTask() {
         XCTAssertTrue(
             CrossNetworkConnectionManager.shouldDeferSignalingSendRecovery(
-                isTransportEstablished: true,
+                isHandshakeComplete: true,
                 messageType: .iceCandidate
             )
         )
@@ -15,27 +15,27 @@ final class SignalingRecoveryPolicyTests: XCTestCase {
     func testPreTransportOrNonIceFailuresAreNotSilentlyDeferred() {
         XCTAssertFalse(
             CrossNetworkConnectionManager.shouldDeferSignalingSendRecovery(
-                isTransportEstablished: false,
+                isHandshakeComplete: false,
                 messageType: .iceCandidate
             )
         )
         XCTAssertFalse(
             CrossNetworkConnectionManager.shouldDeferSignalingSendRecovery(
-                isTransportEstablished: true,
+                isHandshakeComplete: true,
                 messageType: .offer
             )
         )
     }
 
-    func testTransportEstablishedFailuresSwitchToOnDemandSignaling() {
+    func testOnlyHandshakeCompleteFailuresSwitchToOnDemandSignaling() {
         XCTAssertTrue(
             CrossNetworkConnectionManager.shouldUseOnDemandSignalingAfterTransportFailure(
-                isTransportEstablished: true
+                isHandshakeComplete: true
             )
         )
         XCTAssertFalse(
             CrossNetworkConnectionManager.shouldUseOnDemandSignalingAfterTransportFailure(
-                isTransportEstablished: false
+                isHandshakeComplete: false
             )
         )
     }

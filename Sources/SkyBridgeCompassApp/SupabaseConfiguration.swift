@@ -15,9 +15,10 @@ public final class SupabaseConfiguration: ObservableObject {
     @Published public var isConfigured = false
     @Published public var configurationError: String?
     
- // MARK: - 私有属性
+    // MARK: - 私有属性
     
     private var currentConfiguration: SupabaseService.Configuration?
+    private var keychainAutoConfigurationTask: Task<Void, Never>?
 
     public var resolvedConfiguration: SupabaseService.Configuration? {
         currentConfiguration
@@ -26,23 +27,14 @@ public final class SupabaseConfiguration: ObservableObject {
  // MARK: - 初始化
     
     private init() {
- // 尝试从环境变量自动配置
+ // 尝试从非阻塞配置源自动配置；启动阶段不能触碰 Keychain，避免系统授权弹窗拖死 App。
         attemptAutoConfiguration()
     }
     
  // MARK: - 公共方法
     
- /// 尝试从可用配置源自动配置 Supabase（Keychain / 环境变量 / Info.plist / 资源文件）
+    /// 尝试从可用配置源自动配置 Supabase（Keychain / 环境变量 / Info.plist / 资源文件）
     public func attemptAutoConfiguration() {
- // 首先尝试从 Keychain 加载
-        SkyBridgeLogger.ui.debugOnly("🔍 [SupabaseConfiguration] 尝试从 Keychain 加载...")
-        if let config = loadFromKeychain() {
-            SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从 Keychain 加载配置成功")
-            configureSupabase(with: config)
-            return
-        }
-        
- // 其次检查环境变量
         let urlEnv = ProcessInfo.processInfo.environment["SUPABASE_URL"]
         let keyEnv = ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"]
         
@@ -50,37 +42,36 @@ public final class SupabaseConfiguration: ObservableObject {
         SkyBridgeLogger.ui.debugOnly("   SUPABASE_URL: \(urlEnv ?? "未设置")")
         SkyBridgeLogger.ui.debugOnly("   SUPABASE_ANON_KEY: \(keyEnv != nil ? "已设置" : "未设置")")
         
- // 其次检查环境变量 / 包内配置
+ // 先检查环境变量 / 包内配置，这些来源不会阻塞主线程。
         if let config = SupabaseService.Configuration.fromEnvironment() {
             SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从可用配置源加载配置成功")
             configureSupabase(with: config)
         } else {
-            SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseConfiguration] Keychain、环境变量与包内配置都未命中")
-            SkyBridgeLogger.ui.debugOnly("   请在应用中配置 Supabase 或设置环境变量")
- // 未配置：保持离线状态，等待用户显式配置
+            SkyBridgeLogger.ui.debugOnly("⚠️ [SupabaseConfiguration] 环境变量与包内配置未命中，后台尝试 Keychain 配置")
             configurationError = "未找到 Supabase 配置，请在设置中配置"
             isConfigured = false
+            scheduleKeychainAutoConfiguration()
         }
     }
-    
- /// 从 Keychain 加载 Supabase 配置
-    private func loadFromKeychain() -> SupabaseService.Configuration? {
-        do {
-            let keychain = KeychainManager.shared
-            let config = try keychain.retrieveSupabaseConfig()
 
-            guard let validatedConfig = validatedConfiguration(
-                urlString: config.url,
-                anonKey: config.anonKey
-            ) else {
-                SkyBridgeLogger.ui.debugOnly("⚠️ Keychain 中的 Supabase 配置无效或仍为占位值")
-                return nil
+    private func scheduleKeychainAutoConfiguration() {
+        guard keychainAutoConfigurationTask == nil else { return }
+
+        keychainAutoConfigurationTask = Task { [weak self] in
+            let keychainConfiguration = await Task.detached(priority: .utility) {
+                SupabaseService.Configuration.fromKeychain()
+            }.value
+
+            await MainActor.run {
+                guard let self else { return }
+                self.keychainAutoConfigurationTask = nil
+                guard !self.isConfigured,
+                      let keychainConfiguration else {
+                    return
+                }
+                SkyBridgeLogger.ui.debugOnly("✅ [SupabaseConfiguration] 从 Keychain 后台加载配置成功")
+                self.configureSupabase(with: keychainConfiguration)
             }
-
-            return validatedConfig
-        } catch {
-            SkyBridgeLogger.ui.debugOnly("⚠️ 从 Keychain 加载失败: \(error.localizedDescription)")
-            return nil
         }
     }
     

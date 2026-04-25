@@ -54,6 +54,7 @@
 		5AF4B12373F8955D228412F0 /* SupabaseConfig.plist in Resources */ = {isa = PBXBuildFile; fileRef = 40944D05DD176ECF8A8E7BDB /* SupabaseConfig.plist */; };
 		5C11C0249C43AED260C81E89 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B68E3A442804F03C62887E08 /* AuthenticationView.swift */; };
 		5DCD1595987CE16988ACC125 /* CurrentPathTrustedDeviceStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4070718AFE727B04D180A3BB /* CurrentPathTrustedDeviceStoreTests.swift */; };
+		5F11A3B479C44E12A6B7D221 /* P2PConnectableContextRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F11A3B379C44E12A6B7D221 /* P2PConnectableContextRecoveryTests.swift */; };
 		5F2704328C4CFAE111CE91B9 /* ClipboardManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */; };
 		5FC455D2316C3C8EA7B12D57 /* HandshakePadding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 053FDF90F358AEE09BA7D06C /* HandshakePadding.swift */; };
 		621F7A0A1EEFC4728F1A3DDE /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 840F0A7CE3B95CE644FCB56E /* AppIntents.framework */; };
@@ -68,6 +69,8 @@
 		78AAB5A796C451E94DDE8A89 /* DeviceRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920CB7EAE7C04D712E34DF01 /* DeviceRowView.swift */; };
 		7BC94778280AA36EC50960A4 /* DeviceDiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8C00600750038AF17C8EB31 /* DeviceDiscoveryView.swift */; };
 		7D17DBE1290FCE76CD2AE703 /* AuthenticationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF504A11EB980FBB3004D271 /* AuthenticationManager.swift */; };
+		7D86CEB9BAE24CF38E994C01 /* AppleMobileDeviceIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6B3F7094A6E4E1AA9C1D711 /* AppleMobileDeviceIdentityTests.swift */; };
+		7E53A1B24C3842468BF3AC90 /* P2PBootstrapPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26FC4E83656D4977A941B49A /* P2PBootstrapPolicyTests.swift */; };
 		7FE088C16086150B617C924F /* KEMTrustStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3D6F438C5BF4F8C3A594442 /* KEMTrustStore.swift */; };
 		80E7233868CBFCAA2004173E /* CloudKitSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BE5FEA7CC6B032C4D623243 /* CloudKitSyncManager.swift */; };
 		8963BC9ADA39D474492B4A26 /* CryptoProviderProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A5490FE3BB3414C8F04E2FD /* CryptoProviderProtocol.swift */; };
@@ -168,6 +171,8 @@
 		2B1ADCB01BB1D0E58DE6A566 /* SignalingRetryController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingRetryController.swift; sourceTree = "<group>"; };
 		2B6E3549C2F24F52AB68417B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		2F8ED07B5F59B57133CC0DEE /* SkyBridgeCompassiOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SkyBridgeCompassiOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E6B3F7094A6E4E1AA9C1D711 /* AppleMobileDeviceIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleMobileDeviceIdentityTests.swift; sourceTree = "<group>"; };
+		26FC4E83656D4977A941B49A /* P2PBootstrapPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PBootstrapPolicyTests.swift; sourceTree = "<group>"; };
 		3294588CD7895F56B550A5DC /* OfflineMessageQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineMessageQueue.swift; sourceTree = "<group>"; };
 		37E0C1A2D462FAE735D9AC04 /* SkyBridgeActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeActivityAttributes.swift; sourceTree = "<group>"; };
 		380347E9DAA089B6533D6F89 /* TrustedDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustedDeviceStore.swift; sourceTree = "<group>"; };
@@ -180,6 +185,7 @@
 		490C0A61773E98D07F084DC6 /* SupabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseService.swift; sourceTree = "<group>"; };
 		4B5171CE346450D6EB7ABD1E /* NebulaPublicClientOAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaPublicClientOAuth.swift; sourceTree = "<group>"; };
 		501DCB71160A60C330C17929 /* RemoteDesktopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopView.swift; sourceTree = "<group>"; };
+		5F11A3B379C44E12A6B7D221 /* P2PConnectableContextRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PConnectableContextRecoveryTests.swift; sourceTree = "<group>"; };
 		54AD8F4C687F9B90B67B4329 /* ThemeConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeConfiguration.swift; sourceTree = "<group>"; };
 		56BC016A1595D3C5E14E5591 /* QuickActionButtonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionButtonView.swift; sourceTree = "<group>"; };
 		588909BCF563A11B86AF8634 /* WeatherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherService.swift; sourceTree = "<group>"; };
@@ -353,6 +359,7 @@
 		39BB4D8E9F48D029BFDD9F57 /* SkyBridgeCompassiOSTests */ = {
 			isa = PBXGroup;
 			children = (
+				E6B3F7094A6E4E1AA9C1D711 /* AppleMobileDeviceIdentityTests.swift */,
 				ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */,
 				9478092B3A3B83EBEE873237 /* ConnectionCodeFormatTests.swift */,
 				24F23783410F5E90DFA7192E /* ConnectLinkFormatTests.swift */,
@@ -364,7 +371,9 @@
 				D02F165A3577BDC88F31411B /* KEMTrustStoreTests.swift */,
 				9094F55BF7BC5003D8D38290 /* ObservabilityContractTests.swift */,
 				01FF4DE7CA965FD1991AA3B9 /* OrderedInboundChunkRelayTests.swift */,
-				D5685E5E2CD346A62A01BD79 /* PolicyDecisionParityTests.swift */,
+					26FC4E83656D4977A941B49A /* P2PBootstrapPolicyTests.swift */,
+					5F11A3B379C44E12A6B7D221 /* P2PConnectableContextRecoveryTests.swift */,
+					D5685E5E2CD346A62A01BD79 /* PolicyDecisionParityTests.swift */,
 				5D702D54FA811F70FC96D595 /* PolicyDecisionTestVectors.swift */,
 				DA492E325F7E54E1EEEE4A95 /* PQCRekeyElectionTests.swift */,
 				7A0E9CD4D962C76E1D1377C2 /* QRCodeHubInteractionStateTests.swift */,
@@ -830,6 +839,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7D86CEB9BAE24CF38E994C01 /* AppleMobileDeviceIdentityTests.swift in Sources */,
 				DCEFA18F51EEAC5A498234D7 /* CapabilityResolutionParityTests.swift in Sources */,
 				583C16868866DF91809BA256 /* ConnectLinkFormatTests.swift in Sources */,
 				04076E229294D9656744F5A1 /* ConnectionCodeFormatTests.swift in Sources */,
@@ -841,7 +851,9 @@
 				D7466B71CF052E1AB9FBD95A /* KEMTrustStoreTests.swift in Sources */,
 				C2B6620F00166A0067A1098D /* ObservabilityContractTests.swift in Sources */,
 				CC6D1E5C23B4BDFFB19E6278 /* OrderedInboundChunkRelayTests.swift in Sources */,
-				6C29FF78EF4FB9EC482B42A4 /* PQCRekeyElectionTests.swift in Sources */,
+					7E53A1B24C3842468BF3AC90 /* P2PBootstrapPolicyTests.swift in Sources */,
+					5F11A3B479C44E12A6B7D221 /* P2PConnectableContextRecoveryTests.swift in Sources */,
+					6C29FF78EF4FB9EC482B42A4 /* PQCRekeyElectionTests.swift in Sources */,
 				1AB2680B9B6A4DB64E3080B0 /* PolicyDecisionParityTests.swift in Sources */,
 				A30B6ADBE722CB3EDFFBF5A0 /* PolicyDecisionTestVectors.swift in Sources */,
 				065BBA12A9B6F4C9D20F4A11 /* QRCodeHubInteractionStateTests.swift in Sources */,

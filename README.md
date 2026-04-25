@@ -327,8 +327,36 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 
 发布 DMG 的推荐路径：
 
+首次在一台新机器上执行本地公证前，先做一次 notary 凭据 bootstrap：
+
 ```bash
-./Scripts/build_dmg.sh
+./Scripts/bootstrap_notarytool_credentials.sh
+```
+
+脚本会自动：
+
+- 识别本机 `~/.appstoreconnect/private_keys/AuthKey_*.p8`
+- 通过当前 App Store Connect 会话解析 `NOTARYTOOL_ISSUER`
+- 校验 `notarytool` 认证
+- 写入可复用的 Keychain profile 与本地 env 文件
+
+详细说明见：
+
+- [`Docs/ops/notary-credential-bootstrap.md`](</Users/bill/Desktop/SkyBridge Compass Pro release/Docs/ops/notary-credential-bootstrap.md>)
+- [`Scripts/ensure_notarytool_credentials.sh`](</Users/bill/Desktop/SkyBridge Compass Pro release/Scripts/ensure_notarytool_credentials.sh>)
+
+`bundle exec fastlane release` 现在会在正式发布前先自动执行 notary 凭据自检：
+
+- 当前本机凭据已可用：直接继续
+- 当前本机凭据缺失：自动调用 `Scripts/bootstrap_notarytool_credentials.sh`
+- bootstrap 完成后再次验证，成功才进入真正的发版链
+
+```bash
+SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session \
+SKYBRIDGE_REQUIRE_APP_GROUPS=1 \
+SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
+SKYBRIDGE_XCODEBUILD_KEEP_NOISE=1 \
+./Scripts/build_dmg.sh --notarize-app --notarize-dmg --require-notarization
 ```
 
 当前发布约束：
@@ -336,12 +364,25 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 - 发布 DMG 只接受 `Xcode Release` 产物。
 - `package_app.sh` 在 `release_dmg` 上下文下会拒绝 `SwiftPM release fallback`。
 - `build_dmg.sh --use-existing-app` 也会校验现有 `.app` 的构建来源，非 `xcode_release` 会直接失败。
-- 正式发布建议使用 `Developer ID Application` 证书签名；`ad-hoc` 仅适合本地调试，不适合稳定复用 macOS TCC 授权。
+- 正式发布必须使用 `Developer ID Application` 证书签名；`ad-hoc` 仅适合本地调试，不适合稳定复用 macOS TCC 授权。
+- `Developer ID + notarized DMG` 发布链下，Apple 登录固定走 `web_session`（`ASWebAuthenticationSession` + Services ID）；原生 `Sign in with Apple` 仅适用于 Apple 官方支持的分发通道。
+- 最终发布要求 `Widget Extension` 与 `App Groups` 全部随签名产物交付。
+- 主应用与 Widget Extension 需要分别准备匹配的 macOS provisioning profile。
+- 主应用 profile 可通过 `SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH` 指定，Widget Extension profile 可通过 `SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH` 指定。
+- 若要执行本地 notarization，需要提供 `notarytool` 凭据（例如 `NOTARYTOOL_KEY` / `NOTARYTOOL_KEY_ID` / `NOTARYTOOL_ISSUER` 或 keychain profile）。
+
+推荐的最终校验命令：
+
+```bash
+SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 \
+./Scripts/check_macos_release_readiness.sh --require-notarization
+```
 
 脚本自检：
 
 ```bash
 ./Scripts/test_package_build_policy.sh
+./Scripts/test_signing_entitlements_helpers.sh
 ```
 
 当前目录下最近一次本地生成的 DMG 构建产物：

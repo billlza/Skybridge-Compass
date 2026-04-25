@@ -1,3 +1,4 @@
+import CFNetwork
 import Foundation
 import OSLog
 
@@ -357,7 +358,7 @@ public actor WebSocketSignalingClient {
         case .urlsession:
             return [.urlSession(proxyBypass: false)]
         case .auto:
-            return [.urlSession(proxyBypass: false), .urlSession(proxyBypass: true)]
+            return [.urlSession(proxyBypass: true), .urlSession(proxyBypass: false)]
         }
     }
 
@@ -389,11 +390,7 @@ public actor WebSocketSignalingClient {
         config.allowsConstrainedNetworkAccess = true
         config.allowsExpensiveNetworkAccess = true
         if proxyBypass {
-            config.connectionProxyDictionary = [
-                "HTTPEnable": false,
-                "HTTPSEnable": false,
-                "SOCKSEnable": false
-            ]
+            config.connectionProxyDictionary = Self.noProxyConnectionProxyDictionary()
         }
 
         let delegate = URLSessionSignalingDelegate(
@@ -692,6 +689,19 @@ public actor WebSocketSignalingClient {
         let components = duration.components
         return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000.0
     }
+
+    private static func noProxyConnectionProxyDictionary() -> [AnyHashable: Any] {
+        [
+            kCFProxyTypeKey as String: kCFProxyTypeNone as String,
+            "HTTPEnable": false,
+            "HTTPSEnable": false,
+            "SOCKSEnable": false,
+            "ProxyAutoConfigEnable": false,
+            "ProxyAutoDiscoveryEnable": false,
+            "ExceptionsList": [],
+            "ExcludeSimpleHostnames": false
+        ]
+    }
 }
 
 private final class ActorBox<T: Actor>: @unchecked Sendable {
@@ -705,6 +715,10 @@ extension WebSocketSignalingClient {
         for backend: SignalingBackend
     ) -> SignalingHandleID {
         reserveNextHandleId(for: backend)
+    }
+
+    internal static func testOnlyNoProxyConnectionProxyDictionary() -> [AnyHashable: Any] {
+        noProxyConnectionProxyDictionary()
     }
 }
 

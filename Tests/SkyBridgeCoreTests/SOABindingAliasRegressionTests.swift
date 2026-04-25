@@ -8,15 +8,11 @@ final class SOABindingAliasRegressionTests: XCTestCase {
         let remoteUUID = "22222222-2222-2222-2222-222222222222"
         let localAliases = [
             "id:\(localUUID)",
-            "host:\(localUUID)",
-            "bonjour:\(localUUID)@local.",
             "recent:id:\(localUUID)"
         ]
         let remoteAliases = [
             "id:\(remoteUUID)",
-            "host:\(remoteUUID)",
-            "bonjour:\(remoteUUID)@local.",
-            "mac:bonjour:\(remoteUUID)@local."
+            "recent:id:\(remoteUUID)"
         ]
 
         let canonicalLocalPeerId = PeerSessionArbiter.soaPeerId(from: localAliases[0])
@@ -51,6 +47,21 @@ final class SOABindingAliasRegressionTests: XCTestCase {
             XCTAssertEqual(binding.expectedRemotePeerId, canonicalRemotePeerId)
             XCTAssertEqual(binding.pairKey, expectedPairKey)
         }
+    }
+
+    func testSyntheticBonjourAndHostUUIDsDoNotCollapseToStableDeviceId() {
+        let uuid = "33333333-3333-3333-3333-333333333333"
+        let canonicalId = PeerSessionArbiter.canonicalSOAIdentifier("id:\(uuid)")
+
+        XCTAssertEqual(canonicalId, uuid)
+        XCTAssertNotEqual(
+            PeerSessionArbiter.canonicalSOAIdentifier("bonjour:\(uuid)@local."),
+            canonicalId
+        )
+        XCTAssertNotEqual(
+            PeerSessionArbiter.canonicalSOAIdentifier("host:\(uuid)"),
+            canonicalId
+        )
     }
 
     func testSupersedeRequiresAuthenticatedIncoming() async {

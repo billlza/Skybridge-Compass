@@ -15,11 +15,18 @@ import UIKit
 public struct DeviceRowView: View {
     let device: DiscoveredDevice
     let connectionStatus: ConnectionStatus?
+    let connectionStatusText: String?
     let onTap: () -> Void
     
-    public init(device: DiscoveredDevice, connectionStatus: ConnectionStatus? = nil, onTap: @escaping () -> Void) {
+    public init(
+        device: DiscoveredDevice,
+        connectionStatus: ConnectionStatus? = nil,
+        connectionStatusText: String? = nil,
+        onTap: @escaping () -> Void
+    ) {
         self.device = device
         self.connectionStatus = connectionStatus
+        self.connectionStatusText = connectionStatusText
         self.onTap = onTap
     }
     
@@ -52,7 +59,7 @@ public struct DeviceRowView: View {
                             .foregroundColor(.white)
 
                         if let status = connectionStatus {
-                            Text(status.displayName)
+                            Text(connectionStatusText ?? status.displayName)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundColor(connectionStatusColor(status))
                                 .padding(.horizontal, 6)
@@ -275,6 +282,7 @@ struct EmptyDevicesView: View {
 @available(iOS 17.0, *)
 struct ConnectionRowView: View {
     let connection: Connection
+    let statusText: String?
     let onDisconnect: () -> Void
     
     var body: some View {
@@ -301,7 +309,7 @@ struct ConnectionRowView: View {
                     Circle()
                         .fill(statusColor)
                         .frame(width: 6, height: 6)
-                    Text(connection.status.displayName)
+                    Text(statusText ?? connection.status.displayName)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -372,7 +380,10 @@ struct DeviceDetailSheet: View {
                     LabeledContent(RuntimeLocalization.string("名称"), value: device.name)
                     LabeledContent(RuntimeLocalization.string("平台"), value: device.platform.displayName)
                     LabeledContent(RuntimeLocalization.string("系统版本"), value: device.osVersion)
-                    LabeledContent(RuntimeLocalization.string("连接状态"), value: effectiveConnectionStatus?.displayName ?? RuntimeLocalization.string("未连接"))
+                    LabeledContent(
+                        RuntimeLocalization.string("连接状态"),
+                        value: effectiveConnectionStatusText ?? RuntimeLocalization.string("未连接")
+                    )
                     if let ip = device.ipAddress {
                         LabeledContent(RuntimeLocalization.string("IP 地址"), value: ip)
                     }
@@ -491,7 +502,9 @@ struct DeviceDetailSheet: View {
         }
         guard let snapshot = activeCrossNetworkSnapshot else { return nil }
         switch snapshot.phase {
-        case .transportReady, .handshakeComplete:
+        case .transportReady:
+            return .connecting
+        case .handshakeComplete:
             return .connected
         case .reconnecting:
             return .connecting
@@ -518,6 +531,32 @@ struct DeviceDetailSheet: View {
         }
         return normalizedName(snapshot.deviceName ?? crossNetworkManager.remoteDeviceName)
             == normalizedName(device.name)
+    }
+
+    private var effectiveConnectionStatusText: String? {
+        guard let status = effectiveConnectionStatus else { return nil }
+        let rekey = connectionManager.resolvedRekeyStatus(for: device)
+        let crossNetworkSuite =
+            activeCrossNetworkSnapshot?.phase == .handshakeComplete ? activeCrossNetworkSnapshot?.negotiatedSuite : nil
+        let suite = rekey == nil
+            ? (connectionManager.getNegotiatedSuite(for: device.id)?.rawValue ?? crossNetworkSuite)
+            : nil
+        let kind = rekey.map { "\($0.fromSuite) → \($0.toSuite)" }
+        let defaultPQCModeLabel: String?
+        switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
+        case .nativePQC?:
+            defaultPQCModeLabel = "Apple PQC"
+        case .liboqsPQC?:
+            defaultPQCModeLabel = "liboqs"
+        default:
+            defaultPQCModeLabel = nil
+        }
+        return ConnectionPresentationContract.modeAwareStatusText(
+            baseText: status.displayName,
+            kind: kind,
+            suite: suite,
+            defaultPQCModeLabel: defaultPQCModeLabel
+        )
     }
 
     private var isCrossNetworkRemoteDesktopActiveForDevice: Bool {

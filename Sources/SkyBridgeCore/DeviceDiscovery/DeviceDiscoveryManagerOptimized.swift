@@ -294,39 +294,37 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
         logger.info("连接设备: \(device.name)")
 
- // 根据 IPv6 设置选择地址；若地址缺失，则回退到 Bonjour service endpoint。
+ // 根据 IPv6 设置选择地址；若地址缺失，则仅在拥有可信 Bonjour 实例名时回退到 service endpoint。
         let endpoint: NWEndpoint
         let serverNameForTLS: String
-        if enableIPv6Support, let ipv6 = device.ipv6, !ipv6.isEmpty {
- // 优先使用 IPv6 地址
-            let portInt = resolvedConnectablePort(for: device)
+        let portInt = resolvedConnectablePort(for: device)
+
+        if enableIPv6Support, let ipv6 = Self.sanitizedConnectableAddress(device.ipv6) {
             guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
-            let host = NWEndpoint.Host(ipv6)
             let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
-            endpoint = NWEndpoint.hostPort(host: host, port: port)
+            endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(ipv6), port: port)
             serverNameForTLS = ipv6
             logger.info("🌐 使用 IPv6 地址连接: \(ipv6)")
-        } else if let ipv4 = device.ipv4, !ipv4.isEmpty {
- // 回退到 IPv4
-            let portInt = resolvedConnectablePort(for: device)
+        } else if let ipv4 = Self.sanitizedConnectableAddress(device.ipv4) {
             guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
-            let host = NWEndpoint.Host(ipv4)
             let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
-            endpoint = NWEndpoint.hostPort(host: host, port: port)
+            endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(ipv4), port: port)
             serverNameForTLS = ipv4
             logger.info("🌐 使用 IPv4 地址连接: \(ipv4)")
-        } else if let serviceType = resolvedConnectableServiceType(for: device) {
-            let serviceName = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !serviceName.isEmpty else { throw DeviceDiscoveryError.deviceNotConnected }
+        } else if let serviceType = resolvedConnectableServiceType(for: device),
+                  let bonjourEndpoint = Self.preferredBonjourEndpoint(for: device, defaultDomain: serviceDomain) {
             endpoint = .service(
-                name: serviceName,
+                name: bonjourEndpoint.name,
                 type: serviceType,
-                domain: serviceDomain,
+                domain: bonjourEndpoint.domain,
                 interface: nil
             )
-            serverNameForTLS = "\(serviceName).\(serviceDomain)"
-            logger.info("🌐 使用 Bonjour 服务连接: \(serviceName) \(serviceType)")
+            serverNameForTLS = "\(bonjourEndpoint.name).\(bonjourEndpoint.domain)"
+            logger.info("🌐 使用 Bonjour 服务连接: \(bonjourEndpoint.name) \(serviceType)")
         } else {
+            logger.error(
+                "❌ 无法为设备解析有效连接目标: name=\(device.name, privacy: .public) uniqueId=\(device.uniqueIdentifier ?? "", privacy: .public) ipv4=\(device.ipv4 ?? "", privacy: .public) ipv6=\(device.ipv6 ?? "", privacy: .public)"
+            )
             throw DeviceDiscoveryError.deviceNotConnected
         }
 
@@ -552,6 +550,87 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 return String(format: "未知套件(0x%04X)", UInt32(cs))
             }
         }
+    }
+
+    nonisolated static func preferredBonjourEndpoint(
+        for device: DiscoveredDevice,
+        defaultDomain: String
+    ) -> (name: String, domain: String)? {
+        if let parsed = parseBonjourIdentifier(device.uniqueIdentifier) {
+            return parsed
+        }
+
+        guard let name = sanitizeBonjourServiceName(device.name) else {
+            return nil
+        }
+        return (name, normalizedBonjourDomain(defaultDomain))
+    }
+
+    nonisolated private static func parseBonjourIdentifier(
+        _ raw: String?
+    ) -> (name: String, domain: String)? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              raw.hasPrefix("bonjour:") else {
+            return nil
+        }
+
+        let payload = String(raw.dropFirst("bonjour:".count))
+        let components = payload.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let name = sanitizeBonjourServiceName(components.first) else {
+            return nil
+        }
+
+        let domain = components.count > 1 ? components[1] : "local."
+        return (name, normalizedBonjourDomain(domain))
+    }
+
+    nonisolated private static func sanitizeBonjourServiceName(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        if value.hasPrefix("bonjour:") {
+            return parseBonjourIdentifier(value)?.name
+        }
+
+        if let range = value.range(of: "._") {
+            value = String(value[..<range.lowerBound])
+        }
+
+        return PeerTrustLookup.sanitizedBonjourServiceInstanceName(value)
+    }
+
+    nonisolated private static func normalizedBonjourDomain(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "local."
+        }
+        return trimmed.hasSuffix(".") ? trimmed : "\(trimmed)."
+    }
+
+    nonisolated private static func sanitizedConnectableAddress(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return parsedIPAddress(raw)
+    }
+
+    nonisolated private static func parsedIPAddress(_ raw: String) -> String? {
+        var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.hasPrefix("[") && token.hasSuffix("]") {
+            token = String(token.dropFirst().dropLast())
+        }
+        if let percent = token.firstIndex(of: "%") {
+            token = String(token[..<percent])
+        }
+
+        if IPv4Address(token) != nil || IPv6Address(token) != nil {
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return nil
     }
 
  /// 获取指定设备的活动连接
@@ -1051,7 +1130,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  /// 异步添加设备（在后台解析网络信息）
     private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
  // 快速提取基本信息（不阻塞）
-        let deviceName = extractDeviceNameQuick(from: result)
+        let metadata = extractBonjourDeviceInfo(from: result)
+        let deviceName = metadata?.displayName ?? extractDeviceNameQuick(from: result)
         let strong = extractStrongIdentityQuick(from: result)
         let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
         let deviceId = UUID()
@@ -1071,8 +1151,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             name: deviceName,
             ipv4: nil,  // 异步解析
             ipv6: nil,  // 异步解析
+            platformName: metadata?.platform,
+            osVersion: metadata?.osVersion,
+            modelName: metadata?.model,
+            chip: metadata?.chip,
             services: [serviceType],
             portMap: [serviceType: 0],
+            remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? []),
             connectionTypes: [.wifi], // 网络发现默认为Wi-Fi
             uniqueIdentifier: Self.preferredUniqueIdentifier(
                 deviceId: strong.deviceId,
@@ -1104,8 +1189,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 name: deviceName,
                 ipv4: ipv4,
                 ipv6: ipv6,
+                platformName: metadata?.platform,
+                osVersion: metadata?.osVersion,
+                modelName: metadata?.model,
+                chip: metadata?.chip,
                 services: [serviceType],
                 portMap: [serviceType: port],
+                remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? []),
                 connectionTypes: [.wifi],
                 uniqueIdentifier: Self.preferredUniqueIdentifier(
                     deviceId: strong.deviceId,
@@ -1304,7 +1394,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
     private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
  // 更新现有设备信息（不添加新设备）
-        let deviceName = extractDeviceNameQuick(from: result)
+        let metadata = extractBonjourDeviceInfo(from: result)
+        let deviceName = metadata?.displayName ?? extractDeviceNameQuick(from: result)
         let strong = extractStrongIdentityQuick(from: result)
         let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
         let (ipv4, ipv6, port) = await extractNetworkInfoAsync(from: result)
@@ -1333,11 +1424,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
                 let updatedDevice = DiscoveredDevice(
                     id: existingDevice.id,
-                    name: existingDevice.name,
+                    name: deviceName.count > existingDevice.name.count ? deviceName : existingDevice.name,
                     ipv4: ipv4 ?? existingDevice.ipv4,
                     ipv6: ipv6 ?? existingDevice.ipv6,
+                    platformName: metadata?.platform ?? existingDevice.platformName,
+                    osVersion: metadata?.osVersion ?? existingDevice.osVersion,
+                    modelName: metadata?.model ?? existingDevice.modelName,
+                    chip: metadata?.chip ?? existingDevice.chip,
                     services: newServices,
                     portMap: newPortMap,
+                    remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? Array(existingDevice.remoteVideoFormats)),
                     connectionTypes: existingDevice.connectionTypes,
                     uniqueIdentifier: Self.preferredUniqueIdentifier(
                         deviceId: strong.deviceId ?? existingDevice.deviceId,
@@ -1367,6 +1463,22 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             return (devId, fp)
         }
         return (nil, nil)
+    }
+
+    private func extractBonjourDeviceInfo(from result: NWBrowser.Result) -> BonjourDeviceInfo? {
+        guard case .bonjour(let txtRecord) = result.metadata else { return nil }
+        let info = BonjourTXTParser.extractDeviceInfo(txtRecord)
+        if info.deviceId == nil,
+           info.hostname == nil,
+           info.model == nil,
+           info.chip == nil,
+           info.platform == nil,
+           info.osVersion == nil,
+           info.name == nil,
+           info.remoteVideoFormats.isEmpty {
+            return nil
+        }
+        return info
     }
 
     nonisolated private static func preferredUniqueIdentifier(
@@ -1459,7 +1571,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             do {
                 let serviceType = "_skybridge._tcp"
                 // Strong identity TXT (deviceId/pubKeyFP) enables stable binding on peers.
-                let snap = await SelfIdentityProvider.shared.snapshot()
+                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
                 var txt = NWTXTRecord()
                 txt["platform"] = "macos"
                 txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
@@ -1515,7 +1627,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
 
             // Strong identity TXT: allow peers to bind by stable deviceId (no name collision issues).
-            let snap = await SelfIdentityProvider.shared.snapshot()
+            let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
             var txt = NWTXTRecord()
             txt["platform"] = "macos"
             txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
@@ -1645,9 +1757,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
     nonisolated private static func localSOAPeerIdBytes() async -> Data {
         if #available(macOS 14.0, iOS 17.0, *) {
-            let snapshot = await SelfIdentityProvider.shared.snapshot()
-            if !snapshot.deviceId.isEmpty {
-                return soaPeerIdBytes(from: snapshot.deviceId)
+            let deviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+            if !deviceId.isEmpty {
+                return soaPeerIdBytes(from: deviceId)
             }
         }
         return soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
@@ -1685,6 +1797,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         // Use a stable peer id aligned with iOS discovery (bonjour:<name>@<domain>) when possible.
         // This avoids churn across reconnects and improves trust/pairing semantics.
         let peerDeviceId = stablePeerIdentifier(for: connection.endpoint)
+        let endpointHostOrIP: String? = {
+            if case let .hostPort(host, _) = connection.endpoint {
+                return String(describing: host)
+            }
+            return nil
+        }()
+        let classicTransferSessionId = "discovery-optimized-inbound:\(UUID().uuidString)"
         let localSOAPeerId = await localSOAPeerIdBytes()
         var expectedRemoteSOAPeerId: Data?
         var inboundPairKey: Data?
@@ -1695,11 +1814,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     await PeerSessionArbiter.shared.clearOutgoing(pairKey: pairKey, attemptId: nil)
                 }
             }
+            Task {
+                await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)
+            }
         }
         let peer = PeerIdentifier(deviceId: peerDeviceId)
         
         // Precompute identity info for heartbeat without crossing actor boundaries inside GCD timer handlers.
-        let localIdForHeartbeat = await SelfIdentityProvider.shared.snapshot().deviceId
+        let localIdForHeartbeat = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
 
         // ⚠️ 关键修复：不要硬编码 classic-only。
         // iOS 26.2 会优先 PQC（ML-DSA-65 + ML-KEM-768）；如果 mac 端这里固定 Ed25519 会导致 suite 不一致，
@@ -1710,6 +1832,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         var lastPairingIdentityExchangeReplyAt: Date? = nil
         var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority? = nil
         var didMarkConnected = false
+        var latestPeerCapabilities: [String] = []
         
         // Heartbeat: avoid Swift concurrency Tasks here (StrictConcurrency) because they would capture
         // mutable locals like `sessionKeys` and non-Sendable types like `NWConnection`, causing build errors.
@@ -1729,6 +1852,71 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
         let peerIdForPresence = peer.deviceId
         let endpointDescriptionForPresence = stableEndpointLabel(for: connection.endpoint)
+
+        func trimmedIdentifier(_ raw: String?) -> String? {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return trimmed
+        }
+
+        func validatedPairingIdentityPayload(
+            _ payload: AppMessage.PairingIdentityExchangePayload
+        ) -> AppMessage.PairingIdentityExchangePayload? {
+            guard let normalized = payload.normalizedBootstrapPayload else {
+                logger.warning(
+                    "⚠️ ignoring pairingIdentityExchange with empty declaredDeviceId: peer=\(peer.deviceId, privacy: .public) endpoint=\(endpointDescriptionForPresence, privacy: .public)"
+                )
+                return nil
+            }
+            return normalized
+        }
+
+        func normalizedClassicTransferSessionAliases(_ values: [String?]) -> [String] {
+            var normalized: [String] = []
+            var seen = Set<String>()
+
+            for value in values {
+                for candidate in PeerTrustLookup.lookupCandidates(for: value) {
+                    let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { continue }
+                    let lowered = trimmed.lowercased()
+                    guard seen.insert(lowered).inserted else { continue }
+                    normalized.append(trimmed)
+                }
+            }
+
+            return normalized
+        }
+
+        func publishClassicTransferSessionSnapshot(keys: SessionKeys) async {
+            let declaredPeerId = trimmedIdentifier(declaredDeviceIdForVerification)
+            let fallbackPeerId = trimmedIdentifier(peerDeviceId)
+                ?? trimmedIdentifier(peerIdForPresence)
+                ?? endpointDescriptionForPresence
+            let primaryPeerId = declaredPeerId ?? fallbackPeerId
+            let resolvedPeerDeviceId = PeerTrustLookup.persistentDeviceId(from: declaredPeerId)
+                ?? PeerTrustLookup.persistentDeviceId(from: fallbackPeerId)
+                ?? primaryPeerId
+            let aliases = normalizedClassicTransferSessionAliases([
+                declaredDeviceIdForVerification,
+                primaryPeerId,
+                peerDeviceId,
+                endpointHostOrIP,
+                endpointDescriptionForPresence
+            ])
+            let snapshot = ClassicTransferSessionSnapshot(
+                sessionId: classicTransferSessionId,
+                matchDeviceId: primaryPeerId,
+                resolvedPeerDeviceId: resolvedPeerDeviceId,
+                aliases: aliases,
+                endpointHostOrIP: endpointHostOrIP,
+                capabilities: latestPeerCapabilities,
+                sessionKeys: keys
+            )
+            await ClassicTransferSessionRegistry.shared.upsert(session: snapshot)
+        }
 
         func cryptoKind(for suite: CryptoSuite) -> String {
             ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
@@ -1954,6 +2142,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         authenticatedRemoteAuthority = nil
                         driver = nil
                         sessionKeys = nil
+                        await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)
                     default:
                         break
                     }
@@ -2008,6 +2197,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     }
                                 }
                             case .pairingIdentityExchange(let payload):
+                                guard let payload = validatedPairingIdentityPayload(payload) else {
+                                    break
+                                }
                                 let endpoint = stableEndpointLabel(for: connection.endpoint)
                                 let displayName: String = {
                                     if let dn = payload.deviceName, !dn.isEmpty { return dn }
@@ -2016,6 +2208,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 }()
 
                                 declaredDeviceIdForVerification = payload.deviceId
+                                latestPeerCapabilities = payload.capabilities ?? []
                                 await MainActor.run {
                                     PairingTrustApprovalService.shared.updateVerificationCode(
                                         declaredDeviceId: payload.deviceId,
@@ -2055,54 +2248,142 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     kemPublicKeys: payload.kemPublicKeys
                                 )
                                 do {
-                                    // Persist two records:
-                                    // - canonical: keyed by declared stable deviceId (used for UI and policy)
-                                    // - alias: keyed by current transport peer id (e.g., bonjour:<name>@local.) (used for handshake lookups)
-                                    let baseCaps: [String] = [
-                                        "trusted",
-                                        "pqc_bootstrap",
-                                        "platform=\(payload.platform ?? "")",
-                                        "osVersion=\(payload.osVersion ?? "")",
-                                        "modelName=\(payload.modelName ?? "")",
-                                        "chip=\(payload.chip ?? "")",
-                                        "peerEndpoint=\(peer.deviceId)"
-                                    ]
-                                    let canonical = TrustRecord(
-                                        deviceId: payload.deviceId,
-                                        pubKeyFP: "", // intentionally empty: do not enable strict identity pinning during bootstrap
-                                        publicKey: Data(),
-                                        secureEnclavePublicKey: nil,
-                                        protocolPublicKey: nil,
-                                        legacyP256PublicKey: nil,
-                                        signatureAlgorithm: nil,
-                                        kemPublicKeys: payload.kemPublicKeys,
-                                        attestationLevel: .none,
-                                        attestationData: nil,
-                                        capabilities: baseCaps,
-                                        signature: Data(),
-                                        deviceName: displayName
-                                    )
-                                    _ = try await TrustSyncService.shared.addTrustRecord(canonical)
+                                    // Keep bootstrap metadata/KEM keys, but never wipe previously authenticated
+                                    // authority material (protocol keys / fingerprints / SE keys) with empty placeholders.
+                                    let trust = await MainActor.run { TrustSyncService.shared }
+                                    let trimmedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
 
-                                    if peer.deviceId != payload.deviceId {
-                                        let aliasCaps = baseCaps + ["alias=true", "declaredDeviceId=\(payload.deviceId)"]
-                                        let alias = TrustRecord(
-                                            deviceId: peer.deviceId,
-                                            pubKeyFP: "",
-                                            publicKey: Data(),
-                                            secureEnclavePublicKey: nil,
-                                            protocolPublicKey: nil,
-                                            legacyP256PublicKey: nil,
-                                            signatureAlgorithm: nil,
-                                            kemPublicKeys: payload.kemPublicKeys,
-                                            attestationLevel: .none,
-                                            attestationData: nil,
-                                            capabilities: aliasCaps,
-                                            signature: Data(),
-                                            deviceName: displayName
-                                        )
-                                        _ = try await TrustSyncService.shared.addTrustRecord(alias)
+                                    var baseCaps: [String] = ["trusted", "pqc_bootstrap"]
+                                    for capability in payload.capabilities ?? [] {
+                                        let trimmed = capability.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        if !trimmed.isEmpty {
+                                            baseCaps.append(trimmed)
+                                        }
                                     }
+                                    if let platform = payload.platform?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       !platform.isEmpty {
+                                        baseCaps.append("platform=\(platform)")
+                                    }
+                                    if let osVersion = payload.osVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       !osVersion.isEmpty {
+                                        baseCaps.append("osVersion=\(osVersion)")
+                                    }
+                                    if let modelName = payload.modelName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       !modelName.isEmpty {
+                                        baseCaps.append("modelName=\(modelName)")
+                                    }
+                                    if let chip = payload.chip?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       !chip.isEmpty {
+                                        baseCaps.append("chip=\(chip)")
+                                    }
+                                    baseCaps.append("peerEndpoint=\(peer.deviceId)")
+
+                                    var bootstrapKnownDeviceIds: [String] = []
+                                    var seenBootstrapIds = Set<String>()
+                                    func appendBootstrapId(_ raw: String?) {
+                                        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                              !raw.isEmpty,
+                                              seenBootstrapIds.insert(raw).inserted else {
+                                            return
+                                        }
+                                        bootstrapKnownDeviceIds.append(raw)
+                                    }
+
+                                    appendBootstrapId(payload.deviceId)
+                                    appendBootstrapId(peer.deviceId)
+                                    appendBootstrapId(peerIdForPresence)
+
+                                    func mergedCapabilities(existing: [String]?, incoming: [String]) -> [String] {
+                                        var flags = Set<String>()
+                                        var keyed: [String: String] = [:]
+
+                                        func ingest(_ items: [String], preferIncoming: Bool) {
+                                            for raw in items {
+                                                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                guard !trimmed.isEmpty else { continue }
+                                                let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
+                                                if parts.count == 2 {
+                                                    let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                                                    let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                                                    guard !key.isEmpty, !value.isEmpty else { continue }
+                                                    if preferIncoming || keyed[key] == nil {
+                                                        keyed[key] = value
+                                                    }
+                                                } else {
+                                                    flags.insert(trimmed)
+                                                }
+                                            }
+                                        }
+
+                                        ingest(existing ?? [], preferIncoming: false)
+                                        ingest(incoming, preferIncoming: true)
+
+                                        return flags.sorted() + keyed.keys.sorted().compactMap { key in
+                                            keyed[key].map { "\(key)=\($0)" }
+                                        }
+                                    }
+
+                                    func mergedKEMPublicKeys(
+                                        existing: [KEMPublicKeyInfo]?,
+                                        incoming: [KEMPublicKeyInfo]
+                                    ) -> [KEMPublicKeyInfo]? {
+                                        var bySuite = [UInt16: KEMPublicKeyInfo]()
+                                        for key in KEMPublicKeyInfo.normalizedValidKeys(existing ?? []) {
+                                            bySuite[key.suiteWireId] = key
+                                        }
+                                        for key in KEMPublicKeyInfo.normalizedValidKeys(incoming) {
+                                            bySuite[key.suiteWireId] = key
+                                        }
+                                        let merged = bySuite.values.sorted { $0.suiteWireId < $1.suiteWireId }
+                                        return merged.isEmpty ? nil : merged
+                                    }
+
+                                    func mergedKnownDeviceIds(existing: [String]?, incoming: [String]) -> [String]? {
+                                        let merged = Set((existing ?? []) + incoming)
+                                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                            .filter { !$0.isEmpty }
+                                        guard !merged.isEmpty else { return nil }
+                                        return Array(merged).sorted()
+                                    }
+
+                                    func upsertBootstrapRecord(deviceId: String, capabilities: [String]) async throws {
+                                        let existing = await trust.getTrustRecord(deviceId: deviceId)
+                                        let record = TrustRecord(
+                                            deviceId: deviceId,
+                                            pubKeyFP: existing?.pubKeyFP ?? "",
+                                            publicKey: existing?.publicKey ?? Data(),
+                                            secureEnclavePublicKey: existing?.secureEnclavePublicKey,
+                                            protocolPublicKey: existing?.protocolPublicKey,
+                                            protocolSigningAlgorithm: existing?.protocolSigningAlgorithm,
+                                            protocolPublicKeyFingerprint: existing?.protocolPublicKeyFingerprint,
+                                            legacyP256PublicKey: existing?.legacyP256PublicKey,
+                                            signatureAlgorithm: existing?.signatureAlgorithm,
+                                            kemPublicKeys: mergedKEMPublicKeys(
+                                                existing: existing?.kemPublicKeys,
+                                                incoming: payload.kemPublicKeys
+                                            ),
+                                            attestationLevel: existing?.attestationLevel ?? .none,
+                                            attestationData: existing?.attestationData,
+                                            capabilities: mergedCapabilities(
+                                                existing: existing?.capabilities,
+                                                incoming: capabilities
+                                            ),
+                                            signature: Data(),
+                                            deviceName: trimmedDisplayName.isEmpty ? existing?.deviceName : trimmedDisplayName,
+                                            currentDeviceId: payload.deviceId,
+                                            knownDeviceIds: mergedKnownDeviceIds(
+                                                existing: existing?.knownDeviceIdsMetadata,
+                                                incoming: bootstrapKnownDeviceIds
+                                            ),
+                                            lifecycleState: existing?.lifecycleStateMetadata
+                                        )
+                                        _ = try await trust.addTrustRecord(record)
+                                    }
+
+                                    try await upsertBootstrapRecord(
+                                        deviceId: payload.deviceId,
+                                        capabilities: baseCaps
+                                    )
 
                                     logger.info("🔑 已保存对端 KEM 公钥到 TrustSync：declared=\(payload.deviceId, privacy: .public) peer=\(peer.deviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)")
                                 } catch {
@@ -2112,6 +2393,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     from: payload,
                                     displayName: displayName
                                 )
+                                await publishClassicTransferSessionSnapshot(keys: keys)
 
                                 let now = Date()
                                 guard P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
@@ -2127,12 +2409,23 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 let km = DeviceIdentityKeyManager.shared
                                 let kemKeys: [KEMPublicKeyInfo]
                                 do {
-                                    kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                    kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                                        try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                    )
                                 } catch {
                                     logger.warning("⚠️ 本机 KEM 公钥准备失败（bootstrap reply）：\(error.localizedDescription, privacy: .public)")
                                     kemKeys = []
                                 }
-                                let localId = await SelfIdentityProvider.shared.snapshot().deviceId
+                                guard !kemKeys.isEmpty else {
+                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机无有效 KEM 公钥")
+                                    break
+                                }
+                                let localIdRaw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+                                let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !localId.isEmpty else {
+                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
+                                    break
+                                }
                                 let localName = Host.current().localizedName
                                 let localPlatform = "macOS"
                                 let localOS = ProcessInfo.processInfo.operatingSystemVersionString
@@ -2322,6 +2615,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     case .established(let keys):
                         authenticatedRemoteAuthority = await driver.getAuthenticatedRemoteAuthority()
                         sessionKeys = keys
+                        await publishClassicTransferSessionSnapshot(keys: keys)
                         postConnectedUX(keys: keys)
                         if let declaredDeviceIdForVerification {
                             await MainActor.run {

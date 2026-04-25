@@ -494,6 +494,13 @@ private struct QuantumStarLayer: View {
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.7))
                 }
+
+                if let primaryConnectionDetailText {
+                    Text(primaryConnectionDetailText)
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.55))
+                        .lineLimit(1)
+                }
             }
             
             Spacer()
@@ -529,39 +536,68 @@ private struct QuantumStarLayer: View {
 
     // MARK: - Device Model / Chip (best-effort)
 
-    private static var currentModelIdentifier: String {
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        return withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) { ptr in
-                String(cString: ptr)
-            }
-        }
-    }
-
     private static var currentModelDisplayName: String {
-        // 只维护你当前机型/常见机型；其余回退到 identifier
-        switch currentModelIdentifier {
-        case "iPhone17,1": return "iPhone 16 Pro"
-        case "iPhone17,2": return "iPhone 16 Pro Max"
-        case "iPhone17,3": return "iPhone 16"
-        case "iPhone17,4": return "iPhone 16 Plus"
-        default:
-            return currentModelIdentifier
-        }
+        AppleMobileDeviceIdentity.currentSnapshot().modelName
     }
 
     private static var currentChipDisplayName: String {
-        switch currentModelIdentifier {
-        case "iPhone17,1", "iPhone17,2": return "A18 Pro"
-        case "iPhone17,3", "iPhone17,4": return "A18"
-        default:
-            return "Apple Silicon"
-        }
+        AppleMobileDeviceIdentity.currentSnapshot().chip
     }
 
     private var primaryConnectionStatusText: String {
         viewModel.topConnectionPresentation.statusText
+    }
+
+    private var primaryConnectionDetailText: String? {
+        viewModel.topConnectionPresentation.detailText
+    }
+
+    private var defaultPQCModeLabel: String? {
+        switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
+        case .nativePQC?:
+            return "Apple PQC"
+        case .liboqsPQC?:
+            return "liboqs"
+        default:
+            return nil
+        }
+    }
+
+    private func formattedConnectionStatusText(
+        for device: DiscoveredDevice,
+        status: ConnectionStatus?
+    ) -> String? {
+        guard let status else { return nil }
+        let rekey = connectionManager.resolvedRekeyStatus(for: device)
+        let crossNetworkSuite = negotiatedCrossNetworkSuite(for: device)
+        let suite = rekey == nil
+            ? (connectionManager.getNegotiatedSuite(for: device.id)?.rawValue ?? crossNetworkSuite)
+            : nil
+        let kind = rekey.map { "\($0.fromSuite) → \($0.toSuite)" }
+        return ConnectionPresentationContract.modeAwareStatusText(
+            baseText: status.displayName,
+            kind: kind,
+            suite: suite,
+            defaultPQCModeLabel: defaultPQCModeLabel
+        )
+    }
+
+    private func negotiatedCrossNetworkSuite(for device: DiscoveredDevice) -> String? {
+        guard let snapshot = crossNetworkManager.activeSessionSnapshot,
+              snapshot.phase == .handshakeComplete else {
+            return nil
+        }
+
+        let normalizedDeviceID = normalizedIdentifier(device.id)
+        let snapshotID = normalizedIdentifier(snapshot.deviceId ?? crossNetworkManager.remoteDeviceId)
+        if snapshotID == normalizedDeviceID {
+            return snapshot.negotiatedSuite
+        }
+
+        let normalizedDeviceName = normalizedName(device.name)
+        let snapshotName = normalizedName(snapshot.deviceName ?? crossNetworkManager.remoteDeviceName)
+        guard normalizedDeviceName == snapshotName else { return nil }
+        return snapshot.negotiatedSuite
     }
 
     private var primaryConnectionStatusColor: Color {
@@ -718,9 +754,14 @@ private struct QuantumStarLayer: View {
             } else {
                 VStack(spacing: 8) {
                     ForEach(viewModel.discoveredDevices.prefix(3)) { device in
+                        let status = connectionManager.resolvedConnectionStatus(for: device)
                         DeviceRowView(
                             device: device,
-                            connectionStatus: connectionManager.resolvedConnectionStatus(for: device)
+                            connectionStatus: status,
+                            connectionStatusText: formattedConnectionStatusText(
+                                for: device,
+                                status: status
+                            )
                         ) {
                             showingDeviceDetail = device
                         }
@@ -753,7 +794,13 @@ private struct QuantumStarLayer: View {
             
             VStack(spacing: 8) {
                 ForEach(displayedActiveConnections) { connection in
-                    ConnectionRowView(connection: connection) {
+                    ConnectionRowView(
+                        connection: connection,
+                        statusText: formattedConnectionStatusText(
+                            for: connection.device,
+                            status: connectionManager.resolvedConnectionStatus(for: connection.device) ?? connection.status
+                        )
+                    ) {
                         Task {
                             await disconnect(connection)
                         }
@@ -794,7 +841,7 @@ private struct QuantumStarLayer: View {
             portMap: [:],
             signalStrength: -50,
             lastSeen: Date(),
-            isConnected: true,
+            isConnected: snapshot.phase == .handshakeComplete,
             isTrusted: true,
             publicKey: nil,
             advertisedCapabilities: ["remote_desktop"],
@@ -803,7 +850,7 @@ private struct QuantumStarLayer: View {
         return Connection(
             id: "webrtc-\(sessionId)",
             device: pseudoDevice,
-            status: snapshot.phase == .reconnecting ? .connecting : .connected,
+            status: snapshot.phase == .handshakeComplete ? .connected : .connecting,
             encryptionType: .pqc
         )
     }
@@ -1084,11 +1131,17 @@ enum QRCodeHubMode: String, CaseIterable, Identifiable {
 struct QRCodeHubInteractionState: Equatable, Sendable {
     var isConnecting = false
     var isSubmittingCode = false
+    var isSubmittingScannedConnectLink = false
     var sheetErrorMessage: String?
 
     mutating func startConnectionCodeSubmission() {
         sheetErrorMessage = nil
         isSubmittingCode = true
+    }
+
+    mutating func startScannedConnectLinkSubmission() {
+        sheetErrorMessage = nil
+        isSubmittingScannedConnectLink = true
     }
 
     mutating func startPairingConnection() {
@@ -1102,6 +1155,7 @@ struct QRCodeHubInteractionState: Equatable, Sendable {
     mutating func resetForModeChange() {
         isConnecting = false
         isSubmittingCode = false
+        isSubmittingScannedConnectLink = false
         sheetErrorMessage = nil
     }
 
@@ -1113,6 +1167,7 @@ struct QRCodeHubInteractionState: Equatable, Sendable {
                 sheetErrorMessage = normalized
             }
             isSubmittingCode = false
+            isSubmittingScannedConnectLink = false
             isConnecting = false
         case .idle, .connecting, .connected:
             break
@@ -1122,9 +1177,11 @@ struct QRCodeHubInteractionState: Equatable, Sendable {
     mutating func handleReadiness(_ readiness: CrossNetworkWebRTCManager.Readiness) -> Bool {
         switch readiness {
         case .handshakeComplete:
+            isSubmittingScannedConnectLink = false
             return true
         case .idle:
             isSubmittingCode = false
+            isSubmittingScannedConnectLink = false
             return false
         case .transportReady:
             return false
@@ -1144,6 +1201,7 @@ private struct QRCodeHubSheet: View {
     @State private var codeInput: String = ""
     @State private var generatedCode: String = ""
     @State private var isGeneratingCode = false
+    @State private var isPresentedInHierarchy = false
     @FocusState private var isCodeInputFocused: Bool
 
     let onScanPairingData: (QRCodeData) -> Void
@@ -1173,9 +1231,10 @@ private struct QRCodeHubSheet: View {
                                 },
                                 onScanString: { string in
                                     if CrossNetworkWebRTCManager.isConnectLinkString(string) {
+                                        guard !interactionState.isSubmittingScannedConnectLink else { return }
+                                        interactionState.startScannedConnectLinkSubmission()
                                         SkyBridgeLogger.shared.info("🌐 扫描到跨网连接二维码")
                                         onScanConnectLink(string)
-                                        dismiss()
                                         return
                                     }
                                     // 非配对二维码：先简单提示（后续可扩展文件分享等）
@@ -1188,6 +1247,26 @@ private struct QRCodeHubSheet: View {
                             // 用 id 强制重建 VC，从而支持“重新扫描”
                             .id(scannerSessionID)
                             .ignoresSafeArea()
+
+                            if interactionState.isSubmittingScannedConnectLink {
+                                Color.black.opacity(0.4)
+                                    .ignoresSafeArea()
+
+                                VStack(spacing: 14) {
+                                    ProgressView()
+                                        .controlSize(.large)
+                                    Text("连接中...")
+                                        .font(.headline)
+                                        .foregroundStyle(.white)
+                                    Text("正在验证二维码并建立跨网连接")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.white.opacity(0.8))
+                                }
+                                .padding(24)
+                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                .padding(.horizontal, 24)
+                                .transition(.opacity)
+                            }
 
                             if let pendingPairing {
                                 // 半透明遮罩
@@ -1381,6 +1460,13 @@ private struct QRCodeHubSheet: View {
                     Button("关闭") { dismiss() }
                 }
             }
+            .onAppear {
+                isPresentedInHierarchy = true
+            }
+            .onDisappear {
+                isPresentedInHierarchy = false
+                interactionState.resetForModeChange()
+            }
             .alert("跨网连接", isPresented: Binding(
                 get: { interactionState.sheetErrorMessage != nil },
                 set: { if !$0 { interactionState.sheetErrorMessage = nil } }
@@ -1396,6 +1482,7 @@ private struct QRCodeHubSheet: View {
                 isCodeInputFocused = false
             }
             .onChange(of: crossNetworkManager.state) { _, newValue in
+                guard isPresentedInHierarchy else { return }
                 interactionState.handleCrossNetworkState(newValue)
             }
             .onChange(of: crossNetworkManager.readiness) { _, newValue in

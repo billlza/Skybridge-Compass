@@ -1,0 +1,430 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STATIC_ONLY=0
+
+usage() {
+  cat <<'EOF'
+用法: check_ios_test_configuration.sh [--root <path>] [--static-only]
+
+校验 iOS Xcode 测试配置是否满足以下约束：
+1. SkyBridgeCompassiOSTests 目录下的 Swift 文件都已加入测试 target Sources
+2. App scheme 使用共享 test plan，且 test plan 正确引用测试 target 与宿主 app
+3. 独立测试 scheme 的 BuildAction / TestAction / LaunchAction / ProfileAction 都指向正确宿主 app
+4. 测试 target 保持 TEST_HOST / BUNDLE_LOADER 配置
+5. 若存在 XcodeGen project.yml，则其 target / scheme 源配置也必须保持一致
+6. 默认模式下额外用 xcodebuild -showdestinations 做一次轻量动态探测
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root)
+      ROOT_DIR="$2"
+      shift 2
+      ;;
+    --static-only)
+      STATIC_ONLY=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "[ios-test-config] 未知参数: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+python3 - "$ROOT_DIR" "$STATIC_ONLY" <<'PY'
+import json
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Optional
+
+root = Path(sys.argv[1]).resolve()
+static_only = sys.argv[2] == "1"
+
+project_dir = root / "SkyBridge Compass iOS" / "SkyBridgeCompass-iOS.xcodeproj"
+pbxproj_path = project_dir / "project.pbxproj"
+app_scheme_path = project_dir / "xcshareddata" / "xcschemes" / "SkyBridgeCompass-iOS.xcscheme"
+test_scheme_path = project_dir / "xcshareddata" / "xcschemes" / "SkyBridgeCompassiOSTests.xcscheme"
+test_plan_path = project_dir / "xcshareddata" / "xctestplans" / "SkyBridgeCompass-iOS-Shared.xctestplan"
+project_yaml_path = root / "SkyBridge Compass iOS" / "project.yml"
+tests_dir = root / "SkyBridge Compass iOS" / "SkyBridgeCompassiOSTests"
+
+required_paths = [
+    pbxproj_path,
+    app_scheme_path,
+    test_scheme_path,
+    test_plan_path,
+    tests_dir,
+]
+
+errors: list[str] = []
+
+for path in required_paths:
+    if not path.exists():
+        errors.append(f"缺少必需路径: {path}")
+
+if errors:
+    for error in errors:
+        print(f"[ios-test-config] {error}", file=sys.stderr)
+    sys.exit(1)
+
+pbxproj_text = pbxproj_path.read_text(encoding="utf-8")
+project_yaml_text = project_yaml_path.read_text(encoding="utf-8") if project_yaml_path.exists() else None
+
+APP_TARGET_NAME = "SkyBridgeCompass-iOS"
+TEST_TARGET_NAME = "SkyBridgeCompassiOSTests"
+TEST_PLAN_REFERENCE = "container:SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xctestplans/SkyBridgeCompass-iOS-Shared.xctestplan"
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        errors.append(message)
+
+
+def parse_scheme(path: Path) -> ET.Element:
+    return ET.parse(path).getroot()
+
+
+def buildable_refs_by_blueprint_name(scheme: ET.Element) -> dict[str, list[ET.Element]]:
+    refs: dict[str, list[ET.Element]] = {}
+    for ref in scheme.iterfind(".//BuildableReference"):
+        name = ref.attrib.get("BlueprintName")
+        if not name:
+            continue
+        refs.setdefault(name, []).append(ref)
+    return refs
+
+
+def build_action_entries(scheme: ET.Element) -> list[ET.Element]:
+    return scheme.findall("./BuildAction/BuildActionEntries/BuildActionEntry")
+
+
+def testable_entries(scheme: ET.Element) -> list[ET.Element]:
+    return scheme.findall("./TestAction/Testables/TestableReference")
+
+
+def macro_expansion_ref(scheme: ET.Element) -> Optional[ET.Element]:
+    return scheme.find("./TestAction/MacroExpansion/BuildableReference")
+
+
+def action_buildable_ref(action: Optional[ET.Element]) -> Optional[ET.Element]:
+    if action is None:
+        return None
+    ref = action.find("./BuildableProductRunnable/BuildableReference")
+    if ref is not None:
+        return ref
+    return action.find("./MacroExpansion/BuildableReference")
+
+
+def extract_yaml_child_block(text: str, section_name: str, child_name: str) -> Optional[str]:
+    lines = text.splitlines()
+    section_start = None
+    for index, line in enumerate(lines):
+        if line.rstrip() == f"{section_name}:":
+            section_start = index + 1
+            break
+    if section_start is None:
+        return None
+
+    child_start = None
+    for index in range(section_start, len(lines)):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped and not line.startswith(" "):
+            break
+        if line.rstrip() == f"  {child_name}:":
+            child_start = index
+            break
+    if child_start is None:
+        return None
+
+    block: list[str] = [lines[child_start]]
+    for index in range(child_start + 1, len(lines)):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped and not line.startswith(" "):
+            break
+        if line.startswith("  ") and not line.startswith("    ") and stripped.endswith(":"):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+def yaml_scheme_build_includes_target(block: str, target_name: str) -> bool:
+    pattern = rf"(?m)^\s+{re.escape(target_name)}:\s*(?:all|\[[^\]]*\btest\b[^\]]*\])\s*$"
+    return re.search(pattern, block) is not None
+
+
+def nested_key_present(payload: object, key: str) -> bool:
+    if isinstance(payload, dict):
+        if key in payload:
+            return True
+        return any(nested_key_present(value, key) for value in payload.values())
+    if isinstance(payload, list):
+        return any(nested_key_present(item, key) for item in payload)
+    return False
+
+
+app_scheme = parse_scheme(app_scheme_path)
+test_scheme = parse_scheme(test_scheme_path)
+
+app_build_refs = buildable_refs_by_blueprint_name(app_scheme)
+test_build_refs = buildable_refs_by_blueprint_name(test_scheme)
+
+def blueprint_identifier(scheme_refs: dict[str, list[ET.Element]], target_name: str) -> Optional[str]:
+    refs = scheme_refs.get(target_name) or []
+    for ref in refs:
+        value = ref.attrib.get("BlueprintIdentifier")
+        if value:
+            return value
+    return None
+
+
+app_target_id = blueprint_identifier(app_build_refs, APP_TARGET_NAME)
+test_target_id = blueprint_identifier(app_build_refs, TEST_TARGET_NAME) or blueprint_identifier(test_build_refs, TEST_TARGET_NAME)
+
+require(app_target_id is not None, f"{APP_TARGET_NAME} 的 BlueprintIdentifier 未能从 scheme 解析出来")
+require(test_target_id is not None, f"{TEST_TARGET_NAME} 的 BlueprintIdentifier 未能从 scheme 解析出来")
+
+if errors:
+    for error in errors:
+        print(f"[ios-test-config] {error}", file=sys.stderr)
+    sys.exit(1)
+
+assert app_target_id is not None
+assert test_target_id is not None
+
+# 1. 新增测试文件必须进入测试 target Sources
+test_swift_files = sorted(path.name for path in tests_dir.glob("*.swift"))
+require(bool(test_swift_files), f"{tests_dir} 下未找到任何 Swift 测试文件")
+
+native_target_match = re.search(
+    rf"{re.escape(test_target_id)} /\* {re.escape(TEST_TARGET_NAME)} \*/ = \{{.*?buildPhases = \((.*?)\);.*?\}};",
+    pbxproj_text,
+    re.DOTALL,
+)
+require(native_target_match is not None, f"project.pbxproj 未找到测试 target {TEST_TARGET_NAME} 的 PBXNativeTarget 定义")
+
+sources_phase_id = None
+if native_target_match is not None:
+    build_phases_payload = native_target_match.group(1)
+    phase_match = re.search(r"([A-Z0-9]+) /\* Sources \*/", build_phases_payload)
+    if phase_match:
+        sources_phase_id = phase_match.group(1)
+require(sources_phase_id is not None, f"{TEST_TARGET_NAME} 未绑定 Sources build phase")
+
+sources_phase_match = None
+if sources_phase_id is not None:
+    sources_phase_match = re.search(
+        rf"{re.escape(sources_phase_id)} /\* Sources \*/ = \{{.*?files = \((.*?)\);.*?\}};",
+        pbxproj_text,
+        re.DOTALL,
+    )
+require(sources_phase_match is not None, f"project.pbxproj 未找到测试 target Sources build phase 内容")
+
+sources_payload = sources_phase_match.group(1) if sources_phase_match is not None else ""
+
+for file_name in test_swift_files:
+    require(
+        f"/* {file_name} */ = {{isa = PBXFileReference;" in pbxproj_text,
+        f"{file_name} 未加入 project.pbxproj 文件引用",
+    )
+    require(
+        f"/* {file_name} in Sources */ = {{isa = PBXBuildFile;" in pbxproj_text,
+        f"{file_name} 未生成测试 target 的 PBXBuildFile 记录",
+    )
+    require(
+        f"/* {file_name} in Sources */" in sources_payload,
+        f"{file_name} 未加入 {TEST_TARGET_NAME} 的 Sources build phase",
+    )
+
+# 2. 测试 target 需要宿主 app
+for required_snippet in [
+    'BUNDLE_LOADER = "$(TEST_HOST)";',
+    'TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS";',
+]:
+    require(required_snippet in pbxproj_text, f"测试 target 缺少必需配置: {required_snippet}")
+
+# 3. App scheme 必须引用共享 test plan，且能构建测试 target
+app_scheme_test_plan = app_scheme.find("./TestAction/TestPlans/TestPlanReference")
+require(app_scheme_test_plan is not None, f"{APP_TARGET_NAME}.xcscheme 未配置 TestPlanReference")
+if app_scheme_test_plan is not None:
+    require(
+        app_scheme_test_plan.attrib.get("reference") == TEST_PLAN_REFERENCE,
+        f"{APP_TARGET_NAME}.xcscheme 未引用共享 test plan: {TEST_PLAN_REFERENCE}",
+    )
+
+app_scheme_build_entries = build_action_entries(app_scheme)
+app_scheme_build_targets = {
+    entry.find("./BuildableReference").attrib.get("BlueprintName")
+    for entry in app_scheme_build_entries
+    if entry.find("./BuildableReference") is not None
+}
+require(TEST_TARGET_NAME in app_scheme_build_targets, f"{APP_TARGET_NAME}.xcscheme 的 BuildAction 未包含 {TEST_TARGET_NAME}")
+
+app_scheme_macro = macro_expansion_ref(app_scheme)
+require(app_scheme_macro is not None, f"{APP_TARGET_NAME}.xcscheme 缺少 TestAction MacroExpansion")
+if app_scheme_macro is not None:
+    require(
+        app_scheme_macro.attrib.get("BlueprintIdentifier") == app_target_id,
+        f"{APP_TARGET_NAME}.xcscheme 的 TestAction MacroExpansion 必须指向宿主 app",
+    )
+
+# 4. 共享 test plan 必须同时知道测试 target 与宿主 app
+test_plan = json.loads(test_plan_path.read_text(encoding="utf-8"))
+test_target_entries = test_plan.get("testTargets", [])
+test_target_ids = {
+    entry.get("target", {}).get("identifier")
+    for entry in test_target_entries
+    if isinstance(entry, dict)
+}
+require(
+    test_target_id in test_target_ids,
+    f"{test_plan_path.name} 未包含测试 target {TEST_TARGET_NAME}",
+)
+
+variable_expansion_target_id = (
+    test_plan.get("defaultOptions", {})
+    .get("targetForVariableExpansion", {})
+    .get("identifier")
+)
+require(
+    variable_expansion_target_id == app_target_id,
+    f"{test_plan_path.name} 的 targetForVariableExpansion 必须指向宿主 app",
+)
+require(
+    not nested_key_present(test_plan, "selectedTests"),
+    f"{test_plan_path.name} 不得静态配置 selectedTests 过滤",
+)
+require(
+    not nested_key_present(test_plan, "skippedTests"),
+    f"{test_plan_path.name} 不得静态配置 skippedTests 过滤",
+)
+
+# 5. 独立测试 scheme 也必须可单独运行
+test_scheme_build_entries = build_action_entries(test_scheme)
+test_scheme_build_targets = {
+    entry.find("./BuildableReference").attrib.get("BlueprintName")
+    for entry in test_scheme_build_entries
+    if entry.find("./BuildableReference") is not None
+}
+require(APP_TARGET_NAME in test_scheme_build_targets, f"{TEST_TARGET_NAME}.xcscheme 的 BuildAction 未包含宿主 app")
+require(TEST_TARGET_NAME in test_scheme_build_targets, f"{TEST_TARGET_NAME}.xcscheme 的 BuildAction 未包含测试 bundle")
+
+test_scheme_macro = macro_expansion_ref(test_scheme)
+require(test_scheme_macro is not None, f"{TEST_TARGET_NAME}.xcscheme 缺少 TestAction MacroExpansion")
+if test_scheme_macro is not None:
+    require(
+        test_scheme_macro.attrib.get("BlueprintIdentifier") == app_target_id,
+        f"{TEST_TARGET_NAME}.xcscheme 的 TestAction MacroExpansion 必须指向宿主 app",
+    )
+
+test_scheme_launch_ref = action_buildable_ref(test_scheme.find("./LaunchAction"))
+require(test_scheme_launch_ref is not None, f"{TEST_TARGET_NAME}.xcscheme 缺少 LaunchAction 宿主 app 引用")
+if test_scheme_launch_ref is not None:
+    require(
+        test_scheme_launch_ref.attrib.get("BlueprintIdentifier") == app_target_id,
+        f"{TEST_TARGET_NAME}.xcscheme 的 LaunchAction 必须指向宿主 app",
+    )
+
+test_scheme_profile_ref = action_buildable_ref(test_scheme.find("./ProfileAction"))
+require(test_scheme_profile_ref is not None, f"{TEST_TARGET_NAME}.xcscheme 缺少 ProfileAction 宿主 app 引用")
+if test_scheme_profile_ref is not None:
+    require(
+        test_scheme_profile_ref.attrib.get("BlueprintIdentifier") == app_target_id,
+        f"{TEST_TARGET_NAME}.xcscheme 的 ProfileAction 必须指向宿主 app",
+    )
+
+testables = testable_entries(test_scheme)
+testable_target_ids = {
+    testable.find("./BuildableReference").attrib.get("BlueprintIdentifier")
+    for testable in testables
+    if testable.find("./BuildableReference") is not None and testable.attrib.get("skipped") != "YES"
+}
+require(
+    test_target_id in testable_target_ids,
+    f"{TEST_TARGET_NAME}.xcscheme 的 Testables 未启用 {TEST_TARGET_NAME}",
+)
+
+# 6. 若仓库以 XcodeGen project.yml 为工程源头，也必须保持同样约束
+if project_yaml_text is not None:
+    target_block = extract_yaml_child_block(project_yaml_text, "targets", TEST_TARGET_NAME)
+    require(target_block is not None, "project.yml 缺少 SkyBridgeCompassiOSTests target 定义")
+    if target_block is not None:
+        require(
+            "hostApplication: SkyBridgeCompass-iOS" in target_block,
+            "project.yml 的 SkyBridgeCompassiOSTests target 缺少 hostApplication: SkyBridgeCompass-iOS",
+        )
+        require(
+            "- path: SkyBridgeCompassiOSTests" in target_block,
+            "project.yml 的 SkyBridgeCompassiOSTests target 未覆盖测试源码目录",
+        )
+
+    app_scheme_block = extract_yaml_child_block(project_yaml_text, "schemes", APP_TARGET_NAME)
+    require(app_scheme_block is not None, "project.yml 缺少 SkyBridgeCompass-iOS scheme 定义")
+    if app_scheme_block is not None:
+        require(
+            yaml_scheme_build_includes_target(app_scheme_block, TEST_TARGET_NAME),
+            "project.yml 的 SkyBridgeCompass-iOS scheme 未将 SkyBridgeCompassiOSTests 纳入 build targets",
+        )
+
+    test_scheme_block = extract_yaml_child_block(project_yaml_text, "schemes", TEST_TARGET_NAME)
+    require(test_scheme_block is not None, "project.yml 缺少 SkyBridgeCompassiOSTests scheme 定义")
+    if test_scheme_block is not None:
+        require(
+            yaml_scheme_build_includes_target(test_scheme_block, APP_TARGET_NAME),
+            "project.yml 的 SkyBridgeCompassiOSTests scheme 未将宿主 app 纳入 build targets",
+        )
+        require(
+            yaml_scheme_build_includes_target(test_scheme_block, TEST_TARGET_NAME),
+            "project.yml 的 SkyBridgeCompassiOSTests scheme 未将测试 bundle 纳入 build targets",
+        )
+
+# 7. 轻量动态探测：scheme 不应再掉成 empty supported platforms
+if not static_only:
+    command = [
+        "xcodebuild",
+        "-project",
+        str(project_dir),
+        "-scheme",
+        TEST_TARGET_NAME,
+        "-showdestinations",
+    ]
+    probe = subprocess.run(
+        command,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = probe.stdout or ""
+    require(probe.returncode == 0, f"xcodebuild -showdestinations 执行失败: {output.strip()}")
+    require(
+        "Supported platforms for the buildables in the current scheme is empty." not in output,
+        f"{TEST_TARGET_NAME}.xcscheme 仍然出现 supported platforms is empty",
+    )
+    require(
+        f'Available destinations for the "{TEST_TARGET_NAME}" scheme:' in output,
+        f"{TEST_TARGET_NAME}.xcscheme 未返回可用 destinations",
+    )
+
+if errors:
+    for error in errors:
+        print(f"[ios-test-config] {error}", file=sys.stderr)
+    sys.exit(1)
+
+mode = "static" if static_only else "static+dynamic"
+print(f"[ios-test-config] iOS 测试配置检查通过 ({mode})")
+PY

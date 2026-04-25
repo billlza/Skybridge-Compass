@@ -409,7 +409,7 @@ public class DeviceDiscoveryManager: BaseManager {
                 return
             }
             do {
-                let snap = await SelfIdentityProvider.shared.snapshot()
+                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
                 var txt = NWTXTRecord()
                 txt["platform"] = "macos"
                 txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
@@ -739,9 +739,9 @@ public class DeviceDiscoveryManager: BaseManager {
 
     nonisolated private static func localSOAPeerIdBytes() async -> Data {
         if #available(macOS 14.0, iOS 17.0, *) {
-            let snapshot = await SelfIdentityProvider.shared.snapshot()
-            if !snapshot.deviceId.isEmpty {
-                return soaPeerIdBytes(from: snapshot.deviceId)
+            let deviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+            if !deviceId.isEmpty {
+                return soaPeerIdBytes(from: deviceId)
             }
         }
         return soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
@@ -787,14 +787,33 @@ public class DeviceDiscoveryManager: BaseManager {
         // Use a stable peer id string aligned with iOS discovery (bonjour:<name>@<domain>) when possible.
         // This improves trust/pairing UX and ensures trust lookups don't churn across reconnects.
         let peerDeviceId = stablePeerIdentifier(for: connection.endpoint)
+        let endpointHostOrIP: String? = {
+            if case let .hostPort(host, _) = connection.endpoint {
+                return String(describing: host)
+            }
+            return nil
+        }()
+        let classicTransferSessionId = "discovery-inbound:\(UUID().uuidString)"
+        let presencePeerId = peerDeviceId
         let localSOAPeerId = await localSOAPeerIdBytes()
         var expectedRemoteSOAPeerId: Data?
         var inboundPairKey: Data?
+        var latestPeerCapabilities: [String] = []
         defer {
             if let inboundPairKey {
                 Task {
                     await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
                     await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+                }
+            }
+            Task {
+                await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)
+                await MainActor.run {
+                    ConnectionPresenceService.shared.markDisconnected(peerId: presencePeerId)
+                    UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
+                        peerId: presencePeerId,
+                        displayName: presenceDisplayName()
+                    )
                 }
             }
         }
@@ -807,9 +826,103 @@ public class DeviceDiscoveryManager: BaseManager {
         // 并使用本机稳定的身份密钥（DeviceIdentityKeyManager），而不是每次随机生成。
         var driver: HandshakeDriver?
         var sessionKeys: SessionKeys?
+        var previousSessionKeysBeforeRekey: SessionKeys?
         var declaredDeviceIdForVerification: String?
         var lastPairingIdentityExchangeReplyAt: Date?
         var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+
+        func trimmedIdentifier(_ raw: String?) -> String? {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return trimmed
+        }
+
+        func validatedPairingIdentityPayload(
+            _ payload: AppMessage.PairingIdentityExchangePayload
+        ) -> AppMessage.PairingIdentityExchangePayload? {
+            guard let normalized = payload.normalizedBootstrapPayload else {
+                logger.warning(
+                    "⚠️ ignoring pairingIdentityExchange with empty declaredDeviceId: peer=\(peerDeviceId, privacy: .public) endpoint=\(endpointDescription, privacy: .public)"
+                )
+                return nil
+            }
+            return normalized
+        }
+
+        func normalizedClassicTransferSessionAliases(_ values: [String?]) -> [String] {
+            var normalized: [String] = []
+            var seen = Set<String>()
+
+            for value in values {
+                for candidate in PeerTrustLookup.lookupCandidates(for: value) {
+                    let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { continue }
+                    let lowered = trimmed.lowercased()
+                    guard seen.insert(lowered).inserted else { continue }
+                    normalized.append(trimmed)
+                }
+            }
+
+            return normalized
+        }
+
+        func publishClassicTransferSessionSnapshot(keys: SessionKeys) async {
+            let declaredPeerId = trimmedIdentifier(declaredDeviceIdForVerification)
+            let fallbackPeerId = trimmedIdentifier(peerDeviceId) ?? endpointDescription
+            let primaryPeerId = declaredPeerId ?? fallbackPeerId
+            let resolvedPeerDeviceId = PeerTrustLookup.persistentDeviceId(from: declaredPeerId)
+                ?? PeerTrustLookup.persistentDeviceId(from: fallbackPeerId)
+                ?? primaryPeerId
+            let aliases = normalizedClassicTransferSessionAliases([
+                declaredDeviceIdForVerification,
+                primaryPeerId,
+                peerDeviceId,
+                endpointHostOrIP,
+                endpointDescription
+            ])
+            let snapshot = ClassicTransferSessionSnapshot(
+                sessionId: classicTransferSessionId,
+                matchDeviceId: primaryPeerId,
+                resolvedPeerDeviceId: resolvedPeerDeviceId,
+                aliases: aliases,
+                endpointHostOrIP: endpointHostOrIP,
+                capabilities: latestPeerCapabilities,
+                sessionKeys: keys
+            )
+            await ClassicTransferSessionRegistry.shared.upsert(session: snapshot)
+        }
+
+        func presenceDisplayName() -> String {
+            if presencePeerId.hasPrefix("bonjour:") {
+                let payload = presencePeerId.dropFirst("bonjour:".count)
+                return payload.split(separator: "@", maxSplits: 1).first.map(String.init) ?? endpointDescription
+            }
+            return endpointDescription
+        }
+
+        func publishPresence(keys: SessionKeys) async {
+            let suite = keys.negotiatedSuite
+            let cryptoKind = ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
+            await MainActor.run {
+                let displayName = presenceDisplayName()
+                ConnectionPresenceService.shared.markConnected(
+                    peerId: presencePeerId,
+                    displayName: displayName,
+                    address: endpointHostOrIP,
+                    cryptoKind: cryptoKind,
+                    suite: suite.rawValue
+                )
+                UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
+                    peerId: presencePeerId,
+                    displayName: displayName,
+                    cryptoKind: cryptoKind,
+                    suite: suite.rawValue,
+                    guardStatus: "守护中"
+                )
+            }
+        }
 
         func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
             // Finished: 固定长度 38 bytes（magic 4 + version 1 + direction 1 + mac 32）
@@ -902,6 +1015,42 @@ public class DeviceDiscoveryManager: BaseManager {
                 let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
                 let frame = HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx")
 
+                if let messageA = try? HandshakeMessageA.decode(from: frame),
+                   sessionKeys != nil,
+                   previousSessionKeysBeforeRekey == nil {
+                    let fromSuite = sessionKeys?.negotiatedSuite.rawValue ?? "?"
+                    let toSuite = messageA.supportedSuites.first?.rawValue ?? "?"
+                    if let inboundPairKey {
+                        logger.info("🧩 inbound rekey: releasing SOA established guard peer=\(peer.deviceId, privacy: .public)")
+                        await PeerSessionArbiter.shared.clearEstablished(pairKey: inboundPairKey)
+                        await PeerSessionArbiter.shared.clearOutgoing(pairKey: inboundPairKey, attemptId: nil)
+                    }
+                    logger.info(
+                        "🔁 入站 rekey：\(fromSuite, privacy: .public) -> \(toSuite, privacy: .public) peer=\(peer.deviceId, privacy: .public)"
+                    )
+                    let fromKind = sessionKeys.map {
+                        ConnectionCryptoPresentation.modeLabel(kind: nil, suite: $0.negotiatedSuite.rawValue)
+                            ?? $0.negotiatedSuite.rawValue
+                    } ?? fromSuite
+                    let toKind = messageA.supportedSuites.first.flatMap {
+                        ConnectionCryptoPresentation.modeLabel(kind: nil, suite: $0.rawValue)
+                    } ?? toSuite
+                    await MainActor.run {
+                        ConnectionPresenceService.shared.markRekeying(.init(
+                            peerId: presencePeerId,
+                            fromKind: fromKind,
+                            fromSuite: fromSuite,
+                            toKind: toKind,
+                            toSuite: toSuite
+                        ))
+                    }
+                    previousSessionKeysBeforeRekey = sessionKeys
+                    authenticatedRemoteAuthority = nil
+                    driver = nil
+                    sessionKeys = nil
+                    await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)
+                }
+
                 // 如果已建立会话密钥且不是握手控制包，则作为业务消息处理
                 if let keys = sessionKeys, !isLikelyHandshakeControlPacket(frame) {
                     do {
@@ -909,9 +1058,13 @@ public class DeviceDiscoveryManager: BaseManager {
                         if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
                             switch msg {
                             case .pairingIdentityExchange(let payload):
+                                guard let payload = validatedPairingIdentityPayload(payload) else {
+                                    break
+                                }
                                 // Pairing / trust UI prompt: Always allow / Allow once / Reject.
                                 // This gates the bootstrap KEM identity exchange used for strict-PQC onboarding.
                                 declaredDeviceIdForVerification = payload.deviceId
+                                latestPeerCapabilities = payload.capabilities ?? []
                                 let endpoint = endpointDescription
                                 let info = await MainActor.run { Self.bonjourInfoByDeviceId[payload.deviceId] }
                                 let displayName = info?.displayName ?? info?.hostname ?? endpoint
@@ -959,6 +1112,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                     from: payload,
                                     displayName: displayName
                                 )
+                                await publishClassicTransferSessionSnapshot(keys: keys)
 
                                 let now = Date()
                                 guard P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
@@ -974,12 +1128,23 @@ public class DeviceDiscoveryManager: BaseManager {
                                 let km = DeviceIdentityKeyManager.shared
                                 let kemKeys: [KEMPublicKeyInfo]
                                 do {
-                                    kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                    kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                                        try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                    )
                                 } catch {
                                     logger.warning("⚠️ 本机 KEM 公钥准备失败（bootstrap reply）：\(error.localizedDescription, privacy: .public)")
                                     kemKeys = []
                                 }
-                                let localId = await SelfIdentityProvider.shared.snapshot().deviceId
+                                guard !kemKeys.isEmpty else {
+                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机无有效 KEM 公钥")
+                                    break
+                                }
+                                let localIdRaw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+                                let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !localId.isEmpty else {
+                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
+                                    break
+                                }
                                 let localPlatform: String = {
 #if os(macOS)
                                     return "macOS"
@@ -1184,6 +1349,9 @@ public class DeviceDiscoveryManager: BaseManager {
                 case .established(let keys):
                     authenticatedRemoteAuthority = await driver.getAuthenticatedRemoteAuthority()
                     sessionKeys = keys
+                    previousSessionKeysBeforeRekey = nil
+                    await publishClassicTransferSessionSnapshot(keys: keys)
+                    await publishPresence(keys: keys)
                     if let declaredDeviceIdForVerification {
                         await MainActor.run {
                             PairingTrustApprovalService.shared.updateVerificationCode(
@@ -1191,6 +1359,16 @@ public class DeviceDiscoveryManager: BaseManager {
                                 sessionKeys: keys
                             )
                         }
+                    }
+                case .failed(let reason):
+                    if let previousKeys = previousSessionKeysBeforeRekey {
+                        sessionKeys = previousKeys
+                        previousSessionKeysBeforeRekey = nil
+                        await publishClassicTransferSessionSnapshot(keys: previousKeys)
+                        await publishPresence(keys: previousKeys)
+                        logger.warning(
+                            "⚠️ inbound rekey failed; restored previous session. peer=\(peer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
+                        )
                     }
                 default:
                     break

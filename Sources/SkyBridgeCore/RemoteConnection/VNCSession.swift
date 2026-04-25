@@ -10,6 +10,7 @@ public final class VNCSession: ObservableObject {
     public let host: String
     public let port: UInt16
     public let textureFeed = RemoteTextureFeed()
+    private lazy var textureFeedDeliveryGate = LatestTextureDeliveryGate(feed: textureFeed)
 
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "VNCSession")
     private let queue = DispatchQueue(label: "com.skybridge.vnc.session")
@@ -28,9 +29,7 @@ public final class VNCSession: ObservableObject {
  // 将渲染器输出绑定到纹理发布器
         renderer.frameHandler = { [weak self] texture, backing in
             guard let self else { return }
-            Task { @MainActor in
-                self.textureFeed.update(texture: texture, backing: backing)
-            }
+            self.textureFeedDeliveryGate.submit(texture: texture, backing: backing)
         }
     }
 
@@ -201,6 +200,7 @@ public final class VNCSession: ObservableObject {
         running = false
         connection?.cancel()
         connection = nil
+        textureFeedDeliveryGate.clear()
     }
 
  // MARK: - 私有方法

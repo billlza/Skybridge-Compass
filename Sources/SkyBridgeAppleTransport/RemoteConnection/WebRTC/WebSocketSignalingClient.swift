@@ -405,19 +405,19 @@ public actor WebSocketSignalingClient {
             var attempts: [TransportAttempt] = []
 #if os(macOS)
             if nativeFallbackEnabled {
-                attempts.append(.native(proxyBypass: false))
-            }
-            attempts.append(.urlSession(proxyBypass: false))
-            if nativeFallbackEnabled {
                 attempts.append(.native(proxyBypass: true))
             }
             attempts.append(.urlSession(proxyBypass: true))
+            if nativeFallbackEnabled {
+                attempts.append(.native(proxyBypass: false))
+            }
+            attempts.append(.urlSession(proxyBypass: false))
 #else
-            attempts.append(.urlSession(proxyBypass: false))
             attempts.append(.urlSession(proxyBypass: true))
+            attempts.append(.urlSession(proxyBypass: false))
             if nativeFallbackEnabled {
-                attempts.append(.native(proxyBypass: false))
                 attempts.append(.native(proxyBypass: true))
+                attempts.append(.native(proxyBypass: false))
             }
 #endif
             return attempts

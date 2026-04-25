@@ -30,12 +30,24 @@ struct AuthenticationView: View {
     @EnvironmentObject private var viewModel: AuthenticationViewModel
     @StateObject private var hazeClearManager = InteractiveClearManager()
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
+    @ObservedObject private var localizationManager = LocalizationManager.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var isAnimating = false
     @State private var selectedTab = 0
     @State private var pendingSupabaseTurnstileContext: SupabaseTurnstileChallengeContext?
     @State private var pendingSupabaseTurnstileAction: SupabaseTurnstileAction?
     @State private var pendingAppleAuthorization: ASAuthorization?
+
+    private func t(_ key: String) -> String {
+        localizationManager.localizedString(key)
+    }
+
+    private func formatted(_ key: String, _ arguments: CVarArg...) -> String {
+        let format = t(key)
+        return withVaList(arguments) { pointer in
+            NSString(format: format, locale: localizationManager.locale as NSLocale, arguments: pointer) as String
+        }
+    }
     
     var body: some View {
         GeometryReader { geometry in
@@ -72,7 +84,7 @@ struct AuthenticationView: View {
             BehaviorCaptchaView { success, error in
                 viewModel.onCaptchaVerificationComplete(success: success, error: error)
             } onCancel: {
-                viewModel.onCaptchaVerificationComplete(success: false, error: "已取消安全验证")
+                viewModel.onCaptchaVerificationComplete(success: false, error: t("auth.security.verification.cancelled"))
             }
             .presentationDetents([.medium])
         }
@@ -89,13 +101,13 @@ struct AuthenticationView: View {
                     pendingSupabaseTurnstileAction = nil
                     pendingSupabaseTurnstileContext = nil
                     pendingAppleAuthorization = nil
-                    viewModel.errorMessage = "已取消 Cloudflare Turnstile 验证"
+                    viewModel.errorMessage = t("auth.turnstile.cancelled")
                 },
                 onError: { message in
                     pendingSupabaseTurnstileAction = nil
                     pendingSupabaseTurnstileContext = nil
                     pendingAppleAuthorization = nil
-                    viewModel.errorMessage = "Cloudflare Turnstile 验证失败：\(message)"
+                    viewModel.errorMessage = formatted("auth.turnstile.failed", message)
                 }
             )
             .presentationDetents([.medium])
@@ -396,7 +408,8 @@ struct AuthenticationView: View {
     
     private var appleLoginForm: some View {
         VStack(spacing: 20) {
-            if viewModel.usesNativeAppleSignIn {
+            switch viewModel.appleSignInPresentationMode {
+            case .native:
  // Apple登录按钮 - 彩色液态玻璃风格
                 NativeAppleSignInButton {
                     request in
@@ -422,14 +435,14 @@ struct AuthenticationView: View {
                         )
                 }
                 .shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 4)
-            } else {
+            case .webSession, .disabled:
                 Button {
                     beginSupabaseTurnstileAction(.signInWithApple)
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: "applelogo")
                             .font(.system(size: 18, weight: .semibold))
-                        Text("在浏览器中使用 Apple 登录")
+                        Text(LocalizationManager.shared.localizedString("auth.apple.web.button"))
                             .font(.headline)
                     }
                     .foregroundStyle(.white)
@@ -455,9 +468,9 @@ struct AuthenticationView: View {
             }
             
             Text(
-                viewModel.usesNativeAppleSignIn
+                viewModel.appleSignInPresentationMode == .native
                     ? LocalizationManager.shared.localizedString("auth.apple.tip")
-                    : "将打开 Apple 安全网页完成登录，成功后会自动返回应用"
+                    : LocalizationManager.shared.localizedString("auth.apple.web.tip")
             )
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -487,9 +500,9 @@ struct AuthenticationView: View {
             nebulaBrowserLoginHint
 
  // 主要操作按钮
-            if #available(macOS 14.0, *) {
+                if #available(macOS 14.0, *) {
                     LiquidGlassButton(
-                        title: viewModel.isNebulaRegistrationMode ? "在安全浏览器中注册" : "在安全浏览器中登录",
+                        title: viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.action.register") : t("auth.nebula.browser.action.login"),
                     icon: viewModel.isNebulaRegistrationMode ? "person.badge.plus.fill" : "safari.fill",
                     primaryColor: .purple,
                     isLoading: viewModel.isProcessing
@@ -502,9 +515,9 @@ struct AuthenticationView: View {
                         }
                     }
                 }
-            } else {
-                ModernButton(
-                    title: viewModel.isNebulaRegistrationMode ? "在安全浏览器中注册" : "在安全浏览器中登录",
+                } else {
+                    ModernButton(
+                    title: viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.action.register") : t("auth.nebula.browser.action.login"),
                     isLoading: viewModel.isProcessing
                 ) {
                     Task {
@@ -534,7 +547,7 @@ struct AuthenticationView: View {
                     ModernTextField(
                         title: LocalizationManager.shared.localizedString("auth.mfa.code"),
                         text: $viewModel.mfaCode,
-                        placeholder: "请输入多因素认证码",
+                        placeholder: t("auth.mfa.code.placeholder"),
                         icon: "shield.lefthalf.filled"
                     )
                     .transition(.asymmetric(
@@ -570,20 +583,20 @@ struct AuthenticationView: View {
 
     private var nebulaBrowserLoginHint: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(viewModel.isNebulaRegistrationMode ? "推荐使用安全浏览器注册" : "推荐使用安全浏览器登录", systemImage: "lock.shield.fill")
+            Label(viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.recommended.register") : t("auth.nebula.browser.recommended.login"), systemImage: "lock.shield.fill")
                 .font(.headline)
                 .foregroundStyle(.purple)
 
             Text(viewModel.isNebulaRegistrationMode
-                 ? "Nebula 注册会在系统浏览器中完成，邮箱验证与二次验证都会留在浏览器授权会话里。"
-                 : "Nebula 登录会在系统浏览器中完成，授权与二次验证都会留在浏览器授权会话里。")
+                 ? t("auth.nebula.browser.description.register")
+                 : t("auth.nebula.browser.description.login"))
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
                 Image(systemName: "checkmark.seal.fill")
                     .foregroundStyle(.green)
-                Text(viewModel.isNebulaRegistrationMode ? "支持 PKCE、浏览器内注册与 MFA" : "支持 PKCE 与浏览器内 MFA")
+                Text(viewModel.isNebulaRegistrationMode ? t("auth.nebula.browser.capability.register") : t("auth.nebula.browser.capability.login"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -996,7 +1009,7 @@ struct AuthenticationView: View {
                         )
                     )
                 
-                Text("游客模式体验")
+                Text(t("guest.mode"))
                     .font(.headline)
                     .fontWeight(.medium)
                     .foregroundColor(.secondary)
@@ -1059,7 +1072,7 @@ struct AuthenticationView: View {
 
         guard let baseContext = SupabaseTurnstileConfig.current(originURL: originURL) else {
             if SupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
-                viewModel.errorMessage = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY"
+                viewModel.errorMessage = t("auth.turnstile.missingConfig")
                 return
             }
 
@@ -1085,7 +1098,7 @@ struct AuthenticationView: View {
 
         guard let baseContext = SupabaseTurnstileConfig.current(originURL: originURL) else {
             if SupabaseTurnstileConfig.requiresSiteKey(for: originURL) {
-                viewModel.errorMessage = "客户端缺少 Cloudflare Turnstile 配置，请检查 TURNSTILE_SITE_KEY"
+                viewModel.errorMessage = t("auth.turnstile.missingConfig")
                 return
             }
 
@@ -1136,8 +1149,8 @@ struct AuthenticationView: View {
 }
 
 private struct NativeAppleSignInButton: NSViewRepresentable {
-    let configureRequest: (ASAuthorizationAppleIDRequest) -> Void
-    let onCompletion: (Result<ASAuthorization, Error>) -> Void
+    let configureRequest: @MainActor (ASAuthorizationAppleIDRequest) -> Void
+    let onCompletion: @MainActor (Result<ASAuthorization, Error>) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -1159,18 +1172,18 @@ private struct NativeAppleSignInButton: NSViewRepresentable {
     func updateNSView(_ nsView: ASAuthorizationAppleIDButton, context: Context) {}
 
     final class Coordinator: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
-        private let configureRequest: (ASAuthorizationAppleIDRequest) -> Void
-        private let onCompletion: (Result<ASAuthorization, Error>) -> Void
+        private let configureRequest: @MainActor (ASAuthorizationAppleIDRequest) -> Void
+        private let onCompletion: @MainActor (Result<ASAuthorization, Error>) -> Void
 
         init(
-            configureRequest: @escaping (ASAuthorizationAppleIDRequest) -> Void,
-            onCompletion: @escaping (Result<ASAuthorization, Error>) -> Void
+            configureRequest: @escaping @MainActor (ASAuthorizationAppleIDRequest) -> Void,
+            onCompletion: @escaping @MainActor (Result<ASAuthorization, Error>) -> Void
         ) {
             self.configureRequest = configureRequest
             self.onCompletion = onCompletion
         }
 
-        @objc func performRequest() {
+        @objc @MainActor func performRequest() {
             let request = ASAuthorizationAppleIDProvider().createRequest()
             configureRequest(request)
 
@@ -1188,14 +1201,18 @@ private struct NativeAppleSignInButton: NSViewRepresentable {
             controller: ASAuthorizationController,
             didCompleteWithAuthorization authorization: ASAuthorization
         ) {
-            onCompletion(.success(authorization))
+            Task { @MainActor [onCompletion] in
+                onCompletion(.success(authorization))
+            }
         }
 
         func authorizationController(
             controller: ASAuthorizationController,
             didCompleteWithError error: Error
         ) {
-            onCompletion(.failure(error))
+            Task { @MainActor [onCompletion] in
+                onCompletion(.failure(error))
+            }
         }
     }
 }
@@ -1586,6 +1603,7 @@ struct ModernButton: View {
 // MARK: - 预览
 
 struct AuthenticationView_Previews: PreviewProvider {
+    @MainActor
     static var previews: some View {
         if #available(macOS 14.0, *) {
             AuthenticationView()
@@ -1595,7 +1613,7 @@ struct AuthenticationView_Previews: PreviewProvider {
                 .environmentObject(WeatherIntegrationManager.shared)
                 .environmentObject(WeatherEffectsSettings.shared)
         } else {
-            Text("需要 macOS 14.0 或更高版本")
+            Text(LocalizationManager.shared.localizedString("auth.preview.unsupportedOS"))
         }
     }
 }

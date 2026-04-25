@@ -91,6 +91,16 @@ public class P2PDiscoveryService: BaseManager {
         case managedRelayOnly
     }
 
+    #if DEBUG
+    func testingReplaceAuthenticatedConnections(_ connections: [String: P2PConnection]) {
+        authenticatedConnections = connections
+    }
+    #endif
+
+    public func activeAuthenticatedConnectionsForClassicTransfer() -> [P2PConnection] {
+        authenticatedConnections.values.filter { $0.status == .authenticated }
+    }
+
     private enum InterfacePreference: String {
         case automatic
         case wiredEthernetOnly
@@ -660,10 +670,20 @@ public class P2PDiscoveryService: BaseManager {
         timeoutSeconds: TimeInterval = 12
     ) async throws -> P2PConnection {
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
-        let strictPQCEnabled = HandshakePolicy
-            .recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
-            .requirePQC
-        let effectiveTimeoutSeconds = strictPQCEnabled ? max(timeoutSeconds, 90) : timeoutSeconds
+        let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+        let requestedSelection: CryptoProviderFactory.SelectionPolicy = requestedPolicy.requirePQC ? .requirePQC : .preferPQC
+        let prefersPQC = CryptoProviderFactory.make(policy: requestedSelection)
+            .supportedSuites
+            .contains(where: { $0.isPQCGroup })
+        let effectiveTimeoutSeconds: TimeInterval
+        if requestedPolicy.requirePQC {
+            effectiveTimeoutSeconds = max(timeoutSeconds, 90)
+        } else if prefersPQC {
+            // Compatibility/default mode may still need a classic bootstrap plus a PQC retry.
+            effectiveTimeoutSeconds = max(timeoutSeconds, 45)
+        } else {
+            effectiveTimeoutSeconds = timeoutSeconds
+        }
 
         let p2pDevice = makeP2PDeviceForConnection(
             from: device,
@@ -1059,7 +1079,7 @@ public class P2PDiscoveryService: BaseManager {
         var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return "" }
 
-        if name.lowercased().hasPrefix("peer:") {
+        if PeerTrustLookup.sanitizedBonjourServiceInstanceName(name) == nil {
             return ""
         }
 
@@ -1084,7 +1104,7 @@ public class P2PDiscoveryService: BaseManager {
         for suffix in [" 📱", " 🍎"] where name.hasSuffix(suffix) {
             name = String(name.dropLast(suffix.count))
         }
-        return name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return PeerTrustLookup.sanitizedBonjourServiceInstanceName(name) ?? ""
     }
 
     private func stripTrailingBracketSuffix(from raw: String, open: Character, close: Character) -> String? {
@@ -1816,9 +1836,9 @@ public class P2PDiscoveryService: BaseManager {
 
     private nonisolated static func localSOAPeerIdBytes() async -> Data {
         if #available(macOS 14.0, iOS 17.0, *) {
-            let snapshot = await SelfIdentityProvider.shared.snapshot()
-            if !snapshot.deviceId.isEmpty {
-                return soaPeerIdBytes(from: snapshot.deviceId)
+            let deviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+            if !deviceId.isEmpty {
+                return soaPeerIdBytes(from: deviceId)
             }
         }
         return soaPeerIdBytes(from: Host.current().localizedName ?? "mac-local")
@@ -1838,7 +1858,11 @@ public class P2PDiscoveryService: BaseManager {
         let logger = Logger(subsystem: "com.skybridge.Compass", category: "P2PInboundHandshake")
         var didMarkEstablished = false
         var peerIdForPresence = Self.stableEndpointLabel(for: connection.endpoint)
+        let classicTransferSessionId = "p2p-discovery-inbound-\(UUID().uuidString.lowercased())"
         defer {
+            Task {
+                await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)
+            }
             if didMarkEstablished {
                 let disconnectedPeerId = peerIdForPresence
                 Task { @MainActor [weak self] in
@@ -1934,6 +1958,28 @@ public class P2PDiscoveryService: BaseManager {
         var driver: HandshakeDriver?
         peerIdForPresence = peer.deviceId
         let endpointDescriptionForPresence = Self.stableEndpointLabel(for: connection.endpoint)
+        let endpointHostOrIPForClassicTransfer = Self.endpointHostOrIP(for: connection.endpoint)
+        var latestPeerCapabilities: [String] = []
+
+        func trimmedIdentifier(_ raw: String?) -> String? {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return trimmed
+        }
+
+        func validatedPairingIdentityPayload(
+            _ payload: AppMessage.PairingIdentityExchangePayload
+        ) -> AppMessage.PairingIdentityExchangePayload? {
+            guard let normalized = payload.normalizedBootstrapPayload else {
+                logger.warning(
+                    "⚠️ ignoring pairingIdentityExchange with empty declaredDeviceId: peer=\(peer.deviceId, privacy: .public) endpoint=\(endpointDescriptionForPresence, privacy: .public)"
+                )
+                return nil
+            }
+            return normalized
+        }
 
         func cryptoKind(for suite: CryptoSuite) -> String {
             ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
@@ -2081,6 +2127,35 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
 
+        func publishInboundClassicTransferSession(keys: SessionKeys) async {
+            let declaredPeerId = trimmedIdentifier(declaredDeviceIdForVerification)
+            let fallbackPeerId = trimmedIdentifier(peer.deviceId)
+                ?? trimmedIdentifier(peerIdForPresence)
+                ?? endpointDescriptionForPresence
+            let primaryPeerId = declaredPeerId ?? fallbackPeerId
+            let resolvedPeerDeviceId = PeerTrustLookup.persistentDeviceId(from: declaredPeerId)
+                ?? PeerTrustLookup.persistentDeviceId(from: fallbackPeerId)
+                ?? primaryPeerId
+            let aliases = Self.normalizedClassicTransferSessionAliases([
+                declaredDeviceIdForVerification,
+                primaryPeerId,
+                peer.deviceId,
+                peerIdForPresence,
+                endpointHostOrIPForClassicTransfer,
+                endpointDescriptionForPresence
+            ])
+            let snapshot = ClassicTransferSessionSnapshot(
+                sessionId: classicTransferSessionId,
+                matchDeviceId: primaryPeerId,
+                resolvedPeerDeviceId: resolvedPeerDeviceId,
+                aliases: aliases,
+                endpointHostOrIP: endpointHostOrIPForClassicTransfer,
+                capabilities: latestPeerCapabilities,
+                sessionKeys: keys
+            )
+            await ClassicTransferSessionRegistry.shared.upsert(session: snapshot)
+        }
+
         logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） state=\(String(describing: connection.state), privacy: .public)")
 
         do {
@@ -2132,7 +2207,11 @@ public class P2PDiscoveryService: BaseManager {
                         if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
                             switch msg {
                             case .pairingIdentityExchange(let payload):
+                                guard let payload = validatedPairingIdentityPayload(payload) else {
+                                    break
+                                }
                                 declaredDeviceIdForVerification = payload.deviceId
+                                latestPeerCapabilities = payload.capabilities ?? []
                                 let displayName = payload.deviceName
                                     ?? displayNameFromPeerId(peer.deviceId)
 
@@ -2184,13 +2263,24 @@ public class P2PDiscoveryService: BaseManager {
                                 let km = DeviceIdentityKeyManager.shared
                                 let kemKeys: [KEMPublicKeyInfo]
                                 do {
-                                    kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                    kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                                        try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                    )
                                 } catch {
                                     logger.warning("⚠️ 本机 KEM 公钥准备失败（bootstrap reply）：\(error.localizedDescription, privacy: .public)")
                                     kemKeys = []
                                 }
+                                guard !kemKeys.isEmpty else {
+                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机无有效 KEM 公钥")
+                                    break
+                                }
 
-                                let localId = await SelfIdentityProvider.shared.snapshot().deviceId
+                                let localIdRaw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+                                let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !localId.isEmpty else {
+                                    logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
+                                    break
+                                }
                                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
                                 let reply = AppMessage.pairingIdentityExchange(.init(
                                     deviceId: localId,
@@ -2473,6 +2563,7 @@ public class P2PDiscoveryService: BaseManager {
                             )
                         }
                     }
+                    await publishInboundClassicTransferSession(keys: keys)
                     let published = await publishInboundPresence(keys: keys)
                     guard published else { break }
 
@@ -2552,6 +2643,35 @@ public class P2PDiscoveryService: BaseManager {
     ) -> Bool {
         guard let lastSentAt else { return true }
         return now.timeIntervalSince(lastSentAt) >= minimumInterval
+    }
+
+    nonisolated private static func endpointHostOrIP(for endpoint: NWEndpoint) -> String? {
+        switch endpoint {
+        case .hostPort(let host, _):
+            return normalizePeerHostToken(String(describing: host))
+        default:
+            return nil
+        }
+    }
+
+    nonisolated private static func normalizedClassicTransferSessionAliases(
+        _ candidates: [String?]
+    ) -> [String] {
+        var normalized: [String] = []
+        var seen = Set<String>()
+
+        for raw in candidates {
+            guard let raw else { continue }
+            for candidate in PeerTrustLookup.lookupCandidates(for: raw) {
+                let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                let lowered = trimmed.lowercased()
+                guard seen.insert(lowered).inserted else { continue }
+                normalized.append(trimmed)
+            }
+        }
+
+        return normalized
     }
 
     nonisolated private static func normalizePeerHostToken(_ raw: String) -> String {

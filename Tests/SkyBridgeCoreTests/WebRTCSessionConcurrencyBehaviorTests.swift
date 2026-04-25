@@ -79,6 +79,37 @@ struct WebRTCSessionConcurrencyBehaviorTests {
         )
     }
 
+    @Test("pending inbound buffer limit 在超过 count 或 bytes 时快速拒绝")
+    func pendingInboundBufferLimitPlanRejectsUnboundedGrowth() {
+        #expect(
+            WebRTCSession.pendingInboundBufferLimitPlan(
+                pendingCount: 2,
+                pendingBytes: 8_000,
+                incomingBytes: 2_000,
+                maxCount: 8,
+                maxBytes: 16_000
+            ) == .append(nextPendingCount: 3, nextPendingBytes: 10_000)
+        )
+        #expect(
+            WebRTCSession.pendingInboundBufferLimitPlan(
+                pendingCount: 8,
+                pendingBytes: 8_000,
+                incomingBytes: 1_000,
+                maxCount: 8,
+                maxBytes: 16_000
+            ) == .overflow
+        )
+        #expect(
+            WebRTCSession.pendingInboundBufferLimitPlan(
+                pendingCount: 2,
+                pendingBytes: 15_500,
+                incomingBytes: 600,
+                maxCount: 8,
+                maxBytes: 16_000
+            ) == .overflow
+        )
+    }
+
     @Test("remote ICE 在重复项、待 remote description、已就绪三种路径间切换")
     func pendingRemoteICEPlanMatchesSessionReadiness() {
         #expect(

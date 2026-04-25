@@ -17,6 +17,26 @@ import UIKit
 /// 文件传输网络服务
 @available(iOS 17.0, *)
 public actor FileTransferNetworkService {
+    private final class StartState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var finished = false
+
+        func finish() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !finished else { return false }
+            finished = true
+            return true
+        }
+    }
+
+    private enum ListenerHealthState {
+        case stopped
+        case starting
+        case ready
+        case failed
+        case cancelled
+    }
     
     // MARK: - Properties
     
@@ -33,10 +53,11 @@ public actor FileTransferNetworkService {
     private let queue = DispatchQueue(label: "com.skybridge.filetransfer.network", qos: .userInitiated)
     
     /// 文件接收回调
-    public var onFileReceiveRequest: (@Sendable (FileMetadata, NWConnection, String) async throws -> Void)?
+    var onFileReceiveRequest: (@Sendable (FileMetadata, NWConnection, FileTransferPeerContext) async throws -> Void)?
     
     /// 是否正在监听
     private var isListening = false
+    private var listenerHealthState: ListenerHealthState = .stopped
     
     // MARK: - Initialization
     
@@ -45,8 +66,8 @@ public actor FileTransferNetworkService {
     }
     
     /// 设置文件接收回调（便于从 MainActor 安全注入处理逻辑）
-    public func setOnFileReceiveRequest(
-        _ handler: (@Sendable (FileMetadata, NWConnection, String) async throws -> Void)?
+    func setOnFileReceiveRequest(
+        _ handler: (@Sendable (FileMetadata, NWConnection, FileTransferPeerContext) async throws -> Void)?
     ) {
         self.onFileReceiveRequest = handler
     }
@@ -55,7 +76,13 @@ public actor FileTransferNetworkService {
     
     /// 启动监听服务
     public func startListening() async throws {
-        guard !isListening else { return }
+        if await isHealthy() {
+            return
+        }
+        if listener != nil {
+            stopListening()
+        }
+        listenerHealthState = .starting
         
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
@@ -98,22 +125,63 @@ public actor FileTransferNetworkService {
             txtRecord: txtData
         )
         
-        listener?.stateUpdateHandler = { [weak self] state in
-            Task { [weak self] in
-                await self?.handleListenerState(state)
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let startState = StartState()
+                queue.asyncAfter(deadline: .now() + .seconds(8)) {
+                    guard startState.finish() else { return }
+                    continuation.resume(throwing: POSIXError(.ETIMEDOUT))
+                }
+
+                listener?.stateUpdateHandler = { [weak self] state in
+                    Task { [weak self] in
+                        await self?.handleListenerState(state)
+                    }
+
+                    switch state {
+                    case .ready:
+                        guard startState.finish() else { return }
+                        continuation.resume()
+                    case .failed(let error):
+                        guard startState.finish() else { return }
+                        continuation.resume(throwing: error)
+                    case .cancelled:
+                        guard startState.finish() else { return }
+                        continuation.resume(throwing: POSIXError(.ECANCELED))
+                    default:
+                        break
+                    }
+                }
+
+                listener?.newConnectionHandler = { [weak self] connection in
+                    Task { [weak self] in
+                        await self?.handleNewConnection(connection)
+                    }
+                }
+
+                self.listener?.start(queue: self.queue)
             }
+        } catch {
+            stopListening()
+            throw error
         }
-        
-        listener?.newConnectionHandler = { [weak self] connection in
-            Task { [weak self] in
-                await self?.handleNewConnection(connection)
-            }
-        }
-        
-        listener?.start(queue: queue)
-        isListening = true
         
         SkyBridgeLogger.shared.info("📁 文件传输服务已启动，端口: \(self.port)")
+    }
+
+    public func ensureHealthy() async throws {
+        if await isHealthy() {
+            return
+        }
+        SkyBridgeLogger.shared.warning(
+            "⚠️ iOS 文件传输 listener 不健康，准备重启: state=\(String(describing: listenerHealthState)) isListening=\(isListening)"
+        )
+        stopListening()
+        try await startListening()
+    }
+
+    public func isHealthy() async -> Bool {
+        listener != nil && isListening && listenerHealthState == .ready
     }
 
     #if canImport(UIKit)
@@ -163,6 +231,7 @@ public actor FileTransferNetworkService {
         listener?.cancel()
         listener = nil
         isListening = false
+        listenerHealthState = .stopped
         
         // 关闭所有连接
         for (_, connection) in activeConnections {
@@ -264,13 +333,17 @@ public actor FileTransferNetworkService {
     private func handleListenerState(_ state: NWListener.State) {
         switch state {
         case .ready:
+            listenerHealthState = .ready
+            isListening = true
             SkyBridgeLogger.shared.info("✅ 文件传输监听器就绪")
             
         case .failed(let error):
+            listenerHealthState = .failed
             SkyBridgeLogger.shared.error("❌ 文件传输监听器失败: \(error.localizedDescription)")
             isListening = false
             
         case .cancelled:
+            listenerHealthState = .cancelled
             SkyBridgeLogger.shared.info("⏹️ 文件传输监听器已取消")
             isListening = false
             
@@ -329,8 +402,15 @@ public actor FileTransferNetworkService {
             }
             
             guard let headerData = data,
-                  let header = TransferHeader.decode(from: headerData),
-                  header.type == .metadata else {
+                  let header = TransferHeader.decode(from: headerData) else {
+                return
+            }
+            if header.type == .resumeRequest {
+                SkyBridgeLogger.shared.warning("⚠️ iOS classic TCP listener 不支持 resumeRequest，已拒绝该连接")
+                connection.cancel()
+                return
+            }
+            guard header.type == .metadata else {
                 return
             }
             if header.length <= 0 || header.length > 2_000_000 {
@@ -353,13 +433,19 @@ public actor FileTransferNetworkService {
                     return
                 }
                 
-                // 获取对端信息
-                let peerName = self.getPeerName(from: connection)
+                let endpointHostOrIP = self.endpointHostOrIP(from: connection)
+                let peerName = endpointHostOrIP ?? self.getPeerName(from: connection)
+                let peerContext = FileTransferPeerContext(
+                    declaredSenderDeviceId: metadata.senderDeviceId,
+                    endpointHostOrIP: endpointHostOrIP,
+                    peerLabel: peerName,
+                    transferId: metadata.transferId
+                )
                 
                 // 通知文件接收请求
                 Task {
                     do {
-                        try await self.onFileReceiveRequest?(metadata, connection, peerName)
+                        try await self.onFileReceiveRequest?(metadata, connection, peerContext)
                     } catch {
                         SkyBridgeLogger.shared.error("❌ 处理文件接收请求失败: \(error.localizedDescription)")
                     }
@@ -367,12 +453,19 @@ public actor FileTransferNetworkService {
             }
         }
     }
-    
+
     private nonisolated func getPeerName(from connection: NWConnection) -> String {
         if case let .hostPort(host, _) = connection.endpoint {
             return "\(host)"
         }
         return "Unknown"
+    }
+
+    private nonisolated func endpointHostOrIP(from connection: NWConnection) -> String? {
+        if case let .hostPort(host, _) = connection.endpoint {
+            return "\(host)"
+        }
+        return nil
     }
 }
 

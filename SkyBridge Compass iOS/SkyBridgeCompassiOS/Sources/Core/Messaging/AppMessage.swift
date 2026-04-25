@@ -74,6 +74,27 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.remoteControlPort = remoteControlPort
             self.sentAt = sentAt
         }
+
+        public var normalizedBootstrapPayload: PairingIdentityExchangePayload? {
+            let trimmedDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedDeviceId.isEmpty else { return nil }
+            let validKEMKeys = KEMPublicKeyInfo.normalizedValidKeys(kemPublicKeys)
+            guard !validKEMKeys.isEmpty else { return nil }
+            return .init(
+                deviceId: trimmedDeviceId,
+                kemPublicKeys: validKEMKeys,
+                deviceName: deviceName,
+                modelName: modelName,
+                platform: platform,
+                osVersion: osVersion,
+                chip: chip,
+                remoteVideoFormats: remoteVideoFormats,
+                capabilities: capabilities,
+                fileTransferPort: fileTransferPort,
+                remoteControlPort: remoteControlPort,
+                sentAt: sentAt
+            )
+        }
     }
 
     public struct HeartbeatPayload: Codable, Sendable, Equatable {

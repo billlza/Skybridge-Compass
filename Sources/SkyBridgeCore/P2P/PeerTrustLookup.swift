@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 @available(macOS 14.0, iOS 17.0, *)
 enum PeerTrustLookup {
@@ -14,11 +15,56 @@ enum PeerTrustLookup {
         trimmedIdentifier(raw)?.lowercased()
     }
 
+    private static func isPlausibleStableDeviceIdentifierPayload(_ raw: String) -> Bool {
+        guard raw.count >= 8 else { return false }
+        guard !raw.contains(where: \.isWhitespace) else { return false }
+        return raw.allSatisfy { character in
+            character.isASCII && (character.isLetter || character.isNumber || character == "-" || character == "_" || character == ".")
+        }
+    }
+
+    private static func isLiteralIPAddress(_ raw: String) -> Bool {
+        let scopedToken = raw.split(separator: "%", maxSplits: 1).first.map(String.init) ?? raw
+        return IPv4Address(scopedToken) != nil || IPv6Address(scopedToken) != nil
+    }
+
+    static func sanitizedBonjourServiceInstanceName(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        if value.lowercased().hasPrefix("bonjour:") {
+            let payload = String(value.dropFirst("bonjour:".count))
+            let name = payload.split(separator: "@", maxSplits: 1).first.map(String.init)
+            return sanitizedBonjourServiceInstanceName(name)
+        }
+
+        if let range = value.range(of: "._") {
+            value = String(value[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let lowercased = value.lowercased()
+        guard !lowercased.hasPrefix("id:"),
+              !lowercased.hasPrefix("host:"),
+              !lowercased.hasPrefix("peer:"),
+              !lowercased.hasPrefix("recent:"),
+              !lowercased.hasPrefix("mac:") else {
+            return nil
+        }
+        guard UUID(uuidString: value.uppercased()) == nil else { return nil }
+        guard !isLiteralIPAddress(value) else { return nil }
+        guard !value.contains("/") else { return nil }
+        return value.isEmpty ? nil : value
+    }
+
     static func persistentDeviceId(from raw: String?) -> String? {
         guard let trimmed = trimmedIdentifier(raw) else { return nil }
         let normalized = trimmed.lowercased()
         if normalized.hasPrefix("id:") {
-            return trimmed
+            let payload = String(normalized.dropFirst("id:".count))
+            guard isPlausibleStableDeviceIdentifierPayload(payload) else { return nil }
+            return "id:\(payload)"
         }
         if normalized.hasPrefix("host:")
             || normalized.hasPrefix("peer:")
@@ -27,7 +73,8 @@ enum PeerTrustLookup {
             || trimmed.contains("@") {
             return nil
         }
-        return "id:\(trimmed)"
+        guard isPlausibleStableDeviceIdentifierPayload(normalized) else { return nil }
+        return "id:\(normalized)"
     }
 
     static func lookupCandidates(for identifier: String?) -> [String] {
@@ -202,7 +249,7 @@ enum PeerTrustLookup {
         }
 
         let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return nil }
+        guard !normalized.isEmpty, isLiteralIPAddress(normalized) else { return nil }
         return "host:\(normalized)"
     }
 

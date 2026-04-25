@@ -1,8 +1,11 @@
 import Foundation
+@preconcurrency import AVFoundation
 @preconcurrency import ScreenCaptureKit
+import CoreMedia
 import VideoToolbox
 import CoreVideo
 import CoreGraphics
+import AudioToolbox
 import OSLog
 import ImageIO
 import UniformTypeIdentifiers
@@ -41,6 +44,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var jpegMode: Bool = false
     private var bitstreamFormat: EncodedBitstreamFormat = .native
     private var captureCursorInVideo = true
+    private var captureSystemAudio = false
     private var hasEmittedParameterSets = false
     private var pendingForcedKeyFrames = 0
     private var pendingParameterSetReannounce = false
@@ -59,12 +63,28 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var screenParametersObserver: NSObjectProtocol?
     private var activeSpaceObserver: NSObjectProtocol?
     private var activeApplicationObserver: NSObjectProtocol?
+    private let targetAudioFormat = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: 48_000,
+        channels: 2,
+        interleaved: true
+    )!
+    private var audioConverter: AVAudioConverter?
+    private var audioConverterInputSignature: String?
+    private var requestedAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding = .pcmS16LE
+    private var compressedAudioConverter: AVAudioConverter?
+    private var compressedAudioFormat: AVAudioFormat?
+    private var compressedAudioSignature: String?
+    private var didLogAudioCompressionFallback = false
+    private var audioSequenceNumber: UInt64 = 0
 
 /// 编码后视频帧的回调
  /// - 参数说明：data 为压缩后比特流；w/h 为视频维度；type 为帧类型（h264/hevc）
     var onEncodedFrame: ((Data, Int, Int, RemoteFrameType, Bool) -> Void)?
     var onRawFrame: ((CVPixelBuffer, CMTime) -> Void)?
     var onDamageReport: ((RemoteDesktopDamageReport) -> Void)?
+    var onCapturedPCM16AudioChunk: ((RemoteDesktopAudioChunkPayload) -> Void)?
+    var onCapturedAudioChunk: ((RemoteDesktopAudioChunkPayload) -> Void)?
     var onCaptureIssue: ((String) -> Void)?
 
     private final class CompressionCallbackContext {
@@ -90,6 +110,19 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         }
     }
 
+    private final class AudioConversionInputState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var consumed = false
+
+        func takeIfAvailable() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !consumed else { return false }
+            consumed = true
+            return true
+        }
+    }
+
  /// 启动采集与编码
     @MainActor
     func start(
@@ -98,6 +131,8 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         targetFPS: Int = 60,
         keyFrameInterval: Int = 60,
         captureCursorInVideo: Bool = true,
+        captureSystemAudio: Bool = false,
+        audioEncoding: RemoteDesktopAudioChunkPayload.Encoding = .pcmS16LE,
         bitstreamFormat: EncodedBitstreamFormat = .native
     ) async throws {
         guard !started else { return }
@@ -105,10 +140,19 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         configuredFPS = targetFPS
         configuredKeyInterval = keyFrameInterval
         self.captureCursorInVideo = captureCursorInVideo
+        self.captureSystemAudio = captureSystemAudio
+        self.requestedAudioEncoding = audioEncoding
         self.bitstreamFormat = bitstreamFormat
         hasEmittedParameterSets = false
         pendingForcedKeyFrames = 2
         pendingParameterSetReannounce = false
+        audioConverter = nil
+        audioConverterInputSignature = nil
+        compressedAudioConverter = nil
+        compressedAudioFormat = nil
+        compressedAudioSignature = nil
+        didLogAudioCompressionFallback = false
+        audioSequenceNumber = 0
 // 读取编码档位与低延迟设置（主线程安全）
         let settings = RemoteDesktopSettingsManager.shared.settings
         preferredProfile = settings.displaySettings.encodingProfile
@@ -160,7 +204,13 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA // 原始帧，后续由VTCompressionSession进行压缩
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(configuredFPS))
         configuration.queueDepth = lowLatencyEnabled ? 3 : 5
-        configuration.capturesAudio = false
+        let requestedSystemAudio = captureSystemAudio
+        configuration.capturesAudio = requestedSystemAudio
+        if requestedSystemAudio {
+            configuration.sampleRate = 48_000
+            configuration.channelCount = 2
+            configuration.excludesCurrentProcessAudio = true
+        }
         configuration.showsCursor = captureCursorInVideo
 
         output = StreamOutput(owner: self)
@@ -176,13 +226,71 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             throw CocoaError(.featureUnsupported)
         }
         try stream?.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: sampleOutputQueue)
-        try await stream?.startCapture()
+        if requestedSystemAudio {
+            do {
+                try stream?.addStreamOutput(streamOutput, type: .audio, sampleHandlerQueue: sampleOutputQueue)
+            } catch {
+                self.captureSystemAudio = false
+                logger.warning(
+                    "⚠️ 系统音频采集输出不可用，远控将降级为仅视频: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+        do {
+            try await stream?.startCapture()
+        } catch {
+            if requestedSystemAudio {
+                logger.warning(
+                    "⚠️ 启动含系统音频的采集失败，重试仅视频采集: \(error.localizedDescription, privacy: .public)"
+                )
+                resetPipelineAfterFailedStart()
+                started = false
+                try await start(
+                    preferredCodec: preferredCodec,
+                    preferredSize: preferredSize,
+                    targetFPS: targetFPS,
+                    keyFrameInterval: keyFrameInterval,
+                    captureCursorInVideo: captureCursorInVideo,
+                    captureSystemAudio: false,
+                    audioEncoding: audioEncoding,
+                    bitstreamFormat: bitstreamFormat
+                )
+                return
+            }
+            throw error
+        }
         registerDisplayObservers()
         if jpegMode {
             logger.info("🎥 ScreenCaptureKit 采集启动：\(self.width)x\(self.height), codec=JPEG(BGRA)")
         } else {
             logger.info("🎥 ScreenCaptureKit 采集启动：\(self.width)x\(self.height), codec=\(preferredCodec == .h264 ? "H.264" : "HEVC")")
         }
+    }
+
+    @MainActor
+    private func resetPipelineAfterFailedStart() {
+        stream?.stopCapture()
+        stream = nil
+        output = nil
+        unregisterDisplayObservers()
+        deactivateCompressionCallbackContext()
+        if let cs = compressionSession {
+            VTCompressionSessionCompleteFrames(cs, untilPresentationTimeStamp: CMTime.invalid)
+            VTCompressionSessionInvalidate(cs)
+        }
+        compressionSession = nil
+        releaseCompressionCallbackContext()
+        hasEmittedParameterSets = false
+        pendingForcedKeyFrames = 0
+        pendingParameterSetReannounce = false
+        captureSystemAudio = false
+        audioConverter = nil
+        audioConverterInputSignature = nil
+        compressedAudioConverter = nil
+        compressedAudioFormat = nil
+        compressedAudioSignature = nil
+        didLogAudioCompressionFallback = false
+        audioSequenceNumber = 0
     }
 
  /// 停止采集与编码
@@ -210,9 +318,17 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         pendingForcedKeyFrames = 0
         pendingParameterSetReannounce = false
         captureCursorInVideo = true
+        captureSystemAudio = false
         capturedDisplayID = nil
         capturedDisplayPixelSize = .zero
         lastSceneCutRecoveryAt = .distantPast
+        audioConverter = nil
+        audioConverterInputSignature = nil
+        compressedAudioConverter = nil
+        compressedAudioFormat = nil
+        compressedAudioSignature = nil
+        didLogAudioCompressionFallback = false
+        audioSequenceNumber = 0
         logger.info("🛑 ScreenCaptureKit 采集已停止")
     }
 
@@ -590,6 +706,268 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         stateLock.lock()
         lastEncodedFrameAt = Date()
         stateLock.unlock()
+    }
+
+    private func handleAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard captureSystemAudio else { return }
+        let shouldEmitPCMChunks = onCapturedPCM16AudioChunk != nil
+        let shouldEmitTransportChunks = onCapturedAudioChunk != nil
+        guard shouldEmitPCMChunks || shouldEmitTransportChunks else { return }
+        guard let inputBuffer = makeAudioPCMBuffer(from: sampleBuffer) else { return }
+        let inputFormat = inputBuffer.format
+        let inputSignature = audioInputSignature(for: inputFormat)
+        if audioConverter == nil || audioConverterInputSignature != inputSignature {
+            audioConverter = AVAudioConverter(from: inputFormat, to: targetAudioFormat)
+            audioConverterInputSignature = inputSignature
+        }
+        guard let audioConverter else { return }
+
+        let resampleRatio = targetAudioFormat.sampleRate / max(inputFormat.sampleRate, 1)
+        let outputCapacity = AVAudioFrameCount(
+            max(
+                1,
+                Int((Double(inputBuffer.frameLength) * resampleRatio).rounded(.up)) + 32
+            )
+        )
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: targetAudioFormat,
+            frameCapacity: outputCapacity
+        ) else {
+            return
+        }
+
+        let inputState = AudioConversionInputState()
+        var conversionError: NSError?
+        let status = audioConverter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
+            if !inputState.takeIfAvailable() {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+
+        guard conversionError == nil else {
+            logger.debug(
+                "ℹ️ 系统音频转换失败: \(conversionError?.localizedDescription ?? "unknown", privacy: .public)"
+            )
+            return
+        }
+        guard status == .haveData || status == .inputRanDry else { return }
+        guard outputBuffer.frameLength > 0 else { return }
+
+        let nextSequenceNumber = audioSequenceNumber &+ 1
+        let nativePCMChunk = shouldEmitPCMChunks
+            ? makePCM16AudioChunk(from: outputBuffer, sequenceNumber: nextSequenceNumber)
+            : nil
+        if let nativePCMChunk {
+            onCapturedPCM16AudioChunk?(nativePCMChunk)
+        }
+
+        if requestedAudioEncoding == .aacLC,
+           let onCapturedAudioChunk,
+           let compressedChunk = makeCompressedAudioChunk(
+                from: outputBuffer,
+                encoding: .aacLC,
+                sequenceNumber: nextSequenceNumber
+           ) {
+            audioSequenceNumber = compressedChunk.sequenceNumber
+            onCapturedAudioChunk(compressedChunk)
+            return
+        }
+
+        if requestedAudioEncoding == .aacLC,
+           shouldEmitTransportChunks,
+           !didLogAudioCompressionFallback {
+            didLogAudioCompressionFallback = true
+            logger.warning("⚠️ 系统音频 AAC 编码失败，已回退为 PCM 传输")
+        }
+
+        let pcmChunk = nativePCMChunk ?? makePCM16AudioChunk(from: outputBuffer, sequenceNumber: nextSequenceNumber)
+        guard let onCapturedAudioChunk, let pcmChunk else { return }
+        audioSequenceNumber = pcmChunk.sequenceNumber
+        onCapturedAudioChunk(pcmChunk)
+    }
+
+    private func makeAudioPCMBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
+        let inputFormat = AVAudioFormat(cmAudioFormatDescription: formatDescription)
+        let frameLength = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameLength > 0 else { return nil }
+
+        var bufferListSizeNeeded = 0
+        var retainedBlockBuffer: CMBlockBuffer?
+        let probeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &bufferListSizeNeeded,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &retainedBlockBuffer
+        )
+        guard probeStatus == noErr, bufferListSizeNeeded > 0 else { return nil }
+
+        let rawBufferList = UnsafeMutableRawPointer.allocate(
+            byteCount: bufferListSizeNeeded,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        let audioBufferList = rawBufferList.bindMemory(to: AudioBufferList.self, capacity: 1)
+
+        let copyStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &bufferListSizeNeeded,
+            bufferListOut: audioBufferList,
+            bufferListSize: bufferListSizeNeeded,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &retainedBlockBuffer
+        )
+        guard copyStatus == noErr else {
+            rawBufferList.deallocate()
+            return nil
+        }
+
+        guard let pcmBuffer = AVAudioPCMBuffer(
+            pcmFormat: inputFormat,
+            bufferListNoCopy: audioBufferList,
+            deallocator: { _ in
+                _ = retainedBlockBuffer
+                rawBufferList.deallocate()
+            }
+        ) else {
+            rawBufferList.deallocate()
+            return nil
+        }
+        pcmBuffer.frameLength = frameLength
+        return pcmBuffer
+    }
+
+    private func audioInputSignature(for format: AVAudioFormat) -> String {
+        let commonFormatRaw = UInt(format.commonFormat.rawValue)
+        return "\(format.sampleRate)-\(format.channelCount)-\(commonFormatRaw)-\(format.isInterleaved)"
+    }
+
+    private func makePCM16AudioChunk(
+        from buffer: AVAudioPCMBuffer,
+        sequenceNumber: UInt64
+    ) -> RemoteDesktopAudioChunkPayload? {
+        guard let samplePointer = buffer.int16ChannelData?.pointee else { return nil }
+        let bytesPerFrame = Int(targetAudioFormat.streamDescription.pointee.mBytesPerFrame)
+        let payloadSize = Int(buffer.frameLength) * bytesPerFrame
+        guard payloadSize > 0 else { return nil }
+
+        let audioData = Data(bytes: samplePointer, count: payloadSize)
+        return RemoteDesktopAudioChunkPayload(
+            encoding: .pcmS16LE,
+            sampleRate: Int(targetAudioFormat.sampleRate.rounded()),
+            channelCount: Int(targetAudioFormat.channelCount),
+            frameCount: Int(buffer.frameLength),
+            sequenceNumber: sequenceNumber,
+            data: audioData
+        )
+    }
+
+    private func makeCompressedAudioChunk(
+        from buffer: AVAudioPCMBuffer,
+        encoding: RemoteDesktopAudioChunkPayload.Encoding,
+        sequenceNumber: UInt64
+    ) -> RemoteDesktopAudioChunkPayload? {
+        guard let (converter, outputFormat) = ensureCompressedAudioConverter(
+            for: buffer.format,
+            encoding: encoding
+        ) else {
+            return nil
+        }
+
+        let packetCapacity = AVAudioPacketCount(
+            max(1, Int((Double(buffer.frameLength) / 1024.0).rounded(.up)) + 1)
+        )
+        let maximumPacketSize = max(1, converter.maximumOutputPacketSize)
+        let compressedBuffer = AVAudioCompressedBuffer(
+            format: outputFormat,
+            packetCapacity: packetCapacity,
+            maximumPacketSize: maximumPacketSize
+        )
+
+        let inputState = AudioConversionInputState()
+        var conversionError: NSError?
+        let status = converter.convert(to: compressedBuffer, error: &conversionError) { _, outStatus in
+            if !inputState.takeIfAvailable() {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            outStatus.pointee = .haveData
+            return buffer
+        }
+
+        guard conversionError == nil else {
+            logger.debug(
+                "ℹ️ 系统音频压缩失败: \(conversionError?.localizedDescription ?? "unknown", privacy: .public)"
+            )
+            return nil
+        }
+        guard status == .haveData || status == .inputRanDry else { return nil }
+        guard compressedBuffer.packetCount > 0, compressedBuffer.byteLength > 0 else { return nil }
+
+        let packetDescriptions: [RemoteDesktopAudioChunkPayload.PacketDescription]? = {
+            guard let descriptionsPointer = compressedBuffer.packetDescriptions else { return nil }
+            return (0..<Int(compressedBuffer.packetCount)).map { index in
+                let description = descriptionsPointer[index]
+                return RemoteDesktopAudioChunkPayload.PacketDescription(
+                    startOffset: Int(description.mStartOffset),
+                    variableFramesInPacket: description.mVariableFramesInPacket,
+                    dataByteSize: description.mDataByteSize
+                )
+            }
+        }()
+
+        let encodedData = Data(bytes: compressedBuffer.data, count: Int(compressedBuffer.byteLength))
+        return RemoteDesktopAudioChunkPayload(
+            encoding: encoding,
+            sampleRate: Int(buffer.format.sampleRate.rounded()),
+            channelCount: Int(buffer.format.channelCount),
+            frameCount: Int(buffer.frameLength),
+            packetCount: Int(compressedBuffer.packetCount),
+            packetDescriptions: packetDescriptions,
+            magicCookie: converter.magicCookie,
+            sequenceNumber: sequenceNumber,
+            data: encodedData
+        )
+    }
+
+    private func ensureCompressedAudioConverter(
+        for inputFormat: AVAudioFormat,
+        encoding: RemoteDesktopAudioChunkPayload.Encoding
+    ) -> (AVAudioConverter, AVAudioFormat)? {
+        guard encoding == .aacLC else { return nil }
+
+        let converterSignature = "\(inputFormat.sampleRate)-\(inputFormat.channelCount)-\(encoding.rawValue)"
+        if let compressedAudioConverter,
+           let compressedAudioFormat,
+           compressedAudioSignature == converterSignature {
+            return (compressedAudioConverter, compressedAudioFormat)
+        }
+
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: inputFormat.sampleRate,
+            AVNumberOfChannelsKey: Int(inputFormat.channelCount),
+            AVEncoderBitRateKey: 160_000
+        ]
+        guard let outputFormat = AVAudioFormat(settings: outputSettings),
+              let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            return nil
+        }
+
+        converter.primeMethod = .none
+        converter.bitRate = 160_000
+        compressedAudioConverter = converter
+        compressedAudioFormat = outputFormat
+        compressedAudioSignature = converterSignature
+        return (converter, outputFormat)
     }
 
     private func nextFramePropertiesForEncode() -> CFDictionary? {
@@ -983,47 +1361,52 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
 
         func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
             autoreleasepool {
-    // guard let 处理 owner 和 compressionSession
                 guard let owner = owner else { return }
-                owner.noteSampleBufferReceived()
-    // guard let 处理 pixelBuffer (外部输入)
-                guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-                owner.emitDamageReportIfAvailable(sampleBuffer: sampleBuffer, pixelBuffer: pixelBuffer)
+                switch outputType {
+                case .screen:
+                    owner.noteSampleBufferReceived()
+                    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+                    owner.emitDamageReportIfAvailable(sampleBuffer: sampleBuffer, pixelBuffer: pixelBuffer)
 
-                let frameStatus = owner.frameStatus(from: sampleBuffer)
-                guard ScreenCaptureKitStreamer.shouldProcessFrame(with: frameStatus) else {
+                    let frameStatus = owner.frameStatus(from: sampleBuffer)
+                    guard ScreenCaptureKitStreamer.shouldProcessFrame(with: frameStatus) else {
+                        return
+                    }
+                    owner.noteMeaningfulSampleReceived()
+
+                    if owner.jpegMode {
+                        owner.handleJPEGPixelBuffer(pixelBuffer)
+                        return
+                    }
+
+                    if let onRawFrame = owner.onRawFrame {
+                        owner.noteEncodedFrameEmitted()
+                        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                        onRawFrame(pixelBuffer, pts)
+                    }
+
+                    guard let cs = owner.compressionSession else { return }
+                    var flags = VTEncodeInfoFlags()
+                    let pts = CMTime(value: CMTimeValue(Date().timeIntervalSince1970 * 1000), timescale: 1000)
+                    let status = VTCompressionSessionEncodeFrame(
+                        cs,
+                        imageBuffer: pixelBuffer,
+                        presentationTimeStamp: pts,
+                        duration: CMTime.zero,
+                        frameProperties: owner.nextFramePropertiesForEncode(),
+                        sourceFrameRefcon: nil,
+                        infoFlagsOut: &flags
+                    )
+                    if status != noErr {
+                        owner.logger.error("❌ VTCompressionSessionEncodeFrame failed: status=\(status, privacy: .public)")
+                        owner.onCaptureIssue?("encode-status-\(status)")
+                    }
+                case .audio:
+                    owner.handleAudioSampleBuffer(sampleBuffer)
+                case .microphone:
                     return
-                }
-                // `.started` 帧已经带着可用 pixelBuffer；继续丢弃会让 native/raw 与 encoded/fallback 两条送帧链一起饿死。
-                owner.noteMeaningfulSampleReceived()
-
-                // JPEG 模式：直接把 pixelBuffer 转成 JPEG，回调出去
-                if owner.jpegMode {
-                    owner.handleJPEGPixelBuffer(pixelBuffer)
+                @unknown default:
                     return
-                }
-
-                if let onRawFrame = owner.onRawFrame {
-                    owner.noteEncodedFrameEmitted()
-                    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                    onRawFrame(pixelBuffer, pts)
-                }
-
-                guard let cs = owner.compressionSession else { return }
-                var flags = VTEncodeInfoFlags()
-                let pts = CMTime(value: CMTimeValue(Date().timeIntervalSince1970 * 1000), timescale: 1000)
-                let status = VTCompressionSessionEncodeFrame(
-                    cs,
-                    imageBuffer: pixelBuffer,
-                    presentationTimeStamp: pts,
-                    duration: CMTime.zero,
-                    frameProperties: owner.nextFramePropertiesForEncode(),
-                    sourceFrameRefcon: nil,
-                    infoFlagsOut: &flags
-                )
-                if status != noErr {
-                    owner.logger.error("❌ VTCompressionSessionEncodeFrame failed: status=\(status, privacy: .public)")
-                    owner.onCaptureIssue?("encode-status-\(status)")
                 }
             }
         }

@@ -445,7 +445,7 @@ public actor ServiceAdvertiserCenter {
         record["name"] = Host.current().localizedName ?? "Mac"
 
         if #available(macOS 14.0, *) {
-            let snap = await SelfIdentityProvider.shared.snapshot()
+            let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
             if !snap.deviceId.isEmpty {
                 record["deviceId"] = snap.deviceId
                 record["uniqueId"] = snap.deviceId

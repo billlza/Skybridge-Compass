@@ -40,6 +40,8 @@
     <string>0x4AAAAAAC9EZ7Tok9ixRxad</string>
     <key>SKYBRIDGE_ENABLE_APPLE_SIGN_IN</key>
     <true/>
+    <key>SKYBRIDGE_APPLE_SIGN_IN_MODE</key>
+    <string>native</string>
     <key>SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN</key>
     <true/>
     <key>NEBULA_BASE_URL</key>
@@ -58,6 +60,8 @@
     <string>SkyBridge Compass Pro 需要访问摄像头以扫描跨设备连接二维码。</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>SkyBridge Compass Pro 需要访问麦克风以支持远程音频功能。</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问系统音频以支持远程桌面时的远端音频重定向。</string>
 
     <!-- 蓝牙权限配置 -->
     <key>NSBluetoothAlwaysUsageDescription</key>

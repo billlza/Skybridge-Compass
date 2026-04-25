@@ -15,24 +15,34 @@ public final class FileTransferRuntime: ObservableObject {
     private init() {}
     
     public func startIfNeeded() async {
-        guard !started else { return }
-        started = true
-        
+        if started, await networkService.isHealthy() {
+            return
+        }
+
         await networkService.setOnFileReceiveRequest { metadata, connection, peerName in
             let manager = await MainActor.run { FileTransferManager.instance }
             do {
-                _ = try await manager.receiveFile(metadata: metadata, from: connection, peer: peerName)
+                _ = try await manager.receiveFile(metadata: metadata, from: connection, peerContext: peerName)
             } catch {
                 SkyBridgeLogger.shared.error("❌ 文件接收失败: \(error.localizedDescription)")
             }
         }
-        
+
         do {
-            try await networkService.startListening()
-            SkyBridgeLogger.shared.info("✅ iOS 文件传输监听已启动 (port=\(FileTransferConstants.defaultPort))")
+            try await networkService.ensureHealthy()
+            started = await networkService.isHealthy()
+            if started {
+                SkyBridgeLogger.shared.info("✅ iOS 文件传输监听已启动 (port=\(FileTransferConstants.defaultPort))")
+            }
         } catch {
+            started = false
             SkyBridgeLogger.shared.error("❌ iOS 文件传输监听启动失败: \(error.localizedDescription)")
         }
+    }
+
+    public func ensureHealthy() async throws {
+        try await networkService.ensureHealthy()
+        started = await networkService.isHealthy()
     }
     
     public func stop() async {
@@ -40,5 +50,3 @@ public final class FileTransferRuntime: ObservableObject {
         started = false
     }
 }
-
-

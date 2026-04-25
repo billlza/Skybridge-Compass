@@ -3,6 +3,17 @@ import OSLog
 import SkyBridgeCore
 import SkyBridgeProtocolCore
 
+private enum CurrentPathActivationError: LocalizedError {
+    case identityNotProvisioned(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .identityNotProvisioned(let component):
+            return "本机 current-path 身份未就绪：缺少\(component)"
+        }
+    }
+}
+
 @MainActor
 final class CurrentPathDeviceActivationCoordinator {
     static let shared = CurrentPathDeviceActivationCoordinator()
@@ -87,12 +98,14 @@ final class CurrentPathDeviceActivationCoordinator {
 
     private static func currentPathLocalBinding() async throws -> ProtocolIdentityBinding {
         let algorithm: ProtocolSigningAlgorithm = .ed25519
-        await SelfIdentityProvider.shared.loadOrCreate()
-        let selfIdentity = await SelfIdentityProvider.shared.snapshot()
-        let deviceID = selfIdentity.deviceId.isEmpty
-            ? await DeviceIdentityKeyManager.shared.getDeviceId()
-            : selfIdentity.deviceId
+        let deviceID = await DeviceIdentityKeyManager.shared.getDeviceId()
+        guard !deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CurrentPathActivationError.identityNotProvisioned("deviceId")
+        }
         let publicKey = try await DeviceIdentityKeyManager.shared.getProtocolSigningPublicKey(for: algorithm)
+        guard !publicKey.isEmpty else {
+            throw CurrentPathActivationError.identityNotProvisioned("协议签名公钥")
+        }
         return try ProtocolIdentityBinding(
             deviceId: deviceID,
             protocolSigningAlgorithm: algorithm,

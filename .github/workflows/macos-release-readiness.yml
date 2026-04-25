@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/macos-release-readiness.yml"
       - "Package.swift"
+      - "SkyBridge Compass iOS/**"
       - "Sources/**"
       - "Tests/**"
       - "Scripts/**"
@@ -14,6 +15,7 @@ on:
     paths:
       - ".github/workflows/macos-release-readiness.yml"
       - "Package.swift"
+      - "SkyBridge Compass iOS/**"
       - "Sources/**"
       - "Tests/**"
       - "Scripts/**"
@@ -48,6 +50,15 @@ jobs:
           swift --version
           xcrun -toolchain swift swift --version
 
+      - name: Self-Test iOS XCTest Guardrail
+        run: bash Scripts/test_check_ios_test_configuration.sh
+
+      - name: Validate iOS XCTest Configuration
+        run: bash Scripts/check_ios_test_configuration.sh --static-only
+
+      - name: Run iOS XCTest Lane
+        run: bash "SkyBridge Compass iOS/Scripts/test_lane_ios.sh"
+
       - name: Run Swift Package Tests
         run: swift test
 
@@ -55,31 +66,50 @@ jobs:
     needs: macos-preflight
     runs-on: macos-26
     timeout-minutes: 120
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    if: always()
 
     env:
       TOOLCHAINS: swift
-      DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
-      DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
-      MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
-      NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
-      NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
-      NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
 
     steps:
+      - name: Require Successful Preflight
+        if: needs.macos-preflight.result != 'success'
+        run: |
+          echo "::error::macos-preflight did not pass; refusing to evaluate signed release gate."
+          exit 1
+
+      - name: Refuse Signed Release Gate On Pull Requests
+        if: needs.macos-preflight.result == 'success' && github.event_name == 'pull_request'
+        run: |
+          echo "::error::Signed/notarized release gate is intentionally disabled for pull_request events."
+          echo "::error::Run this workflow from a trusted push or workflow_dispatch context so release secrets are never exposed to PR-controlled scripts."
+          exit 1
+
       - uses: actions/checkout@v4
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
 
       - uses: swift-actions/setup-swift@v3
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
         with:
           swift-version: "6.3"
 
       - name: Validate Release Signing Secrets
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
+        env:
+          DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
+          MACOS_WIDGET_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_WIDGET_PROVISION_PROFILE_BASE64 }}
+          NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
         run: |
           missing=()
           for key in \
             DEVELOPER_ID_CERT_P12_BASE64 \
             DEVELOPER_ID_CERT_PASSWORD \
             MACOS_PROVISION_PROFILE_BASE64 \
+            MACOS_WIDGET_PROVISION_PROFILE_BASE64 \
             NOTARYTOOL_KEY_P8_BASE64 \
             NOTARYTOOL_KEY_ID \
             NOTARYTOOL_ISSUER
@@ -95,13 +125,17 @@ jobs:
           fi
 
       - name: Show Toolchain Versions
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
         run: |
           xcodebuild -version
           swift --version
           xcrun -toolchain swift swift --version
 
       - name: Import Developer ID Certificate
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
         env:
+          DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-skybridge
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/skybridge-release.keychain-db"
@@ -139,6 +173,9 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install macOS Provisioning Profile
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
+        env:
+          MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
         run: |
           PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           PROFILE_PATH="$PROFILE_DIR/skybridge-release.provisionprofile"
@@ -146,7 +183,23 @@ jobs:
           echo "$MACOS_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
           echo "SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH=$PROFILE_PATH" >> "$GITHUB_ENV"
 
+      - name: Install Widget Provisioning Profile
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
+        env:
+          MACOS_WIDGET_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_WIDGET_PROVISION_PROFILE_BASE64 }}
+        run: |
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PATH="$PROFILE_DIR/skybridge-widget-release.provisionprofile"
+          mkdir -p "$PROFILE_DIR"
+          echo "$MACOS_WIDGET_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          echo "SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH=$PROFILE_PATH" >> "$GITHUB_ENV"
+
       - name: Install Notary API Key
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
+        env:
+          NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
         run: |
           NOTARY_KEY_PATH="$RUNNER_TEMP/notarytool-authkey.p8"
           echo "$NOTARYTOOL_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
@@ -157,6 +210,12 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Build Signed + Notarized Release DMG
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
+        env:
+          SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE: "web_session"
+          SKYBRIDGE_REQUIRE_APP_GROUPS: "1"
+          SKYBRIDGE_REQUIRE_WIDGET_EXTENSION: "1"
+          SKYBRIDGE_XCODEBUILD_KEEP_NOISE: "1"
         run: |
           bash Scripts/build_dmg.sh \
             --identity "$SIGNING_IDENTITY" \
@@ -165,6 +224,7 @@ jobs:
             --require-notarization
 
       - name: Validate Full macOS Release Readiness
+        if: needs.macos-preflight.result == 'success' && github.event_name != 'pull_request'
         env:
           SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION: "1"
         run: |

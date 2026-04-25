@@ -22,7 +22,7 @@ platform :mac do
     UI.success("✅ Developer ID 证书已配置完成！")
   end
   
-  desc "构建并签名应用（包含 Widget）"
+  desc "低层步骤：构建并签名带 Widget 的 Developer ID .app（Apple 登录采用 web_session，不生成最终 DMG）"
   lane :build_signed do
     # 确保证书存在
     setup_certificates
@@ -36,15 +36,17 @@ platform :mac do
     
     UI.message("使用签名身份: #{signing_identity}")
     
-    # 运行当前权威打包脚本，生成可用于 notarization 的 .app
-    sh("cd .. && IDENTITY='#{signing_identity}' ./Scripts/package_app.sh")
-    sh("cd .. && APP_PATH='dist/SkyBridge Compass Pro.app' IDENTITY='#{signing_identity}' ./Scripts/sign_app.sh")
+    # 低层步骤：生成带 Widget 的正式签名 .app，供单独排查签名/公证问题使用。
+    sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 SKYBRIDGE_XCODEBUILD_KEEP_NOISE=1 IDENTITY='#{signing_identity}' ./Scripts/package_app.sh")
+    sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 APP_PATH='dist/SkyBridge Compass Pro.app' IDENTITY='#{signing_identity}' ./Scripts/sign_app.sh")
     
     UI.success("✅ 应用构建并签名完成！")
   end
   
-  desc "公证应用（用于分发）"
+  desc "低层步骤：仅公证现有 .app（不生成最终 DMG）"
   lane :notarize_app do
+    sh("cd .. && ./Scripts/ensure_notarytool_credentials.sh")
+
     notarize(
       package: "dist/SkyBridge Compass Pro.app",
       bundle_id: "com.skybridge.compass.pro",
@@ -55,20 +57,30 @@ platform :mac do
     UI.success("✅ 应用公证完成！")
   end
   
-  desc "完整构建流程：构建 + 签名 + 公证"
+  desc "最终 Developer ID 发布链：构建、签名、公证 .app/.dmg，Apple 登录固定走 web_session，并执行严格 release readiness 校验"
   lane :release do
-    build_signed
-    notarize_app
-
     signing_identity = current_signing_identity
     if signing_identity.empty?
       UI.user_error!("未找到 Developer ID Application 证书")
     end
 
-    # 复用已签名/已公证的现有 .app 生成当前命名规范的 DMG，并自动复制到桌面
-    sh("cd .. && ./Scripts/build_dmg.sh --skip-build --skip-sign --use-existing-app --identity '#{signing_identity}'")
-    
-    UI.success("✅ 发布版本已准备好，DMG 已复制到桌面！")
+    sh("cd .. && ./Scripts/ensure_notarytool_credentials.sh")
+
+    release_args = [
+      "--identity '#{signing_identity}'",
+      "--notarize-app",
+      "--notarize-dmg",
+      "--require-notarization"
+    ]
+    if ENV["SKYBRIDGE_RELEASE_REUSE_ARTIFACTS"] == "1"
+      release_args << "--skip-build"
+      release_args << "--use-existing-app"
+    end
+
+    sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 SKYBRIDGE_XCODEBUILD_KEEP_NOISE=1 ./Scripts/build_dmg.sh #{release_args.join(' ')}")
+    sh("cd .. && SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 ./Scripts/check_macos_release_readiness.sh --require-notarization")
+
+    UI.success("✅ 最终发布版本已准备好，DMG 已完成严格校验并复制到桌面！")
   end
   
 end

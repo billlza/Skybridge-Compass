@@ -15,6 +15,7 @@
 import Foundation
 import CryptoKit
 import Security
+import LocalAuthentication
 #if canImport(OQSRAII)
 import OQSRAII
 #endif
@@ -175,8 +176,11 @@ public actor DeviceIdentityKeyManager {
  /// ML-DSA-65 公钥 account
         static let mldsaPublicKeyAccount = "mldsa65_publicKey"
         
- /// ML-DSA-65 私钥 account
+/// ML-DSA-65 私钥 account
         static let mldsaSecretKeyAccount = "mldsa65_secretKey"
+        static let mirroredDeviceIdDefaultsKey = "SkyBridge.P2P.DeviceIdentity.DeviceID"
+        static let mirroredProtocolSigningPublicKeyDefaultsKey = "SkyBridge.P2P.DeviceIdentity.ProtocolSigningPublicKey"
+        static let mirroredMLDSAPublicKeyDefaultsKey = "SkyBridge.P2P.DeviceIdentity.MLDSA65PublicKey"
     }
 
     private nonisolated static var useInMemoryKeychain: Bool {
@@ -200,6 +204,18 @@ public actor DeviceIdentityKeyManager {
         inMemoryLock.lock()
         inMemoryStore[key] = data
         inMemoryLock.unlock()
+    }
+
+    private nonisolated static func forbidKeychainAuthenticationUI(_ query: inout [String: Any]) {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+    }
+
+    private nonisolated static func preferDataProtectionKeychain(_ query: inout [String: Any]) {
+#if os(macOS)
+        query[kSecUseDataProtectionKeychain as String] = true
+#endif
     }
     
  // MARK: - Properties
@@ -256,12 +272,36 @@ public actor DeviceIdentityKeyManager {
             _deviceId = stored
             return stored
         }
+
+        if let mirrored = loadMirroredDeviceId() {
+            _deviceId = mirrored
+            return mirrored
+        }
         
- // 生成新的设备 ID
+// 生成新的设备 ID
         let newId = UUID().uuidString
         saveDeviceId(newId)
         _deviceId = newId
         return newId
+    }
+
+    /// 仅加载已存在的设备 ID；不会在缺失时静默重建身份。
+    public func existingDeviceId() async -> String? {
+        if let deviceId = _deviceId {
+            return deviceId
+        }
+
+        if let mirrored = loadMirroredDeviceId() {
+            _deviceId = mirrored
+            return mirrored
+        }
+
+        if let stored = loadStoredDeviceId() {
+            _deviceId = stored
+            return stored
+        }
+
+        return nil
     }
     
  /// 使用身份密钥签名
@@ -412,6 +452,45 @@ public actor DeviceIdentityKeyManager {
         case .mlDSA65:
             let (publicKey, _) = try await getOrCreateMLDSASigningKey()
             return publicKey
+        }
+    }
+
+    /// 仅加载已存在的协议签名公钥；不会在缺失时补建 Keychain 条目。
+    public func existingProtocolSigningPublicKey(
+        for algorithm: ProtocolSigningAlgorithm
+    ) async -> Data? {
+        switch algorithm {
+        case .ed25519:
+            if let mirrored = loadMirroredData(forKey: KeychainConstants.mirroredProtocolSigningPublicKeyDefaultsKey) {
+                return mirrored
+            }
+            do {
+                if let existing = try loadProtocolSigningKey() {
+                    cachedProtocolSigningKey = existing
+                    return existing.publicKey
+                }
+            } catch {
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ 非交互读取现有 Ed25519 协议签名公钥失败: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return nil
+
+        case .mlDSA65:
+            if let mirrored = loadMirroredData(forKey: KeychainConstants.mirroredMLDSAPublicKeyDefaultsKey) {
+                return mirrored
+            }
+            do {
+                if let existing = try loadMLDSASigningKey() {
+                    cachedMLDSASigningKey = existing
+                    return existing.publicKey
+                }
+            } catch {
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ 非交互读取现有 ML-DSA-65 协议签名公钥失败: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return nil
         }
     }
     
@@ -847,19 +926,11 @@ public actor DeviceIdentityKeyManager {
             return try? JSONDecoder().decode(DeviceIdentityKeyInfo.self, from: data)
         }
 
- // 查询 Keychain 中的密钥信息
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecAttrAccount as String: "keyInfo",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        guard status == errSecSuccess, let data = result as? Data else {
+        guard let data = try readGenericPasswordData(
+            service: KeychainConstants.service,
+            account: "keyInfo",
+            migrateAccessible: kSecAttrAccessibleAfterFirstUnlock
+        ) else {
             return nil
         }
         
@@ -878,7 +949,7 @@ public actor DeviceIdentityKeyManager {
     private func getPrivateKeyReference() throws -> SecKey? {
         if Self.useInMemoryKeychain { return nil }
 
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -886,6 +957,7 @@ public actor DeviceIdentityKeyManager {
             kSecReturnRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        Self.forbidKeychainAuthenticationUI(&query)
         
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -919,22 +991,13 @@ public actor DeviceIdentityKeyManager {
             Self.inMemoryLock.unlock()
             return
         }
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecAttrAccount as String: "keyInfo",
-            kSecValueData as String: data
-        ]
-        
- // 先删除旧的
-        SecItemDelete(query as CFDictionary)
-        
- // 添加新的
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw DeviceIdentityKeyError.keychainError(status)
-        }
+
+        try upsertGenericPassword(
+            service: KeychainConstants.service,
+            account: "keyInfo",
+            data: data,
+            accessible: kSecAttrAccessibleAfterFirstUnlock
+        )
     }
 
  /// 加载 KEM 身份密钥记录（按 suite + provider tier）
@@ -969,20 +1032,13 @@ public actor DeviceIdentityKeyManager {
             Self.inMemoryKEMLock.unlock()
             return
         }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.kemService,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-            kSecValueData as String: data
-        ]
-        
-        SecItemDelete(query as CFDictionary)
-        
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw DeviceIdentityKeyError.keychainError(status)
-        }
+
+        try upsertGenericPassword(
+            service: KeychainConstants.kemService,
+            account: account,
+            data: data,
+            accessible: kSecAttrAccessibleAfterFirstUnlock
+        )
     }
 
     private struct KEMCacheKey: Hashable, Sendable {
@@ -1008,21 +1064,12 @@ public actor DeviceIdentityKeyManager {
             decoder.dateDecodingStrategy = .millisecondsSince1970
             return try decoder.decode(KEMIdentityKeyRecord.self, from: data)
         }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.kemService,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
+        guard let data = try readGenericPasswordData(
+            service: KeychainConstants.kemService,
+            account: account,
+            migrateAccessible: kSecAttrAccessibleAfterFirstUnlock
+        ) else {
             return nil
-        }
-        guard status == errSecSuccess, let data = result as? Data else {
-            throw DeviceIdentityKeyError.keychainError(status)
         }
         
         let decoder = JSONDecoder()
@@ -1065,18 +1112,20 @@ public actor DeviceIdentityKeyManager {
  /// 删除现有密钥
     private func deleteExistingKey() throws {
  // 删除私钥
-        let keyQuery: [String: Any] = [
+        var keyQuery: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data
         ]
+        Self.forbidKeychainAuthenticationUI(&keyQuery)
         SecItemDelete(keyQuery as CFDictionary)
         
  // 删除密钥信息
-        let infoQuery: [String: Any] = [
+        var infoQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: "keyInfo"
         ]
+        Self.forbidKeychainAuthenticationUI(&infoQuery)
         SecItemDelete(infoQuery as CFDictionary)
     }
     
@@ -1094,25 +1143,57 @@ public actor DeviceIdentityKeyManager {
             let data = Self.inMemoryStore[key]
             Self.inMemoryLock.unlock()
             guard let data else { return nil }
-            return String(data: data, encoding: .utf8)
+            let value = String(data: data, encoding: .utf8)
+            if let value, !value.isEmpty {
+                saveMirroredDeviceId(value)
+            }
+            return value
         }
 
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.deviceIdKey,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        Self.forbidKeychainAuthenticationUI(&query)
+        Self.preferDataProtectionKeychain(&query)
         
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        guard status == errSecSuccess, let data = result as? Data else {
-            return nil
+        if status == errSecSuccess, let data = result as? Data {
+            let value = String(data: data, encoding: .utf8)
+            if let value, !value.isEmpty {
+                saveMirroredDeviceId(value)
+            }
+            return value
         }
-        
-        return String(data: data, encoding: .utf8)
+
+        if status != errSecItemNotFound {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ Data Protection Keychain 读取设备 ID 失败: status=\(status, privacy: .public)"
+            )
+        }
+
+        do {
+            if let migrated = try readGenericPasswordData(
+                service: KeychainConstants.service,
+                account: KeychainConstants.deviceIdKey,
+                migrateAccessible: kSecAttrAccessibleAfterFirstUnlock,
+                allowLegacyFallbackOnly: true
+            ),
+               let value = String(data: migrated, encoding: .utf8),
+               !value.isEmpty {
+                saveMirroredDeviceId(value)
+                return value
+            }
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ 读取 legacy 设备 ID 失败: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+        return nil
     }
     
  /// 保存设备 ID
@@ -1124,22 +1205,96 @@ public actor DeviceIdentityKeyManager {
             Self.inMemoryLock.lock()
             Self.inMemoryStore[key] = data
             Self.inMemoryLock.unlock()
+            saveMirroredDeviceId(deviceId)
             return
         }
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecAttrAccount as String: KeychainConstants.deviceIdKey,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-            kSecValueData as String: data
-        ]
-        
- // 先删除旧的
-        SecItemDelete(query as CFDictionary)
-        
- // 添加新的
-        SecItemAdd(query as CFDictionary, nil)
+
+        do {
+            try upsertGenericPassword(
+                service: KeychainConstants.service,
+                account: KeychainConstants.deviceIdKey,
+                data: data,
+                accessible: kSecAttrAccessibleAfterFirstUnlock
+            )
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "❌ 保存设备 ID 失败: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+        saveMirroredDeviceId(deviceId)
+    }
+
+    private func loadMirroredDeviceId() -> String? {
+        let value = UserDefaults.standard.string(forKey: KeychainConstants.mirroredDeviceIdDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value, !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private func saveMirroredDeviceId(_ deviceId: String) {
+        UserDefaults.standard.set(deviceId, forKey: KeychainConstants.mirroredDeviceIdDefaultsKey)
+    }
+
+    private func loadMirroredData(forKey key: String) -> Data? {
+        UserDefaults.standard.data(forKey: key)
+    }
+
+    private func saveMirroredData(_ data: Data, forKey key: String) {
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
+    private func readGenericPasswordData(
+        service: String,
+        account: String,
+        migrateAccessible: CFString,
+        allowLegacyFallbackOnly: Bool = false
+    ) throws -> Data? {
+        func makeQuery(useDataProtection: Bool) -> [String: Any] {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            Self.forbidKeychainAuthenticationUI(&query)
+            if useDataProtection {
+                Self.preferDataProtectionKeychain(&query)
+            }
+            return query
+        }
+
+        if !allowLegacyFallbackOnly {
+            var dpResult: AnyObject?
+            let dpStatus = SecItemCopyMatching(makeQuery(useDataProtection: true) as CFDictionary, &dpResult)
+            if dpStatus == errSecSuccess, let data = dpResult as? Data {
+                return data
+            }
+            if dpStatus != errSecItemNotFound {
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ Data Protection Keychain 读取失败: service=\(service, privacy: .public) account=\(account, privacy: .public) status=\(dpStatus, privacy: .public)"
+                )
+            }
+        }
+
+        var legacyResult: AnyObject?
+        let legacyStatus = SecItemCopyMatching(makeQuery(useDataProtection: false) as CFDictionary, &legacyResult)
+        if legacyStatus == errSecItemNotFound {
+            return nil
+        }
+        guard legacyStatus == errSecSuccess, let data = legacyResult as? Data else {
+            throw DeviceIdentityKeyError.keychainError(legacyStatus)
+        }
+
+        try upsertGenericPassword(
+            service: service,
+            account: account,
+            data: data,
+            accessible: migrateAccessible
+        )
+        return data
     }
     
  // MARK: - Ed25519 Protocol Signing Key Helpers ( 5.1)
@@ -1158,26 +1313,18 @@ public actor DeviceIdentityKeyManager {
             Self.inMemoryLock.lock()
             Self.inMemoryStore[key] = privateKeyData
             Self.inMemoryLock.unlock()
+            saveMirroredData(publicKeyData, forKey: KeychainConstants.mirroredProtocolSigningPublicKeyDefaultsKey)
             SkyBridgeLogger.p2p.info("Created new Ed25519 protocol signing key (in-memory)")
             return (publicKey: publicKeyData, privateKey: privateKeyData)
         }
 
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecAttrAccount as String: KeychainConstants.protocolSigningKeyTag,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-            kSecValueData as String: privateKeyData
-        ]
-        
- // 先删除旧的
-        SecItemDelete(query as CFDictionary)
-        
- // 添加新的
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw DeviceIdentityKeyError.keychainError(status)
-        }
+        try upsertGenericPassword(
+            service: KeychainConstants.service,
+            account: KeychainConstants.protocolSigningKeyTag,
+            data: privateKeyData,
+            accessible: kSecAttrAccessibleAfterFirstUnlock
+        )
+        saveMirroredData(publicKeyData, forKey: KeychainConstants.mirroredProtocolSigningPublicKeyDefaultsKey)
         
         SkyBridgeLogger.p2p.info("Created new Ed25519 protocol signing key")
         return (publicKey: publicKeyData, privateKey: privateKeyData)
@@ -1195,28 +1342,42 @@ public actor DeviceIdentityKeyManager {
             return (publicKey: privateKey.publicKey.rawRepresentation, privateKey: privateKeyData)
         }
 
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.protocolSigningKeyTag,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        Self.forbidKeychainAuthenticationUI(&query)
+        Self.preferDataProtectionKeychain(&query)
         
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecItemNotFound {
-            return nil
-        }
-        
-        guard status == errSecSuccess, let privateKeyData = result as? Data else {
-            throw DeviceIdentityKeyError.keychainError(status)
+        let privateKeyData: Data
+        if status == errSecSuccess, let data = result as? Data {
+            privateKeyData = data
+        } else {
+            if status != errSecItemNotFound {
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ Data Protection Keychain 读取 Ed25519 协议私钥失败: status=\(status, privacy: .public)"
+                )
+            }
+            guard let migrated = try readGenericPasswordData(
+                service: KeychainConstants.service,
+                account: KeychainConstants.protocolSigningKeyTag,
+                migrateAccessible: kSecAttrAccessibleAfterFirstUnlock,
+                allowLegacyFallbackOnly: true
+            ) else {
+                return nil
+            }
+            privateKeyData = migrated
         }
         
  // 从私钥派生公钥
         let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData)
         let publicKeyData = privateKey.publicKey.rawRepresentation
+        saveMirroredData(publicKeyData, forKey: KeychainConstants.mirroredProtocolSigningPublicKeyDefaultsKey)
         
         return (publicKey: publicKeyData, privateKey: privateKeyData)
     }
@@ -1298,42 +1459,21 @@ public actor DeviceIdentityKeyManager {
             return (publicKey: publicKeyData, privateKey: privateKeyData)
         }
 
- // 加载公钥
-        let publicKeyQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.mldsaService,
-            kSecAttrAccount as String: KeychainConstants.mldsaPublicKeyAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var publicKeyResult: AnyObject?
-        let publicKeyStatus = SecItemCopyMatching(publicKeyQuery as CFDictionary, &publicKeyResult)
-        
-        if publicKeyStatus == errSecItemNotFound {
+        guard let publicKeyData = try readGenericPasswordData(
+            service: KeychainConstants.mldsaService,
+            account: KeychainConstants.mldsaPublicKeyAccount,
+            migrateAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ) else {
             return nil
         }
-        
-        guard publicKeyStatus == errSecSuccess, let publicKeyData = publicKeyResult as? Data else {
-            throw DeviceIdentityKeyError.keychainError(publicKeyStatus)
+        guard let privateKeyData = try readGenericPasswordData(
+            service: KeychainConstants.mldsaService,
+            account: KeychainConstants.mldsaSecretKeyAccount,
+            migrateAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ) else {
+            return nil
         }
-        
- // 加载私钥
-        let privateKeyQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.mldsaService,
-            kSecAttrAccount as String: KeychainConstants.mldsaSecretKeyAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var privateKeyResult: AnyObject?
-        let privateKeyStatus = SecItemCopyMatching(privateKeyQuery as CFDictionary, &privateKeyResult)
-        
-        guard privateKeyStatus == errSecSuccess, let privateKeyData = privateKeyResult as? Data else {
-            throw DeviceIdentityKeyError.keychainError(privateKeyStatus)
-        }
-        
+        saveMirroredData(publicKeyData, forKey: KeychainConstants.mirroredMLDSAPublicKeyDefaultsKey)
         return (publicKey: publicKeyData, privateKey: privateKeyData)
     }
     
@@ -1355,42 +1495,62 @@ public actor DeviceIdentityKeyManager {
             return
         }
 
- // 保存公钥
-        let publicKeyQuery: [String: Any] = [
+        try upsertGenericPassword(
+            service: KeychainConstants.mldsaService,
+            account: KeychainConstants.mldsaPublicKeyAccount,
+            data: publicKey,
+            accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            synchronizable: kCFBooleanFalse
+        )
+        saveMirroredData(publicKey, forKey: KeychainConstants.mirroredMLDSAPublicKeyDefaultsKey)
+
+        try upsertGenericPassword(
+            service: KeychainConstants.mldsaService,
+            account: KeychainConstants.mldsaSecretKeyAccount,
+            data: privateKey,
+            accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            synchronizable: kCFBooleanFalse
+        )
+    }
+
+    private func upsertGenericPassword(
+        service: String,
+        account: String,
+        data: Data,
+        accessible: CFString? = nil,
+        synchronizable: CFBoolean? = nil
+    ) throws {
+        var matchQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.mldsaService,
-            kSecAttrAccount as String: KeychainConstants.mldsaPublicKeyAccount,
-            kSecValueData as String: publicKey,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
         ]
-        
- // 先删除旧的
-        SecItemDelete(publicKeyQuery as CFDictionary)
-        
- // 添加新的
-        var status = SecItemAdd(publicKeyQuery as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw DeviceIdentityKeyError.keychainError(status)
-        }
-        
- // 保存私钥（更严格的安全属性）
-        let privateKeyQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.mldsaService,
-            kSecAttrAccount as String: KeychainConstants.mldsaSecretKeyAccount,
-            kSecValueData as String: privateKey,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
+        Self.forbidKeychainAuthenticationUI(&matchQuery)
+        Self.preferDataProtectionKeychain(&matchQuery)
+
+        let updateAttributes: [String: Any] = [
+            kSecValueData as String: data
         ]
-        
- // 先删除旧的
-        SecItemDelete(privateKeyQuery as CFDictionary)
-        
- // 添加新的
-        status = SecItemAdd(privateKeyQuery as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw DeviceIdentityKeyError.keychainError(status)
+        let updateStatus = SecItemUpdate(matchQuery as CFDictionary, updateAttributes as CFDictionary)
+
+        switch updateStatus {
+        case errSecSuccess:
+            return
+        case errSecItemNotFound:
+            var addQuery = matchQuery
+            addQuery[kSecValueData as String] = data
+            if let accessible {
+                addQuery[kSecAttrAccessible as String] = accessible
+            }
+            if let synchronizable {
+                addQuery[kSecAttrSynchronizable as String] = synchronizable
+            }
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                throw DeviceIdentityKeyError.keychainError(addStatus)
+            }
+        default:
+            throw DeviceIdentityKeyError.keychainError(updateStatus)
         }
     }
     
@@ -1400,7 +1560,7 @@ public actor DeviceIdentityKeyManager {
     private func getSEPoPKeyReference() throws -> SecKey? {
         if Self.useInMemoryKeychain { return nil }
 
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: KeychainConstants.sePoPKeyTag.utf8Data,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -1408,6 +1568,7 @@ public actor DeviceIdentityKeyManager {
             kSecReturnRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
+        Self.forbidKeychainAuthenticationUI(&query)
         
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -1491,13 +1652,14 @@ public actor DeviceIdentityKeyManager {
                 throw DeviceIdentityKeyError.invalidKeyData
             }
             
-            let query: [String: Any] = [
+            var query: [String: Any] = [
                 kSecClass as String: kSecClassKey,
                 kSecAttrApplicationTag as String: KeychainConstants.sePoPKeyTag.utf8Data,
                 kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
                 kSecValueData as String: keyData,
                 kSecAttrIsPermanent as String: true
             ]
+            Self.forbidKeychainAuthenticationUI(&query)
             
  // 先删除旧的
             SecItemDelete(query as CFDictionary)

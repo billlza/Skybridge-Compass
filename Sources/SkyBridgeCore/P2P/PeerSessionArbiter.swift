@@ -178,19 +178,16 @@ public actor PeerSessionArbiter {
         }
         if normalized.hasPrefix("id:") {
             normalized.removeFirst("id:".count)
-        }
-
-        if let uuid = normalizedUUID(in: normalized) {
-            return uuid
+            if let uuid = normalizedUUID(in: normalized) {
+                return uuid
+            }
+            return normalized
         }
 
         if normalized.hasPrefix("bonjour:") {
             let payload = String(normalized.dropFirst("bonjour:".count))
             let components = payload.split(separator: "@", maxSplits: 1).map(String.init)
             let rawName = components.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if let uuid = normalizedUUID(in: rawName) {
-                return uuid
-            }
             let rawDomain = components.count > 1 ? components[1] : "local."
             let domain = rawDomain.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedDomain = domain.isEmpty ? "local." : domain
@@ -199,10 +196,11 @@ public actor PeerSessionArbiter {
 
         if normalized.hasPrefix("host:") {
             let hostPayload = String(normalized.dropFirst("host:".count))
-            if let uuid = normalizedUUID(in: hostPayload) {
-                return uuid
-            }
             return "host:\(hostPayload)"
+        }
+
+        if let uuid = normalizedUUID(in: normalized) {
+            return uuid
         }
 
         return normalized

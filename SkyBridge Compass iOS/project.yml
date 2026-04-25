@@ -50,6 +50,7 @@ targets:
           NSAllowsLocalNetworking: true
         NSLocationWhenInUseUsageDescription: "SkyBridge 使用你的位置信息来获取本地天气并优化网络状态展示。"
         NSCameraUsageDescription: "SkyBridge 需要访问相机以扫描设备配对二维码。"
+        NSMicrophoneUsageDescription: "SkyBridge 需要麦克风权限以建立远程桌面音频会话，并在你启用音频重定向或语音相关能力时安全处理音频。"
         LSSupportsOpeningDocumentsInPlace: true
         UIFileSharingEnabled: true
         UIRequiredDeviceCapabilities:
@@ -186,6 +187,7 @@ schemes:
   SkyBridgeCompassiOSTests:
     build:
       targets:
+        SkyBridgeCompass-iOS: [test]
         SkyBridgeCompassiOSTests: [test]
     test:
       targets:

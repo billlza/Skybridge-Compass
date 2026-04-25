@@ -10,6 +10,9 @@ IOS_BUNDLE_ID="com.skybridge.compass.ios"
 IOS_DEVICE_ID="${SKYBRIDGE_SMOKE_IOS_DEVICE_ID:-smoke-ios}"
 MAC_TARGET_NAME="${SKYBRIDGE_SMOKE_MAC_TARGET_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname)}"
 PREFERRED_SUITE="${SB_PQC_PREFERRED_SUITE:-xwing}"
+HOST_PREFERRED_SUITE="${SB_PQC_HOST_PREFERRED_SUITE:-$PREFERRED_SUITE}"
+IOS_PREFERRED_SUITE="${SB_PQC_IOS_PREFERRED_SUITE:-$PREFERRED_SUITE}"
+EXPECTED_TARGET_SUITE="${SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE:-}"
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -146,7 +149,7 @@ PY
 
 validate_scenario() {
   case "$SMOKE_SCENARIO" in
-    bootstrap-rekey|xwing-only)
+    bootstrap-rekey|xwing-only|compat-pure-pqc)
       ;;
     *)
       echo "Unsupported smoke scenario: ${SMOKE_SCENARIO}" >&2
@@ -157,11 +160,24 @@ validate_scenario() {
 
 validate_scenario
 
+if [[ -z "$EXPECTED_TARGET_SUITE" ]]; then
+  case "$SMOKE_SCENARIO" in
+    bootstrap-rekey|xwing-only)
+      EXPECTED_TARGET_SUITE="X-Wing"
+      ;;
+    compat-pure-pqc)
+      EXPECTED_TARGET_SUITE="ML-KEM-768"
+      ;;
+  esac
+fi
+
 echo "==> Artifacts: ${ARTIFACT_DIR}"
 echo "==> Simulator: ${SIM_ID}"
 echo "==> Scenario: ${SMOKE_SCENARIO}"
 echo "==> Target name: ${MAC_TARGET_NAME}"
-echo "==> Preferred suite: ${PREFERRED_SUITE}"
+echo "==> Host preferred suite: ${HOST_PREFERRED_SUITE}"
+echo "==> iOS preferred suite: ${IOS_PREFERRED_SUITE}"
+echo "==> Expected negotiated suite: ${EXPECTED_TARGET_SUITE}"
 
 echo "==> Building macOS LAN host"
 MAC_BUILD_LOG="$ARTIFACT_DIR/macos-build.log"
@@ -226,7 +242,7 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
 
   if [[ "$SMOKE_SCENARIO" == "bootstrap-rekey" ]]; then
     SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
-    SB_PQC_PREFERRED_SUITE="$PREFERRED_SUITE" \
+    SB_PQC_PREFERRED_SUITE="$HOST_PREFERRED_SUITE" \
     SKYBRIDGE_SMOKE_ROLE=mac-host \
     SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_STATUS" \
     SKYBRIDGE_SMOKE_PQC_REPORT_FILE="$MAC_PQC_REPORT" \
@@ -235,11 +251,12 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     "$MAC_APP_BIN" >"$MAC_STDOUT" 2>&1 &
   else
     SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
-    SB_PQC_PREFERRED_SUITE="$PREFERRED_SUITE" \
+    SB_PQC_PREFERRED_SUITE="$HOST_PREFERRED_SUITE" \
     SKYBRIDGE_SMOKE_ROLE=mac-host \
     SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_STATUS" \
     SKYBRIDGE_SMOKE_PQC_REPORT_FILE="$MAC_PQC_REPORT" \
     SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=1 \
+    SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
     "$MAC_APP_BIN" >"$MAC_STDOUT" 2>&1 &
   fi
   MAC_PID="$!"
@@ -251,7 +268,7 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
   if [[ "$SMOKE_SCENARIO" == "bootstrap-rekey" ]]; then
     SIMCTL_CHILD_SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
     SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
-    SIMCTL_CHILD_SB_PQC_PREFERRED_SUITE="$PREFERRED_SUITE" \
+    SIMCTL_CHILD_SB_PQC_PREFERRED_SUITE="$IOS_PREFERRED_SUITE" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_ROLE=ios-p2p-client \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_TARGET_DEVICE_ID="$MAC_PQC_DEVICE_ID" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_TARGET_NAME="$MAC_TARGET_NAME" \
@@ -267,12 +284,13 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
   else
     SIMCTL_CHILD_SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
     SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
-    SIMCTL_CHILD_SB_PQC_PREFERRED_SUITE="$PREFERRED_SUITE" \
+    SIMCTL_CHILD_SB_PQC_PREFERRED_SUITE="$IOS_PREFERRED_SUITE" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_ROLE=ios-p2p-client \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_TARGET_DEVICE_ID="$MAC_PQC_DEVICE_ID" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_TARGET_NAME="$MAC_TARGET_NAME" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_STATUS_BASENAME="$IOS_STATUS_BASENAME" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_TIMEOUT_SECONDS="$SMOKE_TIMEOUT_SECONDS" \
+    SIMCTL_CHILD_SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
     SIMCTL_CHILD_SKYBRIDGE_PQC_PEER_DEVICE_ID="$MAC_PQC_DEVICE_ID" \
     SIMCTL_CHILD_SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64="$MAC_PQC_XWING_PUBLIC_KEY_BASE64" \
     SIMCTL_CHILD_SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64="$MAC_PQC_MLKEM768_PUBLIC_KEY_BASE64" \
@@ -290,8 +308,9 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     require_file_pattern "$IOS_STATUS_PATH" 'suite X25519-Ed25519' "iOS classic bootstrap"
     require_file_pattern "$IOS_STATUS_PATH" 'rekey X25519-Ed25519 -> X-Wing' "iOS rekey"
   else
-    wait_for_file_pattern "$IOS_STATUS_PATH" 'success suite=X-Wing handshakeOnly=1' "$SMOKE_TIMEOUT_SECONDS" "iOS X-Wing success"
-    require_file_pattern "$IOS_STATUS_PATH" 'suite X-Wing' "iOS X-Wing handshake"
+    wait_for_file_pattern "$MAC_STATUS" "success .*suite=${EXPECTED_TARGET_SUITE} handshakeOnly=1" "$SMOKE_TIMEOUT_SECONDS" "macOS handshake success"
+    wait_for_file_pattern "$IOS_STATUS_PATH" "success suite=${EXPECTED_TARGET_SUITE} handshakeOnly=1" "$SMOKE_TIMEOUT_SECONDS" "iOS handshake success"
+    require_file_pattern "$IOS_STATUS_PATH" "suite ${EXPECTED_TARGET_SUITE}" "iOS negotiated suite"
     require_file_absent_pattern "$IOS_STATUS_PATH" 'rekey ' "iOS unexpected rekey"
     require_file_absent_pattern "$IOS_STATUS_PATH" 'X25519' "iOS unexpected classic suite"
   fi

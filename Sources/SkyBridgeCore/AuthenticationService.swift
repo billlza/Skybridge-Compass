@@ -146,6 +146,7 @@ import Combine
     private var configuration: Configuration?
     private var isSupabaseMode: Bool = false
     private var accessTokenRefreshTask: Task<AuthSession, Error>?
+    private var persistedSessionLoadTask: Task<Void, Never>?
 
     private init() {
         let config = URLSessionConfiguration.ephemeral
@@ -156,12 +157,6 @@ import Combine
 
         configuration = Self.loadConfigurationFromEnvironment()
         isSupabaseMode = false
-        // Smoke/test harnesses can opt out of synchronous Security.framework keychain
-        // reads and inject a session explicitly after startup.
-        let useInMemoryKeychain = ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
-        if !useInMemoryKeychain, let session = try? loadSessionFromKeychain() {
-            sessionSubject.send(session)
-        }
     }
 
  // MARK: - 生命周期管理
@@ -426,8 +421,20 @@ import Combine
     /// 在启动阶段交互式解锁 Keychain 后补读一次持久化 session，避免首次静默读取失败后永久丢失登录态。
     public func reloadPersistedSessionIfNeeded() {
         guard sessionSubject.value == nil else { return }
-        guard let session = try? loadSessionFromKeychain() else { return }
-        sessionSubject.send(session)
+        guard persistedSessionLoadTask == nil else { return }
+
+        persistedSessionLoadTask = Task(priority: .utility) { [weak self] in
+            let session = await Task.detached(priority: .utility) {
+                KeychainManager.shared.loadAuthSession()
+            }.value
+
+            guard let self else { return }
+            defer { self.persistedSessionLoadTask = nil }
+            guard !Task.isCancelled else { return }
+            guard self.sessionSubject.value == nil, let session else { return }
+            self.sessionSubject.send(session)
+            await TenantAccessController.shared.bindAuthentication(session: session)
+        }
     }
 
     private func session(fromNebulaResult result: NebulaService.NebulaAuthResult) throws -> AuthSession {
@@ -648,6 +655,8 @@ import Combine
     }
 
     private func clearLocalSessionState() async {
+        persistedSessionLoadTask?.cancel()
+        persistedSessionLoadTask = nil
         sessionSubject.send(nil)
         KeychainManager.shared.deleteAuthSession()
         await TenantAccessController.shared.clearAuthentication()

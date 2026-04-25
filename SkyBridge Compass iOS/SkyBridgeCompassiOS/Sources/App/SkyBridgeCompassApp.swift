@@ -878,6 +878,18 @@ private final class LocalP2PSmokeHarness {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
     }
 
+    private var expectsFileTransferSmoke: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_FILE_TRANSFER"] == "1"
+    }
+
+    private var expectedHandshakeSuite: String {
+        environmentValue("SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE") ?? "X-Wing"
+    }
+
+    private var fileTransferRunID: String {
+        environmentValue("SKYBRIDGE_SMOKE_FILE_TRANSFER_RUN_ID") ?? "default"
+    }
+
     private func environmentValue(_ name: String) -> String? {
         guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -890,6 +902,9 @@ private final class LocalP2PSmokeHarness {
 
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
+        if expectsPQCRekey {
+            PQCCryptoManager.instance.allowClassicFallbackForCompatibility = true
+        }
         await preseedPeerKEMTrustIfNeeded(reporter: reporter)
 
         guard !targetDeviceID.isEmpty else {
@@ -923,13 +938,23 @@ private final class LocalP2PSmokeHarness {
         var lastRekey = ""
         var sawClassicHandshake = false
         var sawRekey = false
-        var xwingStableSince: Date?
+        var suiteStableSince: Date?
+        var didPreseedResolvedTarget = false
+        var lastDiscoverySummary = ""
+        var lastDiscoveryHealAt = Date.distantPast
+        let expectedNormalizedSuite = expectedHandshakeSuite.uppercased()
 
         while Date() < deadline {
             let handshakeState = connectionManager.currentHandshakeState
             if handshakeState != lastHandshakeState {
                 lastHandshakeState = handshakeState
                 reporter.append("state \(Self.sanitize(handshakeState))")
+            }
+
+            let discoveredSummary = summarizeDiscoveredDevices(discoveryManager.discoveredDevices)
+            if discoveredSummary != lastDiscoverySummary {
+                lastDiscoverySummary = discoveredSummary
+                reporter.append("discovered \(discoveredSummary)")
             }
 
             let latestError = connectionManager.lastError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -944,6 +969,11 @@ private final class LocalP2PSmokeHarness {
                 reporter.append(
                     "target id=\(Self.sanitize(target.id)) name=\(Self.sanitize(target.name))"
                 )
+            }
+
+            if !didPreseedResolvedTarget, let target = selectedDevice {
+                didPreseedResolvedTarget = true
+                await preseedResolvedTargetKEMTrustIfNeeded(target: target, reporter: reporter)
             }
 
             if !connectAttempted, let target = selectedDevice {
@@ -964,20 +994,26 @@ private final class LocalP2PSmokeHarness {
                 return
             }
 
+            if selectedDevice == nil,
+               Date().timeIntervalSince(lastDiscoveryHealAt) >= 5 {
+                lastDiscoveryHealAt = Date()
+                discoveryManager.retryAuthorizationBlockedBrowsers()
+                await discoveryManager.refresh()
+                reporter.append(
+                    "discovery-heal count=\(discoveryManager.discoveredDevices.count)"
+                )
+            }
+
             if let target = selectedDevice {
                 if let suite = connectionManager.getNegotiatedSuite(for: target.id)?.rawValue,
                    suite != lastSuite {
                     lastSuite = suite
+                    suiteStableSince = Date()
                     reporter.append("suite \(Self.sanitize(suite))")
 
                     let normalizedSuite = suite.uppercased()
                     if normalizedSuite.contains("X25519") {
                         sawClassicHandshake = true
-                        xwingStableSince = nil
-                    } else if normalizedSuite == "X-WING" {
-                        xwingStableSince = xwingStableSince ?? Date()
-                    } else {
-                        xwingStableSince = nil
                     }
                 }
 
@@ -1000,14 +1036,40 @@ private final class LocalP2PSmokeHarness {
 
                     if expectsPQCRekey {
                         if sawClassicHandshake && sawRekey && normalizedSuite == "X-WING" {
-                            reporter.append("success suite=X-Wing bootstrapRekey=1")
+                            if expectsFileTransferSmoke {
+                                do {
+                                    try await performBidirectionalFileTransferSmoke(
+                                        to: target,
+                                        reporter: reporter
+                                    )
+                                    reporter.append("success suite=X-Wing bootstrapRekey=1 fileTransfer=1")
+                                } catch {
+                                    reporter.append("failed stage=file-transfer error=\(Self.sanitize(error.localizedDescription))")
+                                }
+                            } else {
+                                reporter.append("success suite=X-Wing bootstrapRekey=1")
+                            }
                             return
                         }
-                    } else if normalizedSuite == "X-WING",
+                    } else if normalizedSuite == expectedNormalizedSuite,
                               !sawRekey,
-                              let stableSince = xwingStableSince,
+                              let stableSince = suiteStableSince,
                               Date().timeIntervalSince(stableSince) >= 1.0 {
-                        reporter.append("success suite=X-Wing handshakeOnly=1")
+                        if expectsFileTransferSmoke {
+                            do {
+                                try await performBidirectionalFileTransferSmoke(
+                                    to: target,
+                                    reporter: reporter
+                                )
+                                reporter.append(
+                                    "success suite=\(Self.sanitize(suite)) handshakeOnly=1 fileTransfer=1"
+                                )
+                            } catch {
+                                reporter.append("failed stage=file-transfer error=\(Self.sanitize(error.localizedDescription))")
+                            }
+                        } else {
+                            reporter.append("success suite=\(Self.sanitize(suite)) handshakeOnly=1")
+                        }
                         return
                     }
                 }
@@ -1023,6 +1085,19 @@ private final class LocalP2PSmokeHarness {
         }
 
         reporter.append("failed stage=timeout error=ios_local_p2p_smoke_timeout")
+    }
+
+    private func summarizeDiscoveredDevices(_ devices: [DiscoveredDevice]) -> String {
+        guard !devices.isEmpty else { return "count=0" }
+
+        let preview = devices
+            .prefix(3)
+            .map { device in
+                "\(Self.sanitize(device.id))|\(Self.sanitize(device.name))"
+            }
+            .joined(separator: ",")
+        let suffix = devices.count > 3 ? ",more=\(devices.count - 3)" : ""
+        return "count=\(devices.count) peers=\(preview)\(suffix)"
     }
 
     private func statusURL() -> URL? {
@@ -1114,6 +1189,125 @@ private final class LocalP2PSmokeHarness {
         await KEMTrustStore.shared.upsert(deviceId: peerDeviceID, kemPublicKeys: keys)
         let suites = keys.map { String(format: "0x%04x", $0.suiteWireId) }.joined(separator: ",")
         reporter.append("pqc-preseed device=\(Self.sanitize(peerDeviceID)) suites=\(suites)")
+    }
+
+    private func preseedResolvedTargetKEMTrustIfNeeded(
+        target: DiscoveredDevice,
+        reporter: SmokeStatusReporter
+    ) async {
+        var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
+        if let xwing = decodeBase64Key("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.xwingSuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.xwingSuiteWireID,
+                publicKey: xwing
+            )
+        }
+        if let mlkem768 = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.mlkem768SuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.mlkem768SuiteWireID,
+                publicKey: mlkem768
+            )
+            if environmentValue("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64") == nil {
+                keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
+                    suiteWireId: Self.mlkem768FSSuiteWireID,
+                    publicKey: mlkem768
+                )
+            }
+        }
+        if let mlkem768fs = decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64", reporter: reporter) {
+            keysBySuite[Self.mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: Self.mlkem768FSSuiteWireID,
+                publicKey: mlkem768fs
+            )
+        }
+
+        let keys = keysBySuite.keys.sorted().compactMap { keysBySuite[$0] }
+        guard !keys.isEmpty else { return }
+
+        await KEMTrustStore.shared.upsert(deviceId: target.id, kemPublicKeys: keys)
+        reporter.append("pqc-preseed target-alias id=\(Self.sanitize(target.id))")
+    }
+
+    private func performBidirectionalFileTransferSmoke(
+        to target: DiscoveredDevice,
+        reporter: SmokeStatusReporter
+    ) async throws {
+        try await FileTransferRuntime.shared.ensureHealthy()
+
+        let outboundName = "ios-smoke-\(fileTransferRunID).txt"
+        let inboundName = "mac-smoke-\(fileTransferRunID).txt"
+        let outboundURL = try makeSmokeTransferFile(
+            fileName: outboundName,
+            contents: """
+            role=ios
+            run=\(fileTransferRunID)
+            sentAt=\(ISO8601DateFormatter().string(from: Date()))
+            target=\(target.id)
+            """
+        )
+
+        reporter.append("file-transfer outbound-start name=\(Self.sanitize(outboundName))")
+        try await FileTransferManager.instance.sendFile(at: outboundURL, to: target)
+        reporter.append("file-transfer outbound-complete name=\(Self.sanitize(outboundName))")
+
+        let inboundTransfer = try await waitForCompletedTransfer(
+            fileName: inboundName,
+            isIncoming: true,
+            timeoutSeconds: 90
+        )
+        guard let localURL = FileTransferManager.instance.resolveExistingLocalFileURL(for: inboundTransfer),
+              FileManager.default.fileExists(atPath: localURL.path) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 1001,
+                userInfo: [NSLocalizedDescriptionKey: "iOS smoke 未找到接收到的文件 \(inboundName)"]
+            )
+        }
+
+        reporter.append(
+            "file-transfer inbound-complete name=\(Self.sanitize(inboundName)) path=\(Self.sanitize(localURL.lastPathComponent))"
+        )
+    }
+
+    private func makeSmokeTransferFile(fileName: String, contents: String) throws -> URL {
+        let baseDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SmokeTransfers", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        let url = baseDirectory.appendingPathComponent(fileName, isDirectory: false)
+        guard let data = contents.data(using: .utf8) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 1002,
+                userInfo: [NSLocalizedDescriptionKey: "无法编码 iOS smoke 文件内容"]
+            )
+        }
+        try data.write(to: url, options: .atomic)
+        return url
+    }
+
+    private func waitForCompletedTransfer(
+        fileName: String,
+        isIncoming: Bool,
+        timeoutSeconds: TimeInterval
+    ) async throws -> FileTransfer {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if let transfer = FileTransferManager.instance.transferHistory.first(where: { transfer in
+                transfer.fileName == fileName
+                    && transfer.isIncoming == isIncoming
+                    && transfer.status == .completed
+            }) {
+                return transfer
+            }
+
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+
+        throw NSError(
+            domain: "SkyBridge.Smoke",
+            code: 1000,
+            userInfo: [NSLocalizedDescriptionKey: "等待传输完成超时: \(fileName)"]
+        )
     }
 
     private static func sanitize(_ value: String) -> String {
@@ -1523,8 +1717,13 @@ private final class LocalWebRTCSmokeHarness {
             interactionOverlayChannelEnabled: true,
             jitterBufferFrames: 2,
             screenFrameTransport: "webrtc-native-main+sbrf-fallback",
-            screenDataChannelEnabled: false,
+            screenDataChannelEnabled: true,
             nativeVideoTrackReady: false,
+            nativeAudioTrackEnabled: false,
+            audioRedirectionEnabled: RemoteDesktopManager.instance.viewerSettings.audioRedirectionEnabled,
+            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.pcmS16LE.rawValue,
+            audioSampleRate: 48_000,
+            audioChannelCount: 2,
             streamRefreshToken: UInt64(Date().timeIntervalSince1970 * 1_000)
         )
 

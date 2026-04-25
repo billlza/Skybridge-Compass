@@ -16,4 +16,12 @@ public struct KEMPublicKeyInfo: Codable, Sendable, Equatable {
         self.suiteWireId = suiteWireId
         self.publicKey = publicKey
     }
+
+    public static func normalizedValidKeys(_ rawKeys: [KEMPublicKeyInfo]) -> [KEMPublicKeyInfo] {
+        var bySuite: [UInt16: KEMPublicKeyInfo] = [:]
+        for key in rawKeys where !key.publicKey.isEmpty {
+            bySuite[key.suiteWireId] = key
+        }
+        return bySuite.keys.sorted().compactMap { bySuite[$0] }
+    }
 }

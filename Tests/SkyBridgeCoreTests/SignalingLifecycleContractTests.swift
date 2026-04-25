@@ -93,17 +93,17 @@ final class SignalingLifecycleContractTests: XCTestCase {
 
         #if os(macOS)
         XCTAssertEqual(labels, [
+            "native-proxy-bypass",
+            "urlsession-proxy-bypass",
             "native",
             "urlsession",
-            "native-proxy-bypass",
-            "urlsession-proxy-bypass"
         ])
         #else
         XCTAssertEqual(labels, [
-            "urlsession",
             "urlsession-proxy-bypass",
-            "native",
-            "native-proxy-bypass"
+            "urlsession",
+            "native-proxy-bypass",
+            "native"
         ])
         #endif
     }

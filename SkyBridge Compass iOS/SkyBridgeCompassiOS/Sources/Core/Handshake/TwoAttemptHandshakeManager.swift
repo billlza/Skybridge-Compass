@@ -63,6 +63,11 @@ public enum AttemptPreparationError: Error, Sendable {
     case fallbackRateLimited(deviceId: String, cooldownSeconds: Int)
 }
 
+public enum PQCOfferMode: Sendable {
+    case preferredSingle
+    case compatRetry
+}
+
 // MARK: - TwoAttemptHandshakeManager
 
 /// 两次尝试握手管理器
@@ -148,21 +153,19 @@ public struct TwoAttemptHandshakeManager: Sendable {
     /// 准备 Attempt
     public static func prepareAttempt(
         strategy: HandshakeAttemptStrategy,
-        cryptoProvider: any CryptoProvider
+        cryptoProvider: any CryptoProvider,
+        pqcOfferMode: PQCOfferMode = .preferredSingle
     ) throws -> AttemptPreparation {
-        // 1. Choose provider + suite for this attempt
-        // Note: unlike macOS, iOS handshake context is currently single-suite; we must ensure provider matches suite.
         let attemptProvider: any CryptoProvider
         let offeredSuites: [CryptoSuite]
         switch strategy {
         case .pqcOnly:
-            // iOS HandshakeContext 当前仅支持 single-suite（与 macOS 的多 suite 版本不同）。
-            // 为了保持行为一致，这里选择第一条 PQC/Hybrid suite 作为 offeredSuites。
-            guard let first = cryptoProvider.supportedSuites.first(where: { $0.isPQC || $0.isHybrid }) else {
+            let pqcSuites = offeredPQCSuites(using: cryptoProvider, mode: pqcOfferMode)
+            guard !pqcSuites.isEmpty else {
                 throw AttemptPreparationError.pqcProviderUnavailable
             }
             attemptProvider = cryptoProvider
-            offeredSuites = [first]
+            offeredSuites = pqcSuites
         case .classicOnly:
             // Always use Classic provider for classic attempt to avoid "strategy=classic_only but activeSuite=PQC" mismatches.
             let classicProvider = ClassicCryptoProvider()
@@ -194,6 +197,83 @@ public struct TwoAttemptHandshakeManager: Sendable {
             signatureProvider: signatureProvider
         )
     }
+
+    private static func offeredPQCSuites(
+        using cryptoProvider: any CryptoProvider,
+        mode: PQCOfferMode
+    ) -> [CryptoSuite] {
+        let pqcSuites = availableSuitesForNegotiation(using: cryptoProvider).filter(\.isPQCGroup)
+        guard !pqcSuites.isEmpty else { return [] }
+
+        switch mode {
+        case .preferredSingle:
+            return [pqcSuites[0]]
+        case .compatRetry:
+            if let purePQC = pqcSuites.first(where: { !$0.isHybrid }) {
+                return [purePQC]
+            }
+            return [pqcSuites[0]]
+        }
+    }
+
+    private static func availableSuitesForNegotiation(
+        using cryptoProvider: any CryptoProvider
+    ) -> [CryptoSuite] {
+        var suites = cryptoProvider.supportedSuites
+        guard cryptoProvider.tier == .nativePQC else {
+            return deduplicatedSuitesByWire(suites)
+        }
+
+        let preferXWing = cryptoProvider.activeSuite == .xwing || prefersXWingHybridSuite()
+        let xwingAvailable = isAppleXWingAvailable()
+
+        suites.removeAll { suite in
+            suite.wireId == CryptoSuite.xwing.wireId ||
+            suite.wireId == CryptoSuite.mlkem768.wireId
+        }
+
+        if preferXWing && xwingAvailable {
+            suites.insert(.xwing, at: 0)
+            suites.insert(.mlkem768, at: 1)
+        } else {
+            suites.insert(.mlkem768, at: 0)
+            if xwingAvailable {
+                suites.insert(.xwing, at: 1)
+            }
+        }
+
+        return deduplicatedSuitesByWire(suites)
+    }
+
+    private static func deduplicatedSuitesByWire(_ suites: [CryptoSuite]) -> [CryptoSuite] {
+        var seen = Set<UInt16>()
+        var result: [CryptoSuite] = []
+        result.reserveCapacity(suites.count)
+        for suite in suites where seen.insert(suite.wireId).inserted {
+            result.append(suite)
+        }
+        return result
+    }
+
+    private static func prefersXWingHybridSuite() -> Bool {
+        if let raw = ProcessInfo.processInfo.environment["SB_PQC_PREFERRED_SUITE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           raw == "xwing" || raw == "hybrid" {
+            return true
+        }
+
+        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
+    }
+
+    private static func isAppleXWingAvailable() -> Bool {
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return AppleXWingCryptoProvider.selfTest()
+        }
+        #endif
+        return false
+    }
     
     /// 握手执行器类型（使用 AttemptPreparation）
     public typealias PreparedHandshakeExecutor = @Sendable (
@@ -215,11 +295,24 @@ public struct TwoAttemptHandshakeManager: Sendable {
         if preferPQC {
             // 第一次尝试: PQC-only
             do {
-                let preparation = try prepareAttempt(strategy: .pqcOnly, cryptoProvider: cryptoProvider)
+                let preparation = try prepareAttempt(
+                    strategy: .pqcOnly,
+                    cryptoProvider: cryptoProvider,
+                    pqcOfferMode: .preferredSingle
+                )
                 return try await executor(preparation)
             } catch let error as AttemptPreparationError {
                 // PQC 准备失败，尝试 fallback
                 if case .pqcProviderUnavailable = error {
+                    if let bridged = try await attemptPQCCompatibilityRetry(
+                        deviceId: deviceId,
+                        reason: .pqcProviderUnavailable,
+                        policy: policy,
+                        cryptoProvider: cryptoProvider,
+                        executor: executor
+                    ) {
+                        return bridged
+                    }
                     guard policy.allowClassicFallback else {
                         throw error
                     }
@@ -234,18 +327,28 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 throw error
             } catch let error as HandshakeError {
                 // 检查是否允许 fallback
-                if case .failed(let reason) = error,
-                   shouldAllowFallback(reason) {
-                    guard policy.allowClassicFallback else {
-                        throw error
-                    }
-                    return try await attemptFallback(
+                if case .failed(let reason) = error {
+                    if let bridged = try await attemptPQCCompatibilityRetry(
                         deviceId: deviceId,
                         reason: reason,
                         policy: policy,
                         cryptoProvider: cryptoProvider,
                         executor: executor
-                    )
+                    ) {
+                        return bridged
+                    }
+                    if shouldAllowFallback(reason) {
+                        guard policy.allowClassicFallback else {
+                            throw error
+                        }
+                        return try await attemptFallback(
+                            deviceId: deviceId,
+                            reason: reason,
+                            policy: policy,
+                            cryptoProvider: cryptoProvider,
+                            executor: executor
+                        )
+                    }
                 }
                 throw error
             }
@@ -254,6 +357,73 @@ public struct TwoAttemptHandshakeManager: Sendable {
             let preparation = try prepareAttempt(strategy: .classicOnly, cryptoProvider: cryptoProvider)
             return try await executor(preparation)
         }
+    }
+
+    private static func shouldAttemptPQCCompatibilityRetry(_ reason: HandshakeFailureReason) -> Bool {
+        switch reason {
+        case .pqcProviderUnavailable, .suiteNegotiationFailed, .missingPeerKEMPublicKey:
+            return true
+        case .suiteNotSupported,
+             .unknownSuite,
+             .timeout,
+             .cancelled,
+             .peerRejected,
+             .cryptoError,
+             .transportError,
+             .versionMismatch,
+             .signatureVerificationFailed,
+             .invalidMessageFormat,
+             .identityMismatch,
+             .replayDetected,
+             .secureEnclavePoPRequired,
+             .secureEnclaveSignatureInvalid,
+             .keyConfirmationFailed,
+             .suiteSignatureMismatch,
+             .supersededByConcurrentAttempt:
+            return false
+        }
+    }
+
+    private static func attemptPQCCompatibilityRetry(
+        deviceId: String,
+        reason: HandshakeFailureReason,
+        policy: HandshakePolicy,
+        cryptoProvider: any CryptoProvider,
+        executor: PreparedHandshakeExecutor
+    ) async throws -> SessionKeys? {
+        guard shouldAttemptPQCCompatibilityRetry(reason) else {
+            return nil
+        }
+
+        let bridgePreparation: AttemptPreparation
+        do {
+            bridgePreparation = try prepareAttempt(
+                strategy: .pqcOnly,
+                cryptoProvider: cryptoProvider,
+                pqcOfferMode: .compatRetry
+            )
+        } catch {
+            return nil
+        }
+
+        guard bridgePreparation.offeredSuites.allSatisfy({ !$0.isHybrid }) else {
+            return nil
+        }
+
+        SecurityEventEmitter.emitDetached(SecurityEvent(
+            type: .handshakeFailed,
+            severity: .info,
+            message: "Retrying PQC handshake with pure-PQC compatibility suite",
+            context: [
+                "deviceId": deviceId,
+                "reason": String(describing: reason),
+                "strategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
+                "bridgeMode": "pure_pqc_compat_retry",
+                "policyRequirePQC": policy.requirePQC ? "1" : "0"
+            ]
+        ))
+
+        return try await executor(bridgePreparation)
     }
     
     /// 尝试 fallback（带限流）

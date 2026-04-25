@@ -30,8 +30,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  /// 扫描状态
     @Published public private(set) var isScanning = false
 
- /// 设备分类统计
+    /// 设备分类统计
     @Published public private(set) var deviceStats: DeviceStats = DeviceStats()
+
+    /// 网络发现层的元数据摘要。
+    /// 用于驱动依赖 trusted/discovery 交叉匹配的视图在 metadata 变化时刷新。
+    @Published public private(set) var discoveryMetadataSummary: String = ""
 
  // MARK: - 私有属性
 
@@ -151,6 +155,18 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return deviceMap[identifier]
     }
 
+    #if DEBUG
+    func replaceDevicesForTesting(_ devices: [OnlineDevice]) {
+        onlineDevices = devices
+        deviceMap = Dictionary(uniqueKeysWithValues: devices.map { ($0.uniqueIdentifier, $0) })
+        updateDeviceStats()
+    }
+
+    func recomputeDeviceStatusesForTesting() {
+        updateDevicesList()
+    }
+    #endif
+
     /// Resolve the best live `OnlineDevice` representation for a trusted record.
     /// This keeps trusted-device UI aligned with the same identity and alias policy
     /// used by discovery and connection code instead of relying on brittle name-only matching.
@@ -197,6 +213,63 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return scoredMatches.first?.record
     }
 
+    public func resolvedApplePeerMetadata(
+        for trustRecord: TrustRecord
+    ) -> ApplePeerDeviceMetadataNormalizer.Presentation? {
+        resolvedApplePeerMetadata(for: [trustRecord])
+    }
+
+    public func resolvedApplePeerMetadata(
+        for trustRecords: [TrustRecord]
+    ) -> ApplePeerDeviceMetadataNormalizer.Presentation? {
+        let validRecords = trustRecords.filter { !$0.isTombstone && !$0.isExpired }
+        guard !validRecords.isEmpty else { return nil }
+
+        var presentations: [ApplePeerDeviceMetadataNormalizer.Presentation] = []
+
+        let discoveredCandidates = resolvedDiscoveredCandidates(for: validRecords, limit: 5)
+
+        for discoveredDevice in discoveredCandidates {
+            let normalizedDiscovered = ApplePeerDeviceMetadataNormalizer.normalize(
+                modelName: discoveredDevice.modelName,
+                chip: discoveredDevice.chip,
+                platform: discoveredDevice.platformName,
+                osVersion: discoveredDevice.osVersion
+            )
+
+            if normalizedDiscovered.modelName != nil
+                || normalizedDiscovered.chip != nil
+                || normalizedDiscovered.platform != nil
+                || normalizedDiscovered.osVersion != nil {
+                    presentations.append(normalizedDiscovered)
+            }
+        }
+
+        for record in validRecords {
+            if let onlineDevice = resolvedOnlineDevice(for: record) {
+                let normalizedOnline = ApplePeerDeviceMetadataNormalizer.normalize(
+                    modelName: onlineDevice.modelName,
+                    chip: onlineDevice.chip,
+                    platform: onlineDevice.platformName,
+                    osVersion: onlineDevice.osVersion
+                )
+
+                if normalizedOnline.modelName != nil
+                    || normalizedOnline.chip != nil
+                    || normalizedOnline.platform != nil
+                    || normalizedOnline.osVersion != nil {
+                    presentations.append(normalizedOnline)
+                }
+            }
+        }
+
+        let merged = ApplePeerDeviceMetadataNormalizer.mergedPresentations(presentations)
+        logger.debug(
+            "trusted metadata merge: records=\(validRecords.count, privacy: .public) discovered=\(discoveredCandidates.count, privacy: .public) presentations=\(presentations.count, privacy: .public) mergedOS=\(merged?.osVersion ?? "", privacy: .public)"
+        )
+        return merged
+    }
+
     /// 解析在线设备对应的底层发现记录（用于连接时保留真实 Bonjour/IP 元数据）。
     public func resolvedDiscoveredDevice(for onlineDevice: OnlineDevice) -> DiscoveredDevice? {
         resolvedDiscoveredCandidates(for: onlineDevice, limit: 1).first
@@ -227,6 +300,47 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return scored.prefix(limit).map(\.device)
     }
 
+    public func resolvedDiscoveredCandidates(
+        for trustRecords: [TrustRecord],
+        limit: Int = 3
+    ) -> [DiscoveredDevice] {
+        guard limit > 0 else { return [] }
+        let validRecords = trustRecords.filter { !$0.isTombstone && !$0.isExpired }
+        guard !validRecords.isEmpty else { return [] }
+
+        let candidates = networkDiscovery.discoveredDevices
+        guard !candidates.isEmpty else { return [] }
+
+        let scored = candidates
+            .filter { !$0.isLocalDevice }
+            .compactMap { candidate -> (score: Int, device: DiscoveredDevice)? in
+                let baseScore = validRecords.reduce(into: 0) { best, record in
+                    best = max(best, scoreDiscoveredTrustRecordCandidate(candidate, trustRecord: record))
+                }
+                guard baseScore > 0 else { return nil }
+                return (baseScore + metadataRichnessScore(for: candidate), candidate)
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                return lhs.device.name < rhs.device.name
+            }
+
+        let resolved = scored.prefix(limit).map(\.device)
+        if !validRecords.isEmpty {
+            let summary = resolved.map {
+                "\($0.name)|\($0.deviceId ?? "")|\($0.osVersion ?? "")|\($0.uniqueIdentifier ?? "")"
+            }.joined(separator: ";")
+            logger.debug(
+                "trusted discovered candidates: records=\(validRecords.count, privacy: .public) totalCandidates=\(candidates.count, privacy: .public) matched=\(resolved.count, privacy: .public) summary=\(summary, privacy: .public)"
+            )
+        }
+        return resolved
+    }
+
+    private func resolvedDiscoveredDevice(for trustRecord: TrustRecord) -> DiscoveredDevice? {
+        resolvedDiscoveredCandidates(for: [trustRecord], limit: 1).first
+    }
+
  /// 标记设备为已连接
     public func markDeviceAsConnected(_ deviceId: UUID) {
         guard let index = onlineDevices.firstIndex(where: { $0.id == deviceId }) else { return }
@@ -255,6 +369,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     ) {
         let normalizedPeerId = Self.normalizedPeerIdentifier(peerId)
         let normalizedRecentIdentifier = "recent:\(normalizedPeerId)"
+        let stablePeerAliases = Self.normalizedStableConnectionAliases(for: peerId)
 
         func applyConnectedStatus(to device: inout OnlineDevice) {
             device.connectionStatus = .connected
@@ -263,6 +378,22 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             device.lastCryptoSuite = suite
             device.guardStatus = guardStatus
             device.lastSeen = Date()
+        }
+
+        if !stablePeerAliases.isEmpty,
+           let idx = onlineDevices.firstIndex(where: {
+               !Self.normalizedStableConnectionAliases(fromUniqueIdentifier: $0.uniqueIdentifier)
+                   .isDisjoint(with: stablePeerAliases)
+           }) {
+            var device = onlineDevices[idx]
+            applyConnectedStatus(to: &device)
+            onlineDevices[idx] = device
+            deviceMap[device.uniqueIdentifier] = device
+            pruneRecentDuplicates(matching: normalizedRecentIdentifier, keep: device.id)
+            storage.saveDevice(device)
+            updateDevicesList()
+            logger.info("✅ 设备标记为已连接(匹配stable-id): \(device.name, privacy: .public)")
+            return
         }
 
         if let idx = onlineDevices.firstIndex(where: { $0.name == displayName }) {
@@ -355,6 +486,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         let normalizedPeerId = Self.normalizedPeerIdentifier(peerId)
         let normalizedRecentIdentifier = "recent:\(normalizedPeerId)"
         let normalizedDisplayName = displayName.map(normalizeDeviceName) ?? ""
+        let stablePeerAliases = Self.normalizedStableConnectionAliases(for: peerId)
 
         func disconnectStatus(for device: OnlineDevice) -> OnlineDeviceStatus {
             Date().timeIntervalSince(device.lastSeen) < 60 ? .online : .offline
@@ -367,7 +499,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             let matchesRecent =
                 Self.normalizedRecentIdentifier(from: device.uniqueIdentifier) == normalizedRecentIdentifier
             let matchesStableId =
-                Self.normalizedStableIdentifierPayload(from: device.uniqueIdentifier) == normalizedPeerId
+                !stablePeerAliases.isEmpty &&
+                !Self.normalizedStableConnectionAliases(fromUniqueIdentifier: device.uniqueIdentifier)
+                    .isDisjoint(with: stablePeerAliases)
             let matchesIP = indexOfDeviceMatchingPeerIP(normalizedPeerId) == index
             let matchesName =
                 !normalizedDisplayName.isEmpty &&
@@ -479,6 +613,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  /// 处理网络设备更新
     private func handleNetworkDevicesUpdate(_ devices: [DiscoveredDevice]) {
         logger.debug("📡 网络设备更新: \(devices.count) 台")
+        updateDiscoveryMetadataSummary(from: devices)
 
         for device in devices {
             let preferredMAC = preferredMACAddress(from: device.macSet)
@@ -499,6 +634,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 deviceType: device.deviceType,
                 ipv4: device.ipv4,
                 ipv6: device.ipv6,
+                platformName: device.platformName,
+                osVersion: device.osVersion,
+                modelName: device.modelName,
+                chip: device.chip,
                 macAddress: preferredMAC,
                 serialNumber: nil,
                 connectionTypes: device.connectionTypes,
@@ -511,6 +650,36 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         updateDevicesList()
+    }
+
+    private func updateDiscoveryMetadataSummary(from devices: [DiscoveredDevice]) {
+        let summary = devices
+            .filter { !$0.isLocalDevice }
+            .map { device in
+                let services = device.services.sorted().joined(separator: ",")
+                let ports = device.portMap.keys.sorted().map { key in
+                    "\(key)=\(device.portMap[key] ?? 0)"
+                }.joined(separator: ",")
+                return [
+                    device.uniqueIdentifier ?? "",
+                    device.deviceId ?? "",
+                    device.name,
+                    device.platformName ?? "",
+                    device.osVersion ?? "",
+                    device.modelName ?? "",
+                    device.chip ?? "",
+                    device.ipv4 ?? "",
+                    device.ipv6 ?? "",
+                    services,
+                    ports
+                ].joined(separator: "::")
+            }
+            .sorted()
+            .joined(separator: "|")
+
+        if discoveryMetadataSummary != summary {
+            discoveryMetadataSummary = summary
+        }
     }
 
     /// 处理USB设备更新
@@ -535,6 +704,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 deviceType: mapUSBDeviceType(device.deviceType),
                 ipv4: nil,
                 ipv6: nil,
+                platformName: nil,
+                osVersion: nil,
+                modelName: nil,
+                chip: nil,
                 macAddress: nil,
                 serialNumber: device.serialNumber,
                 connectionTypes: [.usb],
@@ -573,6 +746,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 deviceType: deviceType,
                 ipv4: device.ipAddress,
                 ipv6: nil,
+                platformName: nil,
+                osVersion: device.osVersion,
+                modelName: device.model,
+                chip: nil,
                 macAddress: nil,
                 serialNumber: device.id,
                 connectionTypes: [],
@@ -612,6 +789,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         deviceType: DeviceClassifier.DeviceType,
         ipv4: String?,
         ipv6: String?,
+        platformName: String?,
+        osVersion: String?,
+        modelName: String?,
+        chip: String?,
         macAddress: String?,
         serialNumber: String?,
         connectionTypes: Set<DeviceConnectionType>,
@@ -631,6 +812,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 deviceType: deviceType,
                 ipv4: ipv4,
                 ipv6: ipv6,
+                platformName: platformName,
+                osVersion: osVersion,
+                modelName: modelName,
+                chip: chip,
                 macAddress: macAddress,
                 serialNumber: serialNumber,
                 connectionTypes: connectionTypes,
@@ -681,6 +866,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                         deviceType: deviceType,
                         ipv4: ipv4,
                         ipv6: ipv6,
+                        platformName: platformName,
+                        osVersion: osVersion,
+                        modelName: modelName,
+                        chip: chip,
                         macAddress: macAddress,
                         serialNumber: serialNumber,
                         connectionTypes: connectionTypes,
@@ -725,6 +914,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     deviceType: deviceType,
                     ipv4: ipv4,
                     ipv6: ipv6,
+                    platformName: platformName,
+                    osVersion: osVersion,
+                    modelName: modelName,
+                    chip: chip,
                     macAddress: macAddress,
                     serialNumber: serialNumber,
                     connectionTypes: connectionTypes,
@@ -836,6 +1029,19 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             merged.ipv6 = newIp6
         }
 
+        if (merged.platformName?.isEmpty ?? true), let platformName = new.platformName, !platformName.isEmpty {
+            merged.platformName = platformName
+        }
+        if shouldReplaceOSVersion(existing: merged.osVersion, candidate: new.osVersion) {
+            merged.osVersion = new.osVersion
+        }
+        if shouldReplaceMetadataValue(existing: merged.modelName, candidate: new.modelName) {
+            merged.modelName = new.modelName
+        }
+        if shouldReplaceMetadataValue(existing: merged.chip, candidate: new.chip) {
+            merged.chip = new.chip
+        }
+
  // 合并MAC地址
         if merged.macAddress == nil, let newMac = new.macAddress {
             merged.macAddress = newMac
@@ -893,6 +1099,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             deviceType: device.deviceType,
             ipv4: device.ipv4,
             ipv6: device.ipv6,
+            platformName: device.platformName,
+            osVersion: device.osVersion,
+            modelName: device.modelName,
+            chip: device.chip,
             macAddress: device.macAddress,
             serialNumber: device.serialNumber,
             connectionTypes: device.connectionTypes,
@@ -1037,6 +1247,76 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return token.lowercased()
     }
 
+    private func shouldReplaceMetadataValue(existing: String?, candidate: String?) -> Bool {
+        guard let candidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !candidate.isEmpty else {
+            return false
+        }
+
+        guard let existing = existing?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !existing.isEmpty else {
+            return true
+        }
+
+        return candidate.count > existing.count
+    }
+
+    private func shouldReplaceOSVersion(existing: String?, candidate: String?) -> Bool {
+        guard let candidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !candidate.isEmpty else {
+            return false
+        }
+
+        guard let existing = existing?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !existing.isEmpty else {
+            return true
+        }
+
+        let comparison = compareVersionString(candidate, existing)
+        if comparison != .orderedSame {
+            return comparison == .orderedDescending
+        }
+        return candidate.count > existing.count
+    }
+
+    private func compareVersionString(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        guard let lhsComponents = parsedVersionComponents(lhs),
+              let rhsComponents = parsedVersionComponents(rhs) else {
+            return .orderedSame
+        }
+
+        let count = max(lhsComponents.count, rhsComponents.count)
+        for index in 0..<count {
+            let lhsValue = index < lhsComponents.count ? lhsComponents[index] : 0
+            let rhsValue = index < rhsComponents.count ? rhsComponents[index] : 0
+            if lhsValue < rhsValue { return .orderedAscending }
+            if lhsValue > rhsValue { return .orderedDescending }
+        }
+        return .orderedSame
+    }
+
+    private func parsedVersionComponents(_ raw: String) -> [Int]? {
+        guard let range = raw.range(
+            of: "[0-9]+(?:\\.[0-9]+)*",
+            options: [.regularExpression]
+        ) else {
+            return nil
+        }
+
+        let token = raw[range]
+        let components = token.split(separator: ".").compactMap { Int($0) }
+        return components.isEmpty ? nil : components
+    }
+
+    private func metadataRichnessScore(for candidate: DiscoveredDevice) -> Int {
+        var score = 0
+        if candidate.osVersion?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { score += 220 }
+        if candidate.modelName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { score += 160 }
+        if candidate.chip?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { score += 120 }
+        if candidate.platformName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { score += 90 }
+        return score
+    }
+
     private nonisolated static func extractIPComponents(fromNormalizedPeerId peerId: String) -> (ipv4: String?, ipv6: String?) {
         guard peerId.hasPrefix("peer:") else { return (nil, nil) }
         let host = String(peerId.dropFirst("peer:".count))
@@ -1160,11 +1440,70 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return aliases
     }
 
+    private nonisolated static func normalizedPeerAliases(for device: DiscoveredDevice) -> Set<String> {
+        var aliases: Set<String> = []
+
+        if let stableId = normalizeStableIdentifier(device.deviceId) {
+            aliases.insert(normalizedPeerIdentifier(stableId))
+        }
+
+        if let uniqueIdentifier = device.uniqueIdentifier {
+            let trimmed = uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("bonjour:") {
+                aliases.insert(normalizedPeerIdentifier(trimmed))
+            } else if trimmed.hasPrefix("ip:") {
+                let payload = String(trimmed.dropFirst("ip:".count))
+                let normalized = normalizePeerHostToken(payload)
+                if !normalized.isEmpty {
+                    aliases.insert("peer:\(normalized)")
+                }
+            }
+        }
+
+        if let ipv4 = device.ipv4 {
+            let normalized = normalizePeerHostToken(ipv4)
+            if !normalized.isEmpty {
+                aliases.insert("peer:\(normalized)")
+            }
+        }
+
+        if let ipv6 = device.ipv6 {
+            let normalized = normalizePeerHostToken(ipv6)
+            if !normalized.isEmpty {
+                aliases.insert("peer:\(normalized)")
+            }
+        }
+
+        return aliases
+    }
+
     private nonisolated static func normalizedStableIdentifierPayload(from uniqueIdentifier: String) -> String? {
         guard uniqueIdentifier.hasPrefix("id:") else { return nil }
         let payload = String(uniqueIdentifier.dropFirst("id:".count))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return payload.isEmpty ? nil : payload
+    }
+
+    private nonisolated static func normalizedStableConnectionAliases(for raw: String?) -> Set<String> {
+        guard let payload = normalizeStableIdentifier(raw) else { return [] }
+        return Set(
+            [
+                "id:\(payload)",
+                payload
+            ].map(normalizedPeerIdentifier)
+        )
+    }
+
+    private nonisolated static func normalizedStableConnectionAliases(
+        fromUniqueIdentifier uniqueIdentifier: String
+    ) -> Set<String> {
+        guard let payload = normalizedStableIdentifierPayload(from: uniqueIdentifier) else { return [] }
+        return Set(
+            [
+                "id:\(payload)",
+                payload
+            ].map(normalizedPeerIdentifier)
+        )
     }
 
     private nonisolated static func normalizedDedupeName(_ raw: String) -> String {
@@ -1251,13 +1590,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             return nil
         })
 
-        func normalizedStableIdentifier(from uniqueIdentifier: String) -> String? {
-            guard uniqueIdentifier.hasPrefix("id:") else { return nil }
-            let payload = String(uniqueIdentifier.dropFirst("id:".count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return payload.isEmpty ? nil : payload
-        }
-
         func isActivelyConnected(_ device: OnlineDevice) -> Bool {
             // Our inbound "recently connected" records use uniqueIdentifier: "recent:<peerId>"
             if let normalizedRecent = Self.normalizedRecentIdentifier(from: device.uniqueIdentifier) {
@@ -1272,9 +1604,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 return true
             }
 
-            if let stableId = normalizedStableIdentifier(from: device.uniqueIdentifier),
-               (activePeerIds.contains(stableId) ||
-                normalizedActivePeerIds.contains(Self.normalizedPeerIdentifier(stableId))) {
+            let stableAliases = Self.normalizedStableConnectionAliases(fromUniqueIdentifier: device.uniqueIdentifier)
+            if !stableAliases.isEmpty,
+               !stableAliases.isDisjoint(with: normalizedActivePeerIds) {
                 return true
             }
 
@@ -1445,8 +1777,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
     private func scoreTrustedRecordCandidate(_ device: OnlineDevice, trustRecord: TrustRecord) -> Int {
         var score = 0
+        let declaredDeviceId = trustRecordCapabilityValue("declaredDeviceId", for: trustRecord)
         let knownStableIDs = Set(
-            ([trustRecord.deviceId, trustRecord.currentDeviceId] + trustRecord.knownDeviceIds)
+            ([trustRecord.deviceId, trustRecord.currentDeviceId, declaredDeviceId] + trustRecord.knownDeviceIds)
                 .compactMap(Self.normalizeStableIdentifier)
         )
         let knownFingerprints = Set(
@@ -1484,6 +1817,63 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
         if device.isConnectable {
             score += 5
+        }
+
+        return score
+    }
+
+    private func scoreDiscoveredTrustRecordCandidate(
+        _ candidate: DiscoveredDevice,
+        trustRecord: TrustRecord
+    ) -> Int {
+        var score = 0
+        let declaredDeviceId = trustRecordCapabilityValue("declaredDeviceId", for: trustRecord)
+        let knownStableIDs = Set(
+            ([trustRecord.deviceId, trustRecord.currentDeviceId, declaredDeviceId] + trustRecord.knownDeviceIds)
+                .compactMap(Self.normalizeStableIdentifier)
+        )
+        let knownFingerprints = Set(
+            [trustRecord.pubKeyFP, trustRecord.currentPathAuthorityFingerprint]
+                .compactMap { normalizeFingerprint($0) }
+        )
+        let trustedPeerAliases = normalizedPeerAliases(for: trustRecord)
+        let trustedNameTokens = normalizedNameTokens(for: trustRecord)
+
+        let candidateStableIDs = Set(
+            [candidate.deviceId, candidate.uniqueIdentifier]
+                .compactMap { raw -> String? in
+                    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !raw.isEmpty else {
+                        return nil
+                    }
+                    if raw.hasPrefix("id:") {
+                        return Self.normalizeStableIdentifier(String(raw.dropFirst("id:".count)))
+                    }
+                    return Self.normalizeStableIdentifier(raw)
+                }
+        )
+
+        if !candidateStableIDs.isDisjoint(with: knownStableIDs) {
+            score += 320
+        }
+
+        if let candidateFingerprint = candidate.pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           knownFingerprints.contains(candidateFingerprint) {
+            score += 260
+        }
+
+        if !trustedPeerAliases.isEmpty,
+           !Self.normalizedPeerAliases(for: candidate).isDisjoint(with: trustedPeerAliases) {
+            score += 180
+        }
+
+        let normalizedCandidateName = Self.normalizedDedupeName(candidate.name)
+        if !normalizedCandidateName.isEmpty, trustedNameTokens.contains(normalizedCandidateName) {
+            score += 90
+        }
+
+        if candidate.services.contains("_skybridge._tcp") || candidate.portMap["_skybridge._tcp"] != nil {
+            score += 20
         }
 
         return score
@@ -1680,9 +2070,43 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     }
 
     private nonisolated static func normalizeStableIdentifier(_ raw: String?) -> String? {
-        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+        guard var raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
             return nil
         }
+
+        while raw.hasPrefix("host:") {
+            raw = String(raw.dropFirst("host:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if raw.hasPrefix("id:") {
+            raw = String(raw.dropFirst("id:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if raw.hasPrefix("peer:") {
+            let payload = String(raw.dropFirst("peer:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if payload.range(
+                of: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil {
+                raw = payload
+            }
+        }
+
+        guard !raw.isEmpty else { return nil }
+        if raw.hasPrefix("bonjour:") {
+            return nil
+        }
+
+        if raw.range(
+            of: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return raw.lowercased()
+        }
+
         guard raw.count >= 8 else { return nil }
         return raw
     }
@@ -2031,6 +2455,10 @@ public struct OnlineDevice: Identifiable, Hashable, Sendable {
     public var deviceType: DeviceClassifier.DeviceType
     public var ipv4: String?
     public var ipv6: String?
+    public var platformName: String? = nil
+    public var osVersion: String? = nil
+    public var modelName: String? = nil
+    public var chip: String? = nil
     public var macAddress: String?
     public var serialNumber: String?
     public var connectionTypes: Set<DeviceConnectionType>
@@ -2174,7 +2602,7 @@ private class DeviceStorage {
 
 extension OnlineDevice: Codable {
     enum CodingKeys: String, CodingKey {
-        case id, name, deviceType, ipv4, ipv6, macAddress, serialNumber
+        case id, name, deviceType, ipv4, ipv6, platformName, osVersion, modelName, chip, macAddress, serialNumber
         case connectionTypes, services, portMap, uniqueIdentifier, sources
         case discoveredAt, lastSeen, connectionStatus, lastConnectedAt
         case lastCryptoKind, lastCryptoSuite, guardStatus
@@ -2189,6 +2617,10 @@ extension OnlineDevice: Codable {
         deviceType = try container.decode(DeviceClassifier.DeviceType.self, forKey: .deviceType)
         ipv4 = try container.decodeIfPresent(String.self, forKey: .ipv4)
         ipv6 = try container.decodeIfPresent(String.self, forKey: .ipv6)
+        platformName = try container.decodeIfPresent(String.self, forKey: .platformName)
+        osVersion = try container.decodeIfPresent(String.self, forKey: .osVersion)
+        modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
+        chip = try container.decodeIfPresent(String.self, forKey: .chip)
         macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
         serialNumber = try container.decodeIfPresent(String.self, forKey: .serialNumber)
         connectionTypes = try container.decode(Set<DeviceConnectionType>.self, forKey: .connectionTypes)
@@ -2217,6 +2649,10 @@ extension OnlineDevice: Codable {
         try container.encode(deviceType, forKey: .deviceType)
         try container.encodeIfPresent(ipv4, forKey: .ipv4)
         try container.encodeIfPresent(ipv6, forKey: .ipv6)
+        try container.encodeIfPresent(platformName, forKey: .platformName)
+        try container.encodeIfPresent(osVersion, forKey: .osVersion)
+        try container.encodeIfPresent(modelName, forKey: .modelName)
+        try container.encodeIfPresent(chip, forKey: .chip)
         try container.encodeIfPresent(macAddress, forKey: .macAddress)
         try container.encodeIfPresent(serialNumber, forKey: .serialNumber)
         try container.encode(connectionTypes, forKey: .connectionTypes)

@@ -21,31 +21,56 @@ final class LocalPeerServiceCoordinator: ObservableObject {
     }
 
     func startIfNeeded() async {
-        guard !hasStarted else { return }
-
         do {
-            try await fileTransferListener.start()
+            try await ensureHealthy()
         } catch {
-            SkyBridgeLogger.ui.error("❌ 启动常驻文件传输监听失败: \(error.localizedDescription, privacy: .public)")
+            SkyBridgeLogger.ui.error("❌ 常驻本地服务健康检查失败: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func ensureHealthy() async throws {
+        fileTransferManager.localServiceHealthCheck = { @MainActor in
+            try await LocalPeerServiceCoordinator.shared.ensureHealthy()
         }
 
-        do {
-            try await remoteControlServer.start()
-        } catch {
-            SkyBridgeLogger.ui.error("❌ 启动常驻远程控制监听失败: \(error.localizedDescription, privacy: .public)")
+        var fileTransferReady = false
+        var remoteControlReady = false
+
+        try await fileTransferListener.ensureHealthy()
+        fileTransferReady = fileTransferListener.activePort != nil
+
+        let endpointsBeforeRemote = ServiceEndpointRegistry.shared.snapshot()
+        let remoteNeedsRestart = remoteControlServer.activePort == nil
+            || endpointsBeforeRemote.remoteControlPort == nil
+            || endpointsBeforeRemote.remoteControlPort != remoteControlServer.activePort
+            || !remoteControlServer.isBonjourPublished
+        if remoteNeedsRestart {
+            if remoteControlServer.activePort != nil {
+                remoteControlServer.stop()
+            }
+            do {
+                try await remoteControlServer.start()
+            } catch {
+                SkyBridgeLogger.ui.error("❌ 启动常驻远程控制监听失败: \(error.localizedDescription, privacy: .public)")
+            }
         }
+        remoteControlReady = remoteControlServer.activePort != nil
 
         if !p2pDiscoveryService.isAdvertising {
             p2pDiscoveryService.startAdvertising()
         }
 
         let endpoints = ServiceEndpointRegistry.shared.snapshot()
-        SkyBridgeLogger.ui.info(
-            """
-            ✅ 常驻本地服务已就绪: transfer=\(endpoints.fileTransferPort.map(String.init) ?? "-", privacy: .public) \
-            remote=\(endpoints.remoteControlPort.map(String.init) ?? "-", privacy: .public)
-            """
-        )
-        hasStarted = true
+        hasStarted = fileTransferReady && remoteControlReady
+        if hasStarted {
+            SkyBridgeLogger.ui.info(
+                """
+                ✅ 常驻本地服务已就绪: transfer=\(endpoints.fileTransferPort.map(String.init) ?? "-", privacy: .public) \
+                remote=\(endpoints.remoteControlPort.map(String.init) ?? "-", privacy: .public)
+                """
+            )
+        } else {
+            SkyBridgeLogger.ui.warning("⚠️ 常驻本地服务未全部就绪，将在下次调用时重试启动")
+        }
     }
 }

@@ -75,6 +75,18 @@ function resign_embedded_code() {
       codesign_target "${helper_bin}" || true
     done < <(find "${CONTENTS_DIR}/Library/LaunchDaemons" -type f -perm -111 -print0)
   fi
+
+  if [[ -d "${PLUGINS_DIR}" ]]; then
+    while IFS= read -r -d '' appex; do
+      if [[ "${IS_ADHOC_SIGNING}" -eq 0 && "$(basename "${appex}")" == "${WIDGET_EXT_NAME}.appex" ]]; then
+        codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp \
+          --entitlements "${WIDGET_ENTITLEMENTS}" \
+          "${appex}" >/dev/null 2>&1 || true
+      else
+        codesign_target "${appex}" || true
+      fi
+    done < <(find "${PLUGINS_DIR}" -type d -name "*.appex" -print0)
+  fi
 }
 
 function select_identity() {
@@ -194,6 +206,126 @@ function embed_macos_provisionprofile_if_available() {
   fi
 
   log "未找到匹配的 macOS provisioning profile，继续生成不含 embedded.provisionprofile 的开发包"
+}
+
+function resolve_widget_provisionprofile() {
+  local bundle_identifier="$1"
+  local entitlements_path="$2"
+  local profile_dir="${HOME}/Library/MobileDevice/Provisioning Profiles"
+  local team_id
+  team_id="$(printf '%s' "${SIGN_IDENTITY}" | sed -n 's/.*(\([^)]*\)).*/\1/p')"
+  local candidate
+  local fallback_candidate=""
+
+  if [[ -n "${WIDGET_PROVISION_PROFILE_PATH:-}" ]]; then
+    [[ -f "${WIDGET_PROVISION_PROFILE_PATH}" ]] || {
+      echo "错误：指定的 Widget provisioning profile 不存在：${WIDGET_PROVISION_PROFILE_PATH}" >&2
+      exit 1
+    }
+    echo "${WIDGET_PROVISION_PROFILE_PATH}"
+    return 0
+  fi
+
+  [[ -d "${profile_dir}" ]] || return 1
+
+  while IFS= read -r -d '' candidate; do
+    if security cms -D -i "${candidate}" 2>/dev/null | python3 -c '
+import plistlib
+import sys
+
+bundle_id = sys.argv[1].strip()
+team_id = sys.argv[2].strip()
+payload = sys.stdin.buffer.read()
+if not payload:
+    raise SystemExit(1)
+
+profile = plistlib.loads(payload)
+platforms = profile.get("Platform", [])
+entitlements = profile.get("Entitlements", {})
+app_id = entitlements.get("com.apple.application-identifier", "")
+profile_team = (profile.get("TeamIdentifier") or [""])[0]
+
+if "OSX" not in platforms:
+    raise SystemExit(1)
+if app_id != f"{team_id}.{bundle_id}":
+    raise SystemExit(1)
+if profile_team != team_id:
+    raise SystemExit(1)
+' "${bundle_identifier}" "${team_id}"
+    then
+      if [[ -z "${fallback_candidate}" ]]; then
+        fallback_candidate="${candidate}"
+      fi
+
+      if skybridge_profile_supports_requested_restricted_entitlements "${candidate}" "${entitlements_path}"; then
+        echo "${candidate}"
+        return 0
+      fi
+    fi
+  done < <(find "${profile_dir}" -type f -name "*.provisionprofile" -print0)
+
+  if [[ -n "${fallback_candidate}" ]]; then
+    echo "${fallback_candidate}"
+    return 0
+  fi
+
+  return 1
+}
+
+function build_and_embed_widget_extension() {
+  local widget_project="${ROOT_DIR}/SkyBridgeWidgets.xcodeproj"
+  local widget_appex_src="${XCODE_BUILD_DIR}/${WIDGET_EXT_NAME}.appex"
+  local widget_appex_dst="${PLUGINS_DIR}/${WIDGET_EXT_NAME}.appex"
+  local widget_info_plist=""
+  local widget_bundle_identifier=""
+  local widget_profile=""
+
+  if [[ ! -d "${widget_project}" ]]; then
+    if [[ "${SKYBRIDGE_REQUIRE_WIDGET_EXTENSION:-0}" == "1" ]] || is_release_distribution_context; then
+      echo "错误：发布包要求 Widget Extension，但缺少 Xcode 项目：${widget_project}" >&2
+      exit 1
+    fi
+    log "未找到 Widget Xcode 项目，跳过 Widget Extension"
+    return 0
+  fi
+
+  log "构建 Widget Extension: ${WIDGET_EXT_NAME}"
+  skybridge_run_xcodebuild -project "${widget_project}" \
+    -scheme "${WIDGET_EXT_NAME}" \
+    -configuration Release \
+    -destination "${BUILD_DESTINATION}" \
+    -derivedDataPath "${XCODE_DERIVED_DATA_PATH}" \
+    -skipPackageUpdates \
+    -disableAutomaticPackageResolution \
+    CODE_SIGNING_ALLOWED=NO \
+    COMPILER_INDEX_STORE_ENABLE=NO \
+    build
+
+  if [[ ! -d "${widget_appex_src}" ]]; then
+    echo "错误：Widget Extension 构建完成但未找到产物：${widget_appex_src}" >&2
+    exit 1
+  fi
+
+  mkdir -p "${PLUGINS_DIR}"
+  rm -rf "${widget_appex_dst}"
+  cp -R "${widget_appex_src}" "${widget_appex_dst}"
+  log "已嵌入 Widget Extension: ${widget_appex_dst}"
+
+  widget_info_plist="${widget_appex_dst}/Contents/Info.plist"
+  widget_bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${widget_info_plist}" 2>/dev/null || true)
+  if [[ -z "${widget_bundle_identifier}" ]]; then
+    echo "错误：无法读取 Widget Extension bundle identifier：${widget_info_plist}" >&2
+    exit 1
+  fi
+
+  if widget_profile="$(resolve_widget_provisionprofile "${widget_bundle_identifier}" "${WIDGET_ENTITLEMENTS}")"; then
+    cp "${widget_profile}" "${widget_appex_dst}/Contents/embedded.provisionprofile"
+    log "已嵌入 Widget provisioning profile: ${widget_profile}"
+  elif [[ "${SKYBRIDGE_REQUIRE_WIDGET_EXTENSION:-0}" == "1" || "${SKYBRIDGE_REQUIRE_APP_GROUPS:-0}" == "1" ]] || is_release_distribution_context; then
+    echo "错误：发布包未找到匹配的 Widget Extension provisioning profile：${widget_bundle_identifier}" >&2
+    echo "请安装 profile 到 ~/Library/MobileDevice/Provisioning Profiles/，或设置 SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH。" >&2
+    exit 1
+  fi
 }
 
 function compile_icon_composer_assets() {
@@ -322,9 +454,13 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RES_DIR="${CONTENTS_DIR}/Resources"
 FW_DIR="${CONTENTS_DIR}/Frameworks"
 LEGACY_FW_LINK="${CONTENTS_DIR}/lib"
+PLUGINS_DIR="${CONTENTS_DIR}/PlugIns"
 SIGN_IDENTITY="${IDENTITY:-$(select_identity)}"
 APP_PACKAGING_ENTITLEMENTS="${ROOT_DIR}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
+WIDGET_EXT_NAME="SkyBridgeCompassWidgetsExtension"
+WIDGET_ENTITLEMENTS="${ROOT_DIR}/Sources/SkyBridgeCompassWidgets/SkyBridgeCompassWidgetsExtension.entitlements"
 MACOS_PROVISION_PROFILE_PATH="${SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH:-}"
+WIDGET_PROVISION_PROFILE_PATH="${SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH:-}"
 PACKAGING_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-package.XXXXXX")"
 ACTIVE_APP_PACKAGING_ENTITLEMENTS="${PACKAGING_TMP_DIR}/SkyBridgeCompassApp.packaging.entitlements"
 SKIP_BUILD="${SKIP_BUILD:-0}"
@@ -576,6 +712,9 @@ fi
 
 # 生成 PkgInfo（现代系统可选，但保留兼容性）
 echo -n "APPL????" > "${CONTENTS_DIR}/PkgInfo"
+
+# ========== Widget Extension 打包 ==========
+build_and_embed_widget_extension
 
 # ========== PowerMetricsHelper 打包 ==========
 # SMAppService.daemon 需要 plist 文件位于 Contents/Library/LaunchDaemons/

@@ -107,6 +107,7 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
 
  // 统一纹理输出（给 SwiftUI / AppKit 绑定用）
     public let textureFeed = RemoteTextureFeed()
+    private lazy var textureFeedDeliveryGate = LatestTextureDeliveryGate(feed: textureFeed)
 
  // 监控 CPU 简单指标（非必须，可删）
     private var monitoringTimer: Timer?
@@ -137,6 +138,7 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
 
         monitoringTimer?.invalidate()
         monitoringTimer = nil
+        textureFeedDeliveryGate.clear()
 
         sessionQueue.async(flags: .barrier) { [weak self] in
             guard let self else { return }
@@ -301,6 +303,7 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
         Task { @MainActor in
             monitoringTimer?.invalidate()
             monitoringTimer = nil
+            textureFeedDeliveryGate.clear()
             
  // 断开所有会话
             let sessions = sessionQueue.sync { Array(activeSessions.values) }
@@ -478,6 +481,7 @@ final class RemoteDesktopSession {
 
     private let renderer: RemoteFrameRenderer
     private weak var feed: RemoteTextureFeed?
+    private let textureFeedDeliveryGate: LatestTextureDeliveryGate
 
     private let log = Logger(subsystem: "com.skybridge.compass", category: "RemoteSessionRDP")
 
@@ -508,6 +512,7 @@ final class RemoteDesktopSession {
         self.port = port
         self.renderer = renderer
         self.feed = feed
+        self.textureFeedDeliveryGate = LatestTextureDeliveryGate(feed: feed)
         self.summaryChanged = summaryChanged
         self.stateChanged = stateChanged
 
@@ -562,6 +567,7 @@ final class RemoteDesktopSession {
         client.disconnect()
         client.frameCallback = nil
         client.stateCallback = nil
+        textureFeedDeliveryGate.clear()
         feed = nil
         clientState = .disconnected
         stateChanged()
@@ -624,9 +630,7 @@ final class RemoteDesktopSession {
  // 帧回调：FreeRDPBridge 把解码后的 BGRA/H.264 帧交给我们
         renderer.frameHandler = { [weak self] texture, backing in
             guard let self else { return }
-            Task { @MainActor in
-                self.feed?.update(texture: texture, backing: backing)
-            }
+            self.textureFeedDeliveryGate.submit(texture: texture, backing: backing)
         }
 
         client.frameCallback = { [weak self] data, width, height, stride, frameType in

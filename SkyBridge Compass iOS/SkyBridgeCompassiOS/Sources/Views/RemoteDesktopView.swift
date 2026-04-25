@@ -708,6 +708,7 @@ private struct RemoteDesktopStreamSettingsSheet: View {
 
                 Section("交互") {
                     Toggle("共享剪贴板", isOn: $remoteDesktopManager.viewerSettings.clipboardSyncEnabled)
+                    Toggle("远端音频", isOn: $remoteDesktopManager.viewerSettings.audioRedirectionEnabled)
                 }
 
                 Section("当前流") {
@@ -1302,10 +1303,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 height: max(view.bounds.height * drawableScale, 1)
             )
 
-            // 修复：显式触发 draw(in:) 调用，确保新帧被立即渲染
-            // MTKView 在 isPaused=false 时会定期调用 draw(in:)，但可能错过最新帧
-            // 通过设置 needsDisplay，确保新帧到达时立即触发渲染
-            view.setNeedsDisplay()
+            // Continuous VSync draws pick up the latest frame without an extra
+            // UIKit invalidation per decoded frame.
         }
 
         @MainActor
@@ -1340,7 +1339,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             guard shouldClear || frame != nil else {
                 return
             }
-            guard inFlightSemaphore.wait(timeout: .now() + .milliseconds(50)) == .success else {
+            guard inFlightSemaphore.wait(timeout: .now()) == .success else {
                 return
             }
             var shouldSignalSemaphoreOnExit = true

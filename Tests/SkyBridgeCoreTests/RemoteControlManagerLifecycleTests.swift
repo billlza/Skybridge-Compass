@@ -3,6 +3,15 @@ import XCTest
 
 @MainActor
 final class RemoteControlManagerLifecycleTests: XCTestCase {
+    func testHandshakeFailureDoesNotKeepTransportAliveForEitherRole() {
+        XCTAssertFalse(
+            RemoteControlManager.shouldKeepTransportAliveAfterHandshakeFailure(for: .beingControlled)
+        )
+        XCTAssertFalse(
+            RemoteControlManager.shouldKeepTransportAliveAfterHandshakeFailure(for: .controlling)
+        )
+    }
+
     func testRemovingControllingRolePreservesBeingControlledResources() {
         let manager = RemoteControlManager()
 

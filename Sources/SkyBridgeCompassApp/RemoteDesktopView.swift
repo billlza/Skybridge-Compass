@@ -1332,17 +1332,11 @@ struct RemoteDesktopSettingsView: View {
                 Toggle("剪贴板同步", isOn: $settingsManager.settings.interactionSettings.enableClipboardSync)
                     .help("在本地和远程桌面之间同步剪贴板内容")
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(
-                        LocalizationManager.shared.localizedString("settings.remote.interaction.audioPrinterUnavailable.title"),
-                        systemImage: "speaker.slash"
-                    )
-                        .font(.subheadline.weight(.medium))
-                    Text(LocalizationManager.shared.localizedString("settings.remote.interaction.audioPrinterUnavailable.body"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 4)
+                Toggle(
+                    LocalizationManager.shared.localizedString("settings.remote.interaction.audioRedirection"),
+                    isOn: $settingsManager.settings.interactionSettings.enableAudioRedirection
+                )
+                .help("播放远端桌面中的系统音频")
 
                 Toggle("文件传输", isOn: $settingsManager.settings.interactionSettings.enableFileTransfer)
                     .help("启用本地和远程桌面之间的文件传输")

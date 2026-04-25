@@ -13,6 +13,9 @@ Options:
   --dmg-path <path>             DMG to validate; defaults to dist/SkyBridgeCompassPro-<app-version>.dmg
   --source-info-plist <path>    Source Info.plist to compare product feature flags against
   --source-entitlements <path>  Source packaging entitlements plist
+  --widget-path <path>          Widget appex to validate; defaults to <app>/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex
+  --widget-source-entitlements <path>
+                                Source widget entitlements plist
   --skip-launch-smoke           Skip open/launch smoke test
   --launch-timeout <seconds>    Seconds to wait for a fresh process to appear (default: 20)
   --steady-state <seconds>      Seconds the launched process must stay alive (default: 5)
@@ -22,8 +25,9 @@ Options:
 Checks:
   - package_app/build_dmg artifacts exist and look structurally valid
   - app bundle executable launches through LaunchServices and stays alive briefly
-  - Apple 登录产品开关保持与源 Info.plist 一致，原生 Apple 登录可用性与签名/profile 一致
-  - codesign identity, signed entitlements, embedded profile, and source entitlements stay consistent
+  - Apple 登录产品开关保持与源 Info.plist 一致，且签名产物的 Apple 登录模式与发布策略一致
+  - Widget appex 已嵌入、签名、带 profile，并与主应用共享一致的 App Groups
+  - codesign identity, signed entitlements, embedded profiles, and source entitlements stay consistent
   - Gatekeeper/notarization status is surfaced with warnings or failures
 USAGE
 }
@@ -37,6 +41,8 @@ APP_PATH="${PROJECT_ROOT}/dist/SkyBridge Compass Pro.app"
 DMG_PATH=""
 SOURCE_INFO_PLIST="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/Info.plist"
 SOURCE_ENTITLEMENTS="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements"
+WIDGET_PATH=""
+SOURCE_WIDGET_ENTITLEMENTS="${PROJECT_ROOT}/Sources/SkyBridgeCompassWidgets/SkyBridgeCompassWidgetsExtension.entitlements"
 REQUIRE_NOTARIZATION="${SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION:-0}"
 SKIP_LAUNCH_SMOKE=0
 LAUNCH_TIMEOUT_SECONDS="${SKYBRIDGE_RELEASE_GATE_LAUNCH_TIMEOUT_SECONDS:-20}"
@@ -58,6 +64,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --source-entitlements)
       SOURCE_ENTITLEMENTS="${2:-}"
+      shift 2
+      ;;
+    --widget-path)
+      WIDGET_PATH="${2:-}"
+      shift 2
+      ;;
+    --widget-source-entitlements)
+      SOURCE_WIDGET_ENTITLEMENTS="${2:-}"
       shift 2
       ;;
     --skip-launch-smoke)
@@ -277,6 +291,74 @@ if expected_value != actual_value:
 PY
 }
 
+compare_apple_sign_in_mode_alignment() {
+  local expected_info_plist="$1"
+  local actual_info_plist="$2"
+
+  python3 - "${expected_info_plist}" "${actual_info_plist}" <<'PY'
+import plistlib
+import sys
+
+expected_path, actual_path = sys.argv[1:]
+
+with open(expected_path, "rb") as fh:
+    expected = plistlib.load(fh)
+with open(actual_path, "rb") as fh:
+    actual = plistlib.load(fh)
+
+expected_value = expected.get("SKYBRIDGE_APPLE_SIGN_IN_MODE")
+actual_value = actual.get("SKYBRIDGE_APPLE_SIGN_IN_MODE")
+
+if expected_value != actual_value:
+    print(
+        "SKYBRIDGE_APPLE_SIGN_IN_MODE mismatch: "
+        f"expected={expected_value} actual={actual_value}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
+compare_app_group_alignment() {
+  local app_entitlements_path="$1"
+  local widget_entitlements_path="$2"
+
+  python3 - "${app_entitlements_path}" "${widget_entitlements_path}" <<'PY'
+import plistlib
+import sys
+
+app_path, widget_path = sys.argv[1:]
+
+with open(app_path, "rb") as fh:
+    app_entitlements = plistlib.load(fh)
+with open(widget_path, "rb") as fh:
+    widget_entitlements = plistlib.load(fh)
+
+app_groups = {
+    str(item).strip()
+    for item in (app_entitlements.get("com.apple.security.application-groups") or [])
+    if str(item).strip()
+}
+widget_groups = {
+    str(item).strip()
+    for item in (widget_entitlements.get("com.apple.security.application-groups") or [])
+    if str(item).strip()
+}
+
+if not widget_groups:
+    print("widget extension is missing com.apple.security.application-groups", file=sys.stderr)
+    raise SystemExit(1)
+
+if not widget_groups.issubset(app_groups):
+    print(
+        "widget extension requested App Groups that are absent from the signed host app: "
+        f"widget={sorted(widget_groups)} app={sorted(app_groups)}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
 assess_gatekeeper_target() {
   local target_path="$1"
   local target_type="$2"
@@ -389,10 +471,14 @@ APP_BUNDLE_IDENTIFIER="$(plist_read_value "${APP_INFO_PLIST}" "CFBundleIdentifie
 APP_VERSION="$(plist_read_value "${APP_INFO_PLIST}" "CFBundleShortVersionString" 2>/dev/null || true)"
 APP_BUILD_SOURCE="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgePackagingBuildSource" 2>/dev/null || true)"
 APP_EXECUTABLE_PATH="${APP_PATH}/Contents/MacOS/${APP_EXECUTABLE_NAME}"
+if [[ -z "${WIDGET_PATH}" ]]; then
+  WIDGET_PATH="${APP_PATH}/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
+fi
 
 [[ -n "${APP_EXECUTABLE_NAME}" ]] || fail "app Info.plist is missing CFBundleExecutable"
 [[ -n "${APP_BUNDLE_IDENTIFIER}" ]] || fail "app Info.plist is missing CFBundleIdentifier"
 [[ -x "${APP_EXECUTABLE_PATH}" ]] || fail "main executable is missing or not executable: ${APP_EXECUTABLE_PATH}"
+[[ -f "${SOURCE_WIDGET_ENTITLEMENTS}" ]] || fail "missing widget source entitlements: ${SOURCE_WIDGET_ENTITLEMENTS}"
 
 if [[ "${APP_BUILD_SOURCE}" != "xcode_release" ]]; then
   fail "app bundle was not packaged from xcode_release artifacts (actual: ${APP_BUILD_SOURCE:-missing})"
@@ -410,7 +496,14 @@ if ! hdiutil imageinfo "${DMG_PATH}" >/dev/null 2>&1; then
 fi
 
 if [[ -n "${APP_VERSION}" && "$(basename "${DMG_PATH}")" != *"${APP_VERSION}.dmg" ]]; then
-  log_warn "DMG filename does not include app version ${APP_VERSION}: $(basename "${DMG_PATH}")"
+  fail "DMG filename does not include app version ${APP_VERSION}: $(basename "${DMG_PATH}")"
+fi
+
+DMG_SIGNED_METADATA="$(codesign --display --verbose=2 "${DMG_PATH}" 2>&1)" \
+  || fail "DMG is not codesigned with a Developer ID Application identity: ${DMG_PATH}"
+
+if [[ "${DMG_SIGNED_METADATA}" != *"Authority=Developer ID Application:"* ]]; then
+  fail "DMG is not signed with a Developer ID Application identity"
 fi
 
 SIGNED_METADATA="$(codesign --display --verbose=2 "${APP_PATH}" 2>&1)"
@@ -421,12 +514,22 @@ if [[ "${SIGNED_METADATA}" != *"Authority=Developer ID Application:"* ]]; then
   fail "release bundle is not signed with a Developer ID Application identity"
 fi
 
+DMG_TEAM_IDENTIFIER="$(printf '%s\n' "${DMG_SIGNED_METADATA}" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+if [[ -n "${DMG_TEAM_IDENTIFIER}" && "${DMG_TEAM_IDENTIFIER}" != "${SIGNED_TEAM_IDENTIFIER}" ]]; then
+  fail "DMG TeamIdentifier (${DMG_TEAM_IDENTIFIER}) does not match app TeamIdentifier (${SIGNED_TEAM_IDENTIFIER})"
+fi
+
 log_info "Verifying codesign integrity"
 codesign --verify --deep --strict --verbose=2 "${APP_PATH}" >/dev/null
+codesign --verify --verbose=2 "${DMG_PATH}" >/dev/null
 
 SIGNED_ENTITLEMENTS_PATH="${TMP_DIR}/signed-entitlements.plist"
 EXPECTED_ENTITLEMENTS_PATH="${TMP_DIR}/expected-entitlements.plist"
 EXPECTED_INFO_PLIST="${TMP_DIR}/expected-info.plist"
+WIDGET_INFO_PLIST="${WIDGET_PATH}/Contents/Info.plist"
+WIDGET_PROFILE_PATH="${WIDGET_PATH}/Contents/embedded.provisionprofile"
+SIGNED_WIDGET_ENTITLEMENTS_PATH="${TMP_DIR}/signed-widget-entitlements.plist"
+EXPECTED_WIDGET_ENTITLEMENTS_PATH="${TMP_DIR}/expected-widget-entitlements.plist"
 
 skybridge_write_signed_entitlements "${APP_PATH}" "${SIGNED_ENTITLEMENTS_PATH}" \
   || fail "could not extract signed entitlements from ${APP_PATH}"
@@ -440,13 +543,12 @@ if [[ -f "${APP_PROFILE_PATH}" ]]; then
     || fail "embedded provisioning profile does not match the signed app identity"
 
   if ! skybridge_profile_supports_requested_restricted_entitlements "${APP_PROFILE_PATH}" "${SIGNED_ENTITLEMENTS_PATH}"; then
-    fail "embedded provisioning profile does not cover the signed restricted entitlements"
+    fail "embedded provisioning profile does not cover the signed App Groups entitlements"
   fi
 else
-  if skybridge_entitlements_request_applesignin "${SIGNED_ENTITLEMENTS_PATH}"; then
-    fail "signed app still requests Sign in with Apple but no embedded provisioning profile is present"
+  if skybridge_entitlements_request_application_groups "${SIGNED_ENTITLEMENTS_PATH}"; then
+    fail "signed app still requests profile-backed entitlements but no embedded provisioning profile is present"
   fi
-  log_warn "embedded.provisionprofile is absent; restricted entitlement coverage was checked against signed entitlements only"
 fi
 
 cp "${SOURCE_INFO_PLIST}" "${EXPECTED_INFO_PLIST}"
@@ -466,11 +568,56 @@ compare_product_feature_flag_preservation "${SOURCE_INFO_PLIST}" "${APP_INFO_PLI
 compare_native_flag_alignment "${EXPECTED_INFO_PLIST}" "${APP_INFO_PLIST}" \
   || fail "app Info.plist SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN drifted from the effective signed entitlements"
 
+compare_apple_sign_in_mode_alignment "${EXPECTED_INFO_PLIST}" "${APP_INFO_PLIST}" \
+  || fail "app Info.plist SKYBRIDGE_APPLE_SIGN_IN_MODE drifted from the effective signed entitlements"
+
 APP_FEATURE_APPLE_SIGN_IN="$(plist_read_value "${APP_INFO_PLIST}" "SKYBRIDGE_ENABLE_APPLE_SIGN_IN" 2>/dev/null || true)"
 APP_NATIVE_APPLE_SIGN_IN="$(plist_read_value "${APP_INFO_PLIST}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 2>/dev/null || true)"
+APP_APPLE_SIGN_IN_MODE="$(plist_read_value "${APP_INFO_PLIST}" "SKYBRIDGE_APPLE_SIGN_IN_MODE" 2>/dev/null || true)"
 
-if [[ "${APP_FEATURE_APPLE_SIGN_IN}" == "true" && "${APP_NATIVE_APPLE_SIGN_IN}" != "true" ]]; then
-  log_warn "Apple 登录产品功能已开启，但原生 Apple Sign In 当前不可用；发布产物需要提供非原生登录路径"
+if [[ "${SKYBRIDGE_REQUIRE_APPLE_SIGN_IN:-0}" == "1" && "${APP_FEATURE_APPLE_SIGN_IN}" == "true" && "${APP_NATIVE_APPLE_SIGN_IN}" != "true" ]]; then
+  fail "Apple 登录产品功能已开启，但签名产物未启用原生 Apple Sign In"
+fi
+
+if [[ "${APP_FEATURE_APPLE_SIGN_IN}" == "true" && "${APP_APPLE_SIGN_IN_MODE}" != "web_session" ]]; then
+  fail "Developer ID DMG 发布要求 Apple 登录采用 web_session，当前模式为：${APP_APPLE_SIGN_IN_MODE:-missing}"
+fi
+
+[[ -d "${WIDGET_PATH}" ]] || fail "missing widget appex: ${WIDGET_PATH}"
+[[ -f "${WIDGET_INFO_PLIST}" ]] || fail "missing widget Info.plist: ${WIDGET_INFO_PLIST}"
+
+WIDGET_BUNDLE_IDENTIFIER="$(plist_read_value "${WIDGET_INFO_PLIST}" "CFBundleIdentifier" 2>/dev/null || true)"
+[[ -n "${WIDGET_BUNDLE_IDENTIFIER}" ]] || fail "widget Info.plist is missing CFBundleIdentifier"
+
+WIDGET_SIGNED_METADATA="$(codesign --display --verbose=2 "${WIDGET_PATH}" 2>&1)"
+if [[ "${WIDGET_SIGNED_METADATA}" != *"Authority=Developer ID Application:"* ]]; then
+  fail "widget appex is not signed with a Developer ID Application identity"
+fi
+
+log_info "Verifying widget appex codesign integrity"
+codesign --verify --strict --verbose=2 "${WIDGET_PATH}" >/dev/null
+
+skybridge_write_signed_entitlements "${WIDGET_PATH}" "${SIGNED_WIDGET_ENTITLEMENTS_PATH}" \
+  || fail "could not extract signed entitlements from ${WIDGET_PATH}"
+
+cp "${SOURCE_WIDGET_ENTITLEMENTS}" "${EXPECTED_WIDGET_ENTITLEMENTS_PATH}"
+compare_plists "${EXPECTED_WIDGET_ENTITLEMENTS_PATH}" "${SIGNED_WIDGET_ENTITLEMENTS_PATH}" "widget signed entitlements" \
+  || fail "widget signed entitlements drifted from the expected widget entitlements"
+
+compare_app_group_alignment "${SIGNED_ENTITLEMENTS_PATH}" "${SIGNED_WIDGET_ENTITLEMENTS_PATH}" \
+  || fail "widget App Groups are not aligned with the signed host app entitlements"
+
+[[ -f "${WIDGET_PROFILE_PATH}" ]] || fail "widget appex is missing embedded.provisionprofile"
+skybridge_validate_provisionprofile_app_identity \
+  "${WIDGET_PROFILE_PATH}" \
+  "${WIDGET_BUNDLE_IDENTIFIER}" \
+  "${SIGNED_TEAM_IDENTIFIER}" \
+  || fail "widget embedded provisioning profile does not match the signed appex identity"
+
+if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+  "${WIDGET_PROFILE_PATH}" \
+  "${SIGNED_WIDGET_ENTITLEMENTS_PATH}"; then
+  fail "widget embedded provisioning profile does not cover the signed App Groups entitlement"
 fi
 
 assess_gatekeeper_target "${APP_PATH}" "execute" "App Bundle"

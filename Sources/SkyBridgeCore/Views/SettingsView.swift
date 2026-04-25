@@ -1639,17 +1639,7 @@ public struct SettingsView: View {
                 settingsSection(localizationManager.localizedString("settings.remote.interaction.title")) {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.remote.interaction.clipboardSync"), isOn: $remoteDesktopSettingsManager.settings.interactionSettings.enableClipboardSync)
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label(
-                                localizationManager.localizedString("settings.remote.interaction.audioUnavailable.title"),
-                                systemImage: "speaker.slash"
-                            )
-                                .font(.subheadline.weight(.medium))
-                            Text(localizationManager.localizedString("settings.remote.interaction.audioUnavailable.body"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 2)
+                        Toggle(localizationManager.localizedString("settings.remote.interaction.audioRedirection"), isOn: $remoteDesktopSettingsManager.settings.interactionSettings.enableAudioRedirection)
                         Toggle(localizationManager.localizedString("settings.remote.interaction.fileTransfer"), isOn: $remoteDesktopSettingsManager.settings.interactionSettings.enableFileTransfer)
                         Toggle(localizationManager.localizedString("settings.remote.interaction.trackpadGestures"), isOn: $remoteDesktopSettingsManager.settings.interactionSettings.enableTrackpadGestures)
                         

@@ -10,6 +10,9 @@ import ImageIO
 import ApplicationServices
 import UniformTypeIdentifiers
 import VideoToolbox
+#if canImport(WebRTCAudioDeviceBridge)
+import WebRTCAudioDeviceBridge
+#endif
 #if os(iOS)
 import UIKit
 #endif
@@ -371,6 +374,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func isHandshakeComplete(for sessionID: String) -> Bool {
+        if case .handshakeComplete(let activeSessionID, _) = readiness {
+            return activeSessionID == sessionID
+        }
+        return false
+    }
+
     private func noteDetachedSignalingAfterTransportEstablished(
         for sessionID: String,
         source: String,
@@ -456,16 +466,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     internal static func shouldDeferSignalingSendRecovery(
-        isTransportEstablished: Bool,
+        isHandshakeComplete: Bool,
         messageType: WebRTCSignalingEnvelope.MessageType
     ) -> Bool {
-        isTransportEstablished && messageType == .iceCandidate
+        isHandshakeComplete && messageType == .iceCandidate
     }
 
     internal static func shouldUseOnDemandSignalingAfterTransportFailure(
-        isTransportEstablished: Bool
+        isHandshakeComplete: Bool
     ) -> Bool {
-        isTransportEstablished
+        isHandshakeComplete
     }
 
     private func scheduleSignalingRecovery(for sessionID: String, tokenExpired: Bool = false) {
@@ -499,7 +509,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     )
                 }
             }
-            if tokenExpired, self.isTransportEstablished(for: sessionID) {
+            if tokenExpired, self.isHandshakeComplete(for: sessionID) {
                 self.signalingHealth = .degradedFatal
             }
             self.signalingRecoveryTasksBySessionId.removeValue(forKey: sessionID)
@@ -526,7 +536,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             signalingHealth = .healthy
         case .closed:
             if Self.shouldUseOnDemandSignalingAfterTransportFailure(
-                isTransportEstablished: isTransportEstablished(for: event.handleId.sessionId)
+                isHandshakeComplete: isHandshakeComplete(for: event.handleId.sessionId)
             ) {
                 noteDetachedSignalingAfterTransportEstablished(
                     for: event.handleId.sessionId,
@@ -538,7 +548,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             let failureClass = event.failureClass ?? .transientServer
             let sessionID = event.handleId.sessionId
             if Self.shouldUseOnDemandSignalingAfterTransportFailure(
-                isTransportEstablished: isTransportEstablished(for: sessionID)
+                isHandshakeComplete: isHandshakeComplete(for: sessionID)
             ) {
                 noteDetachedSignalingAfterTransportEstablished(
                     for: sessionID,
@@ -767,7 +777,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     static func shouldStartWebRTCScreenStreaming(
         remoteStreamConfiguration: RemoteDesktopStreamConfiguration?
     ) -> Bool {
-        remoteStreamConfiguration != nil
+        guard let remoteStreamConfiguration else { return false }
+        return !remoteStreamConfiguration.isStopRequest
     }
 
     private func consumePendingWebRTCStreamRefresh(for sessionID: String) -> Bool {
@@ -911,6 +922,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             var remaining = max(0, attempts)
             while remaining > 0, !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil {
+                if case .handshakeComplete(let activeSessionID, _) = self.readiness, activeSessionID == sessionID {
+                    break
+                }
                 // The initial join is sent by the caller. Delay the heartbeat loop so we
                 // do not immediately duplicate the bootstrap frame burst on fresh sessions.
                 if remaining == attempts {
@@ -1154,8 +1168,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     private func markCrossNetworkPresenceDisconnected(sessionID: String) {
+        let peerId = Self.crossNetworkPresencePeerID(sessionID: sessionID)
+        let displayName = currentConnection?.deviceName
         ConnectionPresenceService.shared.markDisconnected(
-            peerId: Self.crossNetworkPresencePeerID(sessionID: sessionID)
+            peerId: peerId
+        )
+        UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
+            peerId: peerId,
+            displayName: displayName
         )
     }
 
@@ -1496,6 +1516,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             session.close()
         }
         webrtcSessionsBySessionId.removeAll()
+
+        let listeners = activeListeners
+        activeListeners.removeAll()
+        for listener in listeners {
+            await listener.stop()
+        }
 
         // 2) 结束入站队列，唤醒控制通道等待
         for (_, queue) in webrtcInboundQueuesBySessionId {
@@ -2061,6 +2087,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 code: normalized
             )
             _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
+            try enforceCurrentPathTrustBinding(
+                deviceId: lookup.initiatorDeviceId,
+                protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint
+            )
             webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[lookup.sessionID] = lookup.turnAdmissionLease
             currentPathSignalingOriginBySessionId[lookup.sessionID] = lookup.signalingServerOrigin
@@ -2128,7 +2158,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 guard let self else { return }
                 Task { @MainActor in
                     self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
-                    self.stopJoinHeartbeat(for: sessionID)
                     self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                     self.connectionStatus = .connecting
                     self.readiness = .transportReady(sessionId: sessionID)
@@ -2390,8 +2419,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.logger.info("✅ WebRTC offerer ready: session=\(sessionID, privacy: .public)")
-                self.stopJoinHeartbeat(for: sessionID)
-                self.stopOfferResendLoop(for: sessionID)
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
@@ -2494,7 +2521,6 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.logger.info("✅ WebRTC QR answerer ready: session=\(sessionID, privacy: .public)")
-                self.stopJoinHeartbeat(for: sessionID)
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
@@ -2575,9 +2601,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             readiness = .idle
             return
         }
-        let transportEstablished = isTransportEstablished(for: authorizedEnvelope.sessionId)
+        let handshakeComplete = isHandshakeComplete(for: authorizedEnvelope.sessionId)
         let shouldDeferRecovery = Self.shouldDeferSignalingSendRecovery(
-            isTransportEstablished: transportEstablished,
+            isHandshakeComplete: handshakeComplete,
             messageType: authorizedEnvelope.type
         )
 
@@ -2645,7 +2671,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             try await ensureSignalingConnected(shardKey: authorizedEnvelope.sessionId)
                         }
                     } catch {
-                        signalingHealth = transportEstablished ? .degradedRecoverable : .healthy
+                        signalingHealth = handshakeComplete ? .degradedRecoverable : .healthy
                     }
                 }
                 if attemptsLeft == 0 {
@@ -2653,7 +2679,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     appendSmokeStatus(
                         "signal-send-failed session=\(authorizedEnvelope.sessionId) type=\(authorizedEnvelope.type.rawValue) error=\(error.localizedDescription)"
                     )
-                    if transportEstablished {
+                    if handshakeComplete {
                         noteDetachedSignalingAfterTransportEstablished(
                             for: authorizedEnvelope.sessionId,
                             source: "signal_send_failed",
@@ -2693,7 +2719,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
 
         if Self.shouldUseOnDemandSignalingAfterTransportFailure(
-            isTransportEstablished: isTransportEstablished(for: sessionID)
+            isHandshakeComplete: isHandshakeComplete(for: sessionID)
         ) {
             noteDetachedSignalingAfterTransportEstablished(
                 for: sessionID,
@@ -3116,6 +3142,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         if let task = webrtcInteractionStreamingTasksBySessionId.removeValue(forKey: sessionID) {
             task.cancel()
         }
+        webrtcSessionsBySessionId[sessionID]?.setOutgoingSystemAudioTrackEnabled(false)
     }
 
     private func startWebRTCInboundHandshakeAndControlLoop(sessionID: String, session: WebRTCSession, endpointDescription: String) {
@@ -3297,6 +3324,166 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
             return ordered
         }
+
+        let initialHandshakeTask: Task<Void, Never>? = {
+            guard Self.shouldInitiateInitialWebRTCHandshake(role: session.role) else {
+                return nil
+            }
+
+            return Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.webrtcSessionsBySessionId[sessionID] === session else { return }
+                guard handshakeState.driver == nil, handshakeState.sessionKeys == nil else { return }
+
+                do {
+                    let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+                    let handshakePolicy = HandshakePolicy.recommendedDefault(
+                        compatibilityModeEnabled: compatibilityModeEnabled
+                    )
+                    let strictPQCRequested = handshakePolicy.requirePQC
+                    let capability = CryptoProviderFactory.detectCapability()
+                    let peerResolutionDeadline = Date().addingTimeInterval(strictPQCRequested ? 6.0 : 0.0)
+                    var trustedPeerKEMKeys: [UInt16: Data] = [:]
+                    var trustLookupPeerId: String?
+                    var resolvedPeerDeviceId: String?
+                    var candidateIds: [String] = []
+
+                    while true {
+                        let resolution = Self.initialWebRTCHandshakePeerResolution(
+                            expectedRemoteDeviceId: currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId,
+                            learnedRemoteDeviceId: self.webrtcRemoteIdBySessionId[sessionID],
+                            endpointDescription: endpointDescription
+                        )
+                        resolvedPeerDeviceId = resolution.resolvedPeerDeviceId
+                        candidateIds = resolution.candidateIds
+                        trustLookupPeerId = resolvedPeerDeviceId ?? candidateIds.first
+                        trustedPeerKEMKeys.removeAll(keepingCapacity: true)
+
+                        if let resolvedPeerDeviceId {
+                            for candidateId in orderedUniqueCandidateIds([resolvedPeerDeviceId] + candidateIds) {
+                                let merged = await PeerKEMBootstrapStore.shared
+                                    .mergedKEMPublicKeys(forCandidates: [candidateId])
+                                guard !merged.isEmpty else { continue }
+                                trustedPeerKEMKeys = merged
+                                trustLookupPeerId = candidateId
+                                break
+                            }
+                        }
+
+                        if !Self.shouldWaitForStrictPQCInitialWebRTCHandshake(
+                            strictPQCRequested: strictPQCRequested,
+                            resolvedPeerDeviceId: resolvedPeerDeviceId,
+                            hasTrustedPeerKEM: !trustedPeerKEMKeys.isEmpty
+                        ) {
+                            break
+                        }
+
+                        guard Date() < peerResolutionDeadline else { break }
+                        try? await Task.sleep(for: .milliseconds(150))
+                    }
+
+                    guard let trustLookupPeerId else { return }
+
+                    let hasTrustedPeerKEM = !trustedPeerKEMKeys.isEmpty
+                    let selection: CryptoProviderFactory.SelectionPolicy
+                    if !hasTrustedPeerKEM {
+                        if strictPQCRequested {
+                            throw NSError(
+                                domain: "CrossNetworkConnectionManager",
+                                code: 701,
+                                userInfo: [
+                                    NSLocalizedDescriptionKey:
+                                        "严格 PQC 已启用，但 WebRTC 对端 authoritative deviceId / 受信任 KEM 尚未就绪；当前已拒绝 classic bootstrap。peer=\(resolvedPeerDeviceId ?? trustLookupPeerId)"
+                                ]
+                            )
+                        }
+                        selection = .classicOnly
+                    } else if strictPQCRequested {
+                        guard capability.hasApplePQC || capability.hasLiboqs else {
+                            throw NSError(
+                                domain: "CrossNetworkConnectionManager",
+                                code: 702,
+                                userInfo: [
+                                    NSLocalizedDescriptionKey:
+                                        "严格 PQC 已启用，但当前设备没有可用的 PQC Provider；WebRTC 初始握手不会再降级到 Classic。"
+                                ]
+                            )
+                        }
+                        selection = .requirePQC
+                    } else {
+                        selection = .preferPQC
+                    }
+
+                    let cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                    let sigAAlgorithm: ProtocolSigningAlgorithm = selection == .classicOnly ? .ed25519 : .mlDSA65
+                    let offeredSuites: [CryptoSuite] = selection == .classicOnly
+                        ? cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                        : DeviceIdentityKeyManager
+                            .pairingIdentityAdvertisedPQCSuites(using: cryptoProvider)
+                            .filter(\.isPQCGroup)
+
+                    let outboundDriver = try HandshakeDriver(
+                        transport: transport,
+                        cryptoProvider: cryptoProvider,
+                        protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
+                        identityProvider: DeviceIdentityHandshakeProvider(
+                            sigAAlgorithm: sigAAlgorithm,
+                            includeSecureEnclavePoP: handshakePolicy.requireSecureEnclavePoP
+                        ),
+                        sigAAlgorithm: sigAAlgorithm,
+                        offeredSuites: offeredSuites,
+                        policy: handshakePolicy,
+                        cryptoPolicy: HandshakeCryptoPolicyResolver.policy(for: offeredSuites),
+                        trustProvider: selection == .classicOnly ? currentPathTrustProvider : nil
+                    )
+                    handshakeState.driver = outboundDriver
+
+                    logger.info(
+                        "🤝 WebRTC 初始出站握手启动: session=\(sessionID, privacy: .public) peer=\(trustLookupPeerId, privacy: .public) policy=\(selection.rawValue, privacy: .public) trustedKEM=\(hasTrustedPeerKEM, privacy: .public)"
+                    )
+                    let keys = try await outboundDriver.initiateHandshake(
+                        with: PeerIdentifier(deviceId: trustLookupPeerId)
+                    )
+
+                    guard handshakeState.driver === outboundDriver,
+                          self.webrtcSessionsBySessionId[sessionID] != nil else {
+                        return
+                    }
+
+                    handshakeState.sessionKeys = keys
+                    handshakeState.driver = nil
+                    self.webrtcSessionKeysBySessionId[sessionID] = keys
+                    self.connectionStatus = .connected
+                    self.readiness = .handshakeComplete(
+                        sessionId: sessionID,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+                    self.markCrossNetworkPresenceConnected(
+                        sessionID: sessionID,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+                    self.updatePreparedSessionSnapshot(
+                        sessionID: sessionID,
+                        phase: .handshakeComplete,
+                        negotiatedSuite: keys.negotiatedSuite.rawValue
+                    )
+                    startScreenStreamingIfNeeded(keys: keys)
+                    logger.info(
+                        "✅ WebRTC 初始出站握手完成: session=\(sessionID, privacy: .public) suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
+                    )
+                } catch {
+                    guard self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+                    handshakeState.driver = nil
+                    self.cleanupWebRTCSession(
+                        sessionID,
+                        reason: "handshake_failed",
+                        disconnectKind: .explicit
+                    )
+                    self.connectionStatus = .failed("WebRTC handshake failed: \(error.localizedDescription)")
+                    self.readiness = .idle
+                }
+            }
+        }()
 
         func pairingExchangeFingerprint(_ payload: AppMessage.PairingIdentityExchangePayload) -> String {
             var hasher = SHA256()
@@ -3984,6 +4171,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         func startScreenStreamingIfNeeded(keys: SessionKeys) {
             startInteractionStreamingIfNeeded()
+            if self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.isStopRequest == true {
+                self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+                self.logger.info(
+                    "⏸️ WebRTC 推流保持停止状态: session=\(sessionID, privacy: .public)"
+                )
+                return
+            }
             guard Self.shouldStartWebRTCScreenStreaming(
                 remoteStreamConfiguration: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
             ) else {
@@ -4013,6 +4207,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 var lastBudget: WebRTCRemoteDesktopStreamBudget?
                 var lastVideoPolicy: WebRTCRemoteDesktopVideoPolicy?
                 var lastNativeVideoWarmBackupEnabled: Bool?
+                var lastNativeAudioTrackEnabled: Bool?
+                var lastPreferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding?
+                var lastAudioRedirectionEnabled: Bool?
                 var lastSentFormat = ""
                 var lastBackpressureReportAt = Date.distantPast
                 var lastScreenChannelWaitReportAt = Date.distantPast
@@ -4104,6 +4301,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     let nativeVideoTrackEnabled = session.supportsNativeScreenVideoTrack
                     let nativeVideoTrackReady =
                         self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                    let nativeAudioTrackEnabled =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeAudioTrackEnabled == true
+                    let audioRedirectionEnabled =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.audioRedirectionEnabled == true
+                    let preferredAudioEncoding = RemoteDesktopAudioChunkPayload.Encoding(
+                        rawValue: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.preferredAudioEncoding ?? ""
+                    ) ?? .pcmS16LE
+                    let shouldUseNativeAudioTrack = audioRedirectionEnabled && nativeAudioTrackEnabled
+                    // Keep the encrypted DataChannel audio path alive as a warm backup.
+                    // Viewers that successfully receive native audio can drop fallback
+                    // chunks after the first native packet; mis-advertised native support
+                    // must not turn audio into a total black hole.
+                    let shouldUseFallbackAudioChunks = audioRedirectionEnabled
                     let nativeVideoWarmBackupEnabled =
                         nativeVideoTrackEnabled && !nativeVideoTrackReady
                     guard videoPolicy.usesHardwareEncoder || nativeVideoTrackEnabled else {
@@ -4116,13 +4326,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         directCaptureStreamer = nil
                         encodedFrameStore.clear()
                         lastNativeVideoWarmBackupEnabled = nil
+                        lastNativeAudioTrackEnabled = nil
+                        lastPreferredAudioEncoding = nil
+                        lastAudioRedirectionEnabled = nil
                         lastDirectEncoderStartAt = .distantPast
+                        session.setOutgoingSystemAudioTrackEnabled(false)
                         return false
                     }
 
                     if let current = lastVideoPolicy,
                        current == videoPolicy,
                        lastNativeVideoWarmBackupEnabled == nativeVideoWarmBackupEnabled,
+                       lastNativeAudioTrackEnabled == nativeAudioTrackEnabled,
+                       lastPreferredAudioEncoding == preferredAudioEncoding,
+                       lastAudioRedirectionEnabled == audioRedirectionEnabled,
                        directCaptureStreamer != nil {
                         return true
                     }
@@ -4131,7 +4348,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     directCaptureStreamer = nil
                     encodedFrameStore.clear()
                     lastNativeVideoWarmBackupEnabled = nativeVideoWarmBackupEnabled
+                    lastNativeAudioTrackEnabled = nativeAudioTrackEnabled
+                    lastPreferredAudioEncoding = preferredAudioEncoding
+                    lastAudioRedirectionEnabled = audioRedirectionEnabled
                     lastDirectEncoderStartAt = .distantPast
+                    session.setOutgoingSystemAudioTrackEnabled(shouldUseNativeAudioTrack)
                     func storeEncodedFrame(
                         _ data: Data,
                         width: Int,
@@ -4155,6 +4376,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     let captureFPS = nativeVideoWarmBackupEnabled
                         ? min(videoPolicy.targetFrameRate, 24)
                         : videoPolicy.targetFrameRate
+                    let audioControlBufferedAmountBytes = 96 * 1024
                     if nativeVideoTrackEnabled {
                         captureStreamer.onRawFrame = { pixelBuffer, presentationTimeStamp in
                             if nativeVideoWarmBackupEnabled {
@@ -4209,6 +4431,42 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             )
                         }
                     }
+                    if shouldUseNativeAudioTrack {
+                        captureStreamer.onCapturedPCM16AudioChunk = { chunk in
+                            SBWebRTCSystemAudioDevice.shared().pushRecordedPCM16InterleavedData(
+                                chunk.data,
+                                sampleRate: chunk.sampleRate,
+                                channelCount: chunk.channelCount,
+                                frameCount: chunk.frameCount
+                            )
+                        }
+                    } else {
+                        captureStreamer.onCapturedPCM16AudioChunk = nil
+                    }
+                    if shouldUseFallbackAudioChunks {
+                        captureStreamer.onCapturedAudioChunk = { [weak self] chunk in
+                            guard let self else { return }
+                            let audioWire = RemoteDesktopAudioChunkWire.encode(chunk)
+                            Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                do {
+                                    let ciphertext = try encryptAppPayload(audioWire, with: keys)
+                                    let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-audio")
+                                    try await session.sendFramedPayloadAsync(
+                                        padded,
+                                        maxChunkBytes: 8 * 1024,
+                                        maxBufferedAmountBytes: UInt64(audioControlBufferedAmountBytes)
+                                    )
+                                } catch {
+                                    self.logger.debug(
+                                        "ℹ️ WebRTC 远控音频块发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        captureStreamer.onCapturedAudioChunk = nil
+                    }
                     captureStreamer.onCaptureIssue = { issue in
                         self.logger.warning(
                             "⚠️ WebRTC ScreenCaptureKit 采集提示: session=\(sessionID, privacy: .public) issue=\(issue, privacy: .public)"
@@ -4222,6 +4480,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             targetFPS: captureFPS,
                             keyFrameInterval: videoPolicy.keyFrameInterval,
                             captureCursorInVideo: !nativeVideoTrackEnabled,
+                            captureSystemAudio: audioRedirectionEnabled,
+                            audioEncoding: shouldUseFallbackAudioChunks ? preferredAudioEncoding : .pcmS16LE,
                             bitstreamFormat: nativeVideoTrackEnabled && !nativeVideoWarmBackupEnabled
                                 ? .native
                                 : .annexB
@@ -4243,7 +4503,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             fps=\(captureFPS, privacy: .public) \
                             size=\(Int(videoPolicy.preferredSize.width), privacy: .public)x\(Int(videoPolicy.preferredSize.height), privacy: .public) \
                             reason=\(videoPolicy.reason, privacy: .public) \
-                            mode=\(streamMode, privacy: .public)
+                            mode=\(streamMode, privacy: .public) \
+                            audio=\(audioRedirectionEnabled, privacy: .public) \
+                            nativeAudio=\(shouldUseNativeAudioTrack, privacy: .public) \
+                            audioCodec=\(preferredAudioEncoding.rawValue, privacy: .public)
                             """
                         )
                         self.appendSmokeStatus(
@@ -4643,6 +4906,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         }
 
+        defer {
+            initialHandshakeTask?.cancel()
+        }
+
         logger.info("🤝 WebRTC 控制通道：启动入站握手/消息循环 session=\(sessionID, privacy: .public)")
 
         let maxInboundFrameBytes = 8_000_000
@@ -4700,7 +4967,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 }
                             }
                             switch msg {
-                            case .pairingIdentityExchange(let payload):
+                            case .pairingIdentityExchange(let rawPayload):
+                                guard let payload = rawPayload.normalizedBootstrapPayload else {
+                                    logger.warning(
+                                        "⚠️ WebRTC pairingIdentityExchange ignored: empty declaredDeviceId or empty KEM public key session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                                    )
+                                    break
+                                }
                                 let remoteFormatsSummary = (payload.remoteVideoFormats ?? []).joined(separator: ",")
                                 self.appendSmokeStatus(
                                     "app-pairing-recv session=\(sessionID) formats=\(remoteFormatsSummary)"
@@ -4758,7 +5031,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     let km = DeviceIdentityKeyManager.shared
                                     let kemKeys: [KEMPublicKeyInfo]
                                     do {
-                                        kemKeys = try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                        kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
+                                            try await km.pairingIdentityKEMPublicKeys(using: provider)
+                                        )
                                     } catch {
                                         logger.warning("⚠️ WebRTC bootstrap reply KEM 公钥准备失败: \(error.localizedDescription, privacy: .public)")
                                         self.appendSmokeStatus(
@@ -4766,11 +5041,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                         )
                                         return
                                     }
+                                    guard !kemKeys.isEmpty else {
+                                        logger.warning("⚠️ WebRTC bootstrap reply skipped: no valid local KEM public keys")
+                                        return
+                                    }
 
-                                    let selfIdentity = await SelfIdentityProvider.shared.snapshot()
-                                    let localId = selfIdentity.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                        ? await DeviceIdentityKeyManager.shared.getDeviceId()
-                                        : selfIdentity.deviceId
+                                    let localIdRaw = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+                                    let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    guard !localId.isEmpty else {
+                                        logger.warning("⚠️ WebRTC bootstrap reply skipped: empty local deviceId")
+                                        self.appendSmokeStatus(
+                                            "app-pairing-send-skipped session=\(sessionID) stage=empty_local_device_id"
+                                        )
+                                        return
+                                    }
                                     let localPlatform: String = {
 #if os(macOS)
                                         return "macOS"
@@ -5526,6 +5810,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 }
                             case .streamConfiguration:
                                 if let config = try? JSONDecoder().decode(RemoteDesktopStreamConfiguration.self, from: rm.payload) {
+                                    if config.screenFrameTransport == "stopped",
+                                       config.audioRedirectionEnabled == false {
+                                        let previousConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID] = config
+                                        self.webrtcRemoteVideoFormatsBySessionId[sessionID] = []
+                                        self.webrtcPendingStreamRefreshSessionIds.remove(sessionID)
+                                        self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+                                        self.stopWebRTCScreenStreaming(sessionID: sessionID)
+                                        self.configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+                                        self.logger.info(
+                                            "⏹️ WebRTC viewer 请求停止远控推流: session=\(sessionID, privacy: .public) previousTransport=\(previousConfig?.screenFrameTransport ?? "none", privacy: .public)"
+                                        )
+                                        continue
+                                    }
                                     let previousConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
                                     self.webrtcRemoteStreamConfigurationBySessionId[sessionID] = config
                                     self.webrtcRemoteVideoFormatsBySessionId[sessionID] = self.effectiveWebRTCRemoteVideoFormats(for: sessionID)
@@ -5884,14 +6182,40 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     private func waitForConnection(_ connection: NWConnection) async throws {
         try await withCheckedThrowingContinuation { continuation in
+            final class ResumeState: @unchecked Sendable {
+                let lock = NSLock()
+                var didResume = false
+            }
+            let resumeState = ResumeState()
             connection.stateUpdateHandler = { state in
+                let completion: Result<Void, Error>?
+                resumeState.lock.lock()
                 switch state {
                 case .ready:
-                    continuation.resume()
+                    guard !resumeState.didResume else {
+                        resumeState.lock.unlock()
+                        return
+                    }
+                    resumeState.didResume = true
+                    completion = .success(())
                 case .failed(let error):
-                    continuation.resume(throwing: error)
+                    guard !resumeState.didResume else {
+                        resumeState.lock.unlock()
+                        return
+                    }
+                    resumeState.didResume = true
+                    completion = .failure(error)
                 default:
-                    break
+                    completion = nil
+                }
+                resumeState.lock.unlock()
+                guard let completion else { return }
+                connection.stateUpdateHandler = nil
+                switch completion {
+                case .success:
+                    continuation.resume()
+                case .failure(let error):
+                    continuation.resume(throwing: error)
                 }
             }
         }
@@ -6055,6 +6379,53 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return local.lexicographicallyPrecedes(remote)
     }
 
+    nonisolated static func shouldInitiateInitialWebRTCHandshake(role: WebRTCSession.Role) -> Bool {
+        role == .offerer
+    }
+
+    nonisolated static func initialWebRTCHandshakePeerResolution(
+        expectedRemoteDeviceId: String?,
+        learnedRemoteDeviceId: String?,
+        endpointDescription: String
+    ) -> (resolvedPeerDeviceId: String?, candidateIds: [String]) {
+        let resolvedPeerDeviceId = [expectedRemoteDeviceId, learnedRemoteDeviceId]
+            .compactMap { raw -> String? in
+                guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !trimmed.isEmpty else {
+                    return nil
+                }
+                return trimmed
+            }
+            .first
+
+        var seen = Set<String>()
+        var candidateIds: [String] = []
+        for raw in [expectedRemoteDeviceId, learnedRemoteDeviceId, endpointDescription] {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                continue
+            }
+            if seen.insert(trimmed).inserted {
+                candidateIds.append(trimmed)
+            }
+        }
+
+        return (resolvedPeerDeviceId: resolvedPeerDeviceId, candidateIds: candidateIds)
+    }
+
+    nonisolated static func shouldWaitForStrictPQCInitialWebRTCHandshake(
+        strictPQCRequested: Bool,
+        resolvedPeerDeviceId: String?,
+        hasTrustedPeerKEM: Bool
+    ) -> Bool {
+        guard strictPQCRequested else { return false }
+        guard let resolvedPeerDeviceId,
+              !resolvedPeerDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return true
+        }
+        return !hasTrustedPeerKEM
+    }
+
     private static func normalizeConnectionCode(_ raw: String) -> String? {
         let normalized = sanitizeConnectionCodeInput(raw)
         guard isSupportedConnectionCodeLength(normalized.count) else { return nil }
@@ -6150,6 +6521,62 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return encoder.finalize()
     }
 
+    static func shouldAllowAuthenticatedQRRebind(
+        for conflict: CurrentPathTrustConflict
+    ) -> Bool {
+        switch conflict {
+        case .identityConflict, .deviceIdMigrationRequired:
+            return false
+        case .quarantinedIdentity, .revokedIdentity:
+            return false
+        }
+    }
+
+    private func enforceCurrentPathTrustBinding(
+        deviceId: String,
+        protocolPublicKeyFingerprint: String,
+        authenticatedAuthorityRebindAllowed: Bool = false
+    ) throws {
+        if let conflict = TrustSyncService.shared.evaluateCurrentPathBinding(
+            deviceId: deviceId,
+            protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
+        ) {
+            if authenticatedAuthorityRebindAllowed,
+               Self.shouldAllowAuthenticatedQRRebind(for: conflict) {
+                logger.warning(
+                    "⚠️ allow current-path authority rebind: deviceId=\(deviceId, privacy: .public) fingerprint=\(protocolPublicKeyFingerprint, privacy: .public) conflict=\(String(describing: conflict), privacy: .public)"
+                )
+                return
+            }
+            switch conflict {
+            case .identityConflict:
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8401,
+                    userInfo: [NSLocalizedDescriptionKey: "连接目标 authoritative key 与现有 deviceId 绑定冲突"]
+                )
+            case .deviceIdMigrationRequired:
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8402,
+                    userInfo: [NSLocalizedDescriptionKey: "连接目标 deviceId 与已 pinned authoritative key 不匹配"]
+                )
+            case .quarantinedIdentity:
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8403,
+                    userInfo: [NSLocalizedDescriptionKey: "连接目标身份处于隔离/待重新验证状态"]
+                )
+            case .revokedIdentity:
+                throw NSError(
+                    domain: "CrossNetworkConnectionManager",
+                    code: 8404,
+                    userInfo: [NSLocalizedDescriptionKey: "连接目标身份已撤销"]
+                )
+            }
+        }
+    }
+
     static func verifyDynamicQRCode(_ qrData: DynamicQRCodeData) async -> (ok: Bool, reason: String?, source: QRCodeTrustSource) {
         guard qrData.version >= 6 else {
             return (false, "二维码协议版本过旧", .selfAsserted)
@@ -6224,6 +6651,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             deviceId: qrData.deviceID,
             protocolPublicKeyFingerprint: qrData.protocolPublicKeyFingerprint
         ) {
+            if shouldAllowAuthenticatedQRRebind(for: conflict) {
+                return (true, nil, .selfAsserted)
+            }
             switch conflict {
             case .identityConflict:
                 return (false, "二维码 authoritative key 与现有 deviceId 绑定冲突", .selfAsserted)
@@ -6236,10 +6666,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         }
 
-        if let trustRecord = TrustSyncService.shared.getCurrentPathTrustRecord(
-            fingerprint: qrData.protocolPublicKeyFingerprint
-        ),
-           trustRecord.currentDeviceId == qrData.deviceID {
+        if let _ = TrustSyncService.shared.getCurrentPathTrustRecord(
+            fingerprint: qrData.protocolPublicKeyFingerprint,
+            matchingDeviceId: qrData.deviceID
+        ) {
             return (true, nil, .trustedDevice)
         }
         return (true, nil, .selfAsserted)

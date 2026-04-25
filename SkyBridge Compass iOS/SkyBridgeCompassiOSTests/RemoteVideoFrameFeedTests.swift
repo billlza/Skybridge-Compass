@@ -19,27 +19,40 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         )
     }
 
-    private func makeFrame(index: Int) throws -> DisplaySampleBufferFrame {
-        var pixelBuffer: CVPixelBuffer?
-        let attributes: [CFString: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
-            kCVPixelBufferIOSurfacePropertiesKey: [:]
-        ]
-        XCTAssertEqual(
-            CVPixelBufferCreate(
-                kCFAllocatorDefault,
-                1,
-                1,
-                kCVPixelFormatType_32BGRA,
-                attributes as CFDictionary,
-                &pixelBuffer
-            ),
-            kCVReturnSuccess
+    @MainActor
+    func testSampleBufferDisplayAcknowledgementDoesNotPublishNewFrameVersion() throws {
+        let feed = RemoteVideoFrameFeed()
+        feed.enqueue(frame: try makeFrame(index: 1))
+        let versionAfterEnqueue = feed.frameVersion
+
+        feed.markDisplayedFrame()
+
+        XCTAssertTrue(feed.hasDisplayedFrame)
+        XCTAssertEqual(feed.frameVersion, versionAfterEnqueue)
+    }
+
+    @MainActor
+    func testMetalDisplayAcknowledgementDoesNotResubmitRetainedLatestFrame() throws {
+        let feed = RemoteMetalVideoFrameFeed()
+        feed.enqueue(
+            frame: DecodedPixelBufferFrame(
+                pixelBuffer: try makePixelBuffer(),
+                width: 1,
+                height: 1,
+                presentationTimeStamp: CMTime(value: 1, timescale: 60)
+            )
         )
-        guard let pixelBuffer else {
-            throw XCTSkip("Failed to create pixel buffer")
-        }
+        let versionAfterEnqueue = feed.frameVersion
+
+        feed.markDisplayedFrame()
+
+        XCTAssertTrue(feed.hasDisplayedFrame)
+        XCTAssertEqual(feed.frameVersion, versionAfterEnqueue)
+        XCTAssertNotNil(feed.takeLatestFrame())
+    }
+
+    private func makeFrame(index: Int) throws -> DisplaySampleBufferFrame {
+        let pixelBuffer = try makePixelBuffer()
 
         var formatDescription: CMVideoFormatDescription?
         XCTAssertEqual(
@@ -80,6 +93,30 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
             height: 1,
             presentationTimeStamp: timingInfo.presentationTimeStamp
         )
+    }
+
+    private func makePixelBuffer() throws -> CVPixelBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            kCVPixelBufferIOSurfacePropertiesKey: [:]
+        ]
+        XCTAssertEqual(
+            CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                1,
+                1,
+                kCVPixelFormatType_32BGRA,
+                attributes as CFDictionary,
+                &pixelBuffer
+            ),
+            kCVReturnSuccess
+        )
+        guard let pixelBuffer else {
+            throw XCTSkip("Failed to create pixel buffer")
+        }
+        return pixelBuffer
     }
 }
 

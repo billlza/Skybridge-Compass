@@ -79,23 +79,9 @@ public final class SupabaseService: BaseManager {
             return nil
         }
 
- /// 从环境变量、Info.plist、资源文件或Keychain加载配置
-        @MainActor
+ /// 从环境变量、Info.plist 或资源文件加载配置。启动热路径禁止同步读取 Keychain。
         public static func fromEnvironment() -> Configuration? {
- // 首先尝试从Keychain获取配置
-            do {
-                let keychainConfig = try KeychainManager.shared.retrieveSupabaseConfig()
-                if let keychainConfiguration = candidateConfiguration(
-                    urlString: keychainConfig.url,
-                    anonKey: keychainConfig.anonKey
-                ) {
-                    return keychainConfiguration
-                }
-            } catch {
-                // Ignore and continue with the remaining configuration chain.
-            }
-
- // 如果Keychain中没有配置，尝试从环境变量获取
+ // 首先检查环境变量
             if let environmentConfiguration = candidateConfiguration(
                 urlString: ProcessInfo.processInfo.environment["SUPABASE_URL"],
                 anonKey: ProcessInfo.processInfo.environment["SUPABASE_ANON_KEY"]
@@ -114,6 +100,22 @@ public final class SupabaseService: BaseManager {
             }
  #endif
 
+            return nil
+        }
+
+ /// 从 Keychain 加载配置。调用方必须放到后台线程，不能用于 App/SwiftUI 初始化热路径。
+        public static func fromKeychain() -> Configuration? {
+            do {
+                let keychainConfig = try KeychainManager.shared.retrieveSupabaseConfig()
+                if let keychainConfiguration = candidateConfiguration(
+                    urlString: keychainConfig.url,
+                    anonKey: keychainConfig.anonKey
+                ) {
+                    return keychainConfiguration
+                }
+            } catch {
+                // Ignore and continue with the remaining configuration chain.
+            }
             return nil
         }
     }
@@ -1021,38 +1023,27 @@ public final class SupabaseService: BaseManager {
         identifier: String,
         identifierType: RegistrationIdentifierType,
         deviceFingerprint: String,
-        configName: String = "default"
+        attemptType: RegistrationAttemptType = .register,
+        configName: String? = nil
     ) async throws -> RegistrationGuardDecision {
         let config = try resolvedConfiguration()
         let endpoint = config.url.appendingPathComponent("rest/v1/rpc/guard_registration_attempt_v1")
         let normalizedIdentifier = Self.normalizedRegistrationIdentifier(identifier, type: identifierType)
         let identifierHash = Self.normalizedRegistrationIdentifierHash(identifier, type: identifierType)
-
-        var request = makeAnonymousJSONRequest(url: endpoint, method: "POST", configuration: config)
-        request.httpBody = try JSONSerialization.data(
-            withJSONObject: [
-                "identifier_hash": identifierHash,
-                "identifier_type": identifierType.rawValue,
-                "raw_identifier": normalizedIdentifier,
-                "device_fingerprint": deviceFingerprint,
-                "config_name": configName
-            ]
-        )
+        let resolvedConfigName = configName ?? Self.registrationRiskConfigName(for: attemptType)
 
         do {
-            let (data, response) = try await urlSession.data(for: request)
-            _ = try validatedHTTPResponse(response, body: data)
-
-            if let rows = try? JSONDecoder().decode([SupabaseRegistrationGuardRow].self, from: data),
-               let row = rows.first {
-                return row.decision
-            }
-
-            if let row = try? JSONDecoder().decode(SupabaseRegistrationGuardRow.self, from: data) {
-                return row.decision
-            }
-
-            throw SupabaseError.schemaMismatch("注册风控 RPC 返回格式无效")
+            return try await submitRegistrationRiskRequest(
+                endpoint: endpoint,
+                config: config,
+                identifierHash: identifierHash,
+                identifierType: identifierType,
+                normalizedIdentifier: normalizedIdentifier,
+                deviceFingerprint: deviceFingerprint,
+                configName: resolvedConfigName,
+                attemptType: attemptType,
+                includeAttemptType: true
+            )
         } catch let error as SupabaseError {
             if case .httpStatus(let code, let message) = error,
                Self.isMissingRPCError(
@@ -1060,11 +1051,74 @@ public final class SupabaseService: BaseManager {
                 body: message,
                 rpcName: "guard_registration_attempt_v1"
                ) {
-                throw SupabaseError.schemaMismatch("缺少注册风控 RPC，请先应用最新 Supabase migrations")
+                logger.info("认证风控 RPC 仍为旧签名，回退到兼容请求")
+                return try await submitRegistrationRiskRequest(
+                    endpoint: endpoint,
+                    config: config,
+                    identifierHash: identifierHash,
+                    identifierType: identifierType,
+                    normalizedIdentifier: normalizedIdentifier,
+                    deviceFingerprint: deviceFingerprint,
+                    configName: "default",
+                    attemptType: attemptType,
+                    includeAttemptType: false
+                )
             }
             throw error
         } catch {
             throw SupabaseError.networkError(error)
+        }
+    }
+
+    private func submitRegistrationRiskRequest(
+        endpoint: URL,
+        config: Configuration,
+        identifierHash: String,
+        identifierType: RegistrationIdentifierType,
+        normalizedIdentifier: String,
+        deviceFingerprint: String,
+        configName: String,
+        attemptType: RegistrationAttemptType,
+        includeAttemptType: Bool
+    ) async throws -> RegistrationGuardDecision {
+        var payload: [String: Any] = [
+            "identifier_hash": identifierHash,
+            "identifier_type": identifierType.rawValue,
+            "raw_identifier": normalizedIdentifier,
+            "device_fingerprint": deviceFingerprint,
+            "config_name": configName
+        ]
+
+        if includeAttemptType {
+            payload["attempt_type"] = attemptType.rawValue
+        }
+
+        var request = makeAnonymousJSONRequest(url: endpoint, method: "POST", configuration: config)
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, response) = try await urlSession.data(for: request)
+        _ = try validatedHTTPResponse(response, body: data)
+
+        if let rows = try? JSONDecoder().decode([SupabaseRegistrationGuardRow].self, from: data),
+           let row = rows.first {
+            return row.decision
+        }
+
+        if let row = try? JSONDecoder().decode(SupabaseRegistrationGuardRow.self, from: data) {
+            return row.decision
+        }
+
+        throw SupabaseError.schemaMismatch("注册风控 RPC 返回格式无效")
+    }
+
+    private static func registrationRiskConfigName(for attemptType: RegistrationAttemptType) -> String {
+        switch attemptType {
+        case .register:
+            return "default"
+        case .verifyCode:
+            return "verify_code"
+        case .login:
+            return "login"
         }
     }
 

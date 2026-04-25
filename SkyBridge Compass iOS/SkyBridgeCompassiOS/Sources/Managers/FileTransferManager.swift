@@ -38,9 +38,60 @@ public enum FileTransferConstants {
     
     /// 传输超时时间（秒）
     public static let transferTimeout: TimeInterval = 300
+
+    /// 单个 LAN 连接候选端点的建立超时（秒）
+    public static let connectionTimeout: TimeInterval = 12
     
     /// 默认传输端口
     public static let defaultPort: UInt16 = 8080
+}
+
+struct FileTransferPeerContext: Sendable, Equatable {
+    let declaredSenderDeviceId: String?
+    let endpointHostOrIP: String?
+    let peerLabel: String?
+    let transferId: String
+
+    init(
+        declaredSenderDeviceId: String?,
+        endpointHostOrIP: String?,
+        peerLabel: String?,
+        transferId: String
+    ) {
+        self.declaredSenderDeviceId = declaredSenderDeviceId
+        self.endpointHostOrIP = endpointHostOrIP
+        self.peerLabel = peerLabel
+        self.transferId = transferId
+    }
+
+    func updating(
+        declaredSenderDeviceId: String? = nil,
+        transferId: String? = nil
+    ) -> Self {
+        Self(
+            declaredSenderDeviceId: declaredSenderDeviceId ?? self.declaredSenderDeviceId,
+            endpointHostOrIP: endpointHostOrIP,
+            peerLabel: peerLabel,
+            transferId: transferId ?? self.transferId
+        )
+    }
+}
+
+public enum FileTransferReceiptWaitStage: String, Sendable, Equatable {
+    case headerTimeout = "receipt_wait_header_timeout"
+    case payloadTimeout = "receipt_wait_payload_timeout"
+    case authFailed = "receipt_wait_auth_failed"
+    case receiverRejected = "receipt_wait_receiver_rejected"
+}
+
+enum ClassicTransferCapability {
+    static let classicResume = "classic_resume"
+
+    static func supportsClassicResume(in capabilities: [String]) -> Bool {
+        capabilities.contains { capability in
+            capability.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == classicResume
+        }
+    }
 }
 
 // MARK: - Local Device Info (best-effort, for sender metadata)
@@ -55,21 +106,11 @@ private func SBFT_currentModelIdentifier() -> String {
 }
 
 private func SBFT_currentModelDisplayName() -> String {
-    switch SBFT_currentModelIdentifier() {
-    case "iPhone17,1": return "iPhone 16 Pro"
-    case "iPhone17,2": return "iPhone 16 Pro Max"
-    case "iPhone17,3": return "iPhone 16"
-    case "iPhone17,4": return "iPhone 16 Plus"
-    default: return SBFT_currentModelIdentifier()
-    }
+    AppleMobileDeviceIdentity.currentSnapshot().modelName
 }
 
 private func SBFT_currentChipDisplayName() -> String {
-    switch SBFT_currentModelIdentifier() {
-    case "iPhone17,1", "iPhone17,2": return "A18 Pro"
-    case "iPhone17,3", "iPhone17,4": return "A18"
-    default: return "Apple Silicon"
-    }
+    AppleMobileDeviceIdentity.currentSnapshot().chip
 }
 
 // MARK: - File Chunk
@@ -174,6 +215,8 @@ public enum TransferMessageType: UInt32, Codable, Sendable {
     case chunk = 2
     case complete = 3
     case receipt = 4
+    case resumeRequest = 5
+    case resumeAck = 6
     case unknown = 0
 }
 
@@ -252,6 +295,7 @@ public enum FileTransferError: Error, LocalizedError, Sendable {
     case permissionDenied
     case networkError(String)
     case timeout
+    case receiptWaitFailed(stage: FileTransferReceiptWaitStage, details: String?)
     case encryptionFailed
     case secureSessionRequired
 
@@ -268,6 +312,9 @@ public enum FileTransferError: Error, LocalizedError, Sendable {
         case .permissionDenied: return "权限被拒绝"
         case .networkError(let reason): return "网络错误: \(reason)"
         case .timeout: return "传输超时"
+        case .receiptWaitFailed(let stage, let details):
+            let suffix = details.map { ": \($0)" } ?? ""
+            return "等待接收端落盘回执失败(\(stage.rawValue))\(suffix)"
         case .encryptionFailed: return "加密失败"
         case .secureSessionRequired: return "需要已认证的安全会话"
         }
@@ -334,9 +381,38 @@ public class FileTransferManager: ObservableObject {
     private let maxChunkSizeBytes: Int = 512 * 1024
     private let maxMessageBytes: Int = 2_000_000
     private let queue = DispatchQueue(label: "com.skybridge.filetransfer", qos: .userInitiated)
+    private let receiptWaitTimeoutSeconds: TimeInterval = 60
 
     private struct ClassicTransferSecurityContext {
         let transferKey: SymmetricKey
+        let matchDeviceId: String
+        let resolvedPeerDeviceId: String
+        let matchedBy: ClassicTransferPeerResolutionBranch
+        let declaredCandidates: [String]
+        let endpointCandidates: [String]
+    }
+
+    struct ClassicTransferAuthenticatedPeerCandidate: Sendable, Equatable {
+        let matchDeviceId: String
+        let resolvedPeerDeviceId: String
+        let aliases: [String]
+        let endpointHostOrIP: String?
+        let capabilities: [String]
+    }
+
+    enum ClassicTransferPeerResolutionBranch: String, Sendable, Equatable {
+        case declaredSenderDeviceId = "declared_sender_device_id"
+        case aliasOrCanonicalDeviceId = "alias_or_canonical_device_id"
+        case endpointHostOrIP = "endpoint_host_or_ip"
+        case singleAuthenticatedFallback = "single_authenticated_fallback"
+    }
+
+    struct ClassicTransferPeerResolutionOutcome: Sendable, Equatable {
+        let matchDeviceId: String
+        let resolvedPeerDeviceId: String
+        let matchedBy: ClassicTransferPeerResolutionBranch
+        let declaredCandidates: [String]
+        let endpointCandidates: [String]
     }
 
     private var inFlightTransferCount: Int = 0
@@ -388,6 +464,8 @@ public class FileTransferManager: ObservableObject {
         try await acquireTransferSlot()
         defer { releaseTransferSlot() }
 
+        try await FileTransferRuntime.shared.ensureHealthy()
+
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
             if didAccess { url.stopAccessingSecurityScopedResource() }
@@ -431,17 +509,14 @@ public class FileTransferManager: ObservableObject {
         var state = TransferState(transferId: transfer.id)
         state.localURL = url
         state.startTime = Date()
-        #if canImport(UIKit)
-        let senderDeviceId = UIDevice.current.identifierForVendor?.uuidString
-        let senderDeviceName = UIDevice.current.name
-        let senderPlatform = UIDevice.current.systemName
-        let senderOSVersion = UIDevice.current.systemVersion
-        #else
-        let senderDeviceId: String? = nil
-        let senderDeviceName: String? = nil
-        let senderPlatform: String? = nil
-        let senderOSVersion: String? = nil
-        #endif
+        let localIdentity = AppleMobileDeviceIdentity.currentSnapshot()
+        let senderDeviceId = Self.preferredClassicTransferSenderDeviceId(
+            stableDeviceId: localIdentity.stableDeviceId,
+            vendorDeviceId: localIdentity.vendorDeviceId
+        )
+        let senderDeviceName = localIdentity.deviceName
+        let senderPlatform = localIdentity.platformName
+        let senderOSVersion = localIdentity.osVersion
         let senderModelName = SBFT_currentModelDisplayName()
         let senderChip = SBFT_currentChipDisplayName()
         state.metadata = FileMetadata(
@@ -477,15 +552,19 @@ public class FileTransferManager: ObservableObject {
             // 这里尝试用发现管理器的最新记录补全（尤其是 `_skybridge-transfer._tcp`）。
             let resolvedDevice = resolveLatestTransferDevice(from: device)
 
-            let endpoint = try await makeTransferEndpoint(for: resolvedDevice)
+            let endpoints = try await makeTransferEndpointCandidates(for: resolvedDevice)
 
-            let connection = try await createConnection(to: endpoint)
+            let connection = try await createConnection(toAnyOf: endpoints)
             defer { connection.cancel() }
             transferStates[transfer.id]?.connection = connection
 
             let securityContext = try classicTransferSecurityContext(
-                peerDeviceIdCandidates: [resolvedDevice.id, device.id],
-                transferId: transfer.id
+                peerContext: FileTransferPeerContext(
+                    declaredSenderDeviceId: resolvedDevice.id,
+                    endpointHostOrIP: resolvedDevice.ipAddress,
+                    peerLabel: resolvedDevice.name,
+                    transferId: transfer.id
+                )
             )
 
             // 发送元数据
@@ -563,38 +642,32 @@ public class FileTransferManager: ObservableObject {
         return resolved
     }
 
-    private func makeTransferEndpoint(for device: DiscoveredDevice) async throws -> NWEndpoint {
+    private func makeTransferEndpointCandidates(for device: DiscoveredDevice) async throws -> [NWEndpoint] {
         let transferServiceType = DiscoveredDevice.fileTransferServiceType
-        let bonjourName = preferredTransferServiceName(for: device)
-        let bonjourDomain = preferredTransferServiceDomain(for: device)
-        let hasTransferService = hasAdvertisedTransferService(for: device)
         let explicitTransferPort = preferredTransferPort(for: device)
         let hasActivePeerSession = activePeerSessionExists(for: device)
+        var endpoints: [NWEndpoint] = []
+        var seen = Set<String>()
 
-        if hasTransferService {
-            return .service(
-                name: bonjourName ?? device.name,
-                type: transferServiceType,
-                domain: bonjourDomain,
-                interface: nil
-            )
-        }
-
-        if let bonjourName, !bonjourName.isEmpty,
-           (device.supportsFileTransfer || explicitTransferPort != nil || hasActivePeerSession) {
-            SkyBridgeLogger.shared.info(
-                "📡 文件传输优先使用推断的 Bonjour 服务连接: name=\(bonjourName) domain=\(bonjourDomain)"
-            )
-            return .service(
-                name: bonjourName,
-                type: transferServiceType,
-                domain: bonjourDomain,
-                interface: nil
+        if let bonjour = transferBonjourServiceIdentity(for: device) {
+            appendTransferEndpoint(
+                .service(
+                    name: bonjour.name,
+                    type: transferServiceType,
+                    domain: bonjour.domain,
+                    interface: nil
+                ),
+                to: &endpoints,
+                seen: &seen
             )
         }
 
         if let ip = bestIPAddress(for: device), let port = explicitTransferPort {
-            return .hostPort(host: .init(ip), port: .init(integerLiteral: port))
+            appendTransferEndpoint(
+                .hostPort(host: .init(ip), port: .init(integerLiteral: port)),
+                to: &endpoints,
+                seen: &seen
+            )
         }
 
         if let resolvedIP = await resolveTransferIPAddress(for: device),
@@ -602,18 +675,36 @@ public class FileTransferManager: ObservableObject {
             SkyBridgeLogger.shared.info(
                 "📡 文件传输已解析到主服务地址: name=\(device.name) ip=\(resolvedIP) port=\(port)"
             )
-            return .hostPort(host: .init(resolvedIP), port: .init(integerLiteral: port))
+            appendTransferEndpoint(
+                .hostPort(host: .init(resolvedIP), port: .init(integerLiteral: port)),
+                to: &endpoints,
+                seen: &seen
+            )
         }
 
         if hasActivePeerSession,
            let activePeerIP = activePeerTransferAddress(for: device) {
-            SkyBridgeLogger.shared.warning(
-                "⚠️ 文件传输目标缺少独立服务公告，已基于活跃 P2P 会话回退到直连端口 \(FileTransferConstants.defaultPort): name=\(device.name) ip=\(activePeerIP)"
-            )
-            return .hostPort(
-                host: .init(activePeerIP),
-                port: .init(integerLiteral: explicitTransferPort ?? FileTransferConstants.defaultPort)
-            )
+            if let port = explicitTransferPort {
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 文件传输目标缺少独立服务公告，已基于活跃 P2P 会话回退到显式端口 \(port): name=\(device.name) ip=\(activePeerIP)"
+                )
+                appendTransferEndpoint(
+                    .hostPort(
+                        host: .init(activePeerIP),
+                        port: .init(integerLiteral: port)
+                    ),
+                    to: &endpoints,
+                    seen: &seen
+                )
+            } else {
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 文件传输目标缺少独立端口，拒绝猜测默认端口: name=\(device.name) ip=\(activePeerIP)"
+                )
+            }
+        }
+
+        if !endpoints.isEmpty {
+            return endpoints
         }
 
         if device.supportsFileTransfer, let resolvedIP = await resolveTransferIPAddress(for: device) {
@@ -629,8 +720,18 @@ public class FileTransferManager: ObservableObject {
         throw FileTransferError.invalidDestination
     }
 
+    private func appendTransferEndpoint(
+        _ endpoint: NWEndpoint,
+        to endpoints: inout [NWEndpoint],
+        seen: inout Set<String>
+    ) {
+        let key = String(describing: endpoint)
+        guard seen.insert(key).inserted else { return }
+        endpoints.append(endpoint)
+    }
+
     private func hasAdvertisedTransferService(for device: DiscoveredDevice) -> Bool {
-        transferIdentityCandidates(for: device).contains(where: Self.hasExplicitLANTransferService)
+        transferBonjourServiceIdentity(for: device) != nil
     }
 
     private func preferredTransferPort(for device: DiscoveredDevice) -> UInt16? {
@@ -869,17 +970,28 @@ public class FileTransferManager: ObservableObject {
     }
 
     private func preferredTransferServiceName(for device: DiscoveredDevice) -> String? {
+        transferBonjourServiceIdentity(for: device)?.name
+    }
+
+    private func transferBonjourServiceIdentity(for device: DiscoveredDevice) -> (name: String, domain: String)? {
         for candidate in transferIdentityCandidates(for: device) {
+            let hasTransferServiceEvidence = candidate.bonjourServiceType == DiscoveredDevice.fileTransferServiceType
+                || candidate.services.contains(DiscoveredDevice.fileTransferServiceType)
+                || candidate.id.hasPrefix("bonjour:")
+
+            guard hasTransferServiceEvidence else { continue }
+
             if let bonjourServiceName = candidate.bonjourServiceName,
                isPlausibleServiceInstanceName(bonjourServiceName) {
-                return bonjourServiceName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let domain = candidate.bonjourServiceDomain?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (
+                    name: bonjourServiceName.trimmingCharacters(in: .whitespacesAndNewlines),
+                    domain: domain?.isEmpty == false ? domain! : "local."
+                )
             }
             if let parsed = parseBonjourIdentity(from: candidate.id),
                isPlausibleServiceInstanceName(parsed.name) {
-                return parsed.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            if isPlausibleServiceInstanceName(candidate.name) {
-                return candidate.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (name: parsed.name.trimmingCharacters(in: .whitespacesAndNewlines), domain: parsed.domain)
             }
         }
         return nil
@@ -925,6 +1037,15 @@ public class FileTransferManager: ObservableObject {
         }
         let lowercased = raw.lowercased()
         if lowercased == "unknown device" || lowercased == "未知设备" {
+            return false
+        }
+        if lowercased.hasPrefix("id:")
+            || lowercased.hasPrefix("host:")
+            || lowercased.hasPrefix("peer:")
+            || lowercased.hasPrefix("recent:") {
+            return false
+        }
+        if UUID(uuidString: raw) != nil {
             return false
         }
         if let sanitized = sanitizeAddress(raw),
@@ -1033,14 +1154,9 @@ public class FileTransferManager: ObservableObject {
         let dcChunkSize = min(64 * 1024, max(8 * 1024, metadata.chunkSize))
         let totalChunks = Int(ceil(Double(metadata.fileSize) / Double(dcChunkSize)))
         
-        let senderDeviceId = KeychainManager.shared.getOrGenerateDeviceId()
-        let senderDeviceName: String? = {
-            #if canImport(UIKit)
-            return UIDevice.current.name
-            #else
-            return nil
-            #endif
-        }()
+        let senderIdentity = AppleMobileDeviceIdentity.currentSnapshot()
+        let senderDeviceId = senderIdentity.stableDeviceId
+        let senderDeviceName: String? = senderIdentity.deviceName
         
         let meta = CrossNetworkFileTransferMessage(
             op: .metadata,
@@ -1146,26 +1262,18 @@ public class FileTransferManager: ObservableObject {
     /// - Parameters:
     ///   - metadata: 文件元数据
     ///   - connection: 网络连接
-    public func receiveFile(metadata: FileMetadata, from connection: NWConnection, peer: String) async throws -> URL {
+    func receiveFile(
+        metadata: FileMetadata,
+        from connection: NWConnection,
+        peerContext: FileTransferPeerContext
+    ) async throws -> URL {
         try await acquireTransferSlot()
         defer { releaseTransferSlot() }
 
+        let peer = peerContext.peerLabel ?? peerContext.endpointHostOrIP ?? metadata.senderDeviceId ?? "Unknown"
         SkyBridgeLogger.shared.info("📥 开始接收文件: \(metadata.fileName) 从设备: \(peer)")
         if metadata.chunkSize > maxChunkSizeBytes {
             throw FileTransferError.invalidMetadata
-        }
-
-        let securityContext = try classicTransferSecurityContext(
-            peerDeviceIdCandidates: [metadata.senderDeviceId, peer].compactMap { $0 },
-            transferId: metadata.transferId
-        )
-        let unsignedMetadata = unsignedMetadataCopy(from: metadata)
-        guard isValidAuthenticationTag(
-            metadata.metadataAuthTag,
-            payload: metadataAuthenticationInput(unsignedMetadata),
-            key: securityContext.transferKey
-        ) else {
-            throw FileTransferError.secureSessionRequired
         }
 
         let targetURL = makeUniqueDestinationURL(fileName: metadata.fileName)
@@ -1202,7 +1310,23 @@ public class FileTransferManager: ObservableObject {
         state.localURL = targetURL
         transferStates[transfer.id] = state
 
+        var resolvedSecurityContext: ClassicTransferSecurityContext?
+
         do {
+            let securityContext = try classicTransferSecurityContext(
+                peerContext: peerContext
+            )
+            resolvedSecurityContext = securityContext
+
+            let unsignedMetadata = unsignedMetadataCopy(from: metadata)
+            guard isValidAuthenticationTag(
+                metadata.metadataAuthTag,
+                payload: metadataAuthenticationInput(unsignedMetadata),
+                key: securityContext.transferKey
+            ) else {
+                throw FileTransferError.secureSessionRequired
+            }
+
             // 分块接收文件
             try await receiveFileInChunks(
                 to: targetURL,
@@ -1212,8 +1336,9 @@ public class FileTransferManager: ObservableObject {
                 metadata: metadata
             )
 
-            // 验证哈希
+            logClassicReceiptPhase("hash_verification_started", transferId: transfer.id)
             let receivedHash = try await calculateFileHash(at: targetURL)
+            logClassicReceiptPhase("hash_verification_completed", transferId: transfer.id)
             guard receivedHash == metadata.fileHash else {
                 throw FileTransferError.checksumMismatch
             }
@@ -1227,7 +1352,7 @@ public class FileTransferManager: ObservableObject {
                 securityVersion: metadata.securityVersion
             )
             do {
-                try await sendReceipt(
+                try await sendReceiptReliably(
                     receipt,
                     securityContext: securityContext,
                     over: connection
@@ -1244,19 +1369,19 @@ public class FileTransferManager: ObservableObject {
             return targetURL
 
         } catch {
-            let failure = TransferReceipt(
-                transferId: metadata.transferId,
-                success: false,
-                receivedBytes: 0,
-                fileHash: nil,
-                error: error.localizedDescription,
-                securityVersion: metadata.securityVersion
-            )
-            try? await sendReceipt(
-                failure,
-                securityContext: securityContext,
-                over: connection
-            )
+            if let securityContext = resolvedSecurityContext {
+                await sendFailureReceiptIfPossible(
+                    transferId: metadata.transferId,
+                    securityVersion: metadata.securityVersion,
+                    error: error,
+                    securityContext: securityContext,
+                    over: connection
+                )
+            } else {
+                SkyBridgeLogger.shared.error(
+                    "⚠️ failure receipt 未发送: transferId=\(metadata.transferId) reason=no_security_context declaredSenderId=\(peerContext.declaredSenderDeviceId ?? "-") endpointHostOrIP=\(peerContext.endpointHostOrIP ?? "-")"
+                )
+            }
             await completeTransfer(transfer.id, success: false, error: error)
             throw error
         }
@@ -1421,9 +1546,10 @@ public class FileTransferManager: ObservableObject {
             // 更新进度
             await updateProgress(transfer.id, transferredBytes: sentBytes, totalBytes: fileSize)
         }
-        
+
         // 发送完成信号
         try await sendComplete(over: connection)
+        logClassicReceiptPhase("all_chunks_sent", transferId: transfer.id)
     }
     
     /// 发送元数据
@@ -1488,6 +1614,7 @@ public class FileTransferManager: ObservableObject {
         securityContext: ClassicTransferSecurityContext,
         over connection: NWConnection
     ) async throws {
+        logClassicReceiptPhase("receipt_send_attempted", transferId: receipt.transferId)
         let unsignedReceipt = unsignedReceiptCopy(
             from: receipt,
             securityVersion: receipt.securityVersion ?? 1
@@ -1509,7 +1636,71 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.invalidMetadata
         }
         let header = TransferHeader(type: .receipt, length: data.count)
-        try await sendData(header.encoded + data, over: connection)
+        do {
+            try await sendData(header.encoded + data, over: connection)
+            logClassicReceiptPhase("receipt_send_succeeded", transferId: receipt.transferId)
+        } catch {
+            logClassicReceiptPhase("receipt_send_failed", transferId: receipt.transferId, detail: error.localizedDescription)
+            throw error
+        }
+    }
+
+    private func sendReceiptReliably(
+        _ receipt: TransferReceipt,
+        securityContext: ClassicTransferSecurityContext,
+        over connection: NWConnection,
+        maxAttempts: Int = 3,
+        retryDelayNanoseconds: UInt64 = 250_000_000
+    ) async throws {
+        var lastError: Error?
+
+        for attempt in 1...maxAttempts {
+            do {
+                try await sendReceipt(
+                    receipt,
+                    securityContext: securityContext,
+                    over: connection
+                )
+                return
+            } catch {
+                lastError = error
+                guard attempt < maxAttempts else { break }
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 落盘回执发送失败，准备重试: transferId=\(receipt.transferId) attempt=\(attempt)/\(maxAttempts) reason=\(error.localizedDescription)"
+                )
+                try? await Task.sleep(nanoseconds: retryDelayNanoseconds)
+            }
+        }
+
+        throw lastError ?? FileTransferError.connectionFailed
+    }
+
+    private func sendFailureReceiptIfPossible(
+        transferId: String,
+        receivedBytes: Int64 = 0,
+        securityVersion: Int?,
+        error: Error,
+        securityContext: ClassicTransferSecurityContext,
+        over connection: NWConnection
+    ) async {
+        let failure = TransferReceipt(
+            transferId: transferId,
+            success: false,
+            receivedBytes: receivedBytes,
+            fileHash: nil,
+            error: error.localizedDescription,
+            securityVersion: securityVersion
+        )
+
+        do {
+            try await sendReceiptReliably(
+                failure,
+                securityContext: securityContext,
+                over: connection
+            )
+        } catch {
+            SkyBridgeLogger.shared.error("⚠️ failure receipt 未发送: transferId=\(transferId) reason=\(error.localizedDescription)")
+        }
     }
 
     /// 发送端等待接收端落盘回执，避免“仅发送完成即成功”的假阳性
@@ -1520,7 +1711,13 @@ public class FileTransferManager: ObservableObject {
         expectedFileSize: Int64,
         expectedFileHash: String
     ) async throws -> TransferReceipt {
-        let header = try await receiveHeader(from: connection, timeout: 15)
+        let header: TransferHeader
+        do {
+            header = try await receiveHeader(from: connection, timeout: receiptWaitTimeoutSeconds)
+        } catch FileTransferError.timeout {
+            logClassicReceiptPhase(FileTransferReceiptWaitStage.headerTimeout.rawValue, transferId: expectedTransferId)
+            throw FileTransferError.receiptWaitFailed(stage: .headerTimeout, details: nil)
+        }
         guard header.type == .receipt else {
             throw FileTransferError.transferFailed("接收端未返回落盘回执")
         }
@@ -1528,7 +1725,13 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.invalidMetadata
         }
 
-        let payload = try await receiveData(length: header.length, from: connection, timeout: 15)
+        let payload: Data
+        do {
+            payload = try await receiveData(length: header.length, from: connection, timeout: receiptWaitTimeoutSeconds)
+        } catch FileTransferError.timeout {
+            logClassicReceiptPhase(FileTransferReceiptWaitStage.payloadTimeout.rawValue, transferId: expectedTransferId)
+            throw FileTransferError.receiptWaitFailed(stage: .payloadTimeout, details: nil)
+        }
         let receipt = try JSONDecoder().decode(TransferReceipt.self, from: payload)
         let unsignedReceipt = unsignedReceiptCopy(from: receipt)
         guard receipt.transferId == expectedTransferId else {
@@ -1539,10 +1742,12 @@ public class FileTransferManager: ObservableObject {
             payload: receiptAuthenticationInput(unsignedReceipt),
             key: securityContext.transferKey
         ) else {
-            throw FileTransferError.secureSessionRequired
+            logClassicReceiptPhase(FileTransferReceiptWaitStage.authFailed.rawValue, transferId: expectedTransferId)
+            throw FileTransferError.receiptWaitFailed(stage: .authFailed, details: nil)
         }
         guard receipt.success else {
-            throw FileTransferError.transferFailed("接收端处理失败: \(receipt.error ?? "unknown")")
+            logClassicReceiptPhase(FileTransferReceiptWaitStage.receiverRejected.rawValue, transferId: expectedTransferId)
+            throw FileTransferError.receiptWaitFailed(stage: .receiverRejected, details: receipt.error)
         }
         guard receipt.receivedBytes == expectedFileSize else {
             throw FileTransferError.transferFailed("接收端字节数不一致: \(receipt.receivedBytes)/\(expectedFileSize)")
@@ -1617,6 +1822,8 @@ public class FileTransferManager: ObservableObject {
             await updateProgress(transfer.id, transferredBytes: receivedBytes, totalBytes: totalBytes)
         }
 
+        logClassicReceiptPhase("all_chunks_received", transferId: transfer.id)
+
         // 等待完成信号
         let completeHeader = try await receiveHeader(from: connection)
         guard completeHeader.type == .complete else {
@@ -1650,11 +1857,52 @@ public class FileTransferManager: ObservableObject {
         }
         return header
     }
-    
+
+    private func logClassicReceiptPhase(_ phase: String, transferId: String, detail: String? = nil) {
+        if let detail, !detail.isEmpty {
+            SkyBridgeLogger.shared.info("📨 classic_receipt_phase=\(phase) transferId=\(transferId) detail=\(detail)")
+        } else {
+            SkyBridgeLogger.shared.info("📨 classic_receipt_phase=\(phase) transferId=\(transferId)")
+        }
+    }
+
     // MARK: - Private Methods - Network
-    
+
     /// 创建连接
+    private func createConnection(toAnyOf endpoints: [NWEndpoint]) async throws -> NWConnection {
+        guard !endpoints.isEmpty else {
+            throw FileTransferError.invalidDestination
+        }
+
+        var lastError: Error?
+        for (index, endpoint) in endpoints.enumerated() {
+            let endpointDescription = String(describing: endpoint)
+            SkyBridgeLogger.shared.info(
+                "🔗 文件传输连接候选[\(index + 1)/\(endpoints.count)]: endpoint=\(endpointDescription)"
+            )
+
+            do {
+                let connection = try await createConnection(to: endpoint)
+                SkyBridgeLogger.shared.info(
+                    "✅ 文件传输连接就绪: endpoint=\(endpointDescription)"
+                )
+                return connection
+            } catch {
+                lastError = error
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ 文件传输候选连接失败[\(index + 1)/\(endpoints.count)]: endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                )
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+        throw FileTransferError.connectionFailed
+    }
+
     private func createConnection(to endpoint: NWEndpoint) async throws -> NWConnection {
+        let endpointDescription = String(describing: endpoint)
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
@@ -1689,6 +1937,10 @@ public class FileTransferManager: ObservableObject {
                         connection.stateUpdateHandler = nil
                         continuation.resume(returning: connection)
                     }
+                case .waiting(let error):
+                    SkyBridgeLogger.shared.warning(
+                        "⏳ 文件传输连接等待: endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                    )
                 case .failed(let error):
                     once.run {
                         connection.stateUpdateHandler = nil
@@ -1704,6 +1956,17 @@ public class FileTransferManager: ObservableObject {
                 }
             }
             connection.start(queue: queue)
+
+            queue.asyncAfter(deadline: .now() + FileTransferConstants.connectionTimeout) {
+                once.run {
+                    connection.stateUpdateHandler = nil
+                    SkyBridgeLogger.shared.error(
+                        "❌ 文件传输连接超时: endpoint=\(endpointDescription) timeout=\(Int(FileTransferConstants.connectionTimeout))s"
+                    )
+                    connection.cancel()
+                    continuation.resume(throwing: FileTransferError.timeout)
+                }
+            }
         }
     }
     
@@ -1842,21 +2105,167 @@ public class FileTransferManager: ObservableObject {
         return data
     }
 
-    private func classicTransferSecurityContext(
-        peerDeviceIdCandidates: [String],
-        transferId: String
-    ) throws -> ClassicTransferSecurityContext {
-        for candidate in peerDeviceIdCandidates {
-            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            if let transferKey = try? connectionManager.deriveClassicFileTransferKey(
-                transferId: transferId,
-                deviceId: trimmed
-            ) {
-                return ClassicTransferSecurityContext(transferKey: transferKey)
+    nonisolated static func resolveClassicTransferPeer(
+        peerContext: FileTransferPeerContext,
+        authenticatedPeers: [ClassicTransferAuthenticatedPeerCandidate]
+    ) -> ClassicTransferPeerResolutionOutcome? {
+        let exactDeclared = peerContext.declaredSenderDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let declaredCandidates = normalizedTransferSecurityCandidates(
+            PeerIdentityAliasResolver.lookupCandidates(for: exactDeclared),
+            excluding: exactDeclared
+        )
+        let endpointCandidates = normalizedTransferSecurityCandidates(
+            PeerIdentityAliasResolver.lookupCandidates(for: peerContext.endpointHostOrIP)
+        )
+
+        func exactDeclaredMatch() -> ClassicTransferAuthenticatedPeerCandidate? {
+            guard let exactDeclared, !exactDeclared.isEmpty else { return nil }
+            let exactLower = exactDeclared.lowercased()
+            return authenticatedPeers.first { candidate in
+                candidate.matchDeviceId.caseInsensitiveCompare(exactDeclared) == .orderedSame
+                    || candidate.resolvedPeerDeviceId.caseInsensitiveCompare(exactDeclared) == .orderedSame
+                    || candidate.aliases.contains(where: { $0.lowercased() == exactLower })
             }
         }
-        throw FileTransferError.secureSessionRequired
+
+        func candidateMatch(for requestedCandidates: [String]) -> ClassicTransferAuthenticatedPeerCandidate? {
+            guard !requestedCandidates.isEmpty else { return nil }
+            let requestedLower = Set(requestedCandidates.map { $0.lowercased() })
+            let matches = authenticatedPeers.filter { candidate in
+                !requestedLower.isDisjoint(with: candidate.aliases.map { $0.lowercased() })
+            }
+            guard matches.count == 1 else { return nil }
+            return matches.first
+        }
+
+        if let exactMatch = exactDeclaredMatch() {
+            return ClassicTransferPeerResolutionOutcome(
+                matchDeviceId: exactMatch.matchDeviceId,
+                resolvedPeerDeviceId: exactMatch.resolvedPeerDeviceId,
+                matchedBy: .declaredSenderDeviceId,
+                declaredCandidates: declaredCandidates,
+                endpointCandidates: endpointCandidates
+            )
+        }
+
+        if let aliasMatch = candidateMatch(for: declaredCandidates) {
+            return ClassicTransferPeerResolutionOutcome(
+                matchDeviceId: aliasMatch.matchDeviceId,
+                resolvedPeerDeviceId: aliasMatch.resolvedPeerDeviceId,
+                matchedBy: .aliasOrCanonicalDeviceId,
+                declaredCandidates: declaredCandidates,
+                endpointCandidates: endpointCandidates
+            )
+        }
+
+        if let endpointMatch = candidateMatch(for: endpointCandidates) {
+            return ClassicTransferPeerResolutionOutcome(
+                matchDeviceId: endpointMatch.matchDeviceId,
+                resolvedPeerDeviceId: endpointMatch.resolvedPeerDeviceId,
+                matchedBy: .endpointHostOrIP,
+                declaredCandidates: declaredCandidates,
+                endpointCandidates: endpointCandidates
+            )
+        }
+
+        if authenticatedPeers.count == 1, let only = authenticatedPeers.first {
+            return ClassicTransferPeerResolutionOutcome(
+                matchDeviceId: only.matchDeviceId,
+                resolvedPeerDeviceId: only.resolvedPeerDeviceId,
+                matchedBy: .singleAuthenticatedFallback,
+                declaredCandidates: declaredCandidates,
+                endpointCandidates: endpointCandidates
+            )
+        }
+
+        return nil
+    }
+
+    private func classicTransferSecurityContext(
+        peerContext: FileTransferPeerContext
+    ) throws -> ClassicTransferSecurityContext {
+        let authenticatedPeers = connectionManager.activeClassicTransferAuthenticatedPeers().map { descriptor in
+            ClassicTransferAuthenticatedPeerCandidate(
+                matchDeviceId: descriptor.matchDeviceId,
+                resolvedPeerDeviceId: descriptor.resolvedPeerDeviceId,
+                aliases: descriptor.aliases,
+                endpointHostOrIP: descriptor.endpointHostOrIP,
+                capabilities: descriptor.capabilities
+            )
+        }
+
+        guard let resolution = Self.resolveClassicTransferPeer(
+            peerContext: peerContext,
+            authenticatedPeers: authenticatedPeers
+        ) else {
+            SkyBridgeLogger.shared.error(
+                "❌ 无法解析文件传输安全会话: transferId=\(peerContext.transferId) declaredSenderId=\(peerContext.declaredSenderDeviceId ?? "-") endpointHostOrIP=\(peerContext.endpointHostOrIP ?? "-") aliasCandidates=\((Self.normalizedTransferSecurityCandidates(PeerIdentityAliasResolver.lookupCandidates(for: peerContext.declaredSenderDeviceId), excluding: peerContext.declaredSenderDeviceId) + Self.normalizedTransferSecurityCandidates(PeerIdentityAliasResolver.lookupCandidates(for: peerContext.endpointHostOrIP))).joined(separator: ",")) authenticatedConnections=\(authenticatedPeers.count) matchedFallbackBranch=none"
+            )
+            throw FileTransferError.secureSessionRequired
+        }
+
+        if resolution.matchedBy == .singleAuthenticatedFallback {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 文件传输安全会话回退到唯一已认证连接: transferId=\(peerContext.transferId) declaredSenderId=\(peerContext.declaredSenderDeviceId ?? "-") endpointHostOrIP=\(peerContext.endpointHostOrIP ?? "-") aliasCandidates=\(resolution.declaredCandidates.joined(separator: ",")) authenticatedConnections=\(authenticatedPeers.count) matchedFallbackBranch=\(resolution.matchedBy.rawValue)"
+            )
+        }
+
+        let transferKey = try connectionManager.deriveClassicFileTransferKey(
+            transferId: peerContext.transferId,
+            deviceId: resolution.matchDeviceId
+        )
+
+        return ClassicTransferSecurityContext(
+            transferKey: transferKey,
+            matchDeviceId: resolution.matchDeviceId,
+            resolvedPeerDeviceId: resolution.resolvedPeerDeviceId,
+            matchedBy: resolution.matchedBy,
+            declaredCandidates: resolution.declaredCandidates,
+            endpointCandidates: resolution.endpointCandidates
+        )
+    }
+
+    nonisolated static func preferredClassicTransferSenderDeviceId(
+        stableDeviceId: String,
+        vendorDeviceId: String?
+    ) -> String {
+        let normalizedStable = stableDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedStable.isEmpty {
+            return normalizedStable
+        }
+
+        return vendorDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    nonisolated static func normalizedTransferSecurityCandidates(
+        _ candidates: [String],
+        excluding exactMatch: String? = nil
+    ) -> [String] {
+        var normalized: [String] = []
+        var seen = Set<String>()
+        let excluded = exactMatch?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let lowered = trimmed.lowercased()
+            guard lowered != excluded else { continue }
+            guard seen.insert(lowered).inserted else { continue }
+            normalized.append(trimmed)
+        }
+        return normalized
+    }
+
+    nonisolated static func singlePeerFallbackTransferDeviceId(
+        requestedCandidates: [String],
+        activeConnectionDeviceIDs: [String]
+    ) -> String? {
+        let normalizedActive = normalizedTransferSecurityCandidates(activeConnectionDeviceIDs)
+        guard normalizedActive.count == 1,
+              let only = normalizedActive.first else {
+            return nil
+        }
+
+        return requestedCandidates.contains(only) ? nil : only
     }
 
     private func unsignedMetadataCopy(
