@@ -38,6 +38,7 @@ let package = Package(
     name: "SkyBridgeCompassApp",
     defaultLocalization: "zh-Hans",
     platforms: [
+        .iOS(.v17),
         .macOS(.v14) // 支持 macOS 14.x (Sonoma)、15.x (Sequoia) 和 26.x (Tahoe) - 后量子加密PQC
         // 版本兼容策略：
         // - macOS 14.0–15.x：经典密码 + liboqs/OQSRAII PQC（HPKE 降级为 KEM+AES-GCM）
@@ -54,6 +55,8 @@ let package = Package(
         .executable(name: "MessageSizeBenchRunner", targets: ["MessageSizeBenchRunner"]),
         .library(name: "SkyBridgeProtocolCore", targets: ["SkyBridgeProtocolCore"]),
         .library(name: "SkyBridgeAppleTransport", targets: ["SkyBridgeAppleTransport"]),
+        .library(name: "SkyBridgeOpus", targets: ["SkyBridgeOpus"]),
+        .library(name: "SkyBridgeRealtimeMedia", targets: ["SkyBridgeRealtimeMedia"]),
         .library(name: "SkyBridgeCore", targets: ["SkyBridgeCore"]),
         .library(name: "SkyBridgeUI", targets: ["SkyBridgeUI"]),
         .library(name: "SkyBridgeVisualParity", targets: ["SkyBridgeVisualParity"]),
@@ -74,6 +77,10 @@ let package = Package(
         .binaryTarget(
             name: "liboqs",
             path: "Sources/Vendor/liboqs.xcframework"
+        ),
+        .binaryTarget(
+            name: "libopus",
+            path: "Sources/Vendor/libopus.xcframework"
         ),
         .binaryTarget(
             name: "FreeRDP",
@@ -179,10 +186,42 @@ let package = Package(
             ]
         ),
         .target(
+            name: "CSkyBridgeOpusShim",
+            dependencies: ["libopus"],
+            path: "Sources/CSkyBridgeOpusShim",
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "SkyBridgeOpus",
+            dependencies: [
+                "CSkyBridgeOpusShim"
+            ],
+            path: "Sources/SkyBridgeOpus",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
+        .target(
+            name: "SkyBridgeRealtimeMedia",
+            dependencies: [
+                "SkyBridgeOpus"
+            ],
+            path: "Sources/SkyBridgeRealtimeMedia",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ],
+            linkerSettings: [
+                .linkedFramework("CryptoKit"),
+                .linkedFramework("Network")
+            ]
+        ),
+        .target(
             name: "SkyBridgeCore",
             dependencies: [
                 "SkyBridgeProtocolCore",
                 "SkyBridgeAppleTransport",
+                "SkyBridgeOpus",
+                "SkyBridgeRealtimeMedia",
                 "FreeRDPBridge",
                 "WebRTCAudioDeviceBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
@@ -287,6 +326,8 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore",
                 "SkyBridgeUI",
+                "SkyBridgeOpus",
+                "SkyBridgeRealtimeMedia",
                 "OQSRAII"
             ],
             path: "Tests/SkyBridgeCoreTests",
