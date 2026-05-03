@@ -123,7 +123,7 @@ extension WebRTCSession {
 
         var hasFrameEvidence: Bool {
             guard size != nil else { return false }
-            return hasPacketEvidence
+            return (framesDecoded ?? 0) > 0 || (framesReceived ?? 0) > 0
         }
 
         var summary: String {
@@ -495,6 +495,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private let outboundScreenFrameLock = NSLock()
     private let outboundFrameGate = WebRTCOutboundFrameGate()
     private let outboundScreenFrameGate = WebRTCOutboundFrameGate()
+    private var nextScreenChunkedFrameId: UInt64 = 1
     private var pendingInboundDataBuffers: [Data] = []
     private var pendingInboundDataBytes: Int = 0
     private var pendingInboundScreenDataBuffers: [Data] = []
@@ -592,6 +593,55 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             return .overflow
         }
         return .append(nextPendingCount: nextPendingCount, nextPendingBytes: nextPendingBytes)
+    }
+
+    public nonisolated static let screenChunkedWireFormat = "sbc2-chunked-v1"
+    public nonisolated static let screenChunkHeaderByteCount = 36
+
+    public nonisolated static func encodeScreenChunkEnvelope(
+        frameId: UInt64,
+        chunkIndex: Int,
+        chunkCount: Int,
+        totalBytes: Int,
+        chunkOffset: Int,
+        payload: Data
+    ) throws -> Data {
+        guard chunkIndex >= 0,
+              chunkCount > 0,
+              chunkIndex < chunkCount,
+              totalBytes >= 0,
+              chunkOffset >= 0,
+              payload.count >= 0,
+              chunkOffset + payload.count <= totalBytes,
+              chunkCount <= Int(UInt32.max),
+              chunkIndex <= Int(UInt32.max),
+              totalBytes <= Int(UInt32.max),
+              chunkOffset <= Int(UInt32.max),
+              payload.count <= Int(UInt32.max) else {
+            throw WebRTCError.framedPayloadTooLarge(totalBytes)
+        }
+
+        var data = Data()
+        appendBigEndian(UInt32(0x5342_4332), to: &data) // SBC2
+        data.append(1) // version
+        var flags: UInt8 = 0
+        if chunkIndex == 0 { flags |= 0x01 }
+        if chunkIndex == chunkCount - 1 { flags |= 0x02 }
+        data.append(flags)
+        appendBigEndian(UInt16(screenChunkHeaderByteCount), to: &data)
+        appendBigEndian(frameId, to: &data)
+        appendBigEndian(UInt32(chunkIndex), to: &data)
+        appendBigEndian(UInt32(chunkCount), to: &data)
+        appendBigEndian(UInt32(totalBytes), to: &data)
+        appendBigEndian(UInt32(chunkOffset), to: &data)
+        appendBigEndian(UInt32(payload.count), to: &data)
+        data.append(payload)
+        return data
+    }
+
+    private nonisolated static func appendBigEndian<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        var bigEndian = value.bigEndian
+        withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
     }
 
     nonisolated static func pendingRemoteICEPlan(
@@ -1641,6 +1691,70 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             fallbackToControlChannel: false,
             gate: outboundScreenFrameGate
         )
+    }
+
+    public func sendScreenChunkedPayloadAsync(
+        _ payload: Data,
+        maxChunkBytes: Int = 16 * 1024,
+        maxBufferedAmountBytes: UInt64 = 16 * 1024,
+        pollInterval: Duration = .milliseconds(10),
+        drainTimeout: Duration = .seconds(5)
+    ) async throws -> UInt64 {
+        guard maxChunkBytes > Self.screenChunkHeaderByteCount else {
+            throw WebRTCError.invalidChunkSize(maxChunkBytes)
+        }
+        _ = try Self.validateFramedPayloadParameters(
+            payloadByteCount: payload.count,
+            maxChunkBytes: maxChunkBytes
+        )
+
+        let frameId = withState {
+            let id = nextScreenChunkedFrameId
+            nextScreenChunkedFrameId &+= 1
+            if nextScreenChunkedFrameId == 0 {
+                nextScreenChunkedFrameId = 1
+            }
+            return id
+        }
+
+        try await outboundScreenFrameGate.run {
+            let channel = try resolvedDataChannel(
+                preferScreenChannel: true,
+                fallbackToControlChannel: false
+            )
+            let maxPayloadBytes = maxChunkBytes - Self.screenChunkHeaderByteCount
+            let chunkCount = max(1, (payload.count + maxPayloadBytes - 1) / maxPayloadBytes)
+
+            var offset = 0
+            for chunkIndex in 0..<chunkCount {
+                try await waitForBufferedAmountBelow(
+                    maxBufferedAmountBytes,
+                    pollInterval: pollInterval,
+                    timeout: drainTimeout,
+                    channel: channel
+                )
+                let end = min(offset + maxPayloadBytes, payload.count)
+                let fragment = Data(payload[offset..<end])
+                let chunk = try Self.encodeScreenChunkEnvelope(
+                    frameId: frameId,
+                    chunkIndex: chunkIndex,
+                    chunkCount: chunkCount,
+                    totalBytes: payload.count,
+                    chunkOffset: offset,
+                    payload: fragment
+                )
+                try send(chunk, over: channel)
+                offset = end
+            }
+
+            try await waitForBufferedAmountBelow(
+                maxBufferedAmountBytes,
+                pollInterval: pollInterval,
+                timeout: drainTimeout,
+                channel: channel
+            )
+        }
+        return frameId
     }
 
     private func sendFramedPayloadAsync(

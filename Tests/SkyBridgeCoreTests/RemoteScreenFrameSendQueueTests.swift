@@ -55,7 +55,7 @@ final class RemoteScreenFrameSendQueueTests: XCTestCase {
 
         XCTAssertEqual(queue.enqueue(makeJPEGFrame()), .enqueued)
         XCTAssertEqual(queue.enqueue(makeJPEGFrame()), .enqueued)
-        XCTAssertEqual(queue.enqueue(makeJPEGFrame()), .enqueued)
+        XCTAssertEqual(queue.enqueue(makeJPEGFrame()), .droppedStaleIndependentFrame)
 
         XCTAssertFalse(queue.waitingForSyncFrame)
         XCTAssertEqual(queue.pendingFrames.count, 2)

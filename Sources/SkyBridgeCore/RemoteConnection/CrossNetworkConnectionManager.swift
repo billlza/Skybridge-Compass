@@ -5,6 +5,7 @@ import Combine
 import OSLog
 import SkyBridgeAppleTransport
 import SkyBridgeProtocolCore
+import SkyBridgeRealtimeMedia
 import CoreGraphics
 import ImageIO
 import ApplicationServices
@@ -178,6 +179,7 @@ private enum RemoteMessageTypeWire: String, Codable {
     case keyboardEvent
     case clipboard
     case streamConfiguration
+    case streamConfigurationAck
     case damageReport
     case cursorUpdate
     case overlayUpdate
@@ -186,6 +188,13 @@ private enum RemoteMessageTypeWire: String, Codable {
 private struct RemoteMessageWire: Codable {
     let type: RemoteMessageTypeWire
     let payload: Data
+}
+
+private struct RemoteDesktopStreamConfigurationAckWire: Codable, Sendable {
+    let acceptedAt: TimeInterval
+    let streamRefreshToken: UInt64?
+    let audioEndpointPresent: Bool
+    let screenFrameTransport: String?
 }
 
 private enum MouseEventTypeWire: String, Codable {
@@ -255,6 +264,39 @@ final class LatestWebRTCEncodedFrameStore: @unchecked Sendable {
             }
             defer { latestPredictiveFrame = nil }
             return latestPredictiveFrame
+        }
+    }
+
+    func latestAgeMs(now: Date = Date()) -> Int? {
+        queue.sync {
+            let frame = pendingSyncFrame ?? latestPredictiveFrame
+            guard let frame else { return nil }
+            return max(
+                0,
+                Int(((now.timeIntervalSince1970 - frame.timestamp) * 1000).rounded())
+            )
+        }
+    }
+
+    func takeLatest(maxAge: TimeInterval, now: Date = Date()) -> WebRTCEncodedScreenFrame? {
+        queue.sync {
+            let nowSeconds = now.timeIntervalSince1970
+
+            if let pendingSyncFrame {
+                self.pendingSyncFrame = nil
+                if nowSeconds - pendingSyncFrame.timestamp <= maxAge {
+                    return pendingSyncFrame
+                }
+            }
+
+            if let latestPredictiveFrame {
+                self.latestPredictiveFrame = nil
+                if nowSeconds - latestPredictiveFrame.timestamp <= maxAge {
+                    return latestPredictiveFrame
+                }
+            }
+
+            return nil
         }
     }
 
@@ -354,6 +396,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var signalingRecoveryTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
     private var webrtcTurnAdmissionLeaseBySessionId: [String: SignalServerClient.TurnAdmissionLease] = [:]
+    private var webrtcMediaAdmissionLeaseBySessionId: [String: SignalServerClient.MediaAdmissionLease] = [:]
+    private var webrtcMediaAdmissionLeaseExpiresAtBySessionId: [String: Date] = [:]
     private var webrtcSessionsBySessionId: [String: WebRTCSession] = [:]
     private var pendingWebRTCOfferSessionIds: Set<String> = []
     private var webrtcRemoteIdBySessionId: [String: String] = [:]
@@ -369,6 +413,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcInboundQueuesBySessionId: [String: InboundChunkQueue] = [:]
     private var webrtcScreenStreamingTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcInteractionStreamingTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcInteractionStreamingAllowedSessionIds: Set<String> = []
     private var webrtcRemoteLivenessWatchdogTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcRekeyInProgressSessionIds: Set<String> = []
     private var webrtcRemoteDesktopHeartbeatAtBySessionId: [String: Date] = [:]
@@ -376,10 +421,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcRemoteStreamConfigurationBySessionId: [String: RemoteDesktopStreamConfiguration] = [:]
     private var webrtcPendingStreamRefreshSessionIds: Set<String> = []
     private var webrtcAwaitingStreamConfigurationSessionIds: Set<String> = []
+    private var webrtcSessionReadyDiagnosticSessionIds: Set<String> = []
     private var webrtcBootstrapReplyFingerprintBySessionId: [String: String] = [:]
     private var webrtcSessionKeysBySessionId: [String: SessionKeys] = [:]
     private var activeWebRTCClipboardSessionId: String?
     private var activeWebRTCClipboardToken: UUID?
+
+    private enum NativeVideoHealthState: String {
+        case warming
+        case active
+        case failedNoRTP
+        case senderZero
+        case recovering
+    }
 
     // File transfer waiters (sessionID|transferId|op|chunkIndex -> continuation)
     private var webrtcFileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
@@ -583,7 +637,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         isHandshakeComplete: Bool,
         messageType: WebRTCSignalingEnvelope.MessageType
     ) -> Bool {
-        isHandshakeComplete && messageType == .iceCandidate
+        isHandshakeComplete && messageType != .leave
     }
 
     internal static func shouldUseOnDemandSignalingAfterTransportFailure(
@@ -895,11 +949,98 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return !remoteStreamConfiguration.isStopRequest
     }
 
+    struct WebRTCScreenChannelRoutePlan: Equatable {
+        let state: String
+        let useDedicatedScreenChannel: Bool
+        let useChunkedScreenWire: Bool
+        let shouldWaitForScreenChannel: Bool
+        let allowsInteractionStreaming: Bool
+    }
+
+    static let webRTCScreenChannelOpenGraceSeconds: TimeInterval = 2.0
+    static let webRTCFallbackCGDisplayProducer = "cgdisplaySync"
+    static let webRTCFallbackSCKLatestProducer = "sckLatest"
+    static let webRTCFallbackCGDisplayEmergencyProducer = "cgdisplayEmergency"
+    static let webRTCFallbackDirectEncoderProducer = "directEncoder"
+    static let webRTCSCKLatestFallbackMaxAgeSeconds: TimeInterval = 0.5
+
+    static func planWebRTCScreenChannelRoute(
+        screenDataChannelEnabled: Bool,
+        screenChannelWireFormat: String?,
+        screenChannelOpen: Bool,
+        waitElapsed: TimeInterval?
+    ) -> WebRTCScreenChannelRoutePlan {
+        guard screenDataChannelEnabled else {
+            return WebRTCScreenChannelRoutePlan(
+                state: "control",
+                useDedicatedScreenChannel: false,
+                useChunkedScreenWire: false,
+                shouldWaitForScreenChannel: false,
+                allowsInteractionStreaming: true
+            )
+        }
+
+        let requestedWireFormat = screenChannelWireFormat?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if screenChannelOpen {
+            return WebRTCScreenChannelRoutePlan(
+                state: "open",
+                useDedicatedScreenChannel: true,
+                useChunkedScreenWire: requestedWireFormat == RemoteDesktopStreamConfiguration.screenChannelWireFormatSBC2ChunkedV1,
+                shouldWaitForScreenChannel: false,
+                allowsInteractionStreaming: true
+            )
+        }
+
+        if (waitElapsed ?? 0) < webRTCScreenChannelOpenGraceSeconds {
+            return WebRTCScreenChannelRoutePlan(
+                state: "waiting",
+                useDedicatedScreenChannel: false,
+                useChunkedScreenWire: false,
+                shouldWaitForScreenChannel: true,
+                allowsInteractionStreaming: false
+            )
+        }
+
+        return WebRTCScreenChannelRoutePlan(
+            state: "failed-control-fallback",
+            useDedicatedScreenChannel: false,
+            useChunkedScreenWire: false,
+            shouldWaitForScreenChannel: false,
+            allowsInteractionStreaming: true
+        )
+    }
+
+    static func requiredStableDirectEncoderFrames(targetFrameRate: Int) -> Int {
+        max(3, min(12, Int((Double(max(targetFrameRate, 1)) * 0.25).rounded())))
+    }
+
+    static func shouldPromoteDirectEncoderFallback(
+        nativeVideoWarmBackupEnabled: Bool,
+        nativeVideoHasRenderEvidence: Bool,
+        activeFallbackProducer: String,
+        recoveryStreak: Int,
+        targetFrameRate: Int
+    ) -> Bool {
+        guard nativeVideoWarmBackupEnabled else {
+            return true
+        }
+        guard nativeVideoHasRenderEvidence else {
+            return false
+        }
+        if activeFallbackProducer == webRTCFallbackDirectEncoderProducer {
+            return true
+        }
+        return recoveryStreak >= requiredStableDirectEncoderFrames(targetFrameRate: targetFrameRate)
+    }
+
     static func shouldUseWebRTCAudioFallback(
         audioRedirectionEnabled: Bool,
-        nativeAudioTrackEnabled: Bool
+        nativeAudioTrackEnabled: Bool,
+        legacyAudioFallbackEnabled: Bool = false
     ) -> Bool {
-        audioRedirectionEnabled && !nativeAudioTrackEnabled
+        audioRedirectionEnabled && !nativeAudioTrackEnabled && legacyAudioFallbackEnabled
     }
 
     static func shouldUseWebRTCNativeAudio(
@@ -1034,6 +1175,41 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func appendWebRTCSessionDiagnostic(_ line: String, sessionID: String) {
+        Self.writeWebRTCSessionDiagnostic(line, sessionID: sessionID)
+    }
+
+    nonisolated private static func writeWebRTCSessionDiagnostic(_ line: String, sessionID: String) {
+#if os(macOS)
+        let safeSessionID = sessionID
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+        guard !safeSessionID.isEmpty else { return }
+        let logsDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("SkyBridge", isDirectory: true)
+        let logURL = logsDirectory.appendingPathComponent("webrtc-session-\(safeSessionID).log")
+        let rendered = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        guard let data = rendered.data(using: .utf8) else { return }
+        try? FileManager.default.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: logURL.path),
+           let handle = try? FileHandle(forWritingTo: logURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: logURL, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: logURL.path
+            )
+        }
+#else
+        _ = line
+        _ = sessionID
+#endif
+    }
+
     private func sanitizeStatus(_ value: String) -> String {
         value
             .replacingOccurrences(of: "\n", with: " ")
@@ -1089,6 +1265,31 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func storeWebRTCMediaAdmissionLease(
+        _ lease: SignalServerClient.MediaAdmissionLease?,
+        for sessionID: String,
+        now: Date = Date()
+    ) {
+        guard let lease else {
+            webrtcMediaAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
+            webrtcMediaAdmissionLeaseExpiresAtBySessionId.removeValue(forKey: sessionID)
+            return
+        }
+        webrtcMediaAdmissionLeaseBySessionId[sessionID] = lease
+        webrtcMediaAdmissionLeaseExpiresAtBySessionId[sessionID] = now.addingTimeInterval(max(0, lease.expiresIn))
+    }
+
+    private func usableWebRTCMediaAdmissionLease(for sessionID: String, now: Date = Date()) -> SignalServerClient.MediaAdmissionLease? {
+        guard let lease = webrtcMediaAdmissionLeaseBySessionId[sessionID],
+              Self.isReusableMediaAdmissionLease(
+                expiresAt: webrtcMediaAdmissionLeaseExpiresAtBySessionId[sessionID],
+                now: now
+              ) else {
+            return nil
+        }
+        return lease
+    }
+
     private func cacheLocalICECandidate(_ payload: WebRTCSignalingEnvelope.Payload, for sessionID: String) {
         guard let candidate = payload.candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
               !candidate.isEmpty else {
@@ -1129,6 +1330,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcLocalICECandidatesBySessionId.removeValue(forKey: sessionID)
         webrtcSignalingAuthTokenBySessionId.removeValue(forKey: sessionID)
         webrtcTurnAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
+        webrtcMediaAdmissionLeaseBySessionId.removeValue(forKey: sessionID)
+        webrtcMediaAdmissionLeaseExpiresAtBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteIdBySessionId.removeValue(forKey: sessionID)
         currentPathExpectedRemoteAuthorityBySessionId.removeValue(forKey: sessionID)
         authorityBoundWebRTCBootstrapSessionIds.remove(sessionID)
@@ -1140,6 +1343,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcRemoteStreamConfigurationBySessionId.removeValue(forKey: sessionID)
         webrtcPendingStreamRefreshSessionIds.remove(sessionID)
         webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+        webrtcSessionReadyDiagnosticSessionIds.remove(sessionID)
+        webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
         webrtcBootstrapReplyFingerprintBySessionId.removeValue(forKey: sessionID)
         stopWebRTCClipboardSyncIfNeeded(for: sessionID)
         stopWebRTCLivenessWatchdog(for: sessionID)
@@ -1590,6 +1795,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return raw
     }
 
+    private static func describeWebRTCScreenPayloadMagic(_ payload: Data) -> String {
+        guard payload.count >= 4 else { return "raw" }
+        let prefix = payload.prefix(4)
+        if prefix.elementsEqual([0x53, 0x42, 0x50, 0x32]) { return "SBP2" }
+        if prefix.elementsEqual([0x53, 0x42, 0x52, 0x46]) { return "SBRF" }
+        return "cipher"
+    }
+
     private static func targetMediaSectionIndex(
         for payload: WebRTCSignalingEnvelope.Payload,
         sections: [[String]]
@@ -1702,6 +1915,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcSessionKeysBySessionId.removeAll()
         webrtcSignalingAuthTokenBySessionId.removeAll()
         webrtcTurnAdmissionLeaseBySessionId.removeAll()
+        webrtcMediaAdmissionLeaseBySessionId.removeAll()
+        webrtcMediaAdmissionLeaseExpiresAtBySessionId.removeAll()
         webrtcRemoteIdBySessionId.removeAll()
         currentPathExpectedRemoteAuthorityBySessionId.removeAll()
         authorityBoundWebRTCBootstrapSessionIds.removeAll()
@@ -1912,6 +2127,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             let sessionID = sessionLease.sessionID
             webrtcSignalingAuthTokenBySessionId[sessionLease.sessionID] = sessionLease.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[sessionLease.sessionID] = sessionLease.turnAdmissionLease
+            storeWebRTCMediaAdmissionLease(sessionLease.mediaAdmissionLease, for: sessionLease.sessionID)
             currentPathSignalingOriginBySessionId[sessionLease.sessionID] = sessionLease.signalingServerOrigin
             authorityBoundWebRTCBootstrapSessionIds.insert(sessionID)
             logQRCodeStage("generate", stage: "\(currentStage)_finished", sessionID: sessionID)
@@ -2035,6 +2251,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
             webrtcSignalingAuthTokenBySessionId[qrData.sessionID] = redeemed.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[qrData.sessionID] = redeemed.turnAdmissionLease
+            storeWebRTCMediaAdmissionLease(redeemed.mediaAdmissionLease, for: qrData.sessionID)
             currentPathSignalingOriginBySessionId[qrData.sessionID] = redeemed.signalingServerOrigin
             currentPathExpectedRemoteAuthorityBySessionId[qrData.sessionID] = CurrentPathRemoteAuthority(
                 deviceId: qrData.deviceID,
@@ -2197,6 +2414,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             let code = lease.code
             webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[lease.sessionID] = lease.turnAdmissionLease
+            storeWebRTCMediaAdmissionLease(lease.mediaAdmissionLease, for: lease.sessionID)
             currentPathSignalingOriginBySessionId[lease.sessionID] = lease.signalingServerOrigin
 
             // 2) 当前主路径由服务端发放短期 code + initiator token，code 同时作为 WebRTC sessionId。
@@ -2292,6 +2510,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             )
             webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[lookup.sessionID] = lookup.turnAdmissionLease
+            storeWebRTCMediaAdmissionLease(lookup.mediaAdmissionLease, for: lookup.sessionID)
             currentPathSignalingOriginBySessionId[lookup.sessionID] = lookup.signalingServerOrigin
             currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthority(
                 deviceId: lookup.initiatorDeviceId,
@@ -3434,6 +3653,169 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcSessionsBySessionId[sessionID]?.setOutgoingSystemAudioTrackEnabled(false)
     }
 
+#if os(macOS)
+    @available(macOS 14.0, *)
+    private func makeWebRTCRealtimeAudioSenderIfNeeded(
+        sessionID: String,
+        keys: SessionKeys,
+        config: RemoteDesktopStreamConfiguration?
+    ) async -> (sender: RemoteRealtimeMediaAudioSender, endpoint: SkyBridgeMediaEndpoint)? {
+        guard let config else {
+            logger.info("🎧 WebRTC PQC media audio sender skipped: session=\(sessionID, privacy: .public) reason=missingStreamConfig")
+            return nil
+        }
+        guard config.requestsRealtimeMediaAudio else {
+            logger.info(
+                "🎧 WebRTC PQC media audio sender skipped: session=\(sessionID, privacy: .public) reason=audioNotRequested audioRedirection=\(config.audioRedirectionEnabled == true, privacy: .public) transport=\(config.audioTransport ?? "nil", privacy: .public)"
+            )
+            return nil
+        }
+        guard config.allowsLegacyAudioChunkFallback == false else {
+            logger.info("🎧 WebRTC PQC media audio sender skipped: session=\(sessionID, privacy: .public) reason=legacyFallbackRequested")
+            return nil
+        }
+        guard let viewerAudioEndpoint = config.mediaAudioEndpoint else {
+            logger.warning(
+                "⚠️ WebRTC PQC media audio sender unavailable: session=\(sessionID, privacy: .public) reason=missingViewerEndpoint mediaSession=\(config.mediaSessionId ?? "-", privacy: .public)"
+            )
+            appendWebRTCSessionDiagnostic(
+                "audioTxUnavailable session=\(sessionID) reason=missingViewerEndpoint mediaSession=\(config.mediaSessionId ?? "-")",
+                sessionID: sessionID
+            )
+            return nil
+        }
+        logger.info(
+            """
+            🎧 WebRTC PQC media audio config received: session=\(sessionID, privacy: .public) \
+            mediaSession=\(config.mediaSessionId ?? keys.sessionId, privacy: .public) \
+            viewerEndpoint=\(viewerAudioEndpoint.host, privacy: .public):\(viewerAudioEndpoint.port, privacy: .public) \
+            viewerRelayToken=\(viewerAudioEndpoint.relayToken == nil ? "missing" : "present", privacy: .public) \
+            viewerExpiresAt=\(viewerAudioEndpoint.expiresAt.map { String(format: "%.0f", $0) } ?? "-", privacy: .public) \
+            mode=\(config.requestedMediaAudioMode.rawValue, privacy: .public)
+            """
+        )
+
+        do {
+            var candidateAdmissionLease = usableWebRTCMediaAdmissionLease(for: sessionID)
+            if candidateAdmissionLease == nil {
+                candidateAdmissionLease = try await refreshWebRTCMediaAdmissionLease(sessionID: sessionID)
+            }
+            guard var mediaAdmissionLease = candidateAdmissionLease else {
+                logger.warning(
+                    "⚠️ WebRTC PQC media relay 不可用，缺少可用 admission token: session=\(sessionID, privacy: .public)"
+                )
+                return nil
+            }
+            var relayLease: SignalServerClient.MediaRelayLease
+            do {
+                relayLease = try await signalServer.requestMediaRelayLease(
+                    mediaAdmissionToken: mediaAdmissionLease.token
+                )
+            } catch {
+                guard Self.isMediaAdmissionLeaseRefreshable(error),
+                      let refreshedLease = try await refreshWebRTCMediaAdmissionLease(sessionID: sessionID) else {
+                    throw error
+                }
+                mediaAdmissionLease = refreshedLease
+                logger.info(
+                    "🎧 WebRTC PQC media admission refreshed; retrying relay lease: session=\(sessionID, privacy: .public)"
+                )
+                relayLease = try await signalServer.requestMediaRelayLease(
+                    mediaAdmissionToken: mediaAdmissionLease.token
+                )
+            }
+            let endpoint = SkyBridgeMediaEndpoint(
+                host: relayLease.endpointHost,
+                port: relayLease.endpointPort,
+                relayToken: relayLease.leaseToken,
+                expiresAt: relayLease.expiresAt
+            )
+            let mediaSessionId = config.mediaSessionId ?? keys.sessionId
+            let keyMaterial = SkyBridgeMediaKeyMaterial.derive(
+                sendSecret: keys.sendKey,
+                receiveSecret: keys.receiveKey,
+                sessionId: mediaSessionId,
+                transcriptHash: keys.transcriptHash
+            )
+            let sender = try RemoteRealtimeMediaAudioSender(
+                sessionId: mediaSessionId,
+                endpoint: endpoint,
+                keys: keyMaterial.send,
+                mode: config.requestedMediaAudioMode
+            )
+            try await sender.start()
+            logger.info(
+                """
+                🎧 WebRTC 音频已接入 PQC UDP relay: session=\(sessionID, privacy: .public) event=audioTxStart \
+                relay=\(endpoint.host, privacy: .public):\(endpoint.port, privacy: .public) \
+                role=\(relayLease.role, privacy: .public) mode=\(config.requestedMediaAudioMode.rawValue, privacy: .public)
+                """
+            )
+            appendWebRTCSessionDiagnostic(
+                "audioTxStart session=\(sessionID) relay=\(endpoint.host):\(endpoint.port) role=\(relayLease.role) mode=\(config.requestedMediaAudioMode.rawValue)",
+                sessionID: sessionID
+            )
+            return (sender, endpoint)
+        } catch {
+            logger.warning(
+                "⚠️ WebRTC PQC media relay 不可用，保持视频优先并禁用旧音频回退: session=\(sessionID, privacy: .public) reason=\(Self.mediaAdmissionFailureReason(for: error), privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+            )
+            appendWebRTCSessionDiagnostic(
+                "audioTxUnavailable session=\(sessionID) reason=\(Self.mediaAdmissionFailureReason(for: error)) error=\(error.localizedDescription)",
+                sessionID: sessionID
+            )
+            return nil
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func refreshWebRTCMediaAdmissionLease(sessionID: String) async throws -> SignalServerClient.MediaAdmissionLease? {
+        guard let sessionToken = webrtcSignalingAuthTokenBySessionId[sessionID]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionToken.isEmpty else {
+            logger.warning("⚠️ WebRTC PQC media admission refresh skipped: session=\(sessionID, privacy: .public) reason=missingSessionToken")
+            return nil
+        }
+        guard let role = webrtcSessionsBySessionId[sessionID]?.role else {
+            logger.warning("⚠️ WebRTC PQC media admission refresh skipped: session=\(sessionID, privacy: .public) reason=missingRole")
+            return nil
+        }
+        let roleName = role == .offerer ? "initiator" : "responder"
+        let lease = try await signalServer.refreshMediaAdmissionLease(
+            sessionId: sessionID,
+            sessionToken: sessionToken,
+            role: roleName
+        )
+        storeWebRTCMediaAdmissionLease(lease, for: sessionID)
+        logger.info(
+            "🎧 WebRTC PQC media admission refresh ready: session=\(sessionID, privacy: .public) role=\(roleName, privacy: .public) ttlMs=\(Int((lease.expiresIn * 1000).rounded()), privacy: .public)"
+        )
+        return lease
+    }
+
+    private static func isMediaAdmissionLeaseRefreshable(_ error: Error) -> Bool {
+        guard case SignalServerClient.ClientError.serverRejected(let status, let body) = error else {
+            return false
+        }
+        return status == 401 && (
+            body.contains("media_admission_token_superseded")
+                || body.contains("media_admission_token_expired")
+                || body.contains("media_admission_token_lease_limit")
+        )
+    }
+
+    private static func mediaAdmissionFailureReason(for error: Error) -> String {
+        guard case SignalServerClient.ClientError.serverRejected(let status, let body) = error else {
+            return "relayUnavailable"
+        }
+        if body.contains("media_admission_token_superseded") { return "superseded" }
+        if body.contains("media_admission_token_expired") { return "expired" }
+        if body.contains("media_admission_token_lease_limit") { return "leaseLimit" }
+        if status == 404 || body.contains("Cannot POST /api/media/admission/refresh") { return "serverRefreshUnsupported" }
+        if status == 503 { return "relayUnavailable" }
+        return "leaseRejected"
+    }
+#endif
+
     private func startWebRTCInboundHandshakeAndControlLoop(sessionID: String, session: WebRTCSession, endpointDescription: String) {
         if webrtcControlTasksBySessionId[sessionID] != nil { return }
 
@@ -3743,13 +4125,25 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     )
 
                     guard handshakeState.driver === outboundDriver,
-                          self.webrtcSessionsBySessionId[sessionID] != nil else {
+                    self.webrtcSessionsBySessionId[sessionID] != nil else {
                         return
                     }
 
                     handshakeState.sessionKeys = keys
                     handshakeState.driver = nil
                     self.webrtcSessionKeysBySessionId[sessionID] = keys
+                    let isStrictClassicAuthorityBootstrap =
+                        strictPQCRequested && useClassicAuthorityBootstrap && !keys.negotiatedSuite.isPQCGroup
+                    if isStrictClassicAuthorityBootstrap {
+                        self.lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
+                        self.logger.warning(
+                            "⏳ WebRTC strictPQC classic authority bootstrap is bootstrap-only: session=\(sessionID, privacy: .public) event=pqcRekeyPending suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
+                        )
+                        self.appendSmokeStatus(
+                            "strict-pqc-bootstrap-only session=\(sessionID) suite=\(keys.negotiatedSuite.rawValue)"
+                        )
+                        return
+                    }
                     self.connectionStatus = .connected
                     self.readiness = .handshakeComplete(
                         sessionId: sessionID,
@@ -3812,14 +4206,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             ) else {
                 self.lastRekeyEvent = "waiting peer=\(pairingPayload.deviceId) election"
                 logger.info(
-                    "⏳ WebRTC rekey waiting for stable initiator election: session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public) peer=\(pairingPayload.deviceId, privacy: .public)"
+                    "⏳ WebRTC rekey waiting for stable initiator election: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) peer=\(pairingPayload.deviceId, privacy: .public)"
                 )
                 return
             }
             guard shouldInitiate else {
                 self.lastRekeyEvent = "await inbound peer=\(pairingPayload.deviceId)"
                 logger.info(
-                    "ℹ️ WebRTC rekey elected peer as initiator; waiting inbound rekey: session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public) peer=\(pairingPayload.deviceId, privacy: .public)"
+                    "ℹ️ WebRTC rekey elected peer as initiator; waiting inbound rekey: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) peer=\(pairingPayload.deviceId, privacy: .public)"
                 )
                 return
             }
@@ -3830,7 +4224,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     print("🧪 mac skip PQC rekey: no local PQC provider")
                 }
                 logger.info(
-                    "ℹ️ WebRTC skip PQC rekey: local PQC provider unavailable. session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public)"
+                    "⚠️ WebRTC skip PQC rekey: local PQC provider unavailable. session=\(sessionID, privacy: .public) event=pqcRekeyFailed trigger=\(trigger, privacy: .public)"
                 )
                 return
             }
@@ -3953,7 +4347,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
                 self.lastRekeyEvent = "waiting peer=\(pairingPayload.deviceId) missing=\(missingSummary)"
                 logger.info(
-                    "⏳ WebRTC rekey waiting for peer KEM keys: session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public) candidates=\(candidateIds.joined(separator: ","), privacy: .public) missing=\(missingSummary, privacy: .public)"
+                    "⏳ WebRTC rekey waiting for peer KEM keys: session=\(sessionID, privacy: .public) event=pqcRekeyPending trigger=\(trigger, privacy: .public) candidates=\(candidateIds.joined(separator: ","), privacy: .public) missing=\(missingSummary, privacy: .public)"
                 )
                 return
             }
@@ -3991,8 +4385,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
                 self.lastRekeyEvent = "start peer=\(selectedPeerId) policy=requirePQC"
                 logger.info(
-                    "🔁 WebRTC outbound PQC rekey start: session=\(sessionID, privacy: .public) trigger=\(trigger, privacy: .public) peer=\(selectedPeerId, privacy: .public) offered=\(offeredSummary, privacy: .public)"
+                    "🔁 WebRTC outbound PQC rekey start: session=\(sessionID, privacy: .public) event=pqcRekeyStarted trigger=\(trigger, privacy: .public) peer=\(selectedPeerId, privacy: .public) offered=\(offeredSummary, privacy: .public)"
                 )
+                let strictPQCRequired = HandshakePolicy.recommendedDefault(
+                    compatibilityModeEnabled: UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+                ).requirePQC
 
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -4004,8 +4401,30 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             print("🧪 mac PQC rekey task completed suite=\(rekeyed.negotiatedSuite.rawValue)")
                         }
                         self.logger.info(
-                            "✅ WebRTC outbound PQC rekey completed: session=\(sessionID, privacy: .public) peer=\(selectedPeerId, privacy: .public) suite=\(rekeyed.negotiatedSuite.rawValue, privacy: .public)"
+                            "✅ WebRTC outbound PQC rekey completed: session=\(sessionID, privacy: .public) event=pqcRekeyComplete peer=\(selectedPeerId, privacy: .public) suite=\(rekeyed.negotiatedSuite.rawValue, privacy: .public)"
                         )
+                        guard handshakeState.driver === outboundDriver else { return }
+                        handshakeState.sessionKeys = rekeyed
+                        handshakeState.previousSessionKeysBeforeRekey = nil
+                        handshakeState.driver = nil
+                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                        self.lastRekeyEvent = "complete suite=\(rekeyed.negotiatedSuite.rawValue)"
+                        self.webrtcSessionKeysBySessionId[sessionID] = rekeyed
+                        self.connectionStatus = .connected
+                        self.readiness = .handshakeComplete(
+                            sessionId: sessionID,
+                            negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                        )
+                        self.markCrossNetworkPresenceConnected(
+                            sessionID: sessionID,
+                            negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                        )
+                        self.updatePreparedSessionSnapshot(
+                            sessionID: sessionID,
+                            phase: .handshakeComplete,
+                            negotiatedSuite: rekeyed.negotiatedSuite.rawValue
+                        )
+                        startScreenStreamingIfNeeded(keys: rekeyed)
                     } catch {
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                             print("🧪 mac PQC rekey task failed err=\(error.localizedDescription)")
@@ -4013,8 +4432,25 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         guard handshakeState.driver === outboundDriver else { return }
 
                         if let fallbackKeys = handshakeState.previousSessionKeysBeforeRekey {
+                            if strictPQCRequired && !fallbackKeys.negotiatedSuite.isPQCGroup {
+                                self.logger.error(
+                                    "⛔️ WebRTC outbound PQC rekey failed under strictPQC; closing classic bootstrap-only session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed peer=\(selectedPeerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                                )
+                                handshakeState.previousSessionKeysBeforeRekey = nil
+                                handshakeState.driver = nil
+                                self.webrtcRekeyInProgressSessionIds.remove(sessionID)
+                                self.lastRekeyEvent = "failed strict reason=\(error.localizedDescription)"
+                                self.cleanupWebRTCSession(
+                                    sessionID,
+                                    reason: "strict_pqc_rekey_failed",
+                                    disconnectKind: .explicit
+                                )
+                                self.connectionStatus = .failed("Strict PQC rekey failed: \(error.localizedDescription)")
+                                self.readiness = .idle
+                                return
+                            }
                             self.logger.warning(
-                                "⚠️ WebRTC outbound PQC rekey failed, preserving established session: session=\(sessionID, privacy: .public) peer=\(selectedPeerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                                "⚠️ WebRTC outbound PQC rekey failed, preserving established session: session=\(sessionID, privacy: .public) event=pqcRekeyFailed establishedClassicPreserved=true peer=\(selectedPeerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
                             )
                             handshakeState.sessionKeys = fallbackKeys
                             handshakeState.previousSessionKeysBeforeRekey = nil
@@ -4216,6 +4652,37 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             return data as Data
         }
 
+        func scaledImageForFallback(_ image: CGImage, preferredSize: CGSize) -> CGImage? {
+            func evenDimension(_ value: Int) -> Int {
+                let clamped = max(2, value)
+                return clamped.isMultiple(of: 2) ? clamped : clamped - 1
+            }
+            let targetMaxEdge = max(
+                Int(preferredSize.width.rounded()),
+                Int(preferredSize.height.rounded())
+            )
+            guard targetMaxEdge > 0 else { return image }
+            let sourceMaxEdge = max(image.width, image.height)
+            guard sourceMaxEdge > targetMaxEdge else { return image }
+            let scale = CGFloat(targetMaxEdge) / CGFloat(sourceMaxEdge)
+            let width = evenDimension(Int((CGFloat(image.width) * scale).rounded()))
+            let height = evenDimension(Int((CGFloat(image.height) * scale).rounded()))
+            guard let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else {
+                return nil
+            }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return context.makeImage()
+        }
+
         func syntheticScreenDataIfEnabled() -> ScreenDataWire? {
             guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_SYNTHETIC_SCREEN"] == "1" else {
                 return nil
@@ -4262,7 +4729,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         func currentVideoPolicy(for transportPath: WebRTCSession.ICETransportPath) -> WebRTCRemoteDesktopVideoPolicy {
             let settings = RemoteDesktopSettingsManager.shared.settings.displaySettings
             let peerFormats = self.effectiveWebRTCRemoteVideoFormats(for: sessionID)
-            return WebRTCRemoteDesktopVideoPolicySelector.select(
+            let selectedPolicy = WebRTCRemoteDesktopVideoPolicySelector.select(
                 request: self.webrtcVideoRequest(
                     for: sessionID,
                     from: settings,
@@ -4273,6 +4740,21 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 thermalState: ProcessInfo.processInfo.thermalState,
                 isAppleSilicon: Self.isAppleSiliconRuntime
             )
+            let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+            let audioRedirectionEnabled = streamConfig?.audioRedirectionEnabled == true
+            let shouldUseNativeAudioTrack = Self.shouldUseWebRTCNativeAudio(
+                audioRedirectionEnabled: audioRedirectionEnabled,
+                remoteNativeAudioTrackEnabled: streamConfig?.nativeAudioTrackEnabled == true,
+                localNativeAudioTrackReady: session.supportsNativeSystemAudioTrack
+            )
+            let shouldUseFallbackAudioChunks = Self.shouldUseWebRTCAudioFallback(
+                audioRedirectionEnabled: audioRedirectionEnabled,
+                nativeAudioTrackEnabled: shouldUseNativeAudioTrack,
+                legacyAudioFallbackEnabled: streamConfig?.allowsLegacyAudioChunkFallback == true
+            )
+            return shouldUseFallbackAudioChunks
+                ? selectedPolicy.protectingRealtimeAudio()
+                : selectedPolicy
         }
 
 #if os(macOS)
@@ -4410,6 +4892,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         continue
                     }
 
+                    guard self.webrtcInteractionStreamingAllowedSessionIds.contains(sessionID) else {
+                        try? await Task.sleep(for: .milliseconds(100))
+                        continue
+                    }
+
                     guard let activeKeys = self.webrtcSessionKeysBySessionId[sessionID],
                           let captureContext = currentInteractionCaptureContext(for: transportPath) else {
                         try? await Task.sleep(for: .milliseconds(50))
@@ -4467,9 +4954,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
 
         func startScreenStreamingIfNeeded(keys: SessionKeys) {
-            startInteractionStreamingIfNeeded()
+            if self.webrtcSessionReadyDiagnosticSessionIds.insert(sessionID).inserted {
+                self.appendWebRTCSessionDiagnostic(
+                    "sessionReady session=\(sessionID) suite=\(keys.negotiatedSuite.rawValue)",
+                    sessionID: sessionID
+                )
+            }
             if self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.isStopRequest == true {
                 self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+                self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
                 self.logger.info(
                     "⏸️ WebRTC 推流保持停止状态: session=\(sessionID, privacy: .public)"
                 )
@@ -4485,6 +4978,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     self.appendSmokeStatus(
                         "stream-deferred session=\(sessionID) reason=await_stream_configuration"
                     )
+                    self.appendWebRTCSessionDiagnostic(
+                        "stream-deferred session=\(sessionID) reason=await_stream_configuration",
+                        sessionID: sessionID
+                    )
                 }
                 return
             }
@@ -4494,8 +4991,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 guard let self else { return }
                 let heartbeatTimeoutSeconds: TimeInterval = 12.0
                 let screenFrameChunkBytes = 16 * 1024
+                var screenChannelWaitStartedAt: Date?
+                var lastScreenChannelRouteState = ""
                 var bytesSent: Int = 0
                 var framesSent: Int = 0
+                var framesDroppedBackpressure: Int = 0
+                var fallbackLoopTicks: Int = 0
+                var directEncodedFramesTaken: Int = 0
+                var sckLatestFallbackFrames: Int = 0
+                var sckLatestAgeMsTotal: Int = 0
+                var cgDisplayFallbackFrames: Int = 0
+                var cgDisplayCaptureMsTotal: Int = 0
+                var jpegEncodeMsTotal: Int = 0
+                var lastSendLatencyMs: Int = 0
                 var logWindowStart = Date()
                 var usingSyntheticFrames = false
                 var transportPath: WebRTCSession.ICETransportPath = .unknown
@@ -4507,6 +5015,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 var lastNativeAudioTrackEnabled: Bool?
                 var lastPreferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding?
                 var lastAudioRedirectionEnabled: Bool?
+                var lastRealtimeAudioEndpoint: SkyBridgeMediaEndpoint?
+                var lastRealtimeAudioMode: SkyBridgeMediaAudioMode?
                 var lastSentFormat = ""
                 var lastBackpressureReportAt = Date.distantPast
                 var lastScreenChannelWaitReportAt = Date.distantPast
@@ -4514,35 +5024,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 var awaitingRefreshRequestedAt: Date?
                 var predictiveFramesSentAfterRefresh = 0
                 var lastAwaitingRefreshReportAt = Date.distantPast
+                var lastNativeVideoStatsReportAt = Date.distantPast
                 let encodedFrameStore = LatestWebRTCEncodedFrameStore()
+                var activeFallbackProducer = Self.webRTCFallbackSCKLatestProducer
+                var fallbackProducerSwitchReason = "initial"
+                var lastFallbackSignature = "-"
+                var directEncoderRecoveryStreak = 0
 #if os(macOS)
-                final class WarmupProbeRateLimiter: @unchecked Sendable {
-                    private let lock = NSLock()
-                    private let minInterval: TimeInterval
-                    private var lastAcceptedAt = Date.distantPast
-
-                    init(minInterval: TimeInterval) {
-                        self.minInterval = minInterval
-                    }
-
-                    func shouldAccept(at now: Date) -> Bool {
-                        lock.lock()
-                        defer { lock.unlock() }
-                        if now.timeIntervalSince(lastAcceptedAt) < minInterval {
-                            return false
-                        }
-                        lastAcceptedAt = now
-                        return true
-                    }
-                }
                 var directCaptureStreamer: ScreenCaptureKitStreamer?
                 var directAudioFallbackSender: WebRTCAudioFallbackSender?
+                var directRealtimeAudioSender: RemoteRealtimeMediaAudioSender?
+                var directRealtimeAudioSenderRelayExpiresAt: TimeInterval?
                 var lastHardwareFrameAt = Date.distantPast
                 var lastDirectEncoderStartAt = Date.distantPast
-                let nativeWarmupProbeMinInterval: TimeInterval = 1.0 / 15.0
-                let nativeWarmupProbeRateLimiter = WarmupProbeRateLimiter(
-                    minInterval: nativeWarmupProbeMinInterval
-                )
+                var lastEncodedFallbackMissReportAt = Date.distantPast
+                var nativeVideoHealthState: NativeVideoHealthState = .warming
+                var nativeVideoFailureCooldownUntil = Date.distantPast
                 let damageTracker = CoarseDisplayDamageTracker()
                 var pendingDamageReport: RemoteDesktopDamageReport?
 #endif
@@ -4551,9 +5048,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 #if os(macOS)
                     Task { @MainActor in
                         directCaptureStreamer?.stop()
+                        await directAudioFallbackSender?.close()
+                        await directRealtimeAudioSender?.close()
                     }
 #endif
                     encodedFrameStore.clear()
+                    self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
                     self.webrtcScreenStreamingTasksBySessionId.removeValue(forKey: sessionID)
                 }
 
@@ -4603,6 +5103,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeAudioTrackEnabled == true
                     let audioRedirectionEnabled =
                         self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.audioRedirectionEnabled == true
+                    let legacyAudioFallbackEnabled =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.allowsLegacyAudioChunkFallback == true
                     let preferredAudioEncoding = RemoteDesktopAudioChunkPayload.Encoding(
                         rawValue: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.preferredAudioEncoding ?? ""
                     ) ?? .pcmS16LE
@@ -4614,8 +5116,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     )
                     let shouldUseFallbackAudioChunks = Self.shouldUseWebRTCAudioFallback(
                         audioRedirectionEnabled: audioRedirectionEnabled,
-                        nativeAudioTrackEnabled: shouldUseNativeAudioTrack
+                        nativeAudioTrackEnabled: shouldUseNativeAudioTrack,
+                        legacyAudioFallbackEnabled: legacyAudioFallbackEnabled
                     )
+                    let realtimeAudioEndpoint =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.mediaAudioEndpoint
+                    let realtimeAudioMode =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.requestedMediaAudioMode ?? .lowLatency
+                    let shouldUseRealtimeAudio = audioRedirectionEnabled
+                        && self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.requestsRealtimeMediaAudio == true
+                        && !shouldUseNativeAudioTrack
+                        && !shouldUseFallbackAudioChunks
                     let nativeVideoWarmBackupEnabled =
                         nativeVideoTrackEnabled && !nativeVideoTrackReady
                     guard videoPolicy.usesHardwareEncoder || nativeVideoTrackEnabled else {
@@ -4631,19 +5142,32 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         lastNativeAudioTrackEnabled = nil
                         lastPreferredAudioEncoding = nil
                         lastAudioRedirectionEnabled = nil
+                        lastRealtimeAudioEndpoint = nil
+                        lastRealtimeAudioMode = nil
                         lastDirectEncoderStartAt = .distantPast
                         session.setOutgoingSystemAudioTrackEnabled(false)
                         await directAudioFallbackSender?.close()
                         directAudioFallbackSender = nil
+                        await directRealtimeAudioSender?.close()
+                        directRealtimeAudioSender = nil
+                        directRealtimeAudioSenderRelayExpiresAt = nil
                         return false
                     }
 
+                    let realtimeAudioSenderLeaseReusable = !shouldUseRealtimeAudio
+                        || (
+                            directRealtimeAudioSender != nil
+                            && Self.isReusableMediaRelayEndpoint(expiresAt: directRealtimeAudioSenderRelayExpiresAt)
+                        )
                     if let current = lastVideoPolicy,
                        current == videoPolicy,
                        lastNativeVideoWarmBackupEnabled == nativeVideoWarmBackupEnabled,
                        lastNativeAudioTrackEnabled == nativeAudioTrackEnabled,
                        lastPreferredAudioEncoding == preferredAudioEncoding,
                        lastAudioRedirectionEnabled == audioRedirectionEnabled,
+                       lastRealtimeAudioEndpoint == realtimeAudioEndpoint,
+                       lastRealtimeAudioMode == realtimeAudioMode,
+                       realtimeAudioSenderLeaseReusable,
                        directCaptureStreamer != nil {
                         return true
                     }
@@ -4652,11 +5176,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     directCaptureStreamer = nil
                     await directAudioFallbackSender?.close()
                     directAudioFallbackSender = nil
+                    await directRealtimeAudioSender?.close()
+                    directRealtimeAudioSender = nil
+                    directRealtimeAudioSenderRelayExpiresAt = nil
                     encodedFrameStore.clear()
                     lastNativeVideoWarmBackupEnabled = nativeVideoWarmBackupEnabled
                     lastNativeAudioTrackEnabled = nativeAudioTrackEnabled
                     lastPreferredAudioEncoding = preferredAudioEncoding
                     lastAudioRedirectionEnabled = audioRedirectionEnabled
+                    lastRealtimeAudioEndpoint = realtimeAudioEndpoint
+                    lastRealtimeAudioMode = realtimeAudioMode
                     lastDirectEncoderStartAt = .distantPast
                     session.setOutgoingSystemAudioTrackEnabled(shouldUseNativeAudioTrack)
                     func storeEncodedFrame(
@@ -4679,9 +5208,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
 
                     let captureStreamer = ScreenCaptureKitStreamer()
-                    let captureFPS = nativeVideoWarmBackupEnabled
-                        ? min(videoPolicy.targetFrameRate, 24)
-                        : videoPolicy.targetFrameRate
+                    let captureFPS = videoPolicy.targetFrameRate
                     let audioControlBufferedAmountBytes = 96 * 1024
                     if shouldUseFallbackAudioChunks {
                         directAudioFallbackSender = WebRTCAudioFallbackSender(
@@ -4691,14 +5218,18 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             maxBufferedAmountBytes: UInt64(audioControlBufferedAmountBytes)
                         )
                     }
+                    if shouldUseRealtimeAudio {
+                        if let realtimeSender = await self.makeWebRTCRealtimeAudioSenderIfNeeded(
+                            sessionID: sessionID,
+                            keys: keys,
+                            config: self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
+                        ) {
+                            directRealtimeAudioSender = realtimeSender.sender
+                            directRealtimeAudioSenderRelayExpiresAt = realtimeSender.endpoint.expiresAt
+                        }
+                    }
                     if nativeVideoTrackEnabled {
                         captureStreamer.onRawFrame = { pixelBuffer, presentationTimeStamp in
-                            if nativeVideoWarmBackupEnabled {
-                                let now = Date()
-                                if !nativeWarmupProbeRateLimiter.shouldAccept(at: now) {
-                                    return
-                                }
-                            }
                             let width = CVPixelBufferGetWidth(pixelBuffer)
                             let height = CVPixelBufferGetHeight(pixelBuffer)
                             let timeStampNs: Int64
@@ -4754,6 +5285,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 frameCount: chunk.frameCount
                             )
                         }
+                    } else if let directRealtimeAudioSender {
+                        let realtimePCMSubmissionPipe = RemoteRealtimePCM16SubmissionPipe(sender: directRealtimeAudioSender)
+                        captureStreamer.onCapturedPCM16AudioChunk = { [realtimePCMSubmissionPipe] chunk in
+                            realtimePCMSubmissionPipe.submit(chunk)
+                        }
                     } else {
                         captureStreamer.onCapturedPCM16AudioChunk = nil
                     }
@@ -4781,7 +5317,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             targetFPS: captureFPS,
                             keyFrameInterval: videoPolicy.keyFrameInterval,
                             captureCursorInVideo: !nativeVideoTrackEnabled,
-                            captureSystemAudio: audioRedirectionEnabled,
+                            captureSystemAudio: shouldUseNativeAudioTrack
+                                || shouldUseFallbackAudioChunks
+                                || directRealtimeAudioSender != nil,
                             audioEncoding: shouldUseFallbackAudioChunks ? preferredAudioEncoding : .pcmS16LE,
                             bitstreamFormat: nativeVideoTrackEnabled && !nativeVideoWarmBackupEnabled
                                 ? .native
@@ -4789,10 +5327,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         )
                         directCaptureStreamer = captureStreamer
                         lastDirectEncoderStartAt = Date()
+                        let pqcMediaAudioEnabled = directRealtimeAudioSender != nil
                         let streamMode: String = {
                             if nativeVideoTrackEnabled {
                                 return nativeVideoWarmBackupEnabled
-                                    ? "webrtc-native-warmup+sbrf-fallback"
+                                    ? "webrtc-native-warmup+sbrf-fallback-main"
                                     : "webrtc-native-main"
                             }
                             return "sbrf-main"
@@ -4807,9 +5346,29 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             mode=\(streamMode, privacy: .public) \
                             audio=\(audioRedirectionEnabled, privacy: .public) \
                             nativeAudio=\(shouldUseNativeAudioTrack, privacy: .public) \
+                            pqcMediaAudio=\(pqcMediaAudioEnabled, privacy: .public) \
                             audioCodec=\(preferredAudioEncoding.rawValue, privacy: .public)
                             """
                         )
+                        if let directRealtimeAudioSender {
+                            Task(priority: .utility) { [logger = self.logger, sessionID] in
+                                try? await Task.sleep(for: .seconds(3))
+                                let totals = await directRealtimeAudioSender.telemetryTotals()
+                                logger.info(
+                                    """
+                                    📈 WebRTC PQC media audio tx startup: session=\(sessionID, privacy: .public) \
+                                    audioTxCaptured=\(totals.captured, privacy: .public) \
+                                    audioTxEncoded=\(totals.encoded, privacy: .public) \
+                                    audioTxSent=\(totals.sent, privacy: .public) \
+                                    probable=\(totals.captured == 0 ? "capture-unavailable-or-silent" : (totals.sent == 0 ? "relay-send-not-draining" : "sending"), privacy: .public)
+                                    """
+                                )
+                                Self.writeWebRTCSessionDiagnostic(
+                                    "audioTxStartup session=\(sessionID) audioTxCaptured=\(totals.captured) audioTxEncoded=\(totals.encoded) audioTxSent=\(totals.sent)",
+                                    sessionID: sessionID
+                                )
+                            }
+                        }
                         self.appendSmokeStatus(
                             "stream-sck-started session=\(sessionID) codec=\(nativeVideoTrackEnabled ? "webrtc-native-video" : Self.remoteFrameFormatName(frameType: videoPolicy.codec, payload: Data())) mode=\(streamMode)"
                         )
@@ -4817,6 +5376,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     } catch {
                         captureStreamer.stop()
                         directCaptureStreamer = nil
+                        await directRealtimeAudioSender?.close()
+                        directRealtimeAudioSender = nil
+                        directRealtimeAudioSenderRelayExpiresAt = nil
                         encodedFrameStore.clear()
                         lastDirectEncoderStartAt = .distantPast
                         self.logger.error(
@@ -4868,23 +5430,60 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         lastTransportProbeAt = Date()
                     }
                     let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
-                    let useDedicatedScreenChannel = streamConfig?.screenDataChannelEnabled == true
-                    if useDedicatedScreenChannel {
+                    let requestedDedicatedScreenChannel = streamConfig?.screenDataChannelEnabled == true
+                    if requestedDedicatedScreenChannel {
                         try? session.ensureScreenDataChannel()
-                        guard session.hasOpenScreenDataChannel() else {
-                            if Date().timeIntervalSince(lastScreenChannelWaitReportAt) >= 1.0 {
-                                self.appendSmokeStatus(
-                                    "stream-wait-screen-channel session=\(sessionID)"
-                                )
-                                lastScreenChannelWaitReportAt = Date()
-                            }
-                            do {
-                                try await Task.sleep(for: .milliseconds(50))
-                            } catch {
-                                break
-                            }
-                            continue
+                    }
+                    let screenChannelOpen = requestedDedicatedScreenChannel && session.hasOpenScreenDataChannel()
+                    if requestedDedicatedScreenChannel && !screenChannelOpen && screenChannelWaitStartedAt == nil {
+                        screenChannelWaitStartedAt = Date()
+                    } else if !requestedDedicatedScreenChannel || screenChannelOpen {
+                        screenChannelWaitStartedAt = nil
+                    }
+                    let screenChannelWaitElapsed = screenChannelWaitStartedAt.map { Date().timeIntervalSince($0) }
+                    let screenRoute = Self.planWebRTCScreenChannelRoute(
+                        screenDataChannelEnabled: requestedDedicatedScreenChannel,
+                        screenChannelWireFormat: streamConfig?.screenChannelWireFormat,
+                        screenChannelOpen: screenChannelOpen,
+                        waitElapsed: screenChannelWaitElapsed
+                    )
+                    let useDedicatedScreenChannel = screenRoute.useDedicatedScreenChannel
+                    let useChunkedScreenWire = screenRoute.useChunkedScreenWire
+                    if screenRoute.state != lastScreenChannelRouteState ||
+                        Date().timeIntervalSince(lastScreenChannelWaitReportAt) >= 1.0 {
+                        self.logger.info(
+                            """
+                            📡 WebRTC screenChannelState: session=\(sessionID, privacy: .public) \
+                            state=\(screenRoute.state, privacy: .public) requested=\(requestedDedicatedScreenChannel, privacy: .public) \
+                            open=\(screenChannelOpen, privacy: .public) waitMs=\(Int(((screenChannelWaitElapsed ?? 0) * 1000).rounded()), privacy: .public) \
+                            wire=\(useChunkedScreenWire ? WebRTCSession.screenChunkedWireFormat : "length-framed", privacy: .public)
+                            """
+                        )
+                        self.appendSmokeStatus(
+                            "screenChannelState session=\(sessionID) state=\(screenRoute.state) requested=\(requestedDedicatedScreenChannel) open=\(screenChannelOpen) waitMs=\(Int(((screenChannelWaitElapsed ?? 0) * 1000).rounded()))"
+                        )
+                        self.appendWebRTCSessionDiagnostic(
+                            "screenChannelState session=\(sessionID) state=\(screenRoute.state) requested=\(requestedDedicatedScreenChannel) open=\(screenChannelOpen) waitMs=\(Int(((screenChannelWaitElapsed ?? 0) * 1000).rounded())) wire=\(useChunkedScreenWire ? WebRTCSession.screenChunkedWireFormat : "length-framed")",
+                            sessionID: sessionID
+                        )
+                        lastScreenChannelRouteState = screenRoute.state
+                        lastScreenChannelWaitReportAt = Date()
+                    }
+                    let nativeVideoTrackReadyForInteraction =
+                        self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                    let hasEstablishedScreenPathForInteraction =
+                        framesSent > 0 ||
+                        nativeVideoTrackReadyForInteraction ||
+                        screenRoute.state == "failed-control-fallback"
+                    if screenRoute.allowsInteractionStreaming && hasEstablishedScreenPathForInteraction {
+                        if self.webrtcInteractionStreamingAllowedSessionIds.insert(sessionID).inserted {
+                            self.appendSmokeStatus(
+                                "interaction-stream-enabled session=\(sessionID) reason=screenChannelState:\(screenRoute.state)"
+                            )
                         }
+                        startInteractionStreamingIfNeeded()
+                    } else {
+                        self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
                     }
                     let selectedVideoPolicy = currentVideoPolicy(for: transportPath)
                     let budget = currentBudget(for: transportPath, videoPolicy: selectedVideoPolicy)
@@ -4943,6 +5542,80 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
 #if os(macOS)
                     _ = await ensureDirectEncoder(for: videoPolicy)
+                    if session.supportsNativeScreenVideoTrack,
+                       Date().timeIntervalSince(lastNativeVideoStatsReportAt) >= 2.0 {
+                        let sendSnapshot = session.nativeScreenVideoSendSnapshot()
+                        let rtcStats = await session.outgoingNativeScreenVideoRTCStats()
+                        let nativeVideoTrackReady =
+                            self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                        let nextHealthState: NativeVideoHealthState = {
+                            if nativeVideoTrackReady {
+                                return .active
+                            }
+                            if Date() < nativeVideoFailureCooldownUntil {
+                                return .recovering
+                            }
+                            guard lastDirectEncoderStartAt != .distantPast,
+                                  Date().timeIntervalSince(lastDirectEncoderStartAt) >= 3.0,
+                                  sendSnapshot.submittedFrames > 0 else {
+                                return .warming
+                            }
+                            if !rtcStats.outboundStatsPresent || rtcStats.packetsSent == 0 || rtcStats.bytesSent == 0 {
+                                return .failedNoRTP
+                            }
+                            if rtcStats.framesEncoded == 0 || rtcStats.framesSent == 0 {
+                                return .senderZero
+                            }
+                            return .warming
+                        }()
+                        if nextHealthState == .failedNoRTP || nextHealthState == .senderZero {
+                            nativeVideoFailureCooldownUntil = Date().addingTimeInterval(30)
+                        }
+                        if nextHealthState != nativeVideoHealthState {
+                            nativeVideoHealthState = nextHealthState
+                            self.appendSmokeStatus(
+                                "native-video-health session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReady ? "heartbeat" : "main")"
+                            )
+                        }
+                        self.logger.info(
+                            """
+                            📈 native WebRTC screen tx: session=\(sessionID, privacy: .public) \
+                            state=\(nativeVideoHealthState.rawValue, privacy: .public) \
+                            fallbackMode=\(nativeVideoTrackReady ? "heartbeat" : "main", privacy: .public) \
+                            fallbackProducer=\(activeFallbackProducer, privacy: .public) \
+                            fallbackSignature=\(lastFallbackSignature, privacy: .public) \
+                            fallbackSwitchReason=\(fallbackProducerSwitchReason, privacy: .public) \
+                            submitted=\(sendSnapshot.submittedFrames, privacy: .public) \
+                            trackReady=\(sendSnapshot.trackReady, privacy: .public) \
+                            trackEnabled=\(sendSnapshot.trackEnabled, privacy: .public) \
+                            sourceReady=\(sendSnapshot.sourceReady, privacy: .public) \
+                            capturerReady=\(sendSnapshot.capturerReady, privacy: .public) \
+                            transceiverReady=\(sendSnapshot.transceiverReady, privacy: .public) \
+                            outboundStats=\(rtcStats.outboundStatsPresent, privacy: .public) \
+                            framesEncoded=\(rtcStats.framesEncoded, privacy: .public) \
+                            framesSent=\(rtcStats.framesSent, privacy: .public) \
+                            packetsSent=\(rtcStats.packetsSent, privacy: .public) \
+                            bytesSent=\(rtcStats.bytesSent, privacy: .public) \
+                            codec=\(rtcStats.codec ?? "-", privacy: .public)
+                            """
+                        )
+                        self.appendSmokeStatus(
+                            "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReady ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) framesSent=\(rtcStats.framesSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent)"
+                        )
+                        self.appendWebRTCSessionDiagnostic(
+                            "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReady ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) framesSent=\(rtcStats.framesSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent)",
+                            sessionID: sessionID
+                        )
+                        lastNativeVideoStatsReportAt = Date()
+                    }
+                    if screenRoute.shouldWaitForScreenChannel {
+                        do {
+                            try await Task.sleep(for: .milliseconds(50))
+                        } catch {
+                            break
+                        }
+                        continue
+                    }
                     if self.consumePendingWebRTCStreamRefresh(for: sessionID) {
                         let refreshToken = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.streamRefreshToken
                         awaitingRefreshToken = refreshToken
@@ -4991,16 +5664,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     } catch {
                         break
                     }
+                    fallbackLoopTicks += 1
                     let bufferedAmount = useDedicatedScreenChannel
                         ? session.screenDataChannelBufferedAmountBytes()
                         : session.dataChannelBufferedAmountBytes()
-                    if bufferedAmount > budget.maxBufferedAmountBytes {
+                    if bufferedAmount > budget.maxBufferedAmountBytes,
+                       awaitingRefreshToken == nil {
+                        framesDroppedBackpressure += 1
                         self.logger.debug(
-                            "⏳ WebRTC 屏幕推流背压：跳过本帧 buffered=\(Int(bufferedAmount), privacy: .public) budget=\(Int(budget.maxBufferedAmountBytes), privacy: .public)"
+                            "⏳ WebRTC 屏幕推流背压：跳过 stale 帧 buffered=\(Int(bufferedAmount), privacy: .public) budget=\(Int(budget.maxBufferedAmountBytes), privacy: .public) chunkDropReason=screen-buffered"
                         )
                         if Date().timeIntervalSince(lastBackpressureReportAt) >= 1.0 {
                             self.appendSmokeStatus(
-                                "stream-backpressure session=\(sessionID) buffered=\(Int(bufferedAmount)) budget=\(Int(budget.maxBufferedAmountBytes))"
+                                "stream-backpressure session=\(sessionID) screenBuffered=\(Int(bufferedAmount)) budget=\(Int(budget.maxBufferedAmountBytes)) chunkDropReason=screen-buffered dropped=\(framesDroppedBackpressure)"
                             )
                             lastBackpressureReportAt = Date()
                         }
@@ -5020,21 +5696,106 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
                         let nativeVideoWarmBackupEnabled =
                             session.supportsNativeScreenVideoTrack && !nativeVideoTrackReady
-                        let directEncodedFrame = (videoPolicy.usesHardwareEncoder || nativeVideoWarmBackupEnabled)
-                            ? encodedFrameStore.takeLatest()
+                        let now = Date()
+                        let latestSCKAgeMs = encodedFrameStore.latestAgeMs(now: now)
+                        let directEncodedFrame = videoPolicy.usesHardwareEncoder || nativeVideoWarmBackupEnabled
+                            ? (nativeVideoWarmBackupEnabled
+                                ? encodedFrameStore.takeLatest(maxAge: Self.webRTCSCKLatestFallbackMaxAgeSeconds, now: now)
+                                : encodedFrameStore.takeLatest())
                             : nil
                         if let encodedFrame = directEncodedFrame {
-                            let now = Date()
-                            lastHardwareFrameAt = now
-                            capturedFrame = ScreenDataWire(
-                                width: encodedFrame.width,
-                                height: encodedFrame.height,
-                                imageData: encodedFrame.imageData,
-                                timestamp: encodedFrame.timestamp,
-                                format: encodedFrame.format,
-                                isSyncFrame: encodedFrame.isSyncFrame
-                            )
-                        } else if videoPolicy.usesHardwareEncoder || nativeVideoWarmBackupEnabled {
+                            directEncodedFramesTaken += 1
+                            if nativeVideoWarmBackupEnabled {
+                                let sckLatestAgeMs = max(
+                                    0,
+                                    Int(((now.timeIntervalSince1970 - encodedFrame.timestamp) * 1000).rounded())
+                                )
+                                sckLatestFallbackFrames += 1
+                                sckLatestAgeMsTotal += sckLatestAgeMs
+                                if activeFallbackProducer != Self.webRTCFallbackSCKLatestProducer {
+                                    activeFallbackProducer = Self.webRTCFallbackSCKLatestProducer
+                                    fallbackProducerSwitchReason = "sck-latest-fresh"
+                                    self.logger.info(
+                                        "🔄 WebRTC fallback producer switched: session=\(sessionID, privacy: .public) producer=sckLatest reason=sck-latest-fresh sckLatestAgeMs=\(sckLatestAgeMs, privacy: .public)"
+                                    )
+                                    self.appendWebRTCSessionDiagnostic(
+                                        "fallbackProducerSwitch session=\(sessionID) producer=sckLatest reason=sck-latest-fresh sckLatestAgeMs=\(sckLatestAgeMs)",
+                                        sessionID: sessionID
+                                    )
+                                }
+                                directEncoderRecoveryStreak += 1
+                                lastHardwareFrameAt = now
+                                lastFallbackSignature = "\(encodedFrame.format) \(encodedFrame.width)x\(encodedFrame.height)"
+                                capturedFrame = ScreenDataWire(
+                                    width: encodedFrame.width,
+                                    height: encodedFrame.height,
+                                    imageData: encodedFrame.imageData,
+                                    timestamp: encodedFrame.timestamp,
+                                    format: encodedFrame.format,
+                                    isSyncFrame: encodedFrame.isSyncFrame
+                                )
+                            } else {
+                                directEncoderRecoveryStreak = 0
+                                if activeFallbackProducer != Self.webRTCFallbackDirectEncoderProducer {
+                                    activeFallbackProducer = Self.webRTCFallbackDirectEncoderProducer
+                                    fallbackProducerSwitchReason = "direct-encoder-frame-ready"
+                                    self.logger.info(
+                                        "🔄 WebRTC fallback producer switched: session=\(sessionID, privacy: .public) producer=directEncoder reason=\(fallbackProducerSwitchReason, privacy: .public)"
+                                    )
+                                    self.appendWebRTCSessionDiagnostic(
+                                        "fallbackProducerSwitch session=\(sessionID) producer=directEncoder reason=\(fallbackProducerSwitchReason)",
+                                        sessionID: sessionID
+                                    )
+                                }
+                                lastHardwareFrameAt = now
+                                lastFallbackSignature = "\(encodedFrame.format) \(encodedFrame.width)x\(encodedFrame.height)"
+                                capturedFrame = ScreenDataWire(
+                                    width: encodedFrame.width,
+                                    height: encodedFrame.height,
+                                    imageData: encodedFrame.imageData,
+                                    timestamp: encodedFrame.timestamp,
+                                    format: encodedFrame.format,
+                                    isSyncFrame: encodedFrame.isSyncFrame
+                                )
+                            }
+                        } else if nativeVideoWarmBackupEnabled {
+                            directEncoderRecoveryStreak = 0
+                            if activeFallbackProducer != Self.webRTCFallbackCGDisplayEmergencyProducer {
+                                activeFallbackProducer = Self.webRTCFallbackCGDisplayEmergencyProducer
+                                fallbackProducerSwitchReason = "sck-latest-stale-or-missing"
+                                self.logger.warning(
+                                    """
+                                    ⚠️ WebRTC SCK latest fallback stale; using CGDisplay emergency fallback: \
+                                    session=\(sessionID, privacy: .public) \
+                                    sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-", privacy: .public) \
+                                    staleBudgetMs=\(Int(Self.webRTCSCKLatestFallbackMaxAgeSeconds * 1000), privacy: .public) \
+                                    holdMs=10000
+                                    """
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "fallbackProducerSwitch session=\(sessionID) producer=cgdisplayEmergency reason=\(fallbackProducerSwitchReason) sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-") holdMs=10000",
+                                    sessionID: sessionID
+                                )
+                            }
+                            if Date().timeIntervalSince(lastEncodedFallbackMissReportAt) >= 2.0 {
+                                self.logger.warning(
+                                    """
+                                    ⚠️ WebRTC native warmup SCK latest unavailable; CGDisplay emergency fallback active until fresh SCK frame or nativeReady: \
+                                    session=\(sessionID, privacy: .public) \
+                                    state=\(nativeVideoHealthState.rawValue, privacy: .public) \
+                                    sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-", privacy: .public)
+                                    """
+                                )
+                                self.appendSmokeStatus(
+                                    "stream-native-warmup-fallback-main session=\(sessionID) state=\(nativeVideoHealthState.rawValue) producer=cgdisplayEmergency sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-")"
+                                )
+                                self.appendWebRTCSessionDiagnostic(
+                                    "stream-native-warmup-fallback-main session=\(sessionID) state=\(nativeVideoHealthState.rawValue) producer=\(activeFallbackProducer) sckLatestAgeMs=\(latestSCKAgeMs.map(String.init) ?? "-")",
+                                    sessionID: sessionID
+                                )
+                                lastEncodedFallbackMissReportAt = Date()
+                            }
+                        } else if videoPolicy.usesHardwareEncoder {
                             let outputBaselineAt: Date = {
                                 var baseline = lastHardwareFrameAt
                                 if lastDirectEncoderStartAt > baseline {
@@ -5064,10 +5825,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         }
                     }
 #endif
-                    if capturedFrame == nil,
-                       let img = CGDisplayCreateImage(CGMainDisplayID()),
-                       let jpg = jpegData(from: img) {
-                        let damageTrackingEnabled = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.damageTrackingEnabled ?? true
+                    if capturedFrame == nil {
+                        let captureStartedAt = Date()
+                        let capturedImage = CGDisplayCreateImage(CGMainDisplayID())
+                        cgDisplayCaptureMsTotal += Int((Date().timeIntervalSince(captureStartedAt) * 1000).rounded())
+                        guard let img = capturedImage else {
+                            continue
+                        }
+                        let nativeVideoTrackReady =
+                            self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.nativeVideoTrackReady == true
+                        let nativeVideoFallbackMain =
+                            session.supportsNativeScreenVideoTrack && !nativeVideoTrackReady
+                        let damageTrackingEnabled = (self.webrtcRemoteStreamConfigurationBySessionId[sessionID]?.damageTrackingEnabled ?? true)
+                            && !nativeVideoFallbackMain
                         if damageTrackingEnabled {
                             if let report = damageTracker.analyze(image: img) {
                                 pendingDamageReport = report
@@ -5075,9 +5845,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 continue
                             }
                         }
+                        let outputImage = nativeVideoFallbackMain
+                            ? (scaledImageForFallback(img, preferredSize: videoPolicy.preferredSize) ?? img)
+                            : img
+                        let jpegStartedAt = Date()
+                        guard let jpg = jpegData(from: outputImage) else {
+                            continue
+                        }
+                        jpegEncodeMsTotal += Int((Date().timeIntervalSince(jpegStartedAt) * 1000).rounded())
+                        cgDisplayFallbackFrames += 1
+                        if nativeVideoFallbackMain {
+                            activeFallbackProducer = Self.webRTCFallbackCGDisplayEmergencyProducer
+                            lastFallbackSignature = "jpeg \(outputImage.width)x\(outputImage.height)"
+                        }
                         capturedFrame = ScreenDataWire(
-                            width: img.width,
-                            height: img.height,
+                            width: outputImage.width,
+                            height: outputImage.height,
                             imageData: jpg,
                             timestamp: Date().timeIntervalSince1970,
                             format: "jpeg",
@@ -5114,6 +5897,23 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         imageData: sd.imageData,
                         advertisedSyncFrame: sd.isSyncFrame
                     )
+                    let screenBufferedBeforeSend = useDedicatedScreenChannel
+                        ? session.screenDataChannelBufferedAmountBytes()
+                        : session.dataChannelBufferedAmountBytes()
+                    if screenBufferedBeforeSend > budget.maxBufferedAmountBytes,
+                       !isIndependentFrame {
+                        framesDroppedBackpressure += 1
+                        if Date().timeIntervalSince(lastBackpressureReportAt) >= 1.0 {
+                            self.logger.warning(
+                                "⚠️ WebRTC 屏幕通道背压丢弃 stale 非关键帧: session=\(sessionID, privacy: .public) screenBuffered=\(Int(screenBufferedBeforeSend), privacy: .public) budget=\(Int(budget.maxBufferedAmountBytes), privacy: .public) chunkDropReason=stale-nonkey-backpressure"
+                            )
+                            self.appendSmokeStatus(
+                                "stream-backpressure session=\(sessionID) screenBuffered=\(Int(screenBufferedBeforeSend)) budget=\(Int(budget.maxBufferedAmountBytes)) chunkDropReason=stale-nonkey-backpressure dropped=\(framesDroppedBackpressure)"
+                            )
+                            lastBackpressureReportAt = Date()
+                        }
+                        continue
+                    }
                     if let refreshToken = awaitingRefreshToken,
                        let requestedAt = awaitingRefreshRequestedAt {
                         let waitMs = Int((Date().timeIntervalSince(requestedAt) * 1000).rounded())
@@ -5152,52 +5952,155 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     )
 
                     do {
+                        let sendStartedAt = Date()
                         let enc = try encryptAppPayload(plain, with: keys)
                         let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
-                        if useDedicatedScreenChannel {
+                        let payloadMagic = Self.describeWebRTCScreenPayloadMagic(padded)
+                        let wireFormat = useChunkedScreenWire ? WebRTCSession.screenChunkedWireFormat : "length-framed"
+                        let chunkCount: Int
+                        let framedBytes: Int
+                        var sentFrameId: UInt64?
+                        if useChunkedScreenWire {
+                            let maxPayloadBytes = max(1, screenFrameChunkBytes - WebRTCSession.screenChunkHeaderByteCount)
+                            chunkCount = max(1, (padded.count + maxPayloadBytes - 1) / maxPayloadBytes)
+                            framedBytes = padded.count + chunkCount * WebRTCSession.screenChunkHeaderByteCount
+                            sentFrameId = try await session.sendScreenChunkedPayloadAsync(
+                                padded,
+                                maxChunkBytes: screenFrameChunkBytes,
+                                maxBufferedAmountBytes: budget.maxBufferedAmountBytes
+                            )
+                        } else if useDedicatedScreenChannel {
+                            framedBytes = padded.count + 4
+                            chunkCount = max(1, (framedBytes + screenFrameChunkBytes - 1) / screenFrameChunkBytes)
                             try await session.sendScreenFramedPayloadAsync(
                                 padded,
                                 maxChunkBytes: screenFrameChunkBytes,
                                 maxBufferedAmountBytes: budget.maxBufferedAmountBytes
                             )
                         } else {
+                            framedBytes = padded.count + 4
+                            chunkCount = max(1, (framedBytes + screenFrameChunkBytes - 1) / screenFrameChunkBytes)
                             try await session.sendFramedPayloadAsync(
                                 padded,
                                 maxChunkBytes: screenFrameChunkBytes,
                                 maxBufferedAmountBytes: budget.maxBufferedAmountBytes
                             )
                         }
-                        bytesSent += padded.count + 4
+                        lastSendLatencyMs = Int((Date().timeIntervalSince(sendStartedAt) * 1000).rounded())
+                        bytesSent += framedBytes
                         framesSent += 1
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil,
                            framesSent <= 3 {
                             self.appendSmokeStatus(
-                                "screen-send session=\(sessionID) bytes=\(padded.count) format=\(formatLabel)"
+                                """
+                                screen-send session=\(sessionID) wire=\(wireFormat) \
+                                screenChannel=\(useDedicatedScreenChannel) screenChannelState=\(screenRoute.state) payloadMagic=\(payloadMagic) \
+                                frameId=\(sentFrameId.map(String.init) ?? "-") \
+                                framedBytes=\(framedBytes) chunkCount=\(chunkCount) \
+                                bytes=\(padded.count) format=\(formatLabel) \
+                                sendLatencyMs=\(lastSendLatencyMs) screenBuffered=\(Int(screenBufferedBeforeSend))
+                                """
                             )
                         }
                         let elapsed = Date().timeIntervalSince(logWindowStart)
                         if elapsed >= 5.0 {
                             let upMBps = Double(bytesSent) / elapsed / 1024.0 / 1024.0
                             let fps = Double(framesSent) / elapsed
+                            let fallbackLoopTickFPS = Double(fallbackLoopTicks) / elapsed
+                            let directEncodedFPS = Double(directEncodedFramesTaken) / elapsed
+                            let sckLatestFPS = Double(sckLatestFallbackFrames) / elapsed
+                            let latestSCKAgeMs = encodedFrameStore.latestAgeMs()
+                            let avgSCKLatestAgeMs = sckLatestFallbackFrames > 0
+                                ? Double(sckLatestAgeMsTotal) / Double(sckLatestFallbackFrames)
+                                : Double(latestSCKAgeMs ?? 0)
+                            let cgDisplayFPS = Double(cgDisplayFallbackFrames) / elapsed
+                            let avgCGDisplayCaptureMs = cgDisplayFallbackFrames > 0
+                                ? Double(cgDisplayCaptureMsTotal) / Double(cgDisplayFallbackFrames)
+                                : 0
+                            let avgJPEGEncodeMs = cgDisplayFallbackFrames > 0
+                                ? Double(jpegEncodeMsTotal) / Double(cgDisplayFallbackFrames)
+                                : 0
+                            let bufferedAmount = useDedicatedScreenChannel
+                                ? session.screenDataChannelBufferedAmountBytes()
+                                : session.dataChannelBufferedAmountBytes()
                             self.logger.info(
-                                "📈 WebRTC 屏幕推流吞吐: session=\(sessionID, privacy: .public) up=\(String(format: "%.2f", upMBps), privacy: .public)MB/s fps=\(String(format: "%.1f", fps), privacy: .public)"
+                                """
+                                📈 WebRTC 屏幕推流吞吐: session=\(sessionID, privacy: .public) \
+                                up=\(String(format: "%.2f", upMBps), privacy: .public)MB/s \
+                                fps=\(String(format: "%.1f", fps), privacy: .public) \
+                                wire=\(wireFormat, privacy: .public) screenChannel=\(useDedicatedScreenChannel, privacy: .public) \
+                                screenChannelState=\(screenRoute.state, privacy: .public) \
+                                frameId=\(sentFrameId.map(String.init) ?? "-", privacy: .public) \
+                                fallbackSentFPS=\(String(format: "%.1f", fps), privacy: .public) \
+                                fallbackProducer=\(activeFallbackProducer, privacy: .public) \
+                                fallbackSignature=\(lastFallbackSignature, privacy: .public) \
+                                fallbackLoopTickFPS=\(String(format: "%.1f", fallbackLoopTickFPS), privacy: .public) \
+                                directEncodedFPS=\(String(format: "%.1f", directEncodedFPS), privacy: .public) \
+                                sckLatestFPS=\(String(format: "%.1f", sckLatestFPS), privacy: .public) \
+                                sckLatestAgeMs=\(String(format: "%.1f", avgSCKLatestAgeMs), privacy: .public) \
+                                cgdisplayCaptureFPS=\(String(format: "%.1f", cgDisplayFPS), privacy: .public) \
+                                cgdisplayCaptureMs=\(String(format: "%.1f", avgCGDisplayCaptureMs), privacy: .public) \
+                                jpegEncodeMs=\(String(format: "%.1f", avgJPEGEncodeMs), privacy: .public) \
+                                sendSuccessFPS=\(String(format: "%.1f", fps), privacy: .public) \
+                                payloadMagic=\(payloadMagic, privacy: .public) screenBuffered=\(Int(bufferedAmount), privacy: .public) \
+                                sendLatencyMs=\(lastSendLatencyMs, privacy: .public) dropReason=\(framesDroppedBackpressure > 0 ? "backpressure" : "none", privacy: .public) droppedBackpressure=\(framesDroppedBackpressure, privacy: .public)
+                                """
                             )
                             self.appendSmokeStatus(
                                 """
                                 stream-stats session=\(sessionID) fps=\(String(format: "%.1f", fps)) \
                                 up_mbps=\(String(format: "%.2f", upMBps * 8.0)) \
-                                buffered=\(Int(session.dataChannelBufferedAmountBytes())) \
-                                format=\(formatLabel)
+                                screenBuffered=\(Int(bufferedAmount)) \
+                                format=\(formatLabel) wire=\(wireFormat) \
+                                screenChannel=\(useDedicatedScreenChannel) screenChannelState=\(screenRoute.state) payloadMagic=\(payloadMagic) \
+                                fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) \
+                                fallbackLoopTickFPS=\(String(format: "%.1f", fallbackLoopTickFPS)) \
+                                directEncodedFPS=\(String(format: "%.1f", directEncodedFPS)) \
+                                sckLatestFPS=\(String(format: "%.1f", sckLatestFPS)) \
+                                sckLatestAgeMs=\(String(format: "%.1f", avgSCKLatestAgeMs)) \
+                                cgdisplayCaptureFPS=\(String(format: "%.1f", cgDisplayFPS)) \
+                                cgdisplayCaptureMs=\(String(format: "%.1f", avgCGDisplayCaptureMs)) \
+                                jpegEncodeMs=\(String(format: "%.1f", avgJPEGEncodeMs)) \
+                                sendSuccessFPS=\(String(format: "%.1f", fps)) \
+                                frameId=\(sentFrameId.map(String.init) ?? "-") \
+                                framedBytes=\(framedBytes) chunkCount=\(chunkCount) \
+                                sendLatencyMs=\(lastSendLatencyMs) dropReason=\(framesDroppedBackpressure > 0 ? "backpressure" : "none") droppedBackpressure=\(framesDroppedBackpressure)
                                 """
+                            )
+                            self.appendWebRTCSessionDiagnostic(
+                                """
+                                stream-stats session=\(sessionID) fps=\(String(format: "%.1f", fps)) \
+                                screenBuffered=\(Int(bufferedAmount)) format=\(formatLabel) wire=\(wireFormat) \
+                                screenChannel=\(useDedicatedScreenChannel) screenChannelState=\(screenRoute.state) payloadMagic=\(payloadMagic) \
+                                fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) \
+                                fallbackLoopTickFPS=\(String(format: "%.1f", fallbackLoopTickFPS)) \
+                                directEncodedFPS=\(String(format: "%.1f", directEncodedFPS)) \
+                                sckLatestFPS=\(String(format: "%.1f", sckLatestFPS)) \
+                                sckLatestAgeMs=\(String(format: "%.1f", avgSCKLatestAgeMs)) \
+                                cgdisplayCaptureFPS=\(String(format: "%.1f", cgDisplayFPS)) \
+                                cgdisplayCaptureMs=\(String(format: "%.1f", avgCGDisplayCaptureMs)) \
+                                jpegEncodeMs=\(String(format: "%.1f", avgJPEGEncodeMs)) \
+                                sendSuccessFPS=\(String(format: "%.1f", fps)) \
+                                sendLatencyMs=\(lastSendLatencyMs) dropReason=\(framesDroppedBackpressure > 0 ? "backpressure" : "none")
+                                """,
+                                sessionID: sessionID
                             )
                             bytesSent = 0
                             framesSent = 0
+                            framesDroppedBackpressure = 0
+                            fallbackLoopTicks = 0
+                            directEncodedFramesTaken = 0
+                            sckLatestFallbackFrames = 0
+                            sckLatestAgeMsTotal = 0
+                            cgDisplayFallbackFrames = 0
+                            cgDisplayCaptureMsTotal = 0
+                            jpegEncodeMsTotal = 0
                             logWindowStart = Date()
                         }
                     } catch {
                         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                             self.appendSmokeStatus(
-                                "screen-send-failed session=\(sessionID) error=\(error.localizedDescription)"
+                                "screen-send-failed session=\(sessionID) sendPartialFailure=1 error=\(error.localizedDescription)"
                             )
                         }
                         self.logger.error("❌ WebRTC 屏幕推流发送失败: \(error.localizedDescription, privacy: .public)")
@@ -6140,8 +7043,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                         """
                                         🎛️ WebRTC 收到远控流策略: session=\(sessionID, privacy: .public) \
                                         transport=\(config.screenFrameTransport ?? "legacy", privacy: .public) \
+                                        screenWire=\(config.screenChannelWireFormat ?? "length-framed", privacy: .public) \
                                         preset=\(config.qualityPreset ?? "unknown", privacy: .public) \
                                         nativeReady=\(config.nativeVideoTrackReady == true, privacy: .public) \
+                                        audioRequested=\(config.requestsRealtimeMediaAudio, privacy: .public) \
+                                        audioTransport=\(config.audioTransport ?? "nil", privacy: .public) \
+                                        audioEndpoint=\(config.mediaAudioEndpoint == nil ? "missing" : "present", privacy: .public) \
+                                        audioRelayToken=\(config.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present", privacy: .public) \
+                                        audioMode=\(config.requestedMediaAudioMode.rawValue, privacy: .public) \
                                         damage=\(config.damageTrackingEnabled ?? false, privacy: .public) \
                                         cursor=\(config.separateCursorChannelEnabled ?? false, privacy: .public) \
                                         overlay=\(config.interactionOverlayChannelEnabled ?? false, privacy: .public) \
@@ -6149,6 +7058,47 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                         recovery=\(config.lossRecoveryMode ?? "unknown", privacy: .public)
                                         """
                                     )
+                                    self.appendWebRTCSessionDiagnostic(
+                                        """
+                                        streamConfigReceived session=\(sessionID) transport=\(config.screenFrameTransport ?? "legacy") \
+                                        screenWire=\(config.screenChannelWireFormat ?? "length-framed") \
+                                        nativeReady=\(config.nativeVideoTrackReady == true) \
+                                        audioRequested=\(config.requestsRealtimeMediaAudio) \
+                                        audioEndpoint=\(config.mediaAudioEndpoint == nil ? "missing" : "present") \
+                                        audioRelayToken=\(config.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") \
+                                        refreshToken=\(config.streamRefreshToken.map(String.init) ?? "-")
+                                        """,
+                                        sessionID: sessionID
+                                    )
+                                    if let activeKeys = handshakeState.sessionKeys ?? self.webrtcSessionKeysBySessionId[sessionID] {
+                                        let ack = RemoteDesktopStreamConfigurationAckWire(
+                                            acceptedAt: Date().timeIntervalSince1970,
+                                            streamRefreshToken: config.streamRefreshToken,
+                                            audioEndpointPresent: config.mediaAudioEndpoint != nil,
+                                            screenFrameTransport: config.screenFrameTransport
+                                        )
+                                        do {
+                                            try await sendRealtimeRemoteControlPayload(
+                                                ack,
+                                                type: .streamConfigurationAck,
+                                                sessionKeys: activeKeys,
+                                                maxBufferedAmountBytes: 96 * 1024,
+                                                label: "tx/webrtc-stream-config-ack"
+                                            )
+                                            self.appendWebRTCSessionDiagnostic(
+                                                "streamConfigurationAckSent session=\(sessionID) refreshToken=\(config.streamRefreshToken.map(String.init) ?? "-") audioEndpoint=\(config.mediaAudioEndpoint == nil ? "missing" : "present")",
+                                                sessionID: sessionID
+                                            )
+                                        } catch {
+                                            self.logger.warning(
+                                                "⚠️ WebRTC streamConfigurationAck 发送失败: session=\(sessionID, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                                            )
+                                            self.appendWebRTCSessionDiagnostic(
+                                                "streamConfigurationAckFailed session=\(sessionID) error=\(error.localizedDescription)",
+                                                sessionID: sessionID
+                                            )
+                                        }
+                                    }
                                     if config.streamRefreshToken != previousConfig?.streamRefreshToken {
                                         self.webrtcPendingStreamRefreshSessionIds.insert(sessionID)
                                         if let token = config.streamRefreshToken {
@@ -6163,6 +7113,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     }
                                 }
                             case .damageReport, .cursorUpdate, .overlayUpdate:
+                                break
+                            case .streamConfigurationAck:
                                 break
                             case .screenData:
                                 break
@@ -6365,10 +7317,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         negotiatedSuite: keys.negotiatedSuite.rawValue
                     )
                     startScreenStreamingIfNeeded(keys: keys)
+                    logger.info(
+                        "✅ WebRTC inbound PQC rekey completed: session=\(sessionID, privacy: .public) event=pqcRekeyComplete suite=\(keys.negotiatedSuite.rawValue, privacy: .public)"
+                    )
                 case .failed(let reason):
                     if let fallbackKeys = handshakeState.previousSessionKeysBeforeRekey {
                         logger.warning(
-                            "⚠️ WebRTC rekey 失败，保留既有会话: session=\(sessionID, privacy: .public) reason=\(String(describing: reason), privacy: .public)"
+                            "⚠️ WebRTC rekey 失败，保留既有会话: session=\(sessionID, privacy: .public) event=pqcRekeyFailed reason=\(String(describing: reason), privacy: .public)"
                         )
                         handshakeState.sessionKeys = fallbackKeys
                         handshakeState.previousSessionKeysBeforeRekey = nil
@@ -6687,6 +7642,24 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     ) -> Bool {
         guard let expiresAt else { return false }
         return expiresAt.timeIntervalSince(now) > minimumRemainingTime
+    }
+
+    nonisolated static func isReusableMediaAdmissionLease(
+        expiresAt: Date?,
+        now: Date = Date(),
+        minimumRemainingTime: TimeInterval = 10
+    ) -> Bool {
+        guard let expiresAt else { return false }
+        return expiresAt.timeIntervalSince(now) > minimumRemainingTime
+    }
+
+    nonisolated static func isReusableMediaRelayEndpoint(
+        expiresAt: TimeInterval?,
+        now: Date = Date(),
+        minimumRemainingTime: TimeInterval = 10
+    ) -> Bool {
+        guard let expiresAt else { return true }
+        return expiresAt - now.timeIntervalSince1970 > minimumRemainingTime
     }
 
     nonisolated static func canonicalPQCRekeyElectionDeviceId(_ raw: String?) -> String? {

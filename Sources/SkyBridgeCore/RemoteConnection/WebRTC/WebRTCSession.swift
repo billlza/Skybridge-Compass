@@ -124,6 +124,24 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case relay
     }
 
+    public struct NativeScreenVideoSendSnapshot: Sendable, Equatable {
+        public let trackReady: Bool
+        public let trackEnabled: Bool
+        public let sourceReady: Bool
+        public let capturerReady: Bool
+        public let transceiverReady: Bool
+        public let submittedFrames: UInt64
+    }
+
+    public struct NativeScreenVideoRTCStats: Sendable, Equatable {
+        public let outboundStatsPresent: Bool
+        public let framesEncoded: UInt64
+        public let framesSent: UInt64
+        public let packetsSent: UInt64
+        public let bytesSent: UInt64
+        public let codec: String?
+    }
+
     public typealias ICEConfig = SkyBridgeICEConfiguration
     
     public enum WebRTCError: Error, LocalizedError, Sendable {
@@ -275,6 +293,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private let outboundScreenFrameLock = NSLock()
     private let outboundFrameGate = WebRTCOutboundFrameGate()
     private let outboundScreenFrameGate = WebRTCOutboundFrameGate()
+    private var nextScreenChunkedFrameId: UInt64 = 1
     private var pendingInboundDataBuffers: [Data] = []
     private var pendingInboundDataBytes: Int = 0
     private var pendingInboundScreenDataBuffers: [Data] = []
@@ -393,6 +412,55 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             return .overflow
         }
         return .append(nextPendingCount: nextPendingCount, nextPendingBytes: nextPendingBytes)
+    }
+
+    public nonisolated static let screenChunkedWireFormat = "sbc2-chunked-v1"
+    public nonisolated static let screenChunkHeaderByteCount = 36
+
+    public nonisolated static func encodeScreenChunkEnvelope(
+        frameId: UInt64,
+        chunkIndex: Int,
+        chunkCount: Int,
+        totalBytes: Int,
+        chunkOffset: Int,
+        payload: Data
+    ) throws -> Data {
+        guard chunkIndex >= 0,
+              chunkCount > 0,
+              chunkIndex < chunkCount,
+              totalBytes >= 0,
+              chunkOffset >= 0,
+              payload.count >= 0,
+              chunkOffset + payload.count <= totalBytes,
+              chunkCount <= Int(UInt32.max),
+              chunkIndex <= Int(UInt32.max),
+              totalBytes <= Int(UInt32.max),
+              chunkOffset <= Int(UInt32.max),
+              payload.count <= Int(UInt32.max) else {
+            throw WebRTCError.framedPayloadTooLarge(totalBytes)
+        }
+
+        var data = Data()
+        appendBigEndian(UInt32(0x5342_4332), to: &data) // SBC2
+        data.append(1) // version
+        var flags: UInt8 = 0
+        if chunkIndex == 0 { flags |= 0x01 }
+        if chunkIndex == chunkCount - 1 { flags |= 0x02 }
+        data.append(flags)
+        appendBigEndian(UInt16(screenChunkHeaderByteCount), to: &data)
+        appendBigEndian(frameId, to: &data)
+        appendBigEndian(UInt32(chunkIndex), to: &data)
+        appendBigEndian(UInt32(chunkCount), to: &data)
+        appendBigEndian(UInt32(totalBytes), to: &data)
+        appendBigEndian(UInt32(chunkOffset), to: &data)
+        appendBigEndian(UInt32(payload.count), to: &data)
+        data.append(payload)
+        return data
+    }
+
+    private nonisolated static func appendBigEndian<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        var bigEndian = value.bigEndian
+        withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
     }
 
     nonisolated static func pendingRemoteICEPlan(
@@ -1072,6 +1140,70 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         )
     }
 
+    public func sendScreenChunkedPayloadAsync(
+        _ payload: Data,
+        maxChunkBytes: Int = 16 * 1024,
+        maxBufferedAmountBytes: UInt64 = 16 * 1024,
+        pollInterval: Duration = .milliseconds(10),
+        drainTimeout: Duration = .seconds(5)
+    ) async throws -> UInt64 {
+        guard maxChunkBytes > Self.screenChunkHeaderByteCount else {
+            throw WebRTCError.invalidChunkSize(maxChunkBytes)
+        }
+        _ = try Self.validateFramedPayloadParameters(
+            payloadByteCount: payload.count,
+            maxChunkBytes: maxChunkBytes
+        )
+
+        let frameId = withState {
+            let id = nextScreenChunkedFrameId
+            nextScreenChunkedFrameId &+= 1
+            if nextScreenChunkedFrameId == 0 {
+                nextScreenChunkedFrameId = 1
+            }
+            return id
+        }
+
+        try await outboundScreenFrameGate.run {
+            let channel = try resolvedDataChannel(
+                preferScreenChannel: true,
+                fallbackToControlChannel: false
+            )
+            let maxPayloadBytes = maxChunkBytes - Self.screenChunkHeaderByteCount
+            let chunkCount = max(1, (payload.count + maxPayloadBytes - 1) / maxPayloadBytes)
+
+            var offset = 0
+            for chunkIndex in 0..<chunkCount {
+                try await waitForBufferedAmountBelow(
+                    maxBufferedAmountBytes,
+                    pollInterval: pollInterval,
+                    timeout: drainTimeout,
+                    channel: channel
+                )
+                let end = min(offset + maxPayloadBytes, payload.count)
+                let fragment = Data(payload[offset..<end])
+                let chunk = try Self.encodeScreenChunkEnvelope(
+                    frameId: frameId,
+                    chunkIndex: chunkIndex,
+                    chunkCount: chunkCount,
+                    totalBytes: payload.count,
+                    chunkOffset: offset,
+                    payload: fragment
+                )
+                try send(chunk, over: channel)
+                offset = end
+            }
+
+            try await waitForBufferedAmountBelow(
+                maxBufferedAmountBytes,
+                pollInterval: pollInterval,
+                timeout: drainTimeout,
+                channel: channel
+            )
+        }
+        return frameId
+    }
+
     private func sendFramedPayloadAsync(
         _ payload: Data,
         maxChunkBytes: Int,
@@ -1232,10 +1364,94 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             return (true, outgoingNativeVideoFrameCount)
         }
         if progress.shouldLog {
+            let snapshot = nativeScreenVideoSendSnapshot()
             logger.info(
-                "📈 native WebRTC screen frames submitted: sessionId=\(self.sessionId, privacy: .public) count=\(progress.count, privacy: .public)"
+                "📈 native WebRTC screen frames submitted: sessionId=\(self.sessionId, privacy: .public) count=\(progress.count, privacy: .public) trackEnabled=\(snapshot.trackEnabled, privacy: .public) sourceReady=\(snapshot.sourceReady, privacy: .public) capturerReady=\(snapshot.capturerReady, privacy: .public) transceiverReady=\(snapshot.transceiverReady, privacy: .public)"
             )
         }
+#endif
+    }
+
+    public func nativeScreenVideoSendSnapshot() -> NativeScreenVideoSendSnapshot {
+#if canImport(WebRTC)
+        withState {
+            NativeScreenVideoSendSnapshot(
+                trackReady: localVideoTrack != nil,
+                trackEnabled: localVideoTrack?.isEnabled == true,
+                sourceReady: localVideoSource != nil,
+                capturerReady: localVideoCapturer != nil,
+                transceiverReady: localVideoTransceiver != nil,
+                submittedFrames: outgoingNativeVideoFrameCount
+            )
+        }
+#else
+        NativeScreenVideoSendSnapshot(
+            trackReady: false,
+            trackEnabled: false,
+            sourceReady: false,
+            capturerReady: false,
+            transceiverReady: false,
+            submittedFrames: 0
+        )
+#endif
+    }
+
+    public func outgoingNativeScreenVideoRTCStats() async -> NativeScreenVideoRTCStats {
+#if canImport(WebRTC)
+        guard let peerConnection = withState({ self.peerConnection }) else {
+            return NativeScreenVideoRTCStats(
+                outboundStatsPresent: false,
+                framesEncoded: 0,
+                framesSent: 0,
+                packetsSent: 0,
+                bytesSent: 0,
+                codec: nil
+            )
+        }
+        return await withCheckedContinuation { continuation in
+            final class ResumeState: @unchecked Sendable {
+                private let lock = NSLock()
+                private var resumed = false
+
+                func resume(
+                    _ stats: NativeScreenVideoRTCStats,
+                    continuation: CheckedContinuation<NativeScreenVideoRTCStats, Never>
+                ) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !resumed else { return }
+                    resumed = true
+                    continuation.resume(returning: stats)
+                }
+            }
+
+            let state = ResumeState()
+            peerConnection.statistics { report in
+                state.resume(Self.nativeScreenVideoRTCStats(from: report), continuation: continuation)
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
+                state.resume(
+                    NativeScreenVideoRTCStats(
+                        outboundStatsPresent: false,
+                        framesEncoded: 0,
+                        framesSent: 0,
+                        packetsSent: 0,
+                        bytesSent: 0,
+                        codec: nil
+                    ),
+                    continuation: continuation
+                )
+            }
+        }
+#else
+        return NativeScreenVideoRTCStats(
+            outboundStatsPresent: false,
+            framesEncoded: 0,
+            framesSent: 0,
+            packetsSent: 0,
+            bytesSent: 0,
+            codec: nil
+        )
 #endif
     }
 
@@ -1886,6 +2102,76 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
 
         return .direct
+    }
+
+    private static func nativeScreenVideoRTCStats(from report: RTCStatisticsReport) -> NativeScreenVideoRTCStats {
+        let statsById = report.statistics
+
+        func stringValue(_ stat: RTCStatistics, key: String) -> String? {
+            guard let value = stat.values[key] else { return nil }
+            if let text = value as? String { return text }
+            if let number = value as? NSNumber { return number.stringValue }
+            return nil
+        }
+
+        func uintValue(_ stat: RTCStatistics, keys: [String]) -> UInt64 {
+            for key in keys {
+                guard let value = stat.values[key] else { continue }
+                if let number = value as? NSNumber {
+                    return number.uint64Value
+                }
+                if let text = value as? String,
+                   let parsed = UInt64(text) {
+                    return parsed
+                }
+            }
+            return 0
+        }
+
+        let outboundVideoStats = statsById.values.filter { stat in
+            guard stat.type.lowercased() == "outbound-rtp" else { return false }
+            let kind = stringValue(stat, key: "kind")?.lowercased()
+            let mediaType = stringValue(stat, key: "mediaType")?.lowercased()
+            return kind == "video" || mediaType == "video"
+        }
+
+        guard !outboundVideoStats.isEmpty else {
+            return NativeScreenVideoRTCStats(
+                outboundStatsPresent: false,
+                framesEncoded: 0,
+                framesSent: 0,
+                packetsSent: 0,
+                bytesSent: 0,
+                codec: nil
+            )
+        }
+
+        var framesEncoded: UInt64 = 0
+        var framesSent: UInt64 = 0
+        var packetsSent: UInt64 = 0
+        var bytesSent: UInt64 = 0
+        var codec: String?
+        for stat in outboundVideoStats {
+            framesEncoded &+= uintValue(stat, keys: ["framesEncoded"])
+            framesSent &+= uintValue(stat, keys: ["framesSent"])
+            packetsSent &+= uintValue(stat, keys: ["packetsSent"])
+            bytesSent &+= uintValue(stat, keys: ["bytesSent"])
+            if codec == nil,
+               let codecId = stringValue(stat, key: "codecId"),
+               let codecStat = statsById[codecId] {
+                codec = stringValue(codecStat, key: "mimeType")
+                    ?? stringValue(codecStat, key: "codec")
+            }
+        }
+
+        return NativeScreenVideoRTCStats(
+            outboundStatsPresent: true,
+            framesEncoded: framesEncoded,
+            framesSent: framesSent,
+            packetsSent: packetsSent,
+            bytesSent: bytesSent,
+            codec: codec
+        )
     }
 #endif
 }

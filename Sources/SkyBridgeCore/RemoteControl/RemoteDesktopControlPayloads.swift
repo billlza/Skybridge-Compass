@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeRealtimeMedia
 
 public struct RemoteClipboardPayload: Codable, Sendable, Equatable {
     public let mimeType: String
@@ -178,9 +179,15 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
     public let lossRecoveryMode: String?
     public let screenFrameTransport: String?
     public let screenDataChannelEnabled: Bool?
+    public let screenChannelWireFormat: String?
     public let nativeVideoTrackReady: Bool?
     public let nativeAudioTrackEnabled: Bool?
     public let audioRedirectionEnabled: Bool?
+    public let audioTransport: String?
+    public let audioMode: String?
+    public let mediaSessionId: String?
+    public let mediaAudioEndpoint: SkyBridgeMediaEndpoint?
+    public let compatibilityAudioFallbackEnabled: Bool?
     public let preferredAudioEncoding: String?
     public let audioSampleRate: Int?
     public let audioChannelCount: Int?
@@ -208,9 +215,15 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         lossRecoveryMode: String? = nil,
         screenFrameTransport: String? = nil,
         screenDataChannelEnabled: Bool? = nil,
+        screenChannelWireFormat: String? = nil,
         nativeVideoTrackReady: Bool? = nil,
         nativeAudioTrackEnabled: Bool? = nil,
         audioRedirectionEnabled: Bool? = nil,
+        audioTransport: String? = nil,
+        audioMode: String? = nil,
+        mediaSessionId: String? = nil,
+        mediaAudioEndpoint: SkyBridgeMediaEndpoint? = nil,
+        compatibilityAudioFallbackEnabled: Bool? = nil,
         preferredAudioEncoding: String? = nil,
         audioSampleRate: Int? = nil,
         audioChannelCount: Int? = nil,
@@ -237,9 +250,15 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         self.lossRecoveryMode = lossRecoveryMode
         self.screenFrameTransport = screenFrameTransport
         self.screenDataChannelEnabled = screenDataChannelEnabled
+        self.screenChannelWireFormat = screenChannelWireFormat
         self.nativeVideoTrackReady = nativeVideoTrackReady
         self.nativeAudioTrackEnabled = nativeAudioTrackEnabled
         self.audioRedirectionEnabled = audioRedirectionEnabled
+        self.audioTransport = audioTransport
+        self.audioMode = audioMode
+        self.mediaSessionId = mediaSessionId
+        self.mediaAudioEndpoint = mediaAudioEndpoint
+        self.compatibilityAudioFallbackEnabled = compatibilityAudioFallbackEnabled
         self.preferredAudioEncoding = preferredAudioEncoding
         self.audioSampleRate = audioSampleRate
         self.audioChannelCount = audioChannelCount
@@ -249,6 +268,8 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
 }
 
 public extension RemoteDesktopStreamConfiguration {
+    static let screenChannelWireFormatSBC2ChunkedV1 = "sbc2-chunked-v1"
+
     var isStopRequest: Bool {
         if screenFrameTransport?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "stopped" {
             return true
@@ -257,6 +278,27 @@ public extension RemoteDesktopStreamConfiguration {
             return true
         }
         return targetFrameRate <= 0
+    }
+
+    var requestsRealtimeMediaAudio: Bool {
+        guard audioRedirectionEnabled == true else { return false }
+        return audioTransport?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            == SkyBridgeRealtimeMediaConstants.audioTransportPQCv1
+    }
+
+    var allowsLegacyAudioChunkFallback: Bool {
+        guard audioRedirectionEnabled == true else { return false }
+        let transport = audioTransport?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return compatibilityAudioFallbackEnabled == true
+            || transport == SkyBridgeRealtimeMediaConstants.audioTransportLegacyChunkV1
+    }
+
+    var requestedMediaAudioMode: SkyBridgeMediaAudioMode {
+        if let audioMode,
+           let mode = SkyBridgeMediaAudioMode(rawValue: audioMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) {
+            return mode
+        }
+        return lowLatencyMode ? .lowLatency : .highFidelity
     }
 }
 

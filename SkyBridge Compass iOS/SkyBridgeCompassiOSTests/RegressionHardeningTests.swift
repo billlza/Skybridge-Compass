@@ -55,6 +55,130 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
+    func testViewerStreamConfigurationDoesNotAwaitRealtimeAudioReceiverStartup() throws {
+        let source = try remoteDesktopManagerSource()
+
+        XCTAssertTrue(source.contains("let mediaAudioBinding = currentRealtimeMediaAudioBindingIfUsable()"))
+        XCTAssertTrue(source.contains("ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mediaAudioMode)"))
+        XCTAssertFalse(
+            source.contains("let mediaAudioBinding = await prepareRealtimeMediaAudioReceiverIfNeeded"),
+            "The viewer must send the video/main config without awaiting realtime audio lease or receiver startup."
+        )
+        XCTAssertTrue(
+            source.contains("await self.pushViewerStreamConfiguration(force: false, refreshStream: false)"),
+            "The audio-present update should be a normal deduped config send, not a forced refresh."
+        )
+        XCTAssertTrue(source.contains("payload.mediaAudioEndpoint == nil"))
+    }
+
+    func testRealtimeMediaAudioReceiverStartupIsSingleflightAndObservable() throws {
+        let source = try remoteDesktopManagerSource()
+
+        XCTAssertTrue(source.contains("guard realtimeMediaAudioReceiverStartTask == nil else { return }"))
+        XCTAssertTrue(source.contains("realtimeMediaAudioReceiverStartGeneration"))
+        XCTAssertTrue(source.contains("realtimeMediaAudioReceiverSlowDiagnosticDelay: Duration = .seconds(3)"))
+        XCTAssertTrue(source.contains("realtimeMediaAudioReceiverStageTimeout: Duration = .seconds(8)"))
+        XCTAssertTrue(source.contains("realtimeMediaAudioReceiverTotalTimeout: Duration = .seconds(15)"))
+        XCTAssertTrue(source.contains("event=receiverStartPending"))
+        XCTAssertTrue(source.contains("event=receiverStartSlow"))
+        XCTAssertTrue(source.contains("event=leaseReady"))
+        XCTAssertTrue(source.contains("event=udpBindStarted"))
+        XCTAssertTrue(source.contains("event=receiverStarted"))
+        XCTAssertTrue(source.contains("event=receiverStartFailed"))
+        XCTAssertTrue(source.contains("event=audioPresentConfigSent"))
+        XCTAssertTrue(source.contains("event=streamConfigSent"))
+        XCTAssertFalse(
+            source.contains("event=receiverStartTimeout"),
+            "The 3s receiver startup diagnostic must no longer hard-cancel or report timeout; it is only receiverStartSlow."
+        )
+    }
+
+    func testRealtimeMediaAudioReceiverStartupFailureDoesNotRefreshVideoStream() throws {
+        let source = try remoteDesktopManagerSource()
+        let failureBody = try sourceSlice(
+            from: "private func markRealtimeMediaAudioReceiverStartupFailed",
+            to: "private func ensureRealtimeMediaAudioReceiverStartedIfNeeded",
+            in: source
+        )
+
+        XCTAssertTrue(failureBody.contains("event=receiverStartFailed"))
+        XCTAssertTrue(failureBody.contains("reason=\\(reason.rawValue)"))
+        XCTAssertTrue(failureBody.contains("stage=\\(stage)"))
+        XCTAssertFalse(
+            failureBody.contains("pushViewerStreamConfiguration"),
+            "Audio receiver startup failures must not send stream configuration updates."
+        )
+        XCTAssertFalse(
+            failureBody.contains("refreshStream: true"),
+            "Audio receiver startup failures must not request keyframes or topology refresh."
+        )
+        XCTAssertFalse(
+            failureBody.contains("lastRequestedStreamRefreshReason"),
+            "Audio receiver startup failures should stay out of video refresh diagnostics."
+        )
+    }
+
+    func testSessionAuthorityLostStopsRemoteDesktopRetryLoops() throws {
+        let source = try remoteDesktopManagerSource()
+
+        XCTAssertTrue(source.contains("handleCrossNetworkSessionAuthorityLostIfNeeded(source: \"stream-config\")"))
+        XCTAssertTrue(source.contains("handleCrossNetworkSessionAuthorityLostIfNeeded(source: \"first-frame-watchdog\")"))
+        XCTAssertTrue(source.contains("handleCrossNetworkSessionAuthorityLostIfNeeded(source: \"stream-config-ack-retry\")"))
+        XCTAssertTrue(source.contains("handleCrossNetworkSessionAuthorityLostIfNeeded(source: \"audio-receiver-start\")"))
+        XCTAssertTrue(source.contains("handleCrossNetworkSessionAuthorityLostIfNeeded(source: \"stream-refresh:\\(reason)\")"))
+        XCTAssertTrue(source.contains("event=sessionAuthorityLost"))
+        XCTAssertTrue(source.contains("state = .error(\"sessionAuthorityLost\")"))
+    }
+
+    func testStreamConfigurationAckHookStaysCompileCompatibleUntilSharedProducerExists() throws {
+        let source = try remoteDesktopManagerSource()
+
+        XCTAssertTrue(source.contains("Compile-compatible future hook"))
+        XCTAssertTrue(source.contains("case streamConfigurationAck = \"streamConfigurationAck\""))
+        XCTAssertTrue(source.contains("case .streamConfigurationAck:"))
+        XCTAssertTrue(source.contains("handleStreamConfigurationAck"))
+    }
+
+    private func remoteDesktopManagerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func sourceSlice(from startMarker: String, to endMarker: String, in source: String) throws -> String {
+        let start = try XCTUnwrap(source.range(of: startMarker)?.lowerBound)
+        let suffix = source[start...]
+        let end = try XCTUnwrap(suffix.range(of: endMarker)?.lowerBound)
+        return String(suffix[..<end])
+    }
+
+    func testRemoteDesktopSelectionOverlayIsDiagnosticOnlyByDefault() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(
+            source.contains("SkyBridgeRemoteDesktopShowInteractionOverlay"),
+            "Selection/focus overlay should be behind an explicit diagnostic toggle."
+        )
+        XCTAssertTrue(
+            source.contains("remoteDesktopManager.frameRate >= 5"),
+            "Diagnostic overlays should be suppressed while fallback FPS is too low to trust the screen content."
+        )
+        XCTAssertFalse(
+            source.contains("overlayPayload: remoteDesktopManager.currentOverlayPayload"),
+            "Viewer must not pass selection rects straight into the renderer by default; this caused the visible brown/yellow box."
+        )
+    }
+
     func testLANRemoteControlTrustResolverCollapsesEquivalentDuplicateRecords() {
         let device = DiscoveredDevice(
             id: "bonjour:Lza的MacBook Pro@local.",
@@ -580,9 +704,36 @@ final class RegressionHardeningTests: XCTestCase {
 
         XCTAssertEqual(payload.nativeAudioTrackEnabled, false)
         XCTAssertEqual(payload.audioRedirectionEnabled, RemoteDesktopManager.instance.viewerSettings.audioRedirectionEnabled)
-        XCTAssertEqual(payload.preferredAudioEncoding, RemoteDesktopAudioChunkPayload.Encoding.aacLC.rawValue)
+        XCTAssertEqual(payload.audioTransport, "pqc-media-v1")
+        XCTAssertEqual(payload.compatibilityAudioFallbackEnabled, false)
+        XCTAssertNil(payload.preferredAudioEncoding)
         XCTAssertEqual(payload.audioSampleRate, 48_000)
         XCTAssertEqual(payload.audioChannelCount, 2)
+    }
+
+    func testPQCRealtimeAudioReceiverUsesOpusRingBufferPath() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/RealtimeMediaAudio.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("AVAudioSourceNode"))
+        XCTAssertTrue(source.contains("pqc-opus-source-node-ring"))
+        XCTAssertTrue(source.contains("queuedMs="))
+        XCTAssertTrue(source.contains("targetQueuedMs="))
+        XCTAssertTrue(source.contains("primed="))
+        XCTAssertTrue(source.contains("rebuffer="))
+        XCTAssertTrue(source.contains("underflow="))
+        XCTAssertTrue(source.contains("overflow="))
+        XCTAssertTrue(source.contains("playback prebuffering"))
+        XCTAssertTrue(source.contains("setPreferredIOBufferDuration(mode == .lowLatency ? 0.005 : 0.01)"))
+        XCTAssertFalse(
+            source.contains("scheduleBuffer("),
+            "PQC realtime audio should use the pull/ring-buffer path, not AVAudioPlayerNode buffer scheduling."
+        )
     }
 
     func testCrossNetworkFrameNotificationRequiresActiveStreamingSession() {
@@ -1474,7 +1625,7 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(settings.transportTuning.lossRecoveryMode, "fast-retransmit")
         XCTAssertTrue(settings.transportTuning.damageTrackingEnabled)
         XCTAssertTrue(settings.transportTuning.separateCursorChannelEnabled)
-        XCTAssertTrue(settings.transportTuning.interactionOverlayChannelEnabled)
+        XCTAssertFalse(settings.transportTuning.interactionOverlayChannelEnabled)
     }
 
     func testRemoteDesktopCodecGovernanceDisablesHEVCAfterRepeatedDecoderFailures() {
@@ -2419,6 +2570,107 @@ final class RegressionHardeningTests: XCTestCase {
         ]
 
         XCTAssertNil(WebRTCSession.remoteInboundVideoStatsSnapshot(from: samples))
+    }
+
+    func testWebRTCSessionRemoteInboundVideoStatsSnapshotDoesNotPromoteZeroFrameVideo() {
+        let samples = [
+            WebRTCSession.RemoteInboundVideoStatsSample(
+                type: "inbound-rtp",
+                values: [
+                    "kind": NSString(string: "video"),
+                    "packetsReceived": NSNumber(value: 0),
+                    "bytesReceived": NSNumber(value: 0),
+                    "framesReceived": NSNumber(value: 0),
+                    "framesDecoded": NSNumber(value: 0)
+                ]
+            )
+        ]
+
+        let snapshot = WebRTCSession.remoteInboundVideoStatsSnapshot(from: samples)
+
+        XCTAssertNotNil(snapshot)
+        XCTAssertFalse(snapshot?.hasFrameEvidence == true)
+    }
+
+    func testWebRTCSessionRemoteInboundVideoStatsSnapshotDoesNotPromotePacketOnlyVideo() {
+        let samples = [
+            WebRTCSession.RemoteInboundVideoStatsSample(
+                type: "inbound-rtp",
+                values: [
+                    "kind": NSString(string: "video"),
+                    "packetsReceived": NSNumber(value: 12),
+                    "bytesReceived": NSNumber(value: 44_000),
+                    "framesReceived": NSNumber(value: 0),
+                    "framesDecoded": NSNumber(value: 0),
+                    "frameWidth": NSNumber(value: 2_056),
+                    "frameHeight": NSNumber(value: 1_328)
+                ]
+            )
+        ]
+
+        let snapshot = WebRTCSession.remoteInboundVideoStatsSnapshot(from: samples)
+
+        XCTAssertTrue(snapshot?.hasPacketEvidence == true)
+        XCTAssertFalse(snapshot?.hasFrameEvidence == true)
+    }
+
+    func testWebRTCMediaRelayRefreshUnsupportedIsDiagnosedAndBackedOff() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("serverRefreshUnsupported"))
+        XCTAssertTrue(source.contains("Cannot POST /api/media/admission/refresh"))
+        XCTAssertTrue(source.contains("serverBuildFingerprint"))
+        XCTAssertTrue(source.contains("supportsMediaAdmissionRefresh"))
+        XCTAssertTrue(source.contains("mediaTokenGeneration"))
+        XCTAssertTrue(source.contains("activeMediaAdmissionLeaseBackoffReason"))
+    }
+
+    func testWebRTCMediaRelaySessionTokenSupersededUsesSessionRefresh() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("/api/webrtc/session/refresh"))
+        XCTAssertTrue(source.contains("refreshWebRTCSessionAdmissionTokens"))
+        XCTAssertTrue(source.contains("sessionTokenSuperseded"))
+        XCTAssertTrue(source.contains("sessionReauthFailed"))
+        XCTAssertTrue(source.contains("backoff: 30"))
+    }
+
+    func testRemoteDesktopAudioLeaseFailureDoesNotStartReceiverBeforeLease() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let crossNetworkBranch = try sourceSlice(
+            from: "case .crossNetwork:\n                updateRealtimeMediaAudioReceiverStartPhase(.lease",
+            to: "case .lan:",
+            in: source
+        )
+        guard let leaseRange = crossNetworkBranch.range(of: "crossNetwork.requestRealtimeMediaRelayEndpointForActiveSession()"),
+              let rendererRange = crossNetworkBranch.range(of: "renderer = try IOSRealtimeMediaAudioReceiver(snapshot: snapshot, mode: mode)", range: leaseRange.upperBound..<crossNetworkBranch.endIndex) else {
+            XCTFail("Expected cross-network media lease preflight before receiver creation")
+            return
+        }
+
+        XCTAssertLessThan(leaseRange.lowerBound, rendererRange.lowerBound)
+        XCTAssertTrue(crossNetworkBranch.contains("event=leaseReady"))
+        XCTAssertTrue(crossNetworkBranch.contains("event=udpBindStarted"))
+        XCTAssertTrue(source.contains("streamTopologyFlapSuppressedUntil"))
+        XCTAssertTrue(source.contains("fallback producer flap suppressed"))
     }
 
     func testWebRTCSessionRemoteInboundVideoStatsSnapshotMergesInboundAndTrackSamples() {

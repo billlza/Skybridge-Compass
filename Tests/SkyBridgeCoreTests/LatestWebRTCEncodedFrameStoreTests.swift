@@ -42,6 +42,30 @@ final class LatestWebRTCEncodedFrameStoreTests: XCTestCase {
         XCTAssertNil(store.takeLatest())
     }
 
+    func testFreshFrameCanBeTakenWithinMaxAge() {
+        let store = LatestWebRTCEncodedFrameStore()
+        let now = Date(timeIntervalSince1970: 10)
+        let fresh = makeFrame(byte: 0x21, timestamp: 9.75, isSyncFrame: false)
+
+        store.store(fresh)
+
+        XCTAssertEqual(store.latestAgeMs(now: now), 250)
+        XCTAssertEqual(store.takeLatest(maxAge: 0.5, now: now), fresh)
+        XCTAssertNil(store.takeLatest())
+    }
+
+    func testStaleFrameIsDroppedWhenMaxAgeExpires() {
+        let store = LatestWebRTCEncodedFrameStore()
+        let now = Date(timeIntervalSince1970: 10)
+        let stale = makeFrame(byte: 0x22, timestamp: 9.25, isSyncFrame: true)
+
+        store.store(stale)
+
+        XCTAssertEqual(store.latestAgeMs(now: now), 750)
+        XCTAssertNil(store.takeLatest(maxAge: 0.5, now: now))
+        XCTAssertNil(store.takeLatest())
+    }
+
     private func makeFrame(
         byte: UInt8,
         timestamp: TimeInterval,

@@ -89,4 +89,49 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertEqual(policy.preferredSize.width, 2056)
         XCTAssertEqual(policy.preferredSize.height, 1328)
     }
+
+    func testSelectorProbesHEVCForHighResolutionHighFPSLANWhenPeerSupportsIt() {
+        let policy = RemoteControlStreamPolicySelector.select(
+            request: makeRequest(size: CGSize(width: 2056, height: 1328), codec: .h264, fps: 60),
+            peerFormats: ["jpeg", "h264", "hevc"],
+            thermalState: .nominal,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(policy.codec, .hevc)
+        XCTAssertEqual(policy.targetFrameRate, 60)
+        XCTAssertEqual(policy.reason, "high-fps-lan-hevc-probe")
+    }
+
+    func testSharedAudioFallbackProtectionCapsVideoLoad() {
+        let policy = RemoteControlStreamPolicySelector.select(
+            request: makeRequest(size: CGSize(width: 2056, height: 1328), codec: .h264, fps: 60, gop: 120),
+            peerFormats: ["jpeg", "h264"],
+            thermalState: .nominal,
+            isAppleSilicon: true
+        ).protectingRealtimeAudio()
+
+        XCTAssertEqual(policy.codec, .h264)
+        XCTAssertEqual(policy.targetFrameRate, 24)
+        XCTAssertEqual(policy.keyFrameInterval, 48)
+        XCTAssertEqual(policy.preferredSize.width, 1920)
+        XCTAssertEqual(policy.preferredSize.height, 1240)
+        XCTAssertTrue(policy.reason.contains("+audio-protect"))
+    }
+
+    func testSharedAudioFallbackProtectionCapsFrameRateWithoutResizingConservativePolicy() {
+        let policy = RemoteControlStreamPolicySelector.select(
+            request: makeRequest(size: CGSize(width: 1280, height: 720), codec: .h264, fps: 30),
+            peerFormats: ["jpeg", "h264"],
+            thermalState: .nominal,
+            isAppleSilicon: true
+        )
+
+        let protectedPolicy = policy.protectingRealtimeAudio()
+
+        XCTAssertEqual(protectedPolicy.targetFrameRate, 24)
+        XCTAssertEqual(protectedPolicy.keyFrameInterval, 48)
+        XCTAssertEqual(protectedPolicy.preferredSize, policy.preferredSize)
+        XCTAssertTrue(protectedPolicy.reason.contains("+audio-protect"))
+    }
 }

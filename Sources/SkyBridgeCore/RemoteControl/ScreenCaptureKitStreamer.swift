@@ -55,13 +55,18 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var lastMeaningfulSampleAt: Date = .distantPast
     private var lastEncodedFrameAt: Date = .distantPast
     private var lastSceneCutRecoveryAt: Date = .distantPast
+    private var captureTelemetryWindowStartedAt = Date()
+    private var telemetryCapturedSamples = 0
+    private var telemetryMeaningfulSamples = 0
+    private var telemetryEncodedFrames = 0
+    private var telemetryEncodedBytes = 0
     private let sampleOutputQueue = DispatchQueue(
         label: "com.skybridge.compass.sck.output",
         qos: .userInteractive
     )
     private let audioSampleOutputQueue = DispatchQueue(
         label: "com.skybridge.compass.sck.audio-output",
-        qos: .userInitiated
+        qos: .utility
     )
     private var compressionCallbackRefcon: UnsafeMutableRawPointer?
     private var screenParametersObserver: NSObjectProtocol?
@@ -81,6 +86,19 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var compressedAudioSignature: String?
     private var didLogAudioCompressionFallback = false
     private var audioSequenceNumber: UInt64 = 0
+
+    private struct CaptureTelemetrySnapshot: Sendable {
+        let interval: TimeInterval
+        let capturedSamples: Int
+        let meaningfulSamples: Int
+        let encodedFrames: Int
+        let encodedBytes: Int
+        let targetFPS: Int
+        let codec: String
+        let width: Int
+        let height: Int
+        let capturesAudio: Bool
+    }
 
 /// 编码后视频帧的回调
  /// - 参数说明：data 为压缩后比特流；w/h 为视频维度；type 为帧类型（h264/hevc）
@@ -141,7 +159,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     ) async throws {
         guard !started else { return }
         started = true
-        configuredFPS = targetFPS
+        configuredFPS = max(1, targetFPS)
         configuredKeyInterval = keyFrameInterval
         self.captureCursorInVideo = captureCursorInVideo
         self.captureSystemAudio = captureSystemAudio
@@ -157,6 +175,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         compressedAudioSignature = nil
         didLogAudioCompressionFallback = false
         audioSequenceNumber = 0
+        resetCaptureTelemetry()
 // 读取编码档位与低延迟设置（主线程安全）
         let settings = RemoteDesktopSettingsManager.shared.settings
         preferredProfile = settings.displaySettings.encodingProfile
@@ -206,7 +225,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         configuration.width = width
         configuration.height = height
         configuration.pixelFormat = kCVPixelFormatType_32BGRA // 原始帧，后续由VTCompressionSession进行压缩
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(configuredFPS))
+        configuration.minimumFrameInterval = Self.encodeFrameDuration(forConfiguredFPS: configuredFPS)
         configuration.queueDepth = lowLatencyEnabled ? 3 : 5
         let requestedSystemAudio = captureSystemAudio
         configuration.capturesAudio = requestedSystemAudio
@@ -675,6 +694,14 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         return (lastSampleBufferAt, lastMeaningfulSampleAt, lastEncodedFrameAt)
     }
 
+    static func encodePresentationTimeStamp(from sampleBuffer: CMSampleBuffer) -> CMTime {
+        CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    }
+
+    static func encodeFrameDuration(forConfiguredFPS fps: Int) -> CMTime {
+        CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
+    }
+
     @MainActor
     func captureContextSnapshot() -> CaptureContextSnapshot? {
         guard started,
@@ -695,21 +722,107 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     }
 
     private func noteSampleBufferReceived() {
+        let now = Date()
+        let snapshot: CaptureTelemetrySnapshot?
         stateLock.lock()
-        lastSampleBufferAt = Date()
+        lastSampleBufferAt = now
+        telemetryCapturedSamples += 1
+        snapshot = captureTelemetrySnapshotIfNeeded(now: now)
         stateLock.unlock()
+        logCaptureTelemetryIfNeeded(snapshot)
     }
 
     private func noteMeaningfulSampleReceived() {
+        let now = Date()
+        let snapshot: CaptureTelemetrySnapshot?
         stateLock.lock()
-        lastMeaningfulSampleAt = Date()
+        lastMeaningfulSampleAt = now
+        telemetryMeaningfulSamples += 1
+        snapshot = captureTelemetrySnapshotIfNeeded(now: now)
+        stateLock.unlock()
+        logCaptureTelemetryIfNeeded(snapshot)
+    }
+
+    private func noteEncodedFrameEmitted(encodedBytes: Int = 0, countForTelemetry: Bool = true) {
+        let now = Date()
+        let snapshot: CaptureTelemetrySnapshot?
+        stateLock.lock()
+        lastEncodedFrameAt = now
+        if countForTelemetry {
+            telemetryEncodedFrames += 1
+            telemetryEncodedBytes += max(0, encodedBytes)
+        }
+        snapshot = captureTelemetrySnapshotIfNeeded(now: now)
+        stateLock.unlock()
+        logCaptureTelemetryIfNeeded(snapshot)
+    }
+
+    private func resetCaptureTelemetry() {
+        stateLock.lock()
+        lastSampleBufferAt = .distantPast
+        lastMeaningfulSampleAt = .distantPast
+        lastEncodedFrameAt = .distantPast
+        captureTelemetryWindowStartedAt = Date()
+        telemetryCapturedSamples = 0
+        telemetryMeaningfulSamples = 0
+        telemetryEncodedFrames = 0
+        telemetryEncodedBytes = 0
         stateLock.unlock()
     }
 
-    private func noteEncodedFrameEmitted() {
-        stateLock.lock()
-        lastEncodedFrameAt = Date()
-        stateLock.unlock()
+    private func captureTelemetrySnapshotIfNeeded(now: Date) -> CaptureTelemetrySnapshot? {
+        let interval = now.timeIntervalSince(captureTelemetryWindowStartedAt)
+        guard interval >= 1 else { return nil }
+        let snapshot = CaptureTelemetrySnapshot(
+            interval: interval,
+            capturedSamples: telemetryCapturedSamples,
+            meaningfulSamples: telemetryMeaningfulSamples,
+            encodedFrames: telemetryEncodedFrames,
+            encodedBytes: telemetryEncodedBytes,
+            targetFPS: configuredFPS,
+            codec: captureTelemetryCodecName,
+            width: width,
+            height: height,
+            capturesAudio: captureSystemAudio
+        )
+        captureTelemetryWindowStartedAt = now
+        telemetryCapturedSamples = 0
+        telemetryMeaningfulSamples = 0
+        telemetryEncodedFrames = 0
+        telemetryEncodedBytes = 0
+        return snapshot
+    }
+
+    private var captureTelemetryCodecName: String {
+        if jpegMode { return "jpeg" }
+        switch codecType {
+        case kCMVideoCodecType_H264:
+            return "h264"
+        case kCMVideoCodecType_HEVC:
+            return "hevc"
+        default:
+            return "\(codecType)"
+        }
+    }
+
+    private func logCaptureTelemetryIfNeeded(_ snapshot: CaptureTelemetrySnapshot?) {
+        guard let snapshot else { return }
+        let interval = max(snapshot.interval, 0.001)
+        let captureFPS = String(format: "%.1f", Double(snapshot.capturedSamples) / interval)
+        let meaningfulFPS = String(format: "%.1f", Double(snapshot.meaningfulSamples) / interval)
+        let encodedFPS = String(format: "%.1f", Double(snapshot.encodedFrames) / interval)
+        logger.info(
+            """
+            📊 SCK tx telemetry: targetFPS=\(snapshot.targetFPS, privacy: .public) \
+            codec=\(snapshot.codec, privacy: .public) \
+            size=\(snapshot.width, privacy: .public)x\(snapshot.height, privacy: .public) \
+            capturesAudio=\(String(snapshot.capturesAudio), privacy: .public) \
+            captureFPS=\(captureFPS, privacy: .public) \
+            meaningfulFPS=\(meaningfulFPS, privacy: .public) \
+            encodedFPS=\(encodedFPS, privacy: .public) \
+            encodedBytes=\(snapshot.encodedBytes, privacy: .public)
+            """
+        )
     }
 
     private func handleAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
@@ -765,6 +878,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             ? makePCM16AudioChunk(from: outputBuffer, sequenceNumber: nextSequenceNumber)
             : nil
         if let nativePCMChunk {
+            audioSequenceNumber = nativePCMChunk.sequenceNumber
             onCapturedPCM16AudioChunk?(nativePCMChunk)
         }
 
@@ -1021,7 +1135,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         }
 
         let type: RemoteFrameType = (codecType == kCMVideoCodecType_HEVC) ? .hevc : .h264
-        noteEncodedFrameEmitted()
+        noteEncodedFrameEmitted(encodedBytes: payload.count)
         onEncodedFrame?(payload, width, height, type, isSyncSample(sampleBuffer))
     }
 
@@ -1195,7 +1309,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         guard CGImageDestinationFinalize(dest) else { return }
 
         // 复用 onEncodedFrame：frameType 用 .bgra 标记“非 H26x”，上层可按 magic 判断是否 JPEG
-        noteEncodedFrameEmitted()
+        noteEncodedFrameEmitted(encodedBytes: mutable.length)
         onEncodedFrame?(
             mutable as Data,
             CVPixelBufferGetWidth(pixelBuffer),
@@ -1388,19 +1502,18 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
                     }
 
                     if let onRawFrame = owner.onRawFrame {
-                        owner.noteEncodedFrameEmitted()
+                        owner.noteEncodedFrameEmitted(countForTelemetry: false)
                         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                         onRawFrame(pixelBuffer, pts)
                     }
 
                     guard let cs = owner.compressionSession else { return }
                     var flags = VTEncodeInfoFlags()
-                    let pts = CMTime(value: CMTimeValue(Date().timeIntervalSince1970 * 1000), timescale: 1000)
                     let status = VTCompressionSessionEncodeFrame(
                         cs,
                         imageBuffer: pixelBuffer,
-                        presentationTimeStamp: pts,
-                        duration: CMTime.zero,
+                        presentationTimeStamp: ScreenCaptureKitStreamer.encodePresentationTimeStamp(from: sampleBuffer),
+                        duration: ScreenCaptureKitStreamer.encodeFrameDuration(forConfiguredFPS: owner.configuredFPS),
                         frameProperties: owner.nextFramePropertiesForEncode(),
                         sourceFrameRefcon: nil,
                         infoFlagsOut: &flags

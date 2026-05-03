@@ -9,6 +9,10 @@ import CoreImage
 import UIKit
 #endif
 
+private enum RemoteDesktopDiagnosticDefaults {
+    static let showInteractionOverlayKey = "SkyBridgeRemoteDesktopShowInteractionOverlay"
+}
+
 /// 远程桌面视图 - 支持触摸控制和手势操作
 @available(iOS 17.0, *)
 struct RemoteDesktopView: View {
@@ -274,6 +278,8 @@ struct RemoteDesktopStreamView: View {
     @State private var dragMouseDownSent = false
     @State private var lastScrollTranslationHeight: CGFloat = 0
     @State private var scrollAccumulator: CGFloat = 0
+    @AppStorage(RemoteDesktopDiagnosticDefaults.showInteractionOverlayKey)
+    private var showInteractionOverlay = false
 
     private var isUITesting: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
@@ -321,7 +327,12 @@ struct RemoteDesktopStreamView: View {
     }
     
     private func remoteScreenView(geometry: GeometryProxy) -> some View {
-        Group {
+        let shouldRenderDiagnosticOverlay = showInteractionOverlay
+            && remoteDesktopManager.frameRate >= 5
+        let diagnosticOverlayPayload = shouldRenderDiagnosticOverlay
+            ? remoteDesktopManager.currentOverlayPayload
+            : nil
+        return Group {
 #if canImport(WebRTC)
             if let remoteTrack = nativeCrossNetworkVideoTrack {
                 ZStack {
@@ -330,7 +341,9 @@ struct RemoteDesktopStreamView: View {
                         resolution: remoteDesktopManager.resolution,
                         cursorPayload: remoteDesktopManager.currentCursorPayload,
                         cursorImage: remoteDesktopManager.currentCursorImage,
-                        overlayPayload: remoteDesktopManager.currentOverlayPayload
+                        overlayPayload: crossNetworkManager.remoteVideoTrackHasRenderedFrame
+                            ? diagnosticOverlayPayload
+                            : nil
                     )
 
                     if !crossNetworkManager.remoteVideoTrackHasRenderedFrame {
@@ -342,7 +355,7 @@ struct RemoteDesktopStreamView: View {
                             resolution: remoteDesktopManager.resolution,
                             cursorPayload: remoteDesktopManager.currentCursorPayload,
                             cursorImage: remoteDesktopManager.currentCursorImage,
-                            overlayPayload: remoteDesktopManager.currentOverlayPayload
+                            overlayPayload: diagnosticOverlayPayload
                         )
                     }
                 }
@@ -355,7 +368,7 @@ struct RemoteDesktopStreamView: View {
                     resolution: remoteDesktopManager.resolution,
                     cursorPayload: remoteDesktopManager.currentCursorPayload,
                     cursorImage: remoteDesktopManager.currentCursorImage,
-                    overlayPayload: remoteDesktopManager.currentOverlayPayload
+                    overlayPayload: diagnosticOverlayPayload
                 )
             }
 #else
@@ -367,7 +380,7 @@ struct RemoteDesktopStreamView: View {
                 resolution: remoteDesktopManager.resolution,
                 cursorPayload: remoteDesktopManager.currentCursorPayload,
                 cursorImage: remoteDesktopManager.currentCursorImage,
-                overlayPayload: remoteDesktopManager.currentOverlayPayload
+                overlayPayload: diagnosticOverlayPayload
             )
 #endif
         }
@@ -652,6 +665,8 @@ enum TouchMode: String, CaseIterable {
 private struct RemoteDesktopStreamSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @AppStorage(RemoteDesktopDiagnosticDefaults.showInteractionOverlayKey)
+    private var showInteractionOverlay = false
 
     var body: some View {
         NavigationStack {
@@ -709,6 +724,10 @@ private struct RemoteDesktopStreamSettingsSheet: View {
                 Section("交互") {
                     Toggle("共享剪贴板", isOn: $remoteDesktopManager.viewerSettings.clipboardSyncEnabled)
                     Toggle("远端音频", isOn: $remoteDesktopManager.viewerSettings.audioRedirectionEnabled)
+                }
+
+                Section("诊断") {
+                    Toggle("显示选区/焦点 overlay", isOn: $showInteractionOverlay)
                 }
 
                 Section("当前流") {
@@ -1245,10 +1264,11 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             metalView.device = renderer.device
             metalView.delegate = renderer
             metalView.framebufferOnly = false
-            // Use VSync-driven continuous draws so later frames can't be lost
-            // when multiple setNeedsDisplay calls get coalesced during decode.
-            metalView.enableSetNeedsDisplay = false
-            metalView.isPaused = false
+            // Draw only when the remote decoder publishes a new frame. Continuous
+            // 60Hz MTKView draws burn duplicate passes and widen the drawable
+            // lifecycle window without improving a network-paced stream.
+            metalView.enableSetNeedsDisplay = true
+            metalView.isPaused = true
             metalView.preferredFramesPerSecond = 60
             metalView.isOpaque = true
             metalView.backgroundColor = .black
@@ -1263,9 +1283,20 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         private let stateLock = NSLock()
         private var currentFrame: DecodedPixelBufferFrame?
         private var currentFrameVersion: UInt64 = 0
+        private var submittedFrameVersion: UInt64 = 0
         private var lastDisplayedFrameVersion: UInt64 = 0
         private var needsClear = true
-        private let inFlightSemaphore = DispatchSemaphore(value: 2)
+        private weak var boundView: MTKView?
+        private var pendingRedraw = false
+        private let inFlightSemaphore = DispatchSemaphore(value: 1)
+        private var renderTelemetryWindowStartedAt = Date()
+        private var renderSubmittedFrames = 0
+        private var renderDisplayedFrames = 0
+        private var renderDuplicateSkips = 0
+        private var renderDrawableSkips = 0
+        private var renderInFlightSkips = 0
+        private var renderFailureSkips = 0
+        private var renderTotalMs: Double = 0
         var onFrameDisplayed: (@Sendable (CMTime) -> Void)?
 
         override init() {
@@ -1285,6 +1316,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         @MainActor
         func display(frame: DecodedPixelBufferFrame, version: UInt64, in view: MTKView) {
             stateLock.lock()
+            boundView = view
             currentFrame = frame
             currentFrameVersion = version
             needsClear = false
@@ -1303,19 +1335,24 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 height: max(view.bounds.height * drawableScale, 1)
             )
 
-            // Continuous VSync draws pick up the latest frame without an extra
-            // UIKit invalidation per decoded frame.
+            view.setNeedsDisplay()
+            view.draw()
         }
 
         @MainActor
         func flush(removeDisplayedImage: Bool, in view: MTKView) {
             if removeDisplayedImage {
                 stateLock.lock()
+                boundView = view
                 currentFrame = nil
                 currentFrameVersion = 0
+                submittedFrameVersion = 0
                 lastDisplayedFrameVersion = 0
                 needsClear = true
+                pendingRedraw = false
                 stateLock.unlock()
+                view.setNeedsDisplay()
+                view.draw()
             }
         }
 
@@ -1327,11 +1364,13 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             }
             let frame: DecodedPixelBufferFrame?
             let frameVersion: UInt64
+            let submittedVersion: UInt64
             let lastDisplayedVersion: UInt64
             let shouldClear: Bool
             stateLock.lock()
             frame = currentFrame
             frameVersion = currentFrameVersion
+            submittedVersion = submittedFrameVersion
             lastDisplayedVersion = lastDisplayedFrameVersion
             shouldClear = needsClear
             stateLock.unlock()
@@ -1339,7 +1378,19 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             guard shouldClear || frame != nil else {
                 return
             }
+            if !shouldClear, frame != nil {
+                guard frameVersion != 0,
+                      frameVersion != submittedVersion,
+                      frameVersion != lastDisplayedVersion else {
+                    recordRenderSkip(.duplicate, drawableSize: view.drawableSize)
+                    return
+                }
+            }
             guard inFlightSemaphore.wait(timeout: .now()) == .success else {
+                stateLock.lock()
+                pendingRedraw = true
+                stateLock.unlock()
+                recordRenderSkip(.inFlight, drawableSize: view.drawableSize)
                 return
             }
             var shouldSignalSemaphoreOnExit = true
@@ -1348,67 +1399,303 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                     inFlightSemaphore.signal()
                 }
             }
-            guard let drawable = view.currentDrawable,
-                  let commandQueue,
+            guard let commandQueue,
                   let commandBuffer = commandQueue.makeCommandBuffer() else {
+                recordRenderSkip(.failure, drawableSize: view.drawableSize)
                 return
             }
 
             guard let frame, let ciContext else {
                 guard shouldClear else { return }
-                if let passDescriptor = view.currentRenderPassDescriptor,
-                   let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) {
-                    encoder.endEncoding()
+                guard let renderTarget = makeDrawableRenderTarget(for: view) else {
+                    recordRenderSkip(.drawableUnavailable, drawableSize: view.drawableSize)
+                    return
                 }
-                commandBuffer.addCompletedHandler { [inFlightSemaphore] _ in
+                if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderTarget.renderPassDescriptor) {
+                    encoder.endEncoding()
+                } else {
+                    recordRenderSkip(.failure, drawableSize: view.drawableSize)
+                    return
+                }
+                commandBuffer.addCompletedHandler { [weak self, inFlightSemaphore] _ in
                     inFlightSemaphore.signal()
+                    guard let self else { return }
+                    self.stateLock.lock()
+                    self.needsClear = false
+                    self.stateLock.unlock()
                 }
                 shouldSignalSemaphoreOnExit = false
-                commandBuffer.present(drawable)
+                commandBuffer.present(renderTarget.drawable)
                 commandBuffer.commit()
-                stateLock.lock()
-                needsClear = false
-                stateLock.unlock()
                 return
             }
-
-            // 如果帧版本与已显示的版本相同，跳过渲染（正常情况，避免重复渲染）
-            guard frameVersion != 0, frameVersion != lastDisplayedVersion else {
+            let drawableWidth = max(Int(view.drawableSize.width.rounded(.down)), 1)
+            let drawableHeight = max(Int(view.drawableSize.height.rounded(.down)), 1)
+            guard let renderTexture = makeRenderTexture(
+                width: drawableWidth,
+                height: drawableHeight,
+                pixelFormat: view.colorPixelFormat
+            ) else {
+                recordRenderSkip(.failure, drawableSize: view.drawableSize)
                 return
             }
-
-            let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+            guard let renderTarget = makeDrawableRenderTarget(for: view) else {
+                recordRenderSkip(.drawableUnavailable, drawableSize: view.drawableSize)
+                return
+            }
+            let drawableSize = CGSize(width: CGFloat(drawableWidth), height: CGFloat(drawableHeight))
             let drawableBounds = CGRect(
                 x: 0,
                 y: 0,
-                width: view.drawableSize.width,
-                height: view.drawableSize.height
+                width: CGFloat(drawableWidth),
+                height: CGFloat(drawableHeight)
             )
+            stateLock.lock()
+            submittedFrameVersion = frameVersion
+            renderSubmittedFrames += 1
+            stateLock.unlock()
+            let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
             let scaleX = drawableBounds.width / max(image.extent.width, 1)
             let scaleY = drawableBounds.height / max(image.extent.height, 1)
+            let verticalFlipTransform = CGAffineTransform(
+                a: scaleX,
+                b: 0,
+                c: 0,
+                d: -scaleY,
+                tx: -image.extent.minX * scaleX,
+                ty: drawableBounds.height + (image.extent.minY * scaleY)
+            )
             let renderedImage = image.transformed(
-                by: CGAffineTransform(scaleX: scaleX, y: scaleY)
+                by: verticalFlipTransform
             )
 
+            if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderTarget.renderPassDescriptor) {
+                encoder.endEncoding()
+            }
             ciContext.render(
                 renderedImage,
-                to: drawable.texture,
+                to: renderTexture,
                 commandBuffer: commandBuffer,
                 bounds: drawableBounds,
                 colorSpace: CGColorSpaceCreateDeviceRGB()
             )
+            if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
+                blitEncoder.copy(
+                    from: renderTexture,
+                    sourceSlice: 0,
+                    sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(
+                        width: drawableWidth,
+                        height: drawableHeight,
+                        depth: 1
+                    ),
+                    to: renderTarget.texture,
+                    destinationSlice: 0,
+                    destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                )
+                blitEncoder.endEncoding()
+            } else {
+                recordRenderSkip(.failure, drawableSize: view.drawableSize)
+                return
+            }
 
             let presentationTimeStamp = frame.presentationTimeStamp
+            let frameAgeMs = Self.frameAgeMilliseconds(for: presentationTimeStamp)
+            let renderStartedAt = DispatchTime.now().uptimeNanoseconds
             commandBuffer.addCompletedHandler { [weak self, onFrameDisplayed, inFlightSemaphore] _ in
                 inFlightSemaphore.signal()
-                self?.stateLock.lock()
-                self?.lastDisplayedFrameVersion = frameVersion
-                self?.stateLock.unlock()
-                onFrameDisplayed?(presentationTimeStamp)
+                guard let self else { return }
+                var didAdvanceDisplayedVersion = false
+                let renderEndedAt = DispatchTime.now().uptimeNanoseconds
+                let renderMs = Double(renderEndedAt - renderStartedAt) / 1_000_000
+                let telemetrySnapshot: RenderTelemetrySnapshot?
+                self.stateLock.lock()
+                if frameVersion >= self.lastDisplayedFrameVersion {
+                    self.lastDisplayedFrameVersion = frameVersion
+                    didAdvanceDisplayedVersion = true
+                }
+                if self.submittedFrameVersion == frameVersion {
+                    self.submittedFrameVersion = 0
+                }
+                if didAdvanceDisplayedVersion {
+                    self.renderDisplayedFrames += 1
+                }
+                self.renderTotalMs += renderMs
+                let shouldScheduleFollowUpDraw = self.pendingRedraw
+                    || (
+                        self.currentFrameVersion != 0
+                            && self.currentFrameVersion != self.lastDisplayedFrameVersion
+                    )
+                self.pendingRedraw = false
+                telemetrySnapshot = self.makeRenderTelemetrySnapshotIfNeededLocked(
+                    now: Date(),
+                    drawableSize: drawableSize,
+                    frameAgeMs: frameAgeMs
+                )
+                self.stateLock.unlock()
+                self.logRenderTelemetryIfNeeded(telemetrySnapshot)
+                if didAdvanceDisplayedVersion {
+                    onFrameDisplayed?(presentationTimeStamp)
+                }
+                if shouldScheduleFollowUpDraw {
+                    Task { @MainActor [weak self] in
+                        self?.requestFollowUpDrawIfPossible()
+                    }
+                }
             }
             shouldSignalSemaphoreOnExit = false
-            commandBuffer.present(drawable)
+            commandBuffer.present(renderTarget.drawable)
             commandBuffer.commit()
+        }
+
+        @MainActor
+        private func requestFollowUpDrawIfPossible() {
+            guard let view = boundView else { return }
+            view.setNeedsDisplay()
+            view.draw()
+        }
+
+        private struct DrawableRenderTarget {
+            let drawable: CAMetalDrawable
+            let texture: MTLTexture
+            let renderPassDescriptor: MTLRenderPassDescriptor
+            let size: CGSize
+        }
+
+        @MainActor
+        private func makeDrawableRenderTarget(for view: MTKView) -> DrawableRenderTarget? {
+            guard let drawable = view.currentDrawable else { return nil }
+            let drawableTexture = drawable.texture
+            let renderPassDescriptor = MTLRenderPassDescriptor()
+            renderPassDescriptor.colorAttachments[0].loadAction = .clear
+            renderPassDescriptor.colorAttachments[0].storeAction = .store
+            renderPassDescriptor.colorAttachments[0].clearColor = view.clearColor
+            renderPassDescriptor.colorAttachments[0].texture = drawableTexture
+            return DrawableRenderTarget(
+                drawable: drawable,
+                texture: drawableTexture,
+                renderPassDescriptor: renderPassDescriptor,
+                size: CGSize(
+                    width: CGFloat(drawableTexture.width),
+                    height: CGFloat(drawableTexture.height)
+                )
+            )
+        }
+
+        private enum RenderSkipReason {
+            case duplicate
+            case drawableUnavailable
+            case inFlight
+            case failure
+        }
+
+        private struct RenderTelemetrySnapshot {
+            let interval: TimeInterval
+            let submitted: Int
+            let displayed: Int
+            let duplicateSkips: Int
+            let drawableSkips: Int
+            let inFlightSkips: Int
+            let failureSkips: Int
+            let averageRenderMs: Double
+            let frameAgeMs: Int?
+            let drawableSize: CGSize
+            let submittedFrameVersion: UInt64
+            let lastDisplayedFrameVersion: UInt64
+        }
+
+        private func makeRenderTexture(
+            width: Int,
+            height: Int,
+            pixelFormat: MTLPixelFormat
+        ) -> MTLTexture? {
+            guard let device, width > 0, height > 0 else { return nil }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: pixelFormat,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+            descriptor.storageMode = .private
+            return device.makeTexture(descriptor: descriptor)
+        }
+
+        private func recordRenderSkip(_ reason: RenderSkipReason, drawableSize: CGSize) {
+            let telemetrySnapshot: RenderTelemetrySnapshot?
+            stateLock.lock()
+            switch reason {
+            case .duplicate:
+                renderDuplicateSkips += 1
+            case .drawableUnavailable:
+                renderDrawableSkips += 1
+            case .inFlight:
+                renderInFlightSkips += 1
+            case .failure:
+                renderFailureSkips += 1
+            }
+            telemetrySnapshot = makeRenderTelemetrySnapshotIfNeededLocked(
+                now: Date(),
+                drawableSize: drawableSize,
+                frameAgeMs: nil
+            )
+            stateLock.unlock()
+            logRenderTelemetryIfNeeded(telemetrySnapshot)
+        }
+
+        private func makeRenderTelemetrySnapshotIfNeededLocked(
+            now: Date,
+            drawableSize: CGSize,
+            frameAgeMs: Int?
+        ) -> RenderTelemetrySnapshot? {
+            let interval = now.timeIntervalSince(renderTelemetryWindowStartedAt)
+            guard interval >= 1.0 else { return nil }
+            let submitted = renderSubmittedFrames
+            let averageRenderMs = submitted > 0 ? renderTotalMs / Double(submitted) : 0
+            let snapshot = RenderTelemetrySnapshot(
+                interval: interval,
+                submitted: submitted,
+                displayed: renderDisplayedFrames,
+                duplicateSkips: renderDuplicateSkips,
+                drawableSkips: renderDrawableSkips,
+                inFlightSkips: renderInFlightSkips,
+                failureSkips: renderFailureSkips,
+                averageRenderMs: averageRenderMs,
+                frameAgeMs: frameAgeMs,
+                drawableSize: drawableSize,
+                submittedFrameVersion: submittedFrameVersion,
+                lastDisplayedFrameVersion: lastDisplayedFrameVersion
+            )
+            renderTelemetryWindowStartedAt = now
+            renderSubmittedFrames = 0
+            renderDisplayedFrames = 0
+            renderDuplicateSkips = 0
+            renderDrawableSkips = 0
+            renderInFlightSkips = 0
+            renderFailureSkips = 0
+            renderTotalMs = 0
+            return snapshot
+        }
+
+        private func logRenderTelemetryIfNeeded(_ snapshot: RenderTelemetrySnapshot?) {
+            guard let snapshot else { return }
+            let submittedFPS = String(format: "%.1f", Double(snapshot.submitted) / max(snapshot.interval, 0.001))
+            let displayedFPS = String(format: "%.1f", Double(snapshot.displayed) / max(snapshot.interval, 0.001))
+            let renderMs = String(format: "%.2f", snapshot.averageRenderMs)
+            let frameAgeText = snapshot.frameAgeMs.map(String.init) ?? "-"
+            SkyBridgeLogger.shared.debug(
+                "📈 Metal render telemetry: submittedFPS=\(submittedFPS) displayFPS=\(displayedFPS) renderMs=\(renderMs) frameAgeMs=\(frameAgeText) orientation=verticalFlip drawableAccess=single-late frameDriven=true duplicateSkip=\(snapshot.duplicateSkips) drawableSkip=\(snapshot.drawableSkips) inflightSkip=\(snapshot.inFlightSkips) failureSkip=\(snapshot.failureSkips) drawable=\(Int(snapshot.drawableSize.width))x\(Int(snapshot.drawableSize.height)) submittedVersion=\(snapshot.submittedFrameVersion) displayedVersion=\(snapshot.lastDisplayedFrameVersion)"
+            )
+        }
+
+        private static func frameAgeMilliseconds(for presentationTimeStamp: CMTime) -> Int? {
+            guard presentationTimeStamp.flags.contains(.valid) else { return nil }
+            let now = CMClockGetTime(CMClockGetHostTimeClock())
+            let ageSeconds = CMTimeGetSeconds(CMTimeSubtract(now, presentationTimeStamp))
+            guard ageSeconds.isFinite, ageSeconds >= 0 else { return nil }
+            return Int((ageSeconds * 1_000).rounded())
         }
     }
 }

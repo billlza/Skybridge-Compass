@@ -54,6 +54,7 @@ public actor SignalServerClient {
         public let sessionToken: String
         public let qrBootstrapToken: String
         public let turnAdmissionToken: String
+        public let mediaAdmissionToken: String?
         public let expiresIn: Int
         public let signalingServerOrigin: String
     }
@@ -68,6 +69,7 @@ public actor SignalServerClient {
         public let sessionId: String
         public let sessionToken: String
         public let turnAdmissionToken: String
+        public let mediaAdmissionToken: String?
         public let expiresIn: Int
         public let signalingServerOrigin: String
     }
@@ -77,6 +79,7 @@ public actor SignalServerClient {
         public let sessionId: String
         public let sessionToken: String
         public let turnAdmissionToken: String
+        public let mediaAdmissionToken: String?
         public let expiresIn: Int
         public let signalingServerOrigin: String
         public let initiatorDeviceId: String
@@ -94,6 +97,7 @@ public actor SignalServerClient {
         public let sessionId: String
         public let sessionToken: String
         public let turnAdmissionToken: String
+        public let mediaAdmissionToken: String?
         public let expiresIn: Int
         public let signalingServerOrigin: String
         public let initiatorDeviceId: String
@@ -136,6 +140,33 @@ public actor SignalServerClient {
             case status
             case approvalMethod = "approval_method"
         }
+    }
+
+    private struct MediaLeaseEndpointResponseBody: Decodable {
+        let host: String
+        let port: UInt16
+    }
+
+    private struct MediaLeaseResponseBody: Decodable {
+        let sessionId: String
+        let role: String
+        let endpoint: MediaLeaseEndpointResponseBody
+        let leaseToken: String
+        let expiresAt: Int64
+        let ttl: Int
+        let maxPacketBytes: Int
+    }
+
+    private struct MediaAdmissionRefreshRequestBody: Encodable {
+        let sessionId: String
+        let role: String
+    }
+
+    private struct MediaAdmissionRefreshResponseBody: Decodable {
+        let sessionId: String
+        let role: String
+        let mediaAdmissionToken: String
+        let expiresIn: Int
     }
 
     public struct AdmissionChallenge: Sendable, Equatable {
@@ -219,11 +250,53 @@ public actor SignalServerClient {
         }
     }
 
+    public struct MediaAdmissionLease: Sendable, Equatable {
+        public let token: String
+        public let expiresIn: TimeInterval
+
+        public init(token: String, expiresIn: TimeInterval) {
+            self.token = token
+            self.expiresIn = expiresIn
+        }
+    }
+
+    public struct MediaRelayLease: Sendable, Equatable {
+        public let sessionID: String
+        public let role: String
+        public let endpointHost: String
+        public let endpointPort: UInt16
+        public let leaseToken: String
+        public let expiresAt: TimeInterval
+        public let ttl: TimeInterval
+        public let maxPacketBytes: Int
+
+        public init(
+            sessionID: String,
+            role: String,
+            endpointHost: String,
+            endpointPort: UInt16,
+            leaseToken: String,
+            expiresAt: TimeInterval,
+            ttl: TimeInterval,
+            maxPacketBytes: Int
+        ) {
+            self.sessionID = sessionID
+            self.role = role
+            self.endpointHost = endpointHost
+            self.endpointPort = endpointPort
+            self.leaseToken = leaseToken
+            self.expiresAt = expiresAt
+            self.ttl = ttl
+            self.maxPacketBytes = maxPacketBytes
+        }
+    }
+
     public struct ConnectionCodeLease: Sendable, Equatable {
         public let code: String
         public let sessionID: String
         public let sessionToken: String
         public let turnAdmissionLease: TurnAdmissionLease
+        public let mediaAdmissionLease: MediaAdmissionLease?
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
 
@@ -236,6 +309,7 @@ public actor SignalServerClient {
         public let sessionID: String
         public let sessionToken: String
         public let turnAdmissionLease: TurnAdmissionLease
+        public let mediaAdmissionLease: MediaAdmissionLease?
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
         public let initiatorDeviceId: String
@@ -253,6 +327,7 @@ public actor SignalServerClient {
         public let sessionToken: String
         public let qrBootstrapToken: String
         public let turnAdmissionLease: TurnAdmissionLease
+        public let mediaAdmissionLease: MediaAdmissionLease?
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
 
@@ -265,6 +340,7 @@ public actor SignalServerClient {
         public let sessionID: String
         public let sessionToken: String
         public let turnAdmissionLease: TurnAdmissionLease
+        public let mediaAdmissionLease: MediaAdmissionLease?
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
         public let initiatorDeviceId: String
@@ -312,6 +388,8 @@ public actor SignalServerClient {
     public static let registerSessionPath = "/api/webrtc/register-session"
     public static let redeemSessionPath = "/api/webrtc/redeem-session"
     public static let registerCurrentDevicePath = "/api/devices/register-current"
+    public static let mediaLeasePath = "/api/media/lease"
+    public static let mediaAdmissionRefreshPath = "/api/media/admission/refresh"
 
     public init(
         urlSession: URLSession = .shared,
@@ -432,6 +510,10 @@ public actor SignalServerClient {
                 token: response.turnAdmissionToken,
                 expiresIn: min(TimeInterval(response.expiresIn), 60)
             ),
+            mediaAdmissionLease: Self.mediaAdmissionLease(
+                token: response.mediaAdmissionToken,
+                expiresIn: response.expiresIn
+            ),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin
         )
@@ -462,6 +544,10 @@ public actor SignalServerClient {
                 token: response.turnAdmissionToken,
                 expiresIn: min(TimeInterval(response.expiresIn), 60)
             ),
+            mediaAdmissionLease: Self.mediaAdmissionLease(
+                token: response.mediaAdmissionToken,
+                expiresIn: response.expiresIn
+            ),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin
         )
@@ -483,6 +569,10 @@ public actor SignalServerClient {
             turnAdmissionLease: TurnAdmissionLease(
                 token: response.turnAdmissionToken,
                 expiresIn: min(TimeInterval(response.expiresIn), 60)
+            ),
+            mediaAdmissionLease: Self.mediaAdmissionLease(
+                token: response.mediaAdmissionToken,
+                expiresIn: response.expiresIn
             ),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
@@ -522,6 +612,10 @@ public actor SignalServerClient {
                 token: response.turnAdmissionToken,
                 expiresIn: min(TimeInterval(response.expiresIn), 60)
             ),
+            mediaAdmissionLease: Self.mediaAdmissionLease(
+                token: response.mediaAdmissionToken,
+                expiresIn: response.expiresIn
+            ),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
             initiatorDeviceId: response.initiatorDeviceId,
@@ -549,6 +643,71 @@ public actor SignalServerClient {
             requiresUserAuthentication: true
         )
         return response.device
+    }
+
+    public func requestMediaRelayLease(mediaAdmissionToken: String) async throws -> MediaRelayLease {
+        let response: MediaLeaseResponseBody = try await performJSONRequest(
+            path: Self.mediaLeasePath,
+            method: "POST",
+            body: Data("{}".utf8),
+            extraHeaders: [
+                "X-SkyBridge-Media-Admission": mediaAdmissionToken
+            ]
+        )
+        return MediaRelayLease(
+            sessionID: response.sessionId,
+            role: response.role,
+            endpointHost: response.endpoint.host,
+            endpointPort: response.endpoint.port,
+            leaseToken: response.leaseToken,
+            expiresAt: TimeInterval(response.expiresAt),
+            ttl: TimeInterval(response.ttl),
+            maxPacketBytes: response.maxPacketBytes
+        )
+    }
+
+    public func refreshMediaAdmissionToken(
+        sessionId: String,
+        sessionToken: String,
+        role: String,
+        idempotencyKey: String? = nil
+    ) async throws -> String {
+        try await refreshMediaAdmissionLease(
+            sessionId: sessionId,
+            sessionToken: sessionToken,
+            role: role,
+            idempotencyKey: idempotencyKey
+        ).token
+    }
+
+    public func refreshMediaAdmissionLease(
+        sessionId: String,
+        sessionToken: String,
+        role: String,
+        idempotencyKey: String? = nil
+    ) async throws -> MediaAdmissionLease {
+        var headers = [
+            "X-SkyBridge-Session": sessionToken
+        ]
+        if let idempotencyKey,
+           !idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            headers["Idempotency-Key"] = idempotencyKey
+        }
+        let response: MediaAdmissionRefreshResponseBody = try await performJSONRequest(
+            path: Self.mediaAdmissionRefreshPath,
+            method: "POST",
+            body: try JSONEncoder().encode(MediaAdmissionRefreshRequestBody(sessionId: sessionId, role: role)),
+            extraHeaders: headers
+        )
+        guard response.sessionId == sessionId,
+              response.role == role,
+              !response.mediaAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientError.malformedResponse("invalid media admission refresh response")
+        }
+        return MediaAdmissionLease(
+            token: response.mediaAdmissionToken,
+            expiresIn: TimeInterval(max(0, response.expiresIn))
+        )
     }
 
     public static func lookupCodePath(for code: String) -> String {
@@ -591,6 +750,10 @@ public actor SignalServerClient {
                 token: turnAdmissionToken,
                 expiresIn: min(TimeInterval(expiresIn), 60)
             ),
+            mediaAdmissionLease: Self.mediaAdmissionLease(
+                token: object["mediaAdmissionToken"] as? String,
+                expiresIn: expiresIn
+            ),
             expiresIn: TimeInterval(expiresIn),
             signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? ""
         )
@@ -610,6 +773,10 @@ public actor SignalServerClient {
             turnAdmissionLease: TurnAdmissionLease(
                 token: turnAdmissionToken,
                 expiresIn: min(TimeInterval(expiresIn), 60)
+            ),
+            mediaAdmissionLease: Self.mediaAdmissionLease(
+                token: object["mediaAdmissionToken"] as? String,
+                expiresIn: expiresIn
             ),
             expiresIn: TimeInterval(expiresIn),
             signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? "",
@@ -655,8 +822,23 @@ public actor SignalServerClient {
                 token: turnAdmissionToken,
                 expiresIn: min(TimeInterval(expiresIn), 60)
             ),
+            mediaAdmissionLease: Self.mediaAdmissionLease(
+                token: object["mediaAdmissionToken"] as? String,
+                expiresIn: expiresIn
+            ),
             expiresIn: TimeInterval(expiresIn),
             signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? ""
+        )
+    }
+
+    private static func mediaAdmissionLease(token: String?, expiresIn: Int) -> MediaAdmissionLease? {
+        guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return nil
+        }
+        return MediaAdmissionLease(
+            token: token,
+            expiresIn: min(TimeInterval(expiresIn), 60)
         )
     }
 

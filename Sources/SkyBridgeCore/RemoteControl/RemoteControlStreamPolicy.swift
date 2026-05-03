@@ -18,6 +18,39 @@ struct RemoteControlStreamPolicy: Sendable, Equatable {
     let keyFrameInterval: Int
     let preferredSize: CGSize
     let reason: String
+
+    func protectingRealtimeAudio() -> RemoteControlStreamPolicy {
+        let protectedFrameRate = min(targetFrameRate, Self.realtimeAudioProtectedFrameRate)
+        let protectedSize = RemoteControlCaptureCompatibility.normalizedCaptureSize(
+            Self.sizeByCappingLongEdge(preferredSize, maxLongEdge: Self.realtimeAudioProtectedLongEdge),
+            for: codec
+        )
+        guard protectedFrameRate != targetFrameRate || protectedSize != preferredSize else {
+            return self
+        }
+        return RemoteControlStreamPolicy(
+            codec: codec,
+            targetFrameRate: protectedFrameRate,
+            keyFrameInterval: min(keyFrameInterval, max(10, protectedFrameRate * 2)),
+            preferredSize: protectedSize,
+            reason: "\(reason)+audio-protect"
+        )
+    }
+
+    private static let realtimeAudioProtectedFrameRate = 24
+    private static let realtimeAudioProtectedLongEdge: CGFloat = 1_920
+
+    private static func sizeByCappingLongEdge(_ size: CGSize, maxLongEdge: CGFloat) -> CGSize {
+        let longEdge = max(size.width, size.height)
+        guard longEdge.isFinite, longEdge > maxLongEdge, maxLongEdge > 0 else {
+            return size
+        }
+        let scale = maxLongEdge / longEdge
+        return CGSize(
+            width: max(1, (size.width * scale).rounded(.down)),
+            height: max(1, (size.height * scale).rounded(.down))
+        )
+    }
 }
 
 enum RemoteControlCaptureCompatibility {
@@ -94,6 +127,16 @@ enum RemoteControlStreamPolicySelector {
         } else if request.preferredCodec == .hevc && supportsHEVC {
             codec = .hevc
             reason = "peer-hevc-supported"
+        } else if request.preferredCodec == .h264,
+                  supportsHEVC,
+                  supportsH264,
+                  requestedFPS >= 55,
+                  longEdge >= 2_000,
+                  isAppleSilicon,
+                  request.enableHardwareAcceleration,
+                  request.enableAppleSiliconOptimization {
+            codec = .hevc
+            reason = "high-fps-lan-hevc-probe"
         } else if request.preferredCodec == .h264 && supportsH264 {
             codec = .h264
             reason = "peer-h264-supported"

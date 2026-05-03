@@ -18,6 +18,31 @@ struct WebRTCRemoteDesktopVideoPolicy: Sendable, Equatable {
     let preferredSize: CGSize
     let usesHardwareEncoder: Bool
     let reason: String
+
+    func protectingRealtimeAudio() -> WebRTCRemoteDesktopVideoPolicy {
+        let protectedPolicy = RemoteControlStreamPolicy(
+            codec: codec,
+            targetFrameRate: targetFrameRate,
+            keyFrameInterval: keyFrameInterval,
+            preferredSize: preferredSize,
+            reason: reason
+        ).protectingRealtimeAudio()
+        guard protectedPolicy.codec != codec
+            || protectedPolicy.targetFrameRate != targetFrameRate
+            || protectedPolicy.keyFrameInterval != keyFrameInterval
+            || protectedPolicy.preferredSize != preferredSize
+            || protectedPolicy.reason != reason else {
+            return self
+        }
+        return WebRTCRemoteDesktopVideoPolicy(
+            codec: protectedPolicy.codec,
+            targetFrameRate: protectedPolicy.targetFrameRate,
+            keyFrameInterval: protectedPolicy.keyFrameInterval,
+            preferredSize: protectedPolicy.preferredSize,
+            usesHardwareEncoder: usesHardwareEncoder,
+            reason: protectedPolicy.reason
+        )
+    }
 }
 
 enum WebRTCRemoteDesktopVideoPolicySelector {

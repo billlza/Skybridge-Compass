@@ -41,6 +41,32 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         XCTAssertNil(parser.nextPayload(sessionId: "S3", logLabel: "test"))
     }
 
+    func testInboundFrameParserDropsSBP2WithoutInterpretingItAsLength() {
+        var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 1024)
+        let directSBP2 = Data([0x53, 0x42, 0x50, 0x32, 0x00, 0x00, 0x00, 0x10])
+
+        parser.append(directSBP2)
+        XCTAssertNil(parser.nextPayload(sessionId: "S4", logLabel: "test"))
+        XCTAssertTrue(parser.canProbeDirectCompatibility)
+
+        let payload = Data("recovered".utf8)
+        parser.append(framedPayload(payload))
+        XCTAssertEqual(parser.nextPayload(sessionId: "S4", logLabel: "test"), payload)
+    }
+
+    func testInboundFrameParserDropsSBC2WrongChannelWithoutInterpretingItAsLength() {
+        var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 1024)
+        let sbc2ChunkOnControlChannel = Data([0x53, 0x42, 0x43, 0x32, 0x00, 0x00, 0x00, 0x01])
+
+        parser.append(sbc2ChunkOnControlChannel)
+        XCTAssertNil(parser.nextPayload(sessionId: "S5", logLabel: "test"))
+        XCTAssertTrue(parser.canProbeDirectCompatibility)
+
+        let payload = Data("recovered-after-sbc2".utf8)
+        parser.append(framedPayload(payload))
+        XCTAssertEqual(parser.nextPayload(sessionId: "S5", logLabel: "test"), payload)
+    }
+
     func testInvalidWebSocketURLFailsFastWithoutRetry() async {
         await Task { @MainActor in
             let probe = RetryProbe()
@@ -434,11 +460,18 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
                 messageType: .iceCandidate
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
                 isHandshakeComplete: true,
                 suppressRecovery: false,
                 messageType: .offer
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldDeferSignalingSendRecovery(
+                isHandshakeComplete: true,
+                suppressRecovery: false,
+                messageType: .leave
             )
         )
         XCTAssertFalse(

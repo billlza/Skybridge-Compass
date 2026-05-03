@@ -21,11 +21,13 @@ struct RemoteScreenFrameSendQueue {
     mutating func enqueue(_ frame: ScreenData) -> RemoteScreenFrameQueueEnqueueResult {
         if frame.isIndependentlyDecodableFrame {
             waitingForSyncFrame = false
+            var droppedStaleFrame = false
             if pendingFrames.count >= maxQueuedFrames {
                 pendingFrames.removeFirst(max(1, pendingFrames.count - maxQueuedFrames + 1))
+                droppedStaleFrame = true
             }
             pendingFrames.append(frame)
-            return .enqueued
+            return droppedStaleFrame ? .droppedStaleIndependentFrame : .enqueued
         }
 
         if waitingForSyncFrame {

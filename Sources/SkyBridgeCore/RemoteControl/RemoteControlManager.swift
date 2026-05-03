@@ -17,6 +17,7 @@ import ImageIO
 import ScreenCaptureKit
 import VideoToolbox
 import CryptoKit
+import SkyBridgeRealtimeMedia
 
 private enum RemoteControlWireLimits {
     static let aesGCMCombinedOverheadBytes = 28
@@ -73,6 +74,7 @@ struct ScreenData: Codable, Sendable {
     private let peerId: String
     private let connection: NWConnection
     private let maxFramedMessageBytes: Int
+    private let logger = Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
 
     private var frameTransport: FrameTransport = .legacyJSON
     private var streamingEnabled = true
@@ -95,6 +97,30 @@ struct ScreenData: Codable, Sendable {
     private var syncRecoveryTask: Task<Void, Never>?
     private let maxQueuedAudioPayloads = 3
     private let maxAudioVideoFrameGap: TimeInterval = 0.08
+    private var frameTelemetryWindowStartedAt = Date()
+    private var telemetrySubmittedFrames = 0
+    private var telemetrySentFrames = 0
+    private var telemetryDroppedFrames = 0
+    private var telemetryBackpressureEvents = 0
+    private var telemetrySentBytes = 0
+    private var telemetrySendLatencySamples = 0
+    private var telemetrySendLatencyTotalMs: Double = 0
+    private var telemetrySendLatencyMaxMs: Double = 0
+
+    private struct FrameTelemetrySnapshot: Sendable {
+        let interval: TimeInterval
+        let submittedFrames: Int
+        let sentFrames: Int
+        let droppedFrames: Int
+        let backpressureEvents: Int
+        let sentBytes: Int
+        let sendLatencySamples: Int
+        let averageSendLatencyMs: Double
+        let maxSendLatencyMs: Double
+        let transport: String
+        let queuedFrames: Int
+        let waitingForSyncFrame: Bool
+    }
 
     init(peerId: String, connection: NWConnection, maxFramedMessageBytes: Int) {
         self.peerId = peerId
@@ -115,6 +141,7 @@ struct ScreenData: Codable, Sendable {
         self.allowsInsecureLegacy = allowsInsecureLegacy
         self.sessionKeys = sessionKeys
         if !streamingEnabled {
+            noteFrameTelemetry(dropped: frameQueue.pendingFrames.count)
             frameQueue.clear()
             audioPayloadQueue.removeAll(keepingCapacity: true)
             latestDamageReport = nil
@@ -136,7 +163,14 @@ struct ScreenData: Codable, Sendable {
 
     func submitFrame(_ frame: ScreenData) async {
         guard !closed, streamingEnabled else { return }
+        let wasBackpressured = sending || !frameQueue.pendingFrames.isEmpty || frameQueue.waitingForSyncFrame
+        let pendingFramesBeforeEnqueue = frameQueue.pendingFrames.count
         let enqueueResult = frameQueue.enqueue(frame)
+        noteFrameTelemetry(
+            submitted: 1,
+            dropped: droppedFrameCount(for: enqueueResult, pendingFramesBeforeEnqueue: pendingFramesBeforeEnqueue),
+            backpressure: wasBackpressured || enqueueResult != .enqueued ? 1 : 0
+        )
         if enqueueResult == .droppedPredictiveFrameNeedsSyncRefresh {
             requestSyncRefreshIfNeeded(reason: "send-queue-overflow", minimumInterval: 0)
         }
@@ -172,6 +206,7 @@ struct ScreenData: Codable, Sendable {
 
     func close() {
         closed = true
+        noteFrameTelemetry(dropped: frameQueue.pendingFrames.count)
         frameQueue.clear()
         audioPayloadQueue.removeAll(keepingCapacity: false)
         latestDamageReport = nil
@@ -190,6 +225,109 @@ struct ScreenData: Codable, Sendable {
             lastSentFrameAt: lastSentFrameAt,
             waitingForSyncFrame: frameQueue.waitingForSyncFrame,
             waitingForSyncSince: waitingForSyncSince
+        )
+    }
+
+    private func droppedFrameCount(
+        for result: RemoteScreenFrameQueueEnqueueResult,
+        pendingFramesBeforeEnqueue: Int
+    ) -> Int {
+        switch result {
+        case .enqueued:
+            return 0
+        case .droppedStaleIndependentFrame:
+            return max(1, pendingFramesBeforeEnqueue - frameQueue.maxQueuedFrames + 1)
+        case .droppedPredictiveFrameWaitingForSync:
+            return 1
+        case .droppedPredictiveFrameNeedsSyncRefresh:
+            return max(1, pendingFramesBeforeEnqueue + 1)
+        }
+    }
+
+    private func noteFrameTelemetry(
+        submitted: Int = 0,
+        sent: Int = 0,
+        dropped: Int = 0,
+        backpressure: Int = 0,
+        sentBytes: Int = 0,
+        sendLatencyMs: Double? = nil
+    ) {
+        telemetrySubmittedFrames += max(0, submitted)
+        telemetrySentFrames += max(0, sent)
+        telemetryDroppedFrames += max(0, dropped)
+        telemetryBackpressureEvents += max(0, backpressure)
+        telemetrySentBytes += max(0, sentBytes)
+        if let sendLatencyMs {
+            telemetrySendLatencySamples += 1
+            telemetrySendLatencyTotalMs += max(0, sendLatencyMs)
+            telemetrySendLatencyMaxMs = max(telemetrySendLatencyMaxMs, sendLatencyMs)
+        }
+        emitFrameTelemetryIfNeeded()
+    }
+
+    private func emitFrameTelemetryIfNeeded(now: Date = Date()) {
+        let interval = now.timeIntervalSince(frameTelemetryWindowStartedAt)
+        guard interval >= 1 else { return }
+        let averageLatency = telemetrySendLatencySamples > 0
+            ? telemetrySendLatencyTotalMs / Double(telemetrySendLatencySamples)
+            : 0
+        let snapshot = FrameTelemetrySnapshot(
+            interval: interval,
+            submittedFrames: telemetrySubmittedFrames,
+            sentFrames: telemetrySentFrames,
+            droppedFrames: telemetryDroppedFrames,
+            backpressureEvents: telemetryBackpressureEvents,
+            sentBytes: telemetrySentBytes,
+            sendLatencySamples: telemetrySendLatencySamples,
+            averageSendLatencyMs: averageLatency,
+            maxSendLatencyMs: telemetrySendLatencyMaxMs,
+            transport: frameTelemetryTransportName,
+            queuedFrames: frameQueue.pendingFrames.count,
+            waitingForSyncFrame: frameQueue.waitingForSyncFrame
+        )
+        frameTelemetryWindowStartedAt = now
+        telemetrySubmittedFrames = 0
+        telemetrySentFrames = 0
+        telemetryDroppedFrames = 0
+        telemetryBackpressureEvents = 0
+        telemetrySentBytes = 0
+        telemetrySendLatencySamples = 0
+        telemetrySendLatencyTotalMs = 0
+        telemetrySendLatencyMaxMs = 0
+        logFrameTelemetry(snapshot)
+    }
+
+    private var frameTelemetryTransportName: String {
+        switch frameTransport {
+        case .legacyJSON:
+            return "legacy-json"
+        case .binaryWire:
+            return "sbrf-v1"
+        }
+    }
+
+    private func logFrameTelemetry(_ snapshot: FrameTelemetrySnapshot) {
+        let interval = max(snapshot.interval, 0.001)
+        let submittedFPS = String(format: "%.1f", Double(snapshot.submittedFrames) / interval)
+        let sentFPS = String(format: "%.1f", Double(snapshot.sentFrames) / interval)
+        let averageLatency = String(format: "%.1f", snapshot.averageSendLatencyMs)
+        let maxLatency = String(format: "%.1f", snapshot.maxSendLatencyMs)
+        logger.info(
+            """
+            📊 Remote frame tx telemetry: peer=\(self.peerId, privacy: .public) \
+            transport=\(snapshot.transport, privacy: .public) \
+            submittedFPS=\(submittedFPS, privacy: .public) \
+            sentFPS=\(sentFPS, privacy: .public) \
+            sent=\(snapshot.sentFrames, privacy: .public) \
+            dropped=\(snapshot.droppedFrames, privacy: .public) \
+            backpressure=\(snapshot.backpressureEvents, privacy: .public) \
+            bytes=\(snapshot.sentBytes, privacy: .public) \
+            avgSendMs=\(averageLatency, privacy: .public) \
+            maxSendMs=\(maxLatency, privacy: .public) \
+            latencySamples=\(snapshot.sendLatencySamples, privacy: .public) \
+            queued=\(snapshot.queuedFrames, privacy: .public) \
+            waitingForSync=\(String(snapshot.waitingForSyncFrame), privacy: .public)
+            """
         )
     }
 
@@ -218,27 +356,34 @@ struct ScreenData: Codable, Sendable {
 
                 let payload = try makeScreenPayload(for: nextFrame)
                 guard payload.count <= maxFramedMessageBytes else {
-                    Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-                        .warning(
-                            """
-                            ⚠️ 已丢弃超限远控屏幕帧: peer=\(self.peerId, privacy: .public) \
-                            bytes=\(payload.count, privacy: .public) \
-                            max=\(self.maxFramedMessageBytes, privacy: .public) \
-                            format=\(nextFrame.format ?? "unknown", privacy: .public) \
-                            resolution=\(nextFrame.width, privacy: .public)x\(nextFrame.height, privacy: .public)
-                            """
-                        )
+                    noteFrameTelemetry(dropped: 1)
+                    logger.warning(
+                        """
+                        ⚠️ 已丢弃超限远控屏幕帧: peer=\(self.peerId, privacy: .public) \
+                        bytes=\(payload.count, privacy: .public) \
+                        max=\(self.maxFramedMessageBytes, privacy: .public) \
+                        format=\(nextFrame.format ?? "unknown", privacy: .public) \
+                        resolution=\(nextFrame.width, privacy: .public)x\(nextFrame.height, privacy: .public)
+                        """
+                    )
                     continue
                 }
 
+                let sendStartedAt = Date()
                 try await sendRemoteFrame(payload)
+                let sendLatencyMs = Date().timeIntervalSince(sendStartedAt) * 1_000
+                noteFrameTelemetry(
+                    sent: 1,
+                    sentBytes: payload.count,
+                    sendLatencyMs: sendLatencyMs
+                )
                 lastSentFrameAt = Date()
                 updateSyncRecoveryState()
             } catch {
-                Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-                    .error(
-                        "❌ 发送屏幕数据失败: peer=\(self.peerId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-                    )
+                noteFrameTelemetry(dropped: 1)
+                logger.error(
+                    "❌ 发送屏幕数据失败: peer=\(self.peerId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
                 break
             }
         }
@@ -539,6 +684,8 @@ private final class PeerConnection {
     var handshakePeer: PeerIdentifier?
     @available(macOS 14.0, *)
     var sessionKeys: SessionKeys?
+    @available(macOS 14.0, *)
+    var realtimeAudioSender: RemoteRealtimeMediaAudioSender?
 
     init(
         id: String,
@@ -689,6 +836,12 @@ public final class RemoteControlManager: BaseManager {
     private var activeClipboardPeerId: String?
     private let viewingAudioSessionId = UUID()
     private var lastViewingInboundScreenTimestamp: TimeInterval?
+    private var lastSentViewerStreamConfiguration: RemoteDesktopStreamConfiguration?
+    @available(macOS 14.0, *)
+    private var p2pRealtimeAudioReceiver: SkyBridgeUDPRealtimeMediaReceiver?
+    @available(macOS 14.0, *)
+    private var p2pRealtimeAudioRenderer: RemoteRealtimeMediaAudioReceiver?
+    private var p2pRealtimeAudioReceiverPeerId: String?
 
  /// Metal 设备，作为静态图像兜底（ImageIO -> CGImage -> MTLTexture）
     private let metalDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
@@ -1024,6 +1177,8 @@ public final class RemoteControlManager: BaseManager {
 
         peer.connection.cancel()
         _ = removePeer(deviceId: deviceId, role: .controlling)
+        lastSentViewerStreamConfiguration = nil
+        stopP2PRealtimeAudioReceiverIfNeeded(peerId: deviceId)
         Task {
             await peer.outboundFramePump.close()
         }
@@ -1184,6 +1339,98 @@ public final class RemoteControlManager: BaseManager {
 
  // MARK: - 屏幕共享（被控制端 -> 控制端）
 
+    @available(macOS 14.0, *)
+    private func makeP2PRealtimeAudioSenderIfNeeded(
+        for peer: PeerConnection
+    ) async -> RemoteRealtimeMediaAudioSender? {
+        guard let config = peer.requestedStreamConfiguration,
+              config.requestsRealtimeMediaAudio,
+              config.allowsLegacyAudioChunkFallback == false,
+              let keys = peer.sessionKeys,
+              let advertisedEndpoint = config.mediaAudioEndpoint else {
+            return nil
+        }
+        guard let endpoint = effectiveRealtimeMediaEndpoint(
+            advertisedEndpoint,
+            for: peer
+        ) else {
+            logger.warning(
+                "⚠️ P2P PQC media audio missing reachable endpoint: peer=\(peer.id, privacy: .public) advertisedHost=\(advertisedEndpoint.host, privacy: .public)"
+            )
+            return nil
+        }
+        let mediaSessionId = config.mediaSessionId ?? keys.sessionId
+        if let existingSender = peer.realtimeAudioSender {
+            if await existingSender.matches(
+                sessionId: mediaSessionId,
+                endpoint: endpoint,
+                mode: config.requestedMediaAudioMode
+            ) {
+                logger.info(
+                    "🎧 P2P PQC media audio sender reused across video refresh: peer=\(peer.id, privacy: .public) endpoint=\(endpoint.host, privacy: .public):\(endpoint.port, privacy: .public)"
+                )
+                return existingSender
+            }
+            await existingSender.close()
+            peer.realtimeAudioSender = nil
+        }
+
+        do {
+            let keyMaterial = SkyBridgeMediaKeyMaterial.derive(
+                sendSecret: keys.sendKey,
+                receiveSecret: keys.receiveKey,
+                sessionId: mediaSessionId,
+                transcriptHash: keys.transcriptHash
+            )
+            let sender = try RemoteRealtimeMediaAudioSender(
+                sessionId: mediaSessionId,
+                endpoint: endpoint,
+                keys: keyMaterial.send,
+                mode: config.requestedMediaAudioMode
+            )
+            try await sender.start()
+            return sender
+        } catch {
+            logger.warning(
+                "⚠️ P2P PQC media audio sender unavailable; keeping video-only: peer=\(peer.id, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    private func effectiveRealtimeMediaEndpoint(
+        _ advertised: SkyBridgeMediaEndpoint,
+        for peer: PeerConnection
+    ) -> SkyBridgeMediaEndpoint? {
+        let trimmedHost = advertised.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !Self.isUnspecifiedMediaHost(trimmedHost) {
+            return advertised
+        }
+        guard let host = Self.remoteHost(from: peer.connection.endpoint) else {
+            return nil
+        }
+        return SkyBridgeMediaEndpoint(
+            host: host,
+            port: advertised.port,
+            relayToken: advertised.relayToken,
+            expiresAt: advertised.expiresAt
+        )
+    }
+
+    private static func isUnspecifiedMediaHost(_ host: String) -> Bool {
+        let normalized = host.lowercased()
+        return normalized.isEmpty
+            || normalized == "0.0.0.0"
+            || normalized == "::"
+            || normalized == "[::]"
+            || normalized == "localhost"
+    }
+
+    private static func remoteHost(from endpoint: NWEndpoint) -> String? {
+        guard case .hostPort(let host, _) = endpoint else { return nil }
+        return "\(host)"
+    }
+
  /// 启动本机屏幕捕获 + 硬件编码 + 推流
     private func startScreenSharing(to peer: PeerConnection) async {
         guard isCurrentPeer(peer) else {
@@ -1217,9 +1464,36 @@ public final class RemoteControlManager: BaseManager {
         let streamer = ScreenCaptureKitStreamer()
         let request = effectiveStreamRequest(for: peer)
         let audioRedirectionEnabled = peer.requestedStreamConfiguration?.audioRedirectionEnabled == true
+        let realtimeMediaAudioRequested = peer.requestedStreamConfiguration?.requestsRealtimeMediaAudio == true
+        let legacyAudioFallbackEnabled = peer.requestedStreamConfiguration?.allowsLegacyAudioChunkFallback == true
+        let existingRealtimeAudioSender: RemoteRealtimeMediaAudioSender?
+        if #available(macOS 14.0, *) {
+            existingRealtimeAudioSender = peer.realtimeAudioSender
+        } else {
+            existingRealtimeAudioSender = nil
+        }
+        let realtimeAudioSender: RemoteRealtimeMediaAudioSender?
+        if #available(macOS 14.0, *) {
+            realtimeAudioSender = await makeP2PRealtimeAudioSenderIfNeeded(for: peer)
+        } else {
+            realtimeAudioSender = nil
+        }
+        let didReuseRealtimeAudioSender = existingRealtimeAudioSender != nil
+            && realtimeAudioSender != nil
+            && existingRealtimeAudioSender === realtimeAudioSender
         let preferredAudioEncoding = RemoteDesktopAudioChunkPayload.Encoding(
             rawValue: peer.requestedStreamConfiguration?.preferredAudioEncoding ?? ""
         ) ?? .pcmS16LE
+        let activeAudioPath: String
+        if realtimeAudioSender != nil {
+            activeAudioPath = "pqc-opus"
+        } else if legacyAudioFallbackEnabled {
+            activeAudioPath = "legacy-\(preferredAudioEncoding.rawValue)"
+        } else if audioRedirectionEnabled {
+            activeAudioPath = "requested-no-media-endpoint"
+        } else {
+            activeAudioPath = "disabled"
+        }
         var policy = RemoteControlStreamPolicySelector.select(
             request: request,
             peerFormats: effectiveRemoteVideoFormats(for: peer),
@@ -1227,6 +1501,9 @@ public final class RemoteControlManager: BaseManager {
             isAppleSilicon: Self.isAppleSiliconRuntime
         )
         policy = effectiveCapturePolicy(policy, for: peer)
+        if legacyAudioFallbackEnabled {
+            policy = policy.protectingRealtimeAudio()
+        }
         streamer.onCaptureIssue = { [weak self, weak peer] reason in
             guard let self, let peer else { return }
             Task { @MainActor [weak self, weak peer] in
@@ -1278,7 +1555,7 @@ public final class RemoteControlManager: BaseManager {
                 await outboundFramePump.submitDamageReport(report)
             }
         }
-        if audioRedirectionEnabled {
+        if legacyAudioFallbackEnabled {
             streamer.onCapturedAudioChunk = { [outboundFramePump] chunk in
                 let wirePayload = RemoteDesktopAudioChunkWire.encode(chunk)
                 Task.detached(priority: .utility) {
@@ -1288,6 +1565,24 @@ public final class RemoteControlManager: BaseManager {
         } else {
             streamer.onCapturedAudioChunk = nil
         }
+        if let realtimeAudioSender {
+            peer.realtimeAudioSender = realtimeAudioSender
+            let realtimePCMSubmissionPipe = RemoteRealtimePCM16SubmissionPipe(sender: realtimeAudioSender)
+            streamer.onCapturedPCM16AudioChunk = { [realtimePCMSubmissionPipe] chunk in
+                realtimePCMSubmissionPipe.submit(chunk)
+            }
+        } else {
+            streamer.onCapturedPCM16AudioChunk = nil
+        }
+        if audioRedirectionEnabled && realtimeMediaAudioRequested && !legacyAudioFallbackEnabled && realtimeAudioSender == nil {
+            logger.info(
+                "🎧 P2P 音频请求 PQC media plane，但媒体端点不可用；保持视频优先并禁用 legacy 音频: peer=\(peer.id, privacy: .public)"
+            )
+        } else if realtimeAudioSender != nil {
+            logger.info(
+                "🎧 P2P 音频已接入 PQC media plane，禁止回退共享远控通道: peer=\(peer.id, privacy: .public)"
+            )
+        }
         logger.info(
             """
             📺 推流参数: \(Int(policy.preferredSize.width))x\(Int(policy.preferredSize.height)) \
@@ -1295,7 +1590,11 @@ public final class RemoteControlManager: BaseManager {
             codec=\(Self.codecName(policy.codec), privacy: .public) \
             reason=\(policy.reason, privacy: .public) \
             audio=\(audioRedirectionEnabled, privacy: .public) \
-            audioCodec=\(preferredAudioEncoding.rawValue, privacy: .public)
+            audioTransport=\(peer.requestedStreamConfiguration?.audioTransport ?? "legacy-default", privacy: .public) \
+            legacyAudioFallback=\(legacyAudioFallbackEnabled, privacy: .public) \
+            audioCodec=\(preferredAudioEncoding.rawValue, privacy: .public) \
+            activeAudioPath=\(activeAudioPath, privacy: .public) \
+            build=\(Self.remoteControlBuildFingerprint, privacy: .public)
             """
         )
 
@@ -1307,13 +1606,19 @@ public final class RemoteControlManager: BaseManager {
                 targetFPS: policy.targetFrameRate,
                 keyFrameInterval: policy.keyFrameInterval,
                 captureCursorInVideo: !(peer.requestedStreamConfiguration?.separateCursorChannelEnabled ?? false),
-                captureSystemAudio: audioRedirectionEnabled,
+                captureSystemAudio: legacyAudioFallbackEnabled || realtimeAudioSender != nil,
                 audioEncoding: preferredAudioEncoding,
                 bitstreamFormat: .annexB
             )
             guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
                 logger.info("ℹ️ 已忽略过期的屏幕采集启动完成: peer=\(peer.id, privacy: .public)")
                 streamer.stop()
+                if #available(macOS 14.0, *), let realtimeAudioSender, !didReuseRealtimeAudioSender {
+                    await realtimeAudioSender.close()
+                    if peer.realtimeAudioSender === realtimeAudioSender {
+                        peer.realtimeAudioSender = nil
+                    }
+                }
                 return
             }
             captureStreamer = streamer
@@ -1381,11 +1686,23 @@ public final class RemoteControlManager: BaseManager {
             guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
                 logger.info("ℹ️ 已忽略过期的屏幕采集启动错误: peer=\(peer.id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                 streamer.stop()
+                if #available(macOS 14.0, *), let realtimeAudioSender, !didReuseRealtimeAudioSender {
+                    await realtimeAudioSender.close()
+                    if peer.realtimeAudioSender === realtimeAudioSender {
+                        peer.realtimeAudioSender = nil
+                    }
+                }
                 return
             }
             logger.error(
                 "❌ 启动 ScreenCaptureKitStreamer 失败: \(error.localizedDescription, privacy: .public). 请确认已在“系统设置 > 隐私与安全 > 录屏与系统录音”中为当前运行的 App 条目授权，必要时完全退出后重开。"
             )
+            if #available(macOS 14.0, *), let realtimeAudioSender, !didReuseRealtimeAudioSender {
+                await realtimeAudioSender.close()
+                if peer.realtimeAudioSender === realtimeAudioSender {
+                    peer.realtimeAudioSender = nil
+                }
+            }
             guard isCurrentPeer(peer) else { return }
             if !scheduleScreenSharingStartupRetry(
                 for: peer,
@@ -1948,10 +2265,107 @@ public final class RemoteControlManager: BaseManager {
         try await peer.outboundFramePump.sendRawPayload(payload)
     }
 
+    @available(macOS 14.0, *)
+    private func prepareP2PRealtimeAudioReceiverIfNeeded(
+        for peer: PeerConnection,
+        audioEnabled: Bool,
+        mode: SkyBridgeMediaAudioMode
+    ) async -> SkyBridgeMediaEndpoint? {
+        guard audioEnabled, let keys = peer.sessionKeys else {
+            stopP2PRealtimeAudioReceiverIfNeeded(peerId: peer.id)
+            return nil
+        }
+
+        if p2pRealtimeAudioReceiver != nil,
+           p2pRealtimeAudioRenderer != nil,
+           p2pRealtimeAudioReceiverPeerId == peer.id {
+            return lastSentViewerStreamConfiguration?.mediaAudioEndpoint
+        }
+
+        stopP2PRealtimeAudioReceiverIfNeeded(peerId: p2pRealtimeAudioReceiverPeerId)
+
+        do {
+            let keyMaterial = SkyBridgeMediaKeyMaterial.derive(
+                sendSecret: keys.sendKey,
+                receiveSecret: keys.receiveKey,
+                sessionId: keys.sessionId,
+                transcriptHash: keys.transcriptHash
+            )
+            let renderer = try RemoteRealtimeMediaAudioReceiver(
+                sessionId: keys.sessionId,
+                keys: keyMaterial.receive,
+                mode: mode,
+                audioSessionId: viewingAudioSessionId
+            )
+            let receiver = SkyBridgeUDPRealtimeMediaReceiver()
+            let endpoint = try await receiver.start { [weak self, renderer] datagram in
+                Task(priority: .userInitiated) { [weak self, renderer] in
+                    let latestVideoTimestamp = await MainActor.run { [weak self] in
+                        self?.lastViewingInboundScreenTimestamp
+                    }
+                    await renderer.handle(
+                        packet: datagram.packet,
+                        latestVideoTimestamp: latestVideoTimestamp
+                    )
+                }
+            }
+            p2pRealtimeAudioReceiver = receiver
+            p2pRealtimeAudioRenderer = renderer
+            p2pRealtimeAudioReceiverPeerId = peer.id
+            logger.info(
+                "🎧 P2P PQC media audio receiver ready: peer=\(peer.id, privacy: .public) port=\(endpoint.port, privacy: .public) mode=\(mode.rawValue, privacy: .public)"
+            )
+            return endpoint
+        } catch {
+            logger.warning(
+                "⚠️ P2P PQC media audio receiver unavailable; keeping video-only: peer=\(peer.id, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+            )
+            stopP2PRealtimeAudioReceiverIfNeeded(peerId: peer.id)
+            return nil
+        }
+    }
+
+    private func stopP2PRealtimeAudioReceiverIfNeeded(peerId: String?) {
+        guard p2pRealtimeAudioReceiver != nil || p2pRealtimeAudioRenderer != nil else { return }
+        if let peerId, let current = p2pRealtimeAudioReceiverPeerId, current != peerId {
+            return
+        }
+        if #available(macOS 14.0, *) {
+            p2pRealtimeAudioReceiver?.stop()
+            if let renderer = p2pRealtimeAudioRenderer {
+                Task(priority: .utility) {
+                    await renderer.close()
+                }
+            }
+            p2pRealtimeAudioReceiver = nil
+            p2pRealtimeAudioRenderer = nil
+            p2pRealtimeAudioReceiverPeerId = nil
+        }
+    }
+
     private func sendViewerStreamConfigurationIfPossible(to peer: PeerConnection) async {
         let settings = RemoteDesktopSettingsManager.shared.settings
         let dimensions = settings.displaySettings.resolution.dimensions
         let supportedVideoFormats = supportedViewerVideoFormats()
+        let mediaAudioMode = settings.displaySettings.lowLatencyMode
+            ? SkyBridgeMediaAudioMode.lowLatency
+            : SkyBridgeMediaAudioMode.highFidelity
+        let mediaAudioEndpoint: SkyBridgeMediaEndpoint?
+        if #available(macOS 14.0, *) {
+            mediaAudioEndpoint = await prepareP2PRealtimeAudioReceiverIfNeeded(
+                for: peer,
+                audioEnabled: settings.interactionSettings.enableAudioRedirection,
+                mode: mediaAudioMode
+            )
+        } else {
+            mediaAudioEndpoint = nil
+        }
+        let mediaSessionId: String?
+        if #available(macOS 14.0, *) {
+            mediaSessionId = peer.sessionKeys?.sessionId
+        } else {
+            mediaSessionId = nil
+        }
         let payload = RemoteDesktopStreamConfiguration(
             width: dimensions?.width,
             height: dimensions?.height,
@@ -1973,16 +2387,25 @@ public final class RemoteControlManager: BaseManager {
             lossRecoveryMode: settings.displaySettings.lowLatencyMode ? "fast-retransmit" : "balanced",
             screenFrameTransport: "sbrf-v1",
             screenDataChannelEnabled: true,
+            screenChannelWireFormat: nil,
             nativeVideoTrackReady: false,
             nativeAudioTrackEnabled: false,
             audioRedirectionEnabled: settings.interactionSettings.enableAudioRedirection,
-            preferredAudioEncoding: RemoteDesktopAudioChunkPayload.Encoding.aacLC.rawValue,
+            audioTransport: settings.interactionSettings.enableAudioRedirection
+                ? SkyBridgeRealtimeMediaConstants.audioTransportPQCv1
+                : SkyBridgeRealtimeMediaConstants.audioTransportDisabled,
+            audioMode: mediaAudioMode.rawValue,
+            mediaSessionId: mediaSessionId,
+            mediaAudioEndpoint: mediaAudioEndpoint,
+            compatibilityAudioFallbackEnabled: false,
+            preferredAudioEncoding: nil,
             audioSampleRate: 48_000,
             audioChannelCount: 2
         )
 
         do {
             try await sendRemoteControlPayload(payload, type: .streamConfiguration, to: peer)
+            lastSentViewerStreamConfiguration = payload
             logger.info(
                 """
                 📤 已发送 macOS viewer 流配置: peer=\(peer.id, privacy: .public) \
@@ -2169,6 +2592,15 @@ public final class RemoteControlManager: BaseManager {
         #endif
     }
 
+    private static var remoteControlBuildFingerprint: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = (info["CFBundleShortVersionString"] as? String) ?? "-"
+        let build = (info["CFBundleVersion"] as? String) ?? "-"
+        let bundleId = Bundle.main.bundleIdentifier ?? "-"
+        let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
+        return "bundle=\(bundleId) version=\(version) build=\(build) os=\(osVersion)"
+    }
+
     private static func codecName(_ codec: RemoteFrameType) -> String {
         switch codec {
         case .bgra: return "jpeg"
@@ -2272,6 +2704,10 @@ public final class RemoteControlManager: BaseManager {
 
     private func handleInboundRemoteAudioChunk(_ payload: RemoteDesktopAudioChunkPayload) {
         guard RemoteDesktopSettingsManager.shared.settings.interactionSettings.enableAudioRedirection else {
+            return
+        }
+        guard lastSentViewerStreamConfiguration?.allowsLegacyAudioChunkFallback == true else {
+            logger.debug("ℹ️ 已丢弃 legacy P2P 远控音频块：当前会话要求 PQC media plane")
             return
         }
         if let lastViewingInboundScreenTimestamp,
@@ -2763,6 +3199,10 @@ public final class RemoteControlManager: BaseManager {
             || previous.enableAppleSiliconOptimization != current.enableAppleSiliconOptimization
             || previous.separateCursorChannelEnabled != current.separateCursorChannelEnabled
             || previous.audioRedirectionEnabled != current.audioRedirectionEnabled
+            || previous.audioTransport != current.audioTransport
+            || previous.audioMode != current.audioMode
+            || previous.mediaSessionId != current.mediaSessionId
+            || previous.mediaAudioEndpoint != current.mediaAudioEndpoint
     }
 
     private func sendRemoteFrame(_ plaintext: Data, to peer: PeerConnection) async throws {
@@ -2958,6 +3398,13 @@ public final class RemoteControlManager: BaseManager {
         peer.connection.cancel()
         _ = removePeer(deviceId: peer.id, role: peer.role)
         await peer.outboundFramePump.close()
+        if #available(macOS 14.0, *), let realtimeAudioSender = peer.realtimeAudioSender {
+            await realtimeAudioSender.close()
+            peer.realtimeAudioSender = nil
+        }
+        if peer.role == .controlling {
+            stopP2PRealtimeAudioReceiverIfNeeded(peerId: peer.id)
+        }
         stopInteractionTelemetry(for: peer.id)
         screenCaptureStartupRetryCountByPeerId.removeValue(forKey: peer.id)
         invalidateScreenSharingStartupState(for: peer.id)

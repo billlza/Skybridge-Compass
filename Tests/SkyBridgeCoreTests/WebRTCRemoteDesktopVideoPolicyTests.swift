@@ -63,4 +63,22 @@ final class WebRTCRemoteDesktopVideoPolicyTests: XCTestCase {
         XCTAssertFalse(policy.usesHardwareEncoder)
         XCTAssertTrue(policy.reason.contains("relay"))
     }
+
+    func testSharedAudioFallbackProtectionCapsDirectHardwarePolicy() {
+        let policy = WebRTCRemoteDesktopVideoPolicySelector.select(
+            request: makeRequest(size: CGSize(width: 2056, height: 1328), codec: .h264, fps: 60, gop: 120),
+            transportPath: .direct,
+            peerFormats: ["jpeg", "h264"],
+            thermalState: .nominal,
+            isAppleSilicon: true
+        ).protectingRealtimeAudio()
+
+        XCTAssertEqual(policy.codec, .h264)
+        XCTAssertTrue(policy.usesHardwareEncoder)
+        XCTAssertEqual(policy.targetFrameRate, 24)
+        XCTAssertEqual(policy.keyFrameInterval, 48)
+        XCTAssertEqual(policy.preferredSize.width, 1920)
+        XCTAssertEqual(policy.preferredSize.height, 1240)
+        XCTAssertTrue(policy.reason.contains("+audio-protect"))
+    }
 }

@@ -51,6 +51,79 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         XCTAssertNotNil(feed.takeLatestFrame())
     }
 
+    func testMetalRendererUsesMTKViewRenderPassAndSingleDrawableLifecycle() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("DispatchSemaphore(value: 1)"))
+        XCTAssertFalse(
+            source.contains("view.currentRenderPassDescriptor"),
+            "The Metal renderer must not mix MTKView.currentRenderPassDescriptor with currentDrawable; one draw should own one explicit drawable lifecycle."
+        )
+        XCTAssertTrue(source.contains("let drawable = view.currentDrawable"))
+        XCTAssertEqual(source.components(separatedBy: "view.currentDrawable").count - 1, 1)
+        XCTAssertTrue(source.contains("let drawableTexture = drawable.texture"))
+        XCTAssertEqual(source.components(separatedBy: "drawable.texture").count - 1, 1)
+        XCTAssertTrue(source.contains("let renderPassDescriptor = MTLRenderPassDescriptor()"))
+        guard let textureRange = source.range(of: "let drawableTexture = drawable.texture"),
+              let returnRange = source.range(of: "return DrawableRenderTarget(", range: textureRange.upperBound..<source.endIndex) else {
+            XCTFail("Metal renderer must keep drawable.texture inside the single drawable target helper")
+            return
+        }
+        XCTAssertLessThan(textureRange.lowerBound, returnRange.lowerBound)
+        guard let renderTextureRange = source.range(of: "guard let renderTexture = makeRenderTexture("),
+              let drawableRange = source.range(
+                of: "guard let renderTarget = makeDrawableRenderTarget(for: view)",
+                range: renderTextureRange.upperBound..<source.endIndex
+              ),
+              let presentRange = source.range(
+                of: "commandBuffer.present(renderTarget.drawable)",
+                range: drawableRange.upperBound..<source.endIndex
+              ) else {
+            XCTFail("Metal renderer must preflight render texture before acquiring/presenting the CAMetalDrawable")
+            return
+        }
+        XCTAssertLessThan(renderTextureRange.lowerBound, drawableRange.lowerBound)
+        XCTAssertLessThan(drawableRange.lowerBound, presentRange.lowerBound)
+        XCTAssertTrue(source.contains("commandBuffer.makeBlitCommandEncoder()"))
+        XCTAssertTrue(source.contains("metalView.enableSetNeedsDisplay = true"))
+        XCTAssertTrue(source.contains("metalView.isPaused = true"))
+        XCTAssertTrue(source.contains("view.setNeedsDisplay()"))
+        XCTAssertTrue(source.contains("view.draw()"))
+        XCTAssertTrue(source.contains("pendingRedraw"))
+        XCTAssertTrue(source.contains("requestFollowUpDrawIfPossible"))
+        XCTAssertTrue(source.contains("let verticalFlipTransform = CGAffineTransform("))
+        XCTAssertTrue(source.contains("d: -scaleY"))
+        XCTAssertFalse(source.contains("a: -scaleX"))
+        XCTAssertTrue(source.contains("Metal render telemetry"))
+        XCTAssertTrue(source.contains("frameAgeMs="))
+        XCTAssertTrue(source.contains("orientation=verticalFlip"))
+        XCTAssertTrue(source.contains("drawableAccess=single-late"))
+        XCTAssertTrue(source.contains("frameDriven=true"))
+    }
+
+    func testNativeVideoPromotionRequiresNonNilRenderedFrame() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("func renderFrame(_ frame: RTCVideoFrame?)"))
+        XCTAssertTrue(
+            source.contains("guard let frame else { return }"),
+            "renderFrame(nil) is only a heartbeat/size event and must not trigger nativeReady evidence."
+        )
+        XCTAssertTrue(source.contains("renderer-bound-no-native-frame"))
+    }
+
     private func makeFrame(index: Int) throws -> DisplaySampleBufferFrame {
         let pixelBuffer = try makePixelBuffer()
 

@@ -4242,6 +4242,41 @@ public class P2PConnectionManager: ObservableObject {
         return try skyBridgeCore.decrypt(data, sessionKey: keys.receiveKey)
     }
 
+    func realtimeMediaKeySnapshot(for deviceId: String) -> RemoteRealtimeMediaKeySnapshot? {
+        let canonicalDeviceId = canonicalPeerLookupKey(deviceId)
+        let runtimePeerId = runtimePeerId(forAnyPeerId: canonicalDeviceId)
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+        let directCandidates = [runtimePeerId, canonicalDeviceId, presentationPeerId, deviceId]
+        for candidate in directCandidates {
+            if let keys = sessionKeys[candidate] {
+                return RemoteRealtimeMediaKeySnapshot(
+                    sessionId: "lan-\(candidate)",
+                    sendKey: keys.sendKey,
+                    receiveKey: keys.receiveKey,
+                    transcriptHash: keys.transcriptHash,
+                    mediaAdmissionToken: nil
+                )
+            }
+        }
+
+        let aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: canonicalDeviceId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: runtimePeerId))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: presentationPeerId))
+        for candidate in stateKeysMatchingAliases(aliases, keys: sessionKeys.keys) {
+            if let keys = sessionKeys[candidate] {
+                return RemoteRealtimeMediaKeySnapshot(
+                    sessionId: "lan-\(candidate)",
+                    sendKey: keys.sendKey,
+                    receiveKey: keys.receiveKey,
+                    transcriptHash: keys.transcriptHash,
+                    mediaAdmissionToken: nil
+                )
+            }
+        }
+        return nil
+    }
+
     /// Derive the authenticated LAN file-transfer key from the established session keys.
     /// This mirrors the macOS derivation so local file-transfer metadata/chunks/receipts
     /// stay cryptographically bound to the already authenticated P2P session.

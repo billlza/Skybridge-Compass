@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import OSLog
+import SkyBridgeRealtimeMedia
 #if canImport(WebRTC)
 @preconcurrency import WebRTC
 #endif
@@ -408,14 +409,29 @@ private actor SignalServerClientCompat {
         let sessionToken: String
         let qrBootstrapToken: String
         let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
+    }
+
+    struct SessionRefreshLease: Sendable, Equatable {
+        let sessionID: String
+        let role: String
+        let sessionToken: String
+        let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
+        let expiresIn: TimeInterval
+        let signalingServerOrigin: String?
+        let serverBuildFingerprint: String?
+        let sessionTokenGeneration: String?
+        let mediaTokenGeneration: String?
     }
 
     struct RedeemedSessionLease: Sendable, Equatable {
         let sessionID: String
         let sessionToken: String
         let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -428,6 +444,7 @@ private actor SignalServerClientCompat {
         let sessionID: String
         let sessionToken: String
         let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
     }
@@ -436,6 +453,7 @@ private actor SignalServerClientCompat {
         let sessionID: String
         let sessionToken: String
         let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
         let initiatorDeviceId: String
@@ -523,6 +541,7 @@ private actor SignalServerClientCompat {
         let sessionToken: String
         let qrBootstrapToken: String
         let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String
     }
@@ -532,15 +551,34 @@ private actor SignalServerClientCompat {
         let qrBootstrapToken: String
     }
 
+    private struct SessionRefreshRequestBody: Encodable {
+        let sessionId: String
+        let role: String
+    }
+
     private struct RedeemSessionResponseBody: Decodable {
         let sessionId: String
         let sessionToken: String
         let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String
         let initiatorDeviceId: String
         let initiatorProtocolSigningAlgorithm: String
         let initiatorProtocolPublicKeyFingerprint: String
+    }
+
+    private struct SessionRefreshResponseBody: Decodable {
+        let sessionId: String
+        let role: String
+        let sessionToken: String
+        let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
+        let expiresIn: Int
+        let signalingServerOrigin: String?
+        let serverBuildFingerprint: String?
+        let sessionTokenGeneration: String?
+        let mediaTokenGeneration: String?
     }
 
     private struct RegisterCodeRequestBody: Encodable {
@@ -553,6 +591,7 @@ private actor SignalServerClientCompat {
         let sessionId: String
         let sessionToken: String
         let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String
     }
@@ -562,12 +601,61 @@ private actor SignalServerClientCompat {
         let sessionId: String
         let sessionToken: String
         let turnAdmissionToken: String
+        let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String
         let initiatorDeviceId: String
         let initiatorProtocolSigningAlgorithm: String
         let initiatorProtocolPublicKeyFingerprint: String
         let initiatorDeviceName: String?
+    }
+
+    struct MediaRelayLease: Sendable, Equatable {
+        let sessionID: String
+        let role: String
+        let endpoint: SkyBridgeMediaEndpoint
+        let ttl: TimeInterval
+        let maxPacketBytes: Int
+    }
+
+    struct MediaAdmissionRefreshLease: Sendable, Equatable {
+        let token: String
+        let expiresIn: TimeInterval
+        let serverBuildFingerprint: String?
+        let mediaTokenGeneration: String?
+    }
+
+    private struct MediaLeaseEndpointResponseBody: Decodable {
+        let host: String
+        let port: UInt16
+    }
+
+    private struct MediaLeaseResponseBody: Decodable {
+        let sessionId: String
+        let role: String
+        let endpoint: MediaLeaseEndpointResponseBody
+        let leaseToken: String
+        let expiresAt: Int64
+        let ttl: Int
+        let maxPacketBytes: Int
+        let serverBuildFingerprint: String?
+        let supportsMediaAdmissionRefresh: Bool?
+        let mediaTokenGeneration: String?
+    }
+
+    private struct MediaAdmissionRefreshRequestBody: Encodable {
+        let sessionId: String
+        let role: String
+    }
+
+    private struct MediaAdmissionRefreshResponseBody: Decodable {
+        let sessionId: String
+        let role: String
+        let mediaAdmissionToken: String
+        let expiresIn: Int
+        let serverBuildFingerprint: String?
+        let supportsMediaAdmissionRefresh: Bool?
+        let mediaTokenGeneration: String?
     }
 
     private let urlSession: URLSession
@@ -683,6 +771,7 @@ private actor SignalServerClientCompat {
             sessionToken: response.sessionToken,
             qrBootstrapToken: response.qrBootstrapToken,
             turnAdmissionToken: response.turnAdmissionToken,
+            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin
         )
@@ -713,11 +802,50 @@ private actor SignalServerClientCompat {
             sessionID: response.sessionId,
             sessionToken: response.sessionToken,
             turnAdmissionToken: response.turnAdmissionToken,
+            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
             initiatorDeviceId: response.initiatorDeviceId,
             initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: response.initiatorProtocolSigningAlgorithm) ?? .ed25519,
             initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint
+        )
+    }
+
+    func refreshWebRTCSession(
+        admissionToken: String,
+        sessionId: String,
+        role: String
+    ) async throws -> SessionRefreshLease {
+        logger.info(
+            "🌐 current-path request start path=/api/webrtc/session/refresh sessionId=\(sessionId, privacy: .public) role=\(role, privacy: .public)"
+        )
+        let body = SessionRefreshRequestBody(sessionId: sessionId, role: role)
+        let response: SessionRefreshResponseBody = try await performJSONRequest(
+            path: "/api/webrtc/session/refresh",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
+        )
+        guard response.sessionId == sessionId,
+              response.role == role,
+              !response.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !response.turnAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientError.malformedResponse("invalid session refresh response")
+        }
+        logger.info(
+            "🌐 current-path request ok path=/api/webrtc/session/refresh sessionId=\(response.sessionId, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) sessionTokenGeneration=\(response.sessionTokenGeneration ?? "-", privacy: .public) mediaTokenGeneration=\(response.mediaTokenGeneration ?? "-", privacy: .public)"
+        )
+        return SessionRefreshLease(
+            sessionID: response.sessionId,
+            role: response.role,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
+            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin,
+            serverBuildFingerprint: response.serverBuildFingerprint,
+            sessionTokenGeneration: response.sessionTokenGeneration,
+            mediaTokenGeneration: response.mediaTokenGeneration
         )
     }
 
@@ -747,6 +875,7 @@ private actor SignalServerClientCompat {
             sessionID: response.sessionId,
             sessionToken: response.sessionToken,
             turnAdmissionToken: response.turnAdmissionToken,
+            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin
         )
@@ -773,6 +902,7 @@ private actor SignalServerClientCompat {
             sessionID: response.sessionId,
             sessionToken: response.sessionToken,
             turnAdmissionToken: response.turnAdmissionToken,
+            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
             initiatorDeviceId: response.initiatorDeviceId,
@@ -782,7 +912,89 @@ private actor SignalServerClientCompat {
         )
     }
 
+    func requestMediaRelayLease(mediaAdmissionToken: String) async throws -> MediaRelayLease {
+        logger.info("🌐 current-path request start path=/api/media/lease")
+        let response: MediaLeaseResponseBody = try await performJSONRequest(
+            path: "/api/media/lease",
+            method: "POST",
+            body: Data("{}".utf8),
+            extraHeaders: ["X-SkyBridge-Media-Admission": mediaAdmissionToken]
+        )
+        logger.info(
+            "🌐 current-path request ok path=/api/media/lease sessionId=\(response.sessionId, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) refreshSupported=\(response.supportsMediaAdmissionRefresh == true, privacy: .public) mediaTokenGeneration=\(response.mediaTokenGeneration ?? "-", privacy: .public)"
+        )
+        return MediaRelayLease(
+            sessionID: response.sessionId,
+            role: response.role,
+            endpoint: SkyBridgeMediaEndpoint(
+                host: response.endpoint.host,
+                port: response.endpoint.port,
+                relayToken: response.leaseToken,
+                expiresAt: TimeInterval(response.expiresAt)
+            ),
+            ttl: TimeInterval(response.ttl),
+            maxPacketBytes: response.maxPacketBytes
+        )
+    }
+
+    func refreshMediaAdmissionToken(
+        sessionId: String,
+        sessionToken: String,
+        role: String,
+        idempotencyKey: String? = nil
+    ) async throws -> String {
+        try await refreshMediaAdmissionLease(
+            sessionId: sessionId,
+            sessionToken: sessionToken,
+            role: role,
+            idempotencyKey: idempotencyKey
+        ).token
+    }
+
+    func refreshMediaAdmissionLease(
+        sessionId: String,
+        sessionToken: String,
+        role: String,
+        idempotencyKey: String? = nil
+    ) async throws -> MediaAdmissionRefreshLease {
+        logger.info("🌐 current-path request start path=/api/media/admission/refresh")
+        let body = MediaAdmissionRefreshRequestBody(sessionId: sessionId, role: role)
+        var headers = ["X-SkyBridge-Session": sessionToken]
+        if let idempotencyKey,
+           !idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            headers["Idempotency-Key"] = idempotencyKey
+        }
+        let response: MediaAdmissionRefreshResponseBody = try await performJSONRequest(
+            path: "/api/media/admission/refresh",
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            extraHeaders: headers
+        )
+        guard response.sessionId == sessionId,
+              response.role == role,
+              !response.mediaAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ClientError.malformedResponse("invalid media admission refresh response")
+        }
+        logger.info(
+            "🌐 current-path request ok path=/api/media/admission/refresh sessionId=\(response.sessionId, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) refreshSupported=\(response.supportsMediaAdmissionRefresh == true, privacy: .public) mediaTokenGeneration=\(response.mediaTokenGeneration ?? "-", privacy: .public)"
+        )
+        return MediaAdmissionRefreshLease(
+            token: response.mediaAdmissionToken,
+            expiresIn: TimeInterval(max(0, response.expiresIn)),
+            serverBuildFingerprint: response.serverBuildFingerprint,
+            mediaTokenGeneration: response.mediaTokenGeneration
+        )
+    }
+
     private var accessTokenRefreshTask: Task<AuthSession, Error>?
+
+    private func normalizedOptionalToken(_ token: String?) -> String? {
+        guard let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
 
     private func performJSONRequest<Response: Decodable>(
         path: String,
@@ -1220,12 +1432,8 @@ private final class RemoteVideoTrackHeartbeatRenderer: NSObject, RTCVideoRendere
     }
 
     func renderFrame(_ frame: RTCVideoFrame?) {
-        let measuredSize: CGSize
-        if let frame {
-            measuredSize = CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))
-        } else {
-            measuredSize = lastKnownSize
-        }
+        guard let frame else { return }
+        let measuredSize = CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))
         guard measuredSize.width > 0, measuredSize.height > 0 else { return }
         let handler = onFrame
         DispatchQueue.main.async {
@@ -1320,6 +1528,495 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
     }
 
+    func realtimeMediaKeySnapshot() -> RemoteRealtimeMediaKeySnapshot? {
+        guard let keys = sessionKeys,
+              let sessionId = activeRemoteDesktopSessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty else {
+            return nil
+        }
+        return RemoteRealtimeMediaKeySnapshot(
+            sessionId: sessionId,
+            sendKey: keys.sendKey,
+            receiveKey: keys.receiveKey,
+            transcriptHash: keys.transcriptHash,
+            mediaAdmissionToken: webrtcMediaAdmissionTokenBySessionId[sessionId]
+        )
+    }
+
+    func mediaRelayLeaseDiagnosticForActiveSession() -> String? {
+        guard let sessionId = activeRemoteDesktopSessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty else {
+            return "missingSession"
+        }
+        return mediaAdmissionLeaseFailureReasonBySessionId[sessionId]
+    }
+
+    func requestRealtimeMediaRelayEndpointForActiveSession() async throws -> SkyBridgeMediaEndpoint? {
+        guard let sessionId = activeRemoteDesktopSessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty else {
+            return nil
+        }
+        if let cachedEndpoint = mediaAdmissionRelayEndpointBySessionId[sessionId] {
+            if Self.isUsableMediaRelayEndpoint(cachedEndpoint) {
+                return cachedEndpoint
+            }
+            mediaAdmissionRelayEndpointBySessionId.removeValue(forKey: sessionId)
+        }
+        let initialToken = Self.normalizedNonEmptyToken(webrtcMediaAdmissionTokenBySessionId[sessionId])
+        if let backoffReason = activeMediaAdmissionLeaseBackoffReason(sessionId: sessionId, token: initialToken) {
+            SkyBridgeLogger.shared.debug(
+                "ℹ️ media admission lease retry suppressed: session=\(sessionId) reason=\(backoffReason)"
+            )
+            return nil
+        }
+        guard !mediaAdmissionLeaseInFlightSessionIds.contains(sessionId) else {
+            recordMediaRelayLeaseFailure(sessionId: sessionId, token: nil, reason: "inFlight")
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(100))
+                if let cachedEndpoint = mediaAdmissionRelayEndpointBySessionId[sessionId],
+                   Self.isUsableMediaRelayEndpoint(cachedEndpoint) {
+                    return cachedEndpoint
+                }
+                if !mediaAdmissionLeaseInFlightSessionIds.contains(sessionId) {
+                    break
+                }
+            }
+            return nil
+        }
+        mediaAdmissionLeaseInFlightSessionIds.insert(sessionId)
+        defer { mediaAdmissionLeaseInFlightSessionIds.remove(sessionId) }
+
+        var token = initialToken
+        if token == nil {
+            guard Self.normalizedNonEmptyToken(webrtcSignalingAuthTokenBySessionId[sessionId]) != nil else {
+                recordMediaRelayLeaseFailure(sessionId: sessionId, token: nil, reason: "missingSessionToken")
+                return nil
+            }
+            guard currentRole != nil else {
+                recordMediaRelayLeaseFailure(sessionId: sessionId, token: nil, reason: "missingRole")
+                return nil
+            }
+            do {
+                token = try await refreshMediaAdmissionToken(sessionId: sessionId, staleToken: nil)
+            } catch {
+                let reason = Self.mediaAdmissionRefreshFailureReason(for: error)
+                if reason == "sessionTokenSuperseded" || reason == "sessionTokenExpired" {
+                    do {
+                        token = try await refreshWebRTCSessionAdmissionTokens(
+                            sessionId: sessionId,
+                            reason: reason
+                        )
+                    } catch {
+                        let sessionReason = Self.sessionRefreshFailureReason(for: error)
+                        recordMediaRelayLeaseFailure(
+                            sessionId: sessionId,
+                            token: nil,
+                            reason: sessionReason,
+                            backoff: 30
+                        )
+                        return nil
+                    }
+                } else {
+                    recordMediaRelayLeaseFailure(sessionId: sessionId, token: nil, reason: reason, backoff: 5)
+                    return nil
+                }
+            }
+        }
+        guard let token else {
+            recordMediaRelayLeaseFailure(sessionId: sessionId, token: nil, reason: "missingToken")
+            return nil
+        }
+        if let backoffReason = activeMediaAdmissionLeaseBackoffReason(sessionId: sessionId, token: token) {
+            SkyBridgeLogger.shared.debug(
+                "ℹ️ media admission lease retry suppressed: session=\(sessionId) reason=\(backoffReason)"
+            )
+            return nil
+        }
+        let lease: SignalServerClientCompat.MediaRelayLease
+        do {
+            lease = try await signalServer.requestMediaRelayLease(mediaAdmissionToken: token)
+        } catch {
+            guard Self.isMediaAdmissionTokenRefreshable(error) else {
+                let reason = Self.mediaRelayLeaseFailureReason(for: error)
+                recordMediaRelayLeaseFailure(sessionId: sessionId, token: token, reason: reason, backoff: 5)
+                return nil
+            }
+            let refreshedToken: String
+            do {
+                guard let refreshed = try await refreshMediaAdmissionToken(
+                    sessionId: sessionId,
+                    staleToken: token
+                ) else {
+                    recordMediaRelayLeaseFailure(sessionId: sessionId, token: token, reason: "refreshFailed", backoff: 5)
+                    return nil
+                }
+                refreshedToken = refreshed
+            } catch {
+                let reason = Self.mediaAdmissionRefreshFailureReason(for: error)
+                if reason == "sessionTokenSuperseded" || reason == "sessionTokenExpired" {
+                    do {
+                        guard let refreshed = try await refreshWebRTCSessionAdmissionTokens(
+                            sessionId: sessionId,
+                            reason: reason
+                        ) else {
+                            recordMediaRelayLeaseFailure(
+                                sessionId: sessionId,
+                                token: token,
+                                reason: "sessionReauthFailed",
+                                backoff: 30
+                            )
+                            return nil
+                        }
+                        refreshedToken = refreshed
+                    } catch {
+                        let sessionReason = Self.sessionRefreshFailureReason(for: error)
+                        recordMediaRelayLeaseFailure(
+                            sessionId: sessionId,
+                            token: token,
+                            reason: sessionReason,
+                            backoff: 30
+                        )
+                        return nil
+                    }
+                } else {
+                    recordMediaRelayLeaseFailure(sessionId: sessionId, token: token, reason: reason, backoff: 5)
+                    return nil
+                }
+            }
+            SkyBridgeLogger.shared.info(
+                "🎧 media admission token refreshed; retrying relay lease: session=\(sessionId)"
+            )
+            do {
+                lease = try await signalServer.requestMediaRelayLease(mediaAdmissionToken: refreshedToken)
+            } catch {
+                let baseReason = Self.mediaRelayLeaseFailureReason(for: error)
+                let reason = Self.mediaRelayLeaseFailureReasonAfterRefresh(for: error)
+                if baseReason == "superseded" {
+                    SkyBridgeLogger.shared.info(
+                        "🎧 media admission refreshed token rejected by relay lease: session=\(sessionId) reason=refreshLeaseSuperseded localRetryGeneration=\(Self.tokenGenerationPrefix(refreshedToken) ?? "-") \(Self.mediaTokenDiagnosticSummary(for: error) ?? "")"
+                    )
+                }
+                recordMediaRelayLeaseFailure(sessionId: sessionId, token: refreshedToken, reason: reason, backoff: 5)
+                return nil
+            }
+        }
+        mediaAdmissionRelayEndpointBySessionId[sessionId] = lease.endpoint
+        mediaAdmissionLeaseBackoffBySessionId.removeValue(forKey: sessionId)
+        mediaAdmissionLeaseFailureReasonBySessionId.removeValue(forKey: sessionId)
+        mediaAdmissionAuthorityLostSessionIds.remove(sessionId)
+        SkyBridgeLogger.shared.info(
+            "🎧 PQC media relay lease ready: session=\(lease.sessionID) role=\(lease.role) relay=\(lease.endpoint.host):\(lease.endpoint.port) token=\(lease.endpoint.relayToken == nil ? "missing" : "present") event=leaseReady"
+        )
+        return lease.endpoint
+    }
+
+    private func refreshMediaAdmissionToken(
+        sessionId: String,
+        staleToken: String?
+    ) async throws -> String? {
+        guard let sessionToken = Self.normalizedNonEmptyToken(webrtcSignalingAuthTokenBySessionId[sessionId]),
+              let role = currentRole else {
+            return nil
+        }
+        let roleName = role == .offerer ? "initiator" : "responder"
+        if staleToken != nil {
+            webrtcMediaAdmissionTokenBySessionId.removeValue(forKey: sessionId)
+        }
+        let staleGeneration = Self.tokenGenerationPrefix(staleToken) ?? "missing"
+        let sessionGeneration = Self.tokenGenerationPrefix(sessionToken) ?? "missing"
+        let idempotencyKey = "media-refresh-\(sessionId)-\(roleName)-\(sessionGeneration)-\(staleGeneration)"
+        let refreshed = try await signalServer.refreshMediaAdmissionLease(
+            sessionId: sessionId,
+            sessionToken: sessionToken,
+            role: roleName,
+            idempotencyKey: idempotencyKey
+        )
+        let normalized = Self.normalizedNonEmptyToken(refreshed.token)
+        if let normalized {
+            webrtcMediaAdmissionTokenBySessionId[sessionId] = normalized
+            SkyBridgeLogger.shared.info(
+                "🎧 media admission token refresh accepted: session=\(sessionId) role=\(roleName) localStaleGeneration=\(staleGeneration) localRefreshedGeneration=\(Self.tokenGenerationPrefix(normalized) ?? "-") serverGeneration=\(refreshed.mediaTokenGeneration ?? "-") serverBuild=\(refreshed.serverBuildFingerprint ?? "-")"
+            )
+        } else {
+            if let staleToken {
+                webrtcMediaAdmissionTokenBySessionId[sessionId] = staleToken
+            } else {
+                webrtcMediaAdmissionTokenBySessionId.removeValue(forKey: sessionId)
+            }
+        }
+        return normalized
+    }
+
+    private func refreshWebRTCSessionAdmissionTokens(
+        sessionId: String,
+        reason: String
+    ) async throws -> String? {
+        guard let role = currentRole else {
+            throw NSError(
+                domain: "CrossNetworkWebRTCManager",
+                code: 41,
+                userInfo: [NSLocalizedDescriptionKey: "missingRole"]
+            )
+        }
+        let roleName = role == .offerer ? "initiator" : "responder"
+        guard !mediaAdmissionSessionRefreshInFlightSessionIds.contains(sessionId) else {
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(100))
+                if let token = Self.normalizedNonEmptyToken(webrtcMediaAdmissionTokenBySessionId[sessionId]) {
+                    return token
+                }
+                if !mediaAdmissionSessionRefreshInFlightSessionIds.contains(sessionId) {
+                    break
+                }
+            }
+            return Self.normalizedNonEmptyToken(webrtcMediaAdmissionTokenBySessionId[sessionId])
+        }
+
+        mediaAdmissionSessionRefreshInFlightSessionIds.insert(sessionId)
+        defer { mediaAdmissionSessionRefreshInFlightSessionIds.remove(sessionId) }
+
+        let binding = try await currentPathLocalBinding()
+        let admission = try await requestAdmissionLease(for: binding)
+        let lease = try await signalServer.refreshWebRTCSession(
+            admissionToken: admission.token,
+            sessionId: sessionId,
+            role: roleName
+        )
+        webrtcSignalingAuthTokenBySessionId[sessionId] = lease.sessionToken
+        webrtcTurnAdmissionTokenBySessionId[sessionId] = lease.turnAdmissionToken
+        if let mediaToken = Self.normalizedNonEmptyToken(lease.mediaAdmissionToken) {
+            webrtcMediaAdmissionTokenBySessionId[sessionId] = mediaToken
+        } else {
+            webrtcMediaAdmissionTokenBySessionId.removeValue(forKey: sessionId)
+        }
+        if let origin = lease.signalingServerOrigin,
+           let canonical = try? validateCurrentPathOrigin(origin) {
+            currentPathSignalingOriginBySessionId[sessionId] = canonical
+        }
+        mediaAdmissionRelayEndpointBySessionId.removeValue(forKey: sessionId)
+        mediaAdmissionLeaseBackoffBySessionId.removeValue(forKey: sessionId)
+        mediaAdmissionLeaseFailureReasonBySessionId.removeValue(forKey: sessionId)
+        SkyBridgeLogger.shared.info(
+            "🎧 WebRTC session tokens refreshed for media lease: session=\(sessionId) role=\(roleName) reason=\(reason) serverBuild=\(lease.serverBuildFingerprint ?? "-") sessionTokenGeneration=\(lease.sessionTokenGeneration ?? "-") mediaTokenGeneration=\(lease.mediaTokenGeneration ?? "-")"
+        )
+        return Self.normalizedNonEmptyToken(lease.mediaAdmissionToken)
+    }
+
+    private func recordMediaRelayLeaseFailure(
+        sessionId: String,
+        token: String?,
+        reason: String,
+        backoff: TimeInterval? = nil
+    ) {
+        mediaAdmissionLeaseFailureReasonBySessionId[sessionId] = reason
+        mediaAdmissionRelayEndpointBySessionId.removeValue(forKey: sessionId)
+        if let backoff {
+            mediaAdmissionLeaseBackoffBySessionId[sessionId] = (token, Date().addingTimeInterval(backoff), reason)
+        }
+        let backoffLabel = backoff.map { " backoffMs=\(Int(($0 * 1000).rounded()))" } ?? ""
+        SkyBridgeLogger.shared.info(
+            "🎧 PQC media relay lease unavailable: session=\(sessionId) reason=\(reason)\(backoffLabel)"
+        )
+        if Self.isSessionAuthorityLostReason(reason) {
+            recordSessionAuthorityLost(sessionId: sessionId, reason: reason)
+        }
+    }
+
+    private func recordSessionAuthorityLost(sessionId: String, reason: String) {
+        guard mediaAdmissionAuthorityLostSessionIds.insert(sessionId).inserted else { return }
+        mediaAdmissionLeaseBackoffBySessionId[sessionId] = (nil, Date().addingTimeInterval(30), "sessionAuthorityLost")
+        mediaAdmissionRelayEndpointBySessionId.removeValue(forKey: sessionId)
+        mediaAdmissionLeaseFailureReasonBySessionId[sessionId] = "sessionAuthorityLost"
+        let sessionGeneration = Self.tokenGenerationPrefix(webrtcSignalingAuthTokenBySessionId[sessionId]) ?? "-"
+        let mediaGeneration = Self.tokenGenerationPrefix(webrtcMediaAdmissionTokenBySessionId[sessionId]) ?? "-"
+        SkyBridgeLogger.shared.warning(
+            "🎧 WebRTC session authority lost: session=\(sessionId) event=sessionAuthorityLost reason=\(reason) localSessionGeneration=\(sessionGeneration) localMediaGeneration=\(mediaGeneration) action=fullRejoinRequired"
+        )
+        if currentSessionId == sessionId {
+            applyActiveSessionDisconnect(sessionId: sessionId, kind: .transient)
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.currentSessionId == sessionId else { return }
+                await self.disconnect(clearSnapshot: false)
+                self.lastError = "WebRTC session authority lost; full rejoin required"
+                self.state = .failed("sessionAuthorityLost")
+                self.readiness = .idle
+            }
+        }
+    }
+
+    private func activeMediaAdmissionLeaseBackoffReason(
+        sessionId: String,
+        token: String?,
+        now: Date = Date()
+    ) -> String? {
+        guard let backoff = mediaAdmissionLeaseBackoffBySessionId[sessionId] else {
+            return nil
+        }
+        guard backoff.until > now else {
+            mediaAdmissionLeaseBackoffBySessionId.removeValue(forKey: sessionId)
+            return nil
+        }
+        guard backoff.token == nil || backoff.token == token else {
+            return nil
+        }
+        mediaAdmissionLeaseFailureReasonBySessionId[sessionId] = backoff.reason
+        return backoff.reason
+    }
+
+    private static func isMediaAdmissionTokenRefreshable(_ error: Error) -> Bool {
+        guard case SignalServerClientCompat.ClientError.serverRejected(401, let body) = error else {
+            return false
+        }
+        guard !mediaLeaseBodyIndicatesSessionAuthorityLost(body) else {
+            return false
+        }
+        return body.contains("media_admission_token_superseded")
+            || body.contains("media_admission_token_expired")
+            || body.contains("media_admission_token_lease_limit")
+    }
+
+    private static func isUsableMediaRelayEndpoint(_ endpoint: SkyBridgeMediaEndpoint, now: Date = Date()) -> Bool {
+        guard let expiresAt = endpoint.expiresAt else { return true }
+        return expiresAt - now.timeIntervalSince1970 > 10
+    }
+
+    nonisolated private static func mediaRelayLeaseFailureReason(for error: Error) -> String {
+        guard case SignalServerClientCompat.ClientError.serverRejected(let status, let body) = error else {
+            return "leaseRejected"
+        }
+        if mediaLeaseBodyIndicatesSessionAuthorityLost(body) {
+            return "sessionAuthorityLost"
+        }
+        if body.contains("media_admission_token_superseded") {
+            return "superseded"
+        }
+        if body.contains("media_admission_token_expired") {
+            return "expired"
+        }
+        if body.contains("media_admission_token_lease_limit") {
+            return "leaseLimit"
+        }
+        if body.contains("missing_session") || body.contains("session_inactive") {
+            return "sessionAuthorityLost"
+        }
+        if status == 503 || body.contains("relay") {
+            return "relayUnavailable"
+        }
+        return "leaseRejected"
+    }
+
+    nonisolated private static func mediaRelayLeaseFailureReasonAfterRefresh(for error: Error) -> String {
+        let reason = mediaRelayLeaseFailureReason(for: error)
+        return reason == "superseded" ? "serverStateMismatch" : reason
+    }
+
+    nonisolated private static func mediaTokenDiagnosticSummary(for error: Error) -> String? {
+        guard case SignalServerClientCompat.ClientError.serverRejected(_, let body) = error,
+              let data = body.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let request = object["mediaTokenRequestGeneration"] as? String
+            ?? object["mediaTokenGeneration"] as? String
+            ?? "-"
+        let expected = object["mediaTokenExpectedGeneration"] as? String ?? "-"
+        let expectedPresent: String = {
+            if let bool = object["mediaTokenExpectedPresent"] as? Bool {
+                return bool ? "true" : "false"
+            }
+            return "-"
+        }()
+        let sessionPresent: String = {
+            if let bool = object["mediaTokenSessionPresent"] as? Bool {
+                return bool ? "true" : "false"
+            }
+            return "-"
+        }()
+        let state = object["mediaTokenState"] as? String ?? "-"
+        let revokedReason = object["mediaTokenRevokedReason"] as? String ?? "-"
+        let build = object["serverBuildFingerprint"] as? String ?? "-"
+        let rejectReason = object["rejectReason"] as? String ?? "-"
+        return "requestGeneration=\(request) expectedGeneration=\(expected) expectedPresent=\(expectedPresent) sessionPresent=\(sessionPresent) tokenState=\(state) tokenRevokedReason=\(revokedReason) rejectReason=\(rejectReason) serverBuild=\(build)"
+    }
+
+    nonisolated private static func mediaAdmissionRefreshFailureReason(for error: Error) -> String {
+        guard case SignalServerClientCompat.ClientError.serverRejected(let status, let body) = error else {
+            return "refreshFailed"
+        }
+        if status == 404 || body.contains("Cannot POST /api/media/admission/refresh") {
+            return "serverRefreshUnsupported"
+        }
+        if body.contains("session_token_superseded") {
+            return "sessionTokenSuperseded"
+        }
+        if body.contains("session_token_expired") {
+            return "sessionTokenExpired"
+        }
+        if body.contains("missing_session_token") {
+            return "missingSessionToken"
+        }
+        if body.contains("missing_session") || body.contains("session_inactive") {
+            return "sessionAuthorityLost"
+        }
+        if status == 503 {
+            return "relayUnavailable"
+        }
+        return "refreshFailed"
+    }
+
+    nonisolated private static func sessionRefreshFailureReason(for error: Error) -> String {
+        guard case SignalServerClientCompat.ClientError.serverRejected(let status, let body) = error else {
+            let description = (error as NSError).localizedDescription
+            if description == "missingRole" {
+                return "missingRole"
+            }
+            return "sessionReauthFailed"
+        }
+        if status == 404 || body.contains("Cannot POST /api/webrtc/session/refresh") {
+            return "serverUnsupported"
+        }
+        if body.contains("missing_session") || body.contains("session_inactive") {
+            return "sessionAuthorityLost"
+        }
+        if body.contains("session_scope_mismatch") || body.contains("scope") || status == 403 {
+            return "scopeMismatch"
+        }
+        if status == 503 {
+            return "serverUnavailable"
+        }
+        return "sessionReauthFailed"
+    }
+
+    nonisolated private static func isSessionAuthorityLostReason(_ reason: String) -> Bool {
+        reason == "sessionAuthorityLost"
+    }
+
+    nonisolated private static func mediaLeaseBodyIndicatesSessionAuthorityLost(_ body: String) -> Bool {
+        guard let data = body.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return body.contains("session_inactive") || body.contains("missing_session")
+        }
+        if let present = object["mediaTokenSessionPresent"] as? Bool, present == false {
+            return true
+        }
+        if let error = object["error"] as? String,
+           error == "session_inactive" || error == "missing_session" {
+            return true
+        }
+        if let rejectReason = object["rejectReason"] as? String,
+           ["missingRecord", "revoked", "activeExpired", "iceKilled", "remote_kill", "session_killed"].contains(rejectReason) {
+            return true
+        }
+        if let state = object["mediaTokenState"] as? String,
+           state.caseInsensitiveCompare("revoked") == .orderedSame {
+            let expectedPresent = object["mediaTokenExpectedPresent"] as? Bool
+            let sessionPresent = object["mediaTokenSessionPresent"] as? Bool
+            return expectedPresent != true || sessionPresent == false
+        }
+        return false
+    }
+
     private static let shortCodeAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
     private static let shortCodeAllowedCharacters = Set(shortCodeAlphabet)
     public static let legacyConnectionCodeLength = 6
@@ -1385,6 +2082,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
     private var webrtcSignalingAuthTokenBySessionId: [String: String] = [:]
     private var webrtcTurnAdmissionTokenBySessionId: [String: String] = [:]
+    private var webrtcMediaAdmissionTokenBySessionId: [String: String] = [:]
+    private var mediaAdmissionLeaseBackoffBySessionId: [String: (token: String?, until: Date, reason: String)] = [:]
+    private var mediaAdmissionLeaseInFlightSessionIds = Set<String>()
+    private var mediaAdmissionSessionRefreshInFlightSessionIds = Set<String>()
+    private var mediaAdmissionLeaseFailureReasonBySessionId: [String: String] = [:]
+    private var mediaAdmissionAuthorityLostSessionIds = Set<String>()
+    private var mediaAdmissionRelayEndpointBySessionId: [String: SkyBridgeMediaEndpoint] = [:]
     private var latestLocalOfferBySessionId: [String: String] = [:]
     private var latestLocalAnswerBySessionId: [String: String] = [:]
     private var localICECandidatesBySessionId: [String: [WebRTCSignalingEnvelope.Payload]] = [:]
@@ -1854,6 +2558,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             )
             webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken
             webrtcTurnAdmissionTokenBySessionId[lookup.sessionID] = lookup.turnAdmissionToken
+            if let mediaAdmissionToken = lookup.mediaAdmissionToken {
+                webrtcMediaAdmissionTokenBySessionId[lookup.sessionID] = mediaAdmissionToken
+            }
             currentPathSignalingOriginBySessionId[lookup.sessionID] = canonicalOrigin
             currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthorityCompat(
                 deviceId: lookup.initiatorDeviceId,
@@ -1945,6 +2652,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             let canonicalOrigin = try validateCurrentPathOrigin(lease.signalingServerOrigin)
             webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
             webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
+            if let mediaAdmissionToken = lease.mediaAdmissionToken {
+                webrtcMediaAdmissionTokenBySessionId[lease.sessionID] = mediaAdmissionToken
+            }
             currentPathSignalingOriginBySessionId[lease.sessionID] = canonicalOrigin
             localConnectionCode = lease.code
             localConnectionCodeExpiresAt = Date().addingTimeInterval(lease.expiresIn)
@@ -2055,6 +2765,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             let canonicalOrigin = try validateCurrentPathOrigin(lease.signalingServerOrigin)
             webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
             webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
+            if let mediaAdmissionToken = lease.mediaAdmissionToken {
+                webrtcMediaAdmissionTokenBySessionId[lease.sessionID] = mediaAdmissionToken
+            }
             currentPathSignalingOriginBySessionId[lease.sessionID] = canonicalOrigin
 
             let qrData = DynamicQRCodeData(
@@ -2198,6 +2911,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         localICECandidatesBySessionId.removeAll()
         webrtcSignalingAuthTokenBySessionId.removeAll()
         webrtcTurnAdmissionTokenBySessionId.removeAll()
+        webrtcMediaAdmissionTokenBySessionId.removeAll()
+        mediaAdmissionLeaseBackoffBySessionId.removeAll()
+        mediaAdmissionLeaseInFlightSessionIds.removeAll()
+        mediaAdmissionLeaseFailureReasonBySessionId.removeAll()
+        mediaAdmissionAuthorityLostSessionIds.removeAll()
+        mediaAdmissionRelayEndpointBySessionId.removeAll()
         currentPathExpectedRemoteAuthorityBySessionId.removeAll()
         currentPathSignalingOriginBySessionId.removeAll()
         remoteAppActivityAtBySessionId.removeAll()
@@ -2302,6 +3021,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private func scheduleRemoteVideoTrackConfirmationIfNeeded(trigger: String) {
         guard currentSessionId != nil, remoteVideoTrack != nil else { return }
         guard !remoteVideoTrackHasRenderedFrame else { return }
+        let sessionIdAtStart = currentSessionId
         remoteVideoTrackConfirmationTask?.cancel()
         remoteVideoTrackConfirmationTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -2314,6 +3034,20 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             guard !self.remoteVideoTrackHasRenderedFrame else { return }
             guard let size = self.bestAvailableRemoteVideoEvidenceSize() else { return }
             self.markRemoteVideoTrackReadyForPromotion(size: size, source: trigger)
+            do {
+                try await Task.sleep(for: .milliseconds(2_650))
+            } catch {
+                return
+            }
+            guard self.currentSessionId == sessionIdAtStart,
+                  self.remoteVideoTrack != nil,
+                  !self.remoteVideoTrackHasRenderedFrame else { return }
+            let probable = self.remoteVideoTrackHasReceivedFirstPacket
+                ? "renderer-bound-no-native-frame"
+                : "receiver-stats-zero-or-track-muted"
+            SkyBridgeLogger.shared.warning(
+                "⚠️ WebRTC 原生视频轨 3 秒内无真实渲染帧: session=\(self.currentSessionId ?? "-") probable=\(probable) firstPacket=\(self.remoteVideoTrackHasReceivedFirstPacket) fallbackEvidence=\(trigger)"
+            )
         }
     }
 
@@ -2594,7 +3328,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         suppressRecovery: Bool,
         messageType: WebRTCSignalingEnvelope.MessageType
     ) -> Bool {
-        isHandshakeComplete && !suppressRecovery && messageType == .iceCandidate
+        isHandshakeComplete && !suppressRecovery && messageType != .leave
     }
 
     static func shouldDeferSignalingSendRecovery(
@@ -3776,11 +4510,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     ) -> Bool {
         let signalingToken = Self.normalizedNonEmptyToken(webrtcSignalingAuthTokenBySessionId[qr.sessionID])
         let turnAdmissionToken = Self.normalizedNonEmptyToken(webrtcTurnAdmissionTokenBySessionId[qr.sessionID])
+        let mediaAdmissionToken = Self.normalizedNonEmptyToken(webrtcMediaAdmissionTokenBySessionId[qr.sessionID])
         let cachedOrigin = currentPathSignalingOriginBySessionId[qr.sessionID]
             .flatMap { try? validateCurrentPathOrigin($0) }
         let cachedAuthority = currentPathExpectedRemoteAuthorityBySessionId[qr.sessionID]
 
-        guard Self.shouldReuseRedeemedQRSessionArtifacts(
+        guard mediaAdmissionToken != nil,
+              Self.shouldReuseRedeemedQRSessionArtifacts(
             canonicalQRSignalingOrigin: canonicalOrigin,
             qrDeviceId: qr.deviceID,
             qrProtocolSigningAlgorithm: qr.protocolSigningAlgorithm,
@@ -3802,6 +4538,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }()
         webrtcSignalingAuthTokenBySessionId[qr.sessionID] = signalingToken
         webrtcTurnAdmissionTokenBySessionId[qr.sessionID] = turnAdmissionToken
+        webrtcMediaAdmissionTokenBySessionId[qr.sessionID] = mediaAdmissionToken
         currentPathSignalingOriginBySessionId[qr.sessionID] = canonicalOrigin
         currentPathExpectedRemoteAuthorityBySessionId[qr.sessionID] = CurrentPathRemoteAuthorityCompat(
             deviceId: qr.deviceID,
@@ -3872,6 +4609,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         webrtcSignalingAuthTokenBySessionId[qr.sessionID] = redeemed.sessionToken
         webrtcTurnAdmissionTokenBySessionId[qr.sessionID] = redeemed.turnAdmissionToken
+        if let mediaAdmissionToken = redeemed.mediaAdmissionToken {
+            webrtcMediaAdmissionTokenBySessionId[qr.sessionID] = mediaAdmissionToken
+        }
         currentPathSignalingOriginBySessionId[qr.sessionID] = redeemedOrigin
         currentPathExpectedRemoteAuthorityBySessionId[qr.sessionID] = CurrentPathRemoteAuthorityCompat(
             deviceId: qr.deviceID,
@@ -3890,6 +4630,14 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             return nil
         }
         return trimmed
+    }
+
+    nonisolated private static func tokenGenerationPrefix(_ token: String?) -> String? {
+        guard let token = normalizedNonEmptyToken(token) else { return nil }
+        return SHA256.hash(data: Data(token.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     nonisolated private static func shouldReuseRedeemedQRSessionArtifacts(
@@ -4123,6 +4871,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         let preservedSignalingToken = webrtcSignalingAuthTokenBySessionId[sessionId]
         let preservedTurnAdmissionToken = webrtcTurnAdmissionTokenBySessionId[sessionId]
+        let preservedMediaAdmissionToken = webrtcMediaAdmissionTokenBySessionId[sessionId]
         let preservedSignalingOrigin = currentPathSignalingOriginBySessionId[sessionId]
         let preservedRemoteAuthority = currentPathExpectedRemoteAuthorityBySessionId[sessionId]
 
@@ -4133,6 +4882,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
             if let preservedTurnAdmissionToken {
                 webrtcTurnAdmissionTokenBySessionId[sessionId] = preservedTurnAdmissionToken
+            }
+            if let preservedMediaAdmissionToken {
+                webrtcMediaAdmissionTokenBySessionId[sessionId] = preservedMediaAdmissionToken
             }
             if let preservedSignalingOrigin {
                 currentPathSignalingOriginBySessionId[sessionId] = preservedSignalingOrigin
@@ -5362,6 +6114,34 @@ private extension CrossNetworkWebRTCManager {
 
             self.sessionKeys = keys
             self.handshakeDriver = nil
+            let isStrictClassicAuthorityBootstrap =
+                strictPQCRequested && useClassicAuthorityBootstrap && !keys.negotiatedSuite.isPQCGroup
+            if isStrictClassicAuthorityBootstrap {
+                self.lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
+                SkyBridgeLogger.shared.warning(
+                    "⏳ WebRTC strictPQC classic authority bootstrap is bootstrap-only: session=\(sessionId), event=pqcRekeyPending suite=\(keys.negotiatedSuite.rawValue)"
+                )
+                do {
+                    try await sendPairingIdentityExchangeOverWebRTC(
+                        sessionId: sessionId,
+                        peerDeviceId: peerDeviceId,
+                        session: session,
+                        force: true
+                    )
+                } catch {
+                    SkyBridgeLogger.shared.warning(
+                        "⚠️ WebRTC strictPQC bootstrap pairingIdentityExchange send failed: session=\(sessionId), err=\(error.localizedDescription)"
+                    )
+                }
+                await maybeStartPQCRekeyOverWebRTC(
+                    sessionId: sessionId,
+                    peerDeviceId: peerDeviceId,
+                    session: session,
+                    strictPQCRequested: strictPQCRequested,
+                    trigger: "post_bootstrap"
+                )
+                return
+            }
             if self.currentSessionId == sessionId {
                 // Paper-aligned contract:
                 // WebRTC DataChannel ready is only transportReady; connected must wait for handshakeComplete.
@@ -5789,7 +6569,7 @@ private extension CrossNetworkWebRTCManager {
             }
             persistCurrentPathTrust(sessionId: sessionId)
             SkyBridgeLogger.shared.info(
-                "✅ inbound WebRTC rekey 完成: session=\(sessionId), suite=\(keys.negotiatedSuite.rawValue)"
+                "✅ inbound WebRTC rekey 完成: session=\(sessionId), event=pqcRekeyComplete suite=\(keys.negotiatedSuite.rawValue)"
             )
 
         case .failed(let reason):
@@ -5797,8 +6577,22 @@ private extension CrossNetworkWebRTCManager {
             inboundRekeyResponderSessionIds.remove(sessionId)
             rekeyInProgressSessionIds.remove(sessionId)
             lastRekeyEvent = "failed reason=\(reason)"
+            if strictPQCRequested,
+               sessionKeys?.negotiatedSuite.isPQCGroup != true {
+                let message = "strictPQC WebRTC rekey failed after classic bootstrap: \(reason)"
+                SkyBridgeLogger.shared.error(
+                    "⛔️ \(message) session=\(sessionId), event=pqcRekeyFailed"
+                )
+                lastError = message
+                applyActiveSessionDisconnect(sessionId: sessionId, kind: .explicit)
+                await disconnect(clearSnapshot: false)
+                lastError = message
+                state = .failed(message)
+                readiness = .idle
+                return
+            }
             SkyBridgeLogger.shared.warning(
-                "⚠️ inbound WebRTC rekey 失败，保留既有会话: session=\(sessionId), reason=\(reason)"
+                "⚠️ inbound WebRTC rekey 失败，保留既有会话: session=\(sessionId), event=pqcRekeyFailed reason=\(reason)"
             )
 
         default:
@@ -5844,6 +6638,30 @@ private extension CrossNetworkWebRTCManager {
             handshakeDriver = nil
             inboundInitialHandshakeResponderSessionIds.remove(sessionId)
             inboundClassicAuthorityBootstrapSessionIds.remove(sessionId)
+            if strictPQCRequested,
+               allowsClassicAuthorityBootstrap,
+               !keys.negotiatedSuite.isPQCGroup {
+                lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
+                SkyBridgeLogger.shared.warning(
+                    "⏳ inbound WebRTC strictPQC classic authority bootstrap is bootstrap-only: session=\(sessionId), event=pqcRekeyPending suite=\(keys.negotiatedSuite.rawValue)"
+                )
+                if currentSessionId == sessionId,
+                   let activeSession = self.session {
+                    do {
+                        try await sendPairingIdentityExchangeOverWebRTC(
+                            sessionId: sessionId,
+                            peerDeviceId: remoteDeviceId ?? handshakePeerId ?? sessionId,
+                            session: activeSession,
+                            force: true
+                        )
+                    } catch {
+                        SkyBridgeLogger.shared.warning(
+                            "⚠️ inbound WebRTC strictPQC bootstrap pairingIdentityExchange send failed: session=\(sessionId), err=\(error.localizedDescription)"
+                        )
+                    }
+                }
+                return
+            }
 
             if currentSessionId == sessionId {
                 state = .connected(sessionId: sessionId)
@@ -6078,7 +6896,7 @@ private extension CrossNetworkWebRTCManager {
         ) else {
             lastRekeyEvent = "waiting peer=unknown election"
             SkyBridgeLogger.shared.info(
-                "⏳ WebRTC rekey waiting for concrete remote device id: session=\(sessionId), trigger=\(trigger)"
+                "⏳ WebRTC rekey waiting for concrete remote device id: session=\(sessionId), event=pqcRekeyPending trigger=\(trigger)"
             )
             return
         }
@@ -6088,14 +6906,14 @@ private extension CrossNetworkWebRTCManager {
         ) else {
             lastRekeyEvent = "waiting peer=\(electionRemoteDeviceId) election"
             SkyBridgeLogger.shared.info(
-                "⏳ WebRTC rekey waiting for stable initiator election: session=\(sessionId), trigger=\(trigger), peer=\(electionRemoteDeviceId)"
+                "⏳ WebRTC rekey waiting for stable initiator election: session=\(sessionId), event=pqcRekeyPending trigger=\(trigger), peer=\(electionRemoteDeviceId)"
             )
             return
         }
         guard shouldInitiate else {
             lastRekeyEvent = "await inbound peer=\(electionRemoteDeviceId)"
             SkyBridgeLogger.shared.info(
-                "ℹ️ WebRTC rekey elected peer as initiator; waiting inbound rekey: session=\(sessionId), trigger=\(trigger), peer=\(electionRemoteDeviceId)"
+                "ℹ️ WebRTC rekey elected peer as initiator; waiting inbound rekey: session=\(sessionId), event=pqcRekeyPending trigger=\(trigger), peer=\(electionRemoteDeviceId)"
             )
             return
         }
@@ -6107,7 +6925,7 @@ private extension CrossNetworkWebRTCManager {
         } else {
             SkyBridgeLogger.shared.warning(
                 "⚠️ skip WebRTC rekey: strictPQC requested but local PQC provider unavailable. " +
-                "session=\(sessionId), trigger=\(trigger), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs)"
+                "session=\(sessionId), event=pqcRekeyFailed trigger=\(trigger), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs)"
             )
             return
         }
@@ -6152,7 +6970,7 @@ private extension CrossNetworkWebRTCManager {
             let missing = missingSuites.map(\.rawValue).joined(separator: ",")
             lastRekeyEvent = "waiting peer=\(selectedPeerId) missing=\(missing)"
             SkyBridgeLogger.shared.info(
-                "⏳ WebRTC rekey waiting for peer KEM keys: session=\(sessionId), peer=\(selectedPeerId), missing=\(missing)"
+                "⏳ WebRTC rekey waiting for peer KEM keys: session=\(sessionId), event=pqcRekeyPending peer=\(selectedPeerId), missing=\(missing)"
             )
             return
         }
@@ -6172,7 +6990,7 @@ private extension CrossNetworkWebRTCManager {
 
             lastRekeyEvent = "start peer=\(selectedPeerId) policy=\(selection.rawValue)"
             SkyBridgeLogger.shared.info(
-                "🔁 WebRTC rekey start: session=\(sessionId), trigger=\(trigger), peer=\(selectedPeerId), policy=\(selection.rawValue)"
+                "🔁 WebRTC rekey start: session=\(sessionId), event=pqcRekeyStarted trigger=\(trigger), peer=\(selectedPeerId), policy=\(selection.rawValue)"
             )
             let rekeyed = try await driver.initiateHandshake(with: peer)
             sessionKeys = rekeyed
@@ -6202,12 +7020,26 @@ private extension CrossNetworkWebRTCManager {
             persistCurrentPathTrust(sessionId: sessionId)
 
             SkyBridgeLogger.shared.info(
-                "✅ WebRTC rekey complete: session=\(sessionId), suite=\(rekeyed.negotiatedSuite.rawValue)"
+                "✅ WebRTC rekey complete: session=\(sessionId), event=pqcRekeyComplete suite=\(rekeyed.negotiatedSuite.rawValue)"
             )
         } catch {
             lastRekeyEvent = "failed error=\(error.localizedDescription)"
+            if strictPQCRequested,
+               sessionKeys?.negotiatedSuite.isPQCGroup != true {
+                let message = "strictPQC WebRTC rekey failed after classic bootstrap: \(error.localizedDescription)"
+                SkyBridgeLogger.shared.error(
+                    "⛔️ \(message) session=\(sessionId), event=pqcRekeyFailed trigger=\(trigger)"
+                )
+                lastError = message
+                applyActiveSessionDisconnect(sessionId: sessionId, kind: .explicit)
+                await disconnect(clearSnapshot: false)
+                lastError = message
+                state = .failed(message)
+                readiness = .idle
+                return
+            }
             SkyBridgeLogger.shared.error(
-                "❌ WebRTC rekey failed: session=\(sessionId), trigger=\(trigger), err=\(error.localizedDescription)"
+                "❌ WebRTC rekey failed: session=\(sessionId), event=pqcRekeyFailed trigger=\(trigger), err=\(error.localizedDescription)"
             )
         }
     }
@@ -6234,6 +7066,20 @@ extension CrossNetworkWebRTCManager {
             logLabel: String
         ) -> Data? {
             while buffer.count - readOffset >= 4 {
+                if Self.startsWithKnownDirectEnvelope(buffer, at: readOffset) {
+                    let bufferedBytes = buffer.count - readOffset
+                    let prefixEnd = min(buffer.count, readOffset + 8)
+                    let prefix = buffer[readOffset..<prefixEnd]
+                        .map { String(format: "%02x", $0) }
+                        .joined()
+                    let magic = Self.knownDirectEnvelopeName(buffer, at: readOffset) ?? "unknown"
+                    SkyBridgeLogger.shared.warning(
+                        "⚠️ drop wrong-channel or unframed direct \(logLabel) envelope before length parser: magic=\(magic) buffered=\(bufferedBytes) prefix=\(prefix) reset=direct-envelope session=\(sessionId)"
+                    )
+                    reset()
+                    return nil
+                }
+
                 let length: Int = buffer.withUnsafeBytes { ptr in
                     let b0 = ptr.load(fromByteOffset: readOffset, as: UInt8.self)
                     let b1 = ptr.load(fromByteOffset: readOffset + 1, as: UInt8.self)
@@ -6249,7 +7095,7 @@ extension CrossNetworkWebRTCManager {
                         .map { String(format: "%02x", $0) }
                         .joined()
                     SkyBridgeLogger.shared.warning(
-                        "⚠️ drop invalid \(logLabel) frame length: len=\(length) max=\(maxInboundFrameBytes) buffered=\(bufferedBytes) prefix=\(prefix) session=\(sessionId)"
+                        "⚠️ drop invalid \(logLabel) frame length: len=\(length) max=\(maxInboundFrameBytes) buffered=\(bufferedBytes) prefix=\(prefix) reset=invalid-length session=\(sessionId)"
                     )
                     // WebRTC DataChannel is reliable and ordered. If framing is poisoned, byte-by-byte
                     // resync can turn arbitrary ciphertext into a fake handshake packet. Drop the whole
@@ -6294,6 +7140,327 @@ extension CrossNetworkWebRTCManager {
         private mutating func reset() {
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
+        }
+
+        static func lengthPrefix(from data: Data) -> Int? {
+            guard data.count >= 4 else { return nil }
+            return data.withUnsafeBytes { ptr in
+                let b0 = ptr.load(fromByteOffset: 0, as: UInt8.self)
+                let b1 = ptr.load(fromByteOffset: 1, as: UInt8.self)
+                let b2 = ptr.load(fromByteOffset: 2, as: UInt8.self)
+                let b3 = ptr.load(fromByteOffset: 3, as: UInt8.self)
+                return (Int(b0) << 24) | (Int(b1) << 16) | (Int(b2) << 8) | Int(b3)
+            }
+        }
+
+        static func startsWithKnownDirectEnvelope(_ data: Data, at offset: Int = 0) -> Bool {
+            knownDirectEnvelopeName(data, at: offset) != nil
+        }
+
+        static func knownDirectEnvelopeName(_ data: Data, at offset: Int = 0) -> String? {
+            guard data.count - offset >= 4 else { return nil }
+            let magic = data[offset..<offset + 4]
+            if magic.elementsEqual([0x53, 0x42, 0x50, 0x32]) { return "SBP2" } // traffic padding
+            if magic.elementsEqual([0x53, 0x42, 0x52, 0x46]) { return "SBRF" } // screen frame
+            if magic.elementsEqual([0x53, 0x42, 0x52, 0x41]) { return "SBRA" } // audio frame
+            if magic.elementsEqual([0x53, 0x42, 0x43, 0x32]) { return "SBC2" } // screen chunk
+            return nil
+        }
+    }
+
+    struct ScreenChannelWireDecoder {
+        enum Mode: String, Equatable {
+            case unknown
+            case lengthFramed
+            case directPayload
+            case chunkedPayload = "sbc2-chunked-v1"
+        }
+
+        private(set) var mode: Mode = .unknown
+        private(set) var parser: InboundFrameParser
+        private var chunkedReassembler: ScreenChunkedPayloadReassembler
+        let maxInboundFrameBytes: Int
+
+        private var pendingDirectCandidate: (data: Data, receivedAt: Date)?
+        private let pendingCandidateTTL: TimeInterval = 1.0
+
+        init(maxInboundFrameBytes: Int) {
+            self.maxInboundFrameBytes = maxInboundFrameBytes
+            self.parser = InboundFrameParser(maxInboundFrameBytes: maxInboundFrameBytes)
+            self.chunkedReassembler = ScreenChunkedPayloadReassembler(maxFrameBytes: maxInboundFrameBytes)
+        }
+
+        var canProbeDirectPayload: Bool {
+            mode != .lengthFramed && parser.canProbeDirectCompatibility
+        }
+
+        var hasPendingDirectCandidate: Bool {
+            pendingDirectCandidate != nil
+        }
+
+        mutating func markDirectPayloadMode() {
+            mode = .directPayload
+            parser = InboundFrameParser(maxInboundFrameBytes: maxInboundFrameBytes)
+            chunkedReassembler.reset()
+            pendingDirectCandidate = nil
+        }
+
+        mutating func markLengthFramedMode() {
+            if mode == .unknown {
+                mode = .lengthFramed
+            }
+            pendingDirectCandidate = nil
+        }
+
+        mutating func resetLengthFramedAfterDecodeFailure() {
+            parser = InboundFrameParser(maxInboundFrameBytes: maxInboundFrameBytes)
+            if mode == .lengthFramed {
+                mode = .unknown
+            }
+            pendingDirectCandidate = nil
+        }
+
+        mutating func markChunkedPayloadMode() {
+            mode = .chunkedPayload
+            parser = InboundFrameParser(maxInboundFrameBytes: maxInboundFrameBytes)
+            pendingDirectCandidate = nil
+        }
+
+        func isChunkedPayload(_ chunk: Data) -> Bool {
+            ScreenChunkedPayloadEnvelope.startsWithMagic(chunk)
+        }
+
+        mutating func appendChunkedPayload(_ chunk: Data, now: Date) -> ScreenChunkedPayloadReassembler.Result {
+            guard let envelope = ScreenChunkedPayloadEnvelope.decode(chunk) else {
+                chunkedReassembler.reset()
+                return .dropped(reason: "invalid-sbc2-envelope", frameId: nil)
+            }
+            return chunkedReassembler.append(envelope, now: now)
+        }
+
+        func shouldKeepOutOfLengthParser(_ chunk: Data) -> Bool {
+            guard canProbeDirectPayload else { return mode == .directPayload }
+            if InboundFrameParser.startsWithKnownDirectEnvelope(chunk) {
+                return true
+            }
+            guard let length = InboundFrameParser.lengthPrefix(from: chunk) else {
+                return false
+            }
+            return length <= 0 || length >= maxInboundFrameBytes
+        }
+
+        mutating func cacheDirectCandidateIfPossible(_ chunk: Data, now: Date) -> Bool {
+            guard chunk.count <= maxInboundFrameBytes else { return false }
+            pendingDirectCandidate = (chunk, now)
+            return true
+        }
+
+        mutating func takePendingDirectCandidate(now: Date) -> Data? {
+            guard let candidate = pendingDirectCandidate else { return nil }
+            pendingDirectCandidate = nil
+            guard now.timeIntervalSince(candidate.receivedAt) <= pendingCandidateTTL else {
+                return nil
+            }
+            return candidate.data
+        }
+
+        mutating func appendLengthChunk(_ chunk: Data) {
+            parser.append(chunk)
+        }
+
+        mutating func nextLengthPayload(sessionId: String, logLabel: String) -> Data? {
+            parser.nextPayload(sessionId: sessionId, logLabel: logLabel)
+        }
+    }
+
+    struct ScreenChunkedPayloadEnvelope {
+        static let magic: UInt32 = 0x5342_4332 // SBC2
+        static let version: UInt8 = 1
+        static let headerLength = 36
+
+        let frameId: UInt64
+        let chunkIndex: Int
+        let chunkCount: Int
+        let totalBytes: Int
+        let chunkOffset: Int
+        let payload: Data
+
+        static func startsWithMagic(_ data: Data) -> Bool {
+            guard data.count >= 4 else { return false }
+            return readUInt32(data, at: 0) == magic
+        }
+
+        static func decode(_ data: Data) -> ScreenChunkedPayloadEnvelope? {
+            guard data.count >= headerLength,
+                  readUInt32(data, at: 0) == magic,
+                  data[4] == version,
+                  Int(readUInt16(data, at: 6)) == headerLength else {
+                return nil
+            }
+            let chunkBytes = Int(readUInt32(data, at: 32))
+            guard chunkBytes >= 0,
+                  data.count == headerLength + chunkBytes else {
+                return nil
+            }
+            let frameId = readUInt64(data, at: 8)
+            let chunkIndex = Int(readUInt32(data, at: 16))
+            let chunkCount = Int(readUInt32(data, at: 20))
+            let totalBytes = Int(readUInt32(data, at: 24))
+            let chunkOffset = Int(readUInt32(data, at: 28))
+            let payload = data.subdata(in: headerLength..<data.count)
+            return ScreenChunkedPayloadEnvelope(
+                frameId: frameId,
+                chunkIndex: chunkIndex,
+                chunkCount: chunkCount,
+                totalBytes: totalBytes,
+                chunkOffset: chunkOffset,
+                payload: payload
+            )
+        }
+
+        private static func readUInt16(_ data: Data, at offset: Int) -> UInt16 {
+            data.withUnsafeBytes { ptr in
+                let b0 = UInt16(ptr.load(fromByteOffset: offset, as: UInt8.self))
+                let b1 = UInt16(ptr.load(fromByteOffset: offset + 1, as: UInt8.self))
+                return (b0 << 8) | b1
+            }
+        }
+
+        private static func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
+            data.withUnsafeBytes { ptr in
+                let b0 = UInt32(ptr.load(fromByteOffset: offset, as: UInt8.self))
+                let b1 = UInt32(ptr.load(fromByteOffset: offset + 1, as: UInt8.self))
+                let b2 = UInt32(ptr.load(fromByteOffset: offset + 2, as: UInt8.self))
+                let b3 = UInt32(ptr.load(fromByteOffset: offset + 3, as: UInt8.self))
+                return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+        }
+
+        private static func readUInt64(_ data: Data, at offset: Int) -> UInt64 {
+            data.withUnsafeBytes { ptr in
+                var value: UInt64 = 0
+                for idx in 0..<8 {
+                    value = (value << 8) | UInt64(ptr.load(fromByteOffset: offset + idx, as: UInt8.self))
+                }
+                return value
+            }
+        }
+    }
+
+    struct ScreenChunkedPayloadReassembler {
+        enum Result: Equatable {
+            case waiting(frameId: UInt64, chunkIndex: Int, chunkCount: Int)
+            case complete(frameId: UInt64, payload: Data)
+            case dropped(reason: String, frameId: UInt64?)
+        }
+
+        private let maxFrameBytes: Int
+        private var frameId: UInt64?
+        private var expectedChunkCount: Int = 0
+        private var expectedTotalBytes: Int = 0
+        private var nextChunkIndex: Int = 0
+        private var receivedBytes: Int = 0
+        private var chunks: [Data] = []
+        private var lastUpdatedAt: Date = .distantPast
+        private let frameTTL: TimeInterval = 1.0
+
+        init(maxFrameBytes: Int) {
+            self.maxFrameBytes = maxFrameBytes
+        }
+
+        mutating func reset() {
+            frameId = nil
+            expectedChunkCount = 0
+            expectedTotalBytes = 0
+            nextChunkIndex = 0
+            receivedBytes = 0
+            chunks.removeAll(keepingCapacity: true)
+            lastUpdatedAt = .distantPast
+        }
+
+        private mutating func beginFrame(_ envelope: ScreenChunkedPayloadEnvelope) {
+            frameId = envelope.frameId
+            expectedChunkCount = envelope.chunkCount
+            expectedTotalBytes = envelope.totalBytes
+            nextChunkIndex = 0
+            receivedBytes = 0
+            chunks.removeAll(keepingCapacity: true)
+        }
+
+        mutating func append(
+            _ envelope: ScreenChunkedPayloadEnvelope,
+            now: Date
+        ) -> Result {
+            if frameId != nil, now.timeIntervalSince(lastUpdatedAt) > frameTTL {
+                let droppedFrame = frameId
+                reset()
+                if envelope.chunkIndex != 0 {
+                    return .dropped(reason: "expired-missing-first-chunk", frameId: droppedFrame)
+                }
+            }
+
+            guard envelope.chunkCount > 0,
+                  envelope.chunkIndex >= 0,
+                  envelope.chunkIndex < envelope.chunkCount,
+                  envelope.totalBytes > 0,
+                  envelope.totalBytes <= maxFrameBytes,
+                  envelope.chunkOffset >= 0,
+                  envelope.chunkOffset + envelope.payload.count <= envelope.totalBytes else {
+                reset()
+                return .dropped(reason: "invalid-sbc2-chunk-metadata", frameId: envelope.frameId)
+            }
+
+            if frameId == nil {
+                guard envelope.chunkIndex == 0,
+                      envelope.chunkOffset == 0 else {
+                    reset()
+                    return .dropped(reason: "missing-first-chunk", frameId: envelope.frameId)
+                }
+                beginFrame(envelope)
+            } else if frameId != envelope.frameId ||
+                        expectedChunkCount != envelope.chunkCount ||
+                        expectedTotalBytes != envelope.totalBytes {
+                let droppedFrame = frameId
+                guard envelope.chunkIndex == 0,
+                      envelope.chunkOffset == 0,
+                      frameId != envelope.frameId else {
+                    reset()
+                    return .dropped(reason: "out-of-order-or-new-frame", frameId: droppedFrame ?? envelope.frameId)
+                }
+                reset()
+                beginFrame(envelope)
+            }
+
+            guard envelope.chunkIndex == nextChunkIndex,
+                  envelope.chunkOffset == receivedBytes else {
+                let droppedFrame = frameId ?? envelope.frameId
+                reset()
+                return .dropped(reason: "out-of-order-or-new-frame", frameId: droppedFrame)
+            }
+
+            chunks.append(envelope.payload)
+            receivedBytes += envelope.payload.count
+            nextChunkIndex += 1
+            lastUpdatedAt = now
+
+            if nextChunkIndex == expectedChunkCount {
+                guard receivedBytes == expectedTotalBytes else {
+                    let droppedFrame = frameId
+                    reset()
+                    return .dropped(reason: "total-bytes-mismatch", frameId: droppedFrame)
+                }
+                let completeFrameId = frameId ?? envelope.frameId
+                var payload = Data(capacity: expectedTotalBytes)
+                for chunk in chunks { payload.append(chunk) }
+                reset()
+                return .complete(frameId: completeFrameId, payload: payload)
+            }
+
+            return .waiting(
+                frameId: envelope.frameId,
+                chunkIndex: envelope.chunkIndex,
+                chunkCount: envelope.chunkCount
+            )
         }
     }
 }
@@ -6458,6 +7625,12 @@ private extension CrossNetworkWebRTCManager {
         if msg.type == .overlayUpdate,
            let payload = try? JSONDecoder().decode(RemoteDesktopOverlayPayload.self, from: msg.payload) {
             RemoteDesktopManager.instance.handleInboundOverlayUpdate(payload)
+            return true
+        }
+
+        if msg.type == .streamConfigurationAck,
+           let payload = try? JSONDecoder().decode(RemoteDesktopStreamConfigurationAckPayload.self, from: msg.payload) {
+            RemoteDesktopManager.instance.handleStreamConfigurationAck(payload)
             return true
         }
 
@@ -6753,25 +7926,137 @@ private extension CrossNetworkWebRTCManager {
         let maxInboundFrameBytes = 8_000_000
         do {
             self.appendSmokeTrace("screen-receiveLoop start session=\(sessionId)")
-            var parser = InboundFrameParser(maxInboundFrameBytes: maxInboundFrameBytes)
-            var usesDirectScreenPayloads = false
+            var wireDecoder = ScreenChannelWireDecoder(maxInboundFrameBytes: maxInboundFrameBytes)
+            var announcedWireMode: ScreenChannelWireDecoder.Mode?
 
             while !Task.isCancelled {
                 let chunk = try await inbound.next()
-
-                if parser.canProbeDirectCompatibility,
-                   let keys = await screenReceiveSessionKeysIfCurrent(
+                let now = Date()
+                let keys = await screenReceiveSessionKeysIfCurrent(
                     sessionId: sessionId,
                     sessionObjectIdentifier: sessionObjectIdentifier
-                   ),
-                   let screenData = Self.decodeDirectScreenChannelPayload(chunk, keys: keys) {
-                    if !usesDirectScreenPayloads {
-                        usesDirectScreenPayloads = true
+                )
+
+                if let keys,
+                   let pending = wireDecoder.takePendingDirectCandidate(now: now) {
+                    if let screenData = Self.decodeDirectScreenChannelPayload(pending, keys: keys) {
+                        wireDecoder.markDirectPayloadMode()
+                        if announcedWireMode != wireDecoder.mode {
+                            announcedWireMode = wireDecoder.mode
+                            self.appendSmokeTrace(
+                                "screen-channel wire-mode=\(wireDecoder.mode.rawValue) session=\(sessionId) bytes=\(pending.count) source=pending-direct"
+                            )
+                            SkyBridgeLogger.shared.info(
+                                "ℹ️ screen-channel wire 模式锁定: mode=\(wireDecoder.mode.rawValue) session=\(sessionId)"
+                            )
+                        }
+                        await publishDecodedScreenDataIfCurrent(
+                            screenData,
+                            sessionId: sessionId,
+                            sessionObjectIdentifier: sessionObjectIdentifier
+                        )
+                    } else {
                         self.appendSmokeTrace(
-                            "screen-channel direct-payload compatibility mode session=\(sessionId) bytes=\(chunk.count)"
+                            "screen-channel wireMode=waiting-keys-drop session=\(sessionId) bytes=\(pending.count)"
+                        )
+                        SkyBridgeLogger.shared.debug(
+                            "ℹ️ screen-channel direct candidate 解密失败，已丢弃: mode=waiting-keys-drop session=\(sessionId) bytes=\(pending.count)"
+                        )
+                    }
+                }
+
+                if wireDecoder.isChunkedPayload(chunk) {
+                    switch wireDecoder.appendChunkedPayload(chunk, now: now) {
+                    case .waiting(let frameId, let chunkIndex, let chunkCount):
+                        if chunkIndex == 0 {
+                            self.appendSmokeTrace(
+                                "screen-channel wire=sbc2-chunked-v1 frameId=\(frameId) chunk=1/\(chunkCount) session=\(sessionId)"
+                            )
+                        }
+                        continue
+                    case .dropped(let reason, let frameId):
+                        self.appendSmokeTrace(
+                            "screen-channel wire=sbc2-chunked-v1 reassemblyDropReason=\(reason) frameId=\(frameId.map(String.init) ?? "-") session=\(sessionId)"
+                        )
+                        SkyBridgeLogger.shared.debug(
+                            "ℹ️ screen-channel SBC2 分片已丢弃: reason=\(reason) frameId=\(frameId.map(String.init) ?? "-") session=\(sessionId)"
+                        )
+                        continue
+                    case .complete(let frameId, let payload):
+                        guard let frameKeys = await screenReceiveSessionKeysIfCurrent(
+                            sessionId: sessionId,
+                            sessionObjectIdentifier: sessionObjectIdentifier
+                        ) else {
+                            self.appendSmokeTrace(
+                                "screen-channel wire=sbc2-chunked-v1 waiting-keys-drop frameId=\(frameId) session=\(sessionId)"
+                            )
+                            continue
+                        }
+                        do {
+                            guard let screenData = try Self.decodeEncryptedScreenChannelPayload(payload, keys: frameKeys) else {
+                                continue
+                            }
+                            wireDecoder.markChunkedPayloadMode()
+                            if announcedWireMode != wireDecoder.mode {
+                                announcedWireMode = wireDecoder.mode
+                                self.appendSmokeTrace(
+                                    "screen-channel wire-mode=\(wireDecoder.mode.rawValue) session=\(sessionId) frameId=\(frameId)"
+                                )
+                                SkyBridgeLogger.shared.info(
+                                    "ℹ️ screen-channel wire 模式锁定: mode=\(wireDecoder.mode.rawValue) session=\(sessionId)"
+                                )
+                            }
+                            await publishDecodedScreenDataIfCurrent(
+                                screenData,
+                                sessionId: sessionId,
+                                sessionObjectIdentifier: sessionObjectIdentifier
+                            )
+                        } catch {
+                            self.appendSmokeTrace(
+                                "screen-channel wire=sbc2-chunked-v1 decryptFailed frameId=\(frameId) session=\(sessionId)"
+                            )
+                            SkyBridgeLogger.shared.debug(
+                                "ℹ️ screen-channel SBC2 payload 解密/解析失败: \(error.localizedDescription)"
+                            )
+                        }
+                        continue
+                    }
+                }
+
+                if wireDecoder.mode == .directPayload {
+                    guard let keys else {
+                        _ = wireDecoder.cacheDirectCandidateIfPossible(chunk, now: now)
+                        self.appendSmokeTrace(
+                            "screen-channel wireMode=directPayload waiting-keys session=\(sessionId) bytes=\(chunk.count)"
+                        )
+                        continue
+                    }
+
+                    if let screenData = Self.decodeDirectScreenChannelPayload(chunk, keys: keys) {
+                        await publishDecodedScreenDataIfCurrent(
+                            screenData,
+                            sessionId: sessionId,
+                            sessionObjectIdentifier: sessionObjectIdentifier
+                        )
+                    } else {
+                        SkyBridgeLogger.shared.debug(
+                            "ℹ️ screen-channel direct payload 解密/解析失败，已丢弃: session=\(sessionId) bytes=\(chunk.count)"
+                        )
+                    }
+                    continue
+                }
+
+                if wireDecoder.canProbeDirectPayload,
+                   let keys,
+                   let screenData = Self.decodeDirectScreenChannelPayload(chunk, keys: keys) {
+                    wireDecoder.markDirectPayloadMode()
+                    if announcedWireMode != wireDecoder.mode {
+                        announcedWireMode = wireDecoder.mode
+                        self.appendSmokeTrace(
+                            "screen-channel wire-mode=\(wireDecoder.mode.rawValue) session=\(sessionId) bytes=\(chunk.count) source=direct-probe"
                         )
                         SkyBridgeLogger.shared.info(
-                            "ℹ️ screen-channel 检测到直发兼容模式，已跳过分帧解析: session=\(sessionId)"
+                            "ℹ️ screen-channel wire 模式锁定: mode=\(wireDecoder.mode.rawValue) session=\(sessionId)"
                         )
                     }
                     await publishDecodedScreenDataIfCurrent(
@@ -6782,10 +8067,30 @@ private extension CrossNetworkWebRTCManager {
                     continue
                 }
 
-                parser.append(chunk)
+                if wireDecoder.shouldKeepOutOfLengthParser(chunk) {
+                    if keys == nil,
+                       wireDecoder.cacheDirectCandidateIfPossible(chunk, now: now) {
+                        self.appendSmokeTrace(
+                            "screen-channel wireMode=waiting-keys-cache session=\(sessionId) bytes=\(chunk.count)"
+                        )
+                        SkyBridgeLogger.shared.debug(
+                            "ℹ️ screen-channel direct-looking payload 已等待密钥后重试: session=\(sessionId) bytes=\(chunk.count)"
+                        )
+                    } else {
+                        self.appendSmokeTrace(
+                            "screen-channel wireMode=direct-candidate-drop session=\(sessionId) bytes=\(chunk.count)"
+                        )
+                        SkyBridgeLogger.shared.debug(
+                            "ℹ️ screen-channel direct-looking payload 未通过解密/解析，已丢弃且未进入 length parser: session=\(sessionId) bytes=\(chunk.count)"
+                        )
+                    }
+                    continue
+                }
 
-                while let payload = parser.nextPayload(sessionId: sessionId, logLabel: "screen-channel") {
-                    guard let keys = await screenReceiveSessionKeysIfCurrent(
+                wireDecoder.appendLengthChunk(chunk)
+
+                while let payload = wireDecoder.nextLengthPayload(sessionId: sessionId, logLabel: "screen-channel") {
+                    guard let frameKeys = await screenReceiveSessionKeysIfCurrent(
                         sessionId: sessionId,
                         sessionObjectIdentifier: sessionObjectIdentifier
                     ) else {
@@ -6793,8 +8098,23 @@ private extension CrossNetworkWebRTCManager {
                     }
 
                     do {
-                        guard let screenData = try Self.decodeEncryptedScreenChannelPayload(payload, keys: keys) else {
+                        guard let screenData = try Self.decodeEncryptedScreenChannelPayload(payload, keys: frameKeys) else {
+                            wireDecoder.resetLengthFramedAfterDecodeFailure()
+                            announcedWireMode = nil
+                            self.appendSmokeTrace(
+                                "screen-channel wire=length-framed decodeEmpty reset session=\(sessionId)"
+                            )
                             continue
+                        }
+                        wireDecoder.markLengthFramedMode()
+                        if announcedWireMode != wireDecoder.mode {
+                            announcedWireMode = wireDecoder.mode
+                            self.appendSmokeTrace(
+                                "screen-channel wire-mode=\(wireDecoder.mode.rawValue) session=\(sessionId) payloadBytes=\(payload.count)"
+                            )
+                            SkyBridgeLogger.shared.info(
+                                "ℹ️ screen-channel wire 模式锁定: mode=\(wireDecoder.mode.rawValue) session=\(sessionId)"
+                            )
                         }
                         await publishDecodedScreenDataIfCurrent(
                             screenData,
@@ -6802,8 +8122,13 @@ private extension CrossNetworkWebRTCManager {
                             sessionObjectIdentifier: sessionObjectIdentifier
                         )
                     } catch {
+                        wireDecoder.resetLengthFramedAfterDecodeFailure()
+                        announcedWireMode = nil
+                        self.appendSmokeTrace(
+                            "screen-channel wire=length-framed decryptFailed reset session=\(sessionId)"
+                        )
                         SkyBridgeLogger.shared.debug(
-                            "ℹ️ screen-channel payload 解密/解析失败: \(error.localizedDescription)"
+                            "ℹ️ screen-channel payload 解密/解析失败，已重置 length parser: wireMode=lengthFramed \(error.localizedDescription)"
                         )
                     }
                 }
@@ -7045,6 +8370,36 @@ extension CrossNetworkWebRTCManager {
         case nil:
             return nil
         }
+    }
+
+    nonisolated internal static func testOnlyDecodeDirectScreenChannelPayloadKind(
+        _ payload: Data,
+        keys: SessionKeys
+    ) -> String? {
+        decodeDirectScreenChannelPayload(payload, keys: keys).map { _ in "screen" }
+    }
+
+    nonisolated internal static func testOnlyDecodeEncryptedScreenChannelPayloadKind(
+        _ payload: Data,
+        keys: SessionKeys
+    ) throws -> String? {
+        try decodeEncryptedScreenChannelPayload(payload, keys: keys).map { _ in "screen" }
+    }
+
+    nonisolated internal static func testOnlyMediaRelayLeaseFailureReason(status: Int, body: String) -> String {
+        mediaRelayLeaseFailureReason(for: SignalServerClientCompat.ClientError.serverRejected(status, body))
+    }
+
+    nonisolated internal static func testOnlyMediaRelayLeaseFailureReasonAfterRefresh(status: Int, body: String) -> String {
+        mediaRelayLeaseFailureReasonAfterRefresh(for: SignalServerClientCompat.ClientError.serverRejected(status, body))
+    }
+
+    nonisolated internal static func testOnlyMediaAdmissionRefreshFailureReason(status: Int, body: String) -> String {
+        mediaAdmissionRefreshFailureReason(for: SignalServerClientCompat.ClientError.serverRejected(status, body))
+    }
+
+    nonisolated internal static func testOnlySessionRefreshFailureReason(status: Int, body: String) -> String {
+        sessionRefreshFailureReason(for: SignalServerClientCompat.ClientError.serverRejected(status, body))
     }
 
     nonisolated internal static func testOnlyShouldReuseRedeemedQRSessionArtifacts(

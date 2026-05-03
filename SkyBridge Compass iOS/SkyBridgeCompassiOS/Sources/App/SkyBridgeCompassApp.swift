@@ -1714,7 +1714,7 @@ private final class LocalWebRTCSmokeHarness {
             clipboardSyncEnabled: false,
             damageTrackingEnabled: true,
             separateCursorChannelEnabled: true,
-            interactionOverlayChannelEnabled: true,
+            interactionOverlayChannelEnabled: false,
             jitterBufferFrames: 2,
             screenFrameTransport: "webrtc-native-main+sbrf-fallback",
             screenDataChannelEnabled: true,
