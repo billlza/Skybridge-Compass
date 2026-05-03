@@ -165,6 +165,13 @@ else:
 PY
 }
 
+extract_helper_version() {
+  local bin_path="$1"
+  if [[ -x "${bin_path}" ]]; then
+    strings "${bin_path}" 2>/dev/null | grep -m1 'SKYBRIDGE_HELPER_VERSION=' | cut -d= -f2 || true
+  fi
+}
+
 resolve_default_dmg_path() {
   local app_info_plist="$1"
   local version=""
@@ -471,6 +478,8 @@ APP_BUNDLE_IDENTIFIER="$(plist_read_value "${APP_INFO_PLIST}" "CFBundleIdentifie
 APP_VERSION="$(plist_read_value "${APP_INFO_PLIST}" "CFBundleShortVersionString" 2>/dev/null || true)"
 APP_BUILD_SOURCE="$(plist_read_value "${APP_INFO_PLIST}" "SkyBridgePackagingBuildSource" 2>/dev/null || true)"
 APP_EXECUTABLE_PATH="${APP_PATH}/Contents/MacOS/${APP_EXECUTABLE_NAME}"
+APP_HELPER_PLIST_PATH="${APP_PATH}/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper.plist"
+APP_HELPER_BIN_PATH="${APP_PATH}/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper/com.skybridge.PowerMetricsHelper"
 if [[ -z "${WIDGET_PATH}" ]]; then
   WIDGET_PATH="${APP_PATH}/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
 fi
@@ -478,6 +487,10 @@ fi
 [[ -n "${APP_EXECUTABLE_NAME}" ]] || fail "app Info.plist is missing CFBundleExecutable"
 [[ -n "${APP_BUNDLE_IDENTIFIER}" ]] || fail "app Info.plist is missing CFBundleIdentifier"
 [[ -x "${APP_EXECUTABLE_PATH}" ]] || fail "main executable is missing or not executable: ${APP_EXECUTABLE_PATH}"
+[[ -f "${APP_HELPER_PLIST_PATH}" ]] || fail "missing PowerMetricsHelper launchd plist: ${APP_HELPER_PLIST_PATH}"
+[[ -x "${APP_HELPER_BIN_PATH}" ]] || fail "PowerMetricsHelper binary is missing or not executable: ${APP_HELPER_BIN_PATH}"
+APP_HELPER_VERSION="$(extract_helper_version "${APP_HELPER_BIN_PATH}")"
+[[ -n "${APP_HELPER_VERSION}" ]] || fail "PowerMetricsHelper version marker is missing; refusing version unknown helper"
 [[ -f "${SOURCE_WIDGET_ENTITLEMENTS}" ]] || fail "missing widget source entitlements: ${SOURCE_WIDGET_ENTITLEMENTS}"
 
 if [[ "${APP_BUILD_SOURCE}" != "xcode_release" ]]; then
@@ -522,6 +535,8 @@ fi
 log_info "Verifying codesign integrity"
 codesign --verify --deep --strict --verbose=2 "${APP_PATH}" >/dev/null
 codesign --verify --verbose=2 "${DMG_PATH}" >/dev/null
+log_info "Verifying PowerMetricsHelper codesign integrity (version ${APP_HELPER_VERSION})"
+codesign --verify --strict --verbose=2 "${APP_HELPER_BIN_PATH}" >/dev/null
 
 SIGNED_ENTITLEMENTS_PATH="${TMP_DIR}/signed-entitlements.plist"
 EXPECTED_ENTITLEMENTS_PATH="${TMP_DIR}/expected-entitlements.plist"
@@ -627,6 +642,19 @@ if [[ "${SKIP_LAUNCH_SMOKE}" == "1" ]]; then
   log_warn "launch smoke was skipped by request"
 else
   smoke_launch_app "${APP_PATH}" "${APP_EXECUTABLE_NAME}"
+fi
+
+log_info "PowerMetricsHelper app bundle version: ${APP_HELPER_VERSION}"
+INSTALLED_HELPER_BIN="/Library/PrivilegedHelperTools/com.skybridge.PowerMetricsHelper"
+if [[ -x "${INSTALLED_HELPER_BIN}" ]]; then
+  INSTALLED_HELPER_VERSION="$(extract_helper_version "${INSTALLED_HELPER_BIN}")"
+  log_info "PowerMetricsHelper installed version: ${INSTALLED_HELPER_VERSION:-unknown}"
+fi
+RUNNING_INFO="$(launchctl print system/com.skybridge.PowerMetricsHelper 2>/dev/null || true)"
+RUNNING_PATH="$(echo "${RUNNING_INFO}" | awk -F'= ' '/path =/{print $2; exit}')"
+if [[ -n "${RUNNING_PATH}" ]]; then
+  RUNNING_VERSION="$(extract_helper_version "${RUNNING_PATH}")"
+  log_info "PowerMetricsHelper running version: ${RUNNING_VERSION:-unknown}"
 fi
 
 log_info "minimum macOS release readiness checks passed"

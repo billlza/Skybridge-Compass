@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Parser, Subcommand};
+use serde::Serialize;
 use serde_json::json;
 use skybridge_agent::{
     clear_auth_session, ensure_device_identity, ensure_rust_pqc_identity, load_auth_session,
@@ -48,7 +49,7 @@ enum Commands {
     Session(SessionCommand),
     Disconnect(DisconnectCommand),
     File(FileCommand),
-    Doctor(OutputOptions),
+    Doctor(DoctorCommand),
     Logs(LogsCommand),
     Metrics(OutputOptions),
     #[command(hide = true)]
@@ -74,6 +75,42 @@ struct LoginCommand {
 struct OutputOptions {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct DoctorCommand {
+    #[command(subcommand)]
+    command: Option<DoctorSubcommand>,
+    #[command(flatten)]
+    output: OutputOptions,
+}
+
+#[derive(Debug, Subcommand)]
+enum DoctorSubcommand {
+    Signaling(SignalingDoctorArgs),
+    MediaLease(MediaLeaseDoctorArgs),
+}
+
+#[derive(Debug, Args)]
+struct SignalingDoctorArgs {
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    expected_backend: Option<String>,
+    #[command(flatten)]
+    output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+struct MediaLeaseDoctorArgs {
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    session_id: Option<String>,
+    #[arg(long, env = "SKYBRIDGE_MEDIA_ADMISSION_TOKEN")]
+    media_admission_token: Option<String>,
+    #[command(flatten)]
+    output: OutputOptions,
 }
 
 #[derive(Debug, Args)]
@@ -287,7 +324,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "Phase 6 pending: file transfer history is not wired yet.",
             ),
         },
-        Commands::Doctor(output) => doctor(cli.state_dir, output.json).await,
+        Commands::Doctor(args) => match args.command {
+            Some(DoctorSubcommand::Signaling(signaling)) => doctor_signaling(signaling).await,
+            Some(DoctorSubcommand::MediaLease(media_lease)) => {
+                doctor_media_lease(media_lease).await
+            }
+            None => doctor(cli.state_dir, args.output.json).await,
+        },
         Commands::Logs(logs) => match logs.command {
             LogsSubcommand::Tail(args) => tail_logs(cli.state_dir, args.lines).await,
         },
@@ -1123,6 +1166,426 @@ async fn doctor(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct DoctorCheck {
+    name: &'static str,
+    ok: bool,
+    severity: &'static str,
+    detail: String,
+    #[serde(
+        rename = "serverBuildFingerprint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    server_build_fingerprint: Option<String>,
+    #[serde(rename = "stateBackend", skip_serializing_if = "Option::is_none")]
+    state_backend: Option<String>,
+    #[serde(rename = "rejectReason", skip_serializing_if = "Option::is_none")]
+    reject_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorProbeReport {
+    target: String,
+    checks: Vec<DoctorCheck>,
+}
+
+async fn doctor_signaling(args: SignalingDoctorArgs) -> Result<()> {
+    let as_json = args.output.json;
+    let report =
+        build_signaling_doctor_report(args.base_url, args.expected_backend.as_deref()).await?;
+    print_doctor_probe_report(&report, as_json)
+}
+
+async fn doctor_media_lease(args: MediaLeaseDoctorArgs) -> Result<()> {
+    let as_json = args.output.json;
+    let report =
+        build_media_lease_doctor_report(args.base_url, args.session_id, args.media_admission_token)
+            .await?;
+    print_doctor_probe_report(&report, as_json)
+}
+
+async fn build_signaling_doctor_report(
+    base_url: Option<String>,
+    expected_backend: Option<&str>,
+) -> Result<DoctorProbeReport> {
+    let signal_server = signal_server_client(base_url)?;
+    let target = signal_server.base_url.clone();
+    let root = signal_server.probe_json_endpoint("/").await;
+    let health = signal_server.probe_json_endpoint("/health").await;
+    let ready = signal_server.probe_json_endpoint("/readyz").await;
+    let turn_credentials = signal_server
+        .probe_json_endpoint("/api/turn/credentials")
+        .await;
+    let media_lease_route = signal_server.probe_media_lease_without_token().await;
+    let mut checks = Vec::new();
+
+    checks.push(check_probe_reachable("root", &root, "/"));
+    checks.push(check_probe_reachable("health", &health, "/health"));
+    checks.push(check_readyz(&ready));
+    checks.push(check_route_present(
+        "turn_credentials_route",
+        &turn_credentials,
+        "/api/turn/credentials",
+    ));
+    checks.push(check_route_present(
+        "media_lease_route",
+        &media_lease_route,
+        "/api/media/lease",
+    ));
+
+    let build = first_string(
+        &[probe_body(&health), probe_body(&ready), probe_body(&root)],
+        "serverBuildFingerprint",
+    );
+    checks.push(check_build_fingerprint(build.clone()));
+
+    let state_backend = first_string(
+        &[probe_body(&health), probe_body(&ready), probe_body(&root)],
+        "stateBackend",
+    );
+    checks.push(check_state_backend(state_backend.clone(), expected_backend));
+
+    let supports_media = first_bool(
+        &[probe_body(&health), probe_body(&ready), probe_body(&root)],
+        "supportsMediaAdmissionRefresh",
+    );
+    let media_route_present = route_present(&media_lease_route);
+    let media_ok = supports_media == Some(true) && media_route_present;
+    checks.push(DoctorCheck {
+        name: "media_diagnostics_supported",
+        ok: media_ok,
+        severity: if media_ok { "info" } else { "error" },
+        detail: if media_ok {
+            "health advertises media admission refresh and /api/media/lease is routable".to_owned()
+        } else if supports_media != Some(true) {
+            "server did not advertise media admission diagnostics support".to_owned()
+        } else {
+            "/api/media/lease is missing or hidden behind a bad gateway".to_owned()
+        },
+        server_build_fingerprint: build,
+        state_backend,
+        reject_reason: None,
+    });
+
+    Ok(DoctorProbeReport { target, checks })
+}
+
+async fn build_media_lease_doctor_report(
+    base_url: Option<String>,
+    expected_session_id: Option<String>,
+    media_admission_token: Option<String>,
+) -> Result<DoctorProbeReport> {
+    let signal_server = signal_server_client(base_url)?;
+    let target = signal_server.base_url.clone();
+    let health = signal_server.probe_json_endpoint("/health").await;
+    let mut checks = vec![check_probe_reachable("health", &health, "/health")];
+
+    let supports_media = first_bool(&[probe_body(&health)], "supportsMediaAdmissionRefresh");
+    checks.push(DoctorCheck {
+        name: "media_endpoint_advertised",
+        ok: supports_media == Some(true),
+        severity: if supports_media == Some(true) {
+            "info"
+        } else {
+            "error"
+        },
+        detail: "health should advertise supportsMediaAdmissionRefresh=true".to_owned(),
+        server_build_fingerprint: first_string(&[probe_body(&health)], "serverBuildFingerprint"),
+        state_backend: first_string(&[probe_body(&health)], "stateBackend"),
+        reject_reason: None,
+    });
+
+    let Some(token) = media_admission_token.filter(|value| !value.trim().is_empty()) else {
+        checks.push(DoctorCheck {
+            name: "media_admission_token",
+            ok: false,
+            severity: "warn",
+            detail: "media lease was not probed; pass --media-admission-token or SKYBRIDGE_MEDIA_ADMISSION_TOKEN".to_owned(),
+            server_build_fingerprint: first_string(&[probe_body(&health)], "serverBuildFingerprint"),
+            state_backend: first_string(&[probe_body(&health)], "stateBackend"),
+            reject_reason: None,
+        });
+        return Ok(DoctorProbeReport { target, checks });
+    };
+
+    let lease = signal_server.probe_media_lease(&token).await;
+    let lease_body = probe_body(&lease);
+    let lease_success = lease.as_ref().is_ok_and(|probe| probe.success);
+    let response_session_id = lease_body.and_then(|body| value_string(body, "sessionId"));
+    let expected_session_matches = match expected_session_id.as_deref() {
+        Some(expected) if lease_success => response_session_id
+            .as_deref()
+            .is_some_and(|actual| actual == expected),
+        Some(_) if !lease_success => false,
+        _ => true,
+    };
+    checks.push(DoctorCheck {
+        name: "media_lease_success",
+        ok: lease_success && expected_session_matches,
+        severity: if lease_success && expected_session_matches {
+            "info"
+        } else {
+            "error"
+        },
+        detail: match (&lease, expected_session_id.as_deref()) {
+            (Ok(probe), Some(expected)) if probe.success && expected_session_matches => {
+                format!(
+                    "/api/media/lease returned HTTP {} for session {expected}",
+                    probe.status_code
+                )
+            }
+            (Ok(probe), Some(expected)) if probe.success => format!(
+                "/api/media/lease returned session {}; expected {expected}",
+                response_session_id.as_deref().unwrap_or("<missing>")
+            ),
+            (Ok(probe), _) => format!(
+                "/api/media/lease rejected request with HTTP {}",
+                probe.status_code
+            ),
+            (Err(error), _) => format!("/api/media/lease probe failed: {error}"),
+        },
+        server_build_fingerprint: lease_body
+            .and_then(|body| value_string(body, "serverBuildFingerprint"))
+            .or_else(|| first_string(&[probe_body(&health)], "serverBuildFingerprint")),
+        state_backend: first_string(&[probe_body(&health)], "stateBackend"),
+        reject_reason: lease_body.and_then(|body| value_string(body, "rejectReason")),
+    });
+    let diagnostic_fields_present = lease_body.is_some_and(|body| {
+        body.get("rejectReason").is_some()
+            || body.get("mediaTokenRevokedReason").is_some()
+            || body.get("mediaTokenSessionRejectReason").is_some()
+            || body.get("mediaTokenRequestGeneration").is_some()
+            || body.get("mediaTokenSessionPresent").is_some()
+    });
+    checks.push(DoctorCheck {
+        name: "media_lease_diagnostics",
+        ok: lease_success || diagnostic_fields_present,
+        severity: if lease_success || diagnostic_fields_present {
+            "info"
+        } else {
+            "error"
+        },
+        detail: if lease_success {
+            "media lease succeeded; no rejection diagnostics were needed".to_owned()
+        } else if diagnostic_fields_present {
+            "rejected media lease included structured token/session diagnostics".to_owned()
+        } else {
+            "rejected media lease did not include structured diagnostics".to_owned()
+        },
+        server_build_fingerprint: lease_body
+            .and_then(|body| value_string(body, "serverBuildFingerprint"))
+            .or_else(|| first_string(&[probe_body(&health)], "serverBuildFingerprint")),
+        state_backend: first_string(&[probe_body(&health)], "stateBackend"),
+        reject_reason: lease_body.and_then(|body| value_string(body, "rejectReason")),
+    });
+
+    Ok(DoctorProbeReport { target, checks })
+}
+
+fn signal_server_client(base_url: Option<String>) -> Result<SignalServerClient> {
+    if let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) {
+        let api_key = std::env::var("SKYBRIDGE_CLIENT_API_KEY")
+            .unwrap_or_else(|_| "skybridge-client-v1".to_owned());
+        let client_version = std::env::var("SKYBRIDGE_CLIENT_VERSION")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned());
+        let protocol_version =
+            std::env::var("SKYBRIDGE_PROTOCOL_VERSION").unwrap_or_else(|_| "1".to_owned());
+        return SignalServerClient::new(base_url, api_key, client_version, protocol_version);
+    }
+    SignalServerClient::from_env()
+}
+
+fn print_doctor_probe_report(report: &DoctorProbeReport, as_json: bool) -> Result<()> {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    println!("Target: {}", report.target);
+    for check in &report.checks {
+        let status = if check.ok {
+            "OK".to_owned()
+        } else {
+            check.severity.to_ascii_uppercase()
+        };
+        println!("[{}] {}: {}", status, check.name, check.detail);
+    }
+    Ok(())
+}
+
+fn check_probe_reachable(
+    name: &'static str,
+    probe: &Result<skybridge_core::ControlPlaneRawProbe>,
+    path: &str,
+) -> DoctorCheck {
+    match probe {
+        Ok(probe) => DoctorCheck {
+            name,
+            ok: probe.success,
+            severity: if probe.success { "info" } else { "error" },
+            detail: format!("{path} returned HTTP {}", probe.status_code),
+            server_build_fingerprint: value_string(&probe.body, "serverBuildFingerprint"),
+            state_backend: value_string(&probe.body, "stateBackend"),
+            reject_reason: value_string(&probe.body, "rejectReason"),
+        },
+        Err(error) => DoctorCheck {
+            name,
+            ok: false,
+            severity: "error",
+            detail: format!("{path} probe failed: {error}"),
+            server_build_fingerprint: None,
+            state_backend: None,
+            reject_reason: None,
+        },
+    }
+}
+
+fn check_readyz(probe: &Result<skybridge_core::ControlPlaneRawProbe>) -> DoctorCheck {
+    match probe {
+        Ok(probe) => {
+            let status = value_string(&probe.body, "status").unwrap_or_else(|| "-".to_owned());
+            let ok = probe.success && status == "ready";
+            DoctorCheck {
+                name: "readyz",
+                ok,
+                severity: if ok { "info" } else { "error" },
+                detail: format!(
+                    "/readyz returned HTTP {} status={status}",
+                    probe.status_code
+                ),
+                server_build_fingerprint: value_string(&probe.body, "serverBuildFingerprint"),
+                state_backend: value_string(&probe.body, "stateBackend"),
+                reject_reason: value_string(&probe.body, "rejectReason"),
+            }
+        }
+        Err(error) => DoctorCheck {
+            name: "readyz",
+            ok: false,
+            severity: "error",
+            detail: format!("/readyz probe failed: {error}"),
+            server_build_fingerprint: None,
+            state_backend: None,
+            reject_reason: None,
+        },
+    }
+}
+
+fn route_present(probe: &Result<skybridge_core::ControlPlaneRawProbe>) -> bool {
+    probe
+        .as_ref()
+        .is_ok_and(|probe| !matches!(probe.status_code, 404 | 405 | 502))
+}
+
+fn check_route_present(
+    name: &'static str,
+    probe: &Result<skybridge_core::ControlPlaneRawProbe>,
+    path: &str,
+) -> DoctorCheck {
+    match probe {
+        Ok(probe) => {
+            let ok = !matches!(probe.status_code, 404 | 405 | 502);
+            DoctorCheck {
+                name,
+                ok,
+                severity: if ok { "info" } else { "error" },
+                detail: format!("{path} route probe returned HTTP {}", probe.status_code),
+                server_build_fingerprint: value_string(&probe.body, "serverBuildFingerprint"),
+                state_backend: value_string(&probe.body, "stateBackend"),
+                reject_reason: value_string(&probe.body, "rejectReason"),
+            }
+        }
+        Err(error) => DoctorCheck {
+            name,
+            ok: false,
+            severity: "error",
+            detail: format!("{path} route probe failed: {error}"),
+            server_build_fingerprint: None,
+            state_backend: None,
+            reject_reason: None,
+        },
+    }
+}
+
+fn check_build_fingerprint(fingerprint: Option<String>) -> DoctorCheck {
+    let ok = fingerprint
+        .as_deref()
+        .is_some_and(|value| !is_generic_build_fingerprint(value));
+    DoctorCheck {
+        name: "build_fingerprint",
+        ok,
+        severity: if ok { "info" } else { "error" },
+        detail: match fingerprint.as_deref() {
+            Some(value) if ok => format!("server build fingerprint is {value}"),
+            Some(value) => format!("server build fingerprint is generic: {value}"),
+            None => "server build fingerprint missing".to_owned(),
+        },
+        server_build_fingerprint: fingerprint,
+        state_backend: None,
+        reject_reason: None,
+    }
+}
+
+fn check_state_backend(
+    state_backend: Option<String>,
+    expected_backend: Option<&str>,
+) -> DoctorCheck {
+    let ok = match expected_backend {
+        Some(expected) => state_backend
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case(expected)),
+        None => state_backend.is_some(),
+    };
+    DoctorCheck {
+        name: "state_backend",
+        ok,
+        severity: if ok { "info" } else { "error" },
+        detail: match (state_backend.as_deref(), expected_backend) {
+            (Some(value), Some(_)) if ok => format!("state backend is {value}"),
+            (Some(value), Some(expected)) => {
+                format!("state backend is {value}; expected {expected}")
+            }
+            (None, Some(expected)) => format!("state backend missing; expected {expected}"),
+            (Some(value), None) => format!("state backend is {value}"),
+            (None, None) => "state backend missing".to_owned(),
+        },
+        server_build_fingerprint: None,
+        state_backend,
+        reject_reason: None,
+    }
+}
+
+fn probe_body(probe: &Result<skybridge_core::ControlPlaneRawProbe>) -> Option<&serde_json::Value> {
+    probe.as_ref().ok().map(|probe| &probe.body)
+}
+
+fn value_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value.get(key)?.as_str().map(ToOwned::to_owned)
+}
+
+fn value_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
+    value.get(key)?.as_bool()
+}
+
+fn first_string(values: &[Option<&serde_json::Value>], key: &str) -> Option<String> {
+    values
+        .iter()
+        .filter_map(|value| value.and_then(|item| value_string(item, key)))
+        .next()
+}
+
+fn first_bool(values: &[Option<&serde_json::Value>], key: &str) -> Option<bool> {
+    values
+        .iter()
+        .filter_map(|value| value.and_then(|item| value_bool(item, key)))
+        .next()
+}
+
+fn is_generic_build_fingerprint(value: &str) -> bool {
+    let normalized = value.trim();
+    normalized.is_empty()
+        || normalized == "skybridge-signaling/1.0.0"
+        || normalized.ends_with("+unidentified-build")
+}
+
 async fn metrics(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
     let paths = resolve_paths(state_dir)?;
     let health = load_health_snapshot(&paths).await?;
@@ -1415,4 +1878,198 @@ fn describe_keepalive_brief(keepalive: &RuntimeSessionKeepaliveStatus) -> String
         summary.push_str(&format!(" active={last_activity_at}"));
     }
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn generic_build_fingerprints_are_rejected() {
+        assert!(is_generic_build_fingerprint("skybridge-signaling/1.0.0"));
+        assert!(is_generic_build_fingerprint(
+            "skybridge-signaling/1.0.0+unidentified-build"
+        ));
+        assert!(!is_generic_build_fingerprint(
+            "skybridge-signaling/20260501164000-abcdef123456"
+        ));
+    }
+
+    #[test]
+    fn doctor_subcommands_parse_with_json_flags() {
+        assert!(Cli::try_parse_from(["skybridge", "doctor", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["skybridge", "doctor", "signaling", "--json"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "skybridge",
+                "doctor",
+                "media-lease",
+                "--media-admission-token",
+                "token",
+                "--json",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn signaling_doctor_mock_server_reports_media_surface() -> Result<()> {
+        let base_url = spawn_mock_server(vec![
+            (
+                "GET",
+                "/",
+                200,
+                json!({
+                    "serverBuildFingerprint": "skybridge-signaling/20260501164000-abcdef123456",
+                    "stateBackend": "redis",
+                    "supportsMediaAdmissionRefresh": true,
+                    "endpoints": ["/api/media/lease", "/api/media/admission/refresh"]
+                }),
+            ),
+            (
+                "GET",
+                "/health",
+                200,
+                json!({
+                    "status": "ok",
+                    "ready": true,
+                    "serverBuildFingerprint": "skybridge-signaling/20260501164000-abcdef123456",
+                    "stateBackend": "redis",
+                    "supportsMediaAdmissionRefresh": true
+                }),
+            ),
+            (
+                "GET",
+                "/readyz",
+                200,
+                json!({
+                    "status": "ready",
+                    "serverBuildFingerprint": "skybridge-signaling/20260501164000-abcdef123456",
+                    "stateBackend": "redis",
+                    "supportsMediaAdmissionRefresh": true
+                }),
+            ),
+            (
+                "GET",
+                "/api/turn/credentials",
+                401,
+                json!({
+                    "error": "missing_turn_admission",
+                    "serverBuildFingerprint": "skybridge-signaling/20260501164000-abcdef123456"
+                }),
+            ),
+            (
+                "POST",
+                "/api/media/lease",
+                401,
+                json!({
+                    "error": "missing_media_admission",
+                    "rejectReason": "missingToken",
+                    "serverBuildFingerprint": "skybridge-signaling/20260501164000-abcdef123456"
+                }),
+            ),
+        ])?;
+
+        let report = build_signaling_doctor_report(Some(base_url), Some("redis")).await?;
+
+        assert!(report.checks.iter().all(|check| check.ok));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "media_diagnostics_supported")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn media_lease_doctor_reports_reject_reason_fields() -> Result<()> {
+        let base_url = spawn_mock_server(vec![
+            (
+                "GET",
+                "/health",
+                200,
+                json!({
+                    "status": "ok",
+                    "ready": true,
+                    "serverBuildFingerprint": "skybridge-signaling/20260501164000-abcdef123456",
+                    "stateBackend": "redis",
+                    "supportsMediaAdmissionRefresh": true
+                }),
+            ),
+            (
+                "POST",
+                "/api/media/lease",
+                401,
+                json!({
+                    "error": "media_admission_token_superseded",
+                    "serverBuildFingerprint": "skybridge-signaling/20260501164000-abcdef123456",
+                    "mediaTokenState": "revoked",
+                    "mediaTokenRevokedReason": "remote_kill",
+                    "mediaTokenSessionRejectReason": "remote_kill",
+                    "rejectReason": "remote_kill"
+                }),
+            ),
+        ])?;
+
+        let report = build_media_lease_doctor_report(
+            Some(base_url),
+            Some("SESSION1".to_owned()),
+            Some("token".to_owned()),
+        )
+        .await?;
+
+        let success = report
+            .checks
+            .iter()
+            .find(|check| check.name == "media_lease_success")
+            .expect("media lease success check missing");
+        assert!(!success.ok);
+
+        let diagnostics = report
+            .checks
+            .iter()
+            .find(|check| check.name == "media_lease_diagnostics")
+            .expect("media diagnostics check missing");
+        assert!(diagnostics.ok);
+        assert_eq!(diagnostics.reject_reason.as_deref(), Some("remote_kill"));
+        Ok(())
+    }
+
+    fn spawn_mock_server(
+        routes: Vec<(&'static str, &'static str, u16, serde_json::Value)>,
+    ) -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let routes = Arc::new(routes);
+        thread::spawn(move || {
+            for stream in listener.incoming().take(16) {
+                let Ok(mut stream) = stream else { continue };
+                let mut buffer = [0_u8; 4096];
+                let bytes_read = stream.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                let mut first_line = request.lines().next().unwrap_or("").split_whitespace();
+                let method = first_line.next().unwrap_or("");
+                let path = first_line.next().unwrap_or("");
+                let route = routes.iter().find(|(route_method, route_path, _, _)| {
+                    *route_method == method && *route_path == path
+                });
+                let (status, body) = route
+                    .map(|(_, _, status, body)| (*status, body.clone()))
+                    .unwrap_or_else(|| (404, json!({ "error": "not_found" })));
+                let reason = if status == 200 { "OK" } else { "ERROR" };
+                let body = body.to_string();
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Ok(format!("http://{address}"))
+    }
 }

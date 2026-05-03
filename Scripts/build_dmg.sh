@@ -450,11 +450,14 @@ HELPER_BIN="$APP_BUNDLE/Contents/Library/LaunchDaemons/com.skybridge.PowerMetric
 if [[ -f "$HELPER_PLIST" && -x "$HELPER_BIN" ]]; then
     log_success "检测到 PowerMetricsHelper 与 launchd plist"
     APP_HELPER_VERSION="$(extract_helper_version "$HELPER_BIN")"
-    if [[ -n "${APP_HELPER_VERSION:-}" ]]; then
-        log_info "App 内 Helper 版本: ${APP_HELPER_VERSION}"
+    if [[ -z "${APP_HELPER_VERSION:-}" ]]; then
+        log_error "App 内 PowerMetricsHelper 版本 marker 缺失，禁止发布 version unknown 的 DMG"
+        exit 1
     fi
+    log_info "App 内 Helper 版本: ${APP_HELPER_VERSION}"
 else
-    log_info "未检测到完整 PowerMetricsHelper（高级监控功能可能不可用）"
+    log_error "未检测到完整 PowerMetricsHelper（高级监控功能不可用），禁止发布"
+    exit 1
 fi
 
 log_success "App Bundle 已就绪: $APP_BUNDLE"

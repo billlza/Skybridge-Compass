@@ -126,12 +126,25 @@ pub struct RegisteredDevice {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlPlaneHealthSnapshot {
     pub status: String,
+    #[serde(default)]
+    pub ready: Option<bool>,
     #[serde(rename = "instanceId")]
     pub instance_id: Option<String>,
+    #[serde(rename = "serverBuildFingerprint")]
+    pub server_build_fingerprint: Option<String>,
+    #[serde(rename = "supportsMediaAdmissionRefresh")]
+    pub supports_media_admission_refresh: Option<bool>,
     #[serde(rename = "stateBackend")]
     pub state_backend: Option<String>,
     #[serde(rename = "backendHealth")]
     pub backend_health: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneRawProbe {
+    pub status_code: u16,
+    pub success: bool,
+    pub body: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +180,7 @@ impl SignalServerClient {
         let api_key = api_key.into().trim().to_owned();
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(20))
+            .no_proxy()
             .build()?;
         Ok(Self {
             client,
@@ -247,6 +261,37 @@ impl SignalServerClient {
             Option::<&()>::None,
             &anonymous_session(),
             "",
+            None,
+        )
+        .await
+    }
+
+    pub async fn probe_json_endpoint(&self, path: &str) -> Result<ControlPlaneRawProbe> {
+        self.raw_json_request(path, reqwest::Method::GET, Option::<&()>::None, None)
+            .await
+    }
+
+    pub async fn probe_media_lease(
+        &self,
+        media_admission_token: &str,
+    ) -> Result<ControlPlaneRawProbe> {
+        self.raw_json_request(
+            "/api/media/lease",
+            reqwest::Method::POST,
+            Some(&serde_json::json!({})),
+            Some(vec![(
+                "X-SkyBridge-Media-Admission".to_owned(),
+                media_admission_token.trim().to_owned(),
+            )]),
+        )
+        .await
+    }
+
+    pub async fn probe_media_lease_without_token(&self) -> Result<ControlPlaneRawProbe> {
+        self.raw_json_request(
+            "/api/media/lease",
+            reqwest::Method::POST,
+            Some(&serde_json::json!({})),
             None,
         )
         .await
@@ -763,6 +808,62 @@ impl SignalServerClient {
             bail!("control-plane request failed ({}): {}", status, body);
         }
         Ok(response.json::<ResponseBody>().await?)
+    }
+
+    async fn raw_json_request<RequestBody>(
+        &self,
+        path: &str,
+        method: reqwest::Method,
+        body: Option<&RequestBody>,
+        extra_headers: Option<Vec<(String, String)>>,
+    ) -> Result<ControlPlaneRawProbe>
+    where
+        RequestBody: Serialize + ?Sized,
+    {
+        let method_label = method.as_str().to_owned();
+        let url = format!("{}{}", self.base_url, path);
+        let mut request = self
+            .client
+            .request(method, url)
+            .header("Accept", "application/json")
+            .header("X-API-Key", &self.api_key);
+        if let Some(extra_headers) = extra_headers {
+            for (field, value) in extra_headers {
+                request = request.header(field, value);
+            }
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+
+        let response = request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                anyhow!("control-plane request timed out: {} {}", method_label, path)
+            } else if error.is_connect() {
+                anyhow!(
+                    "control-plane connection failed: {} {}: {}",
+                    method_label,
+                    path,
+                    error
+                )
+            } else {
+                anyhow!(
+                    "control-plane request failed: {} {}: {}",
+                    method_label,
+                    path,
+                    error
+                )
+            }
+        })?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        let body =
+            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": text }));
+        Ok(ControlPlaneRawProbe {
+            status_code: status.as_u16(),
+            success: status.is_success(),
+            body,
+        })
     }
 }
 

@@ -724,6 +724,23 @@ HELPER_SRC_DIR="${ROOT_DIR}/Sources/PowerMetricsHelper"
 HELPER_DST_DIR="${CONTENTS_DIR}/Library/LaunchDaemons/${HELPER_NAME}"
 HELPER_BIN_PATH="${BUILD_DIR}/${HELPER_EXECUTABLE}"
 
+resolve_helper_bin_path() {
+  local candidate
+  for candidate in \
+    "${BUILD_DIR}/${HELPER_EXECUTABLE}" \
+    "${XCODE_BUILD_DIR}/${HELPER_EXECUTABLE}" \
+    "${ROOT_DIR}/.build/xcode/Build/Products/Release/${HELPER_EXECUTABLE}" \
+    "${SWIFTPM_RELEASE_BUILD_DIR}/${HELPER_EXECUTABLE}"; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  printf '%s\n' "${BUILD_DIR}/${HELPER_EXECUTABLE}"
+}
+
+HELPER_BIN_PATH="$(resolve_helper_bin_path)"
+
 # 某些构建路径只会产出主 App，可在这里补构建 Helper
 if [[ ! -x "${HELPER_BIN_PATH}" ]]; then
   log "未检测到 PowerMetricsHelper，尝试单独构建..."
@@ -749,6 +766,7 @@ if [[ ! -x "${HELPER_BIN_PATH}" ]]; then
   else
     log "PowerMetricsHelper 构建失败，将继续打包主应用（高级监控功能不可用）"
   fi
+  HELPER_BIN_PATH="$(resolve_helper_bin_path)"
 fi
 
 # 检查 Helper 可执行文件是否存在
@@ -803,6 +821,10 @@ if [[ -x "${HELPER_BIN_PATH}" ]]; then
   
   log "PowerMetricsHelper 打包完成"
 else
+  if is_release_distribution_context; then
+    echo "错误：release_dmg 打包未找到 PowerMetricsHelper 可执行文件，禁止发布缺失高级监控 Helper 的 DMG。" >&2
+    exit 1
+  fi
   log "跳过 PowerMetricsHelper（未找到可执行文件：${HELPER_BIN_PATH}）"
 fi
 
