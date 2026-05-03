@@ -5,7 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const express = require('express');
 const { Webhook } = require('standardwebhooks');
@@ -14,12 +14,68 @@ const { randomUUID } = require('crypto');
 
 const { AliyunSMSClient } = require('./lib/aliyun_sms');
 const { createSignalingStateBackend, unique } = require('./lib/signaling_state_backend');
+const { createMediaRelay, createSignedMediaLeaseToken } = require('./lib/media_relay');
 const { RegistryStore } = require('./lib/registry_store');
 const { buildIdempotencyFingerprint, clientIPForRequest } = require('./lib/request_security');
+const packageInfo = require('./package.json');
 
 const PORT = Number(process.env.PORT || 8443);
 const HOST = process.env.HOST || '0.0.0.0';
 const INSTANCE_ID = String(process.env.INSTANCE_ID || `${os.hostname()}-${process.pid}`).trim();
+function readBuildFingerprintFile() {
+  const explicitPath = String(process.env.SKYBRIDGE_SIGNALING_BUILD_FINGERPRINT_FILE || '').trim();
+  const candidates = [
+    explicitPath,
+    `${__dirname}/.skybridge-build-fingerprint`
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      const value = fs.readFileSync(candidate, 'utf8').trim();
+      if (value) return value;
+    } catch (_) {}
+  }
+  return '';
+}
+
+function gitBuildFingerprint() {
+  try {
+    const result = spawnSync('git', ['rev-parse', '--short=12', 'HEAD'], {
+      cwd: __dirname,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    const sha = String(result.stdout || '').trim();
+    return sha ? `skybridge-signaling/git-${sha}` : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function isGenericBuildFingerprint(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return true;
+  return normalized === `skybridge-signaling/${packageInfo.version || 'unknown'}`
+    || normalized === 'skybridge-signaling/1.0.0';
+}
+
+function resolveServerBuildFingerprint() {
+  const envFingerprint = String(
+    process.env.SKYBRIDGE_SIGNALING_BUILD_FINGERPRINT ||
+    process.env.RENDER_GIT_COMMIT ||
+    process.env.VERCEL_GIT_COMMIT_SHA ||
+    process.env.GIT_SHA ||
+    ''
+  ).trim();
+  const fileFingerprint = readBuildFingerprintFile();
+  const gitFingerprint = gitBuildFingerprint();
+  if (envFingerprint && !isGenericBuildFingerprint(envFingerprint)) return envFingerprint;
+  if (fileFingerprint && !isGenericBuildFingerprint(fileFingerprint)) return fileFingerprint;
+  if (gitFingerprint) return gitFingerprint;
+  if (envFingerprint) return `${envFingerprint}+unidentified-build`;
+  return `skybridge-signaling/${packageInfo.version || 'unknown'}+unidentified-build`;
+}
+
+const SERVER_BUILD_FINGERPRINT = resolveServerBuildFingerprint();
 const SIGNALING_STATE_BACKEND = String(process.env.SIGNALING_STATE_BACKEND || 'memory').trim().toLowerCase();
 const SIGNALING_REDIS_URL = String(process.env.SIGNALING_REDIS_URL || process.env.REDIS_URL || '').trim();
 const SIGNALING_REDIS_KEY_PREFIX = String(process.env.SIGNALING_REDIS_KEY_PREFIX || 'skybridge:signaling:').trim() || 'skybridge:signaling:';
@@ -37,15 +93,32 @@ const ROOM_MEMBERSHIP_TTL_MS = Number(process.env.ROOM_MEMBERSHIP_TTL_MS || 120_
 
 const REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES = !/^(0|false|no)$/i.test(process.env.REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES || 'true');
 const SESSION_RECLAIM_WINDOW_MS = Number(process.env.SESSION_RECLAIM_WINDOW_MS || 30_000);
+const WEBRTC_ACTIVE_SESSION_TTL_MS = Number(process.env.WEBRTC_ACTIVE_SESSION_TTL_MS || 30 * 60_000);
 
 const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 90_000);
 const ADMISSION_TOKEN_TTL_MS = Number(process.env.ADMISSION_TOKEN_TTL_MS || 120_000);
 const TURN_ADMISSION_TOKEN_TTL_MS = Number(process.env.TURN_ADMISSION_TOKEN_TTL_MS || 60_000);
 const TURN_CRED_TTL_SECONDS = Number(process.env.TURN_CRED_TTL_SECONDS || 300);
+const MEDIA_ADMISSION_TOKEN_TTL_MS = Number(process.env.MEDIA_ADMISSION_TOKEN_TTL_MS || 120_000);
+const MEDIA_RELAY_ENABLED = /^(1|true|yes)$/i.test(process.env.MEDIA_RELAY_ENABLED || 'false');
+const MEDIA_RELAY_HOST = String(process.env.MEDIA_RELAY_HOST || '0.0.0.0').trim() || '0.0.0.0';
+const MEDIA_RELAY_PUBLIC_HOST = String(process.env.MEDIA_RELAY_PUBLIC_HOST || process.env.MEDIA_RELAY_HOST || '').trim();
+const MEDIA_RELAY_UDP_PORT = Number(process.env.MEDIA_RELAY_UDP_PORT || 0);
+const MEDIA_RELAY_LEASE_TTL_MS = Number(process.env.MEDIA_RELAY_LEASE_TTL_MS || 60_000);
+const MEDIA_RELAY_MAX_PACKET_BYTES = Number(process.env.MEDIA_RELAY_MAX_PACKET_BYTES || 1200);
+const MEDIA_RELAY_EXTERNAL_HOST = String(process.env.MEDIA_RELAY_EXTERNAL_HOST || '').trim();
+const MEDIA_RELAY_EXTERNAL_UDP_PORT = Number(process.env.MEDIA_RELAY_EXTERNAL_UDP_PORT || 0);
+const MEDIA_RELAY_TOKEN_SECRET = String(process.env.MEDIA_RELAY_TOKEN_SECRET || '').trim();
+const MEDIA_RELAY_ACCEPT_SIGNED_LEASES = /^(1|true|yes)$/i.test(process.env.MEDIA_RELAY_ACCEPT_SIGNED_LEASES || 'false');
 
 const MAX_CHALLENGES_PER_DEVICE_PER_10M = Number(process.env.MAX_CHALLENGES_PER_DEVICE_PER_10M || 10);
 const MAX_CHALLENGES_PER_USER_PER_10M = Number(process.env.MAX_CHALLENGES_PER_USER_PER_10M || 20);
 const MAX_CHALLENGES_PER_IP_PER_10M = Number(process.env.MAX_CHALLENGES_PER_IP_PER_10M || 40);
+const HTTP_CONTROL_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_CONTROL_RATE_LIMIT_PER_MIN || 60);
+const HTTP_LOOKUP_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_LOOKUP_RATE_LIMIT_PER_MIN || 30);
+const HTTP_TURN_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_TURN_RATE_LIMIT_PER_MIN || 60);
+const HTTP_MEDIA_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN || 60);
+const HTTP_ADMISSION_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN || 60);
 
 const WS_MAX_MSG_BYTES = Number(process.env.WS_MAX_MSG_BYTES || 16 * 1024);
 const WS_MAX_MSGS_PER_10S = Number(process.env.WS_MAX_MSGS_PER_10S || 60);
@@ -593,7 +666,11 @@ function asyncRoute(handler) {
       const errorCode = String(error.code || error.message || 'internal_error');
       console.error(`[HTTP] ${req.method} ${req.path} failed:`, errorCode);
       if (!res.headersSent) {
-        res.status(statusCode).json({ error: errorCode });
+        const responseBody = { error: errorCode };
+        if (error.publicDetails && typeof error.publicDetails === 'object') {
+          Object.assign(responseBody, error.publicDetails);
+        }
+        res.status(statusCode).json(responseBody);
       }
       if (typeof next === 'function') next(error);
     });
@@ -659,11 +736,23 @@ let signalingState = createSignalingStateBackend({
 
 let registryStore = new RegistryStore();
 let smsClient = new AliyunSMSClient();
+let mediaRelay = MEDIA_RELAY_ENABLED
+  ? createMediaRelay({
+      host: MEDIA_RELAY_HOST,
+      publicHost: MEDIA_RELAY_PUBLIC_HOST || MEDIA_RELAY_HOST,
+      port: MEDIA_RELAY_UDP_PORT,
+      leaseTtlMs: MEDIA_RELAY_LEASE_TTL_MS,
+      maxPacketBytes: MEDIA_RELAY_MAX_PACKET_BYTES,
+      signedLeaseSecret: MEDIA_RELAY_ACCEPT_SIGNED_LEASES ? MEDIA_RELAY_TOKEN_SECRET : '',
+      log: console
+    })
+  : null;
 let currentTrustProxy = TRUST_PROXY;
 let currentRequireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES;
 let currentAllowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH;
 const rooms = new Map();
 const wsMeta = new WeakMap();
+const activeSessionTouchAtBySessionId = new Map();
 const securityCounters = new Map();
 const smsCounters = new Map();
 let lastSMSDeliveryEvent = null;
@@ -734,10 +823,13 @@ function currentSMSDeliveryEvent() {
   return lastSMSDeliveryEvent ? { ...lastSMSDeliveryEvent } : null;
 }
 
-function makeError(code, statusCode = 400) {
+function makeError(code, statusCode = 400, publicDetails = null) {
   const error = new Error(code);
   error.code = code;
   error.statusCode = statusCode;
+  if (publicDetails && typeof publicDetails === 'object') {
+    error.publicDetails = publicDetails;
+  }
   return error;
 }
 
@@ -1246,16 +1338,35 @@ async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
       jti: base64url(crypto.randomBytes(16))
     }
   });
+  const mediaAdmissionToken = issueEphemeralTokenRecord({
+    kind: 'media_admission_token',
+    ttlMs: MEDIA_ADMISSION_TOKEN_TTL_MS,
+    payload: {
+      sessionId,
+      role,
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      deviceId: context.binding.deviceId,
+      protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
+      deviceSynthetic,
+      clientVersion: context.clientVersion,
+      protocolVersion: context.protocolVersion
+    }
+  });
   const sessionCreated = await signalingState.createEphemeral('session_token', sessionToken.tokenHash, sessionToken.record);
   const turnCreated = await signalingState.createEphemeral('turn_admission_token', turnAdmissionToken.tokenHash, turnAdmissionToken.record);
-  if (!sessionCreated || !turnCreated) {
+  const mediaCreated = await signalingState.createEphemeral('media_admission_token', mediaAdmissionToken.tokenHash, mediaAdmissionToken.record);
+  if (!sessionCreated || !turnCreated || !mediaCreated) {
     throw makeError('token_issue_failed', 500);
   }
   return {
     sessionToken: sessionToken.token,
     sessionTokenHash: sessionToken.tokenHash,
     turnAdmissionToken: turnAdmissionToken.token,
-    turnAdmissionTokenHash: turnAdmissionToken.tokenHash
+    turnAdmissionTokenHash: turnAdmissionToken.tokenHash,
+    mediaAdmissionToken: mediaAdmissionToken.token,
+    mediaAdmissionTokenHash: mediaAdmissionToken.tokenHash
   };
 }
 
@@ -1267,7 +1378,8 @@ function buildConnectionRecord({
   signalingServerOrigin,
   connectionKind,
   initiatorSessionTokenHash = null,
-  initiatorTurnAdmissionTokenHash = null
+  initiatorTurnAdmissionTokenHash = null,
+  initiatorMediaAdmissionTokenHash = null
 }) {
   return {
     deviceId: initiatorContext.binding.deviceId,
@@ -1277,6 +1389,8 @@ function buildConnectionRecord({
     offer: { mode: connectionKind },
     createdAt: now(),
     expiresAt,
+    rendezvousExpiresAt: expiresAt,
+    activeUntil: expiresAt,
     initiatorTokenHash: '',
     responderTokenHash: null,
     qrBootstrapTokenHash,
@@ -1293,10 +1407,51 @@ function buildConnectionRecord({
     userId: initiatorContext.user.id,
     initiatorSessionTokenHash,
     initiatorTurnAdmissionTokenHash,
+    initiatorMediaAdmissionTokenHash,
     responderSessionTokenHash: null,
     responderTurnAdmissionTokenHash: null,
+    responderMediaAdmissionTokenHash: null,
     revokedAt: 0
   };
+}
+
+function numericTimestamp(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function connectionRendezvousExpiresAt(record) {
+  return numericTimestamp(record?.rendezvousExpiresAt, numericTimestamp(record?.expiresAt, 0));
+}
+
+function connectionActiveUntil(record) {
+  return numericTimestamp(record?.activeUntil, numericTimestamp(record?.expiresAt, 0));
+}
+
+function nextActiveUntil(record, at = now()) {
+  return Math.max(
+    connectionActiveUntil(record),
+    connectionRendezvousExpiresAt(record),
+    at + Math.max(60_000, WEBRTC_ACTIVE_SESSION_TTL_MS)
+  );
+}
+
+function extendConnectionActiveUntil(record, at = now()) {
+  record.activeUntil = nextActiveUntil(record, at);
+  record.expiresAt = Math.max(numericTimestamp(record?.expiresAt, 0), record.activeUntil);
+  return record.activeUntil;
+}
+
+function isRendezvousExpired(record, at = now()) {
+  return at > connectionRendezvousExpiresAt(record);
+}
+
+function logSessionLifecycle(sessionId, event, fields = {}) {
+  const suffix = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ');
+  console.info(`[session] sessionLifecycle=${event} session=${sessionId}${suffix ? ` ${suffix}` : ''}`);
 }
 
 function assertUniqueSessionParticipant(item, binding) {
@@ -1317,6 +1472,75 @@ function admissionOwnsSession(item, admission) {
     return false;
   }
   return true;
+}
+
+function contextFromAdmission(admission) {
+  return {
+    tenantId: admission.tenantId,
+    user: { id: admission.userId },
+    binding: {
+      deviceId: admission.deviceId,
+      protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
+    },
+    deviceSynthetic: Boolean(admission.deviceSynthetic),
+    clientVersion: admission.clientVersion,
+    protocolVersion: admission.protocolVersion
+  };
+}
+
+function roleParticipantBinding(record, role) {
+  if (!record || (role !== 'initiator' && role !== 'responder')) return null;
+  if (role === 'initiator') {
+    return {
+      deviceId: record.deviceId,
+      protocolSigningAlgorithm: record.initiatorProtocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: record.initiatorProtocolPublicKeyFingerprint
+    };
+  }
+  return {
+    deviceId: record.responderId,
+    protocolSigningAlgorithm: record.responderProtocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: record.responderProtocolPublicKeyFingerprint
+  };
+}
+
+function bindingMatches(left, right) {
+  return Boolean(
+    left?.deviceId
+    && right?.deviceId
+    && left.deviceId === right.deviceId
+    && left.protocolSigningAlgorithm === right.protocolSigningAlgorithm
+    && left.protocolPublicKeyFingerprint === right.protocolPublicKeyFingerprint
+  );
+}
+
+function setConnectionRoleTokenHashes(record, role, artifacts) {
+  if (role === 'initiator') {
+    record.initiatorSessionTokenHash = artifacts.sessionTokenHash;
+    record.initiatorTurnAdmissionTokenHash = artifacts.turnAdmissionTokenHash;
+    record.initiatorMediaAdmissionTokenHash = artifacts.mediaAdmissionTokenHash;
+    return;
+  }
+  record.responderSessionTokenHash = artifacts.sessionTokenHash;
+  record.responderTurnAdmissionTokenHash = artifacts.turnAdmissionTokenHash;
+  record.responderMediaAdmissionTokenHash = artifacts.mediaAdmissionTokenHash;
+}
+
+function roleHasActiveTokenHashes(record, role) {
+  return Boolean(
+    connectionRoleTokenHash(record, role, 'session_token')
+    || connectionRoleTokenHash(record, role, 'turn_admission_token')
+    || connectionRoleTokenHash(record, role, 'media_admission_token')
+  );
+}
+
+async function revokeSessionArtifactsIfPresent(artifacts, reason = 'superseded') {
+  await Promise.all([
+    revokeSupersededSessionTokenIfPresent(artifacts?.sessionTokenHash, reason),
+    revokeEphemeralIfPresent('turn_admission_token', artifacts?.turnAdmissionTokenHash, reason),
+    revokeEphemeralIfPresent('media_admission_token', artifacts?.mediaAdmissionTokenHash, reason)
+  ]);
 }
 
 function closeSlowConsumer(ws, reason = 'backpressure') {
@@ -1488,11 +1712,12 @@ async function dropLocalClientById(clientId, reason = 'remote_reclaim') {
   }
 }
 
-async function revokeEphemeralIfPresent(kind, tokenHash) {
+async function revokeEphemeralIfPresent(kind, tokenHash, reason = 'revoked') {
   if (!tokenHash) return;
   return signalingState.updateEphemeral(kind, tokenHash, (record) => {
     record.state = 'revoked';
     record.revokedAt = now();
+    record.revokedReason = reason;
   });
 }
 
@@ -1504,22 +1729,307 @@ function connectionRoleTokenHash(record, role, kind) {
   if (kind === 'turn_admission_token') {
     return role === 'initiator' ? record.initiatorTurnAdmissionTokenHash : record.responderTurnAdmissionTokenHash;
   }
+  if (kind === 'media_admission_token') {
+    return role === 'initiator' ? record.initiatorMediaAdmissionTokenHash : record.responderMediaAdmissionTokenHash;
+  }
   return null;
+}
+
+function tokenGenerationPrefix(tokenHash) {
+  return typeof tokenHash === 'string' && tokenHash.length > 0 ? tokenHash.slice(0, 16) : null;
+}
+
+function mediaTokenRejectReason({
+  tokenRecord = null,
+  sessionPresent = null,
+  expectedHash = null,
+  sessionRejectReason = null
+} = {}) {
+  if (typeof tokenRecord?.revokedReason === 'string' && tokenRecord.revokedReason.trim()) {
+    return tokenRecord.revokedReason.trim();
+  }
+  if (tokenRecord?.state === 'revoked') {
+    return 'revoked';
+  }
+  if (sessionRejectReason) {
+    return sessionRejectReason;
+  }
+  if (sessionPresent === false) {
+    return 'missingRecord';
+  }
+  if (!expectedHash) {
+    return 'expectedTokenMissing';
+  }
+  return undefined;
+}
+
+function mediaTokenDiagnostics({
+  requestHash,
+  expectedHash,
+  tokenRecord = null,
+  sessionPresent = null,
+  sessionRecordPresent = null,
+  sessionRejectReason = null,
+  sessionRevokedReason = null,
+  tokenState = null,
+  leaseCount = null
+}) {
+  const requestGeneration = tokenGenerationPrefix(requestHash);
+  const expectedGeneration = tokenGenerationPrefix(expectedHash);
+  const rejectReason = mediaTokenRejectReason({ tokenRecord, sessionPresent, expectedHash, sessionRejectReason });
+  return {
+    serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
+    supportsMediaAdmissionRefresh: true,
+    mediaTokenGeneration: requestGeneration,
+    mediaTokenRequestGeneration: requestGeneration,
+    mediaTokenExpectedGeneration: expectedGeneration,
+    mediaTokenExpectedPresent: Boolean(expectedHash),
+    mediaTokenSessionPresent: sessionPresent === null ? undefined : Boolean(sessionPresent),
+    mediaTokenSessionRecordPresent: sessionRecordPresent === null ? undefined : Boolean(sessionRecordPresent),
+    mediaTokenSessionRejectReason: sessionRejectReason || undefined,
+    mediaTokenSessionRevokedReason: sessionRevokedReason || undefined,
+    mediaTokenState: tokenState || tokenRecord?.state || undefined,
+    mediaTokenRevokedReason: tokenRecord?.revokedReason || undefined,
+    rejectReason,
+    mediaTokenLeaseCount: Number.isFinite(Number(leaseCount ?? tokenRecord?.leaseCount))
+      ? Number(leaseCount ?? tokenRecord?.leaseCount)
+      : undefined
+  };
+}
+
+function stripUndefinedFields(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, fieldValue]) => fieldValue !== undefined));
+}
+
+async function peekConnectionForDiagnostics(sessionId) {
+  if (!sessionId) return null;
+  if (typeof signalingState.peekConnection === 'function') {
+    return signalingState.peekConnection(sessionId);
+  }
+  return signalingState.getConnection(sessionId);
+}
+
+function connectionRejectReasonForDiagnostics(connection) {
+  if (!connection) return 'missingRecord';
+  if (connection.revokedAt) return connection.revokedReason || 'revoked';
+  if (now() > connectionActiveUntil(connection)) return 'activeExpired';
+  return null;
+}
+
+async function mediaTokenMismatchDiagnostics(tokenRecord, tokenHash) {
+  const session = await peekConnectionForDiagnostics(tokenRecord?.sessionId);
+  const sessionRejectReason = connectionRejectReasonForDiagnostics(session);
+  const sessionActive = Boolean(session && !sessionRejectReason);
+  return stripUndefinedFields(mediaTokenDiagnostics({
+    requestHash: tokenHash,
+    expectedHash: sessionActive
+      ? connectionRoleTokenHash(session, tokenRecord?.role, 'media_admission_token')
+      : null,
+    tokenRecord,
+    sessionPresent: sessionActive,
+    sessionRecordPresent: Boolean(session),
+    sessionRejectReason,
+    sessionRevokedReason: session?.revokedReason || undefined
+  }));
 }
 
 async function isEphemeralTokenCurrent(kind, tokenRecord, tokenHash) {
   if (!tokenRecord?.sessionId || !tokenRecord?.role || !tokenHash) {
     return false;
   }
-  const connection = await signalingState.getConnection(tokenRecord.sessionId);
-  if (!connection) {
+  const connection = await peekConnectionForDiagnostics(tokenRecord.sessionId);
+  if (!connection || connectionRejectReasonForDiagnostics(connection)) {
     return false;
   }
   return connectionRoleTokenHash(connection, tokenRecord.role, kind) === tokenHash;
 }
 
+async function issueMediaAdmissionArtifact({ sessionId, role, context }) {
+  const mediaAdmissionToken = issueEphemeralTokenRecord({
+    kind: 'media_admission_token',
+    ttlMs: MEDIA_ADMISSION_TOKEN_TTL_MS,
+    payload: {
+      sessionId,
+      role,
+      tenantId: context.tenantId,
+      userId: context.userId,
+      deviceId: context.deviceId,
+      protocolSigningAlgorithm: context.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: context.protocolPublicKeyFingerprint,
+      deviceSynthetic: context.deviceSynthetic,
+      clientVersion: context.clientVersion,
+      protocolVersion: context.protocolVersion
+    }
+  });
+  const created = await signalingState.createEphemeral(
+    'media_admission_token',
+    mediaAdmissionToken.tokenHash,
+    mediaAdmissionToken.record
+  );
+  if (!created) {
+    throw makeError('token_issue_failed', 500);
+  }
+  return {
+    mediaAdmissionToken: mediaAdmissionToken.token,
+    mediaAdmissionTokenHash: mediaAdmissionToken.tokenHash,
+    expiresAt: mediaAdmissionToken.record.expiresAt
+  };
+}
+
+async function bindResponderArtifactsStrict(sessionId, {
+  binding,
+  artifacts,
+  qrBootstrapTokenHash = null
+}) {
+  let rejectedError = null;
+  let bound = false;
+  const item = await signalingState.updateConnection(sessionId, (nextItem) => {
+    if (qrBootstrapTokenHash) {
+      if (!nextItem.qrBootstrapTokenHash || nextItem.qrBootstrapTokenHash !== qrBootstrapTokenHash) {
+        rejectedError = 'bootstrap_token_invalid';
+        return false;
+      }
+      if (nextItem.qrBootstrapConsumedAt) {
+        rejectedError = 'responder_already_bound';
+        return false;
+      }
+    }
+    const sameResponder = !nextItem.responderId || nextItem.responderId === binding.deviceId;
+    const sameFingerprint = !nextItem.responderProtocolPublicKeyFingerprint
+      || nextItem.responderProtocolPublicKeyFingerprint === binding.protocolPublicKeyFingerprint;
+    if (!sameResponder || !sameFingerprint) {
+      rejectedError = 'responder_binding_conflict';
+      return false;
+    }
+    if (roleHasActiveTokenHashes(nextItem, 'responder')) {
+      rejectedError = 'responder_already_bound';
+      return false;
+    }
+    nextItem.responderId = binding.deviceId;
+    nextItem.responderProtocolSigningAlgorithm = binding.protocolSigningAlgorithm;
+    nextItem.responderProtocolPublicKeyFingerprint = binding.protocolPublicKeyFingerprint;
+    if (qrBootstrapTokenHash) {
+      nextItem.qrBootstrapConsumedAt = now();
+    }
+    setConnectionRoleTokenHashes(nextItem, 'responder', artifacts);
+    extendConnectionActiveUntil(nextItem);
+    bound = true;
+  });
+  if (!item) return null;
+  if (bound) {
+    logSessionLifecycle(sessionId, 'redeemed', {
+      role: 'responder',
+      activeUntil: item.activeUntil
+    });
+  }
+  return { item, bound, error: rejectedError };
+}
+
+async function refreshSessionArtifactsForRole({ sessionId, role, admission }) {
+  const current = await signalingState.getConnection(sessionId);
+  if (!current) {
+    logSessionLifecycle(sessionId, 'refreshRejected', { role, rejectReason: 'missingRecord' });
+    throw makeError('session_inactive', 403, { rejectReason: 'missingRecord' });
+  }
+  if (!admissionOwnsSession(current, admission)) {
+    logSessionLifecycle(sessionId, 'refreshRejected', { role, rejectReason: 'scopeMismatch' });
+    throw makeError('session_scope_mismatch', 403);
+  }
+  const context = contextFromAdmission(admission);
+  if (!bindingMatches(roleParticipantBinding(current, role), context.binding)) {
+    logSessionLifecycle(sessionId, 'refreshRejected', { role, rejectReason: 'scopeMismatch' });
+    throw makeError('session_scope_mismatch', 403);
+  }
+
+  const targetActiveUntil = nextActiveUntil(current);
+  const artifacts = await issueSessionArtifacts({ sessionId, role, context, expiresAt: targetActiveUntil });
+  let previousSessionTokenHash = null;
+  let previousTurnAdmissionTokenHash = null;
+  let previousMediaAdmissionTokenHash = null;
+  let updateError = null;
+  let rotated = false;
+  const updated = await signalingState.updateConnection(sessionId, (connection) => {
+    if (!connection || connection.revokedAt) {
+      updateError = 'session_inactive';
+      return false;
+    }
+    if (!admissionOwnsSession(connection, admission)) {
+      updateError = 'session_scope_mismatch';
+      return false;
+    }
+    if (!bindingMatches(roleParticipantBinding(connection, role), context.binding)) {
+      updateError = 'session_scope_mismatch';
+      return false;
+    }
+    previousSessionTokenHash = connectionRoleTokenHash(connection, role, 'session_token');
+    previousTurnAdmissionTokenHash = connectionRoleTokenHash(connection, role, 'turn_admission_token');
+    previousMediaAdmissionTokenHash = connectionRoleTokenHash(connection, role, 'media_admission_token');
+    setConnectionRoleTokenHashes(connection, role, artifacts);
+    extendConnectionActiveUntil(connection);
+    rotated = true;
+  });
+
+  if (!updated || !rotated) {
+    await revokeSessionArtifactsIfPresent(artifacts, 'session_refresh_aborted');
+    logSessionLifecycle(sessionId, 'refreshRejected', {
+      role,
+      rejectReason: updateError || 'missingRecord'
+    });
+    throw makeError(updateError || 'session_inactive', 403, {
+      rejectReason: updateError || 'missingRecord'
+    });
+  }
+
+  await Promise.all([
+    previousSessionTokenHash && previousSessionTokenHash !== artifacts.sessionTokenHash
+      ? revokeSupersededSessionTokenIfPresent(previousSessionTokenHash, 'session_token_refreshed')
+      : null,
+    previousTurnAdmissionTokenHash && previousTurnAdmissionTokenHash !== artifacts.turnAdmissionTokenHash
+      ? revokeEphemeralIfPresent('turn_admission_token', previousTurnAdmissionTokenHash, 'session_token_refreshed')
+      : null,
+    previousMediaAdmissionTokenHash && previousMediaAdmissionTokenHash !== artifacts.mediaAdmissionTokenHash
+      ? revokeEphemeralIfPresent('media_admission_token', previousMediaAdmissionTokenHash, 'session_token_refreshed')
+      : null
+  ]);
+
+  return {
+    artifacts,
+    expiresAt: connectionActiveUntil(updated)
+  };
+}
+
+async function touchConnectionActiveSession(sessionId, reason, options = {}) {
+  const minIntervalMs = Number.isFinite(options.minIntervalMs) ? options.minIntervalMs : 30_000;
+  const at = now();
+  const lastTouchedAt = activeSessionTouchAtBySessionId.get(sessionId) || 0;
+  if (minIntervalMs > 0 && at - lastTouchedAt < minIntervalMs) {
+    return null;
+  }
+  let extended = false;
+  const updated = await signalingState.updateConnection(sessionId, (connection) => {
+    if (!connection || connection.revokedAt) {
+      return false;
+    }
+    const previous = connectionActiveUntil(connection);
+    const next = extendConnectionActiveUntil(connection, at);
+    extended = next > previous;
+  });
+  if (!updated) {
+    activeSessionTouchAtBySessionId.delete(sessionId);
+    return null;
+  }
+  activeSessionTouchAtBySessionId.set(sessionId, at);
+  if (extended || minIntervalMs === 0) {
+    logSessionLifecycle(sessionId, 'activeExtended', {
+      reason,
+      activeUntil: connectionActiveUntil(updated)
+    });
+  }
+  return updated;
+}
+
 async function revokeSupersededSessionTokenIfPresent(tokenHash, reason = 'superseded') {
-  const revoked = await revokeEphemeralIfPresent('session_token', tokenHash);
+  const revoked = await revokeEphemeralIfPresent('session_token', tokenHash, reason);
   if (!revoked?.boundClientId || !revoked?.boundInstanceId) {
     return;
   }
@@ -1535,15 +2045,19 @@ async function revokeSupersededSessionTokenIfPresent(tokenHash, reason = 'supers
 }
 
 async function killSession(sessionId, reason) {
+  const normalizedReason = reason || 'session_killed';
   const record = await signalingState.updateConnection(sessionId, (item) => {
     item.revokedAt = now();
+    item.revokedReason = normalizedReason;
   });
   if (record) {
     await Promise.all([
-      revokeEphemeralIfPresent('session_token', record.initiatorSessionTokenHash),
-      revokeEphemeralIfPresent('session_token', record.responderSessionTokenHash),
-      revokeEphemeralIfPresent('turn_admission_token', record.initiatorTurnAdmissionTokenHash),
-      revokeEphemeralIfPresent('turn_admission_token', record.responderTurnAdmissionTokenHash)
+      revokeEphemeralIfPresent('session_token', record.initiatorSessionTokenHash, normalizedReason),
+      revokeEphemeralIfPresent('session_token', record.responderSessionTokenHash, normalizedReason),
+      revokeEphemeralIfPresent('turn_admission_token', record.initiatorTurnAdmissionTokenHash, normalizedReason),
+      revokeEphemeralIfPresent('turn_admission_token', record.responderTurnAdmissionTokenHash, normalizedReason),
+      revokeEphemeralIfPresent('media_admission_token', record.initiatorMediaAdmissionTokenHash, normalizedReason),
+      revokeEphemeralIfPresent('media_admission_token', record.responderMediaAdmissionTokenHash, normalizedReason)
     ]);
   }
   const room = rooms.get(sessionId);
@@ -1626,6 +2140,89 @@ async function getTurnTokenRecord(req) {
   return record;
 }
 
+async function getMediaAdmissionRecord(req) {
+  const rawToken = getOpaqueHeader(req, 'X-SkyBridge-Media-Admission');
+  if (!rawToken) {
+    throw makeError('missing_media_admission_token', 401);
+  }
+  const tokenHash = sha256Hex(rawToken);
+  const preview = await signalingState.getEphemeral('media_admission_token', tokenHash);
+  if (!preview) throw makeError('media_admission_token_expired', 401);
+  if (!(await isEphemeralTokenCurrent('media_admission_token', preview, tokenHash))) {
+    const diagnostics = await mediaTokenMismatchDiagnostics(preview, tokenHash);
+    console.warn(
+      `[media] admission token superseded before lease session=${preview.sessionId || '-'} role=${preview.role || '-'} ` +
+      `requestGeneration=${diagnostics.mediaTokenRequestGeneration || '-'} ` +
+      `expectedGeneration=${diagnostics.mediaTokenExpectedGeneration || '-'} ` +
+      `expectedPresent=${diagnostics.mediaTokenExpectedPresent ? '1' : '0'} ` +
+      `tokenState=${diagnostics.mediaTokenState || '-'} ` +
+      `rejectReason=${diagnostics.rejectReason || '-'} serverBuild=${SERVER_BUILD_FINGERPRINT}`
+    );
+    throw makeError('media_admission_token_superseded', 401, diagnostics);
+  }
+  let updateError = null;
+  const record = await signalingState.updateEphemeral('media_admission_token', tokenHash, (current) => {
+    if (current.state !== 'issued' && current.state !== 'leased') {
+      updateError = 'media_admission_token_consumed';
+      return false;
+    }
+    current.state = 'leased';
+    current.leasedAt = now();
+    current.leaseCount = Number(current.leaseCount || 0) + 1;
+    if (current.leaseCount > 4) {
+      updateError = 'media_admission_token_lease_limit';
+      return false;
+    }
+  });
+  if (!record) throw makeError('media_admission_token_expired', 401);
+  if (updateError) throw makeError(updateError, updateError === 'media_admission_token_lease_limit' ? 429 : 409);
+  return record;
+}
+
+function hasExternalMediaRelay() {
+  return Boolean(MEDIA_RELAY_EXTERNAL_HOST && MEDIA_RELAY_EXTERNAL_UDP_PORT > 0);
+}
+
+async function issueMediaRelayLease(mediaToken) {
+  if (hasExternalMediaRelay()) {
+    const lease = createSignedMediaLeaseToken({
+      sessionId: mediaToken.sessionId,
+      role: mediaToken.role,
+      tenantId: mediaToken.tenantId,
+      userId: mediaToken.userId,
+      ttlMs: MEDIA_RELAY_LEASE_TTL_MS,
+      secret: MEDIA_RELAY_TOKEN_SECRET
+    });
+    return {
+      endpoint: {
+        host: MEDIA_RELAY_EXTERNAL_HOST,
+        port: MEDIA_RELAY_EXTERNAL_UDP_PORT,
+        protocol: 'udp'
+      },
+      lease
+    };
+  }
+  if (!mediaRelay) {
+    throw makeError('media_relay_not_enabled', 503);
+  }
+  const relayAddress = mediaRelay.snapshot().address || await mediaRelay.start();
+  const lease = mediaRelay.createLease({
+    sessionId: mediaToken.sessionId,
+    role: mediaToken.role,
+    tenantId: mediaToken.tenantId,
+    userId: mediaToken.userId,
+    ttlMs: MEDIA_RELAY_LEASE_TTL_MS
+  });
+  return {
+    endpoint: {
+      host: relayAddress.host,
+      port: relayAddress.port,
+      protocol: 'udp'
+    },
+    lease
+  };
+}
+
 async function handleBackendInstanceMessage(payload) {
   if (!payload || typeof payload !== 'object') return;
   switch (payload.kind) {
@@ -1669,17 +2266,18 @@ app.use((req, res, next) => {
     }
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-SkyBridge-Tenant-Id, X-SkyBridge-Admission, X-SkyBridge-Turn-Admission, X-SkyBridge-Client-Version, X-SkyBridge-Protocol-Version');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-SkyBridge-Tenant-Id, X-SkyBridge-Admission, X-SkyBridge-Turn-Admission, X-SkyBridge-Media-Admission, X-SkyBridge-Session, X-SkyBridge-Client-Version, X-SkyBridge-Protocol-Version');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', "default-src 'none'");
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-const rlControl = rateLimit({ windowMs: 60_000, max: 60 });
-const rlLookup = rateLimit({ windowMs: 60_000, max: 30 });
-const rlTurn = rateLimit({ windowMs: 60_000, max: 60 });
-const rlAdmission = rateLimit({ windowMs: 60_000, max: 60 });
+const rlControl = rateLimit({ windowMs: 60_000, max: HTTP_CONTROL_RATE_LIMIT_PER_MIN });
+const rlLookup = rateLimit({ windowMs: 60_000, max: HTTP_LOOKUP_RATE_LIMIT_PER_MIN });
+const rlTurn = rateLimit({ windowMs: 60_000, max: HTTP_TURN_RATE_LIMIT_PER_MIN });
+const rlMedia = rateLimit({ windowMs: 60_000, max: HTTP_MEDIA_RATE_LIMIT_PER_MIN });
+const rlAdmission = rateLimit({ windowMs: 60_000, max: HTTP_ADMISSION_RATE_LIMIT_PER_MIN });
 
 function evaluateServiceHealth({
   backendHealth,
@@ -1739,6 +2337,7 @@ app.get('/', asyncRoute(async (req, res) => {
     service: 'skybridge-signaling',
     time: new Date().toISOString(),
     instanceId: INSTANCE_ID,
+    serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
     stateBackend: SIGNALING_STATE_BACKEND,
     smsProvider: health.sms.provider,
     smsHookConfigured: health.sms.hookConfigured,
@@ -1770,7 +2369,10 @@ app.get('/', asyncRoute(async (req, res) => {
       '/api/webrtc/lookup/:code',
       '/api/webrtc/register-session',
       '/api/webrtc/redeem-session',
+      '/api/webrtc/session/refresh',
       '/api/turn/credentials',
+      '/api/media/admission/refresh',
+      '/api/media/lease',
       '/api/devices/enroll/first',
       '/api/devices/enroll/confirm',
       '/ws?shard=<session_id>&st=<session_token>'
@@ -1784,6 +2386,8 @@ app.get('/health', asyncRoute(async (req, res) => {
     status: health.status,
     ready: health.ready,
     instanceId: INSTANCE_ID,
+    serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
+    supportsMediaAdmissionRefresh: true,
     stateBackend: SIGNALING_STATE_BACKEND,
     smsProvider: health.sms.provider,
     smsHookConfigured: health.sms.hookConfigured,
@@ -1812,6 +2416,8 @@ app.get('/readyz', asyncRoute(async (req, res) => {
   res.status(health.httpStatus).json({
     status: health.ready ? 'ready' : 'not_ready',
     instanceId: INSTANCE_ID,
+    serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
+    supportsMediaAdmissionRefresh: true,
     stateBackend: SIGNALING_STATE_BACKEND,
     reasons: health.reasons,
     requiresSharedStateForPublicCapabilities: health.requiresSharedStateForPublicCapabilities,
@@ -2037,13 +2643,21 @@ app.post('/api/webrtc/register-code', rlControl, asyncRoute(async (req, res) => 
     signalingServerOrigin: resolvedSignalingServerOrigin(req),
     connectionKind: 'webrtc_room_code',
     initiatorSessionTokenHash: artifacts.sessionTokenHash,
-    initiatorTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash
+    initiatorTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash,
+    initiatorMediaAdmissionTokenHash: artifacts.mediaAdmissionTokenHash
   }));
   if (!code) throw makeError('code_generation_failed', 500);
+  logSessionLifecycle(code, 'registered', {
+    kind: 'webrtc_room_code',
+    rendezvousExpiresAt: expiresAt
+  });
   await signalingState.updateEphemeral('session_token', artifacts.sessionTokenHash, (record) => {
     record.sessionId = code;
   });
   await signalingState.updateEphemeral('turn_admission_token', artifacts.turnAdmissionTokenHash, (record) => {
+    record.sessionId = code;
+  });
+  await signalingState.updateEphemeral('media_admission_token', artifacts.mediaAdmissionTokenHash, (record) => {
     record.sessionId = code;
   });
   res.json({
@@ -2051,6 +2665,7 @@ app.post('/api/webrtc/register-code', rlControl, asyncRoute(async (req, res) => 
     sessionId: code,
     sessionToken: artifacts.sessionToken,
     turnAdmissionToken: artifacts.turnAdmissionToken,
+    mediaAdmissionToken: artifacts.mediaAdmissionToken,
     expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
     signalingServerOrigin: resolvedSignalingServerOrigin(req),
     wsPath: '/ws'
@@ -2069,6 +2684,11 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     incrementSecurityCounter('lookup_not_found');
     return res.status(404).json({ found: false });
   }
+  if (isRendezvousExpired(item)) {
+    incrementSecurityCounter('lookup_not_found');
+    logSessionLifecycle(code, 'refreshRejected', { rejectReason: 'rendezvousExpired' });
+    return res.status(404).json({ found: false });
+  }
   if (!admissionOwnsSession(item, admission)) {
     incrementSecurityCounter('lookup_not_found');
     return res.status(404).json({ found: false });
@@ -2082,33 +2702,15 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
   if (uniquenessError) {
     throw makeError(uniquenessError, 409);
   }
-  const context = {
-    tenantId: admission.tenantId,
-    user: { id: admission.userId },
-    binding,
-    deviceSynthetic: Boolean(admission.deviceSynthetic),
-    clientVersion: admission.clientVersion,
-    protocolVersion: admission.protocolVersion
-  };
-  const artifacts = await issueSessionArtifacts({ sessionId: code, role: 'responder', context, expiresAt: item.expiresAt });
-  const result = await signalingState.bindResponder(code, {
-    responderId: binding.deviceId,
-    responderProtocolSigningAlgorithm: binding.protocolSigningAlgorithm,
-    responderProtocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
-    responderSessionTokenHash: artifacts.sessionTokenHash,
-    responderTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash
-  });
-  if (!result?.item) {
-    return res.status(404).json({ found: false });
-  }
-  if (result.error) {
-    throw makeError(result.error, 409);
-  }
-  if (item.responderSessionTokenHash && item.responderSessionTokenHash !== artifacts.sessionTokenHash) {
-    await revokeSupersededSessionTokenIfPresent(item.responderSessionTokenHash, 'responder_token_rotated');
-  }
-  if (item.responderTurnAdmissionTokenHash && item.responderTurnAdmissionTokenHash !== artifacts.turnAdmissionTokenHash) {
-    await revokeEphemeralIfPresent('turn_admission_token', item.responderTurnAdmissionTokenHash);
+  const context = contextFromAdmission(admission);
+  const artifacts = await issueSessionArtifacts({ sessionId: code, role: 'responder', context, expiresAt: nextActiveUntil(item) });
+  const result = await bindResponderArtifactsStrict(code, { binding, artifacts });
+  if (!result?.item || result.error || !result.bound) {
+    await revokeSessionArtifactsIfPresent(artifacts, 'responder_bind_rejected');
+    if (!result?.item) {
+      return res.status(404).json({ found: false });
+    }
+    throw makeError(result.error || 'responder_binding_conflict', 409);
   }
   res.json({
     found: true,
@@ -2119,7 +2721,8 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     initiatorDeviceName: result.item.initiatorDeviceName,
     sessionToken: artifacts.sessionToken,
     turnAdmissionToken: artifacts.turnAdmissionToken,
-    expiresIn: Math.max(0, Math.round((result.item.expiresAt - now()) / 1000)),
+    mediaAdmissionToken: artifacts.mediaAdmissionToken,
+    expiresIn: Math.max(0, Math.round((connectionActiveUntil(result.item) - now()) / 1000)),
     signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req)
   });
 }));
@@ -2167,14 +2770,20 @@ app.post('/api/webrtc/register-session', rlControl, asyncRoute(async (req, res) 
       signalingServerOrigin: resolvedSignalingServerOrigin(req),
       connectionKind: 'webrtc_room_session',
       initiatorSessionTokenHash: artifacts.sessionTokenHash,
-      initiatorTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash
+      initiatorTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash,
+      initiatorMediaAdmissionTokenHash: artifacts.mediaAdmissionTokenHash
     }));
     if (!created) throw makeError('session_exists', 409);
+    logSessionLifecycle(sessionId, 'registered', {
+      kind: 'webrtc_room_session',
+      rendezvousExpiresAt: expiresAt
+    });
     const responseBody = {
       sessionId,
       sessionToken: artifacts.sessionToken,
       qrBootstrapToken,
       turnAdmissionToken: artifacts.turnAdmissionToken,
+      mediaAdmissionToken: artifacts.mediaAdmissionToken,
       expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
       signalingServerOrigin: resolvedSignalingServerOrigin(req),
       wsPath: '/ws'
@@ -2215,6 +2824,10 @@ app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) =>
     if (!item || item.connectionKind !== 'webrtc_room_session') {
       throw makeError('session_expired', 404);
     }
+    if (isRendezvousExpired(item)) {
+      logSessionLifecycle(sessionId, 'refreshRejected', { rejectReason: 'rendezvousExpired' });
+      throw makeError('session_expired', 404);
+    }
     if (!admissionOwnsSession(item, admission)) {
       throw makeError('session_expired', 404);
     }
@@ -2227,38 +2840,27 @@ app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) =>
     if (uniquenessError) {
       throw makeError(uniquenessError, 409);
     }
-    const context = {
-      tenantId: admission.tenantId,
-      user: { id: admission.userId },
+    const context = contextFromAdmission(admission);
+    const artifacts = await issueSessionArtifacts({ sessionId, role: 'responder', context, expiresAt: nextActiveUntil(item) });
+    const result = await bindResponderArtifactsStrict(sessionId, {
       binding,
-      deviceSynthetic: Boolean(admission.deviceSynthetic),
-      clientVersion: admission.clientVersion,
-      protocolVersion: admission.protocolVersion
-    };
-    const artifacts = await issueSessionArtifacts({ sessionId, role: 'responder', context, expiresAt: item.expiresAt });
-    const result = await signalingState.bindResponder(sessionId, {
-      qrBootstrapTokenHash: sha256Hex(qrBootstrapToken),
-      responderId: binding.deviceId,
-      responderProtocolSigningAlgorithm: binding.protocolSigningAlgorithm,
-      responderProtocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
-      responderSessionTokenHash: artifacts.sessionTokenHash,
-      responderTurnAdmissionTokenHash: artifacts.turnAdmissionTokenHash
+      artifacts,
+      qrBootstrapTokenHash: sha256Hex(qrBootstrapToken)
     });
-    if (!result?.item) throw makeError('session_expired', 404);
-    if (result.error) {
-      throw makeError(result.error === 'bootstrap_token_invalid' ? 'bootstrap_token_invalid' : result.error, result.error === 'bootstrap_token_invalid' ? 401 : 409);
-    }
-    if (item.responderSessionTokenHash && item.responderSessionTokenHash !== artifacts.sessionTokenHash) {
-      await revokeSupersededSessionTokenIfPresent(item.responderSessionTokenHash, 'responder_token_rotated');
-    }
-    if (item.responderTurnAdmissionTokenHash && item.responderTurnAdmissionTokenHash !== artifacts.turnAdmissionTokenHash) {
-      await revokeEphemeralIfPresent('turn_admission_token', item.responderTurnAdmissionTokenHash);
+    if (!result?.item || result.error || !result.bound) {
+      await revokeSessionArtifactsIfPresent(artifacts, 'responder_bind_rejected');
+      if (!result?.item) throw makeError('session_expired', 404);
+      throw makeError(
+        result.error === 'bootstrap_token_invalid' ? 'bootstrap_token_invalid' : (result.error || 'responder_binding_conflict'),
+        result.error === 'bootstrap_token_invalid' ? 401 : 409
+      );
     }
     const responseBody = {
       sessionId,
       sessionToken: artifacts.sessionToken,
       turnAdmissionToken: artifacts.turnAdmissionToken,
-      expiresIn: Math.max(0, Math.round((result.item.expiresAt - now()) / 1000)),
+      mediaAdmissionToken: artifacts.mediaAdmissionToken,
+      expiresIn: Math.max(0, Math.round((connectionActiveUntil(result.item) - now()) / 1000)),
       signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req),
       initiatorDeviceId: result.item.deviceId,
       initiatorProtocolSigningAlgorithm: result.item.initiatorProtocolSigningAlgorithm,
@@ -2270,6 +2872,35 @@ app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) =>
     await cancelIdempotencyGuard(idempotency);
     throw error;
   }
+}));
+
+app.post('/api/webrtc/session/refresh', rlControl, asyncRoute(async (req, res) => {
+  const sessionId = String(req.body?.sessionId || '').trim();
+  const role = String(req.body?.role || '').trim();
+  if (!sessionId || (role !== 'initiator' && role !== 'responder')) {
+    throw makeError('invalid_session_refresh_request', 400);
+  }
+  const admission = await consumeAdmissionToken(req, 'session-refresh');
+  await assertPublicCapabilityAvailable('session_refresh', admission.tenantId);
+  const { artifacts, expiresAt } = await refreshSessionArtifactsForRole({ sessionId, role, admission });
+  logSessionLifecycle(sessionId, 'refreshAccepted', {
+    role,
+    activeUntil: expiresAt
+  });
+  res.json({
+    sessionId,
+    role,
+    sessionToken: artifacts.sessionToken,
+    turnAdmissionToken: artifacts.turnAdmissionToken,
+    mediaAdmissionToken: artifacts.mediaAdmissionToken,
+    expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
+    signalingServerOrigin: resolvedSignalingServerOrigin(req),
+    wsPath: '/ws',
+    serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
+    supportsSessionRefresh: true,
+    sessionTokenGeneration: artifacts.sessionTokenHash.slice(0, 16),
+    mediaTokenGeneration: artifacts.mediaAdmissionTokenHash.slice(0, 16)
+  });
 }));
 
 app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
@@ -2313,6 +2944,7 @@ app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
   if (!session || session.revokedAt) {
     throw makeError('session_inactive', 403);
   }
+  await touchConnectionActiveSession(turnToken.sessionId, 'turnCredentials', { minIntervalMs: 30_000 });
   const ttl = Math.max(60, Math.min(600, Math.trunc(TURN_CRED_TTL_SECONDS)));
   const expiresAtEpoch = Math.floor(now() / 1000) + ttl;
   const username = `${expiresAtEpoch}:${deriveTurnOpaqueTag('tenant', turnToken.tenantId)}.${deriveTurnOpaqueTag('device', turnToken.deviceId)}.${deriveTurnOpaqueTag('session', turnToken.sessionId)}.${turnToken.jti}`;
@@ -2325,6 +2957,185 @@ app.get('/api/turn/credentials', rlTurn, asyncRoute(async (req, res) => {
     expiresAt: expiresAtEpoch,
     uris: TURN_URIS,
     mode: 'shared_secret_hmac'
+  });
+}));
+
+app.post('/api/media/admission/refresh', rlMedia, asyncRoute(async (req, res) => {
+  const sessionId = String(req.body?.sessionId || '').trim();
+  const role = String(req.body?.role || '').trim();
+  if (!sessionId || (role !== 'initiator' && role !== 'responder')) {
+    throw makeError('invalid_media_admission_refresh_request', 400);
+  }
+
+  const rawSessionToken = getOpaqueHeader(req, 'X-SkyBridge-Session');
+  if (!rawSessionToken) {
+    throw makeError('missing_session_token', 401);
+  }
+  const idempotencyKey = String(req.get('Idempotency-Key') || req.get('X-SkyBridge-Idempotency-Key') || '').trim();
+  const refreshFingerprint = buildIdempotencyFingerprint({
+    action: 'media-admission-refresh',
+    body: req.body || {},
+    admissionToken: rawSessionToken,
+    backendName: SIGNALING_STATE_BACKEND,
+    fallbackTtlMs: MEDIA_ADMISSION_TOKEN_TTL_MS
+  });
+  const idempotency = await createIdempotencyGuard('media-admission-refresh', idempotencyKey, refreshFingerprint);
+  if (idempotency?.existing?.responseBody) {
+    return res.json(idempotency.existing.responseBody);
+  }
+  try {
+  const sessionTokenHash = sha256Hex(rawSessionToken);
+  const sessionToken = await signalingState.getEphemeral('session_token', sessionTokenHash);
+  if (!sessionToken) {
+    throw makeError('session_token_expired', 401);
+  }
+  if (!(await isEphemeralTokenCurrent('session_token', sessionToken, sessionTokenHash))) {
+    throw makeError('session_token_superseded', 401);
+  }
+  if (sessionToken.sessionId !== sessionId || sessionToken.role !== role) {
+    throw makeError('session_scope_mismatch', 403);
+  }
+
+  await assertPublicCapabilityAvailable('media_relay', sessionToken.tenantId);
+  const artifacts = await issueMediaAdmissionArtifact({
+    sessionId,
+    role,
+    context: sessionToken
+  });
+
+  let previousMediaAdmissionTokenHash = null;
+  let updatedConnection = false;
+  const updated = await signalingState.updateConnection(sessionId, (connection) => {
+    if (!connection || connection.revokedAt) {
+      return false;
+    }
+    const currentSessionTokenHash = connectionRoleTokenHash(connection, role, 'session_token');
+    if (!currentSessionTokenHash || currentSessionTokenHash !== sessionTokenHash) {
+      return false;
+    }
+    previousMediaAdmissionTokenHash = connectionRoleTokenHash(connection, role, 'media_admission_token');
+    if (role === 'initiator') {
+      connection.initiatorMediaAdmissionTokenHash = artifacts.mediaAdmissionTokenHash;
+    } else {
+      connection.responderMediaAdmissionTokenHash = artifacts.mediaAdmissionTokenHash;
+    }
+    extendConnectionActiveUntil(connection);
+    updatedConnection = true;
+  });
+
+  if (!updated || !updatedConnection) {
+    await revokeEphemeralIfPresent('media_admission_token', artifacts.mediaAdmissionTokenHash, 'media_admission_refresh_aborted');
+    throw makeError('session_inactive', 403, { rejectReason: 'missingRecord' });
+  }
+  if (previousMediaAdmissionTokenHash && previousMediaAdmissionTokenHash !== artifacts.mediaAdmissionTokenHash) {
+    await revokeEphemeralIfPresent('media_admission_token', previousMediaAdmissionTokenHash, 'media_admission_refreshed');
+  }
+  logSessionLifecycle(sessionId, 'activeExtended', {
+    reason: 'mediaAdmissionRefresh',
+    activeUntil: connectionActiveUntil(updated)
+  });
+
+  const expectedHashAfterRefresh = connectionRoleTokenHash(updated, role, 'media_admission_token');
+  const diagnostics = stripUndefinedFields(mediaTokenDiagnostics({
+    requestHash: artifacts.mediaAdmissionTokenHash,
+    expectedHash: expectedHashAfterRefresh,
+    tokenRecord: { state: 'issued', leaseCount: 0 }
+  }));
+  console.log(
+    `[media] admission refresh accepted session=${sessionId} role=${role} ` +
+    `refreshedGeneration=${diagnostics.mediaTokenGeneration || '-'} ` +
+    `expectedGeneration=${diagnostics.mediaTokenExpectedGeneration || '-'} ` +
+    `expectedPresent=${diagnostics.mediaTokenExpectedPresent ? '1' : '0'} ` +
+    `idempotency=${idempotencyKey ? '1' : '0'} serverBuild=${SERVER_BUILD_FINGERPRINT}`
+  );
+
+  const responseBody = {
+    sessionId,
+    role,
+    mediaAdmissionToken: artifacts.mediaAdmissionToken,
+    expiresIn: Math.max(0, Math.round((artifacts.expiresAt - now()) / 1000)),
+    serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
+    supportsMediaAdmissionRefresh: true,
+    mediaTokenGeneration: artifacts.mediaAdmissionTokenHash.slice(0, 16),
+    mediaTokenRequestGeneration: diagnostics.mediaTokenRequestGeneration,
+    mediaTokenExpectedGeneration: diagnostics.mediaTokenExpectedGeneration,
+    mediaTokenExpectedPresent: diagnostics.mediaTokenExpectedPresent
+  };
+  await completeIdempotencyGuard(idempotency, responseBody);
+  res.json(responseBody);
+  } catch (error) {
+    await cancelIdempotencyGuard(idempotency);
+    throw error;
+  }
+}));
+
+app.post('/api/media/lease', rlMedia, asyncRoute(async (req, res) => {
+  const rawMediaAdmissionToken = getOpaqueHeader(req, 'X-SkyBridge-Media-Admission');
+  const requestMediaAdmissionTokenHash = rawMediaAdmissionToken ? sha256Hex(rawMediaAdmissionToken) : null;
+  const mediaToken = await getMediaAdmissionRecord(req);
+  await assertPublicCapabilityAvailable('media_relay', mediaToken.tenantId);
+  if (!mediaRelay && !hasExternalMediaRelay()) {
+    throw makeError('media_relay_not_enabled', 503);
+  }
+  if (hasExternalMediaRelay() && !MEDIA_RELAY_TOKEN_SECRET) {
+    throw makeError('media_relay_token_secret_missing', 503);
+  }
+  const session = await signalingState.getConnection(mediaToken.sessionId);
+  if (!session || session.revokedAt) {
+    throw makeError('session_inactive', 403, {
+      rejectReason: session?.revokedAt ? 'revoked' : 'missingRecord'
+    });
+  }
+  const expectedHash = connectionRoleTokenHash(session, mediaToken.role, 'media_admission_token');
+  if (!expectedHash || !requestMediaAdmissionTokenHash || !secureStringEqual(expectedHash, requestMediaAdmissionTokenHash)) {
+    const diagnostics = stripUndefinedFields(mediaTokenDiagnostics({
+      requestHash: requestMediaAdmissionTokenHash,
+      expectedHash,
+      tokenRecord: mediaToken,
+      sessionPresent: true
+    }));
+    console.warn(
+      `[media] admission token superseded at lease session=${mediaToken.sessionId || '-'} role=${mediaToken.role || '-'} ` +
+      `requestGeneration=${diagnostics.mediaTokenRequestGeneration || '-'} ` +
+      `expectedGeneration=${diagnostics.mediaTokenExpectedGeneration || '-'} ` +
+      `expectedPresent=${diagnostics.mediaTokenExpectedPresent ? '1' : '0'} ` +
+      `tokenState=${diagnostics.mediaTokenState || '-'} rejectReason=${diagnostics.rejectReason || '-'} ` +
+      `leaseCount=${diagnostics.mediaTokenLeaseCount ?? '-'} ` +
+      `serverBuild=${SERVER_BUILD_FINGERPRINT}`
+    );
+    throw makeError('media_admission_token_superseded', 401, diagnostics);
+  }
+  await touchConnectionActiveSession(mediaToken.sessionId, 'mediaLease', { minIntervalMs: 0 });
+  const relayLease = await issueMediaRelayLease(mediaToken);
+  const diagnostics = stripUndefinedFields(mediaTokenDiagnostics({
+    requestHash: requestMediaAdmissionTokenHash,
+    expectedHash,
+    tokenRecord: mediaToken,
+    sessionPresent: true
+  }));
+  res.json({
+    mode: 'skybridge-pqc-media-v1',
+    endpoint: relayLease.endpoint,
+    leaseToken: relayLease.lease.leaseToken,
+    role: mediaToken.role,
+    sessionId: mediaToken.sessionId,
+    expiresAt: Math.floor(relayLease.lease.expiresAt / 1000),
+    ttl: Math.max(1, Math.round((relayLease.lease.expiresAt - now()) / 1000)),
+    maxPacketBytes: MEDIA_RELAY_MAX_PACKET_BYTES,
+    serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
+    supportsMediaAdmissionRefresh: true,
+    mediaTokenGeneration: diagnostics.mediaTokenGeneration,
+    mediaTokenRequestGeneration: diagnostics.mediaTokenRequestGeneration,
+    mediaTokenExpectedGeneration: diagnostics.mediaTokenExpectedGeneration,
+    mediaTokenExpectedPresent: diagnostics.mediaTokenExpectedPresent,
+    bindMessage: { type: 'bind', leaseToken: relayLease.lease.leaseToken },
+    media: {
+      codec: 'opus',
+      sampleRate: 48_000,
+      channels: 2,
+      packetDurationMs: 20,
+      encryptedPacket: 'SBMA-v1-AES-GCM'
+    }
   });
 }));
 
@@ -2539,6 +3350,7 @@ wss.on('connection', (ws, req) => {
     const room = getOrCreateRoom(sessionId);
     room.clients.add(ws);
     room.clientsByDeviceId.set(boundToken.deviceId, ws);
+    await touchConnectionActiveSession(sessionId, 'wsBound', { minIntervalMs: 0 });
     await renewRoomMembershipLease(ws, {
       clientId,
       sessionId,
@@ -2621,6 +3433,7 @@ wss.on('connection', (ws, req) => {
         ws.close(1008, 'scope_violation');
         return;
       }
+      await touchConnectionActiveSession(meta.sessionId, 'signalingEnvelope');
       if (message.type === 'iceCandidate') {
         let usage;
         try {
@@ -2644,8 +3457,19 @@ wss.on('connection', (ws, req) => {
           usage = { accepted: true, duplicate: false, killed: false, degraded: true };
         }
         if (usage.killed) {
-          incrementSecurityCounter('ice_killed_session');
-          await killSession(meta.sessionId, usage.reason || 'ice_limit');
+          const reason = usage.reason || 'ice_limit';
+          incrementSecurityCounter('ice_candidate_dropped');
+          console.warn('[WS] ICE candidate dropped without revoking session:', {
+            sessionId: meta.sessionId,
+            deviceId: meta.deviceId,
+            reason
+          });
+          wsSendRaw(ws, {
+            type: 'error',
+            error: 'ice_candidate_dropped',
+            reason,
+            sessionId: meta.sessionId
+          });
           return;
         }
         if (usage.duplicate) {
@@ -2730,6 +3554,11 @@ async function shutdown({ exitProcess = false } = {}) {
   await signalingState.close().catch((error) => {
     console.error('[shutdown] backend close failed:', error.message);
   });
+  if (mediaRelay) {
+    await mediaRelay.close().catch((error) => {
+      console.error('[shutdown] media relay close failed:', error.message);
+    });
+  }
   await new Promise((resolve) => {
     server.close(() => {
       if (exitProcess) process.exit(0);
@@ -2742,6 +3571,7 @@ async function startRuntime({ port = PORT, host = HOST } = {}) {
   assertConfiguredSignalingServerOrigin();
   await signalingState.init(handleBackendInstanceMessage);
   await refreshRuntimeProtection();
+  const mediaRelayAddress = mediaRelay ? await mediaRelay.start() : null;
   const smsStartup = assertSMSStartupReadiness();
   return await new Promise((resolve, reject) => {
     const onError = (error) => {
@@ -2762,6 +3592,13 @@ async function startRuntime({ port = PORT, host = HOST } = {}) {
       }
       console.log(`SMS: provider=${smsStartup.provider} ready=${smsStartup.ready} hookConfigured=${smsStartup.hookConfigured} providerConfigured=${smsStartup.providerConfigured} required=${smsStartup.required}`);
       console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${port}/ws?shard=<session_id>&st=<session_token>`);
+      if (mediaRelayAddress) {
+        console.log(`Media relay: udp://${mediaRelayAddress.host}:${mediaRelayAddress.port} maxPacketBytes=${MEDIA_RELAY_MAX_PACKET_BYTES}`);
+      } else if (hasExternalMediaRelay()) {
+        console.log(`Media relay: external udp://${MEDIA_RELAY_EXTERNAL_HOST}:${MEDIA_RELAY_EXTERNAL_UDP_PORT} maxPacketBytes=${MEDIA_RELAY_MAX_PACKET_BYTES}`);
+      } else {
+        console.log('Media relay: disabled');
+      }
       console.log(`Security: maxPayload=${WS_MAX_MSG_BYTES} maxMsgs10s=${WS_MAX_MSGS_PER_10S} maxBytes10s=${WS_MAX_BYTES_PER_10S} maxBufferedBytes=${WS_MAX_BUFFERED_BYTES} heartbeatMs=${WS_HEARTBEAT_INTERVAL_MS} perMessageDeflate=false`);
       console.log('========================================');
       resolve(server.address());

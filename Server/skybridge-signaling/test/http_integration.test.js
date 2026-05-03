@@ -13,8 +13,22 @@ process.env.WS_HEARTBEAT_INTERVAL_MS = process.env.WS_HEARTBEAT_INTERVAL_MS || '
 process.env.ROOM_MEMBERSHIP_TTL_MS = process.env.ROOM_MEMBERSHIP_TTL_MS || '180';
 process.env.REQUIRE_SMS_AUTH_READY = process.env.REQUIRE_SMS_AUTH_READY || 'true';
 process.env.SUPABASE_SEND_SMS_HOOK_SECRET = process.env.SUPABASE_SEND_SMS_HOOK_SECRET || `whsec_${Buffer.from('integration-hook-secret').toString('base64')}`;
+process.env.MEDIA_RELAY_ENABLED = process.env.MEDIA_RELAY_ENABLED || 'false';
+process.env.MEDIA_RELAY_EXTERNAL_HOST = process.env.MEDIA_RELAY_EXTERNAL_HOST || '203.0.113.10';
+process.env.MEDIA_RELAY_EXTERNAL_UDP_PORT = process.env.MEDIA_RELAY_EXTERNAL_UDP_PORT || '3478';
+process.env.MEDIA_RELAY_TOKEN_SECRET = process.env.MEDIA_RELAY_TOKEN_SECRET || 'integration-media-relay-token-secret';
+process.env.MEDIA_RELAY_MAX_PACKET_BYTES = process.env.MEDIA_RELAY_MAX_PACKET_BYTES || '1200';
+process.env.MAX_CHALLENGES_PER_DEVICE_PER_10M = process.env.MAX_CHALLENGES_PER_DEVICE_PER_10M || '200';
+process.env.MAX_CHALLENGES_PER_USER_PER_10M = process.env.MAX_CHALLENGES_PER_USER_PER_10M || '200';
+process.env.MAX_CHALLENGES_PER_IP_PER_10M = process.env.MAX_CHALLENGES_PER_IP_PER_10M || '400';
+process.env.HTTP_CONTROL_RATE_LIMIT_PER_MIN = process.env.HTTP_CONTROL_RATE_LIMIT_PER_MIN || '1000';
+process.env.HTTP_LOOKUP_RATE_LIMIT_PER_MIN = process.env.HTTP_LOOKUP_RATE_LIMIT_PER_MIN || '1000';
+process.env.HTTP_TURN_RATE_LIMIT_PER_MIN = process.env.HTTP_TURN_RATE_LIMIT_PER_MIN || '1000';
+process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN = process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN || '1000';
+process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN = process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN || '1000';
 
 const { createSignalingStateBackend } = require('../lib/signaling_state_backend');
+const { verifySignedMediaLeaseToken } = require('../lib/media_relay');
 const {
   createRuntime,
   __test: {
@@ -422,6 +436,675 @@ test('turn credentials accept bootstrap-auth synthetic devices', async () => {
   }
 });
 
+test('media lease issues externally signed UDP relay tokens', async () => {
+  const initiator = makeIdentityBinding('media-lease');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+  assert.equal(typeof sessionResponse.json.mediaAdmissionToken, 'string');
+
+  const leaseResponse = await postJSON('/api/media/lease', {
+    headers: {
+      'X-SkyBridge-Media-Admission': sessionResponse.json.mediaAdmissionToken
+    },
+    body: {}
+  });
+
+  assert.equal(leaseResponse.status, 200);
+  assert.equal(leaseResponse.json.mode, 'skybridge-pqc-media-v1');
+  assert.deepEqual(leaseResponse.json.endpoint, {
+    host: process.env.MEDIA_RELAY_EXTERNAL_HOST,
+    port: Number(process.env.MEDIA_RELAY_EXTERNAL_UDP_PORT),
+    protocol: 'udp'
+  });
+  assert.equal(leaseResponse.json.role, 'initiator');
+  assert.equal(leaseResponse.json.sessionId, sessionResponse.json.sessionId);
+  assert.equal(leaseResponse.json.maxPacketBytes, Number(process.env.MEDIA_RELAY_MAX_PACKET_BYTES));
+  assert.equal(leaseResponse.json.bindMessage.type, 'bind');
+  assert.equal(leaseResponse.json.bindMessage.leaseToken, leaseResponse.json.leaseToken);
+
+  const verification = verifySignedMediaLeaseToken(leaseResponse.json.leaseToken, {
+    secret: process.env.MEDIA_RELAY_TOKEN_SECRET
+  });
+  assert.equal(verification.ok, true);
+  assert.equal(verification.lease.sessionId, sessionResponse.json.sessionId);
+  assert.equal(verification.lease.role, 'initiator');
+});
+
+test('ICE candidate burst drops excess candidates without revoking session media authority', async () => {
+  const initiator = makeIdentityBinding('ice-burst-initiator');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+
+  const ws = new WebSocket(
+    `${baseURL.replace(/^http/, 'ws')}/ws?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
+  );
+  try {
+    const bound = await waitForWebSocketMessage(ws, (message) => message.type === 'bound');
+    assert.equal(bound.sessionId, sessionResponse.json.sessionId);
+
+    const dropped = waitForWebSocketMessage(
+      ws,
+      (message) => message.error === 'ice_candidate_dropped',
+      3_000
+    );
+    for (let i = 0; i < 45; i += 1) {
+      ws.send(JSON.stringify({
+        sessionId: sessionResponse.json.sessionId,
+        from: initiator.deviceId,
+        type: 'iceCandidate',
+        payload: {
+          candidate: `candidate:${i} 1 udp 2122260223 192.0.2.${i % 250} ${5000 + i} typ host`,
+          sdpMid: '0'
+        },
+        sentAt: Math.floor(Date.now() / 1000)
+      }));
+    }
+
+    const droppedMessage = await dropped;
+    assert.equal(droppedMessage.sessionId, sessionResponse.json.sessionId);
+
+    const sessionRecord = await signalingState.getConnection(sessionResponse.json.sessionId);
+    assert.ok(sessionRecord, 'ICE burst must not delete the active WebRTC session');
+    assert.equal(Boolean(sessionRecord.revokedAt), false);
+
+    const leaseResponse = await postJSON('/api/media/lease', {
+      headers: {
+        'X-SkyBridge-Media-Admission': sessionResponse.json.mediaAdmissionToken
+      },
+      body: {}
+    });
+    assert.equal(leaseResponse.status, 200);
+    assert.equal(leaseResponse.json.sessionId, sessionResponse.json.sessionId);
+  } finally {
+    ws.close();
+    await waitForWebSocketClose(ws);
+  }
+});
+
+test('media admission refresh replaces superseded role token', async () => {
+  const initiator = makeIdentityBinding('media-refresh');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+  const oldMediaToken = sessionResponse.json.mediaAdmissionToken;
+  assert.equal(typeof oldMediaToken, 'string');
+
+  const refresh = await postJSON('/api/media/admission/refresh', {
+    headers: {
+      'X-SkyBridge-Session': sessionResponse.json.sessionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'initiator'
+    }
+  });
+
+  assert.equal(refresh.status, 200);
+  assert.equal(refresh.json.sessionId, sessionResponse.json.sessionId);
+  assert.equal(refresh.json.role, 'initiator');
+  assert.equal(typeof refresh.json.mediaAdmissionToken, 'string');
+  assert.equal(typeof refresh.json.serverBuildFingerprint, 'string');
+  assert.ok(refresh.json.serverBuildFingerprint.length > 0);
+  assert.equal(refresh.json.supportsMediaAdmissionRefresh, true);
+  assert.equal(typeof refresh.json.mediaTokenGeneration, 'string');
+  assert.ok(refresh.json.mediaTokenGeneration.length > 0);
+  assert.equal(refresh.json.mediaTokenRequestGeneration, refresh.json.mediaTokenGeneration);
+  assert.equal(refresh.json.mediaTokenExpectedGeneration, refresh.json.mediaTokenGeneration);
+  assert.equal(refresh.json.mediaTokenExpectedPresent, true);
+  assert.notEqual(refresh.json.mediaAdmissionToken, oldMediaToken);
+
+  const staleLease = await postJSON('/api/media/lease', {
+    headers: {
+      'X-SkyBridge-Media-Admission': oldMediaToken
+    },
+    body: {}
+  });
+  assert.equal(staleLease.status, 401);
+  assert.equal(staleLease.json.error, 'media_admission_token_superseded');
+  assert.equal(staleLease.json.mediaTokenRequestGeneration, tokenGeneration(oldMediaToken));
+  assert.equal(staleLease.json.mediaTokenExpectedGeneration, refresh.json.mediaTokenGeneration);
+  assert.equal(staleLease.json.mediaTokenExpectedPresent, true);
+
+  const freshLease = await postJSON('/api/media/lease', {
+    headers: {
+      'X-SkyBridge-Media-Admission': refresh.json.mediaAdmissionToken
+    },
+    body: {}
+  });
+  assert.equal(freshLease.status, 200);
+  assert.equal(freshLease.json.sessionId, sessionResponse.json.sessionId);
+  assert.equal(typeof freshLease.json.serverBuildFingerprint, 'string');
+  assert.ok(freshLease.json.serverBuildFingerprint.length > 0);
+  assert.equal(freshLease.json.supportsMediaAdmissionRefresh, true);
+  assert.equal(typeof freshLease.json.mediaTokenGeneration, 'string');
+  assert.ok(freshLease.json.mediaTokenGeneration.length > 0);
+  assert.equal(freshLease.json.mediaTokenGeneration, refresh.json.mediaTokenGeneration);
+  assert.equal(freshLease.json.mediaTokenRequestGeneration, refresh.json.mediaTokenGeneration);
+  assert.equal(freshLease.json.mediaTokenExpectedGeneration, refresh.json.mediaTokenGeneration);
+  assert.equal(freshLease.json.mediaTokenExpectedPresent, true);
+});
+
+test('media lease diagnostics preserve session revocation reason after authority loss', async () => {
+  const initiator = makeIdentityBinding('media-revoked-diagnostics');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+  assert.equal(sessionResponse.status, 200);
+
+  await signalingState.updateConnection(sessionResponse.json.sessionId, (record) => {
+    record.revokedAt = Date.now();
+  });
+  await signalingState.updateEphemeral(
+    'media_admission_token',
+    tokenHash(sessionResponse.json.mediaAdmissionToken),
+    (record) => {
+      record.state = 'revoked';
+      record.revokedAt = Date.now();
+      record.revokedReason = 'remote_kill';
+    }
+  );
+
+  const lease = await postJSON('/api/media/lease', {
+    headers: {
+      'X-SkyBridge-Media-Admission': sessionResponse.json.mediaAdmissionToken
+    },
+    body: {}
+  });
+  assert.equal(lease.status, 401);
+  assert.equal(lease.json.error, 'media_admission_token_superseded');
+  assert.equal(lease.json.mediaTokenState, 'revoked');
+  assert.equal(lease.json.mediaTokenRevokedReason, 'remote_kill');
+  assert.equal(lease.json.rejectReason, 'remote_kill');
+  assert.equal(lease.json.mediaTokenExpectedPresent, false);
+  assert.equal(lease.json.mediaTokenSessionPresent, false);
+});
+
+test('media admission refresh is idempotent when client retries the same refresh', async () => {
+  const initiator = makeIdentityBinding('media-refresh-idempotent');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+  const idempotencyKey = `media-refresh-${crypto.randomUUID()}`;
+  const refreshBody = {
+    sessionId: sessionResponse.json.sessionId,
+    role: 'initiator'
+  };
+  const first = await postJSON('/api/media/admission/refresh', {
+    headers: {
+      'X-SkyBridge-Session': sessionResponse.json.sessionToken,
+      'Idempotency-Key': idempotencyKey
+    },
+    body: refreshBody
+  });
+  const replay = await postJSON('/api/media/admission/refresh', {
+    headers: {
+      'X-SkyBridge-Session': sessionResponse.json.sessionToken,
+      'Idempotency-Key': idempotencyKey
+    },
+    body: refreshBody
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.json.mediaAdmissionToken, first.json.mediaAdmissionToken);
+  assert.equal(replay.json.mediaTokenGeneration, first.json.mediaTokenGeneration);
+
+  const lease = await postJSON('/api/media/lease', {
+    headers: {
+      'X-SkyBridge-Media-Admission': first.json.mediaAdmissionToken
+    },
+    body: {}
+  });
+  assert.equal(lease.status, 200);
+  assert.equal(lease.json.mediaTokenGeneration, first.json.mediaTokenGeneration);
+});
+
+test('media admission refresh endpoint rejects missing session token instead of 404', async () => {
+  const response = await postJSON('/api/media/admission/refresh', {
+    body: {
+      sessionId: 'session-refresh-probe',
+      role: 'initiator'
+    }
+  });
+
+  assert.equal(response.status, 401);
+  assert.equal(response.json.error, 'missing_session_token');
+});
+
+test('webrtc session refresh reauthenticates active initiator and rotates all role tokens', async () => {
+  const initiator = makeIdentityBinding('session-refresh-valid');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+  const refreshAdmission = await issueAdmissionLease(initiator);
+  const refresh = await postJSON('/api/webrtc/session/refresh', {
+    headers: {
+      'X-SkyBridge-Admission': refreshAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'initiator'
+    }
+  });
+
+  assert.equal(refresh.status, 200);
+  assert.equal(refresh.json.sessionId, sessionResponse.json.sessionId);
+  assert.equal(refresh.json.role, 'initiator');
+  assert.equal(typeof refresh.json.sessionToken, 'string');
+  assert.equal(typeof refresh.json.turnAdmissionToken, 'string');
+  assert.equal(typeof refresh.json.mediaAdmissionToken, 'string');
+  assert.equal(typeof refresh.json.serverBuildFingerprint, 'string');
+  assert.equal(refresh.json.supportsSessionRefresh, true);
+  assert.equal(typeof refresh.json.sessionTokenGeneration, 'string');
+  assert.equal(typeof refresh.json.mediaTokenGeneration, 'string');
+  assert.notEqual(refresh.json.sessionToken, sessionResponse.json.sessionToken);
+  assert.notEqual(refresh.json.turnAdmissionToken, sessionResponse.json.turnAdmissionToken);
+  assert.notEqual(refresh.json.mediaAdmissionToken, sessionResponse.json.mediaAdmissionToken);
+
+  const staleMediaLease = await postJSON('/api/media/lease', {
+    headers: {
+      'X-SkyBridge-Media-Admission': sessionResponse.json.mediaAdmissionToken
+    },
+    body: {}
+  });
+  assert.equal(staleMediaLease.status, 401);
+  assert.equal(staleMediaLease.json.error, 'media_admission_token_superseded');
+
+  const freshMediaLease = await postJSON('/api/media/lease', {
+    headers: {
+      'X-SkyBridge-Media-Admission': refresh.json.mediaAdmissionToken
+    },
+    body: {}
+  });
+  assert.equal(freshMediaLease.status, 200);
+  assert.equal(freshMediaLease.json.sessionId, sessionResponse.json.sessionId);
+
+  const turnResponse = await fetch(`${baseURL}/api/turn/credentials`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json',
+      'X-SkyBridge-Turn-Admission': refresh.json.turnAdmissionToken
+    }
+  });
+  assert.equal(turnResponse.status, 200);
+});
+
+test('webrtc session refresh rejects scope device and role mismatches', async () => {
+  const initiator = makeIdentityBinding('session-refresh-owner');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+
+  const wrongRoleAdmission = await issueAdmissionLease(initiator);
+  const wrongRole = await postJSON('/api/webrtc/session/refresh', {
+    headers: {
+      'X-SkyBridge-Admission': wrongRoleAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'responder'
+    }
+  });
+  assert.equal(wrongRole.status, 403);
+  assert.equal(wrongRole.json.error, 'session_scope_mismatch');
+
+  const otherDevice = makeIdentityBinding('session-refresh-other-device');
+  const otherDeviceAdmission = await issueAdmissionLease(otherDevice);
+  const wrongDevice = await postJSON('/api/webrtc/session/refresh', {
+    headers: {
+      'X-SkyBridge-Admission': otherDeviceAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'initiator'
+    }
+  });
+  assert.equal(wrongDevice.status, 403);
+  assert.equal(wrongDevice.json.error, 'session_scope_mismatch');
+
+  const otherUser = makeIdentityBinding('session-refresh-other-user');
+  const otherUserAdmission = await issueAdmissionLease(otherUser, {
+    accessToken: sameTenantOtherUserBearerToken
+  });
+  const wrongScope = await postJSON('/api/webrtc/session/refresh', {
+    headers: {
+      'X-SkyBridge-Admission': otherUserAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'initiator'
+    }
+  });
+  assert.equal(wrongScope.status, 403);
+  assert.equal(wrongScope.json.error, 'session_scope_mismatch');
+});
+
+test('webrtc session refresh rejects inactive sessions', async () => {
+  const initiator = makeIdentityBinding('session-refresh-inactive');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+  await signalingState.updateConnection(sessionResponse.json.sessionId, (record) => {
+    record.revokedAt = Date.now();
+  });
+
+  const refreshAdmission = await issueAdmissionLease(initiator);
+  const refresh = await postJSON('/api/webrtc/session/refresh', {
+    headers: {
+      'X-SkyBridge-Admission': refreshAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'initiator'
+    }
+  });
+
+  assert.equal(refresh.status, 403);
+  assert.equal(refresh.json.error, 'session_inactive');
+});
+
+test('redeemed session refresh and media lease survive rendezvous expiry while active', async () => {
+  const initiator = makeIdentityBinding('active-session-initiator');
+  const initiatorAdmission = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': initiatorAdmission.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+  assert.equal(sessionResponse.status, 200);
+
+  const responder = makeIdentityBinding('active-session-responder');
+  const responderAdmission = await issueAdmissionLease(responder);
+  const redeemed = await postJSON('/api/webrtc/redeem-session', {
+    headers: {
+      'X-SkyBridge-Admission': responderAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      qrBootstrapToken: sessionResponse.json.qrBootstrapToken
+    }
+  });
+  assert.equal(redeemed.status, 200);
+
+  await signalingState.updateConnection(sessionResponse.json.sessionId, (record) => {
+    record.rendezvousExpiresAt = Date.now() - 1_000;
+    record.activeUntil = Date.now() + 120_000;
+    record.expiresAt = record.activeUntil;
+  });
+
+  const refreshAdmission = await issueAdmissionLease(responder);
+  const refresh = await postJSON('/api/webrtc/session/refresh', {
+    headers: {
+      'X-SkyBridge-Admission': refreshAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'responder'
+    }
+  });
+  assert.equal(refresh.status, 200);
+  assert.equal(refresh.json.role, 'responder');
+  assert.equal(typeof refresh.json.mediaAdmissionToken, 'string');
+
+  const lease = await postJSON('/api/media/lease', {
+    headers: {
+      'X-SkyBridge-Media-Admission': refresh.json.mediaAdmissionToken
+    },
+    body: {}
+  });
+  assert.equal(lease.status, 200);
+  assert.equal(lease.json.sessionId, sessionResponse.json.sessionId);
+  assert.equal(lease.json.role, 'responder');
+});
+
+test('unredeemed expired rendezvous cannot be redeemed even if active TTL remains', async () => {
+  const initiator = makeIdentityBinding('expired-rendezvous-initiator');
+  const initiatorAdmission = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': initiatorAdmission.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+  assert.equal(sessionResponse.status, 200);
+
+  await signalingState.updateConnection(sessionResponse.json.sessionId, (record) => {
+    record.rendezvousExpiresAt = Date.now() - 1_000;
+    record.activeUntil = Date.now() + 120_000;
+    record.expiresAt = record.activeUntil;
+  });
+
+  const responder = makeIdentityBinding('expired-rendezvous-responder');
+  const responderAdmission = await issueAdmissionLease(responder);
+  const redeem = await postJSON('/api/webrtc/redeem-session', {
+    headers: {
+      'X-SkyBridge-Admission': responderAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      qrBootstrapToken: sessionResponse.json.qrBootstrapToken
+    }
+  });
+  assert.equal(redeem.status, 404);
+  assert.equal(redeem.json.error, 'session_expired');
+});
+
+test('duplicate responder redeem conflicts without rotating active tokens', async () => {
+  const initiator = makeIdentityBinding('duplicate-responder-initiator');
+  const initiatorAdmission = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': initiatorAdmission.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+
+  const responder = makeIdentityBinding('duplicate-responder');
+  const responderAdmission = await issueAdmissionLease(responder);
+  const first = await postJSON('/api/webrtc/redeem-session', {
+    headers: {
+      'X-SkyBridge-Admission': responderAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      qrBootstrapToken: sessionResponse.json.qrBootstrapToken
+    }
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(typeof first.json.sessionToken, 'string');
+
+  const duplicateAdmission = await issueAdmissionLease(responder);
+  const duplicate = await postJSON('/api/webrtc/redeem-session', {
+    headers: {
+      'X-SkyBridge-Admission': duplicateAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      qrBootstrapToken: sessionResponse.json.qrBootstrapToken
+    }
+  });
+
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.json.error, 'responder_already_bound');
+
+  const stillCurrent = await postJSON('/api/media/admission/refresh', {
+    headers: {
+      'X-SkyBridge-Session': first.json.sessionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'responder'
+    }
+  });
+  assert.equal(stillCurrent.status, 200);
+  assert.equal(stillCurrent.json.sessionId, sessionResponse.json.sessionId);
+  assert.equal(stillCurrent.json.role, 'responder');
+});
+
+test('duplicate responder lookup conflicts without rotating active tokens', async () => {
+  const initiator = makeIdentityBinding('duplicate-lookup-initiator');
+  const initiatorAdmission = await issueAdmissionLease(initiator);
+  const codeResponse = await postJSON('/api/webrtc/register-code', {
+    headers: {
+      'X-SkyBridge-Admission': initiatorAdmission.admissionToken
+    },
+    body: {
+      ttlSeconds: 120,
+      deviceName: 'Initiator Mac'
+    }
+  });
+
+  assert.equal(codeResponse.status, 200);
+
+  const responder = makeIdentityBinding('duplicate-lookup-responder');
+  const responderAdmission = await issueAdmissionLease(responder);
+  const first = await getJSON(`/api/webrtc/lookup/${codeResponse.json.code}`, {
+    headers: {
+      'X-SkyBridge-Admission': responderAdmission.admissionToken
+    }
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(first.json.found, true);
+  assert.equal(typeof first.json.sessionToken, 'string');
+
+  const duplicateAdmission = await issueAdmissionLease(responder);
+  const duplicate = await getJSON(`/api/webrtc/lookup/${codeResponse.json.code}`, {
+    headers: {
+      'X-SkyBridge-Admission': duplicateAdmission.admissionToken
+    }
+  });
+
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.json.error, 'responder_already_bound');
+
+  const stillCurrent = await postJSON('/api/media/admission/refresh', {
+    headers: {
+      'X-SkyBridge-Session': first.json.sessionToken
+    },
+    body: {
+      sessionId: codeResponse.json.sessionId,
+      role: 'responder'
+    }
+  });
+  assert.equal(stillCurrent.status, 200);
+  assert.equal(stillCurrent.json.sessionId, codeResponse.json.sessionId);
+  assert.equal(stillCurrent.json.role, 'responder');
+});
+
+test('old session token cannot refresh media admission after webrtc session refresh', async () => {
+  const initiator = makeIdentityBinding('session-refresh-old-token');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+
+  assert.equal(sessionResponse.status, 200);
+
+  const refreshAdmission = await issueAdmissionLease(initiator);
+  const refresh = await postJSON('/api/webrtc/session/refresh', {
+    headers: {
+      'X-SkyBridge-Admission': refreshAdmission.admissionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'initiator'
+    }
+  });
+  assert.equal(refresh.status, 200);
+
+  const oldSessionTokenRefresh = await postJSON('/api/media/admission/refresh', {
+    headers: {
+      'X-SkyBridge-Session': sessionResponse.json.sessionToken
+    },
+    body: {
+      sessionId: sessionResponse.json.sessionId,
+      role: 'initiator'
+    }
+  });
+  assert.equal(oldSessionTokenRefresh.status, 401);
+  assert.equal(oldSessionTokenRefresh.json.error, 'session_token_superseded');
+});
+
 test('register-current keeps existing registered devices active without bootstrap activation flag', async () => {
   const binding = makeIdentityBinding('register-current-existing');
   const response = await postJSON('/api/devices/register-current', {
@@ -519,6 +1202,9 @@ test('health endpoints expose liveness separately from readiness', async () => {
   assert.equal(ready.json.status, 'ready');
   assert.equal(ready.json.smsReady, true);
   assert.equal(ready.json.sms.provider, 'pnvs');
+  assert.equal(typeof ready.json.serverBuildFingerprint, 'string');
+  assert.ok(ready.json.serverBuildFingerprint.length > 0);
+  assert.equal(ready.json.supportsMediaAdmissionRefresh, true);
 
   const live = await fetch(`${baseURL}/healthz`);
   assert.equal(live.status, 200);
@@ -536,6 +1222,8 @@ test('health endpoints expose liveness separately from readiness', async () => {
     assert.equal(health.status, 503);
     assert.equal(health.json.status, 'degraded');
     assert.deepEqual(health.json.reasons, ['state_backend_unready']);
+    assert.equal(typeof health.json.serverBuildFingerprint, 'string');
+    assert.equal(health.json.supportsMediaAdmissionRefresh, true);
 
     const degradedReady = await getJSON('/readyz');
     assert.equal(degradedReady.status, 503);
@@ -722,6 +1410,14 @@ function makeIdentityBinding(prefix, algorithm = 'Ed25519') {
     protocolPublicKeyFingerprint: crypto.createHash('sha256').update(rawPublicKey).digest('hex'),
     privateKey
   };
+}
+
+function tokenGeneration(token) {
+  return tokenHash(token).slice(0, 16);
+}
+
+function tokenHash(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
 }
 
 async function issueAdmissionLease(binding, { accessToken = bearerToken, requestTenantId = tenantId } = {}) {

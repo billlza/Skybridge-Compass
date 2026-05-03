@@ -53,6 +53,11 @@ function businessPayloadForIdempotency({ action, body, backendName, fallbackTtlM
         sessionId: String(body?.sessionId || '').trim(),
         qrBootstrapToken: String(body?.qrBootstrapToken || '').trim()
       };
+    case 'media-admission-refresh':
+      return {
+        sessionId: String(body?.sessionId || '').trim(),
+        role: String(body?.role || '').trim()
+      };
     default:
       return {};
   }

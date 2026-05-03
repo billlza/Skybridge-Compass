@@ -117,6 +117,7 @@ popd >/dev/null
 GIT_SHA="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
 STAMP="$(date -u +%Y%m%d%H%M%S)"
 RELEASE_NAME="${STAMP}-${GIT_SHA}"
+BUILD_FINGERPRINT="skybridge-signaling/${RELEASE_NAME}"
 ARCHIVE_PATH="$(mktemp -t skybridge-signaling-${RELEASE_NAME}.XXXXXX.tgz)"
 REMOTE_ARCHIVE="/tmp/skybridge-signaling-${RELEASE_NAME}.tgz"
 REMOTE_RELEASE_DIR="$APP_DIR/releases/$RELEASE_NAME"
@@ -150,7 +151,7 @@ echo "[deploy] Uploading archive to $REMOTE_TARGET"
 
 echo "[deploy] Provisioning release directory and dependencies"
 "${SSH_CMD[@]}" "$REMOTE_TARGET" \
-  "APP_DIR='$APP_DIR' REMOTE_ARCHIVE='$REMOTE_ARCHIVE' REMOTE_RELEASE_DIR='$REMOTE_RELEASE_DIR' REMOTE_ENV='$REMOTE_ENV' REMOTE_CURRENT='$REMOTE_CURRENT' HEALTH_URL='$HEALTH_URL' bash -s" <<'REMOTE_PREP'
+  "APP_DIR='$APP_DIR' REMOTE_ARCHIVE='$REMOTE_ARCHIVE' REMOTE_RELEASE_DIR='$REMOTE_RELEASE_DIR' REMOTE_ENV='$REMOTE_ENV' REMOTE_CURRENT='$REMOTE_CURRENT' HEALTH_URL='$HEALTH_URL' BUILD_FINGERPRINT='$BUILD_FINGERPRINT' bash -s" <<'REMOTE_PREP'
 set -euo pipefail
 
 if ! command -v node >/dev/null 2>&1; then
@@ -181,6 +182,7 @@ fi
 sudo mkdir -p "$REMOTE_RELEASE_DIR"
 sudo tar -xzf "$REMOTE_ARCHIVE" -C "$REMOTE_RELEASE_DIR"
 sudo rm -f "$REMOTE_ARCHIVE"
+printf '%s\n' "$BUILD_FINGERPRINT" | sudo tee "$REMOTE_RELEASE_DIR/.skybridge-build-fingerprint" >/dev/null
 
 pushd "$REMOTE_RELEASE_DIR" >/dev/null
 sudo npm ci --omit=dev --no-audit --no-fund

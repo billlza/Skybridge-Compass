@@ -35,6 +35,8 @@ function connectionRecordToStorage(record) {
     offer: record.offer,
     createdAt: record.createdAt,
     expiresAt: record.expiresAt,
+    rendezvousExpiresAt: record.rendezvousExpiresAt || record.expiresAt,
+    activeUntil: record.activeUntil || record.expiresAt,
     initiatorTokenHash: record.initiatorTokenHash,
     responderTokenHash: record.responderTokenHash || null,
     qrBootstrapTokenHash: record.qrBootstrapTokenHash || null,
@@ -51,9 +53,12 @@ function connectionRecordToStorage(record) {
     userId: record.userId || null,
     initiatorSessionTokenHash: record.initiatorSessionTokenHash || null,
     initiatorTurnAdmissionTokenHash: record.initiatorTurnAdmissionTokenHash || null,
+    initiatorMediaAdmissionTokenHash: record.initiatorMediaAdmissionTokenHash || null,
     responderSessionTokenHash: record.responderSessionTokenHash || null,
     responderTurnAdmissionTokenHash: record.responderTurnAdmissionTokenHash || null,
-    revokedAt: record.revokedAt || null
+    responderMediaAdmissionTokenHash: record.responderMediaAdmissionTokenHash || null,
+    revokedAt: record.revokedAt || null,
+    revokedReason: record.revokedReason || null
   });
 }
 
@@ -68,6 +73,8 @@ function connectionRecordFromStorage(raw) {
     offer: parsed.offer && typeof parsed.offer === 'object' ? parsed.offer : null,
     createdAt: toInteger(parsed.createdAt, 0),
     expiresAt: toInteger(parsed.expiresAt, 0),
+    rendezvousExpiresAt: toInteger(parsed.rendezvousExpiresAt, toInteger(parsed.expiresAt, 0)),
+    activeUntil: toInteger(parsed.activeUntil, toInteger(parsed.expiresAt, 0)),
     initiatorTokenHash: typeof parsed.initiatorTokenHash === 'string' ? parsed.initiatorTokenHash : '',
     responderTokenHash: typeof parsed.responderTokenHash === 'string' ? parsed.responderTokenHash : null,
     qrBootstrapTokenHash: typeof parsed.qrBootstrapTokenHash === 'string' ? parsed.qrBootstrapTokenHash : null,
@@ -84,10 +91,32 @@ function connectionRecordFromStorage(raw) {
     userId: typeof parsed.userId === 'string' ? parsed.userId : null,
     initiatorSessionTokenHash: typeof parsed.initiatorSessionTokenHash === 'string' ? parsed.initiatorSessionTokenHash : null,
     initiatorTurnAdmissionTokenHash: typeof parsed.initiatorTurnAdmissionTokenHash === 'string' ? parsed.initiatorTurnAdmissionTokenHash : null,
+    initiatorMediaAdmissionTokenHash: typeof parsed.initiatorMediaAdmissionTokenHash === 'string' ? parsed.initiatorMediaAdmissionTokenHash : null,
     responderSessionTokenHash: typeof parsed.responderSessionTokenHash === 'string' ? parsed.responderSessionTokenHash : null,
     responderTurnAdmissionTokenHash: typeof parsed.responderTurnAdmissionTokenHash === 'string' ? parsed.responderTurnAdmissionTokenHash : null,
-    revokedAt: toInteger(parsed.revokedAt, 0)
+    responderMediaAdmissionTokenHash: typeof parsed.responderMediaAdmissionTokenHash === 'string' ? parsed.responderMediaAdmissionTokenHash : null,
+    revokedAt: toInteger(parsed.revokedAt, 0),
+    revokedReason: typeof parsed.revokedReason === 'string' ? parsed.revokedReason : null
   };
+}
+
+function connectionActiveUntil(record) {
+  return toInteger(record?.activeUntil, toInteger(record?.expiresAt, 0));
+}
+
+function connectionTTL(record) {
+  return Math.max(1, connectionActiveUntil(record) - Date.now());
+}
+
+function connectionInactiveReason(record, at = Date.now()) {
+  if (!record) return 'missingRecord';
+  if (record.revokedAt) return record.revokedReason || 'revoked';
+  if (at > connectionActiveUntil(record)) return 'activeExpired';
+  return null;
+}
+
+function connectionIsInactive(record) {
+  return Boolean(connectionInactiveReason(record));
 }
 
 function normalizeActiveMember(member, fallbackDeviceId = null) {
@@ -183,11 +212,16 @@ class MemorySignalingStateBackend {
   async getConnection(code) {
     const item = this.connectionCodes.get(code);
     if (!item) return null;
-    if (Date.now() > item.expiresAt || item.revokedAt) {
+    if (connectionIsInactive(item)) {
       await this.deleteConnection(code);
       return null;
     }
     return deepClone(item);
+  }
+
+  async peekConnection(code) {
+    const item = this.connectionCodes.get(code);
+    return item ? deepClone(item) : null;
   }
 
   async updateConnection(code, mutator) {
@@ -525,9 +559,8 @@ class MemorySignalingStateBackend {
   }
 
   async sweepExpired() {
-    const now = Date.now();
     for (const [code, record] of this.connectionCodes.entries()) {
-      if (now > record.expiresAt || record.revokedAt) {
+      if (connectionIsInactive(record)) {
         this.connectionCodes.delete(code);
         this.iceCandidates.delete(code);
         this.iceUsage.delete(code);
@@ -535,6 +568,7 @@ class MemorySignalingStateBackend {
       }
     }
 
+    const now = Date.now();
     for (const [sessionId, list] of this.iceCandidates.entries()) {
       const filtered = list.filter((candidate) => (now - candidate.timestamp) <= this.iceTtlMs);
       if (filtered.length === 0) this.iceCandidates.delete(sessionId);
@@ -730,7 +764,7 @@ class RedisSignalingStateBackend {
   async createConnectionRecord(id, record) {
     const reserved = await this.command.set(this.codeKey(id), connectionRecordToStorage(record), {
       NX: true,
-      PX: Math.max(1, record.expiresAt - Date.now())
+      PX: connectionTTL(record)
     });
     if (reserved !== 'OK') {
       return false;
@@ -750,11 +784,19 @@ class RedisSignalingStateBackend {
       await this.deleteConnection(code);
       return null;
     }
-    if (Date.now() > item.expiresAt || item.revokedAt) {
+    if (connectionIsInactive(item)) {
       await this.deleteConnection(code);
       return null;
     }
     return item;
+  }
+
+  async peekConnection(code) {
+    const raw = await this.command.get(this.codeKey(code));
+    if (!raw) {
+      return null;
+    }
+    return connectionRecordFromStorage(raw);
   }
 
   async updateConnection(code, mutator) {
@@ -770,7 +812,7 @@ class RedisSignalingStateBackend {
             return null;
           }
           const item = connectionRecordFromStorage(raw);
-          if (!item || Date.now() > item.expiresAt || item.revokedAt) {
+          if (connectionIsInactive(item)) {
             const tx = isolated.multi();
             tx.del(key);
             tx.sRem(this.codeIndexKey(), code);
@@ -786,7 +828,7 @@ class RedisSignalingStateBackend {
           const execResult = await isolated.multi()
             .set(key, connectionRecordToStorage(nextItem), {
               XX: true,
-              PX: Math.max(1, nextItem.expiresAt - Date.now())
+              PX: connectionTTL(nextItem)
             })
             .sAdd(this.codeIndexKey(), code)
             .exec();

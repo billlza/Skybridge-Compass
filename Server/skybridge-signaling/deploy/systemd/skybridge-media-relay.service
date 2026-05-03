@@ -1,0 +1,30 @@
+[Unit]
+Description=SkyBridge PQC Media UDP Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=skybridge
+Group=skybridge
+WorkingDirectory=/opt/skybridge-media-relay/current
+EnvironmentFile=/opt/skybridge-media-relay/shared/config/production.env
+ExecStart=/usr/bin/env node media_relay_standalone.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/skybridge-media-relay
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

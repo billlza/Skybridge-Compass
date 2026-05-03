@@ -8,6 +8,7 @@
     "test": "node --test test/*.test.js",
     "start": "node server.js",
     "start:prod": "NODE_ENV=production node server.js",
+    "start:media-relay": "node media_relay_standalone.js",
     "check": "node --check server.js",
     "smoke": "bash ./deploy/scripts/smoke_local.sh http://127.0.0.1:8443"
   },

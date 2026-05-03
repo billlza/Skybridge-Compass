@@ -100,6 +100,33 @@ test('redeem-session fingerprint changes when qrBootstrapToken changes', () => {
   assert.notEqual(left, right);
 });
 
+test('media-admission-refresh fingerprint is scoped to session token and role', () => {
+  const left = buildIdempotencyFingerprint({
+    action: 'media-admission-refresh',
+    body: { sessionId: 'session-1', role: 'responder', debug: true },
+    admissionToken: 'session-token-a',
+    backendName: 'redis',
+    fallbackTtlMs: 120_000
+  });
+  const sameSemantics = buildIdempotencyFingerprint({
+    action: 'media-admission-refresh',
+    body: { role: 'responder', sessionId: 'session-1' },
+    admissionToken: 'session-token-a',
+    backendName: 'redis',
+    fallbackTtlMs: 120_000
+  });
+  const differentToken = buildIdempotencyFingerprint({
+    action: 'media-admission-refresh',
+    body: { sessionId: 'session-1', role: 'responder' },
+    admissionToken: 'session-token-b',
+    backendName: 'redis',
+    fallbackTtlMs: 120_000
+  });
+
+  assert.equal(left, sameSemantics);
+  assert.notEqual(left, differentToken);
+});
+
 test('business payload normalizes register-session ttlSeconds to effective semantics', () => {
   const payload = businessPayloadForIdempotency({
     action: 'register-session',
