@@ -14,31 +14,76 @@ IOS_PREFERRED_SUITE="${SB_PQC_IOS_PREFERRED_SUITE:-$PREFERRED_SUITE}"
 EXPECTED_TARGET_SUITE="${SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE:-}"
 EXPECT_PQC_REKEY="${SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY:-1}"
 PRESERVE_INSTALL="${SKYBRIDGE_SMOKE_PRESERVE_INSTALL:-1}"
+SWIFTPM_CACHE_DIR="${SKYBRIDGE_SWIFTPM_CACHE_DIR:-$ROOT_DIR/.swiftpm-cache}"
+SWIFT_MODULE_CACHE_DIR="${SKYBRIDGE_SWIFT_MODULE_CACHE_DIR:-$ROOT_DIR/.swiftpm-module-cache}"
 
 mkdir -p "$ARTIFACT_DIR"
+mkdir -p "$SWIFTPM_CACHE_DIR" "$SWIFT_MODULE_CACHE_DIR"
 
 pick_real_device_id() {
   python3 - <<'PY'
 import re
 import subprocess
 
-output = subprocess.check_output(["xcrun", "xctrace", "list", "devices"], text=True)
-in_devices = False
-for line in output.splitlines():
-    stripped = line.strip()
-    if stripped == "== Devices ==":
-        in_devices = True
-        continue
-    if stripped.startswith("== ") and stripped != "== Devices ==":
-        in_devices = False
-    if not in_devices:
-        continue
-    if not stripped or stripped.startswith("Lza的MacBook Pro"):
-        continue
-    match = re.search(r"\(([0-9A-Fa-f-]{20,})\)$", stripped)
-    if match:
-        print(match.group(1))
-        raise SystemExit(0)
+def pick_from_xctrace():
+    output = subprocess.check_output(["xcrun", "xctrace", "list", "devices"], text=True)
+    in_devices = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped == "== Devices ==":
+            in_devices = True
+            continue
+        if stripped.startswith("== ") and stripped != "== Devices ==":
+            in_devices = False
+        if not in_devices:
+            continue
+        if not stripped or "Mac" in stripped:
+            continue
+        match = re.search(r"\(([0-9A-Fa-f-]{20,})\)$", stripped)
+        if match:
+            print(match.group(1))
+            return True
+    return False
+
+def pick_from_devicectl():
+    try:
+        output = subprocess.check_output(
+            ["xcrun", "devicectl", "list", "devices"],
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+    candidates = []
+    for line in output.splitlines():
+        if "available" not in line or "paired" not in line:
+            continue
+        match = re.search(r"([0-9A-Fa-f-]{8}(?:-[0-9A-Fa-f-]{4}){3}-[0-9A-Fa-f-]{12})", line)
+        if not match:
+            continue
+        priority = 0 if "iPad" in line else 1
+        candidates.append((priority, match.group(1)))
+
+    for _, identifier in sorted(candidates):
+        try:
+            details = subprocess.check_output(
+                ["xcrun", "devicectl", "device", "info", "details", "--device", identifier],
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            continue
+        udid = re.search(r"udid:\s*([0-9A-Fa-f-]{20,})", details)
+        print(udid.group(1) if udid else identifier)
+        return True
+
+    return False
+
+if pick_from_xctrace() or pick_from_devicectl():
+    raise SystemExit(0)
 
 raise SystemExit("No connected real iOS device found.")
 PY
@@ -112,6 +157,28 @@ wait_for_ios_status_pattern() {
   done
 }
 
+capture_device_info() {
+  local attempts="${SKYBRIDGE_SMOKE_DEVICE_INFO_ATTEMPTS:-3}"
+  local attempt
+  for attempt in $(seq 1 "$attempts"); do
+    if xcrun devicectl list devices --json-output "$DEVICE_INFO_JSON" >/dev/null; then
+      return 0
+    fi
+    echo "    devicectl JSON device list failed (${attempt}/${attempts})" >&2
+    sleep 2
+  done
+
+  echo "    warning: continuing after devicectl JSON device list failed" >&2
+  xcrun devicectl list devices >"$ARTIFACT_DIR/device-info.txt" 2>&1 || true
+  python3 - "$DEVICE_INFO_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({"deviceInfoCapture": "failed"}, handle)
+PY
+}
+
 ensure_ios_classic_fallback_pref() {
   local plist_path="$ARTIFACT_DIR/device-preferences.plist"
   python3 - "$plist_path" <<'PY'
@@ -144,11 +211,14 @@ echo "==> Expect PQC rekey: $EXPECT_PQC_REKEY"
 echo "==> Preserve installed app: $PRESERVE_INSTALL"
 
 echo "==> Inspecting connected device"
-xcrun devicectl list devices --json-output "$DEVICE_INFO_JSON" >/dev/null
+capture_device_info
 
 echo "==> Building macOS LAN host"
 (
   cd "$ROOT_DIR"
+  SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
+  CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
+  SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   swift build --product LocalLanInteropHost
 ) >"$ARTIFACT_DIR/macos-build.log"
 
