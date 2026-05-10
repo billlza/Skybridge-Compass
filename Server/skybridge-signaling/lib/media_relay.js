@@ -132,6 +132,29 @@ function createMediaRelay(options = {}) {
   const leases = new Map();
   const endpoints = new Map();
   const sessions = new Map();
+  const diagnostics = {
+    receivedPackets: 0,
+    receivedBytes: 0,
+    forwardedPackets: 0,
+    forwardedBytes: 0,
+    bindRequests: 0,
+    bindAccepted: 0,
+    bindRejected: {},
+    drops: {},
+    sendErrors: {}
+  };
+
+  function incrementDiagnosticCounter(bucket, reason) {
+    bucket[reason] = (bucket[reason] || 0) + 1;
+  }
+
+  function recordDrop(reason) {
+    incrementDiagnosticCounter(diagnostics.drops, reason);
+  }
+
+  function recordSendError(reason) {
+    incrementDiagnosticCounter(diagnostics.sendErrors, reason);
+  }
 
   function createLease({ sessionId, role, tenantId = '', userId = '', ttlMs = leaseTtlMs }) {
     if (!isValidRole(role)) {
@@ -193,7 +216,9 @@ function createMediaRelay(options = {}) {
     for (const [token, lease] of leases.entries()) {
       if (lease.expiresAt > cutoff) continue;
       leases.delete(token);
-      if (lease.endpoint) endpoints.delete(lease.endpoint);
+      if (lease.endpoint && endpoints.get(lease.endpoint) === token) {
+        endpoints.delete(lease.endpoint);
+      }
       const session = sessions.get(lease.sessionId);
       if (session && session[lease.role] === token) {
         session[lease.role] = null;
@@ -207,36 +232,82 @@ function createMediaRelay(options = {}) {
   function sendJSON(rinfo, payload) {
     if (!socket) return;
     const encoded = Buffer.from(JSON.stringify(payload));
-    socket.send(encoded, rinfo.port, rinfo.address);
+    socket.send(encoded, rinfo.port, rinfo.address, (error) => {
+      if (error) recordSendError(`json_${payload?.type || 'message'}`);
+    });
   }
 
   function forwardPacket(message, rinfo) {
     const sourceToken = endpoints.get(endpointKey(rinfo));
-    if (!sourceToken) return;
+    if (!sourceToken) {
+      recordDrop('unbound_source');
+      return;
+    }
     const sourceLease = leases.get(sourceToken);
-    if (!sourceLease || sourceLease.expiresAt <= now()) return;
+    if (!sourceLease) {
+      recordDrop('source_lease_missing');
+      return;
+    }
+    if (sourceLease.expiresAt <= now()) {
+      recordDrop('source_lease_expired');
+      return;
+    }
     const session = sessions.get(sourceLease.sessionId);
-    if (!session) return;
+    if (!session) {
+      recordDrop('session_missing');
+      return;
+    }
     const peerToken = session[oppositeRole(sourceLease.role)];
     const peerLease = peerToken ? leases.get(peerToken) : null;
-    if (!peerLease?.rinfo || peerLease.expiresAt <= now()) return;
-    socket.send(message, peerLease.rinfo.port, peerLease.rinfo.address);
+    if (!peerToken || !peerLease) {
+      recordDrop('peer_lease_missing');
+      return;
+    }
+    if (!peerLease.rinfo) {
+      recordDrop('peer_unbound');
+      return;
+    }
+    if (peerLease.expiresAt <= now()) {
+      recordDrop('peer_lease_expired');
+      return;
+    }
+    diagnostics.forwardedPackets += 1;
+    diagnostics.forwardedBytes += message.length;
+    socket.send(message, peerLease.rinfo.port, peerLease.rinfo.address, (error) => {
+      if (error) recordSendError('forward_packet');
+    });
   }
 
   function handleMessage(message, rinfo) {
-    if (message.length > maxPacketBytes) return;
+    diagnostics.receivedPackets += 1;
+    diagnostics.receivedBytes += message.length;
+    if (message.length > maxPacketBytes) {
+      recordDrop('packet_oversize');
+      return;
+    }
     sweepExpired();
     if (message[0] === 0x7b) {
       let payload;
       try {
         payload = JSON.parse(message.toString('utf8'));
       } catch (_) {
+        recordDrop('invalid_json');
         return;
       }
-      if (payload?.type !== 'bind' || typeof payload.leaseToken !== 'string') return;
+      if (payload?.type !== 'bind' || typeof payload.leaseToken !== 'string') {
+        recordDrop('invalid_bind_message');
+        return;
+      }
+      diagnostics.bindRequests += 1;
+      const result = bindLease(payload.leaseToken, rinfo);
+      if (result.ok) {
+        diagnostics.bindAccepted += 1;
+      } else {
+        incrementDiagnosticCounter(diagnostics.bindRejected, result.error || 'unknown');
+      }
       sendJSON(rinfo, {
         type: 'bind-result',
-        ...bindLease(payload.leaseToken, rinfo)
+        ...result
       });
       return;
     }
@@ -282,7 +353,18 @@ function createMediaRelay(options = {}) {
       leases: leases.size,
       boundEndpoints: endpoints.size,
       sessions: sessions.size,
-      maxPacketBytes
+      maxPacketBytes,
+      diagnostics: {
+        receivedPackets: diagnostics.receivedPackets,
+        receivedBytes: diagnostics.receivedBytes,
+        forwardedPackets: diagnostics.forwardedPackets,
+        forwardedBytes: diagnostics.forwardedBytes,
+        bindRequests: diagnostics.bindRequests,
+        bindAccepted: diagnostics.bindAccepted,
+        bindRejected: { ...diagnostics.bindRejected },
+        drops: { ...diagnostics.drops },
+        sendErrors: { ...diagnostics.sendErrors }
+      }
     };
   }
 

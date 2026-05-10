@@ -2330,6 +2330,31 @@ async function collectServiceHealthSnapshot() {
   return evaluateServiceHealth({ backendHealth, smsHealth });
 }
 
+function collectMediaRelaySnapshot() {
+  if (mediaRelay) {
+    return {
+      enabled: true,
+      external: false,
+      ...mediaRelay.snapshot()
+    };
+  }
+  if (hasExternalMediaRelay()) {
+    return {
+      enabled: true,
+      external: true,
+      address: {
+        host: MEDIA_RELAY_EXTERNAL_HOST,
+        port: MEDIA_RELAY_EXTERNAL_UDP_PORT
+      },
+      maxPacketBytes: MEDIA_RELAY_MAX_PACKET_BYTES
+    };
+  }
+  return {
+    enabled: false,
+    external: false
+  };
+}
+
 app.get('/', asyncRoute(async (req, res) => {
   const health = await collectServiceHealthSnapshot();
   res.status(200).json({
@@ -2346,6 +2371,7 @@ app.get('/', asyncRoute(async (req, res) => {
     smsReadinessReasons: health.sms.reasons,
     sms: health.sms,
     backendHealth: health.backendHealth,
+    mediaRelay: collectMediaRelaySnapshot(),
     ready: health.ready,
     readiness: {
       status: health.status,
@@ -2396,6 +2422,7 @@ app.get('/health', asyncRoute(async (req, res) => {
     smsReadinessReasons: health.sms.reasons,
     sms: health.sms,
     backendHealth: health.backendHealth,
+    mediaRelay: collectMediaRelaySnapshot(),
     reasons: health.reasons,
     requiresSharedStateForPublicCapabilities: health.requiresSharedStateForPublicCapabilities,
     requiresSMSAuthReady: health.requiresSMSAuthReady,

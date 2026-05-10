@@ -466,6 +466,7 @@ test('media lease issues externally signed UDP relay tokens', async () => {
     protocol: 'udp'
   });
   assert.equal(leaseResponse.json.role, 'initiator');
+  assert.equal(leaseResponse.json.peer, undefined);
   assert.equal(leaseResponse.json.sessionId, sessionResponse.json.sessionId);
   assert.equal(leaseResponse.json.maxPacketBytes, Number(process.env.MEDIA_RELAY_MAX_PACKET_BYTES));
   assert.equal(leaseResponse.json.bindMessage.type, 'bind');

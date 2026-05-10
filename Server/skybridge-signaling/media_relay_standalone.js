@@ -9,6 +9,7 @@ const publicHost = String(process.env.MEDIA_RELAY_PUBLIC_HOST || process.env.MED
 const port = Number(process.env.MEDIA_RELAY_UDP_PORT || 3478);
 const maxPacketBytes = Number(process.env.MEDIA_RELAY_MAX_PACKET_BYTES || 1200);
 const leaseTtlMs = Number(process.env.MEDIA_RELAY_LEASE_TTL_MS || 60_000);
+const diagnosticsIntervalMs = Number(process.env.MEDIA_RELAY_DIAGNOSTICS_INTERVAL_MS || 30_000);
 const signedLeaseSecret = String(process.env.MEDIA_RELAY_TOKEN_SECRET || '').trim();
 const instanceId = String(process.env.INSTANCE_ID || `${os.hostname()}-${process.pid}`).trim();
 
@@ -27,8 +28,27 @@ const relay = createMediaRelay({
   log: console
 });
 
+let diagnosticsTimer = null;
+
+function logDiagnostics() {
+  const snapshot = relay.snapshot();
+  console.log(`[media-relay] diagnostics ${JSON.stringify({
+    instanceId,
+    address: snapshot.address,
+    leases: snapshot.leases,
+    boundEndpoints: snapshot.boundEndpoints,
+    sessions: snapshot.sessions,
+    maxPacketBytes: snapshot.maxPacketBytes,
+    diagnostics: snapshot.diagnostics
+  })}`);
+}
+
 async function shutdown(signal) {
   console.log(`[media-relay] shutdown requested: ${signal}`);
+  if (diagnosticsTimer) {
+    clearInterval(diagnosticsTimer);
+    diagnosticsTimer = null;
+  }
   await relay.close();
 }
 
@@ -48,6 +68,13 @@ relay.start()
     console.log(`Public: udp://${address.host}:${address.port}`);
     console.log(`MaxPacketBytes: ${maxPacketBytes}`);
     console.log('Signed leases: enabled');
+    if (Number.isFinite(diagnosticsIntervalMs) && diagnosticsIntervalMs > 0) {
+      diagnosticsTimer = setInterval(logDiagnostics, diagnosticsIntervalMs);
+      diagnosticsTimer.unref?.();
+      console.log(`DiagnosticsIntervalMs: ${diagnosticsIntervalMs}`);
+    } else {
+      console.log('DiagnosticsIntervalMs: disabled');
+    }
     console.log('========================================');
   })
   .catch((error) => {
