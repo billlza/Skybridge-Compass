@@ -81,7 +81,7 @@ public final class PairingTrustApprovalService: ObservableObject {
     /// deviceId -> decisionRawValue (persists "alwaysAllow" and "reject"; allowOnce is not persisted)
     private var policyByDeviceId: [String: String] = [:]
     
-    private var continuationByRequestId: [UUID: CheckedContinuation<Decision, Never>] = [:]
+    private var continuationByRequestId: [UUID: [CheckedContinuation<Decision, Never>]] = [:]
     
     private init() {
         policyByDeviceId = Self.loadPolicy()
@@ -136,8 +136,9 @@ public final class PairingTrustApprovalService: ObservableObject {
             return .alwaysAllow
         }
 
-        let deviceId = request.declaredDeviceId
-        if let bindingKey = request.policyBindingKey,
+        let deviceId = request.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let bindingKey = request.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !bindingKey.isEmpty,
            let raw = policyByDeviceId[bindingKey],
            let policy = Decision(rawValue: raw) {
             switch policy {
@@ -148,12 +149,27 @@ public final class PairingTrustApprovalService: ObservableObject {
             }
         }
 
-        if let raw = policyByDeviceId[deviceId], let policy = Decision(rawValue: raw), policy == .reject {
-            return .reject
+        if let raw = policyByDeviceId[deviceId], let policy = Decision(rawValue: raw) {
+            switch policy {
+            case .alwaysAllow, .reject:
+                return policy
+            case .allowOnce:
+                break
+            }
         }
 
         // Only one prompt at a time (keep first to avoid UI spam).
-        if pendingRequest != nil {
+        if let pendingRequest {
+            if isSameTrustRequest(pendingRequest, request) {
+                if let pendingDecision {
+                    logger.info("Pairing request reused existing decision for deviceId=\(deviceId, privacy: .public) decision=\(pendingDecision.rawValue, privacy: .public)")
+                    return pendingDecision
+                }
+                logger.info("Pairing request coalesced with pending prompt for deviceId=\(deviceId, privacy: .public)")
+                return await withCheckedContinuation { cont in
+                    continuationByRequestId[pendingRequest.id, default: []].append(cont)
+                }
+            }
             logger.warning("Pairing request ignored because another prompt is pending. deviceId=\(deviceId, privacy: .public)")
             return .reject
         }
@@ -166,13 +182,26 @@ public final class PairingTrustApprovalService: ObservableObject {
         logger.info("🔔 Pairing/trust approval required: name=\(request.displayName, privacy: .public) deviceId=\(deviceId, privacy: .public)")
         
         return await withCheckedContinuation { cont in
-            continuationByRequestId[request.id] = cont
+            continuationByRequestId[request.id, default: []].append(cont)
         }
+    }
+
+    private func isSameTrustRequest(_ lhs: Request, _ rhs: Request) -> Bool {
+        let lhsBinding = lhs.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rhsBinding = rhs.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let lhsBinding, let rhsBinding, !lhsBinding.isEmpty, !rhsBinding.isEmpty {
+            return lhsBinding == rhsBinding
+        }
+        let lhsDeviceId = lhs.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rhsDeviceId = rhs.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !lhsDeviceId.isEmpty && lhsDeviceId == rhsDeviceId
     }
     
     /// Update the transcript-bound pairing verification code for the current prompt (if it matches the declared deviceId).
     public func updateVerificationCode(declaredDeviceId: String, sessionKeys: SessionKeys) {
-        guard let req = pendingRequest, req.declaredDeviceId == declaredDeviceId else { return }
+        let deviceId = declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let req = pendingRequest,
+              req.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines) == deviceId else { return }
         pendingVerificationCode = sessionKeys.pairingVerificationCode()
         pendingVerificationSuite = sessionKeys.negotiatedSuite.rawValue
         pendingVerificationUpdatedAt = Date()
@@ -182,7 +211,7 @@ public final class PairingTrustApprovalService: ObservableObject {
     /// If the request hasn't been resolved yet, treat dismissal as `reject`.
     public func userDismissedCurrentPrompt() {
         guard let req = pendingRequest else { return }
-        if continuationByRequestId[req.id] != nil {
+        if continuationByRequestId[req.id]?.isEmpty == false {
             resolve(req, decision: .reject)
             return
         }
@@ -196,19 +225,25 @@ public final class PairingTrustApprovalService: ObservableObject {
 
     /// Resolve a pending request from UI.
     public func resolve(_ request: Request, decision: Decision) {
-        if decision == .reject {
-            policyByDeviceId[request.declaredDeviceId] = decision.rawValue
-            if let bindingKey = request.policyBindingKey {
+        switch decision {
+        case .alwaysAllow, .reject:
+            let deviceId = request.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !deviceId.isEmpty {
+                policyByDeviceId[deviceId] = decision.rawValue
+            }
+            if let bindingKey = request.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !bindingKey.isEmpty {
                 policyByDeviceId[bindingKey] = decision.rawValue
             }
             savePolicy()
-        } else if decision == .alwaysAllow, let bindingKey = request.policyBindingKey {
-            policyByDeviceId[bindingKey] = decision.rawValue
-            savePolicy()
+        case .allowOnce:
+            break
         }
         
-        if let cont = continuationByRequestId.removeValue(forKey: request.id) {
-            cont.resume(returning: decision)
+        if let continuations = continuationByRequestId.removeValue(forKey: request.id) {
+            for cont in continuations {
+                cont.resume(returning: decision)
+            }
         }
 
         pendingDecision = decision

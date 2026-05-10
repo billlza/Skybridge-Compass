@@ -538,7 +538,7 @@ public actor HandshakeDriver {
         // Rekey hardening (Classic -> PQC):
         // During in-band rekey, ciphertext from the previous session can arrive interleaved with handshake frames.
         // Those bytes must NOT fail the handshake parser (e.g. versionMismatch 1 vs 135).
-        let isHandshakeControl = (unwrapped.first == HandshakeConstants.protocolVersion)
+        let isHandshakeControl = isCompleteHandshakeControlFrame(unwrapped)
         
         switch state {
         case .sendingMessageA, .waitingMessageB:
@@ -842,6 +842,14 @@ public actor HandshakeDriver {
     private nonisolated func isFinishedMessage(_ data: Data) -> Bool {
         guard data.count >= 4 else { return false }
         return data.prefix(4).elementsEqual([0x46, 0x49, 0x4E, 0x31])
+    }
+
+    private nonisolated func isCompleteHandshakeControlFrame(_ data: Data) -> Bool {
+        if (try? HandshakeFinished.decode(from: data)) != nil { return true }
+        guard data.count >= 5, data.first == HandshakeConstants.protocolVersion else { return false }
+        if (try? HandshakeMessageA.decode(from: data)) != nil { return true }
+        if (try? HandshakeMessageB.decode(from: data)) != nil { return true }
+        return false
     }
     
     private func makeFinished(direction: HandshakeFinished.Direction, sessionKeys: SessionKeys) throws -> HandshakeFinished {

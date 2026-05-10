@@ -122,23 +122,10 @@ public final class USBCConnectionManager: ObservableObject {
  // MARK: - 初始化
 
     public init() {
-        // ⚠️ 说明：
-        // - 在 `swift test` / XCTest 环境下，ExternalAccessory 会触发 IAP/EA 子系统注册，
-        //   某些无 UI/守护进程的运行环境会导致测试进程退出码异常（即使测试用例全部通过）。
-        // - 这里对测试环境禁用 MFi 初始化与扫描，避免影响开发者的自动化/CI。
-        if !Self.isRunningUnderTests {
-            self.accessoryManager = EAAccessoryManager.shared()
-            logger.info("USB-C连接管理器已初始化，支持MFi认证")
-            setupMFiNotifications()
-        } else {
-            self.accessoryManager = nil
-            logger.info("USB-C连接管理器已初始化（测试环境：已禁用MFi认证扫描）")
-        }
+        self.accessoryManager = nil
+        logger.info("USB-C连接管理器已初始化（MFi 扫描按需启用）")
 
         Task {
-            if !Self.isRunningUnderTests {
-                await scanForMFiDevices()
-            }
             await scanForUSBDevices()
         }
     }
@@ -151,6 +138,40 @@ public final class USBCConnectionManager: ObservableObject {
         // 兜底：如果 XCTest 符号存在，也视为测试进程
         if NSClassFromString("XCTestCase") != nil { return true }
         return false
+    }
+
+    static var canUseExternalAccessory: Bool {
+        guard !isRunningUnderTests else { return false }
+        guard hasBluetoothUsageDescription else { return false }
+        return isLaunchServicesAppProcess
+    }
+
+    static var hasBluetoothUsageDescription: Bool {
+        let candidateKeys = [
+            "NSBluetoothAlwaysUsageDescription",
+            "NSBluetoothPeripheralUsageDescription"
+        ]
+
+        return candidateKeys.contains { key in
+            guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
+                return false
+            }
+            return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    static var isLaunchServicesAppProcess: Bool {
+        let env = ProcessInfo.processInfo.environment
+        guard env["XPC_SERVICE_NAME"]?.hasPrefix("application.") == true else {
+            return false
+        }
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier, !bundleIdentifier.isEmpty else {
+            return false
+        }
+        guard env["__CFBundleIdentifier"] == bundleIdentifier else {
+            return false
+        }
+        return Bundle.main.bundleURL.pathExtension == "app"
     }
 
  // MARK: - 公共方法
@@ -197,12 +218,15 @@ public final class USBCConnectionManager: ObservableObject {
 
  /// 扫描MFi认证设备
     public func scanForMFiDevices() async {
-        guard !Self.isRunningUnderTests else { return }
+        guard Self.canUseExternalAccessory else {
+            logger.info("跳过MFi认证设备扫描：当前进程缺少可安全访问 ExternalAccessory 的 bundle/权限上下文")
+            return
+        }
+
         if verboseLogging { SkyBridgeLogger.connection.debugOnly("🔍 USBCConnectionManager: 开始扫描MFi认证设备") }
         logger.info("开始扫描MFi认证设备")
 
-        let manager = accessoryManager ?? EAAccessoryManager.shared()
-        accessoryManager = manager
+        guard let manager = ensureAccessoryManager() else { return }
         let accessories = manager.connectedAccessories
         mfiAccessories = accessories
 
@@ -408,6 +432,20 @@ public final class USBCConnectionManager: ObservableObject {
                 }
             }
         }
+    }
+
+    private func ensureAccessoryManager() -> EAAccessoryManager? {
+        guard Self.canUseExternalAccessory else { return nil }
+
+        if let accessoryManager {
+            return accessoryManager
+        }
+
+        let manager = EAAccessoryManager.shared()
+        accessoryManager = manager
+        setupMFiNotifications()
+        logger.info("MFi认证扫描已启用")
+        return manager
     }
 
  /// 处理MFi配件连接

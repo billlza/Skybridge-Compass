@@ -1456,6 +1456,36 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
         }
         #endif
     }
+
+    func testInboundResponderKeepsApplePQCWhenPeerProviderTypeIsLiboqs() {
+        let env = MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
+        let provider = CryptoProviderFactory.makeInboundPQCResponderProvider(
+            policy: .requirePQC,
+            peerSupportedSuites: [.mlkem768MLDSA65, .x25519Ed25519],
+            environment: env
+        )
+
+        #if HAS_APPLE_PQC_SDK
+        if #available(macOS 26.0, *) {
+            XCTAssertEqual(provider.tier, .nativePQC)
+            XCTAssertNotEqual(provider.providerName, "liboqs")
+        }
+        #else
+        XCTAssertEqual(provider.tier, .liboqsPQC)
+        #endif
+    }
+
+    func testInboundResponderUsesLiboqsOnlyWhenApplePQCUnavailable() {
+        let env = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: true)
+        let provider = CryptoProviderFactory.makeInboundPQCResponderProvider(
+            policy: .requirePQC,
+            peerSupportedSuites: [.mlkem768MLDSA65, .x25519Ed25519],
+            environment: env
+        )
+
+        XCTAssertEqual(provider.tier, .liboqsPQC)
+        XCTAssertEqual(provider.providerName, "liboqs")
+    }
     
  /// Test provider selection event emission
  /// **Validates: Requirements 4.4**

@@ -58,4 +58,26 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         let routes = await manager.resolveActivePeerRoutes()
         XCTAssertFalse(routes.contains(where: { $0.deviceId == peerId }))
     }
+
+    func testResolveActivePeerRoutesDoesNotUseLocalListenerPortAsRemoteRoute() async throws {
+        let manager = FileTransferManager()
+        let peerId = "route-local-port-\(UUID().uuidString)"
+        let oldTransferPort = ServiceEndpointRegistry.shared.snapshot().fileTransferPort
+        ServiceEndpointRegistry.shared.setFileTransferPort(49152)
+        defer {
+            ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
+            ServiceEndpointRegistry.shared.setFileTransferPort(oldTransferPort)
+        }
+
+        ConnectionPresenceService.shared.markConnected(
+            peerId: peerId,
+            displayName: "iPad",
+            address: "10.0.0.9",
+            cryptoKind: "Apple PQC",
+            suite: "X-Wing"
+        )
+
+        let routes = await manager.resolveActivePeerRoutes()
+        XCTAssertFalse(routes.contains(where: { $0.deviceId == peerId }))
+    }
 }

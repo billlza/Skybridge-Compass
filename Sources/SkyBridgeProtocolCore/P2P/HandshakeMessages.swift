@@ -1002,6 +1002,7 @@ public struct HandshakeMessageB: Sendable {
     public static func decode(from data: Data) throws -> HandshakeMessageB {
         // Accept SBP1 handshake padding (Phase C1): unwrap before decoding.
         let data = HandshakePadding.unwrapIfNeeded(data, label: "HandshakeMessageB.decode")
+        let smokeDecodeLoggingEnabled = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
         guard data.count >= 5 else {
             throw HandshakeError.failed(.invalidMessageFormat("MessageB too short"))
         }
@@ -1042,7 +1043,7 @@ public struct HandshakeMessageB: Sendable {
         let serverNonce = data[offset..<(offset + 32)]
         offset += 32
 
- // encryptedPayload
+        // encryptedPayload
         let payloadLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         guard offset + Int(payloadLen) <= data.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Payload truncated"))
@@ -1053,7 +1054,7 @@ public struct HandshakeMessageB: Sendable {
  // 解析 HPKESealedBox（握手阶段）
         let encryptedPayload = try HPKESealedBox(combined: Data(payloadData), isHandshake: true)
 
- // identityPublicKey
+        // identityPublicKey
         let idKeyLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         guard offset + Int(idKeyLen) <= data.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Identity key truncated"))
@@ -1061,7 +1062,7 @@ public struct HandshakeMessageB: Sendable {
         let identityPublicKey = data[offset..<(offset + Int(idKeyLen))]
         offset += Int(idKeyLen)
 
- // signature
+        // signature
         let sigLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         guard offset + Int(sigLen) <= data.count else {
             throw HandshakeError.failed(.invalidMessageFormat("Signature truncated"))
@@ -1074,12 +1075,27 @@ public struct HandshakeMessageB: Sendable {
         if offset < data.count {
             let seSigLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
             guard offset + Int(seSigLen) <= data.count else {
+                if smokeDecodeLoggingEnabled {
+                    print(
+                        "🧪 MessageB decode seSig truncated total=\(data.count) suite=\(selectedSuite.rawValue) share=\(shareLen) payload=\(payloadLen) id=\(idKeyLen) sig=\(sigLen) se=\(seSigLen) offset=\(offset)"
+                    )
+                }
                 throw HandshakeError.failed(.invalidMessageFormat("Secure Enclave signature truncated"))
             }
             let seSig = data[offset..<(offset + Int(seSigLen))]
+            offset += Int(seSigLen)
             if !seSig.isEmpty {
                 secureEnclaveSignature = Data(seSig)
             }
+        }
+        guard offset == data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("MessageB trailing bytes"))
+        }
+        if smokeDecodeLoggingEnabled {
+            let seLen = secureEnclaveSignature?.count ?? 0
+            print(
+                "🧪 MessageB decode fields total=\(data.count) suite=\(selectedSuite.rawValue) share=\(shareLen) payload=\(payloadLen) id=\(idKeyLen) sig=\(sigLen) se=\(seLen)"
+            )
         }
 
         return HandshakeMessageB(

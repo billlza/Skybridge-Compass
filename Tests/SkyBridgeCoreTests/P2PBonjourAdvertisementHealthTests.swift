@@ -83,6 +83,36 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(optimized.contains("owner: Self.advertisementOwner\n            )"))
     }
 
+    func testTrustedBonjourTXTResolverHasBoundedCallbackLifetime() throws {
+        let source = try readSource("Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift")
+        let resolver = try sourceSlice(
+            from: "private final class BonjourTXTLookupResolver",
+            to: "struct InfoBanner",
+            in: source
+        )
+
+        XCTAssertTrue(
+            resolver.contains("private let resumed = OSAllocatedUnfairLock(initialState: false)"),
+            "NetService resolve callbacks and timeout callbacks must share a one-shot completion gate."
+        )
+        XCTAssertTrue(
+            resolver.contains("service.delegate = nil"),
+            "The resolver must detach the NetService delegate before releasing its self-retain."
+        )
+        XCTAssertTrue(
+            resolver.contains("service.remove(from: .main, forMode: .common)"),
+            "NetService should be removed from the run loop during completion cleanup."
+        )
+        XCTAssertTrue(
+            resolver.contains("process.terminationHandler"),
+            "dns-sd fallback should use terminationHandler instead of blocking a cooperative Swift task thread."
+        )
+        XCTAssertFalse(
+            resolver.contains("process.waitUntilExit()"),
+            "Blocking waitUntilExit can run Foundation run-loop callbacks on the cooperative worker and revive stale weak delegates."
+        )
+    }
+
     private func readSource(_ relativePath: String) throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -90,5 +120,11 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             .deletingLastPathComponent()
         let url = root.appendingPathComponent(relativePath)
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func sourceSlice(from start: String, to end: String, in source: String) throws -> String {
+        let startRange = try XCTUnwrap(source.range(of: start))
+        let endRange = try XCTUnwrap(source.range(of: end, range: startRange.upperBound..<source.endIndex))
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
     }
 }

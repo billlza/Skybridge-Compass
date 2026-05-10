@@ -30,6 +30,33 @@ final class PresenceRouteContractTests: XCTestCase {
         XCTAssertFalse(ConnectionPresenceService.shared.activeConnections.contains(where: { $0.id == peerId }))
     }
 
+    func testPublishConnectedAtomicallyRejectsZeroTransferPort() {
+        let peerId = "route-zero-port-\(UUID().uuidString)"
+        defer { ConnectionPresenceService.shared.markDisconnected(peerId: peerId) }
+
+        let incomplete = ConnectionPresenceService.PresenceRouteDescriptor(
+            peerId: peerId,
+            deviceName: "iPad",
+            displayAddress: "10.0.0.9",
+            transferAddress: "10.0.0.9",
+            transferPort: 0,
+            routeSource: .inbound
+        )
+
+        let published = ConnectionPresenceService.shared.publishConnectedAtomically(
+            peerId: peerId,
+            displayName: "iPad",
+            address: "10.0.0.9",
+            cryptoKind: "Apple PQC",
+            suite: "X-Wing",
+            routeDescriptor: incomplete
+        )
+
+        XCTAssertFalse(published)
+        XCTAssertNil(ConnectionPresenceService.shared.routeDescriptorsByPeerId[peerId])
+        XCTAssertFalse(ConnectionPresenceService.shared.activeConnections.contains(where: { $0.id == peerId }))
+    }
+
     func testPublishConnectedAtomicallyPublishesConnectionAndRouteTogether() {
         let peerId = "route-complete-\(UUID().uuidString)"
         defer { ConnectionPresenceService.shared.markDisconnected(peerId: peerId) }
@@ -55,6 +82,27 @@ final class PresenceRouteContractTests: XCTestCase {
         XCTAssertTrue(published)
         XCTAssertEqual(ConnectionPresenceService.shared.routeDescriptorsByPeerId[peerId], route)
         XCTAssertTrue(ConnectionPresenceService.shared.activeConnections.contains(where: { $0.id == peerId }))
+    }
+
+    func testMarkConnectedDoesNotSynthesizeFileTransferRouteFromLocalListenerPort() {
+        let peerId = "route-no-synthesize-\(UUID().uuidString)"
+        let oldTransferPort = ServiceEndpointRegistry.shared.snapshot().fileTransferPort
+        ServiceEndpointRegistry.shared.setFileTransferPort(49152)
+        defer {
+            ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
+            ServiceEndpointRegistry.shared.setFileTransferPort(oldTransferPort)
+        }
+
+        ConnectionPresenceService.shared.markConnected(
+            peerId: peerId,
+            displayName: "iPad",
+            address: "10.0.0.9",
+            cryptoKind: "Apple PQC",
+            suite: "X-Wing"
+        )
+
+        XCTAssertTrue(ConnectionPresenceService.shared.activeConnections.contains(where: { $0.id == peerId }))
+        XCTAssertNil(ConnectionPresenceService.shared.routeDescriptorsByPeerId[peerId])
     }
 
     func testPresenceCanonicalizesAliasUpdatesAndDisconnectsAcrossPeerIdentifiers() {
@@ -122,6 +170,6 @@ final class PresenceRouteContractTests: XCTestCase {
         )
 
         XCTAssertEqual(resolved.displayAddress, "10.0.0.42")
-        XCTAssertEqual(resolved.transferPort, 8080)
+        XCTAssertEqual(resolved.transferPort, -1)
     }
 }

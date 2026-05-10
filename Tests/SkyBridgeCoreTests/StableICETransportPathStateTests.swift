@@ -29,6 +29,21 @@ final class StableICETransportPathStateTests: XCTestCase {
     }
 
     @MainActor
+    func testDefaultUnknownProbeThresholdToleratesCellularStatsJitter() {
+        var state = StableICETransportPathState()
+
+        _ = state.recordProbe(.relay)
+        for probe in 1...9 {
+            XCTAssertTrue(state.recordProbe(.unknown), "probe \(probe) should retain the last stable path")
+            XCTAssertEqual(state.effectivePath, .relay)
+        }
+
+        XCTAssertFalse(state.recordProbe(.unknown))
+        XCTAssertEqual(state.effectivePath, .unknown)
+        XCTAssertEqual(state.consecutiveUnknownProbes, 10)
+    }
+
+    @MainActor
     func testStableDirectProbeResetsUnknownCounter() {
         var state = StableICETransportPathState()
 

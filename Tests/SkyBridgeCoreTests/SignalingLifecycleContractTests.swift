@@ -134,4 +134,11 @@ final class SignalingLifecycleContractTests: XCTestCase {
         XCTAssertEqual(dictionary[kCFNetworkProxiesProxyAutoConfigEnable as String] as? Bool, false)
         XCTAssertEqual(dictionary[kCFNetworkProxiesProxyAutoDiscoveryEnable as String] as? Bool, false)
     }
+
+    func testDefaultSignalingBoundTimeoutAllowsColdCurrentPathStartup() {
+        XCTAssertGreaterThanOrEqual(
+            WebSocketSignalingClient.testOnlyDefaultConnectionTimeoutSeconds(),
+            15
+        )
+    }
 }

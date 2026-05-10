@@ -68,9 +68,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private var usbCancellable: AnyCancellable?
 
  // 服务类型瘦身 - 默认仅SkyBridge，兼容/调试模式可扩展其余类型
- // 服务类型分类 - 核心服务（默认扫描）
+    // 服务类型分类 - 核心服务（默认扫描）
     private let coreServiceTypes = [
         "_skybridge._tcp",
+        "_skybridge-transfer._tcp",
         "_companion-link._tcp",
         "_airplay._tcp",
         "_rdlink._tcp",
@@ -250,10 +251,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             return
         }
 
- // 触发MFi设备扫描
-        await usbManager.scanForMFiDevices()
-
- // 触发USB设备扫描
+ // 触发USB设备扫描。MFi/ExternalAccessory 扫描需要用户显式入口，避免通用发现路径在启动或连接时触发隐私/TCC框架。
         await usbManager.scanForUSBDevices()
 
         logger.info("✅ USB设备扫描完成")
@@ -1234,6 +1232,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         if case .service(_, _, let servicePort, _) = result.endpoint {
             port = Int(servicePort) ?? 0
         }
+        if port == 0 {
+            port = Self.extractAdvertisedServicePort(from: result) ?? 0
+        }
 
  // 服务端点场景下，不应把 result.interfaces 映射成“远端地址”；
  // interfaces 仅表示本机可用接口，会导致误把本机 IP 记成对端地址。
@@ -1421,6 +1422,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 if !existingDevice.services.contains(serviceType) {
                     newServices.append(serviceType)
                     newPortMap[serviceType] = port
+                } else if (newPortMap[serviceType] ?? 0) <= 0, port > 0 {
+                    newPortMap[serviceType] = port
                 }
 
                 let updatedDevice = DiscoveredDevice(
@@ -1480,6 +1483,21 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             return nil
         }
         return info
+    }
+
+    private static func extractAdvertisedServicePort(from result: NWBrowser.Result) -> Int? {
+        guard case .bonjour(let txtRecord) = result.metadata else { return nil }
+        let dict = BonjourTXTParser.parse(txtRecord)
+        let raw = dict["fileTransferPort"]
+            ?? dict["transferPort"]
+            ?? dict["file_transfer_port"]
+            ?? dict["port"]
+        guard let raw,
+              let port = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...65535).contains(port) else {
+            return nil
+        }
+        return port
     }
 
     nonisolated private static func preferredUniqueIdentifier(

@@ -1063,7 +1063,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
  // 合并端口映射
-        merged.portMap.merge(new.portMap) { current, _ in current }
+        merged.portMap.merge(new.portMap) { current, incoming in
+            current > 0 ? current : incoming
+        }
 
  // 合并设备来源
         for source in new.sources {

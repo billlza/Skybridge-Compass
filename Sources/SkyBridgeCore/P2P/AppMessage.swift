@@ -35,6 +35,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
     public struct PairingIdentityExchangePayload: Codable, Sendable, Equatable {
         public let deviceId: String
         public let kemPublicKeys: [KEMPublicKeyInfo]
+        public let protocolIdentityPublicKeys: [ProtocolIdentityPublicKeyInfo]?
         /// Optional UI metadata (best-effort). Used to populate “Trusted Devices” UI and approval prompts.
         public let deviceName: String?
         public let modelName: String?
@@ -50,6 +51,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public init(
             deviceId: String,
             kemPublicKeys: [KEMPublicKeyInfo],
+            protocolIdentityPublicKeys: [ProtocolIdentityPublicKeyInfo]? = nil,
             deviceName: String? = nil,
             modelName: String? = nil,
             platform: String? = nil,
@@ -63,6 +65,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         ) {
             self.deviceId = deviceId
             self.kemPublicKeys = kemPublicKeys
+            self.protocolIdentityPublicKeys = ProtocolIdentityPublicKeyInfo.normalizedValidKeys(protocolIdentityPublicKeys)
             self.deviceName = deviceName
             self.modelName = modelName
             self.platform = platform
@@ -83,6 +86,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             return .init(
                 deviceId: trimmedDeviceId,
                 kemPublicKeys: validKEMKeys,
+                protocolIdentityPublicKeys: ProtocolIdentityPublicKeyInfo.normalizedValidKeys(protocolIdentityPublicKeys),
                 deviceName: deviceName,
                 modelName: modelName,
                 platform: platform,
@@ -94,6 +98,46 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 remoteControlPort: remoteControlPort,
                 sentAt: sentAt
             )
+        }
+    }
+
+    public struct ProtocolIdentityPublicKeyInfo: Codable, Sendable, Equatable {
+        public let protocolSigningAlgorithm: String
+        public let publicKey: Data
+
+        public init(protocolSigningAlgorithm: String, publicKey: Data) {
+            self.protocolSigningAlgorithm = protocolSigningAlgorithm
+            self.publicKey = publicKey
+        }
+
+        public var normalizedAlgorithm: ProtocolSigningAlgorithm? {
+            let raw = protocolSigningAlgorithm.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ProtocolSigningAlgorithm(rawValue: raw)
+        }
+
+        public var authoritativeFingerprint: String? {
+            guard let algorithm = normalizedAlgorithm, !publicKey.isEmpty else { return nil }
+            return ProtocolIdentityPublicKeys(
+                protocolPublicKey: publicKey,
+                protocolAlgorithm: algorithm
+            ).authoritativeFingerprint.lowercased()
+        }
+
+        public static func normalizedValidKeys(_ rawKeys: [ProtocolIdentityPublicKeyInfo]?) -> [ProtocolIdentityPublicKeyInfo]? {
+            var byFingerprint: [String: ProtocolIdentityPublicKeyInfo] = [:]
+            for key in rawKeys ?? [] {
+                guard let algorithm = key.normalizedAlgorithm,
+                      let fingerprint = key.authoritativeFingerprint,
+                      !fingerprint.isEmpty else {
+                    continue
+                }
+                byFingerprint[fingerprint] = ProtocolIdentityPublicKeyInfo(
+                    protocolSigningAlgorithm: algorithm.rawValue,
+                    publicKey: key.publicKey
+                )
+            }
+            guard !byFingerprint.isEmpty else { return nil }
+            return byFingerprint.keys.sorted().compactMap { byFingerprint[$0] }
         }
     }
 
@@ -110,6 +154,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let capabilities: [String]?
         public let fileTransferPort: UInt16?
         public let remoteControlPort: UInt16?
+        public let webrtcMedia: WebRTCMediaHeartbeatDiagnostics?
 
         public init(
             sentAt: Date = Date(),
@@ -122,7 +167,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             remoteVideoFormats: [String]? = nil,
             capabilities: [String]? = nil,
             fileTransferPort: UInt16? = nil,
-            remoteControlPort: UInt16? = nil
+            remoteControlPort: UInt16? = nil,
+            webrtcMedia: WebRTCMediaHeartbeatDiagnostics? = nil
         ) {
             self.sentAt = sentAt
             self.deviceId = deviceId
@@ -135,6 +181,68 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.capabilities = capabilities
             self.fileTransferPort = fileTransferPort
             self.remoteControlPort = remoteControlPort
+            self.webrtcMedia = webrtcMedia
+        }
+    }
+
+    public struct WebRTCMediaHeartbeatDiagnostics: Codable, Sendable, Equatable {
+        public let nativeVideoRendered: Bool
+        public let nativeVideoWidth: Int?
+        public let nativeVideoHeight: Int?
+        public let audioRxDatagrams: UInt64?
+        public let audioRxRecv: UInt64?
+        public let audioRxDecoded: UInt64?
+        public let audioRxPlayed: UInt64?
+        public let audioRxRejected: UInt64?
+        public let audioRxAuthRejected: UInt64?
+        public let audioRxSessionHashRejected: UInt64?
+        public let audioRxReplayRejected: UInt64?
+        public let audioRxJitterEvicted: UInt64?
+        public let audioRxPlaybackDropped: UInt64?
+        public let audioRenderedFrames: UInt64?
+        public let audioUnderflow: UInt64?
+        public let audioRebuffer: UInt64?
+        public let audioStartupSilenceFrames: UInt64?
+        public let audioEngineRunning: Bool?
+
+        public init(
+            nativeVideoRendered: Bool,
+            nativeVideoWidth: Int? = nil,
+            nativeVideoHeight: Int? = nil,
+            audioRxDatagrams: UInt64? = nil,
+            audioRxRecv: UInt64? = nil,
+            audioRxDecoded: UInt64? = nil,
+            audioRxPlayed: UInt64? = nil,
+            audioRxRejected: UInt64? = nil,
+            audioRxAuthRejected: UInt64? = nil,
+            audioRxSessionHashRejected: UInt64? = nil,
+            audioRxReplayRejected: UInt64? = nil,
+            audioRxJitterEvicted: UInt64? = nil,
+            audioRxPlaybackDropped: UInt64? = nil,
+            audioRenderedFrames: UInt64? = nil,
+            audioUnderflow: UInt64? = nil,
+            audioRebuffer: UInt64? = nil,
+            audioStartupSilenceFrames: UInt64? = nil,
+            audioEngineRunning: Bool? = nil
+        ) {
+            self.nativeVideoRendered = nativeVideoRendered
+            self.nativeVideoWidth = nativeVideoWidth
+            self.nativeVideoHeight = nativeVideoHeight
+            self.audioRxDatagrams = audioRxDatagrams
+            self.audioRxRecv = audioRxRecv
+            self.audioRxDecoded = audioRxDecoded
+            self.audioRxPlayed = audioRxPlayed
+            self.audioRxRejected = audioRxRejected
+            self.audioRxAuthRejected = audioRxAuthRejected
+            self.audioRxSessionHashRejected = audioRxSessionHashRejected
+            self.audioRxReplayRejected = audioRxReplayRejected
+            self.audioRxJitterEvicted = audioRxJitterEvicted
+            self.audioRxPlaybackDropped = audioRxPlaybackDropped
+            self.audioRenderedFrames = audioRenderedFrames
+            self.audioUnderflow = audioUnderflow
+            self.audioRebuffer = audioRebuffer
+            self.audioStartupSilenceFrames = audioStartupSilenceFrames
+            self.audioEngineRunning = audioEngineRunning
         }
     }
 

@@ -660,6 +660,7 @@ public actor DeviceIdentityKeyManager {
         if provider.tier == .nativePQC {
             suites.append(.xwingMLDSA)
             suites.append(.mlkem768MLDSA65)
+            suites.append(.mlkem768MLDSA65FS)
         }
 
         let dedupedByWire = suites.reduce(into: [UInt16: CryptoSuite]()) { partialResult, suite in

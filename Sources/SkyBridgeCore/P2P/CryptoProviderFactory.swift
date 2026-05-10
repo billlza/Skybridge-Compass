@@ -186,9 +186,10 @@ public enum CryptoProviderFactory {
 
     public static func makeInboundPQCResponderProvider(
         policy: SelectionPolicy,
-        peerSupportedSuites: [CryptoSuite]
+        peerSupportedSuites: [CryptoSuite],
+        environment: any CryptoEnvironment = SystemCryptoEnvironment.system
     ) -> any CryptoProvider {
-        let baseProvider = make(policy: policy)
+        let baseProvider = make(policy: policy, environment: environment)
 
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *), baseProvider.tier == .nativePQC {

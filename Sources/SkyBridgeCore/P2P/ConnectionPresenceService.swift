@@ -52,7 +52,7 @@ public final class ConnectionPresenceService: ObservableObject {
             !deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !displayAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !transferAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            (0...65535).contains(transferPort)
+            (1...65535).contains(transferPort)
         }
     }
     
@@ -230,25 +230,6 @@ public final class ConnectionPresenceService: ObservableObject {
             activeConnections.append(conn)
         }
 
-        if let compatibilityRoute = makeCompatibilityRouteDescriptor(
-                peerId: peerId,
-                displayName: displayName,
-                address: address,
-                connectedAt: conn.connectedAt
-            ),
-           routeDescriptorsByPeerId[canonicalPeerId]?.routeSource == nil ||
-           routeDescriptorsByPeerId[canonicalPeerId]?.routeSource == .compatibility {
-            routeDescriptorsByPeerId[canonicalPeerId] = PresenceRouteDescriptor(
-                peerId: canonicalPeerId,
-                deviceName: compatibilityRoute.deviceName,
-                displayAddress: compatibilityRoute.displayAddress,
-                transferAddress: compatibilityRoute.transferAddress,
-                transferPort: compatibilityRoute.transferPort,
-                routeSource: compatibilityRoute.routeSource,
-                connectedAt: compatibilityRoute.connectedAt
-            )
-        }
-        
         logger.info("✅ presence connected: peer=\(canonicalPeerId, privacy: .public) addr=\(address ?? "nil", privacy: .public) kind=\(cryptoKind, privacy: .public) suite=\(suite, privacy: .public)")
         // If we were in a "rekeying" state for this peer, clear it on successful connection update.
         rekeyStatusByPeerId.removeValue(forKey: canonicalPeerId)
@@ -325,31 +306,5 @@ public final class ConnectionPresenceService: ObservableObject {
 
     public func activeRouteDescriptors() -> [PresenceRouteDescriptor] {
         routeDescriptorsByPeerId.values.sorted { $0.connectedAt > $1.connectedAt }
-    }
-
-    private func makeCompatibilityRouteDescriptor(
-        peerId: String,
-        displayName: String,
-        address: String?,
-        connectedAt: Date
-    ) -> PresenceRouteDescriptor? {
-        guard let trimmedAddress = address?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmedAddress.isEmpty else {
-            return nil
-        }
-        guard let transferPort = ServiceEndpointRegistry.shared.snapshot().fileTransferPort,
-              (1...65535).contains(Int(transferPort)) else {
-            return nil
-        }
-
-        return PresenceRouteDescriptor(
-            peerId: peerId,
-            deviceName: displayName,
-            displayAddress: trimmedAddress,
-            transferAddress: trimmedAddress,
-            transferPort: Int(transferPort),
-            routeSource: .compatibility,
-            connectedAt: connectedAt
-        )
     }
 }

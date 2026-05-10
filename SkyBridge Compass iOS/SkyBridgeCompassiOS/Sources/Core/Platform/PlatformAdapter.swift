@@ -93,6 +93,34 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         isInitialized = true
     }
 
+    public func initialize(
+        policy: CryptoProviderFactory.SelectionPolicy,
+        providerOverride: any CryptoProvider
+    ) async throws {
+        currentSelectionPolicy = policy
+
+        SkyBridgeLogger.shared.info("🧩 SkyBridgeiOSCore.initialize(policy=\(String(describing: policy)), providerOverride=\(providerOverride.providerName))")
+
+        switch policy {
+        case .preferPQC:
+            handshakePolicy = .default
+        case .requirePQC:
+            handshakePolicy = .strictPQC
+        case .classicOnly:
+            handshakePolicy = HandshakePolicy(requirePQC: false, allowClassicFallback: false, minimumTier: .classic)
+        }
+        SkyBridgeLogger.shared.info("🧩 HandshakePolicy: requirePQC=\(handshakePolicy.requirePQC ? "1" : "0"), allowClassicFallback=\(handshakePolicy.allowClassicFallback ? "1" : "0"), minimumTier=\(handshakePolicy.minimumTier.rawValue)")
+
+        cryptoProvider = providerOverride
+
+        let sigAlgorithm: ProtocolSigningAlgorithm = providerOverride.tier == .classic ? .ed25519 : .mlDSA65
+        signatureProvider = ProtocolSignatureProviderSelector.select(for: sigAlgorithm)
+
+        try await loadOrCreateIdentityKey(algorithm: sigAlgorithm)
+
+        isInitialized = true
+    }
+
     public func getProtocolSigningKeyHandle(
         for algorithm: ProtocolSigningAlgorithm
     ) async throws -> SigningKeyHandle {

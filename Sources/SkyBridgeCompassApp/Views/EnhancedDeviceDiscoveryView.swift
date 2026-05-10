@@ -2297,14 +2297,20 @@ public struct EnhancedDeviceDiscoveryView: View {
         func scheduleRefresh(for groups: [TrustRecordDisplayGroup]) {
             let snapshot = groups
             logger.debug("schedule refresh for \(snapshot.count) trusted groups")
+            refreshTask?.cancel()
             refreshTask = Task { [weak self] in
                 await self?.refresh(for: snapshot)
             }
         }
 
+        deinit {
+            refreshTask?.cancel()
+        }
+
         private func refresh(for groups: [TrustRecordDisplayGroup]) async {
             var updated: [String: ApplePeerDeviceMetadataNormalizer.Presentation] = [:]
             for group in groups {
+                guard !Task.isCancelled else { return }
                 guard let endpoint = Self.bonjourEndpoint(for: group) else {
                     logger.debug("skip group \(group.id, privacy: .public): no bonjour endpoint")
                     continue
@@ -2399,15 +2405,15 @@ public struct EnhancedDeviceDiscoveryView: View {
 }
 
 private final class BonjourTXTLookupResolver: NSObject, NetServiceDelegate, @unchecked Sendable {
+    private let resumed = OSAllocatedUnfairLock(initialState: false)
     private let service: NetService
     private var continuation: CheckedContinuation<BonjourDeviceInfo?, Never>?
-    private var completed = false
+    private var timeoutTask: Task<Void, Never>?
     private var selfRetain: BonjourTXTLookupResolver?
 
     private init(name: String, type: String, domain: String) {
         self.service = NetService(domain: domain, type: type, name: name)
         super.init()
-        self.service.delegate = self
     }
 
     static func resolve(
@@ -2437,12 +2443,18 @@ private final class BonjourTXTLookupResolver: NSObject, NetServiceDelegate, @unc
     ) {
         self.continuation = continuation
         self.selfRetain = self
+        service.delegate = self
         service.schedule(in: .main, forMode: .common)
         service.resolve(withTimeout: timeout)
 
-        let resolver = self
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
-            resolver.finish(with: nil)
+        timeoutTask?.cancel()
+        timeoutTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(timeout))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self.finish(with: nil)
+            }
         }
     }
 
@@ -2465,8 +2477,16 @@ private final class BonjourTXTLookupResolver: NSObject, NetServiceDelegate, @unc
     }
 
     private func finish(with info: BonjourDeviceInfo?) {
-        guard !completed else { return }
-        completed = true
+        let shouldResume = resumed.withLock { completed -> Bool in
+            guard !completed else { return false }
+            completed = true
+            return true
+        }
+        guard shouldResume else { return }
+
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        service.delegate = nil
         service.stop()
         service.remove(from: .main, forMode: .common)
         continuation?.resume(returning: info)
@@ -2491,36 +2511,49 @@ private final class BonjourTXTLookupResolver: NSObject, NetServiceDelegate, @unc
         process.standardOutput = outputPipe
         process.standardError = outputPipe
 
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
+        let completed = OSAllocatedUnfairLock(initialState: false)
+        return await withCheckedContinuation { continuation in
+            let finish: @Sendable () -> Void = {
+                let shouldResume = completed.withLock { state -> Bool in
+                    guard !state else { return false }
+                    state = true
+                    return true
+                }
+                guard shouldResume else { return }
+                let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                guard let output = String(data: data, encoding: .utf8) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                for line in output.split(whereSeparator: \.isNewline).reversed() {
+                    let parsed = parseDNSSDKeyValueLine(String(line))
+                    if !parsed.isEmpty {
+                        continuation.resume(returning: BonjourTXTParser.extractDeviceInfo(from: parsed))
+                        return
+                    }
+                }
+                continuation.resume(returning: nil)
+            }
 
-        let timeoutTask = Task {
-            let nanos = UInt64(max(timeout, 0.5) * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: nanos)
-            if process.isRunning {
-                process.terminate()
+            process.terminationHandler = { _ in
+                finish()
+            }
+
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(returning: nil)
+                return
+            }
+
+            Task {
+                try? await Task.sleep(for: .seconds(max(timeout, 0.5)))
+                let shouldTerminate = completed.withLock { !$0 }
+                if shouldTerminate, process.isRunning {
+                    process.terminate()
+                }
             }
         }
-
-        process.waitUntilExit()
-        timeoutTask.cancel()
-
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-
-        for line in output.split(whereSeparator: \.isNewline).reversed() {
-            let parsed = parseDNSSDKeyValueLine(String(line))
-            if !parsed.isEmpty {
-                return BonjourTXTParser.extractDeviceInfo(from: parsed)
-            }
-        }
-
-        return nil
     }
 
     private static func parseDNSSDKeyValueLine(_ line: String) -> [String: String] {

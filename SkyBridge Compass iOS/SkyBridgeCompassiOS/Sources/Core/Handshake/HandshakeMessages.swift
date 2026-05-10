@@ -597,6 +597,21 @@ public struct HandshakeMessageA: Sendable {
         let identityPublicKey = data[offset..<(offset + Int(idKeyLen))]
         offset += Int(idKeyLen)
 
+        // v2 initiator contribution (only when FS suites are offered)
+        var initiatorContribution: Data?
+        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
+            let contributionLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
+            guard offset + Int(contributionLen) <= data.count else {
+                throw HandshakeError.failed(.invalidMessageFormat("v2 initiator contribution truncated"))
+            }
+            try HandshakeEncoding.validateInitiatorContributionLength(Int(contributionLen), for: supportedSuites)
+            if contributionLen > 0 {
+                let contribution = data[offset..<(offset + Int(contributionLen))]
+                initiatorContribution = Data(contribution)
+            }
+            offset += Int(contributionLen)
+        }
+
         // optional extensions container
         var extensionsRaw = Data()
         if offset + Self.extensionContainerMagic.count + 2 <= data.count {
@@ -612,21 +627,6 @@ public struct HandshakeMessageA: Sendable {
                 }
                 offset += Int(extLen)
             }
-        }
-
-        // v2 initiator contribution (only when FS suites are offered)
-        var initiatorContribution: Data?
-        if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
-            let contributionLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
-            guard offset + Int(contributionLen) <= data.count else {
-                throw HandshakeError.failed(.invalidMessageFormat("v2 initiator contribution truncated"))
-            }
-            try HandshakeEncoding.validateInitiatorContributionLength(Int(contributionLen), for: supportedSuites)
-            if contributionLen > 0 {
-                let contribution = data[offset..<(offset + Int(contributionLen))]
-                initiatorContribution = Data(contribution)
-            }
-            offset += Int(contributionLen)
         }
         
         // signature
@@ -698,15 +698,15 @@ public struct HandshakeMessageA: Sendable {
         data.append(policyData)
         HandshakeEncoding.appendUInt16LE(UInt16(identityPublicKey.count), to: &data)
         data.append(identityPublicKey)
-        if !extensionsRaw.isEmpty {
-            data.append(Self.extensionContainerMagic)
-            HandshakeEncoding.appendUInt16LE(UInt16(extensionsRaw.count), to: &data)
-            data.append(extensionsRaw)
-        }
         if supportedSuites.contains(where: { $0.requiresV2EphemeralContribution }) {
             let contribution = initiatorContribution ?? Data()
             HandshakeEncoding.appendUInt16LE(UInt16(contribution.count), to: &data)
             data.append(contribution)
+        }
+        if !extensionsRaw.isEmpty {
+            data.append(Self.extensionContainerMagic)
+            HandshakeEncoding.appendUInt16LE(UInt16(extensionsRaw.count), to: &data)
+            data.append(extensionsRaw)
         }
         return data
     }
@@ -906,9 +906,13 @@ public struct HandshakeMessageB: Sendable {
                 throw HandshakeError.failed(.invalidMessageFormat("Secure Enclave signature truncated"))
             }
             let seSig = data[offset..<(offset + Int(seSigLen))]
+            offset += Int(seSigLen)
             if !seSig.isEmpty {
                 secureEnclaveSignature = Data(seSig)
             }
+        }
+        guard offset == data.count else {
+            throw HandshakeError.failed(.invalidMessageFormat("MessageB trailing bytes"))
         }
         
         return HandshakeMessageB(

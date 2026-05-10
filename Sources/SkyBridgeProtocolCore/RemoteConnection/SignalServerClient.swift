@@ -660,7 +660,7 @@ public actor SignalServerClient {
             endpointHost: response.endpoint.host,
             endpointPort: response.endpoint.port,
             leaseToken: response.leaseToken,
-            expiresAt: TimeInterval(response.expiresAt),
+            expiresAt: Self.normalizedMediaRelayExpiresAt(response.expiresAt),
             ttl: TimeInterval(response.ttl),
             maxPacketBytes: response.maxPacketBytes
         )
@@ -840,6 +840,11 @@ public actor SignalServerClient {
             token: token,
             expiresIn: min(TimeInterval(expiresIn), 60)
         )
+    }
+
+    private static func normalizedMediaRelayExpiresAt(_ rawValue: Int64) -> TimeInterval {
+        let seconds = TimeInterval(rawValue)
+        return seconds > 10_000_000_000 ? seconds / 1000 : seconds
     }
 
     private static func decodeJSONObject(from data: Data) throws -> [String: Any] {

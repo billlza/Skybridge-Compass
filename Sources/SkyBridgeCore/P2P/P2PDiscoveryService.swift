@@ -61,6 +61,7 @@ public class P2PDiscoveryService: BaseManager {
  /// 服务类型瘦身策略 - 默认仅SkyBridge；兼容/调试模式可扩展
     private let allServiceTypes = [
         "_skybridge._tcp",
+        "_skybridge-transfer._tcp",
         "_companion-link._tcp",
         "_airplay._tcp",
         "_rdlink._tcp",
@@ -70,7 +71,7 @@ public class P2PDiscoveryService: BaseManager {
     public var enableCompatibilityMode: Bool = false
     public var enableCompanionLink: Bool = false
     private func effectiveServiceTypes() -> [String] {
-        var base = ["_skybridge._tcp"]
+        var base = ["_skybridge._tcp", "_skybridge-transfer._tcp"]
         if enableCompanionLink { base.append("_companion-link._tcp") }
         if enableCompatibilityMode {
             base.append(contentsOf: allServiceTypes.filter { !$0.hasPrefix("_skybridge") && !$0.hasPrefix("_companion-link") })
@@ -1356,6 +1357,21 @@ public class P2PDiscoveryService: BaseManager {
         return normalizeSOAFlag(dict["hs_soa"] ?? dict["HS_SOA"])
     }
 
+    private func extractAdvertisedServicePort(from result: NWBrowser.Result) -> Int? {
+        guard case .bonjour(let txtRecord) = result.metadata else { return nil }
+        let dict = BonjourTXTParser.parse(txtRecord)
+        let raw = dict["fileTransferPort"]
+            ?? dict["transferPort"]
+            ?? dict["file_transfer_port"]
+            ?? dict["port"]
+        guard let raw,
+              let port = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...65535).contains(port) else {
+            return nil
+        }
+        return port
+    }
+
     private func normalizeSOAFlag(_ value: String?) -> Bool {
         guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else {
             return false
@@ -1456,10 +1472,15 @@ public class P2PDiscoveryService: BaseManager {
         })
     }
 
- /// 添加发现的设备 - 增强版：识别设备类型
+    /// 添加发现的设备 - 增强版：识别设备类型
     private func addDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
         let deviceName = extractDeviceName(from: result)
-        let (ipv4, ipv6, port) = extractNetworkInfo(from: result)
+        let networkInfo = extractNetworkInfo(from: result)
+        let ipv4 = networkInfo.ipv4
+        let ipv6 = networkInfo.ipv6
+        let port = networkInfo.port > 0
+            ? networkInfo.port
+            : (extractAdvertisedServicePort(from: result) ?? 0)
         let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
         let strongIdentity = extractStrongIdentity(from: result)
         let supportsSOA = extractSOAFlag(from: result)
@@ -1537,6 +1558,8 @@ public class P2PDiscoveryService: BaseManager {
             if !existingDevice.services.contains(serviceType) {
                 existingDevice.services.append(serviceType)
                 existingDevice.portMap[serviceType] = port
+            } else if (existingDevice.portMap[serviceType] ?? 0) <= 0, port > 0 {
+                existingDevice.portMap[serviceType] = port
             }
             if supportsSOA, !existingDevice.services.contains("hs_soa") {
                 existingDevice.services.append("hs_soa")
@@ -1575,10 +1598,11 @@ public class P2PDiscoveryService: BaseManager {
         let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
         let strongIdentity = extractStrongIdentity(from: result)
         let supportsSOA = extractSOAFlag(from: result)
-        Task.detached { [serviceType, bonjourUniqueIdentifier, strongIdentity, supportsSOA] in
+        let advertisedPort = extractAdvertisedServicePort(from: result) ?? 0
+        Task.detached { [serviceType, bonjourUniqueIdentifier, strongIdentity, supportsSOA, advertisedPort] in
             let deviceName = P2P_ExtractDeviceName(result)
             let (ipv4, ipv6) = P2P_ExtractNetworkAddrs(result)
-            let port = 0
+            let port = advertisedPort
             var detectedDeviceType = ""
             if serviceType.contains("airplay") {
                 if !deviceName.lowercased().contains("iphone"),
@@ -1630,6 +1654,8 @@ public class P2PDiscoveryService: BaseManager {
                     var existing = self.discoveredDevices[existingIndex]
                     if !existing.services.contains(serviceType) {
                         existing.services.append(serviceType)
+                        existing.portMap[serviceType] = port
+                    } else if (existing.portMap[serviceType] ?? 0) <= 0, port > 0 {
                         existing.portMap[serviceType] = port
                     }
                     if supportsSOA, !existing.services.contains("hs_soa") {
@@ -2905,10 +2931,7 @@ public class P2PDiscoveryService: BaseManager {
         return InboundPresenceResolution(
             name: fallbackName.isEmpty ? "P2P Peer" : fallbackName,
             displayAddress: fallbackAddress,
-            transferPort: {
-                let advertisedPort = Int(ServiceEndpointRegistry.shared.snapshot().fileTransferPort ?? 0)
-                return (1...65535).contains(advertisedPort) ? advertisedPort : 8080
-            }()
+            transferPort: -1
         )
     }
 

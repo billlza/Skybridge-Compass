@@ -162,6 +162,39 @@ public enum CryptoProviderFactory {
         #endif
         return UnavailablePQCProvider()
     }
+
+    public static func makeInboundPQCResponderProvider(
+        policy: SelectionPolicy,
+        peerSupportedSuites: [CryptoSuite]
+    ) -> any CryptoProvider {
+        let baseProvider = make(policy: policy)
+
+        #if HAS_APPLE_PQC_SDK
+        if #available(iOS 26.0, macOS 26.0, *), baseProvider.tier == .nativePQC {
+            let peerSupportsXWing = peerSupportedSuites.contains {
+                $0.providerCompatibilitySuite.wireId == CryptoSuite.xwing.providerCompatibilitySuite.wireId
+            }
+            let peerSupportsMLKEM = peerSupportedSuites.contains {
+                $0.providerCompatibilitySuite.wireId == CryptoSuite.mlkem768.providerCompatibilitySuite.wireId
+            }
+
+            switch (peerSupportsXWing, peerSupportsMLKEM) {
+            case (true, false):
+                return AppleXWingCryptoProvider()
+            case (false, true):
+                return ApplePQCCryptoProvider()
+            default:
+                return baseProvider
+            }
+        }
+        #endif
+
+        return baseProvider
+    }
+
+    public static func handshakeOfferedPQCSuites(using provider: any CryptoProvider) -> [CryptoSuite] {
+        provider.supportedSuites.filter { $0.isPQCGroup }
+    }
     
     // MARK: - Private Methods
     

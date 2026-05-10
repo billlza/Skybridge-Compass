@@ -254,8 +254,47 @@ private final class LocalLanInteropHostCoordinator {
             """
         )
         reporter.append("file-transfer outbound-start name=\(sanitize(outboundName))")
-        try await fileTransferManager.sendFileToFirstActivePeer(at: outboundURL)
+        let targetDeviceId = Self.stableBonjourTargetDeviceId(inboundTransfer.deviceId)
+        guard let route = await BonjourFileTransferRouteResolver().resolve(
+            targetDeviceId: targetDeviceId,
+            preferredName: inboundTransfer.deviceName,
+            timeoutSeconds: 6.0
+        ) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 2002,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "未发现匹配 \(inboundTransfer.deviceId) 的 _skybridge-transfer._tcp Bonjour 路由"
+                ]
+            )
+        }
+        reporter.append(
+            "file-transfer outbound-route source=bonjour-transfer device=\(sanitize(route.deviceId ?? inboundTransfer.deviceId)) host=\(sanitize(route.host)) port=\(route.port)"
+        )
+        try await fileTransferManager.sendFile(
+            at: outboundURL,
+            to: inboundTransfer.deviceId,
+            deviceName: route.name,
+            ipAddress: route.host,
+            port: route.port
+        )
         reporter.append("file-transfer outbound-complete name=\(sanitize(outboundName))")
+    }
+
+    private static func stableBonjourTargetDeviceId(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowered = trimmed.lowercased()
+        guard !lowered.hasPrefix("peer:"),
+              !lowered.hasPrefix("host:"),
+              !lowered.hasPrefix("bonjour:") else {
+            return nil
+        }
+        if lowered.hasPrefix("id:") {
+            return String(trimmed.dropFirst("id:".count))
+        }
+        return trimmed
     }
 
     private func makeSmokeTransferFile(fileName: String, contents: String) throws -> URL {
@@ -293,6 +332,214 @@ private final class LocalLanInteropHostCoordinator {
     }
 }
 
+private struct BonjourFileTransferRoute {
+    let name: String
+    let host: String
+    let port: Int
+    let deviceId: String?
+    let platform: String?
+}
+
+@MainActor
+private final class BonjourFileTransferRouteResolver: NSObject, @preconcurrency NetServiceBrowserDelegate, @preconcurrency NetServiceDelegate {
+    private let serviceType = "_skybridge-transfer._tcp."
+    private let serviceDomain = "local."
+    private var browser: NetServiceBrowser?
+    private var services: [NetService] = []
+    private var candidates: [BonjourFileTransferRoute] = []
+    private var continuation: CheckedContinuation<BonjourFileTransferRoute?, Never>?
+    private var targetDeviceId: String?
+    private var preferredName: String?
+    private var finished = false
+
+    func resolve(
+        targetDeviceId: String?,
+        preferredName: String?,
+        timeoutSeconds: TimeInterval
+    ) async -> BonjourFileTransferRoute? {
+        self.targetDeviceId = Self.normalizedDeviceId(targetDeviceId)
+        self.preferredName = preferredName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .nilIfEmpty
+
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            let browser = NetServiceBrowser()
+            self.browser = browser
+            browser.delegate = self
+            browser.searchForServices(ofType: serviceType, inDomain: serviceDomain)
+
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(max(0.5, timeoutSeconds)))
+                guard let self else { return }
+                self.finish(with: self.bestCandidate())
+            }
+        }
+    }
+
+    func netServiceBrowser(
+        _ browser: NetServiceBrowser,
+        didFind service: NetService,
+        moreComing: Bool
+    ) {
+        services.append(service)
+        service.delegate = self
+        service.schedule(in: .main, forMode: .common)
+        service.resolve(withTimeout: 2.0)
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let route = makeRoute(from: sender) else { return }
+        candidates.append(route)
+
+        if let targetDeviceId,
+           let candidateDeviceId = Self.normalizedDeviceId(route.deviceId),
+           candidateDeviceId == targetDeviceId {
+            finish(with: route)
+        }
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        sender.stop()
+    }
+
+    private func makeRoute(from service: NetService) -> BonjourFileTransferRoute? {
+        let txt = service.txtRecordData().map(Self.parseTXTRecord(_:)) ?? [:]
+        let advertisedPort = Self.intValue(
+            txt["fileTransferPort"] ?? txt["transferPort"] ?? txt["file_transfer_port"] ?? txt["port"]
+        )
+        let port = service.port > 0 ? service.port : advertisedPort
+        guard (1...65535).contains(port) else { return nil }
+
+        let host = service.hostName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+            ?? Self.firstUsableAddress(from: service.addresses)
+        guard let host, !host.isEmpty else { return nil }
+
+        let deviceId = txt["deviceId"] ?? txt["id"] ?? txt["deviceID"] ?? txt["device_id"]
+        let name = txt["name"] ?? txt["device"] ?? service.name
+        let platform = txt["platform"] ?? txt["os"]
+        return BonjourFileTransferRoute(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? service.name,
+            host: host,
+            port: port,
+            deviceId: deviceId?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            platform: platform?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        )
+    }
+
+    private func bestCandidate() -> BonjourFileTransferRoute? {
+        if let targetDeviceId {
+            return candidates.first { candidate in
+                Self.normalizedDeviceId(candidate.deviceId) == targetDeviceId
+            }
+        }
+
+        if let preferredName {
+            let named = candidates.filter { route in
+                route.name.lowercased().contains(preferredName)
+            }
+            if named.count == 1 {
+                return named.first
+            }
+        }
+
+        let iOSCandidates = candidates.filter { route in
+            route.platform?.lowercased().contains("ios") == true
+                || route.name.lowercased().contains("ipad")
+                || route.name.lowercased().contains("iphone")
+        }
+        if iOSCandidates.count == 1 {
+            return iOSCandidates.first
+        }
+
+        return candidates.count == 1 ? candidates.first : nil
+    }
+
+    private func finish(with route: BonjourFileTransferRoute?) {
+        guard !finished else { return }
+        finished = true
+        browser?.stop()
+        browser?.delegate = nil
+        browser = nil
+        for service in services {
+            service.stop()
+            service.delegate = nil
+            service.remove(from: .main, forMode: .common)
+        }
+        services.removeAll()
+        continuation?.resume(returning: route)
+        continuation = nil
+    }
+
+    private static func parseTXTRecord(_ data: Data) -> [String: String] {
+        NetService.dictionary(fromTXTRecord: data).reduce(into: [:]) { result, pair in
+            guard let value = String(data: pair.value, encoding: .utf8) else { return }
+            result[pair.key] = value
+        }
+    }
+
+    private static func normalizedDeviceId(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !value.isEmpty else {
+            return nil
+        }
+        if value.hasPrefix("id:") {
+            value.removeFirst("id:".count)
+        }
+        return value
+    }
+
+    private static func intValue(_ raw: String?) -> Int {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines) else { return 0 }
+        return Int(raw) ?? 0
+    }
+
+    private static func firstUsableAddress(from addresses: [Data]?) -> String? {
+        guard let addresses else { return nil }
+        var linkLocalIPv6: String?
+        for data in addresses {
+            let address = extractAddress(from: data)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !address.isEmpty, address != "未知地址" else { continue }
+            let lower = address.lowercased()
+            if lower.contains("."),
+               !lower.hasPrefix("127."),
+               !lower.hasPrefix("169.254") {
+                return address
+            }
+            if lower.hasPrefix("fe80:"), lower.contains("%"), linkLocalIPv6 == nil {
+                linkLocalIPv6 = address
+            } else if lower.contains(":"),
+                      !lower.hasPrefix("fe80:") {
+                return address
+            }
+        }
+        return linkLocalIPv6
+    }
+
+    private static func extractAddress(from data: Data) -> String {
+        data.withUnsafeBytes { bytes in
+            guard bytes.count >= MemoryLayout<sockaddr>.size,
+                  let sockaddr = bytes.bindMemory(to: sockaddr.self).baseAddress else {
+                return ""
+            }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let length = socklen_t(sockaddr.pointee.sa_len)
+            let flags = NI_NUMERICHOST
+            guard getnameinfo(sockaddr, length, &host, socklen_t(host.count), nil, 0, flags) == 0 else {
+                return ""
+            }
+            let data = Data(bytes: host, count: host.count)
+            let trimmed = data.prefix { $0 != 0 }
+            return String(decoding: trimmed, as: UTF8.self)
+        }
+    }
+}
+
 private enum HostStartupError: LocalizedError {
     case initializationTimedOut(String)
 
@@ -312,7 +559,9 @@ struct LocalLanInteropHostMain {
             ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ENABLE_COMPATIBILITY_MODE"] == "1"
             || ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
         if enableCompatibilityBootstrap {
-            UserDefaults.standard.set(true, forKey: "Settings.EnableCompatibilityMode")
+            var smokeDefaults = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+            smokeDefaults["Settings.EnableCompatibilityMode"] = true
+            UserDefaults.standard.setVolatileDomain(smokeDefaults, forName: UserDefaults.argumentDomain)
         }
         let coordinator = await MainActor.run { LocalLanInteropHostCoordinator() }
 

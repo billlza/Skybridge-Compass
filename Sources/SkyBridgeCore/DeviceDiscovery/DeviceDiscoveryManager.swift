@@ -31,6 +31,7 @@ public class DeviceDiscoveryManager: BaseManager {
  // 服务类型瘦身 - 默认仅SkyBridge；兼容/调试模式可扩展
     private let allServiceTypes = [
         "_skybridge._tcp",
+        "_skybridge-transfer._tcp",
         "_companion-link._tcp",
         "_airplay._tcp",
         "_rdlink._tcp",
@@ -39,7 +40,7 @@ public class DeviceDiscoveryManager: BaseManager {
     public var enableCompatibilityMode: Bool = false
     public var enableCompanionLink: Bool = false
     private func effectiveServiceTypes() -> [String] {
-        var base = ["_skybridge._tcp"]
+        var base = ["_skybridge._tcp", "_skybridge-transfer._tcp"]
         if enableCompanionLink { base.append("_companion-link._tcp") }
         if enableCompatibilityMode {
             base.append(contentsOf: allServiceTypes.filter { !$0.hasPrefix("_skybridge") && !$0.hasPrefix("_companion-link") })
@@ -562,10 +563,17 @@ public class DeviceDiscoveryManager: BaseManager {
                     return !cleanExistingName.isEmpty && cleanExistingName == cleanNewName
                 }) {
                     var existingDevice = self.discoveredDevices[existingIndex]
+                    var didChange = false
                     if !existingDevice.services.contains(serviceType) {
                         existingDevice.services.append(serviceType)
                         existingDevice.portMap[serviceType] = port
- // 合并后重新判定本机（异步）
+                        didChange = true
+                    } else if (existingDevice.portMap[serviceType] ?? 0) <= 0, port > 0 {
+                        existingDevice.portMap[serviceType] = port
+                        didChange = true
+                    }
+                    if didChange {
+	// 合并后重新判定本机（异步）
                         Task { [weak self] in
                             guard let self = self else { return }
                             var updated = existingDevice
@@ -1599,6 +1607,9 @@ public class DeviceDiscoveryManager: BaseManager {
             if netService.port > 0 {
                 port = netService.port
             }
+            if port == 0, let advertisedPort = Self.DDM_ExtractAdvertisedServicePort(result) {
+                port = advertisedPort
+            }
 
             if let addresses = netService.addresses, (ipv4 == nil || ipv6 == nil) {
                 for addressData in addresses {
@@ -1749,6 +1760,21 @@ nonisolated private static func DDM_ExtractBonjourDeviceInfo(_ result: NWBrowser
     return BonjourTXTParser.extractDeviceInfo(txtRecord)
 }
 
+nonisolated private static func DDM_ExtractAdvertisedServicePort(_ result: NWBrowser.Result) -> Int? {
+    guard case .bonjour(let txtRecord) = result.metadata else { return nil }
+    let dict = BonjourTXTParser.parse(txtRecord)
+    let raw = dict["fileTransferPort"]
+        ?? dict["transferPort"]
+        ?? dict["file_transfer_port"]
+        ?? dict["port"]
+    guard let raw,
+          let port = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+          (1...65535).contains(port) else {
+        return nil
+    }
+    return port
+}
+
     nonisolated private static func DDM_GetIPAddressesForInterface(_ interfaceName: String) -> (ipv4: String?, ipv6: String?)? {
     var ifaddr: UnsafeMutablePointer<ifaddrs>?
     guard getifaddrs(&ifaddr) == 0 else { return nil }
@@ -1826,6 +1852,7 @@ nonisolated private static func DDM_ExtractNetworkInfo(_ result: NWBrowser.Resul
         let netService = NetService(domain: domain.isEmpty ? "local." : domain, type: type, name: name)
         netService.resolve(withTimeout: 1.0)
         if netService.port > 0 { port = netService.port }
+        if port == 0, let advertisedPort = DDM_ExtractAdvertisedServicePort(result) { port = advertisedPort }
         if let addresses = netService.addresses, (ipv4 == nil || ipv6 == nil) {
             for data in addresses {
                 let addr = DDM_ExtractIPAddress(from: data)

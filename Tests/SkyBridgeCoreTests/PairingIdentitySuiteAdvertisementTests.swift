@@ -11,7 +11,7 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         )
 
         let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: provider)
-        XCTAssertEqual(suites.map(\.wireId), [0x0001, 0x0101])
+        XCTAssertEqual(suites.map(\.wireId), [0x0001, 0x0101, 0x0102])
     }
 
     func testNativeTierAddsInteropSuitesWhenActiveSuiteIsMLKEM() {
@@ -45,6 +45,42 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
 
         let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: provider)
         XCTAssertTrue(suites.isEmpty)
+    }
+
+    func testPairingIdentityCarriesCanonicalProtocolIdentityFingerprints() throws {
+        let ed25519PublicKey = Data(repeating: 0x11, count: 32)
+        let mlDSAPublicKey = Data(repeating: 0x22, count: 1952)
+        let protocolKeys = [
+            AppMessage.ProtocolIdentityPublicKeyInfo(
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                publicKey: ed25519PublicKey
+            ),
+            AppMessage.ProtocolIdentityPublicKeyInfo(
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+                publicKey: mlDSAPublicKey
+            )
+        ]
+
+        let payload = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "peer-1",
+            kemPublicKeys: [
+                KEMPublicKeyInfo(suiteWireId: CryptoSuite.xwingMLDSA.wireId, publicKey: Data(repeating: 0x33, count: 32))
+            ],
+            protocolIdentityPublicKeys: protocolKeys
+        )
+        let decoded = try JSONDecoder().decode(
+            AppMessage.PairingIdentityExchangePayload.self,
+            from: try JSONEncoder().encode(payload)
+        )
+
+        let fingerprints = Set((decoded.protocolIdentityPublicKeys ?? []).compactMap(\.authoritativeFingerprint))
+        let expected = Set([
+            ProtocolIdentityPublicKeys(protocolPublicKey: ed25519PublicKey, protocolAlgorithm: .ed25519)
+                .authoritativeFingerprint,
+            ProtocolIdentityPublicKeys(protocolPublicKey: mlDSAPublicKey, protocolAlgorithm: .mlDSA65)
+                .authoritativeFingerprint
+        ])
+        XCTAssertEqual(fingerprints, expected)
     }
 }
 

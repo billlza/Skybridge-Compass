@@ -11,4 +11,31 @@ final class USBInterfaceDescriptorTests: XCTestCase {
         let cls = USBCConnectionManager.parseInterfaceClass(from: cfg)
         XCTAssertEqual(cls, 1)
     }
+
+    func testExternalAccessoryGateIsClosedUnderUnitTests() {
+        XCTAssertFalse(USBCConnectionManager.canUseExternalAccessory)
+    }
+
+    func testGenericDiscoveryDoesNotTriggerMFiScan() throws {
+        let source = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift")
+        XCTAssertFalse(source.contains("scanForMFiDevices()"))
+    }
+
+    func testUSBManagementRefreshDoesNotTriggerMFiScan() throws {
+        let source = try readSource("Sources/SkyBridgeCompassApp/Views/USBDeviceManagementView.swift")
+        XCTAssertFalse(source.contains("scanForMFiDevices()"))
+    }
+
+    func testExternalAccessoryManagerIsLazyOnly() throws {
+        let source = try readSource("Sources/SkyBridgeCore/Connection/USBCConnectionManager.swift")
+        let occurrences = source.components(separatedBy: "EAAccessoryManager.shared()").count - 1
+        XCTAssertEqual(occurrences, 1)
+        XCTAssertTrue(source.contains("private func ensureAccessoryManager() -> EAAccessoryManager?"))
+    }
+
+    private func readSource(_ relativePath: String) throws -> String {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let url = root.appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
 }

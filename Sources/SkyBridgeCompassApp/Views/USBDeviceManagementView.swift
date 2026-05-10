@@ -164,10 +164,7 @@ struct USBDeviceManagementView: View {
         isScanning = true
         
         Task {
- // 扫描MFi设备
-            await usbManager.scanForMFiDevices()
-            
- // 扫描USB设备
+ // 扫描USB设备。MFi/ExternalAccessory 扫描必须走显式授权路径，避免刷新页面时隐式触发系统隐私框架。
             await usbManager.scanForUSBDevices()
             
  // 获取设备列表
