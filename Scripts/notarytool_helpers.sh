@@ -99,7 +99,26 @@ skybridge_notarytool_submit_and_wait() {
     cmd+=("${extra_args[@]}")
   fi
 
-  "${cmd[@]}"
+  local output=""
+  local exit_code=0
+  if output="$("${cmd[@]}" 2>&1)"; then
+    printf '%s\n' "${output}"
+    return 0
+  fi
+  exit_code=$?
+  printf '%s\n' "${output}" >&2
+
+  if [[ "${output}" == *"abortedUpload"* || "${output}" == *"HTTPClientError.deadlineExceeded"* ]]; then
+    echo "notarytool upload timed out; retrying once with --no-s3-acceleration" >&2
+    cmd=(xcrun notarytool submit "${artifact}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" --wait --no-s3-acceleration)
+    if ((${#extra_args[@]} > 0)); then
+      cmd+=("${extra_args[@]}")
+    fi
+    "${cmd[@]}"
+    return $?
+  fi
+
+  return "${exit_code}"
 }
 
 skybridge_staple_artifact() {

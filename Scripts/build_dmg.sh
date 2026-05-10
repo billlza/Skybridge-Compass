@@ -214,6 +214,89 @@ verify_app_runtime_layout() {
     fi
 }
 
+verify_app_embedded_privacy_info_plist() {
+    local app_bundle="$1"
+    local app_info_plist="$app_bundle/Contents/Info.plist"
+    local app_bin="$app_bundle/Contents/MacOS/SkyBridgeCompassApp"
+    local embedded_info_plist
+
+    embedded_info_plist="$(mktemp "${TMPDIR:-/tmp}/skybridge-embedded-info.XXXXXX.plist")"
+    python3 - "$app_bin" "$embedded_info_plist" "$app_info_plist" <<'PY'
+import plistlib
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+app_bin = Path(sys.argv[1])
+embedded_path = Path(sys.argv[2])
+app_info_path = Path(sys.argv[3])
+
+required_keys = [
+    "NSBluetoothAlwaysUsageDescription",
+    "NSLocalNetworkUsageDescription",
+    "NSCameraUsageDescription",
+    "NSMicrophoneUsageDescription",
+    "NSAudioCaptureUsageDescription",
+    "NSLocationUsageDescription",
+    "NSLocationWhenInUseUsageDescription",
+    "NSUSBUsageDescription",
+]
+
+proc = subprocess.run(
+    ["otool", "-X", "-s", "__TEXT", "__info_plist", str(app_bin)],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+if proc.returncode != 0:
+    print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
+    raise SystemExit(1)
+
+section_bytes = bytearray()
+for line in proc.stdout.splitlines():
+    parts = line.split()
+    if len(parts) < 2:
+        continue
+    for word in parts[1:]:
+        if re.fullmatch(r"[0-9a-fA-F]{8}", word):
+            section_bytes.extend(bytes.fromhex(word)[::-1])
+
+payload = bytes(section_bytes).rstrip(b"\x00")
+if not payload:
+    print("missing __TEXT,__info_plist section", file=sys.stderr)
+    raise SystemExit(1)
+
+start = payload.find(b"<?xml")
+if start == -1:
+    start = payload.find(b"<plist")
+if start > 0:
+    payload = payload[start:]
+
+embedded = plistlib.loads(payload)
+with app_info_path.open("rb") as fh:
+    app_info = plistlib.load(fh)
+
+for key in required_keys:
+    app_value = app_info.get(key)
+    embedded_value = embedded.get(key)
+    if not isinstance(embedded_value, str) or not embedded_value.strip():
+        print(f"embedded Info.plist missing required privacy usage description: {key}", file=sys.stderr)
+        raise SystemExit(1)
+    if app_value != embedded_value:
+        print(
+            f"embedded Info.plist privacy usage description mismatch for {key}: "
+            f"bundle={app_value!r} embedded={embedded_value!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+embedded_path.write_bytes(payload)
+PY
+    rm -f "$embedded_info_plist"
+    log_info "隐私用途说明校验通过: 主二进制嵌入 Info.plist 与 App Bundle 保持一致"
+}
+
 verify_app_release_features() {
     local app_bundle="$1"
     local info_plist="$app_bundle/Contents/Info.plist"
@@ -462,6 +545,7 @@ fi
 
 log_success "App Bundle 已就绪: $APP_BUNDLE"
 verify_app_runtime_layout "$APP_BUNDLE"
+verify_app_embedded_privacy_info_plist "$APP_BUNDLE"
 verify_app_release_features "$APP_BUNDLE"
 
 if [[ "$SKIP_SIGN" == false ]]; then
@@ -485,6 +569,7 @@ else
 fi
 
 verify_app_runtime_layout "$APP_BUNDLE"
+verify_app_embedded_privacy_info_plist "$APP_BUNDLE"
 verify_app_release_features "$APP_BUNDLE"
 
 log_step "步骤 4: 创建 DMG"

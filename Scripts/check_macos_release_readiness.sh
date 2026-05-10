@@ -326,6 +326,107 @@ if expected_value != actual_value:
 PY
 }
 
+extract_embedded_info_plist() {
+  local executable_path="$1"
+  local output_path="$2"
+
+  python3 - "${executable_path}" "${output_path}" <<'PY'
+import plistlib
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+executable_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+
+proc = subprocess.run(
+    ["otool", "-X", "-s", "__TEXT", "__info_plist", str(executable_path)],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+if proc.returncode != 0:
+    print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
+    raise SystemExit(1)
+
+hex_bytes = bytearray()
+for line in proc.stdout.splitlines():
+    parts = line.split()
+    if len(parts) < 2:
+        continue
+    for word in parts[1:]:
+        if not re.fullmatch(r"[0-9a-fA-F]{8}", word):
+            continue
+        # otool prints 32-bit words in target byte order; reverse each word to
+        # reconstruct the section bytes.
+        raw = bytes.fromhex(word)
+        hex_bytes.extend(raw[::-1])
+
+payload = bytes(hex_bytes).rstrip(b"\x00")
+if not payload:
+    print("missing __TEXT,__info_plist section", file=sys.stderr)
+    raise SystemExit(1)
+
+start = payload.find(b"<?xml")
+if start == -1:
+    start = payload.find(b"<plist")
+if start > 0:
+    payload = payload[start:]
+
+try:
+    plistlib.loads(payload)
+except Exception as exc:
+    print(f"embedded __TEXT,__info_plist is not a valid plist: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+output_path.write_bytes(payload)
+PY
+}
+
+compare_required_privacy_usage_descriptions() {
+  local expected_info_plist="$1"
+  local actual_info_plist="$2"
+  local label="$3"
+
+  python3 - "${expected_info_plist}" "${actual_info_plist}" "${label}" <<'PY'
+import plistlib
+import sys
+
+expected_path, actual_path, label = sys.argv[1:]
+
+required_keys = [
+    "NSBluetoothAlwaysUsageDescription",
+    "NSLocalNetworkUsageDescription",
+    "NSCameraUsageDescription",
+    "NSMicrophoneUsageDescription",
+    "NSAudioCaptureUsageDescription",
+    "NSLocationUsageDescription",
+    "NSLocationWhenInUseUsageDescription",
+    "NSUSBUsageDescription",
+]
+
+with open(expected_path, "rb") as fh:
+    expected = plistlib.load(fh)
+with open(actual_path, "rb") as fh:
+    actual = plistlib.load(fh)
+
+for key in required_keys:
+    expected_value = expected.get(key)
+    actual_value = actual.get(key)
+    if not isinstance(actual_value, str) or not actual_value.strip():
+        print(f"{label} missing required privacy usage description: {key}", file=sys.stderr)
+        raise SystemExit(1)
+    if expected_value != actual_value:
+        print(
+            f"{label} privacy usage description mismatch for {key}: "
+            f"expected={expected_value!r} actual={actual_value!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+PY
+}
+
 compare_app_group_alignment() {
   local app_entitlements_path="$1"
   local widget_entitlements_path="$2"
@@ -541,6 +642,7 @@ codesign --verify --strict --verbose=2 "${APP_HELPER_BIN_PATH}" >/dev/null
 SIGNED_ENTITLEMENTS_PATH="${TMP_DIR}/signed-entitlements.plist"
 EXPECTED_ENTITLEMENTS_PATH="${TMP_DIR}/expected-entitlements.plist"
 EXPECTED_INFO_PLIST="${TMP_DIR}/expected-info.plist"
+EMBEDDED_APP_INFO_PLIST="${TMP_DIR}/embedded-app-info.plist"
 WIDGET_INFO_PLIST="${WIDGET_PATH}/Contents/Info.plist"
 WIDGET_PROFILE_PATH="${WIDGET_PATH}/Contents/embedded.provisionprofile"
 SIGNED_WIDGET_ENTITLEMENTS_PATH="${TMP_DIR}/signed-widget-entitlements.plist"
@@ -585,6 +687,15 @@ compare_native_flag_alignment "${EXPECTED_INFO_PLIST}" "${APP_INFO_PLIST}" \
 
 compare_apple_sign_in_mode_alignment "${EXPECTED_INFO_PLIST}" "${APP_INFO_PLIST}" \
   || fail "app Info.plist SKYBRIDGE_APPLE_SIGN_IN_MODE drifted from the effective signed entitlements"
+
+compare_required_privacy_usage_descriptions "${SOURCE_INFO_PLIST}" "${APP_INFO_PLIST}" "app Info.plist" \
+  || fail "app Info.plist privacy usage descriptions drifted from the source Info.plist"
+
+extract_embedded_info_plist "${APP_EXECUTABLE_PATH}" "${EMBEDDED_APP_INFO_PLIST}" \
+  || fail "main executable is missing an embedded __TEXT,__info_plist section"
+
+compare_required_privacy_usage_descriptions "${APP_INFO_PLIST}" "${EMBEDDED_APP_INFO_PLIST}" "main executable embedded Info.plist" \
+  || fail "main executable embedded Info.plist privacy usage descriptions drifted from the app bundle Info.plist"
 
 APP_FEATURE_APPLE_SIGN_IN="$(plist_read_value "${APP_INFO_PLIST}" "SKYBRIDGE_ENABLE_APPLE_SIGN_IN" 2>/dev/null || true)"
 APP_NATIVE_APPLE_SIGN_IN="$(plist_read_value "${APP_INFO_PLIST}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 2>/dev/null || true)"
