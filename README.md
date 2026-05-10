@@ -164,6 +164,12 @@ cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
 - `skybridge doctor`
+- `skybridge doctor webrtc-media --artifact-dir <dir> --latest`
+- `skybridge smoke local-p2p`
+- `skybridge smoke local-webrtc`
+- `skybridge smoke real-device --real-device-id <udid>`
+- `skybridge smoke fault-detection`
+- `skybridge smoke suite --profile <quick|full|local-p2p|local-webrtc|real-device|release|all>`
 - `skybridge logs tail`
 - `skybridge metrics`
 - `skybridge version`

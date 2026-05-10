@@ -38,6 +38,13 @@ struct LocalWebRTCSmokeHost {
         }
 
         let expectsPQCRekey = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
+        if expectsPQCRekey {
+            var smokeDefaults = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+            smokeDefaults["pqc_allow_classic_fallback"] = true
+            UserDefaults.standard.setVolatileDomain(smokeDefaults, forName: UserDefaults.argumentDomain)
+        }
+        let allowsClassicMediaSuccess =
+            ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ALLOW_CLASSIC_MEDIA_SUCCESS"] == "1"
         let requiresStreamEvidence = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_STREAM"] == "1"
         let requiresDirectPath = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_DIRECT"] == "1"
         let holdAfterSuccessSeconds = Double(ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS"] ?? "") ?? 0
@@ -82,7 +89,7 @@ struct LocalWebRTCSmokeHost {
 
                 let suiteName = negotiatedSuite.uppercased()
                 let isClassicBootstrap = suiteName == "X25519" || suiteName == "X25519-ED25519"
-                if !reportedSuccess && (!expectsPQCRekey || !isClassicBootstrap) {
+                if !reportedSuccess && (!expectsPQCRekey || !isClassicBootstrap || allowsClassicMediaSuccess) {
                     let evidence = smokeEvidence(statusURL: statusURL())
                     let streamSatisfied = !requiresStreamEvidence || evidence.hasStream
                     let directSatisfied = !requiresDirectPath || evidence.hasDirectPath
@@ -188,6 +195,7 @@ struct LocalWebRTCSmokeHost {
     private static func configureAuthContext(reporter: SmokeStatusReporter) async throws {
         reporter.append("auth-session-load-start")
         let session = try await currentAuthSession(reporter: reporter)
+        try validateRegistrySmokeAuthSessionIfNeeded(session, reporter: reporter)
         reporter.append("auth-session-loaded")
         if shouldConfigureSupabaseForSmokeAuth() {
             if let config = loadSupabaseConfig(),
@@ -471,6 +479,27 @@ struct LocalWebRTCSmokeHost {
         }
     }
 
+    private static func validateRegistrySmokeAuthSessionIfNeeded(
+        _ session: AuthSession,
+        reporter: SmokeStatusReporter
+    ) throws {
+        guard shouldConfigureSupabaseForSmokeAuth() else {
+            reporter.append("auth-registry-jwt-validation-skipped")
+            return
+        }
+        if let error = smokeAuthJWTValidationError(session.accessToken) {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "registry smoke auth requires a usable signed Supabase JWT: \(error)"
+                ]
+            )
+        }
+        reporter.append("auth-registry-jwt-validated")
+    }
+
     private static func refreshSupabaseSession(
         refreshToken: String,
         previous: AuthSession
@@ -529,10 +558,51 @@ struct LocalWebRTCSmokeHost {
         return expiryDate.timeIntervalSinceNow <= skewSeconds
     }
 
+    private static func smokeAuthJWTValidationError(
+        _ token: String,
+        minimumLifetimeSeconds: TimeInterval = 300
+    ) -> String? {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else {
+            return "expected 3 JWT segments, found \(parts.count)"
+        }
+        if let emptyIndex = parts.firstIndex(where: { $0.isEmpty }) {
+            let labels = ["header", "payload", "signature"]
+            return "\(labels[min(emptyIndex, labels.count - 1)]) segment is empty"
+        }
+        guard let header = decodeJWTJSONObject(parts[0]) else {
+            return "JWT header is not valid base64url JSON"
+        }
+        guard let payload = decodeJWTJSONObject(parts[1]) else {
+            return "JWT payload is not valid base64url JSON"
+        }
+        guard let alg = (header["alg"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !alg.isEmpty else {
+            return "JWT header is missing alg"
+        }
+        if alg.lowercased() == "none" {
+            return "JWT header alg=none is a compatibility smoke token, not a signed Supabase JWT"
+        }
+        guard let expiration = numericJWTClaim(payload["exp"]) else {
+            return "JWT payload is missing numeric exp"
+        }
+        let secondsRemaining = expiration - Date().timeIntervalSince1970
+        if secondsRemaining <= minimumLifetimeSeconds {
+            return "JWT expires too soon for registry smoke (\(Int(secondsRemaining))s remaining)"
+        }
+        return nil
+    }
+
     private static func decodeJWTClaims(_ token: String) -> [String: Any]? {
-        let parts = token.split(separator: ".")
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count >= 2 else { return nil }
-        var base64 = String(parts[1])
+        return decodeJWTJSONObject(parts[1])
+    }
+
+    private static func decodeJWTJSONObject(_ segment: Substring) -> [String: Any]? {
+        var base64 = String(segment)
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
         let remainder = base64.count % 4
@@ -541,6 +611,22 @@ struct LocalWebRTCSmokeHost {
         }
         guard let data = Data(base64Encoded: base64) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func numericJWTClaim(_ value: Any?) -> TimeInterval? {
+        if value is Bool {
+            return nil
+        }
+        if let value = value as? TimeInterval {
+            return value
+        }
+        if let value = value as? Int {
+            return TimeInterval(value)
+        }
+        if let value = value as? NSNumber {
+            return value.doubleValue
+        }
+        return nil
     }
 
     private static func deriveTenantIdentifier(accessToken: String) -> String? {
@@ -656,9 +742,32 @@ struct LocalWebRTCSmokeHost {
         }
         let hasStream = contents.contains("stream-format ")
             || contents.contains("stream-stats ")
+            || hasNativeVideoRTPEvidence(in: contents)
         let hasDirectPath = contents.contains("stream-path ")
             && contents.contains("path=direct")
         return (hasStream, hasDirectPath)
+    }
+
+    private static func hasNativeVideoRTPEvidence(in contents: String) -> Bool {
+        contents.split(separator: "\n").contains { line in
+            guard line.contains("native-video-tx "),
+                  line.contains("state=rtpFlowing") else {
+                return false
+            }
+            return positiveMetric("submitted", in: line)
+                && (positiveMetric("framesSent", in: line)
+                    || positiveMetric("packetsSent", in: line)
+                    || positiveMetric("bytesSent", in: line))
+        }
+    }
+
+    private static func positiveMetric(_ key: String, in line: Substring) -> Bool {
+        let prefix = "\(key)="
+        guard let range = line.range(of: prefix) else { return false }
+        let suffix = line[range.upperBound...]
+        let digits = suffix.prefix { $0 >= "0" && $0 <= "9" }
+        guard let value = Int(digits) else { return false }
+        return value > 0
     }
 }
 
