@@ -205,6 +205,8 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
                 break
             case .dropped(let reason, _):
                 XCTFail("Unexpected drop: \(reason)")
+            case .suppressed(let frameId, let reason):
+                XCTFail("Unexpected suppression: frameId=\(frameId) reason=\(reason)")
             }
         }
 
@@ -232,6 +234,14 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
             XCTAssertEqual(reason, "missing-first-chunk")
         } else {
             XCTFail("Expected missing-first-chunk drop")
+        }
+
+        let orphan = try XCTUnwrap(CrossNetworkWebRTCManager.ScreenChunkedPayloadEnvelope.decode(chunks[2]))
+        if case .suppressed(let frameId, let reason) = reassembler.append(orphan, now: Date()) {
+            XCTAssertEqual(frameId, 7)
+            XCTAssertEqual(reason, "missing-first-chunk")
+        } else {
+            XCTFail("Expected same-frame orphan chunk to be suppressed")
         }
 
         let nextFrame = try makeSBC2Chunks(payload: padded, frameId: 8, maxChunkBytes: 64 * 1024)
@@ -278,6 +288,8 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
                 break
             case .dropped(let reason, _):
                 XCTFail("Unexpected replacement frame drop: \(reason)")
+            case .suppressed(let frameId, let reason):
+                XCTFail("Unexpected replacement suppression: frameId=\(frameId) reason=\(reason)")
             }
         }
 

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import SkyBridgeCore
 
@@ -13,6 +14,47 @@ struct WebRTCSessionConcurrencyBehaviorTests {
     func callbackDispatchPlanReflectsQueueAffinity() {
         #expect(WebRTCSession.callbackDispatchPlan(isOnStateQueue: true) == .asyncOffStateQueue)
         #expect(WebRTCSession.callbackDispatchPlan(isOnStateQueue: false) == .executeInline)
+    }
+
+    @Test("inbound callback dispatch keeps DataChannel chunks ordered per session")
+    func inboundCallbacksUseSessionSerialQueue() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let macSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCSession.swift"),
+            encoding: .utf8
+        )
+        let iosSource = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSession.swift"),
+            encoding: .utf8
+        )
+
+        #expect(macSource.contains("private let callbackQueue = DispatchQueue"))
+        #expect(macSource.contains("callbackQueue.async(execute: DispatchWorkItem(block: operation))"))
+        #expect(!macSource.contains("DispatchQueue.global(qos: .userInitiated).async"))
+        #expect(iosSource.contains("private let callbackQueue = DispatchQueue"))
+        #expect(iosSource.contains("callbackQueue.async(execute: DispatchWorkItem(block: operation))"))
+        #expect(!iosSource.contains("DispatchQueue.global(qos: .userInitiated).async"))
+    }
+
+    @Test("native screen submit can keep SCK raw timestamps separate from paced RTP timestamps")
+    func nativeScreenSubmitSeparatesRawAndPacedTimestamps() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let macSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCSession.swift"),
+            encoding: .utf8
+        )
+
+        #expect(macSource.contains("rawTimeStampNs: Int64"))
+        #expect(macSource.contains("preferredTimestampNs: Int64"))
+        #expect(macSource.contains("rawTimestampNs: rawTimeStampNs"))
+        #expect(macSource.contains("preferredTimestampNs: timeStampNs"))
+        #expect(macSource.contains("lastOutgoingNativeVideoRawTimestampDeltaNs = previousRaw.map"))
     }
 
     @Test("lifecycle guard 仅在连接匹配且 token 未失效时放行回调")

@@ -124,6 +124,112 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         XCTAssertTrue(source.contains("renderer-bound-no-native-frame"))
     }
 
+    func testVisibleNativeVideoPromotionIsDrivenByObservableMTLViewRenderFrame() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let rtcVideoViewBody = try sourceSlice(
+            from: "struct RemoteDesktopRTCVideoView: UIViewRepresentable",
+            to: "#endif",
+            in: source
+        )
+        let coordinatorBody = try sourceSlice(
+            from: "final class Coordinator: NSObject, RTCVideoViewDelegate",
+            to: "final class ObservableRTCMTLVideoView: RTCMTLVideoView",
+            in: rtcVideoViewBody
+        )
+
+        XCTAssertTrue(rtcVideoViewBody.contains("final class ObservableRTCMTLVideoView: RTCMTLVideoView"))
+        XCTAssertTrue(rtcVideoViewBody.contains("override func renderFrame(_ frame: RTCVideoFrame?)"))
+        XCTAssertTrue(rtcVideoViewBody.contains("super.renderFrame(frame)"))
+        XCTAssertTrue(rtcVideoViewBody.contains("guard let frame else { return }"))
+        XCTAssertTrue(rtcVideoViewBody.contains("minimumVisibleNativeRenderFrames = 1"))
+        XCTAssertTrue(rtcVideoViewBody.contains("nativeRenderEvidenceSource"))
+        XCTAssertTrue(rtcVideoViewBody.contains("currentRemoteVideoTrackRenderToken(trackId: track.trackId)"))
+        XCTAssertTrue(rtcVideoViewBody.contains("renderEpoch: renderEpoch"))
+        XCTAssertTrue(source.contains("acceptsRenderEvidence: nativeVideoOwnsSurface"))
+        XCTAssertTrue(rtcVideoViewBody.contains("acceptsNativeRenderEvidence"))
+        XCTAssertTrue(rtcVideoViewBody.contains("isOpaque = false"))
+        XCTAssertTrue(rtcVideoViewBody.contains("backgroundColor = .clear"))
+        XCTAssertTrue(rtcVideoViewBody.contains("DispatchQueue.main.async"))
+        XCTAssertTrue(rtcVideoViewBody.contains("lastRenderedFrameTimestampNs"))
+        XCTAssertTrue(rtcVideoViewBody.contains("resetVisibleRenderEvidence()"))
+        XCTAssertTrue(rtcVideoViewBody.contains("uiView.resetVisibleRenderEvidence()"))
+        XCTAssertTrue(rtcVideoViewBody.contains("isVisibleForNativeRenderEvidence"))
+        XCTAssertTrue(rtcVideoViewBody.contains("acceptsNativeRenderEvidence\n                && window != nil"))
+        XCTAssertTrue(rtcVideoViewBody.contains("window != nil"))
+        XCTAssertTrue(rtcVideoViewBody.contains("consecutiveVisibleRenderFrames"))
+        XCTAssertTrue(rtcVideoViewBody.contains("hasLoggedVisibleRenderEvidence"))
+        XCTAssertTrue(rtcVideoViewBody.contains("WebRTC native video render diagnostic"))
+        XCTAssertTrue(rtcVideoViewBody.contains("WebRTC native video visible render evidence"))
+        XCTAssertTrue(rtcVideoViewBody.contains("nativeRenderEvidenceSource=\\(Self.nativeRenderEvidenceSource)"))
+        XCTAssertTrue(rtcVideoViewBody.contains("onRenderedFrame?(size)"))
+        XCTAssertTrue(coordinatorBody.contains("VisibleRTCMTLVideoRenderer"))
+        XCTAssertTrue(coordinatorBody.contains("track.add(renderer)"))
+        XCTAssertTrue(coordinatorBody.contains("boundTrack.remove(boundRenderer)"))
+        XCTAssertTrue(coordinatorBody.contains("view.renderFrame(frame)"))
+        XCTAssertTrue(coordinatorBody.contains("view.setSize(size)"))
+        XCTAssertTrue(coordinatorBody.contains("renderer=forwarder"))
+        XCTAssertFalse(
+            coordinatorBody.contains("track.add(view)"),
+            "The visible RTCMTLVideoView is driven through a retained forwarding renderer so evidence is recorded on the same frame submitted to the view."
+        )
+        XCTAssertTrue(rtcVideoViewBody.contains("WebRTC native video UIView created and bound"))
+        XCTAssertFalse(
+            coordinatorBody.contains("track.add(self)"),
+            "The coordinator is only lifecycle glue; the retained forwarding renderer submits frames to the visible RTCMTLVideoView and lets the observable subclass record render evidence."
+        )
+
+        let didChangeBody = try sourceSlice(
+            from: "func videoView(_ videoView: any RTCVideoRenderer, didChangeVideoSize size: CGSize)",
+            to: "}\n    }\n\n    final class ObservableRTCMTLVideoView",
+            in: rtcVideoViewBody
+        )
+        XCTAssertFalse(
+            didChangeBody.contains("noteRemoteVideoTrackRenderedFrame"),
+            "A size callback is not proof that the visible RTCMTLVideoView rendered pixels."
+        )
+        let sizeEvidenceBody = try sourceSlice(
+            from: "func noteVideoViewSizeEvidence(_ size: CGSize)",
+            to: "func resetVisibleRenderEvidence()",
+            in: rtcVideoViewBody
+        )
+        XCTAssertFalse(
+            sizeEvidenceBody.contains("onRenderedFrame?(size)"),
+            "RTCVideoViewDelegate size evidence must not indirectly promote native video before renderFrame sees a real frame."
+        )
+    }
+
+    func testNativeVideoSurfaceFollowsActualCrossNetworkTransportState() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let viewSourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"
+        )
+        let managerSourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+        )
+        let viewSource = try String(contentsOf: viewSourceURL, encoding: .utf8)
+        let managerSource = try String(contentsOf: managerSourceURL, encoding: .utf8)
+        let nativeVideoPredicate = try sourceSlice(
+            from: "private var isUsingNativeCrossNetworkVideo: Bool",
+            to: "private var nativeCrossNetworkVideoTrack",
+            in: viewSource
+        )
+
+        XCTAssertTrue(nativeVideoPredicate.contains("remoteDesktopManager.isUsingCrossNetworkTransport"))
+        XCTAssertFalse(nativeVideoPredicate.contains("connection.device.capabilities.contains"))
+        XCTAssertFalse(nativeVideoPredicate.contains("advertisedCapabilities.contains"))
+        XCTAssertTrue(managerSource.contains("@Published public private(set) var isUsingCrossNetworkTransport = false"))
+        XCTAssertTrue(managerSource.contains("activeTransportMode = .crossNetwork\n                isUsingCrossNetworkTransport = true"))
+        XCTAssertTrue(managerSource.contains("activeTransportMode = .lan\n            isUsingCrossNetworkTransport = false"))
+    }
+
     private func makeFrame(index: Int) throws -> DisplaySampleBufferFrame {
         let pixelBuffer = try makePixelBuffer()
 
@@ -191,6 +297,13 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         }
         return pixelBuffer
     }
+
+    private func sourceSlice(from startMarker: String, to endMarker: String, in source: String) throws -> String {
+        let start = try XCTUnwrap(source.range(of: startMarker)?.lowerBound)
+        let suffix = source[start...]
+        let end = try XCTUnwrap(suffix.range(of: endMarker)?.lowerBound)
+        return String(suffix[..<end])
+    }
 }
 
 @available(iOS 17.0, *)
@@ -248,12 +361,16 @@ final class RemoteDesktopNativePromotionTests: XCTestCase {
     }
 
     func testActualNativeRenderEvidenceRejectsPacketAndFallbackInference() {
-        XCTAssertTrue(CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("heartbeat-renderer"))
         XCTAssertTrue(CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("rtc-mtl-video-view"))
-        XCTAssertTrue(CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-stats"))
 
         XCTAssertFalse(
             CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("fallback-screen-data-confirmed")
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("heartbeat-renderer")
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-stats")
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-first-packet")

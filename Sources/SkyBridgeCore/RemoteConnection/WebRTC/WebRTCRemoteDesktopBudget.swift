@@ -14,6 +14,7 @@ enum WebRTCRemoteDesktopBudgetSelector {
         longEdge: Int,
         lowLatencyMode: Bool,
         codec: RemoteFrameType = .bgra,
+        nativeVideoTrackEnabled: Bool = false,
         enableHardwareAcceleration: Bool = true,
         enableAppleSiliconOptimization: Bool = true,
         isAppleSilicon: Bool = false
@@ -58,15 +59,32 @@ enum WebRTCRemoteDesktopBudgetSelector {
                 baseReason = "direct-hevc"
             }
         case .relay:
-            if longEdge >= 5120 {
-                fpsCap = 8
-            } else if longEdge >= 3840 {
-                fpsCap = 12
+            if nativeVideoTrackEnabled, codec != .bgra {
+                if longEdge >= 5120 {
+                    fpsCap = isAppleSilicon && enableHardwareAcceleration && enableAppleSiliconOptimization ? 60 : 45
+                } else if longEdge >= 3840 {
+                    fpsCap = lowLatencyMode && isAppleSilicon && enableHardwareAcceleration
+                        ? 60
+                        : (lowLatencyMode ? 45 : 30)
+                } else {
+                    fpsCap = lowLatencyMode ? 60 : 45
+                }
+                bufferCap = codec == .hevc ? 1_536_000 : 1_280_000
+                baseReason = "relay-native-rtp"
             } else {
-                fpsCap = 15
+                if longEdge >= 5120 {
+                    fpsCap = 8
+                } else if longEdge >= 3840 {
+                    fpsCap = 12
+                } else {
+                    fpsCap = codec == .bgra ? 12 : 15
+                }
+                let useDegradedFallbackBudget = nativeVideoTrackEnabled && codec == .bgra
+                bufferCap = useDegradedFallbackBudget
+                    ? UInt64(WebRTCDegradedFallbackJPEGProfile.maxTransportFrameBytes)
+                    : 384_000
+                baseReason = useDegradedFallbackBudget ? "relay-degraded-emergency-jpeg" : "relay-conservative"
             }
-            bufferCap = 384_000
-            baseReason = "relay-conservative"
         case .unknown:
             switch codec {
             case .bgra:
@@ -108,7 +126,7 @@ enum WebRTCRemoteDesktopBudgetSelector {
         case .fair:
             switch transportPath {
             case .relay:
-                fpsCap = min(fpsCap, 10)
+                fpsCap = min(fpsCap, nativeVideoTrackEnabled && codec != .bgra ? 30 : 10)
             case .direct:
                 switch codec {
                 case .bgra:
@@ -122,8 +140,13 @@ enum WebRTCRemoteDesktopBudgetSelector {
         case .serious:
             switch transportPath {
             case .relay:
-                fpsCap = min(fpsCap, 8)
-                bufferCap = min(bufferCap, 256_000)
+                if nativeVideoTrackEnabled, codec != .bgra {
+                    fpsCap = min(fpsCap, longEdge >= 3840 ? 24 : 30)
+                    bufferCap = min(bufferCap, codec == .hevc ? 1_000_000 : 896_000)
+                } else {
+                    fpsCap = min(fpsCap, 8)
+                    bufferCap = min(bufferCap, UInt64(WebRTCDegradedFallbackJPEGProfile.maxTransportFrameBytes))
+                }
             case .direct:
                 switch codec {
                 case .bgra:
@@ -142,7 +165,15 @@ enum WebRTCRemoteDesktopBudgetSelector {
             case .direct:
                 fpsCap = min(fpsCap, codec == .bgra ? 8 : 24)
                 bufferCap = min(bufferCap, codec == .bgra ? 128_000 : 384_000)
-            case .relay, .unknown:
+            case .relay:
+                if nativeVideoTrackEnabled, codec != .bgra {
+                    fpsCap = min(fpsCap, longEdge >= 3840 ? 12 : 15)
+                    bufferCap = min(bufferCap, codec == .hevc ? 768_000 : 640_000)
+                } else {
+                    fpsCap = min(fpsCap, 4)
+                    bufferCap = min(bufferCap, 128_000)
+                }
+            case .unknown:
                 fpsCap = min(fpsCap, 4)
                 bufferCap = min(bufferCap, 128_000)
             }

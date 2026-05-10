@@ -25,7 +25,7 @@ struct SignalingRetryController {
 
     init(
         retryDelay: Duration = .milliseconds(350),
-        attemptTimeout: Duration = .seconds(5),
+        attemptTimeout: Duration = .seconds(15),
         sleep: @escaping SleepClosure = { duration in
             try? await Task.sleep(for: duration)
         }
@@ -76,6 +76,10 @@ struct SignalingRetryController {
         }
     }
 
+    static func testOnlyDefaultAttemptTimeoutSeconds() -> Double {
+        durationSeconds(.seconds(15))
+    }
+
     @MainActor
     private func runAttempt(send: @escaping @MainActor @Sendable () async throws -> Void) async throws {
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -97,5 +101,10 @@ struct SignalingRetryController {
                 throw error
             }
         }
+    }
+
+    private static func durationSeconds(_ duration: Duration) -> Double {
+        let components = duration.components
+        return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000.0
     }
 }

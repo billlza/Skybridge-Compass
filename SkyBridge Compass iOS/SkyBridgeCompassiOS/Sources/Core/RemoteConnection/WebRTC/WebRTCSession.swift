@@ -48,7 +48,10 @@ private enum WebRTCPeerConnectionFactoryProvider {
         if let sharedFactory {
             return sharedFactory
         }
-        let factory = RTCPeerConnectionFactory()
+        let factory = RTCPeerConnectionFactory(
+            encoderFactory: RTCDefaultVideoEncoderFactory(),
+            decoderFactory: RTCDefaultVideoDecoderFactory()
+        )
         sharedFactory = factory
         return factory
     }
@@ -135,6 +138,24 @@ extension WebRTCSession {
                 "framesDecoded=\(framesDecoded.map(String.init) ?? "-")",
                 "size=\(frameWidth.map(String.init) ?? "-")x\(frameHeight.map(String.init) ?? "-")"
             ].joined(separator: " ")
+        }
+    }
+
+    struct RemoteInboundVideoStatsCandidate {
+        let source: String
+        let receiver: RTCRtpReceiver?
+        let receiverTrackId: String
+        let snapshot: RemoteInboundVideoStatsSnapshot
+
+        var traceSource: String {
+            if receiver != nil {
+                return "receiver-specific"
+            }
+            return source
+        }
+
+        var summary: String {
+            "source=\(traceSource) receiverTrackId=\(receiverTrackId.isEmpty ? "-" : receiverTrackId) \(snapshot.summary)"
         }
     }
 
@@ -297,6 +318,30 @@ extension WebRTCSession {
 @available(iOS 17.0, *)
 public final class WebRTCSession: NSObject, @unchecked Sendable {
     public enum Role: Sendable { case offerer, answerer }
+
+    enum RemoteVideoTrackRefreshAction: Equatable {
+        case noOp
+        case rebind
+    }
+
+    nonisolated static func receiverStatsProbeRemoteVideoTrackRefreshAction(
+        currentTrackId: String?,
+        receiverTrackId: String?,
+        hasCurrentRemoteVideoTrack: Bool
+    ) -> RemoteVideoTrackRefreshAction {
+        guard hasCurrentRemoteVideoTrack else { return .rebind }
+
+        let current = normalizedRemoteVideoTrackId(currentTrackId)
+        let incoming = normalizedRemoteVideoTrackId(receiverTrackId)
+        if current != incoming {
+            return .rebind
+        }
+        return .noOp
+    }
+
+    nonisolated static func normalizedRemoteVideoTrackId(_ trackId: String?) -> String {
+        trackId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
     
     public struct ICEConfig: Sendable {
         public var stunURL: String
@@ -387,7 +432,21 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private static let maxPendingInboundControlBytes = 512 * 1024
     private static let maxPendingInboundScreenBuffers = 256
     private static let maxPendingInboundScreenBytes = 4 * 1024 * 1024
+    private static let extremeNativeScreenVideoSDPWidth = 2_056
+    private static let extremeNativeScreenVideoSDPHeight = 1_329
+    private static let extremeNativeScreenVideoSDPFPS = 60
+    private static let extremeNativeScreenVideoH264LevelHex = "33"
+    private static var extremeNativeScreenVideoH264MaxFS: Int {
+        nativeScreenVideoH264MacroblockFrameSize(
+            width: extremeNativeScreenVideoSDPWidth,
+            height: extremeNativeScreenVideoSDPHeight
+        )
+    }
+    private static var extremeNativeScreenVideoH264MaxMBPS: Int {
+        extremeNativeScreenVideoH264MaxFS * extremeNativeScreenVideoSDPFPS
+    }
     private let stateQueue = DispatchQueue(label: "com.skybridge.compass.ios.webrtc.session.state.\(UUID().uuidString)")
+    private let callbackQueue = DispatchQueue(label: "com.skybridge.compass.ios.webrtc.session.callback.\(UUID().uuidString)", qos: .userInitiated)
     private let stateQueueKey = DispatchSpecificKey<String>()
     private let stateQueueID = UUID().uuidString
     
@@ -537,7 +596,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private func dispatchCallback(_ operation: @escaping () -> Void) {
         switch Self.callbackDispatchPlan(isOnStateQueue: isOnStateQueue) {
         case .asyncOffStateQueue:
-            DispatchQueue.global(qos: .userInitiated).async(execute: DispatchWorkItem(block: operation))
+            callbackQueue.async(execute: DispatchWorkItem(block: operation))
         case .executeInline:
             operation()
         }
@@ -803,11 +862,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             
             let config = RTCConfiguration()
             config.sdpSemantics = .unifiedPlan
+            config.continualGatheringPolicy = .gatherContinually
             if Self.shouldForceRelayOnlyForSmoke {
                 config.iceTransportPolicy = .relay
-                config.continualGatheringPolicy = .gatherOnce
-            } else {
-                config.continualGatheringPolicy = .gatherContinually
             }
             config.iceServers = buildIceServers()
             
@@ -1302,6 +1359,18 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         )
     }
 
+    private static func remoteVideoTracksShareNativeBacking(_ lhs: RTCVideoTrack?, _ rhs: RTCVideoTrack?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return true
+        case let (lhs?, rhs?):
+            // RTCRtpReceiver.track may vend a fresh wrapper on each read; WebRTC requires isEqual for backing identity.
+            return lhs === rhs || lhs.isEqual(rhs)
+        default:
+            return false
+        }
+    }
+
     private func captureRemoteVideoTrack(_ track: RTCVideoTrack?, receiver: RTCRtpReceiver? = nil) {
         if let receiver {
             if remoteVideoReceiver?.isEqual(receiver) == false {
@@ -1310,7 +1379,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             remoteVideoReceiver = receiver
             remoteVideoReceiver?.delegate = self
         }
-        guard remoteVideoTrack !== track else {
+        let tracksShareNativeBacking = Self.remoteVideoTracksShareNativeBacking(remoteVideoTrack, track)
+        guard !tracksShareNativeBacking else {
             if track != nil,
                remoteVideoFrameEvidenceTask == nil,
                !didEmitRemoteVideoFrameEvidence {
@@ -1318,15 +1388,13 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             }
             return
         }
-        let previousTrackId = remoteVideoTrack?.trackId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let incomingTrackId = track?.trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousTrackId = Self.normalizedRemoteVideoTrackId(remoteVideoTrack?.trackId)
+        let incomingTrackId = Self.normalizedRemoteVideoTrackId(track?.trackId)
         let isTrackRebind =
-            (previousTrackId?.isEmpty == false)
+            !previousTrackId.isEmpty
             && previousTrackId == incomingTrackId
             && track != nil
-        if let incomingTrackId,
-           !incomingTrackId.isEmpty,
-           isTrackRebind {
+        if !incomingTrackId.isEmpty, isTrackRebind {
             logger.info(
                 "🔁 rebind remote native video track after receiver replaced backing instance. sessionId=\(self.sessionId, privacy: .public) trackId=\(incomingTrackId, privacy: .public)"
             )
@@ -1336,8 +1404,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         remoteVideoFrameEvidenceTask = nil
         didEmitRemoteVideoFrameEvidence = isTrackRebind ? didEmitRemoteVideoFrameEvidence : false
         remoteVideoTrack = track
-        if track != nil {
+        if let track {
+            track.isEnabled = true
             logger.info("🎬 detected remote native video track. sessionId=\(self.sessionId, privacy: .public)")
+            onTrace?("remote-video-track-enabled session=\(sessionId) trackId=\(track.trackId) enabled=\(track.isEnabled ? 1 : 0)")
             remoteVideoTrackInspectionTask?.cancel()
             remoteVideoTrackInspectionTask = nil
             startRemoteVideoFrameEvidenceObservation()
@@ -1360,6 +1430,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             guard let self else { return }
             var attempt = 0
             var lastProbeLogAt = Date.distantPast
+            var lastFrameEvidenceTraceAt = Date.distantPast
             var didEmitPacketEvidence = false
             while !Task.isCancelled {
                 if attempt > 0 {
@@ -1375,44 +1446,70 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                         && self.remoteVideoTrack != nil
                 }
                 guard shouldContinue else { return }
-                let receiverSamples: [RemoteInboundVideoStatsSample]
-                if let receiver = self.withState({ () -> RTCRtpReceiver? in
+                let receivers = self.withState { () -> [RTCRtpReceiver] in
                     guard !self.isClosed,
-                          self.lifecycleToken == expectedLifecycleToken else { return nil }
-                    return self.resolveRemoteVideoReceiver()
-                }) {
-                    receiverSamples = await self.remoteInboundVideoStatsSamples(for: receiver)
-                    guard !Task.isCancelled else { return }
-                } else {
-                    receiverSamples = []
+                          self.lifecycleToken == expectedLifecycleToken else { return [] }
+                    return self.resolveRemoteVideoReceivers()
                 }
 
-                var snapshots: [RemoteInboundVideoStatsSnapshot] = []
-                if let receiverSnapshot = Self.remoteInboundVideoStatsSnapshot(from: receiverSamples) {
-                    snapshots.append(receiverSnapshot)
+                var candidates: [RemoteInboundVideoStatsCandidate] = []
+                for receiver in receivers {
+                    let receiverTrackId = self.normalizedTrackId(for: receiver)
+                    let receiverSamples = await self.remoteInboundVideoStatsSamples(for: receiver)
+                    guard !Task.isCancelled else { return }
+                    if let snapshot = Self.remoteInboundVideoStatsSnapshot(from: receiverSamples) {
+                        candidates.append(
+                            RemoteInboundVideoStatsCandidate(
+                                source: "receiver-specific",
+                                receiver: receiver,
+                                receiverTrackId: receiverTrackId,
+                                snapshot: snapshot
+                            )
+                        )
+                    }
                 }
-                if snapshots.isEmpty || !snapshots.contains(where: \.hasFrameEvidence) {
+                if candidates.isEmpty || !candidates.contains(where: { $0.snapshot.hasFrameEvidence }) {
                     let peerSamples = await self.allPeerConnectionVideoStatsSamples()
                     guard !Task.isCancelled else { return }
                     if let peerSnapshot = Self.remoteInboundVideoStatsSnapshot(from: peerSamples) {
-                        snapshots.append(peerSnapshot)
+                        candidates.append(
+                            RemoteInboundVideoStatsCandidate(
+                                source: "peer-fallback",
+                                receiver: nil,
+                                receiverTrackId: "-",
+                                snapshot: peerSnapshot
+                            )
+                        )
                     }
                 }
 
-                guard let snapshot = snapshots.max(
-                    by: { lhs, rhs in Self.snapshotPriority(lhs) < Self.snapshotPriority(rhs) }
+                guard let candidate = candidates.max(
+                    by: { lhs, rhs in Self.snapshotPriority(lhs.snapshot) < Self.snapshotPriority(rhs.snapshot) }
                 ) else {
                     continue
+                }
+                let snapshot = candidate.snapshot
+                if let receiver = candidate.receiver {
+                    let didRefreshTrack = self.withState {
+                        self.refreshRemoteVideoTrackFromReceiverIfNeeded(
+                            receiver,
+                            expectedLifecycleToken: expectedLifecycleToken,
+                            reason: "active-receiver-stats"
+                        )
+                    }
+                    if didRefreshTrack {
+                        return
+                    }
                 }
 
                 let now = Date()
                 if now.timeIntervalSince(lastProbeLogAt) >= 1.0 {
                     lastProbeLogAt = now
                     self.logger.debug(
-                        "📈 remote native video receiver stats probe. sessionId=\(self.sessionId, privacy: .public) \(snapshot.summary, privacy: .public)"
+                        "📈 remote native video receiver stats probe. sessionId=\(self.sessionId, privacy: .public) \(candidate.summary, privacy: .public)"
                     )
                     self.onTrace?(
-                        "remote-video-stats session=\(self.sessionId) \(snapshot.summary)"
+                        "remote-video-stats session=\(self.sessionId) \(candidate.summary)"
                     )
                 }
 
@@ -1427,28 +1524,69 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 guard snapshot.hasFrameEvidence, let size = snapshot.size else {
                     continue
                 }
-                let shouldEmit = self.withState {
+                let shouldNotifyFirstFrame = self.withState {
                     guard !self.isClosed,
-                          self.lifecycleToken == expectedLifecycleToken,
-                          !self.didEmitRemoteVideoFrameEvidence else { return false }
+                          self.lifecycleToken == expectedLifecycleToken else { return false }
+                    if self.didEmitRemoteVideoFrameEvidence {
+                        return false
+                    }
                     self.didEmitRemoteVideoFrameEvidence = true
-                    self.remoteVideoFrameEvidenceTask = nil
                     return true
                 }
-                guard shouldEmit else { return }
-                self.logger.info(
-                    "🎬 remote native video receiver stats confirmed first frame. sessionId=\(self.sessionId, privacy: .public) \(snapshot.summary, privacy: .public)"
-                )
+                guard shouldNotifyFirstFrame || now.timeIntervalSince(lastFrameEvidenceTraceAt) >= 10 else {
+                    continue
+                }
+                lastFrameEvidenceTraceAt = now
+                if shouldNotifyFirstFrame {
+                    self.logger.info(
+                        "🎬 remote native video receiver stats confirmed first frame. sessionId=\(self.sessionId, privacy: .public) \(candidate.summary, privacy: .public)"
+                    )
+                }
                 self.onTrace?(
-                    "remote-video-frame-evidence session=\(self.sessionId) source=receiver-stats \(snapshot.summary)"
+                    "remote-video-frame-evidence session=\(self.sessionId) \(candidate.summary)"
                 )
                 let handler = self.onRemoteVideoFrameEvidence
                 self.dispatchCallback {
                     handler?(size, "receiver-stats")
                 }
-                return
             }
         }
+    }
+
+    private func normalizedTrackId(for receiver: RTCRtpReceiver) -> String {
+        Self.normalizedRemoteVideoTrackId((receiver.track as? RTCVideoTrack)?.trackId)
+    }
+
+    private func refreshRemoteVideoTrackFromReceiverIfNeeded(
+        _ receiver: RTCRtpReceiver,
+        expectedLifecycleToken: UInt64,
+        reason: String
+    ) -> Bool {
+        guard !isClosed,
+              lifecycleToken == expectedLifecycleToken,
+              let receiverTrack = receiver.track as? RTCVideoTrack else {
+            return false
+        }
+        let refreshAction = Self.receiverStatsProbeRemoteVideoTrackRefreshAction(
+            currentTrackId: remoteVideoTrack?.trackId,
+            receiverTrackId: receiverTrack.trackId,
+            hasCurrentRemoteVideoTrack: remoteVideoTrack != nil
+        )
+        guard refreshAction == .rebind else {
+            return false
+        }
+
+        let currentTrackId = Self.normalizedRemoteVideoTrackId(remoteVideoTrack?.trackId)
+        let nextTrackId = Self.normalizedRemoteVideoTrackId(receiverTrack.trackId)
+        let previousTrackId = currentTrackId.isEmpty ? "-" : currentTrackId
+        logger.info(
+            "🔁 remote native video track refreshed from receiver stats probe. sessionId=\(self.sessionId, privacy: .public) previousTrackId=\(previousTrackId, privacy: .public) trackId=\(nextTrackId.isEmpty ? "-" : nextTrackId, privacy: .public) reason=\(reason, privacy: .public)"
+        )
+        onTrace?(
+            "remote-video-track-sync session=\(sessionId) previousTrackId=\(previousTrackId) trackId=\(nextTrackId.isEmpty ? "-" : nextTrackId) reason=\(reason)"
+        )
+        captureRemoteVideoTrack(receiverTrack, receiver: receiver)
+        return true
     }
 
     private func remoteInboundVideoStatsSamples(
@@ -1505,6 +1643,34 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             return receiver
         }
         return nil
+    }
+
+    private func resolveRemoteVideoReceivers() -> [RTCRtpReceiver] {
+        var receivers: [RTCRtpReceiver] = []
+        func appendIfNeeded(_ receiver: RTCRtpReceiver?) {
+            guard let receiver else { return }
+            guard receiver.track is RTCVideoTrack else { return }
+            if !receivers.contains(where: { $0 === receiver || $0.isEqual(receiver) }) {
+                receiver.delegate = self
+                receivers.append(receiver)
+            }
+        }
+
+        appendIfNeeded(remoteVideoReceiver)
+        appendIfNeeded(videoTransceiver?.receiver)
+        if let peerConnection {
+            for transceiver in peerConnection.transceivers where transceiver.mediaType == .video {
+                appendIfNeeded(transceiver.receiver)
+            }
+            for receiver in peerConnection.receivers {
+                appendIfNeeded(receiver)
+            }
+        }
+
+        if remoteVideoReceiver == nil {
+            remoteVideoReceiver = receivers.first
+        }
+        return receivers
     }
 
     private func inspectRemoteVideoTrackIfAvailable(peerConnection: RTCPeerConnection) {
@@ -1916,6 +2082,214 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
         return UInt32(payloadByteCount)
     }
+
+    private func localSDPWithNativeScreenH264ConstraintsIfNeeded(
+        _ sdp: String,
+        kind: String
+    ) -> String {
+        guard Self.nativeScreenVideoH264SDPConstraintsEnabled() else { return sdp }
+        let constrained = Self.sdpWithNativeScreenH264LevelSupport(
+            sdp,
+            requiredLevelHex: Self.extremeNativeScreenVideoH264LevelHex,
+            maxFS: Self.extremeNativeScreenVideoH264MaxFS,
+            maxMBPS: Self.extremeNativeScreenVideoH264MaxMBPS
+        )
+        guard constrained != sdp else { return sdp }
+        onTrace?(
+            """
+            local-sdp-h264-extreme-constraints session=\(sessionId) \
+            kind=\(kind) \
+            level=\(Self.extremeNativeScreenVideoH264LevelHex) \
+            maxFS=\(Self.extremeNativeScreenVideoH264MaxFS) \
+            maxMBPS=\(Self.extremeNativeScreenVideoH264MaxMBPS)
+            """
+        )
+        return constrained
+    }
+
+    private static func nativeScreenVideoH264SDPConstraintsEnabled(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment["SKYBRIDGE_WEBRTC_EXTREME_MEDIA"] == "1"
+            || environment["SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK"] == "1"
+    }
+
+    private static func nativeScreenVideoH264MacroblockFrameSize(width: Int, height: Int) -> Int {
+        let clampedWidth = max(1, width)
+        let clampedHeight = max(1, height)
+        let macroblockWidth = (clampedWidth + 15) / 16
+        let macroblockHeight = (clampedHeight + 15) / 16
+        return macroblockWidth * macroblockHeight
+    }
+
+    private static func sdpWithNativeScreenH264LevelSupport(
+        _ sdp: String,
+        requiredLevelHex: String,
+        maxFS: Int,
+        maxMBPS: Int
+    ) -> String {
+        let newline = sdp.contains("\r\n") ? "\r\n" : "\n"
+        let hasTrailingNewline = sdp.hasSuffix("\r\n") || sdp.hasSuffix("\n")
+        var lines = sdp
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        if lines.last == "" {
+            lines.removeLast()
+        }
+
+        var prefix: [String] = []
+        var sections: [[String]] = []
+        var currentSection: [String]?
+        for line in lines {
+            if line.hasPrefix("m=") {
+                if let currentSection {
+                    sections.append(currentSection)
+                }
+                currentSection = [line]
+            } else if currentSection != nil {
+                currentSection?.append(line)
+            } else {
+                prefix.append(line)
+            }
+        }
+        if let currentSection {
+            sections.append(currentSection)
+        }
+
+        let rewrittenSections = sections.map {
+            sdpSectionWithNativeScreenH264LevelSupport(
+                $0,
+                requiredLevelHex: requiredLevelHex,
+                maxFS: maxFS,
+                maxMBPS: maxMBPS
+            )
+        }
+        let renderedLines = prefix + rewrittenSections.flatMap { $0 }
+        let rendered = renderedLines.joined(separator: newline)
+        return hasTrailingNewline ? rendered + newline : rendered
+    }
+
+    private static func sdpSectionWithNativeScreenH264LevelSupport(
+        _ section: [String],
+        requiredLevelHex: String,
+        maxFS: Int,
+        maxMBPS: Int
+    ) -> [String] {
+        guard section.first?.hasPrefix("m=video ") == true else { return section }
+        let h264Payloads = Set(
+            section.compactMap { line -> String? in
+                guard let parsed = sdpAttributePayloadAndValue(line, prefix: "a=rtpmap:") else {
+                    return nil
+                }
+                let codecName = parsed.value
+                    .split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+                    .first
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+                guard codecName == "h264" || codecName == "avc" else { return nil }
+                return parsed.payload
+            }
+        )
+        guard !h264Payloads.isEmpty else { return section }
+
+        return section.map { line in
+            guard let parsed = sdpAttributePayloadAndValue(line, prefix: "a=fmtp:"),
+                  h264Payloads.contains(parsed.payload) else { return line }
+            let updated = h264FmtpParametersWithNativeScreenLevelSupport(
+                parsed.value,
+                requiredLevelHex: requiredLevelHex,
+                maxFS: maxFS,
+                maxMBPS: maxMBPS
+            )
+            return "a=fmtp:\(parsed.payload) \(updated)"
+        }
+    }
+
+    private static func sdpAttributePayloadAndValue(
+        _ line: String,
+        prefix: String
+    ) -> (payload: String, value: String)? {
+        guard line.hasPrefix(prefix) else { return nil }
+        let body = String(line.dropFirst(prefix.count))
+        let parts = body.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        guard let payload = parts.first else { return nil }
+        return (
+            String(payload).trimmingCharacters(in: .whitespacesAndNewlines),
+            parts.dropFirst().first.map(String.init) ?? ""
+        )
+    }
+
+    private static func h264FmtpParametersWithNativeScreenLevelSupport(
+        _ fmtp: String,
+        requiredLevelHex: String,
+        maxFS: Int,
+        maxMBPS: Int
+    ) -> String {
+        var entries = fmtp
+            .split(separator: ";", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var seenKeys = Set<String>()
+
+        for index in entries.indices {
+            let parts = entries[index].split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let key = parts.first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+            let value = parts.dropFirst().first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+            guard !key.isEmpty else { continue }
+            seenKeys.insert(key)
+            switch key {
+            case "profile-level-id":
+                entries[index] = "profile-level-id=\(h264ProfileLevelID(value, upgradedToAtLeast: requiredLevelHex))"
+            case "level-asymmetry-allowed":
+                entries[index] = "level-asymmetry-allowed=1"
+            case "packetization-mode":
+                entries[index] = value.isEmpty ? "packetization-mode=1" : "packetization-mode=\(value)"
+            case "max-fs":
+                entries[index] = "max-fs=\(maxFmtpInteger(value, minimum: maxFS))"
+            case "max-mbps":
+                entries[index] = "max-mbps=\(maxFmtpInteger(value, minimum: maxMBPS))"
+            default:
+                break
+            }
+        }
+
+        if !seenKeys.contains("level-asymmetry-allowed") {
+            entries.append("level-asymmetry-allowed=1")
+        }
+        if !seenKeys.contains("packetization-mode") {
+            entries.append("packetization-mode=1")
+        }
+        if !seenKeys.contains("max-fs") {
+            entries.append("max-fs=\(maxFS)")
+        }
+        if !seenKeys.contains("max-mbps") {
+            entries.append("max-mbps=\(maxMBPS)")
+        }
+        return entries.joined(separator: ";")
+    }
+
+    private static func h264ProfileLevelID(
+        _ profileLevelID: String,
+        upgradedToAtLeast requiredLevelHex: String
+    ) -> String {
+        let cleaned = profileLevelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let required = requiredLevelHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard cleaned.count == 6,
+              required.count == 2,
+              let currentLevel = Int(cleaned.suffix(2), radix: 16),
+              let requiredLevel = Int(required, radix: 16) else {
+            return cleaned.isEmpty ? profileLevelID : cleaned
+        }
+        guard currentLevel < requiredLevel else { return cleaned }
+        return "\(cleaned.prefix(4))\(required)"
+    }
+
+    private static func maxFmtpInteger(_ value: String, minimum: Int) -> Int {
+        guard let parsed = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return minimum
+        }
+        return max(parsed, minimum)
+    }
     
 #if canImport(WebRTC)
     private func createOffer() {
@@ -1945,8 +2319,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     return
                 }
                 guard let sdp else { return }
-                let sdpString = sdp.sdp
-                pc.setLocalDescription(sdp) { [weak self, weak pc] err in
+                let rawSDPString = sdp.sdp
+                let sdpString = self.localSDPWithNativeScreenH264ConstraintsIfNeeded(
+                    rawSDPString,
+                    kind: "offer"
+                )
+                let localDescription = sdpString == rawSDPString
+                    ? sdp
+                    : RTCSessionDescription(type: .offer, sdp: sdpString)
+                pc.setLocalDescription(localDescription) { [weak self, weak pc] err in
                     guard let self else { return }
                     self.scheduleState {
                         guard let pc,
@@ -1961,6 +2342,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                             self.onTrace?("set-local-offer failed session=\(self.sessionId) error=\(err.localizedDescription)")
                             return
                         }
+                        self.logLocalSDPSummary(kind: "offer", sdp: sdpString)
                         self.lastEmittedLocalSDP = sdpString
                         self.onTrace?("local-offer-ready session=\(self.sessionId) bytes=\(sdpString.utf8.count)")
                         let handler = self.onLocalOffer
@@ -2000,8 +2382,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     return
                 }
                 guard let sdp else { return }
-                let sdpString = sdp.sdp
-                pc.setLocalDescription(sdp) { [weak self, weak pc] err in
+                let rawSDPString = sdp.sdp
+                let sdpString = self.localSDPWithNativeScreenH264ConstraintsIfNeeded(
+                    rawSDPString,
+                    kind: "answer"
+                )
+                let localDescription = sdpString == rawSDPString
+                    ? sdp
+                    : RTCSessionDescription(type: .answer, sdp: sdpString)
+                pc.setLocalDescription(localDescription) { [weak self, weak pc] err in
                     guard let self else { return }
                     self.scheduleState {
                         guard let pc,
@@ -2016,6 +2405,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                             self.onTrace?("set-local-answer failed session=\(self.sessionId) error=\(err.localizedDescription)")
                             return
                         }
+                        self.logLocalSDPSummary(kind: "answer", sdp: sdpString)
                         self.lastEmittedLocalSDP = sdpString
                         self.onTrace?("local-answer-ready session=\(self.sessionId) bytes=\(sdpString.utf8.count)")
                         let handler = self.onLocalAnswer
@@ -2035,6 +2425,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         guard !sdp.isEmpty, sdp != lastEmittedLocalSDP else { return }
         lastEmittedLocalSDP = sdp
         logger.info("🔁 emitting gathered local description. sessionId=\(self.sessionId, privacy: .public) role=\(String(describing: self.role), privacy: .public)")
+        logLocalSDPSummary(kind: role == .offerer ? "offer-gathered" : "answer-gathered", sdp: sdp)
         onTrace?("emit-complete-local-description session=\(sessionId) role=\(String(describing: role)) bytes=\(sdp.utf8.count)")
         switch role {
         case .offerer:
@@ -2049,6 +2440,111 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             }
         }
 #endif
+    }
+
+    struct SDPMediaSummary: Equatable {
+        let kind: String
+        let port: String
+        let mid: String
+        let direction: String
+        let codecs: [String]
+        let hasMSID: Bool
+        let hasSSRC: Bool
+        let rejected: Bool
+    }
+
+    static func mediaSummaries(from sdp: String) -> [SDPMediaSummary] {
+        let normalized = sdp.replacingOccurrences(of: "\r\n", with: "\n")
+        var summaries: [SDPMediaSummary] = []
+        var current: [String] = []
+
+        func flushCurrent() {
+            guard let first = current.first,
+                  first.hasPrefix("m=") else { return }
+            let mediaParts = first.split(separator: " ", omittingEmptySubsequences: true)
+            guard let media = mediaParts.first?.dropFirst(2),
+                  !media.isEmpty else { return }
+            let port = mediaParts.dropFirst().first.map(String.init) ?? "-"
+            var payloadTypes: [String] = []
+            if mediaParts.count > 3 {
+                payloadTypes = mediaParts.dropFirst(3).map(String.init)
+            }
+            var mid = "-"
+            var direction = "unspecified"
+            var rtpmapByPayload: [String: String] = [:]
+            var hasMSID = false
+            var hasSSRC = false
+            for line in current.dropFirst() {
+                if line.hasPrefix("a=mid:") {
+                    mid = String(line.dropFirst(6))
+                } else if line == "a=sendrecv" || line == "a=sendonly" || line == "a=recvonly" || line == "a=inactive" {
+                    direction = String(line.dropFirst(2))
+                } else if line.hasPrefix("a=rtpmap:") {
+                    let rtpmap = String(line.dropFirst(9))
+                    let parts = rtpmap.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+                    if let payload = parts.first,
+                       let codec = parts.dropFirst().first {
+                        rtpmapByPayload[String(payload)] = String(codec)
+                    }
+                } else if line.hasPrefix("a=msid:") {
+                    hasMSID = true
+                } else if line.hasPrefix("a=ssrc:") {
+                    hasSSRC = true
+                }
+            }
+            let codecs = payloadTypes.compactMap { payload -> String? in
+                guard let codec = rtpmapByPayload[payload] else { return nil }
+                return "\(payload):\(codec)"
+            }
+            summaries.append(
+                SDPMediaSummary(
+                    kind: String(media),
+                    port: port,
+                    mid: mid,
+                    direction: direction,
+                    codecs: codecs,
+                    hasMSID: hasMSID,
+                    hasSSRC: hasSSRC,
+                    rejected: port == "0"
+                )
+            )
+        }
+
+        for line in normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            if line.hasPrefix("m=") {
+                flushCurrent()
+                current = [line]
+            } else if !current.isEmpty {
+                current.append(line)
+            }
+        }
+        flushCurrent()
+        return summaries
+    }
+
+    private static func conciseSDPMediaSummary(_ summary: SDPMediaSummary) -> String {
+        let codecList = summary.codecs.prefix(8).joined(separator: ",")
+        return "kind=\(summary.kind) mid=\(summary.mid) port=\(summary.port) rejected=\(summary.rejected) direction=\(summary.direction) codecs=\(codecList.isEmpty ? "-" : codecList) msid=\(summary.hasMSID) ssrc=\(summary.hasSSRC)"
+    }
+
+    private func logLocalSDPSummary(kind: String, sdp: String) {
+        let mediaSummaries = Self.mediaSummaries(from: sdp)
+        let videoSummary = mediaSummaries.first { $0.kind == "video" }
+        let hasVideoMedia = videoSummary != nil
+        let direction = videoSummary?.direction ?? "unspecified"
+        let videoSection = videoSummary.map(Self.conciseSDPMediaSummary) ?? "-"
+        logger.info(
+            """
+            📄 local SDP ready. sessionId=\(self.sessionId, privacy: .public) \
+            kind=\(kind, privacy: .public) \
+            hasVideo=\(hasVideoMedia, privacy: .public) \
+            direction=\(direction, privacy: .public) \
+            video=\(videoSection, privacy: .public) \
+            nativeVideoTransceiver=\(self.videoTransceiver != nil, privacy: .public) \
+            nativeAudioTransceiver=\(self.audioTransceiver != nil, privacy: .public)
+            """
+        )
+        onTrace?("local-sdp-summary session=\(sessionId) kind=\(kind) video=\(videoSection)")
     }
 
     private struct NormalizedRemoteSDP {

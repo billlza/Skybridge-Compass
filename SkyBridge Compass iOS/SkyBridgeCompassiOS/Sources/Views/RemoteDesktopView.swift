@@ -335,17 +335,16 @@ struct RemoteDesktopStreamView: View {
         return Group {
 #if canImport(WebRTC)
             if let remoteTrack = nativeCrossNetworkVideoTrack {
+                let probeNativeVideoAboveFallback =
+                    crossNetworkManager.nativeVideoProbeActive
+                    && !crossNetworkManager.remoteVideoTrackHasRenderedFrame
+                let nativeVideoHasInboundFrameEvidence =
+                    crossNetworkManager.remoteVideoTrackHasReceiverFrameEvidence
+                let nativeVideoOwnsSurface =
+                    probeNativeVideoAboveFallback
+                    || nativeVideoHasInboundFrameEvidence
+                    || crossNetworkManager.remoteVideoTrackHasRenderedFrame
                 ZStack {
-                    RemoteDesktopNativeVideoSurface(
-                        track: remoteTrack,
-                        resolution: remoteDesktopManager.resolution,
-                        cursorPayload: remoteDesktopManager.currentCursorPayload,
-                        cursorImage: remoteDesktopManager.currentCursorImage,
-                        overlayPayload: crossNetworkManager.remoteVideoTrackHasRenderedFrame
-                            ? diagnosticOverlayPayload
-                            : nil
-                    )
-
                     if !crossNetworkManager.remoteVideoTrackHasRenderedFrame {
                         RemoteDesktopCompositedSurface(
                             feed: remoteDesktopManager.videoFrameFeed,
@@ -357,7 +356,26 @@ struct RemoteDesktopStreamView: View {
                             cursorImage: remoteDesktopManager.currentCursorImage,
                             overlayPayload: diagnosticOverlayPayload
                         )
+                        .zIndex(probeNativeVideoAboveFallback ? 0 : 1)
                     }
+
+                    RemoteDesktopNativeVideoSurface(
+                        track: remoteTrack,
+                        acceptsRenderEvidence: nativeVideoOwnsSurface,
+                        resolution: remoteDesktopManager.resolution,
+                        cursorPayload: remoteDesktopManager.currentCursorPayload,
+                        cursorImage: remoteDesktopManager.currentCursorImage,
+                        overlayPayload: crossNetworkManager.remoteVideoTrackHasRenderedFrame
+                            ? diagnosticOverlayPayload
+                            : nil
+                    )
+                    .zIndex(nativeVideoOwnsSurface ? 2 : 0)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier(
+                        nativeVideoOwnsSurface
+                            ? "remote.native-video.surface.active"
+                            : "remote.native-video.surface.prewarmed"
+                    )
                 }
             } else {
                 RemoteDesktopCompositedSurface(
@@ -389,8 +407,8 @@ struct RemoteDesktopStreamView: View {
     }
 
     private var isUsingNativeCrossNetworkVideo: Bool {
-        connection.device.capabilities.contains(RemoteDesktopManager.crossNetworkDeviceCapability)
-            || connection.device.advertisedCapabilities.contains(RemoteDesktopManager.crossNetworkDeviceCapability)
+        remoteDesktopManager.isStreaming
+            && remoteDesktopManager.isUsingCrossNetworkTransport
     }
 
     private var nativeCrossNetworkVideoTrack: RTCVideoTrack? {
@@ -836,6 +854,7 @@ private struct RemoteDesktopCompositedSurface: View {
 @available(iOS 17.0, *)
 private struct RemoteDesktopNativeVideoSurface: View {
     let track: RTCVideoTrack
+    let acceptsRenderEvidence: Bool
     let resolution: CGSize
     let cursorPayload: RemoteDesktopCursorPayload?
     let cursorImage: UIImage?
@@ -853,7 +872,10 @@ private struct RemoteDesktopNativeVideoSurface: View {
             )
 
             ZStack {
-                RemoteDesktopRTCVideoView(track: track)
+                RemoteDesktopRTCVideoView(
+                    track: track,
+                    acceptsRenderEvidence: acceptsRenderEvidence
+                )
                     .frame(width: canvasSize.width, height: canvasSize.height)
 
                 RemoteDesktopInteractionOverlayView(
@@ -870,61 +892,325 @@ private struct RemoteDesktopNativeVideoSurface: View {
 }
 
 @available(iOS 17.0, *)
-private struct RemoteDesktopRTCVideoView: UIViewRepresentable {
+struct RemoteDesktopRTCVideoView: UIViewRepresentable {
     let track: RTCVideoTrack
+    let acceptsRenderEvidence: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
 
-    func makeUIView(context: Context) -> RTCMTLVideoView {
-        let view = RTCMTLVideoView(frame: .zero)
+    func makeUIView(context: Context) -> ObservableRTCMTLVideoView {
+        let view = ObservableRTCMTLVideoView(frame: .zero)
+        view.diagnosticTrackId = track.trackId
+        view.acceptsNativeRenderEvidence = acceptsRenderEvidence
+        view.isOpaque = false
+        view.backgroundColor = .clear
+        view.layer.isOpaque = false
+        view.isEnabled = true
+        let renderEpoch = CrossNetworkWebRTCManager.instance.currentRemoteVideoTrackRenderToken(trackId: track.trackId)
+        view.renderEpoch = renderEpoch
         view.videoContentMode = .scaleAspectFit
         view.delegate = context.coordinator
+        let trackId = track.trackId
+        view.onRenderedFrame = { size in
+            Task { @MainActor in
+                CrossNetworkWebRTCManager.instance.noteRemoteVideoTrackRenderedFrame(
+                    size,
+                    source: ObservableRTCMTLVideoView.nativeRenderEvidenceSource,
+                    trackId: trackId,
+                    renderEpoch: renderEpoch
+                )
+                RemoteDesktopManager.instance.updateCrossNetworkNativeVideoResolution(size)
+            }
+        }
         context.coordinator.bind(track: track, to: view)
+        SkyBridgeSmokeTraceWriter.appendStatus(
+            "native-render-view-bound trackId=\(track.trackId) acceptsEvidence=\(acceptsRenderEvidence ? 1 : 0) epoch=\(renderEpoch) source=rtc-mtl-video-view"
+        )
+        SkyBridgeLogger.shared.info(
+            "🎬 WebRTC native video UIView created and bound: trackId=\(track.trackId) enabled=\(track.isEnabled)"
+        )
         return view
     }
 
-    func updateUIView(_ uiView: RTCMTLVideoView, context: Context) {
+    func updateUIView(_ uiView: ObservableRTCMTLVideoView, context: Context) {
+        uiView.diagnosticTrackId = track.trackId
+        uiView.acceptsNativeRenderEvidence = acceptsRenderEvidence
+        uiView.isOpaque = false
+        uiView.backgroundColor = .clear
+        uiView.layer.isOpaque = false
+        uiView.isEnabled = true
+        let renderEpoch = CrossNetworkWebRTCManager.instance.currentRemoteVideoTrackRenderToken(trackId: track.trackId)
+        if uiView.renderEpoch != renderEpoch {
+            uiView.renderEpoch = renderEpoch
+            uiView.resetVisibleRenderEvidence()
+        }
         uiView.delegate = context.coordinator
+        let trackId = track.trackId
+        uiView.onRenderedFrame = { size in
+            Task { @MainActor in
+                CrossNetworkWebRTCManager.instance.noteRemoteVideoTrackRenderedFrame(
+                    size,
+                    source: ObservableRTCMTLVideoView.nativeRenderEvidenceSource,
+                    trackId: trackId,
+                    renderEpoch: renderEpoch
+                )
+                RemoteDesktopManager.instance.updateCrossNetworkNativeVideoResolution(size)
+            }
+        }
         context.coordinator.bind(track: track, to: uiView)
+        if acceptsRenderEvidence {
+            SkyBridgeSmokeTraceWriter.appendStatus(
+                "native-render-view-updated trackId=\(track.trackId) acceptsEvidence=1 epoch=\(renderEpoch) source=rtc-mtl-video-view"
+            )
+        }
     }
 
-    static func dismantleUIView(_ uiView: RTCMTLVideoView, coordinator: Coordinator) {
+    static func dismantleUIView(_ uiView: ObservableRTCMTLVideoView, coordinator: Coordinator) {
         coordinator.unbind()
+        uiView.onRenderedFrame = nil
+        uiView.acceptsNativeRenderEvidence = false
+        uiView.resetVisibleRenderEvidence()
         uiView.delegate = nil
     }
 
     final class Coordinator: NSObject, RTCVideoViewDelegate {
         private weak var boundTrack: RTCVideoTrack?
-        private weak var boundView: RTCMTLVideoView?
+        private weak var boundView: ObservableRTCMTLVideoView?
+        private var boundRenderer: VisibleRTCMTLVideoRenderer?
 
-        func bind(track: RTCVideoTrack, to view: RTCMTLVideoView) {
+        func bind(track: RTCVideoTrack, to view: ObservableRTCMTLVideoView) {
             if boundTrack === track, boundView === view {
                 return
             }
             unbind()
+            track.isEnabled = true
+            let renderer = VisibleRTCMTLVideoRenderer(view: view)
             boundTrack = track
             boundView = view
-            track.add(view)
+            boundRenderer = renderer
+            track.add(renderer)
+            SkyBridgeSmokeTraceWriter.appendStatus(
+                "native-render-track-bound trackId=\(track.trackId) enabled=\(track.isEnabled ? 1 : 0) source=rtc-mtl-video-view renderer=forwarder"
+            )
+            SkyBridgeLogger.shared.debug(
+                "🎬 WebRTC native video renderer bound: trackId=\(track.trackId) enabled=\(track.isEnabled)"
+            )
         }
 
         func unbind() {
-            if let boundTrack, let boundView {
-                boundTrack.remove(boundView)
+            if let boundTrack, let boundRenderer {
+                boundTrack.remove(boundRenderer)
             }
             boundTrack = nil
             boundView = nil
+            boundRenderer = nil
         }
 
         func videoView(_ videoView: any RTCVideoRenderer, didChangeVideoSize size: CGSize) {
             Task { @MainActor in
-                CrossNetworkWebRTCManager.instance.noteRemoteVideoTrackRenderedFrame(
-                    size,
-                    source: "rtc-mtl-video-view"
-                )
                 RemoteDesktopManager.instance.updateCrossNetworkNativeVideoResolution(size)
+                if let view = videoView as? ObservableRTCMTLVideoView {
+                    view.noteVideoViewSizeEvidence(size)
+                }
             }
+        }
+
+        private final class VisibleRTCMTLVideoRenderer: NSObject, RTCVideoRenderer {
+            private weak var view: ObservableRTCMTLVideoView?
+            private let logState = VisibleRenderForwarderLogState()
+
+            init(view: ObservableRTCMTLVideoView) {
+                self.view = view
+            }
+
+            func setSize(_ size: CGSize) {
+                guard size.width > 0, size.height > 0 else { return }
+                guard let view else { return }
+                let logState = logState
+                DispatchQueue.main.async { [weak view] in
+                    guard let view else { return }
+                    view.setSize(size)
+                    view.noteVideoViewSizeEvidence(size)
+                    if logState.markFirstSize() {
+                        SkyBridgeSmokeTraceWriter.appendStatus(
+                            "native-render-forwarder-size trackId=\(view.diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) source=rtc-mtl-video-view"
+                        )
+                    }
+                }
+            }
+
+            func renderFrame(_ frame: RTCVideoFrame?) {
+                guard let frame else { return }
+                let size = CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))
+                guard size.width > 0, size.height > 0 else { return }
+                guard let view else { return }
+                let logState = logState
+                DispatchQueue.main.async { [weak view] in
+                    guard let view else { return }
+                    view.renderFrame(frame)
+                    if logState.markFirstFrame() {
+                        SkyBridgeSmokeTraceWriter.appendStatus(
+                            "native-render-forwarder-frame trackId=\(view.diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) source=rtc-mtl-video-view"
+                        )
+                    }
+                }
+            }
+
+            private final class VisibleRenderForwarderLogState: @unchecked Sendable {
+                private let lock = NSLock()
+                private var didLogFirstFrame = false
+                private var didLogFirstSize = false
+
+                func markFirstFrame() -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !didLogFirstFrame else { return false }
+                    didLogFirstFrame = true
+                    return true
+                }
+
+                func markFirstSize() -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !didLogFirstSize else { return false }
+                    didLogFirstSize = true
+                    return true
+                }
+            }
+        }
+    }
+
+    final class ObservableRTCMTLVideoView: RTCMTLVideoView {
+        private static let minimumVisibleNativeRenderFrames = 1
+        private static let diagnosticLogInterval: TimeInterval = 1.0
+        var diagnosticTrackId = "-"
+        var acceptsNativeRenderEvidence = false
+        var renderEpoch: UInt64 = 0
+        static let nativeRenderEvidenceSource = "rtc-mtl-video-view"
+        var onRenderedFrame: ((CGSize) -> Void)?
+        private var consecutiveVisibleRenderFrames = 0
+        private var lastVisibleRenderSize: CGSize = .zero
+        private var lastRenderedFrameTimestampNs: Int64?
+        private var hasLoggedVisibleRenderEvidence = false
+        private var hasLoggedViewSizeEvidence = false
+        private var lastDiagnosticLogAt = Date.distantPast
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard acceptsNativeRenderEvidence else { return }
+            logNativeRenderDiagnostic(
+                "layout",
+                "\(visibilityDiagnostic)"
+            )
+        }
+
+        override func renderFrame(_ frame: RTCVideoFrame?) {
+            super.renderFrame(frame)
+            guard let frame else { return }
+            let size = CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))
+            guard size.width > 0, size.height > 0 else { return }
+            let timestampNs = frame.timeStampNs
+            DispatchQueue.main.async { [weak self] in
+                self?.noteRenderedFrameCandidate(size: size, timestampNs: timestampNs)
+            }
+        }
+
+        private func noteRenderedFrameCandidate(size: CGSize, timestampNs: Int64) {
+            guard isVisibleForNativeRenderEvidence else {
+                logNativeRenderDiagnostic(
+                    "blocked",
+                    "reason=not-visible \(visibilityDiagnostic) size=\(Int(size.width))x\(Int(size.height)) timestampNs=\(timestampNs)"
+                )
+                resetVisibleRenderEvidence()
+                return
+            }
+            if let lastRenderedFrameTimestampNs, timestampNs <= lastRenderedFrameTimestampNs {
+                logNativeRenderDiagnostic(
+                    "blocked",
+                    "reason=stale-timestamp trackId=\(diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) timestampNs=\(timestampNs) lastTimestampNs=\(lastRenderedFrameTimestampNs)"
+                )
+                return
+            }
+            lastRenderedFrameTimestampNs = timestampNs
+            if lastVisibleRenderSize == size {
+                consecutiveVisibleRenderFrames += 1
+            } else {
+                lastVisibleRenderSize = size
+                consecutiveVisibleRenderFrames = 1
+                hasLoggedVisibleRenderEvidence = false
+            }
+            guard consecutiveVisibleRenderFrames >= Self.minimumVisibleNativeRenderFrames else {
+                logNativeRenderDiagnostic(
+                    "candidate",
+                    "trackId=\(diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) consecutive=\(consecutiveVisibleRenderFrames)"
+                )
+                return
+            }
+            if !hasLoggedVisibleRenderEvidence {
+                hasLoggedVisibleRenderEvidence = true
+                SkyBridgeLogger.shared.info(
+                    "🎬 WebRTC native video visible render evidence: trackId=\(diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) consecutive=\(consecutiveVisibleRenderFrames) nativeRenderEvidenceSource=\(Self.nativeRenderEvidenceSource)"
+                )
+            }
+            onRenderedFrame?(size)
+        }
+
+        func noteVideoViewSizeEvidence(_ size: CGSize) {
+            guard size.width > 0, size.height > 0 else { return }
+            guard isVisibleForNativeRenderEvidence else {
+                logNativeRenderDiagnostic(
+                    "blocked",
+                    "reason=delegate-not-visible \(visibilityDiagnostic) size=\(Int(size.width))x\(Int(size.height))"
+                )
+                return
+            }
+            if !hasLoggedViewSizeEvidence {
+                hasLoggedViewSizeEvidence = true
+                SkyBridgeLogger.shared.info(
+                    "🎬 WebRTC native video visible view-size evidence: trackId=\(diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) nativeRenderEvidenceSource=\(Self.nativeRenderEvidenceSource)"
+                )
+            }
+            SkyBridgeSmokeTraceWriter.appendStatus(
+                "native-render-view-size trackId=\(diagnosticTrackId) size=\(Int(size.width))x\(Int(size.height)) source=\(Self.nativeRenderEvidenceSource)"
+            )
+        }
+
+        func resetVisibleRenderEvidence() {
+            consecutiveVisibleRenderFrames = 0
+            lastVisibleRenderSize = .zero
+            lastRenderedFrameTimestampNs = nil
+            hasLoggedVisibleRenderEvidence = false
+            hasLoggedViewSizeEvidence = false
+        }
+
+        private func logNativeRenderDiagnostic(_ phase: String, _ details: String) {
+            let now = Date()
+            guard now.timeIntervalSince(lastDiagnosticLogAt) >= Self.diagnosticLogInterval else {
+                return
+            }
+            lastDiagnosticLogAt = now
+            SkyBridgeLogger.shared.debug(
+                "🎬 WebRTC native video render diagnostic: phase=\(phase) \(details)"
+            )
+            SkyBridgeSmokeTraceWriter.appendStatus(
+                "native-render-diagnostic phase=\(phase) \(details)"
+            )
+        }
+
+        private var isVisibleForNativeRenderEvidence: Bool {
+            acceptsNativeRenderEvidence
+                && window != nil
+                && !isHidden
+                && alpha > 0.01
+                && bounds.width > 0
+                && bounds.height > 0
+                && superview != nil
+        }
+
+        private var visibilityDiagnostic: String {
+            "trackId=\(diagnosticTrackId) acceptsEvidence=\(acceptsNativeRenderEvidence) window=\(window != nil) superview=\(superview != nil) hidden=\(isHidden) alpha=\(String(format: "%.3f", alpha)) bounds=\(Int(bounds.width))x\(Int(bounds.height))"
         }
     }
 }

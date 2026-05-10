@@ -1608,6 +1608,8 @@ public final class RemoteControlManager: BaseManager {
                 captureCursorInVideo: !(peer.requestedStreamConfiguration?.separateCursorChannelEnabled ?? false),
                 captureSystemAudio: legacyAudioFallbackEnabled || realtimeAudioSender != nil,
                 audioEncoding: preferredAudioEncoding,
+                lowLatencyMode: peer.requestedStreamConfiguration?.lowLatencyMode
+                    ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.lowLatencyMode,
                 bitstreamFormat: .annexB
             )
             guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {

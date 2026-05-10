@@ -172,6 +172,27 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         }.value
     }
 
+    func testQRCodeBootstrapUsesLongerNetworkStartupTimeouts() async {
+        await Task { @MainActor in
+            XCTAssertGreaterThanOrEqual(
+                CrossNetworkWebRTCManager.testOnlyCurrentPathRequestTimeoutSeconds(),
+                30
+            )
+            XCTAssertGreaterThanOrEqual(
+                CrossNetworkWebRTCManager.testOnlyWebRTCStartupJoinHeartbeatAttempts(),
+                60
+            )
+            XCTAssertGreaterThanOrEqual(
+                SignalingRetryController.testOnlyDefaultAttemptTimeoutSeconds(),
+                15
+            )
+            XCTAssertGreaterThanOrEqual(
+                WebSocketSignalingClient.testOnlyDefaultConnectionTimeoutSeconds(),
+                15
+            )
+        }.value
+    }
+
     func testWebSocketSignalingClientParsesServerFramesAndRedactsTokenizedURL() async {
         await Task { @MainActor in
             let raw = #"{"type":"bound","sessionId":"ROOM1234","role":"initiator","clientId":"client-1"}"#
@@ -387,18 +408,18 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     }
 
     @MainActor
-    func testActualNativeRenderEvidenceRequiresRendererOrReceiverStats() {
-        XCTAssertTrue(
-            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("heartbeat-renderer")
-        )
+    func testActualNativeRenderEvidenceRequiresRendererCallback() {
         XCTAssertTrue(
             CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("rtc-mtl-video-view")
         )
-        XCTAssertTrue(
-            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-stats")
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("heartbeat-renderer")
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("fallback-screen-data-confirmed")
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-stats")
         )
         XCTAssertFalse(
             CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence(

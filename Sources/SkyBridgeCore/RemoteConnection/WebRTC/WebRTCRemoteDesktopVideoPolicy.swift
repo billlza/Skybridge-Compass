@@ -45,13 +45,69 @@ struct WebRTCRemoteDesktopVideoPolicy: Sendable, Equatable {
     }
 }
 
+struct WebRTCDegradedFallbackJPEGProfile: Sendable, Equatable {
+    static let maxLongEdge = 1280
+    static let secondaryLongEdge = 960
+    static let targetFrameRate = 12
+    static let maxEncodedFrameBytes = 160 * 1024
+    static let maxTransportFrameBytes = 256 * 1024
+    static let qualityLadder: [CGFloat] = [0.65, 0.50, 0.40]
+
+    let maxLongEdge: Int
+    let targetFrameRate: Int
+    let maxEncodedFrameBytes: Int
+    let maxTransportFrameBytes: Int
+    let qualityLadder: [CGFloat]
+
+    static let emergency = WebRTCDegradedFallbackJPEGProfile(
+        maxLongEdge: maxLongEdge,
+        targetFrameRate: targetFrameRate,
+        maxEncodedFrameBytes: maxEncodedFrameBytes,
+        maxTransportFrameBytes: maxTransportFrameBytes,
+        qualityLadder: qualityLadder
+    )
+
+    func constrainedSize(for size: CGSize) -> CGSize {
+        Self.constrainedSize(for: size, maxLongEdge: maxLongEdge)
+    }
+
+    static func constrainedSize(for size: CGSize, maxLongEdge: Int) -> CGSize {
+        guard size.width > 0, size.height > 0, maxLongEdge > 0 else {
+            return size
+        }
+        let sourceLongEdge = max(size.width, size.height)
+        guard sourceLongEdge > CGFloat(maxLongEdge) else { return size }
+        let scale = CGFloat(maxLongEdge) / sourceLongEdge
+        return CGSize(
+            width: max(2, floor(size.width * scale)),
+            height: max(2, floor(size.height * scale))
+        )
+    }
+}
+
 enum WebRTCRemoteDesktopVideoPolicySelector {
+    static func degradedFallbackPolicy(
+        from policy: WebRTCRemoteDesktopVideoPolicy,
+        profile: WebRTCDegradedFallbackJPEGProfile = .emergency,
+        reasonSuffix: String = "degraded-emergency-jpeg"
+    ) -> WebRTCRemoteDesktopVideoPolicy {
+        WebRTCRemoteDesktopVideoPolicy(
+            codec: .bgra,
+            targetFrameRate: min(policy.targetFrameRate, profile.targetFrameRate),
+            keyFrameInterval: max(10, min(policy.keyFrameInterval, profile.targetFrameRate * 2)),
+            preferredSize: profile.constrainedSize(for: policy.preferredSize),
+            usesHardwareEncoder: false,
+            reason: "\(policy.reason)+\(reasonSuffix)"
+        )
+    }
+
     static func select(
         request: WebRTCRemoteDesktopVideoRequest,
         transportPath: WebRTCSession.ICETransportPath,
         peerFormats: Set<String>,
         thermalState: ProcessInfo.ThermalState,
-        isAppleSilicon: Bool
+        isAppleSilicon: Bool,
+        nativeVideoTrackEnabled: Bool = false
     ) -> WebRTCRemoteDesktopVideoPolicy {
         let basePolicy = RemoteControlStreamPolicySelector.select(
             request: .init(
@@ -69,6 +125,20 @@ enum WebRTCRemoteDesktopVideoPolicySelector {
         )
 
         guard transportPath == .direct else {
+            if nativeVideoTrackEnabled, basePolicy.codec != .bgra {
+                return WebRTCRemoteDesktopVideoPolicy(
+                    codec: basePolicy.codec,
+                    targetFrameRate: basePolicy.targetFrameRate,
+                    keyFrameInterval: basePolicy.keyFrameInterval,
+                    preferredSize: nativeRTPPreferredSize(
+                        for: request.preferredSize,
+                        transportPath: transportPath,
+                        highFrameRate: request.lowLatencyMode
+                    ),
+                    usesHardwareEncoder: true,
+                    reason: "\(transportPath == .relay ? "relay" : "unknown-path")-native-rtp-\(basePolicy.reason)"
+                )
+            }
             return WebRTCRemoteDesktopVideoPolicy(
                 codec: .bgra,
                 targetFrameRate: max(4, min(request.requestedFrameRate, transportPath == .relay ? 15 : 24)),
@@ -140,6 +210,27 @@ enum WebRTCRemoteDesktopVideoPolicySelector {
             preferredSize: request.preferredSize,
             usesHardwareEncoder: false,
             reason: reason
+        )
+    }
+
+    private static func nativeRTPPreferredSize(
+        for preferredSize: CGSize,
+        transportPath: WebRTCSession.ICETransportPath,
+        highFrameRate: Bool
+    ) -> CGSize {
+        guard preferredSize.width > 0, preferredSize.height > 0 else {
+            return preferredSize
+        }
+        guard transportPath == .relay else {
+            return conservativePreferredSize(for: preferredSize, transportPath: transportPath)
+        }
+        let longEdgeLimit: CGFloat = highFrameRate ? 2560 : 1920
+        let longEdge = max(preferredSize.width, preferredSize.height)
+        guard longEdge > longEdgeLimit else { return preferredSize }
+        let scale = longEdgeLimit / longEdge
+        return CGSize(
+            width: max(960, floor(preferredSize.width * scale)),
+            height: max(540, floor(preferredSize.height * scale))
         )
     }
 }

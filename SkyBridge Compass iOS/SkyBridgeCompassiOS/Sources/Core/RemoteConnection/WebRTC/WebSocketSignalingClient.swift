@@ -146,7 +146,7 @@ public actor WebSocketSignalingClient {
     private let url: URL
     private let sessionId: String
     private var nextSequenceGeneration: Int
-    private let connectionTimeout: Duration = .seconds(5)
+    private let connectionTimeout: Duration = .seconds(15)
     private static let websocketRequestTimeoutSeconds: TimeInterval = 120
     private static let websocketResourceTimeoutSeconds: TimeInterval = 60 * 60 * 24
     private let selectionPolicy: BackendSelectionPolicy
@@ -809,6 +809,10 @@ extension WebSocketSignalingClient {
 
     internal static func testOnlyNoProxyConnectionProxyDictionary() -> [AnyHashable: Any] {
         noProxyConnectionProxyDictionary()
+    }
+
+    internal static func testOnlyDefaultConnectionTimeoutSeconds() -> Double {
+        durationSeconds(.seconds(15))
     }
 }
 

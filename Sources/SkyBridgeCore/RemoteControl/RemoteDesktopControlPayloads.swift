@@ -191,6 +191,8 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
     public let preferredAudioEncoding: String?
     public let audioSampleRate: Int?
     public let audioChannelCount: Int?
+    public let performanceValidationMode: String?
+    public let mediaFallbackPolicy: String?
     public let streamRefreshToken: UInt64?
     public let sentAt: TimeInterval
 
@@ -227,6 +229,8 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         preferredAudioEncoding: String? = nil,
         audioSampleRate: Int? = nil,
         audioChannelCount: Int? = nil,
+        performanceValidationMode: String? = nil,
+        mediaFallbackPolicy: String? = nil,
         streamRefreshToken: UInt64? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
@@ -262,6 +266,8 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         self.preferredAudioEncoding = preferredAudioEncoding
         self.audioSampleRate = audioSampleRate
         self.audioChannelCount = audioChannelCount
+        self.performanceValidationMode = performanceValidationMode
+        self.mediaFallbackPolicy = mediaFallbackPolicy
         self.streamRefreshToken = streamRefreshToken
         self.sentAt = sentAt
     }
@@ -299,6 +305,42 @@ public extension RemoteDesktopStreamConfiguration {
             return mode
         }
         return lowLatencyMode ? .lowLatency : .highFidelity
+    }
+
+    var normalizedPerformanceValidationMode: String? {
+        performanceValidationMode?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    var normalizedMediaFallbackPolicy: String? {
+        mediaFallbackPolicy?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    var requiresExtremePerformanceValidation: Bool {
+        switch normalizedPerformanceValidationMode {
+        case "extreme", "strict", "strict-extreme", "2k60", "4k60", "performance-acceptance":
+            return true
+        default:
+            break
+        }
+        switch normalizedMediaFallbackPolicy {
+        case "fail-fast", "disabled", "forbidden":
+            return true
+        default:
+            return false
+        }
+    }
+
+    var allowsDegradedMediaFallbacks: Bool {
+        switch normalizedMediaFallbackPolicy {
+        case "fail-fast", "disabled", "forbidden":
+            return false
+        default:
+            return !requiresExtremePerformanceValidation
+        }
     }
 }
 

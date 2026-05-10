@@ -5,6 +5,27 @@ import Network
 
 @available(iOS 17.0, *)
 final class RegressionHardeningTests: XCTestCase {
+    func testMediaRelayLeaseDecoderUsesLocalRoleEndpoint() throws {
+        let body = """
+        {
+          "mode": "skybridge-pqc-media-v1",
+          "endpoint": { "host": "203.0.113.10", "port": 3478, "protocol": "udp" },
+          "leaseToken": "local-token",
+          "role": "responder",
+          "sessionId": "session-a",
+          "expiresAt": 1770000000000,
+          "ttl": 60,
+          "maxPacketBytes": 1200
+        }
+        """.data(using: .utf8)!
+
+        let lease = try CrossNetworkWebRTCManager.testOnlyDecodeMediaRelayLeaseResponse(body)
+
+        XCTAssertEqual(lease.localRole, "responder")
+        XCTAssertEqual(lease.localToken, "local-token")
+        XCTAssertEqual(lease.localExpiresAt, 1770000000)
+    }
+
     @MainActor
     func testRemoteAudioInsufficientPriorityUsesLongerRetryBackoff() {
         let insufficientPriority = NSError(domain: NSOSStatusErrorDomain, code: 561_017_449)
@@ -68,6 +89,12 @@ final class RegressionHardeningTests: XCTestCase {
             source.contains("await self.pushViewerStreamConfiguration(force: false, refreshStream: false)"),
             "The audio-present update should be a normal deduped config send, not a forced refresh."
         )
+        XCTAssertTrue(
+            source.contains("event=audioEndpointPrepared"),
+            "The viewer should publish the relay endpoint after the configured relay bind policy is satisfied."
+        )
+        XCTAssertTrue(source.contains("strictRelayBindRequired ? .requireAcknowledgement : .optimisticAfterSend"))
+        XCTAssertTrue(source.contains("relayBindPolicy: relayBindPolicy"))
         XCTAssertTrue(source.contains("payload.mediaAudioEndpoint == nil"))
     }
 
@@ -82,7 +109,10 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertTrue(source.contains("event=receiverStartPending"))
         XCTAssertTrue(source.contains("event=receiverStartSlow"))
         XCTAssertTrue(source.contains("event=leaseReady"))
-        XCTAssertTrue(source.contains("event=udpBindStarted"))
+        XCTAssertTrue(source.contains("event=udpConnectionStarted"))
+        XCTAssertTrue(source.contains("event=relayBindSent"))
+        XCTAssertTrue(source.contains("event=relayBindAccepted"))
+        XCTAssertTrue(source.contains("event=relayBindAckTimedOut"))
         XCTAssertTrue(source.contains("event=receiverStarted"))
         XCTAssertTrue(source.contains("event=receiverStartFailed"))
         XCTAssertTrue(source.contains("event=audioPresentConfigSent"))
@@ -91,6 +121,61 @@ final class RegressionHardeningTests: XCTestCase {
             source.contains("event=receiverStartTimeout"),
             "The 3s receiver startup diagnostic must no longer hard-cancel or report timeout; it is only receiverStartSlow."
         )
+    }
+
+    func testOptimisticRelayBindAckTimeoutUsesGraceInsteadOfImmediateLeaseRetry() throws {
+        let source = try remoteDesktopManagerSource()
+        let timeoutBody = try sourceSlice(
+            from: "case .relayBindAckTimedOut:",
+            to: "case .relayBindRejected:",
+            in: source
+        )
+        let failureBody = try sourceSlice(
+            from: "private func handleRealtimeMediaAudioRelayBindFailure",
+            to: "private func scheduleRealtimeMediaAudioRelayBindGrace",
+            in: source
+        )
+        let graceBody = try sourceSlice(
+            from: "private func scheduleRealtimeMediaAudioRelayBindGrace",
+            to: "private func handleRealtimeMediaAudioRelayTransportEvent",
+            in: source
+        )
+
+        XCTAssertTrue(timeoutBody.contains("scheduleRealtimeMediaAudioRelayBindGrace"))
+        XCTAssertTrue(timeoutBody.contains("action=optimistic-grace"))
+        XCTAssertFalse(
+            timeoutBody.contains("handleRealtimeMediaAudioRelayBindFailure"),
+            "Optimistic relay bind ACK timeout must remain pending during the grace window instead of immediately invalidating the endpoint."
+        )
+        XCTAssertTrue(
+            failureBody.contains("guard realtimeMediaAudioReceiverSessionId == sessionId"),
+            "Late rejected/malformed events from an old relay transport must not poison the current endpoint."
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(failureBody.range(of: "guard realtimeMediaAudioReceiverSessionId == sessionId")?.lowerBound),
+            try XCTUnwrap(failureBody.range(of: "markRealtimeMediaRelayEndpointUnusableForActiveSession")?.lowerBound)
+        )
+        XCTAssertTrue(graceBody.contains("if snapshot.received > 0"))
+        XCTAssertFalse(
+            graceBody.contains("if snapshot.datagramsSeen > 0 || snapshot.received > 0"),
+            "Grace success must require authenticated received audio, not just raw UDP bytes."
+        )
+        XCTAssertTrue(graceBody.contains("relayBindAckTimedOutNoTraffic"))
+        XCTAssertTrue(graceBody.contains("relayBindAckTimedOutNoAuthenticatedTraffic"))
+        XCTAssertTrue(source.contains("pushViewerStreamConfiguration(force: false, refreshStream: false)"))
+    }
+
+    func testRelayBindRejectedAndMalformedStillFailCurrentEndpoint() throws {
+        let source = try remoteDesktopManagerSource()
+        let failureCases = try sourceSlice(
+            from: "case .relayBindRejected(let reason):",
+            to: "private func updateRealtimeMediaAudioReceiverStartPhase",
+            in: source
+        )
+
+        XCTAssertTrue(failureCases.contains("reason: \"relayBindRejected:"))
+        XCTAssertTrue(failureCases.contains("reason: \"relayBindMalformed\""))
+        XCTAssertTrue(failureCases.contains("handleRealtimeMediaAudioRelayBindFailure"))
     }
 
     func testRealtimeMediaAudioReceiverStartupFailureDoesNotRefreshVideoStream() throws {
@@ -118,6 +203,23 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
+    func testStreamRefreshStormsAreThrottledDuringAudioPresentSessions() throws {
+        let source = try remoteDesktopManagerSource()
+
+        XCTAssertTrue(source.contains("private let streamDecodeStallRefreshMinimumInterval: TimeInterval = 3.0"))
+        XCTAssertTrue(source.contains("reason: \"decode-stall-reset\",\n                        minimumInterval: self.streamDecodeStallRefreshMinimumInterval"))
+
+        let hevcDisableBody = try sourceSlice(
+            from: "case .disableHEVC(let until):",
+            to: "case .reenableHEVCProbe:",
+            in: source
+        )
+        XCTAssertTrue(
+            hevcDisableBody.contains("lastRefreshRequestAt = now"),
+            "HEVC disable refreshes must participate in the shared stream refresh cooldown so decode-stall reset cannot immediately send another forced config."
+        )
+    }
+
     func testSessionAuthorityLostStopsRemoteDesktopRetryLoops() throws {
         let source = try remoteDesktopManagerSource()
 
@@ -139,12 +241,79 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertTrue(source.contains("handleStreamConfigurationAck"))
     }
 
+    func testSBC2ReassemblerSuppressesRepeatedOrphanChunksUntilNextFrameStarts() throws {
+        let frameId: UInt64 = 42
+        var reassembler = CrossNetworkWebRTCManager.ScreenChunkedPayloadReassembler(
+            maxFrameBytes: 4096
+        )
+        let start = Date(timeIntervalSince1970: 1_000)
+
+        let orphan1 = CrossNetworkWebRTCManager.ScreenChunkedPayloadEnvelope(
+            frameId: frameId,
+            chunkIndex: 1,
+            chunkCount: 3,
+            totalBytes: 12,
+            chunkOffset: 4,
+            payload: Data([1, 2, 3, 4])
+        )
+        XCTAssertEqual(
+            reassembler.append(orphan1, now: start),
+            .dropped(reason: "missing-first-chunk", frameId: frameId)
+        )
+
+        let orphan2 = CrossNetworkWebRTCManager.ScreenChunkedPayloadEnvelope(
+            frameId: frameId,
+            chunkIndex: 2,
+            chunkCount: 3,
+            totalBytes: 12,
+            chunkOffset: 8,
+            payload: Data([5, 6, 7, 8])
+        )
+        XCTAssertEqual(
+            reassembler.append(orphan2, now: start.addingTimeInterval(0.01)),
+            .suppressed(frameId: frameId, reason: "missing-first-chunk")
+        )
+
+        let newFrame0 = CrossNetworkWebRTCManager.ScreenChunkedPayloadEnvelope(
+            frameId: frameId + 1,
+            chunkIndex: 0,
+            chunkCount: 1,
+            totalBytes: 4,
+            chunkOffset: 0,
+            payload: Data([9, 10, 11, 12])
+        )
+        XCTAssertEqual(
+            reassembler.append(newFrame0, now: start.addingTimeInterval(0.02)),
+            .complete(frameId: frameId + 1, payload: Data([9, 10, 11, 12]))
+        )
+    }
+
     private func remoteDesktopManagerSource() throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func crossNetworkWebRTCManagerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func webRTCSessionSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSession.swift"
         )
         return try String(contentsOf: sourceURL, encoding: .utf8)
     }
@@ -724,6 +893,30 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertTrue(source.contains("pqc-opus-source-node-ring"))
         XCTAssertTrue(source.contains("queuedMs="))
         XCTAssertTrue(source.contains("targetQueuedMs="))
+        XCTAssertTrue(source.contains("rebufferResumeMs="))
+        XCTAssertTrue(source.contains("softUnderflowBridgeMs="))
+        XCTAssertTrue(source.contains("bridgedUnderflowFrames"))
+        XCTAssertTrue(source.contains("effectiveJitterTargetMs"))
+        XCTAssertTrue(source.contains("effectiveJitterMaxMs"))
+        XCTAssertTrue(source.contains("adaptationReason"))
+        XCTAssertTrue(source.contains("stableJitterWindowCount"))
+        XCTAssertTrue(source.contains("initialJitterTargetMs"))
+        XCTAssertTrue(source.contains("return max(profile.jitterTargetMs, 700)"))
+        XCTAssertTrue(source.contains("return max(profile.jitterMaxMs, 1_400)"))
+        XCTAssertTrue(source.contains("return max(profile.jitterTargetMs, 520)"))
+        XCTAssertTrue(source.contains("return max(profile.jitterMaxMs, 900)"))
+        XCTAssertTrue(source.contains("return max(profile.jitterTargetMs, 900)"))
+        XCTAssertTrue(source.contains("return max(profile.jitterMaxMs, 1_600)"))
+        XCTAssertTrue(source.contains("stableJitterWindowCount >= 6"))
+        XCTAssertTrue(source.contains("underflow > 0"))
+        XCTAssertTrue(source.contains("scheduleLeadMs < -60"))
+        XCTAssertTrue(source.contains("scheduleLeadMs < -100"))
+        XCTAssertTrue(source.contains("evictRatio="))
+        XCTAssertTrue(source.contains("audioArrivalP50Ms"))
+        XCTAssertTrue(source.contains("audioArrivalP95Ms"))
+        XCTAssertTrue(source.contains("audioArrivalMaxMs"))
+        XCTAssertTrue(source.contains("audioJitterBufferDepthMs"))
+        XCTAssertTrue(source.contains("hasStartedPlayback ? rebufferResumeFrames : targetQueuedFrames"))
         XCTAssertTrue(source.contains("primed="))
         XCTAssertTrue(source.contains("rebuffer="))
         XCTAssertTrue(source.contains("underflow="))
@@ -736,6 +929,42 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
+    func testFallbackNativeVideoEvidenceDiagnosticIsThrottled() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("lastFallbackOnlyNativeVideoDiagnosticAt"))
+        XCTAssertTrue(source.contains("now.timeIntervalSince(lastFallbackOnlyNativeVideoDiagnosticAt) >= 2.0"))
+        XCTAssertEqual(
+            source.components(separatedBy: "fallback screen data confirms only degraded screen path").count - 1,
+            1
+        )
+    }
+
+    func testHighFidelityRealtimeAudioProfileKeepsRelayJitterHeadroom() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let profileURL = root.appendingPathComponent(
+            "SkyBridge Compass iOS/LocalPackages/SkyBridgeMediaLocal/Sources/SkyBridgeRealtimeMedia/MediaProfile.swift"
+        )
+        let source = try String(contentsOf: profileURL, encoding: .utf8)
+        let highFidelityBody = try sourceSlice(
+            from: "case .highFidelity:",
+            to: "}\n    }\n\n    public var samplesPerPacket",
+            in: source
+        )
+
+        XCTAssertTrue(highFidelityBody.contains("jitterTargetMs: 140"))
+        XCTAssertTrue(highFidelityBody.contains("jitterMaxMs: 360"))
+    }
+
     func testCrossNetworkFrameNotificationRequiresActiveStreamingSession() {
         XCTAssertFalse(
             RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
@@ -745,6 +974,457 @@ final class RegressionHardeningTests: XCTestCase {
                 updateSessionId: "session-1"
             )
         )
+    }
+
+    func testNativeVideoRenderedIgnoresFallbackScreenFrames() {
+        // Once native WebRTC has rendered a frame, screen-channel fallback must
+        // not reclaim topology/decode ownership even if a previous fallback
+        // frame already pushed the UI out of the native pipeline.
+        XCTAssertTrue(
+            RemoteDesktopManager.shouldIgnoreFallbackFrameAfterNativeVideoRendered(
+                activeTransportModeIsCrossNetwork: true,
+                nativeVideoTrackHasRenderedFrame: true
+            )
+        )
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldIgnoreFallbackFrameAfterNativeVideoRendered(
+                activeTransportModeIsCrossNetwork: true,
+                nativeVideoTrackHasRenderedFrame: false
+            )
+        )
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldIgnoreFallbackFrameAfterNativeVideoRendered(
+                activeTransportModeIsCrossNetwork: false,
+                nativeVideoTrackHasRenderedFrame: true
+            )
+        )
+    }
+
+    func testReceiverStatsDoNotCountAsActualNativeRenderEvidence() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("rtc-mtl-video-view")
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("heartbeat-renderer"),
+            "The heartbeat renderer is attached beside the visible view, so it only proves track delivery, not visible native video."
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.testOnlyIsActualNativeRenderEvidence("receiver-stats"),
+            "Receiver stats prove inbound RTP/decode, not that the native video view rendered visible pixels."
+        )
+    }
+
+    func testHeartbeatRendererFrameCanStartVisibleNativeRenderProbeWithoutPromoting() throws {
+        let source = try crossNetworkWebRTCManagerSource()
+        let evidenceBody = try sourceSlice(
+            from: "func noteRemoteVideoTrackRenderedFrame(\n        _ size: CGSize,",
+            to: "@MainActor\n    func noteRemoteVideoTrackReceivedFirstPacket",
+            in: source
+        )
+        let heartbeatBranch = try sourceSlice(
+            from: "source == \"receiver-stats\" || source == \"heartbeat-renderer\"",
+            to: "guard Self.isActualNativeRenderEvidence(source: source) else { return }",
+            in: evidenceBody
+        )
+
+        XCTAssertTrue(heartbeatBranch.contains("track-renderer-frame-evidence"))
+        XCTAssertTrue(heartbeatBranch.contains("native-heartbeat-frame-evidence"))
+        XCTAssertTrue(heartbeatBranch.contains("scheduleNativeRenderProbeIfNeeded(trigger: source)"))
+        XCTAssertFalse(
+            heartbeatBranch.contains("markRemoteVideoTrackReadyForPromotion"),
+            "Heartbeat renderer frames may raise the visible native probe, but only the visible RTCMTLVideoView render path can promote nativeReady."
+        )
+    }
+
+    func testNativeVideoFallbackScreenGuardRunsBeforeTopologyHandling() throws {
+        let remoteDesktopSource = try remoteDesktopManagerSource()
+        let handleScreenDataBody = try sourceSlice(
+            from: "private func handleScreenData(_ screenData: ScreenData) async",
+            to: "private func handleIncomingStreamTopologyChangeIfNeeded(for screenData: ScreenData) async",
+            in: remoteDesktopSource
+        )
+        guard let warmupDropGuardRange = handleScreenDataBody.range(of: "shouldDropNativeWarmupNonJPEGFallbackFrame"),
+              let renderedGuardRange = handleScreenDataBody.range(of: "shouldIgnoreFallbackFrameAfterNativeVideoRendered"),
+              let noteReceivedRange = handleScreenDataBody.range(of: "noteReceivedFrame"),
+              let topologyRange = handleScreenDataBody.range(of: "handleIncomingStreamTopologyChangeIfNeeded") else {
+            return XCTFail("Expected native warmup/rendered fallback guards and topology handler in handleScreenData.")
+        }
+        XCTAssertLessThan(
+            warmupDropGuardRange.lowerBound,
+            noteReceivedRange.lowerBound,
+            "Native warmup non-JPEG fallback frames must be dropped before frame accounting can mark them as a real screen frame."
+        )
+        XCTAssertLessThan(
+            warmupDropGuardRange.lowerBound,
+            topologyRange.lowerBound,
+            "Native warmup non-JPEG fallback frames must be dropped before topology/decode state can be polluted."
+        )
+        XCTAssertLessThan(
+            renderedGuardRange.lowerBound,
+            topologyRange.lowerBound,
+            "Native-rendered fallback frames must be ignored before topology/decode state can be reset."
+        )
+        XCTAssertTrue(handleScreenDataBody.contains("dropReason=native-warmup-non-jpeg-fallback"))
+    }
+
+    func testNativeWarmupFallbackGuardAcceptsOnlyJPEGUntilVisibleNativeRender() {
+        XCTAssertTrue(
+            RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+                activeTransportModeIsCrossNetwork: true,
+                hasRemoteNativeVideoTrack: true,
+                nativeVideoTrackHasRenderedFrame: false,
+                format: "hevc"
+            )
+        )
+        XCTAssertTrue(
+            RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+                activeTransportModeIsCrossNetwork: true,
+                hasRemoteNativeVideoTrack: true,
+                nativeVideoTrackHasRenderedFrame: false,
+                format: "h264"
+            )
+        )
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+                activeTransportModeIsCrossNetwork: true,
+                hasRemoteNativeVideoTrack: true,
+                nativeVideoTrackHasRenderedFrame: false,
+                format: "jpeg"
+            )
+        )
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+                activeTransportModeIsCrossNetwork: true,
+                hasRemoteNativeVideoTrack: true,
+                nativeVideoTrackHasRenderedFrame: false,
+                format: "jpg"
+            )
+        )
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+                activeTransportModeIsCrossNetwork: true,
+                hasRemoteNativeVideoTrack: true,
+                nativeVideoTrackHasRenderedFrame: true,
+                format: "hevc"
+            )
+        )
+    }
+
+    func testNativeVideoPipelineOwnershipRejectsImplicitWaitingDemotion() throws {
+        let remoteDesktopSource = try remoteDesktopManagerSource()
+        let updatePipelineBody = try sourceSlice(
+            from: "private func updateRenderPipeline(_ pipeline: RemoteDesktopRenderPipeline)",
+            to: "private func flushRenderedVideoFeeds",
+            in: remoteDesktopSource
+        )
+
+        XCTAssertTrue(updatePipelineBody.contains("crossNetwork.remoteVideoTrackHasRenderedFrame"))
+        XCTAssertTrue(updatePipelineBody.contains("renderPipelineStatus == .webrtcNativeVideo"))
+        XCTAssertTrue(
+            updatePipelineBody.contains("pipeline != .webrtcNativeVideo"),
+            "After visible native render evidence, only explicit native pipeline ownership should remain in this stream epoch."
+        )
+        XCTAssertFalse(
+            updatePipelineBody.contains("pipeline != .waiting"),
+            "Topology resets must not be able to demote a visible native video pipeline into waiting state."
+        )
+    }
+
+    func testFallbackEvidenceDoesNotAdvertiseNativeVideoReady() throws {
+        let crossNetworkSource = try crossNetworkWebRTCManagerSource()
+        let remoteDesktopSource = try remoteDesktopManagerSource()
+
+        let fallbackBody = try sourceSlice(
+            from: "private func maybeConfirmRemoteVideoTrackFromFallbackEvidence",
+            to: "@MainActor\n    private func markRemoteVideoTrackReadyForPromotion",
+            in: crossNetworkSource
+        )
+        XCTAssertFalse(
+            fallbackBody.contains("markRemoteVideoTrackReadyForPromotion"),
+            "Fallback screen data must not advance native video promotion; nativeReady is reserved for actual native render evidence."
+        )
+        XCTAssertTrue(fallbackBody.contains("native promotion still waits for real RTP/render evidence"))
+
+        let promotionReadyBody = try sourceSlice(
+            from: "func handleCrossNetworkNativeVideoTrackPromotionReady()",
+            to: "func handleCrossNetworkNativeAudioTrackReceivedFirstPacket()",
+            in: remoteDesktopSource
+        )
+        XCTAssertFalse(
+            promotionReadyBody.contains("announceCrossNetworkNativeVideoReadyIfNeeded"),
+            "Promotion-ready without a rendered native frame must not send nativeVideoTrackReady=true."
+        )
+    }
+
+    func testReceiverStatsDoNotPromoteBeforeActualNativeRenderEvidence() throws {
+        let crossNetworkSource = try crossNetworkWebRTCManagerSource()
+        let renderedFrameBody = try sourceSlice(
+            from: "func noteRemoteVideoTrackRenderedFrame(_ size: CGSize, source: String)",
+            to: "@MainActor\n    func noteRemoteVideoTrackReceivedFirstPacket(source: String)",
+            in: crossNetworkSource
+        )
+        guard let actualEvidenceGuard = renderedFrameBody.range(of: "guard Self.isActualNativeRenderEvidence(source: source) else { return }"),
+              let watchdogCancel = renderedFrameBody.range(of: "remoteVideoTrackConfirmationTask?.cancel()"),
+              let pipelinePromotion = renderedFrameBody.range(of: "noteCrossNetworkNativeVideoFrame") else {
+            return XCTFail("Expected actual-evidence guard, watchdog cancel, and native pipeline promotion in rendered frame handler.")
+        }
+        XCTAssertLessThan(actualEvidenceGuard.lowerBound, watchdogCancel.lowerBound)
+        XCTAssertLessThan(actualEvidenceGuard.lowerBound, pipelinePromotion.lowerBound)
+        guard let promotionReady = renderedFrameBody.range(of: "markRemoteVideoTrackReadyForPromotion") else {
+            return XCTFail("Expected actual rendered frame evidence to mark native video promotion-ready.")
+        }
+        XCTAssertLessThan(
+            actualEvidenceGuard.lowerBound,
+            promotionReady.lowerBound,
+            "Receiver stats, heartbeat renderer, and packet evidence must not set promotion-ready before actual visible native render evidence."
+        )
+        XCTAssertTrue(renderedFrameBody.contains("renderEpoch: UInt64?"))
+        XCTAssertTrue(renderedFrameBody.contains("guard let renderEpoch,"))
+        XCTAssertTrue(renderedFrameBody.contains("renderEpoch == remoteVideoTrackRenderEpoch"))
+        XCTAssertTrue(renderedFrameBody.contains("ignore stale native render evidence"))
+        XCTAssertTrue(renderedFrameBody.contains("reason=probe-inactive"))
+        XCTAssertTrue(renderedFrameBody.contains("reason=track-mismatch"))
+        XCTAssertTrue(renderedFrameBody.contains("reason=epoch-mismatch"))
+        XCTAssertTrue(crossNetworkSource.contains("@Published public private(set) var remoteVideoTrackRenderEpoch"))
+        XCTAssertTrue(crossNetworkSource.contains("remoteVideoTrackRenderEpoch &+= 1"))
+        XCTAssertTrue(crossNetworkSource.contains("func currentRemoteVideoTrackRenderToken(trackId: String?) -> UInt64"))
+        XCTAssertFalse(
+            crossNetworkSource.contains("let shouldPreserveRenderedEvidence = track != nil && isTrackRebind && preservedRenderedFrame"),
+            "A same-id track rebind must require fresh visible render evidence from the new renderer epoch."
+        )
+
+        let firstPacketBody = try sourceSlice(
+            from: "func noteRemoteVideoTrackReceivedFirstPacket(source: String)",
+            to: "@MainActor\n    func noteRemoteAudioTrackReceivedFirstPacket(source: String)",
+            in: crossNetworkSource
+        )
+        XCTAssertFalse(
+            firstPacketBody.contains("markRemoteVideoTrackReadyForPromotion"),
+            "Inbound packet evidence proves RTP arrival only; it must not satisfy native promotion."
+        )
+
+        let resolutionBody = try sourceSlice(
+            from: "func noteRemoteVideoTrackResolutionAvailable(_ size: CGSize, source: String)",
+            to: "@MainActor\n    private func bestAvailableRemoteVideoEvidenceSize()",
+            in: crossNetworkSource
+        )
+        XCTAssertFalse(
+            resolutionBody.contains("markRemoteVideoTrackReadyForPromotion"),
+            "Size callbacks can arrive without visible pixels and must not satisfy native promotion."
+        )
+
+        let confirmationBody = try sourceSlice(
+            from: "private func scheduleRemoteVideoTrackConfirmationIfNeeded(trigger: String)",
+            to: "@MainActor\n    func noteRemoteVideoTrackRenderedFrame(_ size: CGSize, source: String)",
+            in: crossNetworkSource
+        )
+        XCTAssertFalse(
+            confirmationBody.contains("markRemoteVideoTrackReadyForPromotion"),
+            "The native render watchdog should diagnose missing visible frames, not promote from fallback evidence."
+        )
+    }
+
+    func testNativeRenderProbeRaisesRTCMTLViewWithoutPromotingFromStats() throws {
+        let crossNetworkSource = try crossNetworkWebRTCManagerSource()
+        let viewSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(crossNetworkSource.contains("@Published public private(set) var nativeVideoProbeActive"))
+        XCTAssertTrue(crossNetworkSource.contains("scheduleNativeRenderProbeIfNeeded(trigger: source)"))
+        XCTAssertTrue(crossNetworkSource.contains("allowsPacketOnlyEvidence: true"))
+        XCTAssertTrue(crossNetworkSource.contains("native-render-probe-packet-active"))
+        XCTAssertTrue(crossNetworkSource.contains("handleCrossNetworkNativeVideoWarmupEvidence"))
+        XCTAssertTrue(crossNetworkSource.contains("reason: \"native-track-installed\""))
+        XCTAssertTrue(crossNetworkSource.contains("\"native-receiver-frame-evidence\""))
+        XCTAssertTrue(crossNetworkSource.contains("\"native-heartbeat-frame-evidence\""))
+        XCTAssertTrue(crossNetworkSource.contains("reason: warmupReason"))
+        XCTAssertTrue(crossNetworkSource.contains("native-render-probe-start"))
+        XCTAssertTrue(crossNetworkSource.contains("native-render-probe-timeout"))
+        XCTAssertTrue(crossNetworkSource.contains("action=raise-rtc-mtl-video-view"))
+        XCTAssertTrue(crossNetworkSource.contains("try await Task.sleep(for: .milliseconds(2_500))"))
+        XCTAssertTrue(viewSource.contains("probeNativeVideoAboveFallback"))
+        XCTAssertTrue(viewSource.contains("nativeVideoHasInboundFrameEvidence"))
+        XCTAssertTrue(viewSource.contains("nativeVideoOwnsSurface"))
+        XCTAssertTrue(viewSource.contains("crossNetworkManager.nativeVideoProbeActive"))
+        XCTAssertTrue(viewSource.contains("crossNetworkManager.remoteVideoTrackHasReceiverFrameEvidence"))
+        XCTAssertTrue(viewSource.contains("&& !crossNetworkManager.remoteVideoTrackHasRenderedFrame"))
+
+        let remoteScreenBody = try sourceSlice(
+            from: "private func remoteScreenView(geometry: GeometryProxy) -> some View",
+            to: "#else\n            RemoteDesktopCompositedSurface",
+            in: viewSource
+        )
+        let nativeSurfaceCount = remoteScreenBody.components(
+            separatedBy: "RemoteDesktopNativeVideoSurface("
+        ).count - 1
+        XCTAssertEqual(
+            nativeSurfaceCount,
+            1,
+            "The same RTCMTLVideoView wrapper should stay mounted; probe should raise it with zIndex instead of rebuilding it."
+        )
+        XCTAssertTrue(remoteScreenBody.contains(".zIndex(probeNativeVideoAboveFallback ? 0 : 1)"))
+        XCTAssertTrue(remoteScreenBody.contains(".zIndex(nativeVideoOwnsSurface ? 2 : 0)"))
+        XCTAssertTrue(remoteScreenBody.contains(".allowsHitTesting(false)"))
+        XCTAssertTrue(remoteScreenBody.contains("nativeVideoHasInboundFrameEvidence"))
+    }
+
+    func testRemoteVideoStatsProbeResyncsReceiverTrackBeforeEvidence() throws {
+        let source = try webRTCSessionSource()
+        let evidenceLoop = try sourceSlice(
+            from: "private func startRemoteVideoFrameEvidenceObservation()",
+            to: "private func remoteInboundVideoStatsSamples",
+            in: source
+        )
+        let refreshBody = try sourceSlice(
+            from: "private func refreshRemoteVideoTrackFromReceiverIfNeeded",
+            to: "private func remoteInboundVideoStatsSamples",
+            in: source
+        )
+
+        XCTAssertTrue(source.contains("refreshRemoteVideoTrackFromReceiverIfNeeded"))
+        XCTAssertTrue(source.contains("remote-video-track-sync"))
+        XCTAssertTrue(evidenceLoop.contains("resolveRemoteVideoReceivers"))
+        XCTAssertTrue(evidenceLoop.contains("for receiver in receivers"))
+        XCTAssertTrue(evidenceLoop.contains("source: \"receiver-specific\""))
+        XCTAssertTrue(evidenceLoop.contains("source: \"peer-fallback\""))
+        XCTAssertTrue(evidenceLoop.contains("reason: \"active-receiver-stats\""))
+        XCTAssertTrue(evidenceLoop.contains("remote-video-frame-evidence session=\\(self.sessionId) \\(candidate.summary)"))
+        XCTAssertTrue(refreshBody.contains("receiverStatsProbeRemoteVideoTrackRefreshAction"))
+        XCTAssertTrue(refreshBody.contains("guard refreshAction == .rebind else {\n            return false\n        }"))
+        let sameTrackIdGuard = refreshBody.range(
+            of: "guard refreshAction == .rebind"
+        )?.lowerBound ?? refreshBody.endIndex
+        let syncLog = refreshBody.range(of: "remote native video track refreshed from receiver stats probe")?.lowerBound
+            ?? refreshBody.startIndex
+        XCTAssertLessThan(
+            sameTrackIdGuard,
+            syncLog,
+            "Receiver stats polling may return a fresh Swift wrapper for the same native track; same trackId must be a no-op before rebind logging or handler publication."
+        )
+        let syncIndex = evidenceLoop.range(of: "refreshRemoteVideoTrackFromReceiverIfNeeded")?.lowerBound
+            ?? evidenceLoop.endIndex
+        let evidenceIndex = evidenceLoop.range(of: "remote-video-frame-evidence")?.lowerBound
+            ?? evidenceLoop.startIndex
+        XCTAssertTrue(
+            syncIndex < evidenceIndex,
+            "The active receiver-backed track must be installed before receiver-stats evidence can start a native render probe."
+        )
+    }
+
+    func testReceiverStatsProbeSameTrackIdRefreshIsAlwaysNoOp() throws {
+        let source = try webRTCSessionSource()
+        let refreshBody = try sourceSlice(
+            from: "private func refreshRemoteVideoTrackFromReceiverIfNeeded",
+            to: "private func remoteInboundVideoStatsSamples",
+            in: source
+        )
+
+        XCTAssertEqual(
+            WebRTCSession.receiverStatsProbeRemoteVideoTrackRefreshAction(
+                currentTrackId: "video-1",
+                receiverTrackId: " video-1 ",
+                hasCurrentRemoteVideoTrack: true
+            ),
+            .noOp
+        )
+        XCTAssertEqual(
+            WebRTCSession.receiverStatsProbeRemoteVideoTrackRefreshAction(
+                currentTrackId: "video-1",
+                receiverTrackId: "video-1",
+                hasCurrentRemoteVideoTrack: true
+            ),
+            .noOp,
+            "Receiver stats probe can vend fresh RTCVideoTrack wrappers for the same native track; same trackId must never publish a rebind from this polling path."
+        )
+        XCTAssertEqual(
+            WebRTCSession.receiverStatsProbeRemoteVideoTrackRefreshAction(
+                currentTrackId: "video-1",
+                receiverTrackId: "video-2",
+                hasCurrentRemoteVideoTrack: true
+            ),
+            .rebind
+        )
+        XCTAssertEqual(
+            WebRTCSession.receiverStatsProbeRemoteVideoTrackRefreshAction(
+                currentTrackId: nil,
+                receiverTrackId: "video-1",
+                hasCurrentRemoteVideoTrack: false
+            ),
+            .rebind
+        )
+
+        XCTAssertTrue(refreshBody.contains("receiverStatsProbeRemoteVideoTrackRefreshAction"))
+        XCTAssertTrue(refreshBody.contains("guard refreshAction == .rebind else {\n            return false\n        }"))
+        XCTAssertFalse(
+            refreshBody.contains("tracksShareNativeBacking: Self.remoteVideoTracksShareNativeBacking(remoteVideoTrack, receiverTrack)"),
+            "Receiver stats probe must not use backing identity as a rebind trigger; wrapper churn is exactly what caused repeated same-track rebinds."
+        )
+        XCTAssertFalse(
+            refreshBody.contains("remoteVideoTrack !== receiverTrack"),
+            "Receiver stats probe must not compare RTCVideoTrack wrapper identity directly; receiver.track can return a fresh wrapper."
+        )
+        let noOpGuardIndex = refreshBody.range(of: "guard refreshAction == .rebind")?.lowerBound
+            ?? refreshBody.endIndex
+        let refreshLogIndex = refreshBody.range(of: "remote native video track refreshed from receiver stats probe")?.lowerBound
+            ?? refreshBody.startIndex
+        XCTAssertTrue(
+            noOpGuardIndex < refreshLogIndex,
+            "Same-track no-op must return before refresh/rebind logging and onRemoteVideoTrack publication."
+        )
+    }
+
+    func testRemoteVideoInstallSkipsRenderEpochBumpForSameNativeBacking() throws {
+        let crossNetworkSource = try crossNetworkWebRTCManagerSource()
+        let installBody = try sourceSlice(
+            from: "private func installRemoteVideoTrack(_ track: RTCVideoTrack?)",
+            to: "func currentRemoteVideoTrackRenderToken",
+            in: crossNetworkSource
+        )
+
+        XCTAssertTrue(installBody.contains("Self.remoteVideoTracksShareNativeBacking(remoteVideoTrack, track)"))
+        XCTAssertTrue(installBody.contains("scheduleRemoteVideoTrackConfirmationIfNeeded(trigger: \"track-unchanged\")"))
+        let sameBackingGuardIndex = installBody.range(of: "guard !tracksShareNativeBacking")?.lowerBound
+            ?? installBody.endIndex
+        let epochBumpIndex = installBody.range(of: "remoteVideoTrackRenderEpoch &+= 1")?.lowerBound
+            ?? installBody.startIndex
+        XCTAssertTrue(
+            sameBackingGuardIndex < epochBumpIndex,
+            "Same native backing must exit before render epoch is bumped."
+        )
+        XCTAssertTrue(
+            installBody.contains("&& currentTrackId == incomingTrackId\n            && track != nil"),
+            "Same-trackId real backing replacements should still be treated as a renderer rebind."
+        )
+    }
+
+    func testVideoRefreshPayloadOmitsAudioEndpointAndAdvertisesJPEGOnlyWarmupFallback() throws {
+        let source = try remoteDesktopManagerSource()
+        let pushBody = try sourceSlice(
+            from: "private func pushViewerStreamConfiguration(force: Bool, refreshStream: Bool = false) async",
+            to: "private func sendViewerStreamConfigurationPayload",
+            in: source
+        )
+        let payloadBody = try sourceSlice(
+            from: "func makeViewerStreamConfigurationPayload(\n        refreshStream: Bool,",
+            to: "private func nextStreamRefreshToken()",
+            in: source
+        )
+
+        XCTAssertTrue(pushBody.contains("let includeAudioEndpointInStreamConfig = !refreshStream"))
+        XCTAssertTrue(pushBody.contains("mediaAudioEndpoint: includeAudioEndpointInStreamConfig ? mediaAudioBinding?.endpoint : nil"))
+        XCTAssertTrue(pushBody.contains("mediaSessionId: includeAudioEndpointInStreamConfig ? mediaAudioBinding?.mediaSessionId : nil"))
+        XCTAssertTrue(pushBody.contains("if includeAudioEndpointInStreamConfig, payload.mediaAudioEndpoint != nil"))
+        XCTAssertTrue(source.contains("func handleCrossNetworkNativeVideoWarmupEvidence(reason: String)"))
+        XCTAssertTrue(source.contains("await self?.pushViewerStreamConfiguration(force: true, refreshStream: true)"))
+        XCTAssertTrue(payloadBody.contains("shouldUseJPEGOnlyFallbackDuringNativeWarmup"))
+        XCTAssertTrue(payloadBody.contains("? [\"jpeg\"]"))
+        XCTAssertTrue(payloadBody.contains("? \"jpeg\""))
+        XCTAssertTrue(payloadBody.contains("nativeVideoTrackReady: Self.advertisedCrossNetworkNativeVideoReadyFlag"))
     }
 
     func testCrossNetworkFrameNotificationRejectsStaleOrMismatchedSessions() {
@@ -2668,7 +3348,10 @@ final class RegressionHardeningTests: XCTestCase {
 
         XCTAssertLessThan(leaseRange.lowerBound, rendererRange.lowerBound)
         XCTAssertTrue(crossNetworkBranch.contains("event=leaseReady"))
-        XCTAssertTrue(crossNetworkBranch.contains("event=udpBindStarted"))
+        XCTAssertTrue(crossNetworkBranch.contains("event=audioEndpointPrepared"))
+        XCTAssertTrue(crossNetworkBranch.contains("event=udpConnectionStarted"))
+        XCTAssertTrue(crossNetworkBranch.contains("strictRelayBindRequired ? .requireAcknowledgement : .optimisticAfterSend"))
+        XCTAssertTrue(crossNetworkBranch.contains("relayBindPolicy: relayBindPolicy"))
         XCTAssertTrue(source.contains("streamTopologyFlapSuppressedUntil"))
         XCTAssertTrue(source.contains("fallback producer flap suppressed"))
     }
@@ -2795,6 +3478,152 @@ final class RegressionHardeningTests: XCTestCase {
         let messageA = try await context.buildMessageA()
         XCTAssertEqual(messageA.supportedSuites, [.mlkem768fs])
         XCTAssertNotNil(messageA.initiatorContribution)
+    }
+
+    @MainActor
+    func testWebRTCRekeyKEMCoverageTreatsCanonicalMLKEMAsForwardSecureReady() {
+        let coverage = CrossNetworkWebRTCManager.testOnlyResolveTrustedPeerKEMCoverage(
+            requiredSuites: [.mlkem768fs, .mlkem768],
+            trustedPeerKEM: [.mlkem768: Data([0x99])]
+        )
+
+        XCTAssertEqual(coverage.availableSuites, [.mlkem768fs, .mlkem768])
+        XCTAssertTrue(coverage.missingSuites.isEmpty)
+    }
+
+    @MainActor
+    func testWebRTCRekeyKEMCoverageDoesNotTreatXWingAsMLKEMFamily() {
+        let coverage = CrossNetworkWebRTCManager.testOnlyResolveTrustedPeerKEMCoverage(
+            requiredSuites: [.mlkem768fs, .mlkem768],
+            trustedPeerKEM: [.xwing: Data([0x42])]
+        )
+
+        XCTAssertTrue(coverage.availableSuites.isEmpty)
+        XCTAssertEqual(coverage.missingSuites, [.mlkem768fs, .mlkem768])
+    }
+
+    @MainActor
+    func testWebRTCStrictPQCRekeyCandidatesKeepMLKEMInteropWhenXWingIsPreferred() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: true,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+        let candidates = CrossNetworkWebRTCManager.testOnlyStrictPQCRekeyCandidateSuites(
+            capability: capability,
+            selectedProviderSuites: [.xwing],
+            selectedProviderTier: .nativePQC,
+            appleXWingAvailable: true
+        )
+
+        XCTAssertEqual(candidates, [.xwing, .mlkem768fs, .mlkem768])
+
+        let mlkemOnlyPeer = CrossNetworkWebRTCManager.testOnlyResolveTrustedPeerKEMCoverage(
+            requiredSuites: candidates,
+            trustedPeerKEM: [.mlkem768: Data([0x99])]
+        )
+        XCTAssertEqual(mlkemOnlyPeer.availableSuites, [.mlkem768fs, .mlkem768])
+        XCTAssertFalse(mlkemOnlyPeer.availableSuites.contains(.xwing))
+
+        let xwingPeer = CrossNetworkWebRTCManager.testOnlyResolveTrustedPeerKEMCoverage(
+            requiredSuites: candidates,
+            trustedPeerKEM: [.xwing: Data([0x42]), .mlkem768: Data([0x99])]
+        )
+        XCTAssertEqual(xwingPeer.availableSuites.first, .xwing)
+    }
+
+    @MainActor
+    func testWebRTCStrictPQCRekeyProviderPlansDoNotUseXWingForMLKEMOnlyPeer() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: true,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+
+        let plans = CrossNetworkWebRTCManager.testOnlyWebRTCPQCRekeyProviderPlans(
+            capability: capability,
+            prefersLiboqsForPeer: false,
+            peerHasXWing: false,
+            appleXWingAvailable: true
+        )
+
+        XCTAssertEqual(plans.first?.label, "native-pqc")
+        XCTAssertEqual(plans.first?.suites, [.mlkem768fs, .mlkem768])
+    }
+
+    @MainActor
+    func testWebRTCStrictPQCRekeyProviderPlansUseXWingOnlyForXWingPeer() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: true,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+
+        let plans = CrossNetworkWebRTCManager.testOnlyWebRTCPQCRekeyProviderPlans(
+            capability: capability,
+            prefersLiboqsForPeer: false,
+            peerHasXWing: true,
+            appleXWingAvailable: true
+        )
+
+        XCTAssertEqual(plans.first?.label, "native-xwing")
+        XCTAssertEqual(plans.first?.suites, [.xwing])
+    }
+
+    @MainActor
+    func testWebRTCStrictPQCRekeyProviderPlansPreferApplePQCBeforeLiboqsForInteropPeer() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: true,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+
+        let plans = CrossNetworkWebRTCManager.testOnlyWebRTCPQCRekeyProviderPlans(
+            capability: capability,
+            prefersLiboqsForPeer: true,
+            peerHasXWing: false,
+            appleXWingAvailable: true
+        )
+
+        XCTAssertEqual(plans.first?.label, "native-pqc")
+        XCTAssertEqual(plans.first?.suites, [.mlkem768fs, .mlkem768])
+        XCTAssertEqual(plans.dropFirst().first?.label, "liboqs-fallback")
+    }
+
+    @MainActor
+    func testWebRTCStrictPQCRekeyCandidatesUseLiboqsWhenApplePQCUnavailable() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: false,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+        let candidates = CrossNetworkWebRTCManager.testOnlyStrictPQCRekeyCandidateSuites(
+            capability: capability,
+            selectedProviderSuites: [.mlkem768fs, .mlkem768],
+            selectedProviderTier: .liboqsPQC,
+            appleXWingAvailable: false
+        )
+
+        XCTAssertEqual(candidates, [.mlkem768fs, .mlkem768])
+    }
+
+    @MainActor
+    func testWebRTCStrictPQCRekeyProviderPlansUseLiboqsWhenApplePQCUnavailable() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: false,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+
+        let plans = CrossNetworkWebRTCManager.testOnlyWebRTCPQCRekeyProviderPlans(
+            capability: capability,
+            prefersLiboqsForPeer: true,
+            peerHasXWing: false,
+            appleXWingAvailable: false
+        )
+
+        XCTAssertEqual(plans.first?.label, "liboqs")
+        XCTAssertEqual(plans.first?.suites, [.mlkem768fs, .mlkem768])
     }
 
     @MainActor
@@ -3048,6 +3877,74 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(reason, .cancelled)
         let authorityAfterCancel = await initiator.getAuthenticatedRemoteAuthority()
         XCTAssertNil(authorityAfterCancel)
+    }
+
+    func testStrictBootstrapOnlyLogsAppMessageTypeAndAcceptsLivenessControls() throws {
+        let source = try crossNetworkWebRTCManagerSource()
+        let bootstrapFilter = try sourceSlice(
+            from: "let messageKind = Self.bootstrapAppMessageKind(appMessage)",
+            to: "await handleInboundAppMessageOverWebRTC",
+            in: source
+        )
+
+        XCTAssertTrue(bootstrapFilter.contains("case .heartbeat, .ping, .pong, .peerDisconnecting:"))
+        XCTAssertTrue(bootstrapFilter.contains("accepted control app message before PQC rekey"))
+        XCTAssertTrue(bootstrapFilter.contains("type=\\(messageKind)"))
+        XCTAssertTrue(bootstrapFilter.contains("lastRekey=\\(lastRekeyEvent ?? \"-\")"))
+        XCTAssertTrue(bootstrapFilter.contains("ignored non-bootstrap app message"))
+    }
+
+    func testStrictBootstrapOnlyDropsMediaPayloadsBeforePQCRekey() throws {
+        let source = try crossNetworkWebRTCManagerSource()
+        let highThroughputPublisher = try sourceSlice(
+            from: "private func publishHighThroughputRemoteDesktopPayloadIfCurrent",
+            to: "@discardableResult\n    private func handleDecodedControlPlaintext",
+            in: source
+        )
+        let receiveLoopProbe = try sourceSlice(
+            from: "if let decoded = Self.decodeRemoteDesktopHighThroughputPayload(plaintext)",
+            to: "if await handleDecodedControlPlaintext",
+            in: source
+        )
+        let screenPublisher = try sourceSlice(
+            from: "private func publishDecodedScreenDataIfCurrent",
+            to: "func sendFramed",
+            in: source
+        )
+
+        XCTAssertTrue(highThroughputPublisher.contains("isStrictPQCClassicBootstrapOnlyCurrentSession"))
+        XCTAssertTrue(highThroughputPublisher.contains("source=control-channel"))
+        XCTAssertTrue(highThroughputPublisher.contains("return false"))
+        XCTAssertTrue(receiveLoopProbe.contains("let published = await publishHighThroughputRemoteDesktopPayloadIfCurrent"))
+        XCTAssertTrue(receiveLoopProbe.contains("if published && !usesDirectControlPayloads"))
+        XCTAssertTrue(screenPublisher.contains("strictPQCClassicBootstrapOnlySessionIds.contains(sessionId)"))
+        XCTAssertTrue(screenPublisher.contains("source=screen-channel"))
+        XCTAssertLessThan(
+            try XCTUnwrap(screenPublisher.range(of: "strictPQCClassicBootstrapOnlySessionIds.contains(sessionId)")?.lowerBound),
+            try XCTUnwrap(screenPublisher.range(of: "publishDecodedScreenData(screenData)")?.lowerBound)
+        )
+    }
+
+    func testStrictBootstrapTimeoutExtendsWhileLivenessOrRekeyIsActive() throws {
+        let source = try crossNetworkWebRTCManagerSource()
+        let livenessWatchdog = try sourceSlice(
+            from: "private func startRemotePeerLivenessWatchdog",
+            to: "private func markStrictPQCClassicBootstrapOnly",
+            in: source
+        )
+        let bootstrapTimeout = try sourceSlice(
+            from: "strictPQCClassicBootstrapTimeoutTasksBySessionId[sessionId] = Task",
+            to: "private func clearStrictPQCClassicBootstrapOnly",
+            in: source
+        )
+
+        XCTAssertTrue(source.contains("strictPQCClassicBootstrapMaxGraceSeconds"))
+        XCTAssertTrue(livenessWatchdog.contains("strictPQCClassicBootstrapOnlySessionIds.contains(sessionId)"))
+        XCTAssertTrue(livenessWatchdog.contains("continue"))
+        XCTAssertTrue(bootstrapTimeout.contains("hasFreshActivity || isRekeyActivelyProgressing"))
+        XCTAssertTrue(bootstrapTimeout.contains("strictPQCClassicBootstrapMaxGraceSeconds"))
+        XCTAssertTrue(bootstrapTimeout.contains("timeout extended while rekey/liveness is active"))
+        XCTAssertTrue(bootstrapTimeout.contains("failStrictPQCBootstrapSession"))
     }
 }
 

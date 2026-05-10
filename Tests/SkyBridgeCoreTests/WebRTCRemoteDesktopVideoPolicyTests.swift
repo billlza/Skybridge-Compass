@@ -64,6 +64,40 @@ final class WebRTCRemoteDesktopVideoPolicyTests: XCTestCase {
         XCTAssertTrue(policy.reason.contains("relay"))
     }
 
+    func testRelayPathUsesHardwareNativeRTPWhenNativeScreenTrackIsEnabled() {
+        let policy = WebRTCRemoteDesktopVideoPolicySelector.select(
+            request: makeRequest(size: CGSize(width: 3840, height: 2160), codec: .h264, fps: 60, lowLatency: true),
+            transportPath: .relay,
+            peerFormats: ["jpeg", "h264"],
+            thermalState: .nominal,
+            isAppleSilicon: true,
+            nativeVideoTrackEnabled: true
+        )
+
+        XCTAssertEqual(policy.codec, .h264)
+        XCTAssertTrue(policy.usesHardwareEncoder)
+        XCTAssertGreaterThan(policy.targetFrameRate, 15)
+        XCTAssertTrue(policy.reason.contains("relay-native-rtp"))
+    }
+
+    func testRelayNativeRTPKeepsExplicit2KHighFPSRequest() {
+        let policy = WebRTCRemoteDesktopVideoPolicySelector.select(
+            request: makeRequest(size: CGSize(width: 2056, height: 1329), codec: .h264, fps: 60, lowLatency: true),
+            transportPath: .relay,
+            peerFormats: ["jpeg", "h264"],
+            thermalState: .nominal,
+            isAppleSilicon: true,
+            nativeVideoTrackEnabled: true
+        )
+
+        XCTAssertEqual(policy.codec, .h264)
+        XCTAssertTrue(policy.usesHardwareEncoder)
+        XCTAssertEqual(policy.targetFrameRate, 60)
+        XCTAssertEqual(policy.preferredSize.width, 2056)
+        XCTAssertEqual(policy.preferredSize.height, 1329)
+        XCTAssertTrue(policy.reason.contains("relay-native-rtp"))
+    }
+
     func testSharedAudioFallbackProtectionCapsDirectHardwarePolicy() {
         let policy = WebRTCRemoteDesktopVideoPolicySelector.select(
             request: makeRequest(size: CGSize(width: 2056, height: 1328), codec: .h264, fps: 60, gop: 120),

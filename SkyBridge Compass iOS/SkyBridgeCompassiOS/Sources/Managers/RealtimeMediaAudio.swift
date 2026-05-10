@@ -11,6 +11,37 @@ import AVFoundation
 import SkyBridgeOpus
 import SkyBridgeRealtimeMedia
 
+struct IOSRealtimeMediaAudioReceiverStartupSnapshot: Sendable {
+    let datagramsSeen: UInt64
+    let received: UInt64
+    let decoded: UInt64
+    let played: UInt64
+    let rejected: UInt64
+    let authRejected: UInt64
+    let sessionHashRejected: UInt64
+    let replayRejected: UInt64
+    let sourceRejected: UInt64
+    let sourceMigrated: UInt64
+}
+
+struct IOSRealtimeMediaAudioReceiverHeartbeatSnapshot: Sendable {
+    let datagramsSeen: UInt64
+    let received: UInt64
+    let decoded: UInt64
+    let played: UInt64
+    let rejected: UInt64
+    let authRejected: UInt64
+    let sessionHashRejected: UInt64
+    let replayRejected: UInt64
+    let jitterEvicted: UInt64
+    let playbackDropped: UInt64
+    let renderedFrames: UInt64?
+    let underflowEvents: UInt64?
+    let rebufferEvents: UInt64?
+    let startupSilenceFrames: UInt64?
+    let engineRunning: Bool?
+}
+
 struct RemoteRealtimeMediaKeySnapshot: Sendable, Equatable {
     let sessionId: String
     let sendKey: Data
@@ -32,11 +63,35 @@ actor IOSRealtimeMediaAudioPlayer {
         let appendedFrames: UInt64
         let renderedFrames: UInt64
         let rebufferEvents: UInt64
+        let bridgedUnderflowFrames: UInt64
         let startupSilenceFrames: UInt64
         let targetQueuedMs: Double
         let isPrimed: Bool
         let isEngineRunning: Bool
         let audioPath: String
+    }
+
+    struct EffectivePlaybackProfile: Sendable, Equatable {
+        let jitterTargetMs: Int
+        let jitterMaxMs: Int
+        let maxJitterTargetMs: Int
+        let maxJitterMaxMs: Int
+
+        var targetQueuedMs: Int {
+            jitterTargetMs + 20
+        }
+
+        var rebufferResumeMs: Int {
+            max(100, (targetQueuedMs * 3 + 3) / 4)
+        }
+
+        var softUnderflowBridgeMs: Int {
+            max(40, min(jitterTargetMs, rebufferResumeMs))
+        }
+
+        var capacityMs: Int {
+            max(maxJitterMaxMs + 40, maxJitterTargetMs + 20)
+        }
     }
 
     private enum PlaybackState: String {
@@ -57,6 +112,8 @@ actor IOSRealtimeMediaAudioPlayer {
     private var renderBuffer: RealtimePCMRenderBuffer?
     private var activeProfileSignature: String?
     private var targetQueuedFrames: Int = 0
+    private var rebufferResumeFrames: Int = 0
+    private var softUnderflowBridgeFrames: Int = 0
     private var hardQueuedFrames: Int = 0
     private var playbackState: PlaybackState = .stopped
     private var lastDropLogAt = Date.distantPast
@@ -68,11 +125,12 @@ actor IOSRealtimeMediaAudioPlayer {
         frameCount: Int,
         sequence: UInt64,
         profile: SkyBridgeMediaAudioProfile,
-        mode: SkyBridgeMediaAudioMode
+        mode: SkyBridgeMediaAudioMode,
+        effectiveProfile: EffectivePlaybackProfile
     ) -> Bool {
         guard frameCount > 0 else { return false }
         do {
-            try ensureConfigured(profile: profile, mode: mode)
+            try ensureConfigured(profile: profile, mode: mode, effectiveProfile: effectiveProfile)
         } catch {
             SkyBridgeLogger.shared.debug("PQC media audio player unavailable: \(error.localizedDescription)")
             return false
@@ -104,6 +162,8 @@ actor IOSRealtimeMediaAudioPlayer {
         renderBuffer = nil
         activeProfileSignature = nil
         targetQueuedFrames = 0
+        rebufferResumeFrames = 0
+        softUnderflowBridgeFrames = 0
         hardQueuedFrames = 0
         playbackState = .stopped
     }
@@ -120,6 +180,7 @@ actor IOSRealtimeMediaAudioPlayer {
             appendedFrames: snapshot.appendedFrames,
             renderedFrames: snapshot.renderedFrames,
             rebufferEvents: snapshot.rebufferEvents,
+            bridgedUnderflowFrames: snapshot.bridgedUnderflowFrames,
             startupSilenceFrames: snapshot.startupSilenceFrames,
             targetQueuedMs: snapshot.targetQueuedMs,
             isPrimed: snapshot.isPrimed,
@@ -128,9 +189,28 @@ actor IOSRealtimeMediaAudioPlayer {
         )
     }
 
-    private func ensureConfigured(profile: SkyBridgeMediaAudioProfile, mode: SkyBridgeMediaAudioMode) throws {
-        let signature = "\(profile.sampleRate)-\(profile.channels)-\(profile.frameDurationMs)-\(profile.jitterTargetMs)-\(profile.jitterMaxMs)-\(mode.rawValue)"
+    func renderQueueDeficitPacketCount(profile: SkyBridgeMediaAudioProfile) -> Int {
+        guard let snapshot = renderBuffer?.snapshot(reset: false) else { return 0 }
+        let deficitFrames = max(0, snapshot.targetQueuedFrames - snapshot.queuedFrames)
+        guard deficitFrames > 0 else { return 0 }
+        return max(1, (deficitFrames + profile.samplesPerPacket - 1) / profile.samplesPerPacket)
+    }
+
+    private func ensureConfigured(
+        profile: SkyBridgeMediaAudioProfile,
+        mode: SkyBridgeMediaAudioMode,
+        effectiveProfile: EffectivePlaybackProfile
+    ) throws {
+        let signature = "\(profile.sampleRate)-\(profile.channels)-\(profile.frameDurationMs)-\(mode.rawValue)-adaptive-\(effectiveProfile.maxJitterTargetMs)-\(effectiveProfile.maxJitterMaxMs)"
         if renderBuffer != nil, sourceNode != nil, activeProfileSignature == signature {
+            renderBuffer?.updateTargets(
+                targetQueuedFrames: frames(for: effectiveProfile.targetQueuedMs, profile: profile),
+                rebufferResumeFrames: frames(for: effectiveProfile.rebufferResumeMs, profile: profile),
+                softUnderflowBridgeFrames: frames(for: effectiveProfile.softUnderflowBridgeMs, profile: profile)
+            )
+            self.targetQueuedFrames = frames(for: effectiveProfile.targetQueuedMs, profile: profile)
+            self.rebufferResumeFrames = frames(for: effectiveProfile.rebufferResumeMs, profile: profile)
+            self.softUnderflowBridgeFrames = frames(for: effectiveProfile.softUnderflowBridgeMs, profile: profile)
             return
         }
         stop()
@@ -140,18 +220,21 @@ actor IOSRealtimeMediaAudioPlayer {
         try session.setPreferredIOBufferDuration(mode == .lowLatency ? 0.005 : 0.01)
         try session.setActive(true)
 
-        let targetMs = max(profile.jitterTargetMs + profile.frameDurationMs, profile.frameDurationMs * 3)
-        let hardMs = max(profile.jitterMaxMs + profile.frameDurationMs * 2, targetMs)
-        let targetFrames = max(
-            profile.samplesPerPacket * 3,
-            profile.sampleRate * targetMs / 1_000
-        )
-        let capacityFrames = max(targetFrames, profile.sampleRate * hardMs / 1_000)
+        let targetMs = effectiveProfile.targetQueuedMs
+        let rebufferResumeMs = effectiveProfile.rebufferResumeMs
+        let softUnderflowBridgeMs = effectiveProfile.softUnderflowBridgeMs
+        let hardMs = effectiveProfile.capacityMs
+        let targetFrames = frames(for: targetMs, profile: profile)
+        let rebufferResumeFrames = frames(for: rebufferResumeMs, profile: profile)
+        let softUnderflowBridgeFrames = frames(for: softUnderflowBridgeMs, profile: profile)
+        let capacityFrames = max(targetFrames, frames(for: hardMs, profile: profile))
         let renderBuffer = RealtimePCMRenderBuffer(
             sampleRate: Double(profile.sampleRate),
             channels: profile.channels,
             capacityFrames: capacityFrames,
-            targetQueuedFrames: targetFrames
+            targetQueuedFrames: targetFrames,
+            rebufferResumeFrames: rebufferResumeFrames,
+            softUnderflowBridgeFrames: softUnderflowBridgeFrames
         )
         let engine = AVAudioEngine()
         let sourceNode = AVAudioSourceNode { [renderBuffer] isSilence, _, frameCount, outputData in
@@ -166,11 +249,17 @@ actor IOSRealtimeMediaAudioPlayer {
         self.renderBuffer = renderBuffer
         self.activeProfileSignature = signature
         self.targetQueuedFrames = targetFrames
+        self.rebufferResumeFrames = rebufferResumeFrames
+        self.softUnderflowBridgeFrames = softUnderflowBridgeFrames
         self.hardQueuedFrames = capacityFrames
         self.playbackState = .buffering
         SkyBridgeLogger.shared.info(
-            "🎧 PQC media audio playback prebuffering: codec=opus path=pqc-opus-source-node-ring mode=\(mode.rawValue) targetQueuedMs=\(targetMs) capacityMs=\(hardMs)"
+            "🎧 PQC media audio playback prebuffering: codec=opus path=pqc-opus-source-node-ring mode=\(mode.rawValue) targetQueuedMs=\(targetMs) rebufferResumeMs=\(rebufferResumeMs) softUnderflowBridgeMs=\(softUnderflowBridgeMs) capacityMs=\(hardMs)"
         )
+    }
+
+    private func frames(for milliseconds: Int, profile: SkyBridgeMediaAudioProfile) -> Int {
+        max(profile.samplesPerPacket, profile.sampleRate * max(1, milliseconds) / 1_000)
     }
 
     private func startEngineIfReady() throws {
@@ -215,6 +304,7 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
         let appendedFrames: UInt64
         let renderedFrames: UInt64
         let rebufferEvents: UInt64
+        let bridgedUnderflowFrames: UInt64
         let startupSilenceFrames: UInt64
         let targetQueuedFrames: Int
         let isPrimed: Bool
@@ -236,12 +326,15 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
     private let sampleRate: Double
     private let channels: Int
     private let capacityFrames: Int
-    private let targetQueuedFrames: Int
+    private var targetQueuedFrames: Int
+    private var rebufferResumeFrames: Int
+    private var softUnderflowBridgeFrames: Int
     private var storage: [Float]
     private var readFrame = 0
     private var writeFrame = 0
     private var queuedFrames = 0
     private var isPrimed = false
+    private var hasStartedPlayback = false
     private var lastSamples: [Float]
     private var underflowEvents: UInt64 = 0
     private var underflowFrames: UInt64 = 0
@@ -250,15 +343,43 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
     private var appendedFrames: UInt64 = 0
     private var renderedFrames: UInt64 = 0
     private var rebufferEvents: UInt64 = 0
+    private var bridgedUnderflowFrames: UInt64 = 0
     private var startupSilenceFrames: UInt64 = 0
+    private var softUnderflowBridgeFramesRemaining: Int
 
-    init(sampleRate: Double, channels: Int, capacityFrames: Int, targetQueuedFrames: Int) {
+    init(
+        sampleRate: Double,
+        channels: Int,
+        capacityFrames: Int,
+        targetQueuedFrames: Int,
+        rebufferResumeFrames: Int,
+        softUnderflowBridgeFrames: Int
+    ) {
         self.sampleRate = sampleRate
         self.channels = max(1, channels)
         self.capacityFrames = max(1, capacityFrames)
         self.targetQueuedFrames = max(1, min(targetQueuedFrames, capacityFrames))
+        self.rebufferResumeFrames = max(1, min(rebufferResumeFrames, self.targetQueuedFrames))
+        self.softUnderflowBridgeFrames = max(0, softUnderflowBridgeFrames)
+        self.softUnderflowBridgeFramesRemaining = max(0, softUnderflowBridgeFrames)
         self.storage = Array(repeating: 0, count: max(1, capacityFrames) * max(1, channels))
         self.lastSamples = Array(repeating: 0, count: max(1, channels))
+    }
+
+    func updateTargets(
+        targetQueuedFrames: Int,
+        rebufferResumeFrames: Int,
+        softUnderflowBridgeFrames: Int
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.targetQueuedFrames = max(1, min(targetQueuedFrames, capacityFrames))
+        self.rebufferResumeFrames = max(1, min(rebufferResumeFrames, self.targetQueuedFrames))
+        self.softUnderflowBridgeFrames = max(0, softUnderflowBridgeFrames)
+        self.softUnderflowBridgeFramesRemaining = min(
+            max(0, self.softUnderflowBridgeFramesRemaining),
+            self.softUnderflowBridgeFrames
+        )
     }
 
     func appendPCM16(_ data: Data, frameCount: Int) -> AppendResult {
@@ -291,8 +412,11 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
         }
         writeFrame = (writeFrame + frameCount) % capacityFrames
         queuedFrames += frameCount
-        if queuedFrames >= targetQueuedFrames {
+        let primingThreshold = hasStartedPlayback ? rebufferResumeFrames : targetQueuedFrames
+        if queuedFrames >= primingThreshold {
             isPrimed = true
+            hasStartedPlayback = true
+            softUnderflowBridgeFramesRemaining = softUnderflowBridgeFrames
         }
         appendedFrames &+= UInt64(frameCount)
         return .appended(queuedFrames: queuedFrames)
@@ -316,10 +440,18 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
 
         let framesToRead = min(requestedFrames, queuedFrames)
         if framesToRead < requestedFrames {
+            let missingFrames = requestedFrames - framesToRead
             underflowEvents &+= 1
-            underflowFrames &+= UInt64(requestedFrames - framesToRead)
-            rebufferEvents &+= 1
-            isPrimed = false
+            underflowFrames &+= UInt64(missingFrames)
+            if missingFrames <= softUnderflowBridgeFramesRemaining {
+                softUnderflowBridgeFramesRemaining -= missingFrames
+                bridgedUnderflowFrames &+= UInt64(missingFrames)
+            } else {
+                bridgedUnderflowFrames &+= UInt64(softUnderflowBridgeFramesRemaining)
+                softUnderflowBridgeFramesRemaining = 0
+                rebufferEvents &+= 1
+                isPrimed = false
+            }
         }
 
         if outputBuffers.count == 1,
@@ -371,6 +503,9 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
 
         readFrame = (readFrame + framesToRead) % capacityFrames
         queuedFrames -= framesToRead
+        if isPrimed, queuedFrames >= rebufferResumeFrames {
+            softUnderflowBridgeFramesRemaining = softUnderflowBridgeFrames
+        }
         renderedFrames &+= UInt64(framesToRead)
         return noErr
     }
@@ -423,6 +558,7 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
             appendedFrames: appendedFrames,
             renderedFrames: renderedFrames,
             rebufferEvents: rebufferEvents,
+            bridgedUnderflowFrames: bridgedUnderflowFrames,
             startupSilenceFrames: startupSilenceFrames,
             targetQueuedFrames: targetQueuedFrames,
             isPrimed: isPrimed
@@ -435,6 +571,7 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
             appendedFrames = 0
             renderedFrames = 0
             rebufferEvents = 0
+            bridgedUnderflowFrames = 0
             startupSilenceFrames = 0
         }
         return snapshot
@@ -448,10 +585,13 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     private struct ReceiverTelemetryCounters: Sendable {
+        var datagramsSeen: UInt64 = 0
         var received: UInt64 = 0
         var decoded: UInt64 = 0
         var played: UInt64 = 0
         var rejected: UInt64 = 0
+        var authRejected: UInt64 = 0
+        var sessionHashRejected: UInt64 = 0
         var replayRejected: UInt64 = 0
         var jitterLate: UInt64 = 0
         var jitterDuplicate: UInt64 = 0
@@ -464,10 +604,13 @@ actor IOSRealtimeMediaAudioReceiver {
 
         static func - (lhs: ReceiverTelemetryCounters, rhs: ReceiverTelemetryCounters) -> ReceiverTelemetryCounters {
             ReceiverTelemetryCounters(
+                datagramsSeen: lhs.datagramsSeen &- rhs.datagramsSeen,
                 received: lhs.received &- rhs.received,
                 decoded: lhs.decoded &- rhs.decoded,
                 played: lhs.played &- rhs.played,
                 rejected: lhs.rejected &- rhs.rejected,
+                authRejected: lhs.authRejected &- rhs.authRejected,
+                sessionHashRejected: lhs.sessionHashRejected &- rhs.sessionHashRejected,
                 replayRejected: lhs.replayRejected &- rhs.replayRejected,
                 jitterLate: lhs.jitterLate &- rhs.jitterLate,
                 jitterDuplicate: lhs.jitterDuplicate &- rhs.jitterDuplicate,
@@ -482,6 +625,7 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     private let sessionIdHash: UInt64
+    private let sessionId: String
     private let keys: SkyBridgeMediaDirectionKeys
     private let profile: SkyBridgeMediaAudioProfile
     private let mode: SkyBridgeMediaAudioMode
@@ -489,10 +633,13 @@ actor IOSRealtimeMediaAudioReceiver {
     private var replayWindow = SkyBridgeMediaReplayWindow()
     private var jitterBuffer: SkyBridgeMediaJitterBuffer<SkyBridgeMediaOpenedPacket>
     private var playoutTask: Task<Void, Never>?
+    private var datagramsSeen: UInt64 = 0
     private var received: UInt64 = 0
     private var decoded: UInt64 = 0
     private var played: UInt64 = 0
     private var rejected: UInt64 = 0
+    private var authRejected: UInt64 = 0
+    private var sessionHashRejected: UInt64 = 0
     private var lateOrDuplicate: UInt64 = 0
     private var replayRejected: UInt64 = 0
     private var jitterLate: UInt64 = 0
@@ -509,6 +656,12 @@ actor IOSRealtimeMediaAudioReceiver {
     private var lastTelemetryAt = Date.distantPast
     private var lastTelemetryCounters = ReceiverTelemetryCounters()
     private var consecutivePLCFrames = 0
+    private var effectiveJitterTargetMs: Int
+    private var effectiveJitterMaxMs: Int
+    private var stableJitterWindowCount = 0
+    private var lastJitterAdaptationReason = "baseline"
+    private var arrivalIntervalStats = RollingMillisecondStats(maxSamples: 96)
+    private var lastAcceptedPacketArrivalAt: TimeInterval?
 
     init(snapshot: RemoteRealtimeMediaKeySnapshot, mode: SkyBridgeMediaAudioMode) throws {
         let keyMaterial = SkyBridgeMediaKeyMaterial.derive(
@@ -518,13 +671,19 @@ actor IOSRealtimeMediaAudioReceiver {
             transcriptHash: snapshot.transcriptHash
         )
         self.sessionIdHash = SkyBridgeMediaPacketCodec.sessionIdHash(snapshot.sessionId)
+        self.sessionId = snapshot.sessionId
         self.keys = keyMaterial.receive
         self.mode = mode
         self.profile = SkyBridgeMediaAudioProfile.profile(for: mode)
+        let initialJitterTargetMs = Self.initialJitterTargetMs(for: self.profile, mode: mode)
+        let initialJitterMaxMs = Self.initialJitterMaxMs(for: self.profile, mode: mode)
+        self.effectiveJitterTargetMs = initialJitterTargetMs
+        self.effectiveJitterMaxMs = initialJitterMaxMs
         self.jitterBuffer = SkyBridgeMediaJitterBuffer(
-            targetDelayMs: self.profile.jitterTargetMs,
-            maxDelayMs: self.profile.jitterMaxMs,
-            packetDurationMs: self.profile.frameDurationMs
+            targetDelayMs: Self.orderingJitterTargetMs(for: self.profile, mode: mode),
+            maxDelayMs: Self.orderingJitterMaxMs(for: self.profile, mode: mode),
+            packetDurationMs: self.profile.frameDurationMs,
+            reorderGraceMs: 0
         )
         self.decoder = try SkyBridgeOpusDecoder(
             sampleRate: profile.sampleRate,
@@ -534,9 +693,11 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     func handle(datagram: SkyBridgeMediaReceivedDatagram) async {
+        datagramsSeen &+= 1
         do {
             let opened = try SkyBridgeMediaPacketCodec.open(packet: datagram.packet, keys: keys)
             guard opened.header.sessionIdHash == sessionIdHash else {
+                sessionHashRejected &+= 1
                 rejected &+= 1
                 await logTelemetryIfNeeded()
                 return
@@ -560,14 +721,16 @@ actor IOSRealtimeMediaAudioReceiver {
                 return
             }
             received &+= 1
+            let receivedAt = Date().timeIntervalSinceReferenceDate
+            recordPacketArrival(now: receivedAt)
             let insertResult = jitterBuffer.insert(
                 SkyBridgeMediaJitterFrame(
                     sequence: opened.header.sequence,
                     timestampSamples: opened.header.timestampSamples,
-                    insertedAt: Date().timeIntervalSinceReferenceDate,
+                    insertedAt: receivedAt,
                     payload: opened
                 ),
-                now: Date().timeIntervalSinceReferenceDate
+                now: receivedAt
             )
             switch insertResult {
             case .accepted:
@@ -583,6 +746,7 @@ actor IOSRealtimeMediaAudioReceiver {
                 lateOrDuplicate &+= 1
             }
         } catch {
+            authRejected &+= 1
             rejected &+= 1
             SkyBridgeLogger.shared.debug("PQC media audio packet rejected: \(error.localizedDescription)")
         }
@@ -597,6 +761,42 @@ actor IOSRealtimeMediaAudioReceiver {
 
     func receivedPacketCount() -> UInt64 {
         received
+    }
+
+    func startupDiagnosticSnapshot() -> IOSRealtimeMediaAudioReceiverStartupSnapshot {
+        IOSRealtimeMediaAudioReceiverStartupSnapshot(
+            datagramsSeen: datagramsSeen,
+            received: received,
+            decoded: decoded,
+            played: played,
+            rejected: rejected,
+            authRejected: authRejected,
+            sessionHashRejected: sessionHashRejected,
+            replayRejected: replayRejected,
+            sourceRejected: sourceRejected,
+            sourceMigrated: sourceMigrated
+        )
+    }
+
+    func heartbeatDiagnosticSnapshot() async -> IOSRealtimeMediaAudioReceiverHeartbeatSnapshot {
+        let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(reset: false)
+        return IOSRealtimeMediaAudioReceiverHeartbeatSnapshot(
+            datagramsSeen: datagramsSeen,
+            received: received,
+            decoded: decoded,
+            played: played,
+            rejected: rejected,
+            authRejected: authRejected,
+            sessionHashRejected: sessionHashRejected,
+            replayRejected: replayRejected,
+            jitterEvicted: jitterEvicted,
+            playbackDropped: playbackDropped,
+            renderedFrames: playback?.renderedFrames,
+            underflowEvents: playback?.underflowEvents,
+            rebufferEvents: playback?.rebufferEvents,
+            startupSilenceFrames: playback?.startupSilenceFrames,
+            engineRunning: playback?.isEngineRunning
+        )
     }
 
     private func acceptAuthenticatedSource(
@@ -631,11 +831,14 @@ actor IOSRealtimeMediaAudioReceiver {
     private func resetReceiveOrderingState(reason: String) async {
         replayWindow = SkyBridgeMediaReplayWindow()
         jitterBuffer = SkyBridgeMediaJitterBuffer(
-            targetDelayMs: profile.jitterTargetMs,
-            maxDelayMs: profile.jitterMaxMs,
-            packetDurationMs: profile.frameDurationMs
+            targetDelayMs: orderingJitterTargetMs,
+            maxDelayMs: orderingJitterMaxMs,
+            packetDurationMs: profile.frameDurationMs,
+            reorderGraceMs: 0
         )
         consecutivePLCFrames = 0
+        arrivalIntervalStats.reset()
+        lastAcceptedPacketArrivalAt = nil
         playoutTask?.cancel()
         playoutTask = nil
         if let freshDecoder = try? SkyBridgeOpusDecoder(
@@ -672,23 +875,49 @@ actor IOSRealtimeMediaAudioReceiver {
 
     private func playoutTick(maxFrames dueFrames: Int) async {
         var scheduledFrames = 0
-        let frameLimit = max(1, min(playoutBurstFrameLimit, dueFrames))
+        let renderDeficitFrames = await IOSRealtimeMediaAudioPlayer.shared.renderQueueDeficitPacketCount(
+            profile: profile
+        )
+        let allowPLCGap = renderDeficitFrames >= gapPlayoutDeficitThresholdPacketCount
+        let frameLimit = max(1, min(playoutBurstFrameLimit, dueFrames + renderDeficitFrames))
         while scheduledFrames < frameLimit {
-            guard await playoutNextFrame() else { return }
+            guard await playoutNextFrame(allowPLCGap: allowPLCGap) else { return }
             scheduledFrames += 1
         }
     }
 
+    private var gapPlayoutDeficitThresholdPacketCount: Int {
+        let lowWaterMs: Int
+        switch mode {
+        case .lowLatency:
+            lowWaterMs = 700
+        case .highFidelity:
+            lowWaterMs = 240
+        }
+        let frameDurationMs = max(1, profile.frameDurationMs)
+        let deficitMs = max(frameDurationMs * 8, effectiveJitterTargetMs - lowWaterMs)
+        return max(8, min(96, deficitMs / frameDurationMs))
+    }
+
     private var playoutBurstFrameLimit: Int {
-        max(2, min(6, profile.jitterTargetMs / profile.frameDurationMs))
+        max(2, min(32, effectiveJitterMaxMs / profile.frameDurationMs))
     }
 
     private var maxConsecutivePLCFrameCount: Int {
-        max(3, profile.jitterMaxMs / profile.frameDurationMs)
+        max(3, effectiveJitterMaxMs / profile.frameDurationMs)
     }
 
-    private func playoutNextFrame() async -> Bool {
-        switch jitterBuffer.popReadyOrGap(now: Date().timeIntervalSinceReferenceDate) {
+    private func playoutNextFrame(allowPLCGap: Bool) async -> Bool {
+        let now = Date().timeIntervalSinceReferenceDate
+        let result: SkyBridgeMediaJitterPopResult<SkyBridgeMediaOpenedPacket>
+        if allowPLCGap {
+            result = jitterBuffer.popReadyOrGap(now: now)
+        } else if let frame = jitterBuffer.popReadyFrame(now: now) {
+            result = .frame(frame)
+        } else {
+            result = .wait
+        }
+        switch result {
         case .wait:
             return false
         case .gap(let sequence):
@@ -742,7 +971,8 @@ actor IOSRealtimeMediaAudioReceiver {
             frameCount: samples.count / profile.channels,
             sequence: sequence,
             profile: profile,
-            mode: mode
+            mode: mode,
+            effectiveProfile: effectivePlaybackProfile
         )
         if didSchedule {
             played &+= 1
@@ -754,10 +984,13 @@ actor IOSRealtimeMediaAudioReceiver {
 
     private func currentCounters() -> ReceiverTelemetryCounters {
         ReceiverTelemetryCounters(
+            datagramsSeen: datagramsSeen,
             received: received,
             decoded: decoded,
             played: played,
             rejected: rejected,
+            authRejected: authRejected,
+            sessionHashRejected: sessionHashRejected,
             replayRejected: replayRejected,
             jitterLate: jitterLate,
             jitterDuplicate: jitterDuplicate,
@@ -770,6 +1003,175 @@ actor IOSRealtimeMediaAudioReceiver {
         )
     }
 
+    private static func initialJitterTargetMs(
+        for profile: SkyBridgeMediaAudioProfile,
+        mode: SkyBridgeMediaAudioMode
+    ) -> Int {
+        switch mode {
+        case .lowLatency:
+            return max(profile.jitterTargetMs, 2_400)
+        case .highFidelity:
+            return max(profile.jitterTargetMs, 520)
+        }
+    }
+
+    private static func initialJitterMaxMs(
+        for profile: SkyBridgeMediaAudioProfile,
+        mode: SkyBridgeMediaAudioMode
+    ) -> Int {
+        switch mode {
+        case .lowLatency:
+            return max(profile.jitterMaxMs, 4_800)
+        case .highFidelity:
+            return max(profile.jitterMaxMs, 900)
+        }
+    }
+
+    private static func orderingJitterTargetMs(
+        for profile: SkyBridgeMediaAudioProfile,
+        mode: SkyBridgeMediaAudioMode
+    ) -> Int {
+        switch mode {
+        case .lowLatency:
+            return min(max(profile.jitterTargetMs, profile.frameDurationMs * 4), 120)
+        case .highFidelity:
+            return min(max(profile.jitterTargetMs, 180), 320)
+        }
+    }
+
+    private static func orderingJitterMaxMs(
+        for profile: SkyBridgeMediaAudioProfile,
+        mode: SkyBridgeMediaAudioMode
+    ) -> Int {
+        switch mode {
+        case .lowLatency:
+            return min(max(profile.jitterMaxMs, profile.frameDurationMs * 120), 2_400)
+        case .highFidelity:
+            return min(max(profile.jitterMaxMs, 900), 1_200)
+        }
+    }
+
+    private var orderingJitterTargetMs: Int {
+        Self.orderingJitterTargetMs(for: profile, mode: mode)
+    }
+
+    private var orderingJitterMaxMs: Int {
+        Self.orderingJitterMaxMs(for: profile, mode: mode)
+    }
+
+    private var minimumAdaptiveJitterTargetMs: Int {
+        switch mode {
+        case .lowLatency:
+            return max(profile.jitterTargetMs, 520)
+        case .highFidelity:
+            return max(profile.jitterTargetMs, 340)
+        }
+    }
+
+    private var minimumAdaptiveJitterMaxMs: Int {
+        switch mode {
+        case .lowLatency:
+            return max(profile.jitterMaxMs, 900)
+        case .highFidelity:
+            return max(profile.jitterMaxMs, 760)
+        }
+    }
+
+    private var maxAdaptiveJitterTargetMs: Int {
+        switch mode {
+        case .lowLatency:
+            return max(profile.jitterTargetMs, 3_200)
+        case .highFidelity:
+            return max(profile.jitterTargetMs, 700)
+        }
+    }
+
+    private var maxAdaptiveJitterMaxMs: Int {
+        switch mode {
+        case .lowLatency:
+            return max(profile.jitterMaxMs, 5_600)
+        case .highFidelity:
+            return max(profile.jitterMaxMs, 1_200)
+        }
+    }
+
+    private var effectivePlaybackProfile: IOSRealtimeMediaAudioPlayer.EffectivePlaybackProfile {
+        IOSRealtimeMediaAudioPlayer.EffectivePlaybackProfile(
+            jitterTargetMs: effectiveJitterTargetMs,
+            jitterMaxMs: effectiveJitterMaxMs,
+            maxJitterTargetMs: maxAdaptiveJitterTargetMs,
+            maxJitterMaxMs: maxAdaptiveJitterMaxMs
+        )
+    }
+
+    private func recordPacketArrival(now: TimeInterval) {
+        if let lastAcceptedPacketArrivalAt {
+            let intervalMs = max(0, (now - lastAcceptedPacketArrivalAt) * 1_000)
+            arrivalIntervalStats.append(intervalMs)
+        }
+        lastAcceptedPacketArrivalAt = now
+    }
+
+    private func adaptJitterIfNeeded(
+        window: ReceiverTelemetryCounters,
+        playback: IOSRealtimeMediaAudioPlayer.PlaybackTelemetrySnapshot?
+    ) {
+        let scheduleLeadMs = playback.map { $0.queuedMs - $0.targetQueuedMs } ?? 0
+        let queuedMs = playback?.queuedMs ?? 0
+        let targetQueuedMs = playback?.targetQueuedMs ?? 0
+        let rebuffer = playback?.rebufferEvents ?? 0
+        let underflow = playback?.underflowEvents ?? 0
+        let evictionRatio = window.received > 0
+            ? Double(window.jitterEvicted) / Double(window.received)
+            : 0
+        let lowQueueThresholdMs = min(600, max(180, targetQueuedMs * 0.25))
+        let severeQueueThresholdMs = min(300, max(80, targetQueuedMs * 0.12))
+        let queuePressure = playback != nil
+            && scheduleLeadMs < -60
+            && queuedMs <= lowQueueThresholdMs
+        let severeQueuePressure = playback != nil
+            && scheduleLeadMs < -100
+            && queuedMs <= severeQueueThresholdMs
+        let severePressure = rebuffer > 0 || severeQueuePressure
+        let pressure = severePressure
+            || underflow > 0
+            || window.jitterEvicted > 0
+            || evictionRatio >= 0.02
+            || queuePressure
+        let oldTarget = effectiveJitterTargetMs
+        let oldMax = effectiveJitterMaxMs
+        if pressure {
+            stableJitterWindowCount = 0
+            let targetStep = severePressure ? 40 : 20
+            let maxStep = severePressure ? 80 : 40
+            effectiveJitterTargetMs = min(maxAdaptiveJitterTargetMs, effectiveJitterTargetMs + targetStep)
+            effectiveJitterMaxMs = min(maxAdaptiveJitterMaxMs, max(effectiveJitterMaxMs + maxStep, effectiveJitterTargetMs + 220))
+            lastJitterAdaptationReason = "pressure:jitterEvicted=\(window.jitterEvicted),evictRatio=\(String(format: "%.3f", evictionRatio)),underflow=\(underflow),rebuffer=\(rebuffer),queuedMs=\(Int(queuedMs.rounded())),targetQueuedMs=\(Int(targetQueuedMs.rounded())),scheduleLeadMs=\(Int(scheduleLeadMs.rounded()))"
+        } else {
+            stableJitterWindowCount += 1
+            if stableJitterWindowCount >= 6 {
+                effectiveJitterTargetMs = max(minimumAdaptiveJitterTargetMs, effectiveJitterTargetMs - 20)
+                effectiveJitterMaxMs = max(minimumAdaptiveJitterMaxMs, effectiveJitterMaxMs - 40)
+                stableJitterWindowCount = 0
+                lastJitterAdaptationReason = "stable-decay"
+            } else {
+                lastJitterAdaptationReason = "stable-hold:\(stableJitterWindowCount)"
+            }
+        }
+        effectiveJitterMaxMs = min(
+            maxAdaptiveJitterMaxMs,
+            max(effectiveJitterMaxMs, effectiveJitterTargetMs + 2 * profile.frameDurationMs)
+        )
+        guard oldTarget != effectiveJitterTargetMs || oldMax != effectiveJitterMaxMs else { return }
+        jitterBuffer = jitterBuffer.reconfigure(
+            targetDelayMs: orderingJitterTargetMs,
+            maxDelayMs: orderingJitterMaxMs
+        )
+        SkyBridgeLogger.shared.info(
+            "🎧 PQC media audio jitter adapted: targetMs=\(effectiveJitterTargetMs) maxMs=\(effectiveJitterMaxMs) orderingTargetMs=\(orderingJitterTargetMs) orderingMaxMs=\(orderingJitterMaxMs) reason=\(lastJitterAdaptationReason)"
+        )
+    }
+
     private func logTelemetryIfNeeded() async {
         let now = Date()
         guard now.timeIntervalSince(lastTelemetryAt) >= 5 else { return }
@@ -778,17 +1180,24 @@ actor IOSRealtimeMediaAudioReceiver {
         let window = counters - lastTelemetryCounters
         lastTelemetryCounters = counters
         let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(reset: true)
+        let arrivalStats = arrivalIntervalStats.snapshot(reset: true)
+        adaptJitterIfNeeded(window: window, playback: playback)
         let queuedMs = playback.map { String(format: "%.0f", $0.queuedMs) } ?? "-"
         let targetQueuedMs = playback.map { String(format: "%.0f", $0.targetQueuedMs) } ?? "-"
         let capacityMs = playback.map { String(format: "%.0f", $0.capacityMs) } ?? "-"
         let underflow = playback?.underflowEvents ?? 0
         let overflow = playback?.overflowEvents ?? 0
         let rebuffer = playback?.rebufferEvents ?? 0
+        let bridgedUnderflow = playback?.bridgedUnderflowFrames ?? 0
         let startupSilenceFrames = playback?.startupSilenceFrames ?? 0
         let renderedFrames = playback?.renderedFrames ?? 0
         let primed = playback?.isPrimed ?? false
         let engineRunning = playback?.isEngineRunning ?? false
-        let scheduleLeadMs = playback.map { String(format: "%.0f", $0.queuedMs) } ?? "-"
+        let scheduleLeadMs = playback.map { String(format: "%.0f", $0.queuedMs - $0.targetQueuedMs) } ?? "-"
+        let audioArrivalP50Ms = arrivalStats.map { String(format: "%.0f", $0.p50Ms) } ?? "-"
+        let audioArrivalP95Ms = arrivalStats.map { String(format: "%.0f", $0.p95Ms) } ?? "-"
+        let audioArrivalMaxMs = arrivalStats.map { String(format: "%.0f", $0.maxMs) } ?? "-"
+        let audioJitterBufferDepthMs = jitterBuffer.bufferedFrameCount * profile.frameDurationMs
         let windowLate = window.replayRejected + window.jitterLate + window.jitterDuplicate + window.jitterEvicted
         let windowArrivals = window.received + windowLate
         let lateRatio = windowArrivals > 0 ? Double(windowLate) / Double(windowArrivals) : 0
@@ -796,8 +1205,90 @@ actor IOSRealtimeMediaAudioReceiver {
         let lateRatioText = String(format: "%.3f", lateRatio)
         let plcRatioText = String(format: "%.3f", plcRatio)
         let audioPath = playback?.audioPath ?? "pqc-opus-source-node-ring"
+        let probable: String? = {
+            if played > 0 && window.received == 0 {
+                return "zero-rx-after-playback"
+            }
+            if window.received > 0 && window.decoded == 0 {
+                return "rx-decode-stalled"
+            }
+            if window.decoded > 0 && window.played == 0 {
+                return "rx-playback-stalled"
+            }
+            if window.datagramsSeen > 0 && window.received == 0 {
+                if window.sessionHashRejected > 0 {
+                    return "session-hash-rejected"
+                }
+                if window.authRejected > 0 {
+                    return "auth-decrypt-rejected"
+                }
+                if window.sourceRejected > 0 {
+                    return "source-rejected"
+                }
+                if window.replayRejected > 0 {
+                    return "replay-rejected"
+                }
+            }
+            return nil
+        }()
+        let probableSuffix = probable.map { " probable=\($0)" } ?? ""
         SkyBridgeLogger.shared.info(
-            "📈 PQC media audio rx: recv=\(window.received) decode=\(window.decoded) play=\(window.played) rejected=\(window.rejected) recvTotal=\(received) decodeTotal=\(decoded) playTotal=\(played) replayRejected=\(window.replayRejected) jitterLate=\(window.jitterLate) jitterDuplicate=\(window.jitterDuplicate) jitterEvicted=\(window.jitterEvicted) jitterGapStop=\(window.jitterGapStopped) plc=\(window.plcFrames) sourceReject=\(window.sourceRejected) sourceMigrate=\(window.sourceMigrated) playbackDrop=\(window.playbackDropped) jitter=\(jitterBuffer.bufferedFrameCount) codec=opus activeCodec=opus audioPath=\(audioPath) queuedMs=\(queuedMs) targetQueuedMs=\(targetQueuedMs) capacityMs=\(capacityMs) scheduleLeadMs=\(scheduleLeadMs) primed=\(primed) engineRunning=\(engineRunning) underflow=\(underflow) rebuffer=\(rebuffer) overflow=\(overflow) startupSilenceFrames=\(startupSilenceFrames) renderedFrames=\(renderedFrames) plcRatio=\(plcRatioText) lateRatio=\(lateRatioText)"
+            "📈 PQC media audio rx: datagrams=\(window.datagramsSeen) recv=\(window.received) decode=\(window.decoded) play=\(window.played) rejected=\(window.rejected) recvTotal=\(received) decodeTotal=\(decoded) playTotal=\(played) authRejected=\(window.authRejected) sessionHashRejected=\(window.sessionHashRejected) replayRejected=\(window.replayRejected) jitterLate=\(window.jitterLate) jitterDuplicate=\(window.jitterDuplicate) jitterEvicted=\(window.jitterEvicted) jitterGapStop=\(window.jitterGapStopped) plc=\(window.plcFrames) sourceReject=\(window.sourceRejected) sourceMigrate=\(window.sourceMigrated) playbackDrop=\(window.playbackDropped) jitter=\(jitterBuffer.bufferedFrameCount) audioJitterBufferDepthMs=\(audioJitterBufferDepthMs) codec=opus activeCodec=opus audioPath=\(audioPath) queuedMs=\(queuedMs) targetQueuedMs=\(targetQueuedMs) capacityMs=\(capacityMs) effectiveJitterTargetMs=\(effectiveJitterTargetMs) effectiveJitterMaxMs=\(effectiveJitterMaxMs) orderingJitterTargetMs=\(orderingJitterTargetMs) orderingJitterMaxMs=\(orderingJitterMaxMs) adaptationReason=\(lastJitterAdaptationReason) scheduleLeadMs=\(scheduleLeadMs) audioArrivalP50Ms=\(audioArrivalP50Ms) audioArrivalP95Ms=\(audioArrivalP95Ms) audioArrivalMaxMs=\(audioArrivalMaxMs) primed=\(primed) engineRunning=\(engineRunning) underflow=\(underflow) rebuffer=\(rebuffer) bridgedUnderflow=\(bridgedUnderflow) overflow=\(overflow) startupSilenceFrames=\(startupSilenceFrames) renderedFrames=\(renderedFrames) plcRatio=\(plcRatioText) lateRatio=\(lateRatioText)\(probableSuffix)"
+        )
+        SkyBridgeSmokeTraceWriter.append(
+            "audio-rx audioRxDatagrams=\(window.datagramsSeen) audioRxRecv=\(window.received) audioRxDecoded=\(window.decoded) audioRxPlayed=\(window.played) recvTotal=\(received) decodeTotal=\(decoded) playTotal=\(played) rejected=\(window.rejected) authRejected=\(window.authRejected) sessionHashRejected=\(window.sessionHashRejected) replayRejected=\(window.replayRejected) jitterLate=\(window.jitterLate) jitterDuplicate=\(window.jitterDuplicate) jitterEvicted=\(window.jitterEvicted) jitterGapStop=\(window.jitterGapStopped) plcFrames=\(window.plcFrames) plcRatio=\(plcRatioText) audioJitterBufferDepthMs=\(audioJitterBufferDepthMs) queuedMs=\(queuedMs) targetQueuedMs=\(targetQueuedMs) capacityMs=\(capacityMs) scheduleLeadMs=\(scheduleLeadMs) audioArrivalP50Ms=\(audioArrivalP50Ms) audioArrivalP95Ms=\(audioArrivalP95Ms) audioArrivalMaxMs=\(audioArrivalMaxMs) sourceReject=\(window.sourceRejected) sourceMigrate=\(window.sourceMigrated) engineRunning=\(engineRunning) renderedFrames=\(renderedFrames) underflow=\(underflow) rebuffer=\(rebuffer) bridgedUnderflow=\(bridgedUnderflow) startupSilenceFrames=\(startupSilenceFrames) playbackDrop=\(window.playbackDropped)\(probableSuffix)"
+        )
+        var diagnosticFields: [String: Any] = [
+            "kind": "audioRxRolling",
+            "session": sessionId,
+            "session_id": sessionId,
+            "audioRxDatagrams": window.datagramsSeen,
+            "audioRxRecv": window.received,
+            "audioRxDecoded": window.decoded,
+            "audioRxPlayed": window.played,
+            "recvTotal": received,
+            "decodeTotal": decoded,
+            "playTotal": played,
+            "rejected": window.rejected,
+            "authRejected": window.authRejected,
+            "sessionHashRejected": window.sessionHashRejected,
+            "replayRejected": window.replayRejected,
+            "jitterLate": window.jitterLate,
+            "jitterDuplicate": window.jitterDuplicate,
+            "jitterEvicted": window.jitterEvicted,
+            "jitterGapStopped": window.jitterGapStopped,
+            "plcFrames": window.plcFrames,
+            "plcRatio": plcRatio,
+            "sourceReject": window.sourceRejected,
+            "sourceMigrate": window.sourceMigrated,
+            "engineRunning": engineRunning,
+            "renderedFrames": renderedFrames,
+            "underflow": underflow,
+            "rebuffer": rebuffer,
+            "effectiveJitterTargetMs": effectiveJitterTargetMs,
+            "effectiveJitterMaxMs": effectiveJitterMaxMs,
+            "orderingJitterTargetMs": orderingJitterTargetMs,
+            "orderingJitterMaxMs": orderingJitterMaxMs,
+            "adaptationReason": lastJitterAdaptationReason,
+            "audioQueuedMs": playback.map { $0.queuedMs } ?? NSNull(),
+            "audioTargetQueuedMs": playback.map { $0.targetQueuedMs } ?? NSNull(),
+            "audioCapacityMs": playback.map { $0.capacityMs } ?? NSNull(),
+            "scheduleLeadMs": playback.map { $0.queuedMs - $0.targetQueuedMs } ?? NSNull(),
+            "audioJitterBufferDepthMs": audioJitterBufferDepthMs,
+            "bridgedUnderflow": bridgedUnderflow,
+            "startupSilenceFrames": startupSilenceFrames,
+            "playbackDrop": window.playbackDropped
+        ]
+        if let arrivalStats {
+            diagnosticFields["audioArrivalP50Ms"] = arrivalStats.p50Ms
+            diagnosticFields["audioArrivalP95Ms"] = arrivalStats.p95Ms
+            diagnosticFields["audioArrivalMaxMs"] = arrivalStats.maxMs
+        }
+        if let probable {
+            diagnosticFields["probable"] = probable
+        }
+        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            diagnosticFields
         )
     }
 
@@ -840,5 +1331,52 @@ actor IOSRealtimeMediaAudioReceiver {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             .lowercased()
+    }
+}
+
+private struct RollingMillisecondStats {
+    struct Snapshot: Sendable {
+        let p50Ms: Double
+        let p95Ms: Double
+        let maxMs: Double
+    }
+
+    private let maxSamples: Int
+    private var samples: [Double] = []
+
+    init(maxSamples: Int) {
+        self.maxSamples = max(1, maxSamples)
+    }
+
+    mutating func append(_ sample: Double) {
+        samples.append(sample)
+        if samples.count > maxSamples {
+            samples.removeFirst(samples.count - maxSamples)
+        }
+    }
+
+    mutating func snapshot(reset: Bool) -> Snapshot? {
+        guard !samples.isEmpty else { return nil }
+        let sortedSamples = samples.sorted()
+        let snapshot = Snapshot(
+            p50Ms: percentile(0.50, in: sortedSamples),
+            p95Ms: percentile(0.95, in: sortedSamples),
+            maxMs: sortedSamples.last ?? 0
+        )
+        if reset {
+            samples.removeAll(keepingCapacity: true)
+        }
+        return snapshot
+    }
+
+    mutating func reset() {
+        samples.removeAll(keepingCapacity: true)
+    }
+
+    private func percentile(_ percentile: Double, in sortedSamples: [Double]) -> Double {
+        guard !sortedSamples.isEmpty else { return 0 }
+        let clampedPercentile = min(1, max(0, percentile))
+        let index = Int((Double(sortedSamples.count - 1) * clampedPercentile).rounded(.up))
+        return sortedSamples[min(index, sortedSamples.count - 1)]
     }
 }

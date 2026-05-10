@@ -62,6 +62,82 @@ final class WebRTCRemoteDesktopBudgetTests: XCTestCase {
         XCTAssertEqual(budget.maxBufferedAmountBytes, 384_000)
     }
 
+    func testRelayNativeRTPBudgetAllowsInteractiveFrameRate() {
+        let budget = WebRTCRemoteDesktopBudgetSelector.select(
+            requestedFrameRate: 60,
+            transportPath: .relay,
+            thermalState: .nominal,
+            longEdge: 1920,
+            lowLatencyMode: true,
+            codec: .h264,
+            nativeVideoTrackEnabled: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(budget.frameRate, 60)
+        XCTAssertEqual(budget.maxBufferedAmountBytes, 1_280_000)
+        XCTAssertEqual(budget.reason, "relay-native-rtp")
+    }
+
+    func testRelayNativeRTP4KLowLatencyBudgetAllowsSixtyFPSOnAppleSilicon() {
+        let budget = WebRTCRemoteDesktopBudgetSelector.select(
+            requestedFrameRate: 60,
+            transportPath: .relay,
+            thermalState: .nominal,
+            longEdge: 3840,
+            lowLatencyMode: true,
+            codec: .h264,
+            nativeVideoTrackEnabled: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(budget.frameRate, 60)
+        XCTAssertEqual(budget.maxBufferedAmountBytes, 1_280_000)
+        XCTAssertEqual(budget.reason, "relay-native-rtp")
+    }
+
+    func testRelayNativeRTPBudgetKeepsUsableFrameRateUnderSeriousThermalPressure() {
+        let budget = WebRTCRemoteDesktopBudgetSelector.select(
+            requestedFrameRate: 60,
+            transportPath: .relay,
+            thermalState: .serious,
+            longEdge: 1920,
+            lowLatencyMode: true,
+            codec: .h264,
+            nativeVideoTrackEnabled: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(budget.frameRate, 30)
+        XCTAssertEqual(budget.maxBufferedAmountBytes, 896_000)
+        XCTAssertEqual(budget.reason, "relay-native-rtp")
+    }
+
+    func testRelayNativeRTPBudgetDoesNotCollapseToFallbackUnderCriticalThermalPressure() {
+        let budget = WebRTCRemoteDesktopBudgetSelector.select(
+            requestedFrameRate: 60,
+            transportPath: .relay,
+            thermalState: .critical,
+            longEdge: 1920,
+            lowLatencyMode: true,
+            codec: .h264,
+            nativeVideoTrackEnabled: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(budget.frameRate, 15)
+        XCTAssertEqual(budget.maxBufferedAmountBytes, 640_000)
+        XCTAssertEqual(budget.reason, "relay-native-rtp")
+    }
+
     func testThermalPressureReducesBudgetFurther() {
         let budget = WebRTCRemoteDesktopBudgetSelector.select(
             requestedFrameRate: 60,
@@ -72,6 +148,28 @@ final class WebRTCRemoteDesktopBudgetTests: XCTestCase {
         )
 
         XCTAssertEqual(budget.frameRate, 8)
-        XCTAssertEqual(budget.maxBufferedAmountBytes, 256_000)
+        XCTAssertEqual(budget.maxBufferedAmountBytes, UInt64(WebRTCDegradedFallbackJPEGProfile.maxTransportFrameBytes))
+    }
+
+    func testNativeRelayFallbackBudgetUsesTransportFrameCeiling() {
+        let budget = WebRTCRemoteDesktopBudgetSelector.select(
+            requestedFrameRate: 60,
+            transportPath: .relay,
+            thermalState: .nominal,
+            longEdge: 1920,
+            lowLatencyMode: true,
+            codec: .bgra,
+            nativeVideoTrackEnabled: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(budget.maxBufferedAmountBytes, UInt64(WebRTCDegradedFallbackJPEGProfile.maxTransportFrameBytes))
+        XCTAssertGreaterThan(
+            WebRTCDegradedFallbackJPEGProfile.maxTransportFrameBytes,
+            WebRTCDegradedFallbackJPEGProfile.maxEncodedFrameBytes
+        )
+        XCTAssertEqual(budget.reason, "relay-degraded-emergency-jpeg")
     }
 }

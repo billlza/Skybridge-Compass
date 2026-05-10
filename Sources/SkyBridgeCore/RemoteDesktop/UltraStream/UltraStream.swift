@@ -547,7 +547,8 @@ public final class UltraStreamSender {
             preferredCodec: frameType,
             preferredSize: config.maxResolution,
             targetFPS: config.targetFPS,
-            keyFrameInterval: config.keyFrameInterval
+            keyFrameInterval: config.keyFrameInterval,
+            lowLatencyMode: config.targetFPS >= 55
         )
         
         log.info("UltraStream Sender started")

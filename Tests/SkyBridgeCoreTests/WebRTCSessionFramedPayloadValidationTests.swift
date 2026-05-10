@@ -1,6 +1,11 @@
 import Testing
 import Foundation
+import CoreVideo
 @testable import SkyBridgeCore
+
+#if canImport(WebRTC)
+@preconcurrency import WebRTC
+#endif
 
 @Suite("WebRTCSession Framed Payload Validation Tests")
 struct WebRTCSessionFramedPayloadValidationTests {
@@ -76,15 +81,57 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(chunk.suffix(payload.count) == payload)
     }
 
+    @Test("SBC2 sender rejects whole frames that cannot fit the current screen buffer budget")
+    func screenChunkedWholeFrameBudgetRejectsBeforeChunkZero() throws {
+        let accepted = try WebRTCSession.validateScreenChunkedWholeFrameBudget(
+            payloadByteCount: 100,
+            maxChunkBytes: WebRTCSession.screenChunkHeaderByteCount + 50,
+            bufferedAmountBytes: 20,
+            maxBufferedAmountBytes: 228
+        )
+
+        #expect(accepted.chunkCount == 2)
+        #expect(accepted.framedBytes == 172)
+
+        do {
+            _ = try WebRTCSession.validateScreenChunkedWholeFrameBudget(
+                payloadByteCount: 100,
+                maxChunkBytes: WebRTCSession.screenChunkHeaderByteCount + 50,
+                bufferedAmountBytes: 57,
+                maxBufferedAmountBytes: 228
+            )
+            Issue.record("SBC2 sender must reject the whole frame before sending chunk 0")
+        } catch let error as WebRTCSession.WebRTCError {
+            switch error {
+            case .screenFrameBudgetExceeded(
+                let framedBytes,
+                let bufferedAmount,
+                let maxBufferedAmountBytes
+            ):
+                #expect(framedBytes == 172)
+                #expect(bufferedAmount == 57)
+                #expect(maxBufferedAmountBytes == 228)
+            default:
+                Issue.record("错误类型不正确: \(error)")
+            }
+        } catch {
+            Issue.record("未预期的错误类型: \(error)")
+        }
+    }
+
     @Test("screen chunked sender has a dedicated gate and no legacy length prefix")
     func screenChunkedSenderUsesDedicatedGateAndSBC2Telemetry() throws {
         let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCSession.swift")
         let hostSource = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
 
         #expect(source.contains("public func sendScreenChunkedPayloadAsync"))
+        #expect(source.contains("validateScreenChunkedWholeFrameBudget"))
+        #expect(source.contains("dataChannelBufferedAmountBytes(for: channel)"))
         #expect(source.contains("encodeScreenChunkEnvelope"))
         #expect(source.contains("gate: outboundScreenFrameGate") || source.contains("outboundScreenFrameGate.run"))
         #expect(hostSource.contains("session.sendScreenChunkedPayloadAsync"))
+        #expect(hostSource.contains("chunkDropReason=whole-frame-budget"))
+        #expect(hostSource.contains("catch WebRTCSession.WebRTCError.screenFrameBudgetExceeded"))
         #expect(hostSource.contains("wire=\\(wireFormat"))
         #expect(hostSource.contains("frameId="))
         #expect(hostSource.contains("sendLatencyMs="))
@@ -111,16 +158,109 @@ struct WebRTCSessionFramedPayloadValidationTests {
     @Test("native WebRTC screen sender exposes host-side RTP telemetry before nativeReady promotion")
     func nativeScreenVideoSenderExposesRTPTelemetry() throws {
         let sessionSource = try readSource("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCSession.swift")
+        let iosSessionSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSession.swift")
         let hostSource = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
 
         #expect(sessionSource.contains("NativeScreenVideoSendSnapshot"))
         #expect(sessionSource.contains("NativeScreenVideoRTCStats"))
         #expect(sessionSource.contains("outgoingNativeScreenVideoRTCStats"))
+        #expect(sessionSource.contains("refreshOutgoingScreenVideoSender"))
+        #expect(sessionSource.contains("monotonicOutgoingNativeVideoTimestamp"))
+        #expect(sessionSource.contains("recommendedNativeScreenVideoBitrateBps"))
+        #expect(sessionSource.contains("minimumExtremeNativeScreenVideoBitrateBps"))
+        #expect(sessionSource.contains("maxBitrateBps"))
+        #expect(sessionSource.contains("minBitrateBps"))
+        #expect(sessionSource.contains("degradationPreference"))
+        #expect(sessionSource.contains("disallowQualityDegradation"))
+        #expect(sessionSource.contains("lastFrameTimestampWasAdjusted"))
+        #expect(sessionSource.contains("mediaSummaries(from sdp: String)"))
+        #expect(sessionSource.contains("preferNativeScreenVideoCodecIfPossible"))
+        #expect(sessionSource.contains("preferredHardwareVideoEncoderCodec"))
+        #expect(sessionSource.contains("encoderFactory.preferredCodec"))
+        #expect(sessionSource.contains("nativeScreenVideoCodecPreferenceRank"))
+        #expect(sessionSource.contains("nativeScreenVideoCodecIsHardwarePreferred"))
+        #expect(sessionSource.contains("nativeScreenVideoCodecPreferences(from codecs: [RTCRtpCodecCapability])"))
+        #expect(sessionSource.contains("nativeScreenVideoCodecIsRTX"))
+        #expect(sessionSource.contains("preferredPayloadType"))
+        #expect(sessionSource.contains("parameters[\"apt\"]"))
+        #expect(sessionSource.contains("shouldUpdateNativeVideoFormat"))
+        #expect(sessionSource.contains("pushDiagnosticSyntheticNativeVideoFrame"))
+        #expect(sessionSource.contains("com.skybridge.webrtc.synthetic-native-video"))
+        #expect(sessionSource.contains("SKYBRIDGE_WEBRTC_DIAGNOSTIC_GENERIC_VIDEO_SOURCE"))
+        #expect(sessionSource.contains("SKYBRIDGE_WEBRTC_DIAGNOSTIC_SKIP_VIDEO_SENDER_PARAMETERS"))
+        #expect(sessionSource.contains("SKYBRIDGE_WEBRTC_DIAGNOSTIC_SKIP_ADAPT_OUTPUT_FORMAT"))
+        #expect(sessionSource.contains("factory.videoSource()"))
+        #expect(sessionSource.contains("sourceKind="))
+        #expect(sessionSource.contains("pixelBufferPrimaryBytesPerRow"))
+        #expect(sessionSource.contains("CVPixelBufferGetIOSurface"))
+        #expect(sessionSource.contains("lastSubmittedFrameBytesPerRow"))
+        #expect(sessionSource.contains("lastSubmittedFrameHasIOSurface"))
+        #expect(sessionSource.contains("lastRawFrameTimestampDeltaNs"))
+        #expect(sessionSource.contains("lastFrameTimestampDeltaNs"))
+        #expect(sessionSource.contains("targetWidth"))
+        #expect(sessionSource.contains("targetHeight"))
+        #expect(sessionSource.contains("targetFPS"))
+        #expect(sessionSource.contains("codecParameters"))
+        #expect(sessionSource.contains("conciseSDPFmtpParameters"))
+        #expect(sessionSource.contains("profile-level-id"))
+        #expect(sessionSource.contains("max-fs"))
+        #expect(sessionSource.contains("max-mbps"))
+        #expect(sessionSource.contains("nativeScreenVideoH264SDPConstraintsEnabled"))
+        #expect(sessionSource.contains("sdpWithNativeScreenH264LevelSupport"))
+        #expect(sessionSource.contains("h264ProfileLevelID"))
+        #expect(sessionSource.contains("local-sdp-h264-extreme-constraints"))
+        #expect(iosSessionSource.contains("nativeScreenVideoH264SDPConstraintsEnabled"))
+        #expect(iosSessionSource.contains("sdpWithNativeScreenH264LevelSupport"))
+        #expect(iosSessionSource.contains("h264ProfileLevelID"))
+        #expect(iosSessionSource.contains("local-sdp-h264-extreme-constraints"))
+        #expect(sessionSource.contains("WebRTCNativeScreenVideoFrameNormalizer"))
+        #expect(sessionSource.contains("VTPixelTransferSessionTransferImage"))
+        #expect(sessionSource.contains("evenBackingDimension"))
+        #expect(sessionSource.contains("requiresVisibleCrop"))
+        #expect(sessionSource.contains("adaptedWidth: Int32(normalizedFrame.visibleWidth)"))
+        #expect(sessionSource.contains("adaptedHeight: Int32(normalizedFrame.visibleHeight)"))
+        #expect(sessionSource.contains("cropWidth: Int32(normalizedFrame.visibleWidth)"))
+        #expect(sessionSource.contains("cropHeight: Int32(normalizedFrame.visibleHeight)"))
+        #expect(sessionSource.contains("codedSize="))
+        #expect(sessionSource.contains("kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange"))
+        #expect(sessionSource.contains("kCVPixelFormatType_420YpCbCr8BiPlanarFullRange"))
+        #expect(sessionSource.contains("preferredNormalizedPixelFormat"))
+        #expect(sessionSource.contains("cachedRawTimestampNs"))
+        #expect(sessionSource.contains("rawTimestampNs: rawTimeStampNs"))
+        #expect(sessionSource.contains("lastRawFramePixelFormat"))
+        #expect(sessionSource.contains("lastSubmittedFramePixelFormat"))
+        #expect(sessionSource.contains("normalizedFrames"))
+        #expect(sessionSource.contains("rtpFlowing"))
         #expect(sessionSource.contains("framesSent"))
         #expect(sessionSource.contains("bytesSent"))
+        #expect(sessionSource.contains("availableOutgoingBitrate"))
+        #expect(sessionSource.contains("currentRoundTripTime"))
+        #expect(sessionSource.contains("nackCount"))
+        #expect(sessionSource.contains("pliCount"))
+        #expect(sessionSource.contains("firCount"))
         #expect(hostSource.contains("native WebRTC screen tx"))
         #expect(hostSource.contains("native-video-tx session="))
+        #expect(hostSource.contains("rawPixelFormat="))
+        #expect(hostSource.contains("submittedPixelFormat="))
+        #expect(hostSource.contains("native-video-frame-source"))
+        #expect(hostSource.contains("SKYBRIDGE_WEBRTC_DIAGNOSTIC_SYNTHETIC_NATIVE_VIDEO"))
+        #expect(hostSource.contains("SKYBRIDGE_WEBRTC_DIAGNOSTIC_SYNTHETIC_NATIVE_VIDEO_SIZE"))
+        #expect(hostSource.contains("stream-diagnostic-synthetic-native-video-started"))
+        #expect(hostSource.contains("diagnostic-synthetic-native-video-enabled"))
+        #expect(hostSource.contains("bytesPerRow="))
+        #expect(hostSource.contains("iosurface="))
+        #expect(hostSource.contains("target="))
+        #expect(hostSource.contains("rawDeltaNs="))
+        #expect(hostSource.contains("timestampDeltaNs="))
+        #expect(hostSource.contains("frameNormalized="))
         #expect(hostSource.contains("NativeVideoHealthState"))
+        #expect(hostSource.contains("rawFramesSubmitted"))
+        #expect(hostSource.contains("rtpFlowing"))
+        #expect(hostSource.contains("rendered"))
+        #expect(hostSource.contains("degradedNoRTP"))
+        #expect(hostSource.contains("native-video-sender-refresh session="))
+        #expect(!hostSource.contains("action=recreate-transceiver"))
+        #expect(hostSource.contains("native-video-rtp-flowing"))
         #expect(hostSource.contains("failedNoRTP"))
         #expect(hostSource.contains("fallbackMode="))
         #expect(hostSource.contains("fallbackSentFPS="))
@@ -134,18 +274,40 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(hostSource.contains("jpegEncodeMs="))
         #expect(hostSource.contains("sendSuccessFPS="))
         #expect(hostSource.contains("dropReason="))
-        #expect(hostSource.contains("scaledImageForFallback"))
-        #expect(hostSource.contains("evenDimension"))
+        #expect(hostSource.contains("boundedWebRTCWarmupJPEGProfile"))
+        #expect(hostSource.contains("screenSendMaxBufferedAmountBytes"))
+        #expect(hostSource.contains("shouldThrottleNativeWarmupJPEGFallback"))
         #expect(hostSource.contains("requiredStableDirectEncoderFrames"))
         #expect(hostSource.contains("nativeVideoHasRenderEvidence"))
         #expect(hostSource.contains("webRTCFallbackSCKLatestProducer"))
         #expect(hostSource.contains("webRTCFallbackCGDisplayProducer"))
         #expect(hostSource.contains("webRTCFallbackCGDisplayEmergencyProducer"))
-        #expect(hostSource.contains("takeLatest(maxAge: Self.webRTCSCKLatestFallbackMaxAgeSeconds"))
-        #expect(hostSource.contains("sck-latest-stale-or-missing"))
+        #expect(hostSource.contains("webRTCFallbackBoundedJPEGWarmupProducer"))
+        #expect(hostSource.contains("boundedJPEGWarmupMain"))
+        #expect(hostSource.contains("native-warmup-bounded-jpeg"))
+        #expect(hostSource.contains("captureStreamer.onEncodedFrame = nil"))
+        #expect(hostSource.contains("degradedFallbackJPEGProfile: nil"))
         #expect(hostSource.contains("stream-native-warmup-fallback-main"))
-        #expect(hostSource.contains("CGDisplay emergency fallback active until fresh SCK frame or nativeReady"))
+        #expect(hostSource.contains("bounded JPEG fallback until native render evidence"))
         #expect(hostSource.contains("nativeVideoTrackReady"))
+        #expect(hostSource.contains("shouldDropNativeWarmupNonJPEGFallbackFrame"))
+        #expect(hostSource.contains("dropReason=native-warmup-non-jpeg-fallback"))
+        #expect(hostSource.contains("droppedNativeWarmupNonJPEG="))
+        #expect(hostSource.contains("nativeCaptureCodec="))
+        #expect(hostSource.contains("effectiveWebRTCNativeCaptureVideoFormats"))
+        #expect(hostSource.contains("webRTCHardwareCompatibleCaptureSize"))
+        #expect(hostSource.contains("native-video-quality-limited-"))
+        #expect(hostSource.contains("native-video-bwe-stats-unavailable"))
+        #expect(hostSource.contains("native-video-unacceptable-codec-"))
+        #expect(hostSource.contains("native-video-software-encoder-"))
+        #expect(hostSource.contains("native-video-target-bitrate-below-floor"))
+        #expect(hostSource.contains("nativeVideoNoRTPFailureGraceSeconds"))
+        #expect(hostSource.contains("strictNativeVideoNoRTPFailureReason"))
+        #expect(hostSource.contains("native-video-encoder-no-output"))
+        #expect(hostSource.contains("bitrateFloorTolerance"))
+        #expect(hostSource.contains("availableOutgoingBitrate="))
+        #expect(hostSource.contains("remotePacketsLost="))
+        #expect(hostSource.contains("nack="))
     }
 
     @Test("WebRTC PQC media audio refreshes expired admission and relay leases")
@@ -154,24 +316,36 @@ struct WebRTCSessionFramedPayloadValidationTests {
         let hostSource = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
         let viewerSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift")
         let viewerWebRTCSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift")
+        let smokeHarnessSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/SkyBridgeCompassApp.swift")
 
         #expect(clientSource.contains("public func refreshMediaAdmissionLease"))
         #expect(clientSource.contains("idempotencyKey"))
         #expect(hostSource.contains("webrtcMediaAdmissionLeaseExpiresAtBySessionId"))
         #expect(hostSource.contains("usableWebRTCMediaAdmissionLease"))
-        #expect(hostSource.contains("isReusableMediaRelayEndpoint(expiresAt: directRealtimeAudioSenderRelayExpiresAt)"))
+        #expect(hostSource.contains("isReusableMediaRelayEndpoint("))
+        #expect(hostSource.contains("minimumRemainingTime: realtimeAudioRelayRenewalMargin"))
+        #expect(hostSource.contains("requestWebRTCRealtimeAudioSenderEndpoint"))
+        #expect(hostSource.contains("leaseSource=localRoleLease"))
         #expect(hostSource.contains("isMediaAdmissionLeaseRefreshable"))
         #expect(hostSource.contains("media_admission_token_expired"))
         #expect(hostSource.contains("media_admission_token_lease_limit"))
+        #expect(hostSource.contains("status == 429 && body.contains(\"media_admission_token_lease_limit\")"))
         #expect(hostSource.contains("WebRTC PQC media audio config received"))
         #expect(hostSource.contains("reason=missingViewerEndpoint"))
         #expect(hostSource.contains("audioTxCaptured="))
-        #expect(hostSource.contains("telemetryTotals()"))
+        #expect(hostSource.contains("diagnosticSnapshot()"))
+        #expect(hostSource.contains("diagnosticSessionId: sessionID"))
+        #expect(hostSource.contains("audioTxEncoded="))
+        #expect(hostSource.contains("WebRTCMediaDiagnosticWriter.append"))
         #expect(viewerSource.contains("isUsableRealtimeMediaAudioEndpoint(endpoint)"))
         #expect(viewerSource.contains("PQC media relay lease request"))
         #expect(viewerSource.contains("streamConfigIncludesAudio="))
         #expect(viewerSource.contains("audioRxRecv=0"))
-        #expect(viewerSource.contains("relayEndpoint = try await crossNetwork.requestRealtimeMediaRelayEndpointForActiveSession()"))
+        #expect(viewerSource.contains("relayEndpointPair = try await crossNetwork.requestRealtimeMediaRelayEndpointForActiveSession()"))
+        #expect(smokeHarnessSource.contains("requiresStrictAudioRelayRenewal ? .requireAcknowledgement : .optimisticAfterSend"))
+        #expect(smokeHarnessSource.contains("initialSmokeAudioRelayBindPolicy"))
+        #expect(smokeHarnessSource.contains("if skyBridgeIsSameRealtimeMediaRelayAddress(currentEndpoint, newEndpoint),"))
+        #expect(!smokeHarnessSource.contains("!requiresStrictAudioRelayRenewal,\n           skyBridgeIsSameRealtimeMediaRelayAddress(currentEndpoint, newEndpoint)"))
         #expect(viewerWebRTCSource.contains("mediaAdmissionRelayEndpointBySessionId.removeValue(forKey: sessionId)"))
         #expect(viewerWebRTCSource.contains("/api/webrtc/session/refresh"))
         #expect(viewerWebRTCSource.contains("refreshWebRTCSessionAdmissionTokens"))
@@ -179,6 +353,30 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(viewerWebRTCSource.contains("refreshLeaseSuperseded"))
         #expect(viewerWebRTCSource.contains("media_admission_token_expired"))
         #expect(viewerWebRTCSource.contains("media_admission_token_lease_limit"))
+        #expect(viewerWebRTCSource.contains("status == 429 && body.contains(\"media_admission_token_lease_limit\")"))
+    }
+
+    @Test("registry WebRTC smoke rejects compat JWTs before hitting Supabase")
+    func registrySmokeRejectsUnsignedCompatJWTsBeforeRegistryRequests() throws {
+        let scriptSource = try readSource("Scripts/run_local_webrtc_smoke.sh")
+        let hostSource = try readSource("Sources/LocalWebRTCSmokeHost/main.swift")
+
+        #expect(scriptSource.contains("SMOKE_AUTH_SESSION_SOURCE_FILE"))
+        #expect(scriptSource.contains("SKYBRIDGE_SMOKE_AUTH_SESSION_FILE"))
+        #expect(scriptSource.contains("jwt_validation_error(token, require_fresh)"))
+        #expect(scriptSource.contains("JWT header alg=none is a compatibility smoke token"))
+        #expect(scriptSource.contains("not a usable signed Supabase JWT for registry smoke"))
+        #expect(scriptSource.contains("Registry media smoke requires a signed Supabase user JWT"))
+        #expect(scriptSource.contains("SKYBRIDGE_ACCESS_TOKEN"))
+        #expect(scriptSource.contains("SKYBRIDGE_REFRESH_TOKEN"))
+        #expect(scriptSource.contains("minimum_lifetime_seconds = 300"))
+
+        #expect(hostSource.contains("validateRegistrySmokeAuthSessionIfNeeded"))
+        #expect(hostSource.contains("auth-registry-jwt-validated"))
+        #expect(hostSource.contains("auth-registry-jwt-validation-skipped"))
+        #expect(hostSource.contains("smokeAuthJWTValidationError"))
+        #expect(hostSource.contains("JWT header alg=none is a compatibility smoke token"))
+        #expect(hostSource.contains("registry smoke auth requires a usable signed Supabase JWT"))
     }
 
     @Test("WebRTC stream configuration ACK and nonblocking audio receiver startup are wired")
@@ -201,7 +399,17 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(viewerSource.contains("receiverStartPending"))
         #expect(viewerSource.contains("receiverStartSlow"))
         #expect(viewerSource.contains("leaseReady"))
-        #expect(viewerSource.contains("udpBindStarted"))
+        #expect(viewerSource.contains("audioEndpointPrepared"))
+        #expect(viewerSource.contains("udpConnectionStarted"))
+        #expect(viewerSource.contains("relayBindSent"))
+        #expect(viewerSource.contains("relayBindAckTimedOut"))
+        #expect(viewerSource.contains("action=optimistic-grace"))
+        #expect(viewerSource.contains("relayBindAckGraceTrafficObserved"))
+        #expect(viewerSource.contains("relayBindAckTimedOutNoTraffic"))
+        #expect(viewerSource.contains("relayBindAckTimedOutNoAuthenticatedTraffic"))
+        #expect(viewerSource.contains("pushViewerStreamConfiguration(force: false, refreshStream: false)"))
+        #expect(viewerSource.contains("strictRelayBindRequired ? .requireAcknowledgement : .optimisticAfterSend"))
+        #expect(viewerSource.contains("relayBindPolicy: relayBindPolicy"))
         #expect(viewerSource.contains("receiverStarted"))
         #expect(viewerSource.contains("receiverStartFailed"))
         #expect(viewerSource.contains("event=audioPresentConfigSent"))
@@ -212,7 +420,48 @@ struct WebRTCSessionFramedPayloadValidationTests {
 
         #expect(viewerWebRTCSource.contains("msg.type == .streamConfigurationAck"))
         #expect(viewerWebRTCSource.contains("handleStreamConfigurationAck(payload)"))
+        #expect(viewerWebRTCSource.contains("markRealtimeMediaRelayEndpointUnusableForActiveSession"))
     }
+
+#if canImport(WebRTC)
+    @Test("RTCCVPixelBuffer crop metadata preserves odd visible screen height")
+    func rtccvPixelBufferCropPreservesOddVisibleHeight() throws {
+        let width = 2_056
+        let visibleHeight = 1_329
+        let codedHeight = 1_330
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            codedHeight,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            [
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+                kCVPixelBufferMetalCompatibilityKey as String: true
+            ] as CFDictionary,
+            &pixelBuffer
+        )
+        #expect(status == kCVReturnSuccess)
+        let unwrappedPixelBuffer = try #require(pixelBuffer)
+        let rtcBuffer = RTCCVPixelBuffer(
+            pixelBuffer: unwrappedPixelBuffer,
+            adaptedWidth: Int32(width),
+            adaptedHeight: Int32(visibleHeight),
+            cropWidth: Int32(width),
+            cropHeight: Int32(visibleHeight),
+            cropX: 0,
+            cropY: 0
+        )
+        let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0, timeStampNs: 1)
+
+        #expect(CVPixelBufferGetHeight(unwrappedPixelBuffer) == codedHeight)
+        #expect(rtcBuffer.width == Int32(width))
+        #expect(rtcBuffer.height == Int32(visibleHeight))
+        #expect(rtcBuffer.cropHeight == Int32(visibleHeight))
+        #expect(frame.width == Int32(width))
+        #expect(frame.height == Int32(visibleHeight))
+    }
+#endif
 
     private func readSource(_ relativePath: String) throws -> String {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)

@@ -54,7 +54,17 @@ struct RemoteControlStreamPolicy: Sendable, Equatable {
 }
 
 enum RemoteControlCaptureCompatibility {
-    static func normalizedCaptureSize(_ requestedSize: CGSize, for codec: RemoteFrameType) -> CGSize {
+    static func normalizedCaptureSize(
+        _ requestedSize: CGSize,
+        for codec: RemoteFrameType,
+        preserveExactVisibleSize: Bool = false
+    ) -> CGSize {
+        if preserveExactVisibleSize {
+            return CGSize(
+                width: normalizedDimension(requestedSize.width, requiresEvenAlignment: false),
+                height: normalizedDimension(requestedSize.height, requiresEvenAlignment: false)
+            )
+        }
         let requiresEvenAlignment = codec != .bgra
         return CGSize(
             width: normalizedDimension(requestedSize.width, requiresEvenAlignment: requiresEvenAlignment),

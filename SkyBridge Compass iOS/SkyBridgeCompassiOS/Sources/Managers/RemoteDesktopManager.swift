@@ -1872,6 +1872,8 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
     let preferredAudioEncoding: String?
     let audioSampleRate: Int?
     let audioChannelCount: Int?
+    let performanceValidationMode: String?
+    let mediaFallbackPolicy: String?
     let streamRefreshToken: UInt64?
     let sentAt: TimeInterval
 
@@ -1908,6 +1910,8 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         preferredAudioEncoding: String? = nil,
         audioSampleRate: Int? = nil,
         audioChannelCount: Int? = nil,
+        performanceValidationMode: String? = nil,
+        mediaFallbackPolicy: String? = nil,
         streamRefreshToken: UInt64? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
@@ -1943,6 +1947,8 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         self.preferredAudioEncoding = preferredAudioEncoding
         self.audioSampleRate = audioSampleRate
         self.audioChannelCount = audioChannelCount
+        self.performanceValidationMode = performanceValidationMode
+        self.mediaFallbackPolicy = mediaFallbackPolicy
         self.streamRefreshToken = streamRefreshToken
         self.sentAt = sentAt
     }
@@ -1980,6 +1986,8 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
             && lhs.preferredAudioEncoding == rhs.preferredAudioEncoding
             && lhs.audioSampleRate == rhs.audioSampleRate
             && lhs.audioChannelCount == rhs.audioChannelCount
+            && lhs.performanceValidationMode == rhs.performanceValidationMode
+            && lhs.mediaFallbackPolicy == rhs.mediaFallbackPolicy
             && lhs.streamRefreshToken == rhs.streamRefreshToken
     }
 }
@@ -3123,6 +3131,11 @@ public class RemoteDesktopManager: ObservableObject {
     private static let realtimeMediaAudioReceiverSlowDiagnosticDelay: Duration = .seconds(3)
     private static let realtimeMediaAudioReceiverStageTimeout: Duration = .seconds(8)
     private static let realtimeMediaAudioReceiverTotalTimeout: Duration = .seconds(15)
+    private static let realtimeMediaAudioRelayBindAckGraceDelay: Duration = .seconds(5)
+    private static let realtimeMediaAudioNoTrafficRecoveryDelay: Duration = .seconds(10)
+    private static let realtimeMediaAudioNoTrafficRecoveryMaxAttempts: Int = 2
+    private static let realtimeMediaAudioRelayRolloverGraceDelay: Duration = .seconds(15)
+    private static let realtimeMediaAudioEndpointRenewalLeadTime: TimeInterval = 12
     private static let viewerSettingsStore = CodablePersistenceStore<RemoteDesktopViewerSettings>(
         location: .protectedApplicationSupport(
             path: "RemoteDesktop/viewer-settings.json",
@@ -3154,6 +3167,62 @@ public class RemoteDesktopManager: ObservableObject {
         let format: String
         let width: Int
         let height: Int
+    }
+
+    nonisolated static func shouldIgnoreFallbackFrameAfterNativeVideoRendered(
+        activeTransportModeIsCrossNetwork: Bool,
+        nativeVideoTrackHasRenderedFrame: Bool
+    ) -> Bool {
+        activeTransportModeIsCrossNetwork && nativeVideoTrackHasRenderedFrame
+    }
+
+    nonisolated static func shouldDropNativeWarmupNonJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: Bool,
+        hasRemoteNativeVideoTrack: Bool,
+        nativeVideoTrackHasRenderedFrame: Bool,
+        format: String?
+    ) -> Bool {
+        guard activeTransportModeIsCrossNetwork,
+              hasRemoteNativeVideoTrack,
+              !nativeVideoTrackHasRenderedFrame else {
+            return false
+        }
+        let normalizedFormat = format?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalizedFormat != "jpeg" && normalizedFormat != "jpg"
+    }
+
+    nonisolated static func shouldUseJPEGOnlyFallbackDuringNativeWarmup(
+        activeTransportModeIsCrossNetwork: Bool,
+        hasRemoteNativeVideoTrack: Bool,
+        nativeVideoTrackHasRenderedFrame: Bool
+    ) -> Bool {
+        activeTransportModeIsCrossNetwork
+            && hasRemoteNativeVideoTrack
+            && !nativeVideoTrackHasRenderedFrame
+    }
+
+    nonisolated static func shouldRequestExtremeMediaValidation(
+        activeTransportModeIsCrossNetwork: Bool,
+        viewerSettings: RemoteDesktopViewerSettings,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        if environment["SKYBRIDGE_WEBRTC_EXTREME_MEDIA"] == "1"
+            || environment["SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK"] == "1" {
+            return true
+        }
+        guard activeTransportModeIsCrossNetwork else { return false }
+        switch viewerSettings.activePreset {
+        case .clarity, .pro4k120, .pro5k120:
+            return true
+        case .custom:
+            return viewerSettings.targetFrameRate >= 60
+                && viewerSettings.preferredCodec != .jpeg
+                && viewerSettings.resolution != .hd720
+        case .automatic, .fluid:
+            return false
+        }
     }
 
     private struct CurrentPathRemoteAuthority: Sendable {
@@ -3211,6 +3280,7 @@ public class RemoteDesktopManager: ObservableObject {
     /// 当前传输方式（用于 UI 提示）
     @Published public private(set) var transportStatusText: String?
     @Published public private(set) var renderPipelineStatus: RemoteDesktopRenderPipeline = .waiting
+    @Published public private(set) var isUsingCrossNetworkTransport = false
     @Published public private(set) var lastDamageRectCount: Int = 0
     @Published public private(set) var lastDamageUsesFullFrameFallback: Bool = false
     @Published private(set) var currentCursorPayload: RemoteDesktopCursorPayload?
@@ -3251,12 +3321,22 @@ public class RemoteDesktopManager: ObservableObject {
     private enum RealtimeMediaAudioReceiverStartPhase: String {
         case pending
         case lease
-        case udpBind
+        case udpConnection
+        case relayBindAck
+        case receiverReady
     }
 
     private enum RealtimeMediaAudioReceiverStartFailureReason: String {
         case stageTimeout
         case totalTimeout
+    }
+
+    private enum OptimisticRelayBindState: Equatable {
+        case idle
+        case ackPending(sessionId: String, endpoint: SkyBridgeMediaEndpoint)
+        case accepted(sessionId: String, endpoint: SkyBridgeMediaEndpoint)
+        case trafficObserved(sessionId: String, endpoint: SkyBridgeMediaEndpoint)
+        case failed(sessionId: String, endpoint: SkyBridgeMediaEndpoint, reason: String)
     }
 
     private let skyBridgeCore = SkyBridgeiOSCore.shared
@@ -3306,6 +3386,11 @@ public class RemoteDesktopManager: ObservableObject {
     private var realtimeMediaAudioReceiverStartTask: Task<Void, Never>?
     private var realtimeMediaAudioReceiverStartGeneration: UInt64 = 0
     private var realtimeMediaAudioReceiverStartPhase: RealtimeMediaAudioReceiverStartPhase?
+    private var realtimeMediaAudioRelayBindState: OptimisticRelayBindState = .idle
+    private var realtimeMediaAudioRelayBindGraceTask: Task<Void, Never>?
+    private var realtimeMediaAudioRelayRenewalTask: Task<Void, Never>?
+    private var realtimeMediaAudioNoTrafficRecoveryTask: Task<Void, Never>?
+    private var realtimeMediaAudioNoTrafficRecoveryAttemptsBySessionId: [String: Int] = [:]
     private var streamConfigurationAckTask: Task<Void, Never>?
     private var streamConfigurationAckGeneration: UInt64 = 0
     private var streamConfigurationAckSatisfied: Bool = false
@@ -3325,6 +3410,9 @@ public class RemoteDesktopManager: ObservableObject {
     private var hevcDisableRefreshSuppressedUntil: Date?
     private var hevcDisableRefreshTokenInFlight: UInt64?
     private var lastWaitingSyncDiagnosticLogTime: Date = .distantPast
+    private var lastNativePrimaryIgnoredFallbackDiagnosticAt: Date = .distantPast
+    private var lastNativeWarmupNonJPEGFallbackDropDiagnosticAt: Date = .distantPast
+    private let streamDecodeStallRefreshMinimumInterval: TimeInterval = 3.0
     private var codecGovernance = RemoteDesktopCodecGovernance()
     private var decodedVideoRendererPreference: DecodedVideoRendererPreference = .metal
     private var streamEpoch: UInt64 = 0
@@ -3351,8 +3439,14 @@ public class RemoteDesktopManager: ObservableObject {
     private var firstFrameContinuityTask: Task<Void, Never>?
     private var interactionContinuityTask: Task<Void, Never>?
     private var lastMetalFallbackAt: Date?
-    private let metalFallbackRestoreCooldown: TimeInterval = 30
-    private let metalFallbackStableFrameRestoreThreshold = 180
+    private let metalFallbackRestoreCooldown: TimeInterval = 0.75
+    private let metalFallbackStableFrameRestoreThreshold = 2
+    private let metalFallbackPersistentFailureThreshold = 3
+    private let metalFallbackPersistentFailureCooldown: TimeInterval = 6
+    private let metalFallbackExpectedRestoreWindow: TimeInterval = 2
+    private var metalRestoreFailureCount: Int = 0
+    private var metalRestoreSuppressedUntil: Date?
+    private var metalFallbackReason: String?
     private var stableSampleBufferFramesSinceMetalFallback: Int = 0
     private var crossNetworkFrameSubscriptionTask: Task<Void, Never>?
     private var crossNetworkFrameSubscriptionSessionId: String?
@@ -3399,7 +3493,10 @@ public class RemoteDesktopManager: ObservableObject {
         consecutiveSampleBufferDisplayStalls = 0
         lastInboundScreenTimestamp = nil
         lastCrossNetworkNativeReadyAnnouncementAt = nil
+        lastNativePrimaryIgnoredFallbackDiagnosticAt = .distantPast
+        lastNativeWarmupNonJPEGFallbackDropDiagnosticAt = .distantPast
         lastMetalFallbackAt = nil
+        metalFallbackReason = nil
         stableSampleBufferFramesSinceMetalFallback = 0
         decodedVideoRendererPreference = preferredDecodedVideoRenderer()
         metalAwaitingFirstDisplaySince = nil
@@ -3443,6 +3540,7 @@ public class RemoteDesktopManager: ObservableObject {
                 networkConnection?.cancel()
                 networkConnection = nil
                 activeTransportMode = .crossNetwork
+                isUsingCrossNetworkTransport = true
                 decodedVideoRendererPreference = preferredDecodedVideoRenderer()
                 transportStatusText = currentTransportStatusText()
                 currentConnection = Connection(device: resolvedDevice, status: .connected)
@@ -3511,6 +3609,7 @@ public class RemoteDesktopManager: ObservableObject {
                 }
             }
             activeTransportMode = .lan
+            isUsingCrossNetworkTransport = false
             decodedVideoRendererPreference = preferredDecodedVideoRenderer()
             transportStatusText = currentTransportStatusText()
 
@@ -3542,6 +3641,7 @@ public class RemoteDesktopManager: ObservableObject {
             await clearLANSecureChannelState()
             currentConnection = nil
             activeTransportMode = .none
+            isUsingCrossNetworkTransport = false
             transportStatusText = currentTransportStatusText()
             state = .error(error.localizedDescription)
             throw error
@@ -3646,6 +3746,7 @@ public class RemoteDesktopManager: ObservableObject {
         if ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_REMOTE") {
             currentConnection = connection
             activeTransportMode = .none
+            isUsingCrossNetworkTransport = false
             hasReceivedFrameInCurrentStream = false
             isStreaming = true
             state = .streaming
@@ -3820,6 +3921,7 @@ public class RemoteDesktopManager: ObservableObject {
         networkConnection = nil
         await clearLANSecureChannelState()
         activeTransportMode = .none
+        isUsingCrossNetworkTransport = false
         transportStatusText = currentTransportStatusText()
 
         if shouldDisconnectCrossNetworkSession {
@@ -3935,15 +4037,56 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
+    @MainActor
     func updateCrossNetworkNativeVideoResolution(_ size: CGSize) {
         guard activeTransportMode == .crossNetwork else { return }
         guard isStreaming else { return }
         guard size.width > 0, size.height > 0 else { return }
-        resolution = size
+        let visibleSize = normalizedCrossNetworkNativeVideoVisibleFrameSize(forCodedSize: size)
+        resolution = visibleSize
         crossNetwork.noteRemoteVideoTrackResolutionAvailable(
-            size,
+            visibleSize,
             source: "remote-desktop-resolution"
         )
+    }
+
+    @MainActor
+    private func normalizedCrossNetworkNativeVideoVisibleFrameSize(forCodedSize codedSize: CGSize) -> CGSize {
+        guard let expectedVisibleSize = expectedCrossNetworkNativeVideoVisibleFrameSize() else {
+            return codedSize
+        }
+        let expectedWidth = Int(expectedVisibleSize.width)
+        let expectedHeight = Int(expectedVisibleSize.height)
+        let codedWidth = Int(codedSize.width)
+        let codedHeight = Int(codedSize.height)
+        let expectedCodedWidth = Self.evenNativeVideoBackingDimension(expectedWidth)
+        let expectedCodedHeight = Self.evenNativeVideoBackingDimension(expectedHeight)
+        if codedWidth == expectedCodedWidth, codedHeight == expectedCodedHeight {
+            return expectedVisibleSize
+        }
+        if codedWidth == expectedWidth, codedHeight == expectedHeight {
+            return expectedVisibleSize
+        }
+        return codedSize
+    }
+
+    private static func evenNativeVideoBackingDimension(_ visibleDimension: Int) -> Int {
+        let sanitized = max(1, visibleDimension)
+        return sanitized.isMultiple(of: 2) ? sanitized : sanitized + 1
+    }
+
+    @MainActor
+    func expectedCrossNetworkNativeVideoVisibleFrameSize() -> CGSize? {
+        guard activeTransportMode == .crossNetwork else { return nil }
+        guard let payload = lastSentStreamConfiguration,
+              payload.adaptiveResolutionEnabled != true,
+              let width = payload.width,
+              let height = payload.height,
+              width > 0,
+              height > 0 else {
+            return nil
+        }
+        return CGSize(width: CGFloat(width), height: CGFloat(height))
     }
 
     @MainActor
@@ -4095,6 +4238,7 @@ public class RemoteDesktopManager: ObservableObject {
         networkConnection = nil
         await clearLANSecureChannelState()
         activeTransportMode = .none
+        isUsingCrossNetworkTransport = false
         transportStatusText = currentTransportStatusText()
         lastSentStreamConfiguration = nil
         lastIncomingStreamSignature = nil
@@ -4189,6 +4333,21 @@ public class RemoteDesktopManager: ObservableObject {
             || transport == "legacy-chunk-v1"
     }
 
+    private var strictCrossNetworkMediaValidationActive: Bool {
+        guard activeTransportMode == .crossNetwork else { return false }
+        let mode = lastSentStreamConfiguration?.performanceValidationMode?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let fallbackPolicy = lastSentStreamConfiguration?.mediaFallbackPolicy?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return mode == "extreme"
+            || mode == "strict"
+            || fallbackPolicy == "fail-fast"
+            || fallbackPolicy == "disabled"
+            || fallbackPolicy == "forbidden"
+    }
+
     private func beginRemoteAudioPlaybackSession() {
         remoteAudioPlaybackGeneration &+= 1
     }
@@ -4242,8 +4401,26 @@ public class RemoteDesktopManager: ObservableObject {
         announceCrossNetworkNativeVideoReadyIfNeeded(force: true)
     }
 
+    @MainActor
+    func handleCrossNetworkNativeVideoWarmupEvidence(reason: String) {
+        guard activeTransportMode == .crossNetwork,
+              isStreaming,
+              currentConnection != nil,
+              !crossNetwork.remoteVideoTrackHasRenderedFrame else {
+            return
+        }
+        let now = Date()
+        let canRequest = lastRefreshRequestAt.map { now.timeIntervalSince($0) >= 0.5 } ?? true
+        guard canRequest else { return }
+        lastRefreshRequestAt = now
+        lastRequestedStreamRefreshReason = reason
+        Task { @MainActor [weak self] in
+            await self?.pushViewerStreamConfiguration(force: true, refreshStream: true)
+        }
+    }
+
     func handleCrossNetworkNativeVideoTrackPromotionReady() {
-        announceCrossNetworkNativeVideoReadyIfNeeded(force: false)
+        SkyBridgeLogger.shared.debug("ℹ️ WebRTC 原生视频轨 promotion-ready 仅作诊断，nativeReady 等待真实渲染帧")
     }
 
     func handleCrossNetworkNativeAudioTrackReceivedFirstPacket() {
@@ -4347,36 +4524,60 @@ public class RemoteDesktopManager: ObservableObject {
                     generation: startGeneration,
                     startTime: startTime
                 )
-                let relayEndpoint: SkyBridgeMediaEndpoint?
+                let relayEndpointPair: CrossNetworkWebRTCManager.RealtimeMediaRelayEndpointPair?
                 do {
-                    relayEndpoint = try await crossNetwork.requestRealtimeMediaRelayEndpointForActiveSession()
+                    relayEndpointPair = try await crossNetwork.requestRealtimeMediaRelayEndpointForActiveSession()
                 } catch {
                     leaseTimeoutTask?.cancel()
                     throw error
                 }
                 leaseTimeoutTask?.cancel()
-                guard let relayEndpoint else {
+                guard let relayEndpointPair else {
                     let reason = crossNetwork.mediaRelayLeaseDiagnosticForActiveSession() ?? "unknown"
                     SkyBridgeLogger.shared.info("🎧 PQC media relay lease unavailable; keeping WebRTC video-only reason=\(reason)")
                     return nil
                 }
+                let relayEndpoint = relayEndpointPair.localEndpoint
                 guard isCurrentRealtimeMediaAudioReceiverStart(startGeneration) else { return nil }
                 SkyBridgeLogger.shared.info(
-                    "🎧 PQC media audio receiver lease ready: event=leaseReady session=\(snapshot.sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=\(relayEndpoint.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
+                    "🎧 PQC media audio receiver lease ready: event=leaseReady session=\(snapshot.sessionId) role=\(relayEndpointPair.localRole) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=\(relayEndpoint.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
                 )
                 stopRealtimeMediaAudioReceiver(cancelPendingStart: false)
                 renderer = try IOSRealtimeMediaAudioReceiver(snapshot: snapshot, mode: mode)
-                let relayTransport = SkyBridgeUDPRealtimeMediaTransport(endpoint: relayEndpoint) { [renderer] datagram in
-                    Task.detached(priority: .utility) {
-                        await renderer.handle(datagram: datagram)
+                realtimeMediaAudioRenderer = renderer
+                realtimeMediaAudioReceiverSessionId = snapshot.sessionId
+                realtimeMediaAudioEndpoint = relayEndpoint
+                let strictRelayBindRequired = Self.shouldRequestExtremeMediaValidation(
+                    activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+                    viewerSettings: viewerSettings
+                )
+                let relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy =
+                    strictRelayBindRequired ? .requireAcknowledgement : .optimisticAfterSend
+                let relayTransport = SkyBridgeUDPRealtimeMediaTransport(
+                    endpoint: relayEndpoint,
+                    receiveHandler: { [renderer] datagram in
+                        Task.detached(priority: .utility) {
+                            await renderer.handle(datagram: datagram)
+                        }
+                    },
+                    relayBindPolicy: relayBindPolicy,
+                    startEventHandler: { [weak self] event in
+                        Task { @MainActor [weak self] in
+                            self?.handleRealtimeMediaAudioRelayTransportEvent(
+                                event,
+                                sessionId: snapshot.sessionId,
+                                endpoint: relayEndpoint,
+                                generation: startGeneration
+                            )
+                        }
                     }
-                }
-                updateRealtimeMediaAudioReceiverStartPhase(.udpBind, generation: startGeneration)
+                )
+                updateRealtimeMediaAudioReceiverStartPhase(.udpConnection, generation: startGeneration)
                 SkyBridgeLogger.shared.info(
-                    "🎧 PQC media audio receiver UDP bind started: event=udpBindStarted session=\(snapshot.sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) transport=\(activeTransportModeLabel())"
+                    "🎧 PQC media audio receiver UDP connection started: event=udpConnectionStarted session=\(snapshot.sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) transport=\(activeTransportModeLabel())"
                 )
                 let udpBindTimeoutTask = scheduleRealtimeMediaAudioReceiverStageTimeout(
-                    phase: .udpBind,
+                    phase: .udpConnection,
                     mode: mode,
                     generation: startGeneration,
                     startTime: startTime
@@ -4388,6 +4589,10 @@ public class RemoteDesktopManager: ObservableObject {
                     throw error
                 }
                 udpBindTimeoutTask?.cancel()
+                updateRealtimeMediaAudioReceiverStartPhase(.receiverReady, generation: startGeneration)
+                SkyBridgeLogger.shared.info(
+                    "🎧 PQC media audio receiver UDP path ready: event=udpPathReady session=\(snapshot.sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) transport=\(activeTransportModeLabel())"
+                )
                 guard isCurrentRealtimeMediaAudioReceiverStart(startGeneration) else {
                     await relayTransport.stop()
                     await renderer.close()
@@ -4395,6 +4600,23 @@ public class RemoteDesktopManager: ObservableObject {
                 }
                 realtimeMediaAudioRelayTransport = relayTransport
                 endpoint = relayEndpoint
+                SkyBridgeLogger.shared.info(
+                    "🎧 PQC media audio endpoint published after relay bind policy satisfied: event=audioEndpointPrepared session=\(snapshot.sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=\(relayEndpoint.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
+                )
+                SkyBridgeSmokeTraceWriter.append(
+                    "audio-rx endpointPrepared session=\(snapshot.sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port)"
+                )
+                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                    [
+                        "kind": "audioRxEndpointPrepared",
+                        "session": snapshot.sessionId,
+                        "session_id": snapshot.sessionId,
+                        "relay": "\(relayEndpoint.host):\(relayEndpoint.port)",
+                        "role": relayEndpointPair.localRole,
+                        "relayTokenPresent": relayEndpoint.relayToken != nil
+                    ]
+                )
+                await pushViewerStreamConfiguration(force: false, refreshStream: false)
             case .lan:
                 updateRealtimeMediaAudioReceiverStartPhase(.lease, generation: startGeneration)
                 SkyBridgeLogger.shared.info(
@@ -4404,12 +4626,12 @@ public class RemoteDesktopManager: ObservableObject {
                 stopRealtimeMediaAudioReceiver(cancelPendingStart: false)
                 renderer = try IOSRealtimeMediaAudioReceiver(snapshot: snapshot, mode: mode)
                 let receiver = SkyBridgeUDPRealtimeMediaReceiver()
-                updateRealtimeMediaAudioReceiverStartPhase(.udpBind, generation: startGeneration)
+                updateRealtimeMediaAudioReceiverStartPhase(.udpConnection, generation: startGeneration)
                 SkyBridgeLogger.shared.info(
                     "🎧 PQC media audio receiver UDP bind started: event=udpBindStarted session=\(snapshot.sessionId) transport=\(activeTransportModeLabel())"
                 )
                 let udpBindTimeoutTask = scheduleRealtimeMediaAudioReceiverStageTimeout(
-                    phase: .udpBind,
+                    phase: .udpConnection,
                     mode: mode,
                     generation: startGeneration,
                     startTime: startTime
@@ -4438,15 +4660,70 @@ public class RemoteDesktopManager: ObservableObject {
             realtimeMediaAudioRenderer = renderer
             realtimeMediaAudioReceiverSessionId = snapshot.sessionId
             realtimeMediaAudioEndpoint = endpoint
+            scheduleRealtimeMediaAudioEndpointRenewal(
+                sessionId: snapshot.sessionId,
+                endpoint: endpoint,
+                mode: mode
+            )
+            scheduleRealtimeMediaAudioNoTrafficRecovery(
+                sessionId: snapshot.sessionId,
+                endpoint: endpoint,
+                renderer: renderer,
+                mode: mode
+            )
             SkyBridgeLogger.shared.info(
                 "🎧 PQC media audio receiver ready: session=\(snapshot.sessionId) port=\(endpoint.port) mode=\(mode.rawValue) transport=\(activeTransportModeLabel()) codec=opus audioPath=pqc-opus-source-node-ring relayToken=\(endpoint.relayToken == nil ? "missing" : "present") legacyFallback=false"
             )
             Task.detached(priority: .utility) { [renderer, sessionId = snapshot.sessionId, endpoint, mode] in
                 try? await Task.sleep(for: .seconds(3))
-                let received = await renderer.receivedPacketCount()
-                if received == 0 {
+                let snapshot = await renderer.startupDiagnosticSnapshot()
+                if snapshot.received == 0 {
+                    let probable: String = {
+                        if snapshot.datagramsSeen == 0 {
+                            return "host-not-sending-or-relay-blocked"
+                        }
+                        if snapshot.sessionHashRejected > 0 {
+                            return "session-hash-rejected"
+                        }
+                        if snapshot.authRejected > 0 {
+                            return "auth-decrypt-rejected"
+                        }
+                        if snapshot.sourceRejected > 0 {
+                            return "source-rejected"
+                        }
+                        if snapshot.replayRejected > 0 {
+                            return "replay-rejected"
+                        }
+                        return "rx-not-accepted"
+                    }()
                     SkyBridgeLogger.shared.warning(
-                        "🎧 PQC media audio rx no packets: session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) audioRxRecv=0 probable=host-not-sending-or-relay-blocked"
+                        "🎧 PQC media audio rx startup stalled: session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 audioRxDecoded=\(snapshot.decoded) audioRxPlayed=\(snapshot.played) rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) sourceReject=\(snapshot.sourceRejected) sourceMigrate=\(snapshot.sourceMigrated) probable=\(probable)"
+                    )
+                    SkyBridgeSmokeTraceWriter.append(
+                        "audio-rx session=\(sessionId) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 audioRxDecoded=\(snapshot.decoded) audioRxPlayed=\(snapshot.played) recvTotal=\(snapshot.received) decodeTotal=\(snapshot.decoded) playTotal=\(snapshot.played) rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) sourceReject=\(snapshot.sourceRejected) sourceMigrate=\(snapshot.sourceMigrated) relay=\(endpoint.host):\(endpoint.port) mode=\(mode.rawValue) probable=\(probable)"
+                    )
+                    SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                        [
+                            "kind": "audioRxStartup",
+                            "session": sessionId,
+                            "session_id": sessionId,
+                            "audioRxDatagrams": snapshot.datagramsSeen,
+                            "audioRxRecv": UInt64(0),
+                            "audioRxDecoded": snapshot.decoded,
+                            "audioRxPlayed": snapshot.played,
+                            "recvTotal": snapshot.received,
+                            "decodeTotal": snapshot.decoded,
+                            "playTotal": snapshot.played,
+                            "rejected": snapshot.rejected,
+                            "authRejected": snapshot.authRejected,
+                            "sessionHashRejected": snapshot.sessionHashRejected,
+                            "replayRejected": snapshot.replayRejected,
+                            "sourceReject": snapshot.sourceRejected,
+                            "sourceMigrate": snapshot.sourceMigrated,
+                            "relay": "\(endpoint.host):\(endpoint.port)",
+                            "mode": mode.rawValue,
+                            "probable": probable
+                        ]
                     )
                 }
             }
@@ -4496,6 +4773,13 @@ public class RemoteDesktopManager: ObservableObject {
             realtimeMediaAudioReceiverStartTask = nil
             realtimeMediaAudioReceiverStartPhase = nil
         }
+        realtimeMediaAudioRelayBindGraceTask?.cancel()
+        realtimeMediaAudioRelayBindGraceTask = nil
+        realtimeMediaAudioRelayRenewalTask?.cancel()
+        realtimeMediaAudioRelayRenewalTask = nil
+        realtimeMediaAudioNoTrafficRecoveryTask?.cancel()
+        realtimeMediaAudioNoTrafficRecoveryTask = nil
+        realtimeMediaAudioRelayBindState = .idle
         realtimeMediaAudioReceiver?.stop()
         if let relayTransport = realtimeMediaAudioRelayTransport {
             Task(priority: .utility) {
@@ -4538,16 +4822,17 @@ public class RemoteDesktopManager: ObservableObject {
             realtimeMediaAudioReceiverStartTask = nil
             stopRealtimeMediaAudioReceiver()
         }
+        let includeAudioEndpointInStreamConfig = !refreshStream
         let payload = makeViewerStreamConfigurationPayload(
             refreshStream: refreshStream,
-            mediaAudioEndpoint: mediaAudioBinding?.endpoint,
-            mediaSessionId: mediaAudioBinding?.mediaSessionId
+            mediaAudioEndpoint: includeAudioEndpointInStreamConfig ? mediaAudioBinding?.endpoint : nil,
+            mediaSessionId: includeAudioEndpointInStreamConfig ? mediaAudioBinding?.mediaSessionId : nil
         )
         guard force || payload != lastSentStreamConfiguration else { return }
         do {
             try await sendViewerStreamConfigurationPayload(payload, retryAttempt: nil)
             lastSentStreamConfiguration = payload
-            if payload.mediaAudioEndpoint != nil {
+            if includeAudioEndpointInStreamConfig, payload.mediaAudioEndpoint != nil {
                 SkyBridgeLogger.shared.info(
                     "🎧 PQC media audio-present config sent: event=audioPresentConfigSent refreshStream=\(payload.streamRefreshToken != nil) mediaSession=\(payload.mediaSessionId ?? "-") audioRelayToken=\(payload.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
                 )
@@ -4697,12 +4982,31 @@ public class RemoteDesktopManager: ObservableObject {
         mediaSessionId: String? = nil
     ) -> RemoteDesktopStreamConfigurationPayload {
         let now = Date()
-        let supportedFormats = effectiveSupportedRemoteVideoFormats(at: now)
-        let preferredCodec = codecGovernance.effectivePreferredCodec(
-            userPreference: viewerSettings.preferredCodec,
-            supportedFormats: Self.supportedRemoteVideoFormats(),
-            at: now
+        let strictMediaValidationEnabled = Self.shouldRequestExtremeMediaValidation(
+            activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+            viewerSettings: viewerSettings
         )
+        let nativeWarmupRequiresJPEGFallback: Bool
+#if canImport(WebRTC)
+        nativeWarmupRequiresJPEGFallback = !strictMediaValidationEnabled
+            && Self.shouldUseJPEGOnlyFallbackDuringNativeWarmup(
+            activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+            hasRemoteNativeVideoTrack: crossNetwork.remoteVideoTrack != nil,
+            nativeVideoTrackHasRenderedFrame: crossNetwork.remoteVideoTrackHasRenderedFrame
+        )
+#else
+        nativeWarmupRequiresJPEGFallback = false
+#endif
+        let supportedFormats = nativeWarmupRequiresJPEGFallback
+            ? ["jpeg"]
+            : effectiveSupportedRemoteVideoFormats(at: now)
+        let preferredCodec = nativeWarmupRequiresJPEGFallback
+            ? "jpeg"
+            : codecGovernance.effectivePreferredCodec(
+                userPreference: viewerSettings.preferredCodec,
+                supportedFormats: Self.supportedRemoteVideoFormats(),
+                at: now
+            )
         let dimensions = viewerSettings.resolution.dimensions
         let transportTuning = viewerSettings.transportTuning
         return RemoteDesktopStreamConfigurationPayload(
@@ -4725,7 +5029,7 @@ public class RemoteDesktopManager: ObservableObject {
             jitterBufferFrames: transportTuning.jitterBufferFrames,
             lossRecoveryMode: transportTuning.lossRecoveryMode,
             screenFrameTransport: activeTransportMode == .crossNetwork
-                ? "webrtc-native-main+sbrf-fallback"
+                ? (strictMediaValidationEnabled ? "webrtc-native-main" : "webrtc-native-main+sbrf-fallback")
                 : "sbrf-v1",
             // Keep fallback screen frames off the control channel. The iOS
             // screen-channel receive loop is nonisolated; the control channel
@@ -4751,6 +5055,8 @@ public class RemoteDesktopManager: ObservableObject {
             preferredAudioEncoding: nil,
             audioSampleRate: 48_000,
             audioChannelCount: 2,
+            performanceValidationMode: strictMediaValidationEnabled ? "extreme" : nil,
+            mediaFallbackPolicy: strictMediaValidationEnabled ? "fail-fast" : "explicit-degraded",
             streamRefreshToken: refreshStream ? nextStreamRefreshToken() : nil
         )
     }
@@ -4801,6 +5107,9 @@ public class RemoteDesktopManager: ObservableObject {
         realtimeMediaAudioReceiverStartTask?.cancel()
         realtimeMediaAudioReceiverStartTask = nil
         realtimeMediaAudioReceiverStartPhase = nil
+        realtimeMediaAudioRelayBindGraceTask?.cancel()
+        realtimeMediaAudioRelayBindGraceTask = nil
+        realtimeMediaAudioRelayBindState = .idle
         stopRealtimeMediaAudioReceiver(cancelPendingStart: false)
         isStreaming = false
         state = .error("sessionAuthorityLost")
@@ -4822,6 +5131,499 @@ public class RemoteDesktopManager: ObservableObject {
             return nil
         }
         return (endpoint, mediaSessionId)
+    }
+
+    private func scheduleRealtimeMediaAudioNoTrafficRecovery(
+        sessionId: String,
+        endpoint: SkyBridgeMediaEndpoint,
+        renderer: IOSRealtimeMediaAudioReceiver,
+        mode: SkyBridgeMediaAudioMode
+    ) {
+        realtimeMediaAudioNoTrafficRecoveryTask?.cancel()
+        realtimeMediaAudioNoTrafficRecoveryTask = nil
+        guard activeTransportMode == .crossNetwork else { return }
+        realtimeMediaAudioNoTrafficRecoveryTask = Task { @MainActor [weak self, renderer] in
+            do {
+                try await Task.sleep(for: Self.realtimeMediaAudioNoTrafficRecoveryDelay)
+            } catch {
+                return
+            }
+            guard let self,
+                  self.activeTransportMode == .crossNetwork,
+                  self.isStreaming,
+                  self.viewerSettings.audioRedirectionEnabled,
+                  self.realtimeMediaAudioReceiverSessionId == sessionId,
+                  self.realtimeMediaAudioEndpoint == endpoint,
+                  self.realtimeMediaAudioRenderer != nil else {
+                return
+            }
+            let snapshot = await renderer.startupDiagnosticSnapshot()
+            if snapshot.datagramsSeen > 0 || snapshot.received > 0 {
+                self.realtimeMediaAudioNoTrafficRecoveryAttemptsBySessionId.removeValue(forKey: sessionId)
+                return
+            }
+
+            let attempt = (self.realtimeMediaAudioNoTrafficRecoveryAttemptsBySessionId[sessionId] ?? 0) + 1
+            self.realtimeMediaAudioNoTrafficRecoveryAttemptsBySessionId[sessionId] = attempt
+            let relay = "\(endpoint.host):\(endpoint.port)"
+            guard attempt <= Self.realtimeMediaAudioNoTrafficRecoveryMaxAttempts else {
+                SkyBridgeLogger.shared.warning(
+                    "🎧 PQC media audio relay no-traffic recovery exhausted: event=relayNoTrafficRecoveryExhausted session=\(sessionId) relay=\(relay) attempts=\(attempt - 1) action=doctor-fail transport=\(self.activeTransportModeLabel())"
+                )
+                SkyBridgeSmokeTraceWriter.append(
+                    "audio-rx relayNoTrafficRecoveryExhausted session=\(sessionId) relay=\(relay) attempts=\(attempt - 1) probable=relay-bound-but-no-datagrams"
+                )
+                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                    [
+                        "kind": "audioRxNoTrafficRecovery",
+                        "session": sessionId,
+                        "session_id": sessionId,
+                        "relay": relay,
+                        "attempt": attempt - 1,
+                        "action": "exhausted",
+                        "probable": "relay-bound-but-no-datagrams"
+                    ]
+                )
+                return
+            }
+
+            SkyBridgeLogger.shared.warning(
+                "🎧 PQC media audio relay accepted but delivered no datagrams: event=relayNoTrafficRecovery session=\(sessionId) relay=\(relay) attempt=\(attempt) action=lease-refresh transport=\(self.activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append(
+                "audio-rx relayNoTrafficRecovery session=\(sessionId) relay=\(relay) attempt=\(attempt) action=lease-refresh probable=relay-bound-but-no-datagrams"
+            )
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxNoTrafficRecovery",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "relay": relay,
+                    "attempt": attempt,
+                    "action": "lease-refresh",
+                    "probable": "relay-bound-but-no-datagrams"
+                ]
+            )
+            self.crossNetwork.clearCachedRealtimeMediaRelayEndpointForActiveSession(
+                reason: "relayNoTrafficAfterBindAccepted"
+            )
+            self.stopRealtimeMediaAudioReceiver(cancelPendingStart: false)
+            self.ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mode)
+        }
+    }
+
+    private func scheduleRealtimeMediaAudioEndpointRenewal(
+        sessionId: String,
+        endpoint: SkyBridgeMediaEndpoint,
+        mode: SkyBridgeMediaAudioMode
+    ) {
+        realtimeMediaAudioRelayRenewalTask?.cancel()
+        realtimeMediaAudioRelayRenewalTask = nil
+        guard activeTransportMode == .crossNetwork,
+              let expiresAt = endpoint.expiresAt else {
+            return
+        }
+        let nowSeconds = Date().timeIntervalSince1970
+        let delaySeconds = max(1, expiresAt - nowSeconds - Self.realtimeMediaAudioEndpointRenewalLeadTime)
+        let delayNanos = UInt64(delaySeconds * 1_000_000_000)
+        let delayMs = Int((delaySeconds * 1000).rounded())
+        let expiresInMs = Int(((expiresAt - nowSeconds) * 1000).rounded())
+        SkyBridgeLogger.shared.info(
+            "🎧 PQC media audio relay renewal scheduled: event=relayLeaseRenewalScheduled session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) delayMs=\(delayMs) expiresInMs=\(expiresInMs) transport=\(activeTransportModeLabel())"
+        )
+        SkyBridgeSmokeTraceWriter.append(
+            "audio-rx relayLeaseRenewalScheduled session=\(sessionId) delayMs=\(delayMs) relay=\(endpoint.host):\(endpoint.port)"
+        )
+        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            [
+                "kind": "audioRxEndpointRenewalScheduled",
+                "session": sessionId,
+                "session_id": sessionId,
+                "relay": "\(endpoint.host):\(endpoint.port)",
+                "delayMs": delayMs,
+                "expiresInMs": expiresInMs
+            ]
+        )
+        realtimeMediaAudioRelayRenewalTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delayNanos)
+            } catch {
+                return
+            }
+            guard let self,
+                  self.activeTransportMode == .crossNetwork,
+                  self.isStreaming,
+                  self.viewerSettings.audioRedirectionEnabled,
+                  self.realtimeMediaAudioReceiverSessionId == sessionId,
+                  self.realtimeMediaAudioEndpoint == endpoint else {
+                return
+            }
+            await self.renewRealtimeMediaAudioRelayEndpoint(
+                sessionId: sessionId,
+                currentEndpoint: endpoint,
+                mode: mode
+            )
+        }
+    }
+
+    private static func isSameRealtimeMediaRelayAddress(
+        _ lhs: SkyBridgeMediaEndpoint,
+        _ rhs: SkyBridgeMediaEndpoint
+    ) -> Bool {
+        lhs.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            == rhs.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            && lhs.port == rhs.port
+    }
+
+    private func renewRealtimeMediaAudioRelayEndpoint(
+        sessionId: String,
+        currentEndpoint: SkyBridgeMediaEndpoint,
+        mode: SkyBridgeMediaAudioMode
+    ) async {
+        guard activeTransportMode == .crossNetwork,
+              isStreaming,
+              viewerSettings.audioRedirectionEnabled,
+              realtimeMediaAudioReceiverSessionId == sessionId,
+              realtimeMediaAudioEndpoint == currentEndpoint,
+              let renderer = realtimeMediaAudioRenderer else {
+            return
+        }
+        SkyBridgeLogger.shared.info(
+            "🎧 PQC media audio relay renewal started: event=relayLeaseRenewalStart session=\(sessionId) oldRelay=\(currentEndpoint.host):\(currentEndpoint.port) transport=\(activeTransportModeLabel())"
+        )
+        crossNetwork.clearCachedRealtimeMediaRelayEndpointForActiveSession(reason: "lease-renewal")
+        let relayEndpointPair: CrossNetworkWebRTCManager.RealtimeMediaRelayEndpointPair?
+        do {
+            relayEndpointPair = try await crossNetwork.requestRealtimeMediaRelayEndpointForActiveSession()
+        } catch {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio relay renewal lease request failed: session=\(sessionId) error=\(error.localizedDescription)"
+            )
+            scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: currentEndpoint, mode: mode)
+            return
+        }
+        guard let relayEndpointPair else {
+            let reason = crossNetwork.mediaRelayLeaseDiagnosticForActiveSession() ?? "unknown"
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio relay renewal lease unavailable: session=\(sessionId) reason=\(reason)"
+            )
+            scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: currentEndpoint, mode: mode)
+            return
+        }
+        let relayEndpoint = relayEndpointPair.localEndpoint
+        let relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy =
+            strictCrossNetworkMediaValidationActive ? .requireAcknowledgement : .optimisticAfterSend
+        if Self.isSameRealtimeMediaRelayAddress(currentEndpoint, relayEndpoint),
+           let relayToken = relayEndpoint.relayToken,
+           let currentTransport = realtimeMediaAudioRelayTransport {
+            do {
+                try await currentTransport.rebindRelayToken(
+                    relayToken,
+                    relayBindPolicy: relayBindPolicy
+                )
+                realtimeMediaAudioEndpoint = relayEndpoint
+                realtimeMediaAudioRelayBindState = relayBindPolicy == .requireAcknowledgement
+                    ? .accepted(sessionId: sessionId, endpoint: relayEndpoint)
+                    : .ackPending(sessionId: sessionId, endpoint: relayEndpoint)
+                SkyBridgeLogger.shared.info(
+                    "🎧 PQC media audio relay renewed in place: event=relayLeaseRenewed session=\(sessionId) role=\(relayEndpointPair.localRole) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=present transport=\(activeTransportModeLabel())"
+                )
+                SkyBridgeSmokeTraceWriter.append(
+                    "audio-rx relayLeaseRenewed session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) mode=in-place"
+                )
+                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                    [
+                        "kind": "audioRxEndpointRenewed",
+                        "session": sessionId,
+                        "session_id": sessionId,
+                        "relay": "\(relayEndpoint.host):\(relayEndpoint.port)",
+                        "role": relayEndpointPair.localRole,
+                        "relayTokenPresent": true,
+                        "probable": "relay-lease-renewed-in-place"
+                    ]
+                )
+                scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: relayEndpoint, mode: mode)
+                return
+            } catch {
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ PQC media audio in-place relay renewal failed; falling back to transport rollover: session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) error=\(error.localizedDescription)"
+                )
+            }
+        }
+        let relayTransport = SkyBridgeUDPRealtimeMediaTransport(
+            endpoint: relayEndpoint,
+            receiveHandler: { [renderer] datagram in
+                Task.detached(priority: .utility) {
+                    await renderer.handle(datagram: datagram)
+                }
+            },
+            relayBindPolicy: relayBindPolicy,
+            startEventHandler: { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.handleRealtimeMediaAudioRelayTransportEvent(
+                        event,
+                        sessionId: sessionId,
+                        endpoint: relayEndpoint,
+                        generation: nil
+                    )
+                }
+            }
+        )
+        do {
+            try await relayTransport.start()
+        } catch {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio relay renewal UDP start failed: session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) error=\(error.localizedDescription)"
+            )
+            crossNetwork.markRealtimeMediaRelayEndpointUnusableForActiveSession(reason: "renewalStartFailed")
+            scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: currentEndpoint, mode: mode)
+            return
+        }
+        guard activeTransportMode == .crossNetwork,
+              isStreaming,
+              viewerSettings.audioRedirectionEnabled,
+              realtimeMediaAudioReceiverSessionId == sessionId,
+              realtimeMediaAudioEndpoint == currentEndpoint else {
+            await relayTransport.stop()
+            return
+        }
+        let oldTransport = realtimeMediaAudioRelayTransport
+        realtimeMediaAudioRelayTransport = relayTransport
+        realtimeMediaAudioEndpoint = relayEndpoint
+        realtimeMediaAudioRelayBindState = .idle
+        SkyBridgeLogger.shared.info(
+            "🎧 PQC media audio relay renewed: event=relayLeaseRenewed session=\(sessionId) role=\(relayEndpointPair.localRole) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=\(relayEndpoint.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
+        )
+        SkyBridgeSmokeTraceWriter.append(
+            "audio-rx relayLeaseRenewed session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port)"
+        )
+        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            [
+                "kind": "audioRxEndpointRenewed",
+                "session": sessionId,
+                "session_id": sessionId,
+                "relay": "\(relayEndpoint.host):\(relayEndpoint.port)",
+                "role": relayEndpointPair.localRole,
+                "relayTokenPresent": relayEndpoint.relayToken != nil,
+                "probable": "relay-lease-renewed"
+            ]
+        )
+        scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: relayEndpoint, mode: mode)
+        await pushViewerStreamConfiguration(force: true, refreshStream: false)
+        if let oldTransport {
+            Task(priority: .utility) {
+                try? await Task.sleep(for: Self.realtimeMediaAudioRelayRolloverGraceDelay)
+                await oldTransport.stop()
+            }
+        }
+    }
+
+    private func handleRealtimeMediaAudioRelayBindFailure(
+        reason: String,
+        sessionId: String,
+        endpoint: SkyBridgeMediaEndpoint
+    ) {
+        let endpointMatches = realtimeMediaAudioEndpoint == endpoint
+        guard realtimeMediaAudioReceiverSessionId == sessionId,
+              endpointMatches else {
+            let currentRelayLabel = realtimeMediaAudioEndpoint.map { "\($0.host):\($0.port)" } ?? "-"
+            SkyBridgeLogger.shared.debug(
+                "ℹ️ ignore stale PQC media relay bind failure: session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) reason=\(reason) currentSession=\(realtimeMediaAudioReceiverSessionId ?? "-") currentRelay=\(currentRelayLabel)"
+            )
+            return
+        }
+        realtimeMediaAudioRelayBindGraceTask?.cancel()
+        realtimeMediaAudioRelayBindGraceTask = nil
+        realtimeMediaAudioRelayBindState = .failed(sessionId: sessionId, endpoint: endpoint, reason: reason)
+        crossNetwork.markRealtimeMediaRelayEndpointUnusableForActiveSession(reason: reason)
+        stopRealtimeMediaAudioReceiver(cancelPendingStart: false)
+        realtimeMediaAudioRelayBindState = .failed(sessionId: sessionId, endpoint: endpoint, reason: reason)
+        Task { @MainActor [weak self] in
+            await self?.pushViewerStreamConfiguration(force: false, refreshStream: false)
+        }
+    }
+
+    private func scheduleRealtimeMediaAudioRelayBindGrace(
+        sessionId: String,
+        endpoint: SkyBridgeMediaEndpoint
+    ) {
+        realtimeMediaAudioRelayBindGraceTask?.cancel()
+        realtimeMediaAudioRelayBindGraceTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: Self.realtimeMediaAudioRelayBindAckGraceDelay)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            guard self.realtimeMediaAudioReceiverSessionId == sessionId,
+                  self.realtimeMediaAudioEndpoint == endpoint,
+                  let renderer = self.realtimeMediaAudioRenderer else {
+                return
+            }
+            let snapshot = await renderer.startupDiagnosticSnapshot()
+            if snapshot.received > 0 {
+                self.realtimeMediaAudioRelayBindState = .trafficObserved(
+                    sessionId: sessionId,
+                    endpoint: endpoint
+                )
+                SkyBridgeLogger.shared.info(
+                    "🎧 PQC media audio relay bind ack timeout tolerated: event=relayBindAckGraceTrafficObserved session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=\(snapshot.received) transport=\(self.activeTransportModeLabel())"
+                )
+                SkyBridgeSmokeTraceWriter.append(
+                    "audio-rx relayBindAckGraceTrafficObserved session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=\(snapshot.received)"
+                )
+                return
+            }
+            if snapshot.datagramsSeen > 0 {
+                SkyBridgeLogger.shared.warning(
+                    "🎧 PQC media audio relay bind grace saw only rejected traffic: event=relayBindGraceUnauthenticatedTraffic session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) audioRxDatagrams=\(snapshot.datagramsSeen) audioRxRecv=0 rejected=\(snapshot.rejected) authRejected=\(snapshot.authRejected) sessionHashRejected=\(snapshot.sessionHashRejected) replayRejected=\(snapshot.replayRejected) action=endpoint-backoff transport=\(self.activeTransportModeLabel())"
+                )
+                self.handleRealtimeMediaAudioRelayBindFailure(
+                    reason: "relayBindAckTimedOutNoAuthenticatedTraffic",
+                    sessionId: sessionId,
+                    endpoint: endpoint
+                )
+                return
+            }
+            SkyBridgeLogger.shared.warning(
+                "🎧 PQC media audio relay bind grace expired with no traffic: event=relayBindAckGraceTimedOut session=\(sessionId) relay=\(endpoint.host):\(endpoint.port) action=endpoint-backoff transport=\(self.activeTransportModeLabel())"
+            )
+            self.handleRealtimeMediaAudioRelayBindFailure(
+                reason: "relayBindAckTimedOutNoTraffic",
+                sessionId: sessionId,
+                endpoint: endpoint
+            )
+        }
+    }
+
+    private func handleRealtimeMediaAudioRelayTransportEvent(
+        _ event: SkyBridgeRealtimeMediaTransportEvent,
+        sessionId: String,
+        endpoint: SkyBridgeMediaEndpoint,
+        generation: UInt64?
+    ) {
+        guard isCurrentRealtimeMediaAudioReceiverStart(generation)
+                || realtimeMediaAudioReceiverSessionId == sessionId else {
+            return
+        }
+        let relay = "\(endpoint.host):\(endpoint.port)"
+        switch event {
+        case .udpConnectionReady:
+            updateRealtimeMediaAudioReceiverStartPhase(.relayBindAck, generation: generation)
+            SkyBridgeLogger.shared.info(
+                "🎧 PQC media audio receiver UDP connection ready: event=udpConnectionReady session=\(sessionId) relay=\(relay) transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append("audio-rx udpConnectionReady session=\(sessionId) relay=\(relay)")
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxRelayBind",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "stage": "udpConnectionReady",
+                    "relay": relay,
+                    "probable": "relay-bind-pending"
+                ]
+            )
+        case .relayBindSent:
+            updateRealtimeMediaAudioReceiverStartPhase(.relayBindAck, generation: generation)
+            realtimeMediaAudioRelayBindState = .ackPending(sessionId: sessionId, endpoint: endpoint)
+            SkyBridgeLogger.shared.info(
+                "🎧 PQC media audio relay bind sent: event=relayBindSent session=\(sessionId) relay=\(relay) transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append("audio-rx relayBindSent session=\(sessionId) relay=\(relay)")
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxRelayBind",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "stage": "relayBindSent",
+                    "relay": relay,
+                    "probable": "relay-bind-pending"
+                ]
+            )
+        case .relayBindAccepted:
+            updateRealtimeMediaAudioReceiverStartPhase(.receiverReady, generation: generation)
+            realtimeMediaAudioRelayBindGraceTask?.cancel()
+            realtimeMediaAudioRelayBindGraceTask = nil
+            realtimeMediaAudioRelayBindState = .accepted(sessionId: sessionId, endpoint: endpoint)
+            SkyBridgeLogger.shared.info(
+                "🎧 PQC media audio relay bind accepted: event=relayBindAccepted session=\(sessionId) relay=\(relay) transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append("audio-rx relayBindAccepted session=\(sessionId) relay=\(relay)")
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxRelayBind",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "stage": "relayBindAccepted",
+                    "relay": relay,
+                    "probable": "relay-bind-ok"
+                ]
+            )
+        case .relayBindAckTimedOut:
+            realtimeMediaAudioRelayBindState = .ackPending(sessionId: sessionId, endpoint: endpoint)
+            scheduleRealtimeMediaAudioRelayBindGrace(sessionId: sessionId, endpoint: endpoint)
+            SkyBridgeLogger.shared.warning(
+                "🎧 PQC media audio relay bind ack pending: event=relayBindAckTimedOut session=\(sessionId) relay=\(relay) action=optimistic-grace probable=ack-lost-or-relay-late transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append(
+                "audio-rx relayBindAckTimedOut session=\(sessionId) relay=\(relay) action=optimistic-grace probable=ack-lost-or-relay-late"
+            )
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxRelayBind",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "stage": "relayBindAckTimedOut",
+                    "relay": relay,
+                    "probable": "ack-lost-or-relay-late",
+                    "action": "optimistic-grace"
+                ]
+            )
+        case .relayBindRejected(let reason):
+            handleRealtimeMediaAudioRelayBindFailure(
+                reason: "relayBindRejected:\(reason)",
+                sessionId: sessionId,
+                endpoint: endpoint
+            )
+            SkyBridgeLogger.shared.warning(
+                "🎧 PQC media audio relay bind rejected: event=relayBindRejected session=\(sessionId) relay=\(relay) reason=\(reason) transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append(
+                "audio-rx relayBindRejected session=\(sessionId) relay=\(relay) reason=\(reason)"
+            )
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxRelayBind",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "stage": "relayBindRejected",
+                    "relay": relay,
+                    "reason": reason,
+                    "probable": "relay-token-rejected"
+                ]
+            )
+        case .relayBindMalformed:
+            handleRealtimeMediaAudioRelayBindFailure(
+                reason: "relayBindMalformed",
+                sessionId: sessionId,
+                endpoint: endpoint
+            )
+            SkyBridgeLogger.shared.warning(
+                "🎧 PQC media audio relay bind malformed: event=relayBindMalformed session=\(sessionId) relay=\(relay) transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append("audio-rx relayBindMalformed session=\(sessionId) relay=\(relay)")
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxRelayBind",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "stage": "relayBindMalformed",
+                    "relay": relay,
+                    "probable": "relay-control-protocol-mismatch"
+                ]
+            )
+        }
     }
 
     private func updateRealtimeMediaAudioReceiverStartPhase(
@@ -4985,6 +5787,9 @@ public class RemoteDesktopManager: ObservableObject {
             }
             if let binding {
                 SkyBridgeLogger.shared.info("🎧 PQC media audio receiver started: event=receiverStarted session=\(binding.mediaSessionId) relay=\(binding.endpoint.host):\(binding.endpoint.port) token=\(binding.endpoint.relayToken == nil ? "missing" : "present")")
+                SkyBridgeSmokeTraceWriter.append(
+                    "audio-rx receiverStarted session=\(binding.mediaSessionId) relay=\(binding.endpoint.host):\(binding.endpoint.port)"
+                )
                 await self.pushViewerStreamConfiguration(force: false, refreshStream: false)
             } else {
                 SkyBridgeLogger.shared.info("🎧 PQC media audio receiver start failed: event=receiverStartFailed reason=unavailable stage=\(finalPhase) transport=\(self.activeTransportModeLabel())")
@@ -5026,8 +5831,7 @@ public class RemoteDesktopManager: ObservableObject {
         if activeTransportMode == .crossNetwork,
            crossNetwork.remoteVideoTrackHasRenderedFrame,
            renderPipelineStatus == .webrtcNativeVideo,
-           pipeline != .webrtcNativeVideo,
-           pipeline != .waiting {
+           pipeline != .webrtcNativeVideo {
             return
         }
         guard renderPipelineStatus != pipeline else { return }
@@ -6300,6 +7104,55 @@ public class RemoteDesktopManager: ObservableObject {
     }
     
     private func handleScreenData(_ screenData: ScreenData) async {
+        if strictCrossNetworkMediaValidationActive {
+            let reason = "strict media validation failed: fallback screen frame received"
+            SkyBridgeLogger.shared.error(
+                "⛔️ WebRTC strict media validation failed on viewer: reason=fallback-screen-frame-received size=\(screenData.width)x\(screenData.height) format=\(screenData.format ?? "unknown")"
+            )
+            SkyBridgeSmokeTraceWriter.appendStatus(
+                "strict-media-failed session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") reason=fallback-screen-frame-received format=\(screenData.format ?? "unknown") size=\(screenData.width)x\(screenData.height)"
+            )
+            await handleTransportFailure(reason)
+            return
+        }
+        let hasRemoteNativeVideoTrack: Bool
+#if canImport(WebRTC)
+        hasRemoteNativeVideoTrack = crossNetwork.remoteVideoTrack != nil
+#else
+        hasRemoteNativeVideoTrack = false
+#endif
+        if Self.shouldDropNativeWarmupNonJPEGFallbackFrame(
+            activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+            hasRemoteNativeVideoTrack: hasRemoteNativeVideoTrack,
+            nativeVideoTrackHasRenderedFrame: crossNetwork.remoteVideoTrackHasRenderedFrame,
+            format: screenData.format
+        ) {
+            let now = Date()
+            if now.timeIntervalSince(lastNativeWarmupNonJPEGFallbackDropDiagnosticAt) >= 1.0 {
+                lastNativeWarmupNonJPEGFallbackDropDiagnosticAt = now
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ WebRTC native warmup dropped non-JPEG fallback before viewer topology/decode: \(screenData.width)x\(screenData.height) format=\(screenData.format ?? "unknown") dropReason=native-warmup-non-jpeg-fallback"
+                )
+                SkyBridgeSmokeTraceWriter.appendStatus(
+                    "screen-drop session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") dropReason=native-warmup-non-jpeg-fallback format=\(screenData.format ?? "unknown") size=\(screenData.width)x\(screenData.height)"
+                )
+            }
+            return
+        }
+        if Self.shouldIgnoreFallbackFrameAfterNativeVideoRendered(
+            activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+            nativeVideoTrackHasRenderedFrame: crossNetwork.remoteVideoTrackHasRenderedFrame
+        ) {
+            let now = Date()
+            noteReceivedFrame(at: now)
+            if now.timeIntervalSince(lastNativePrimaryIgnoredFallbackDiagnosticAt) >= 1.0 {
+                lastNativePrimaryIgnoredFallbackDiagnosticAt = now
+                SkyBridgeLogger.shared.debug(
+                    "ℹ️ 忽略 native WebRTC 主链期间的 fallback screen frame: \(screenData.width)x\(screenData.height) format=\(screenData.format ?? "unknown")"
+                )
+            }
+            return
+        }
         let now = Date()
         let isFirstFrameInStream = !hasReceivedFrameInCurrentStream
         noteReceivedFrame(at: now)
@@ -6520,6 +7373,7 @@ public class RemoteDesktopManager: ObservableObject {
             lastDecoderResetTime = now
             consecutiveDecodeMisses = 0
             lastRequestedStreamRefreshReason = "codec-governance-disable-hevc"
+            lastRefreshRequestAt = now
             await pushViewerStreamConfiguration(force: true, refreshStream: true)
             hevcDisableRefreshTokenInFlight = lastRequestedStreamRefreshToken
             let remaining = max(1, Int(until.timeIntervalSince(now).rounded(.up)))
@@ -6649,17 +7503,36 @@ public class RemoteDesktopManager: ObservableObject {
             : 1
     }
 
-    private func activateSampleBufferFallbackForDecodedVideo() {
+    private func activateSampleBufferFallbackForDecodedVideo(reason: String) {
         guard decodedVideoRendererPreference != .sampleBuffer else { return }
+        let now = Date()
+        if let lastMetalFallbackAt, now.timeIntervalSince(lastMetalFallbackAt) < 5 {
+            metalRestoreFailureCount += 1
+        } else {
+            metalRestoreFailureCount = 1
+        }
+        if metalRestoreFailureCount >= metalFallbackPersistentFailureThreshold {
+            metalRestoreSuppressedUntil = now.addingTimeInterval(metalFallbackPersistentFailureCooldown)
+            let cooldownMs = Int(metalFallbackPersistentFailureCooldown * 1000)
+            SkyBridgeLogger.shared.warning(
+                "⚠️ Metal restore repeated failures suppressed: reason=\(reason) failures=\(metalRestoreFailureCount) cooldownMs=\(cooldownMs)"
+            )
+        }
         decodedVideoRendererPreference = .sampleBuffer
         metalAwaitingFirstDisplaySince = nil
-        lastMetalFallbackAt = Date()
+        lastMetalFallbackAt = now
+        metalFallbackReason = reason
         stableSampleBufferFramesSinceMetalFallback = 0
         consecutiveSampleBufferNoEnqueueWindows = 0
         consecutiveSampleBufferDisplayStalls = 0
-        metalVideoFrameFeed.flush(removeDisplayedImage: true)
+        metalVideoFrameFeed.flush(removeDisplayedImage: false)
+        if currentFrame == nil, let lastGoodFrozenFrame {
+            currentFrame = lastGoodFrozenFrame
+        }
         updateRenderPipeline(.sampleBufferDisplayLayer)
-        SkyBridgeLogger.shared.warning("⚠️ Metal 渲染未消费新帧，已回退到 AVSampleBufferDisplayLayer")
+        SkyBridgeLogger.shared.warning(
+            "⚠️ Metal 渲染未消费新帧，已立即回退到 AVSampleBufferDisplayLayer: reason=\(reason) restoreProbeMs=\(Int(metalFallbackRestoreCooldown * 1000)) expectedRestoreMs=\(Int(metalFallbackExpectedRestoreWindow * 1000)) failures=\(metalRestoreFailureCount)"
+        )
     }
 
     private func activateCGImageFallbackForDecodedVideo() {
@@ -6667,6 +7540,7 @@ public class RemoteDesktopManager: ObservableObject {
         decodedVideoRendererPreference = .cgImage
         metalAwaitingFirstDisplaySince = nil
         lastMetalFallbackAt = nil
+        metalFallbackReason = nil
         stableSampleBufferFramesSinceMetalFallback = 0
         consecutiveSampleBufferNoEnqueueWindows = 0
         consecutiveSampleBufferDisplayStalls = 0
@@ -6679,7 +7553,6 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func maybeRestoreMetalRendererAfterStableSampleBuffer(at now: Date) async {
-        guard activeTransportMode == .lan else { return }
         guard preferredDecodedVideoRenderer() == .metal else { return }
         guard decodedVideoRendererPreference == .sampleBuffer else { return }
         guard renderPipelineStatus == .sampleBufferDisplayLayer else { return }
@@ -6688,6 +7561,14 @@ public class RemoteDesktopManager: ObservableObject {
         }
         guard let lastMetalFallbackAt else { return }
         guard now.timeIntervalSince(lastMetalFallbackAt) >= metalFallbackRestoreCooldown else { return }
+        if let suppressedUntil = metalRestoreSuppressedUntil,
+           now < suppressedUntil {
+            let cooldownMs = Int(suppressedUntil.timeIntervalSince(now) * 1000)
+            SkyBridgeLogger.shared.debug(
+                "Metal restore probe suppressed: reason=\(metalFallbackReason ?? "unknown") cooldownMs=\(cooldownMs)"
+            )
+            return
+        }
 
         stableSampleBufferFramesSinceMetalFallback += 1
         guard stableSampleBufferFramesSinceMetalFallback >= metalFallbackStableFrameRestoreThreshold else { return }
@@ -6696,11 +7577,15 @@ public class RemoteDesktopManager: ObservableObject {
         stableSampleBufferFramesSinceMetalFallback = 0
         self.lastMetalFallbackAt = nil
         metalAwaitingFirstDisplaySince = nil
+        let restoreReason = metalFallbackReason ?? "unknown"
+        metalFallbackReason = nil
         await requestStreamRefreshIfNeeded(
             reason: "sample-buffer-stable-restore-metal",
             minimumInterval: metalFallbackRestoreCooldown
         )
-        SkyBridgeLogger.shared.info("♻️ AVSampleBufferDisplayLayer 已稳定，准备恢复 Metal Renderer")
+        SkyBridgeLogger.shared.info(
+            "♻️ AVSampleBufferDisplayLayer 已稳定，准备恢复 Metal Renderer: transport=\(activeTransportModeLabel()) reason=\(restoreReason) elapsedMs=\(Int(now.timeIntervalSince(lastMetalFallbackAt) * 1000)) expectedMs=\(Int(metalFallbackExpectedRestoreWindow * 1000)) cooldownMs=\(Int(metalFallbackRestoreCooldown * 1000)) stableFrames=\(metalFallbackStableFrameRestoreThreshold)"
+        )
     }
 
     private func makeCGImage(from pixelBufferFrame: DecodedPixelBufferFrame) -> CGImage? {
@@ -6849,7 +7734,7 @@ public class RemoteDesktopManager: ObservableObject {
            renderPipelineStatus == .metalRenderer {
             lastContinuityRecoveryAt = now
             zeroMeasuredFrameRate(at: now)
-            activateSampleBufferFallbackForDecodedVideo()
+            activateSampleBufferFallbackForDecodedVideo(reason: reason)
             return
         }
         if (reason == "frames-arriving-without-display"
@@ -6906,6 +7791,9 @@ public class RemoteDesktopManager: ObservableObject {
     ) async {
         metalAwaitingFirstDisplaySince = nil
         lastMetalFallbackAt = nil
+        metalFallbackReason = nil
+        metalRestoreFailureCount = 0
+        metalRestoreSuppressedUntil = nil
         stableSampleBufferFramesSinceMetalFallback = 0
         metalVideoFrameFeed.markDisplayedFrame()
         noteDisplayedFrame(at: Date())
@@ -7084,7 +7972,10 @@ public class RemoteDesktopManager: ObservableObject {
                     await self.decoder.resetPreservingLastFrame()
                     self.lastDecoderResetTime = now
                     self.consecutiveDecodeMisses = 0
-                    await self.requestStreamRefreshIfNeeded(reason: "decode-stall-reset")
+                    await self.requestStreamRefreshIfNeeded(
+                        reason: "decode-stall-reset",
+                        minimumInterval: self.streamDecodeStallRefreshMinimumInterval
+                    )
                     SkyBridgeLogger.shared.warning("⚠️ 检测到远控视频解码停滞，已自动重置解码器")
                 }
             }
