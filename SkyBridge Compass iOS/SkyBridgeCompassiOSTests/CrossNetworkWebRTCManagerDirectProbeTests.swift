@@ -57,7 +57,7 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
     }
 
     @MainActor
-    func testViewerStreamConfigurationKeepsCrossNetworkFallbackOnDedicatedScreenChannel() throws {
+    func testViewerStreamConfigurationDisablesCrossNetworkFallbackScreenChannel() throws {
         let payload = RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
 
         XCTAssertEqual(payload.screenDataChannelEnabled, true)
@@ -69,6 +69,8 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
             "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
         )
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("screenDataChannelEnabled: activeTransportMode != .crossNetwork"))
+        XCTAssertTrue(source.contains("mediaFallbackPolicy: activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\""))
         XCTAssertTrue(source.contains("screenChannelWireFormat: activeTransportMode == .crossNetwork"))
         XCTAssertTrue(source.contains("\"sbc2-chunked-v1\""))
     }

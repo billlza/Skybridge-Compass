@@ -10,6 +10,7 @@ struct RemoteControlStreamRequest: Sendable, Equatable {
     let lowLatencyMode: Bool
     let enableHardwareAcceleration: Bool
     let enableAppleSiliconOptimization: Bool
+    let preserveExactVisibleSize: Bool
 }
 
 struct RemoteControlStreamPolicy: Sendable, Equatable {
@@ -17,13 +18,15 @@ struct RemoteControlStreamPolicy: Sendable, Equatable {
     let targetFrameRate: Int
     let keyFrameInterval: Int
     let preferredSize: CGSize
+    let preserveExactVisibleSize: Bool
     let reason: String
 
     func protectingRealtimeAudio() -> RemoteControlStreamPolicy {
         let protectedFrameRate = min(targetFrameRate, Self.realtimeAudioProtectedFrameRate)
         let protectedSize = RemoteControlCaptureCompatibility.normalizedCaptureSize(
             Self.sizeByCappingLongEdge(preferredSize, maxLongEdge: Self.realtimeAudioProtectedLongEdge),
-            for: codec
+            for: codec,
+            preserveExactVisibleSize: preserveExactVisibleSize
         )
         guard protectedFrameRate != targetFrameRate || protectedSize != preferredSize else {
             return self
@@ -33,6 +36,7 @@ struct RemoteControlStreamPolicy: Sendable, Equatable {
             targetFrameRate: protectedFrameRate,
             keyFrameInterval: min(keyFrameInterval, max(10, protectedFrameRate * 2)),
             preferredSize: protectedSize,
+            preserveExactVisibleSize: preserveExactVisibleSize,
             reason: "\(reason)+audio-protect"
         )
     }
@@ -119,14 +123,19 @@ enum RemoteControlStreamPolicySelector {
         let supportsJPEG = peerFormatsUnknown || normalizedFormats.contains("jpeg")
         let supportsH264 = peerFormatsUnknown || normalizedFormats.contains("h264")
         let supportsHEVC = normalizedFormats.contains("hevc")
+        let exactOddVisibleDimension = request.preserveExactVisibleSize
+            && (Int(request.preferredSize.width.rounded(.down)).isMultiple(of: 2) == false
+                || Int(request.preferredSize.height.rounded(.down)).isMultiple(of: 2) == false)
 
         if request.lowLatencyMode {
-            if supportsH264 {
+            if supportsH264 && !exactOddVisibleDimension {
                 codec = .h264
                 reason = "low-latency-h264"
             } else if supportsHEVC {
                 codec = .hevc
-                reason = "low-latency-hevc-fallback"
+                reason = exactOddVisibleDimension
+                    ? "low-latency-hevc-exact-visible"
+                    : "low-latency-hevc-fallback"
             } else if supportsJPEG {
                 codec = .bgra
                 reason = "low-latency-jpeg-compat"
@@ -218,7 +227,8 @@ enum RemoteControlStreamPolicySelector {
 
         let normalizedSize = RemoteControlCaptureCompatibility.normalizedCaptureSize(
             request.preferredSize,
-            for: codec
+            for: codec,
+            preserveExactVisibleSize: request.preserveExactVisibleSize
         )
 
         return RemoteControlStreamPolicy(
@@ -226,6 +236,7 @@ enum RemoteControlStreamPolicySelector {
             targetFrameRate: targetFrameRate,
             keyFrameInterval: keyFrameInterval,
             preferredSize: normalizedSize,
+            preserveExactVisibleSize: request.preserveExactVisibleSize,
             reason: reason
         )
     }

@@ -967,15 +967,21 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         )
         XCTAssertTrue(p2pSource.contains("legacyAudioFallbackEnabled"))
         XCTAssertTrue(p2pSource.contains("if legacyAudioFallbackEnabled {\n            policy = policy.protectingRealtimeAudio()"))
+        XCTAssertTrue(p2pSource.contains("private var realtimeAudioCaptureStreamer: ScreenCaptureKitStreamer?"))
+        XCTAssertTrue(p2pSource.contains("realtimeAudioCapture=\\(realtimeAudioCaptureStreamerForAttempt == nil ? \"none\" : \"separate-sck\""))
         XCTAssertTrue(p2pSource.contains("Remote frame tx telemetry"))
         XCTAssertTrue(p2pSource.contains("submittedFPS="))
         XCTAssertTrue(p2pSource.contains("sentFPS="))
         XCTAssertTrue(p2pSource.contains("avgSendMs="))
         XCTAssertFalse(
             p2pSource.contains("if realtimeAudioSender != nil {\n            policy = policy.protectingRealtimeAudio()"),
-            "Dedicated P2P realtime audio runs on its own media plane and must not cap screen FPS."
+            "Dedicated P2P realtime audio must not use the legacy 24fps shared-channel protection."
         )
         XCTAssertTrue(p2pSource.contains("captureSystemAudio: legacyAudioFallbackEnabled"))
+        XCTAssertFalse(p2pSource.contains("captureSystemAudio: legacyAudioFallbackEnabled || realtimeAudioSender"))
+        XCTAssertTrue(p2pSource.contains("targetFPS: 1"))
+        XCTAssertTrue(p2pSource.contains("captureVideoOutput: false"))
+        XCTAssertTrue(p2pSource.contains("captureSystemAudio: true"))
         XCTAssertTrue(p2pSource.contains("RemoteRealtimePCM16SubmissionPipe(sender: realtimeAudioSender)"))
         XCTAssertFalse(
             p2pSource.contains("captureSystemAudio: audioRedirectionEnabled"),
@@ -995,7 +1001,7 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             webrtcSource.contains("shouldUseRealtimeAudio\n                ? strictSelectedPolicy.protectingRealtimeAudio()"),
             "Dedicated WebRTC/PQC media audio runs on its own transport and must not cap the native video path."
         )
-        XCTAssertTrue(webrtcSource.contains("RemoteRealtimePCM16SubmissionPipe()"))
+        XCTAssertTrue(webrtcSource.contains("RemoteRealtimePCM16SubmissionPipe(\n                                replayBufferedOnAttach: false\n                            )"))
         XCTAssertTrue(webrtcSource.contains("realtimePCMSubmissionPipe.attach(sender: realtimeSender.sender)"))
         XCTAssertTrue(webrtcSource.contains("captureSystemAudio: shouldUseNativeAudioTrack\n                                || shouldUseFallbackAudioChunks\n                                || shouldUseRealtimeAudio"))
         XCTAssertTrue(webrtcSource.contains("audioTxCapturePipeReady session="))
@@ -1004,6 +1010,12 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift"),
             encoding: .utf8
         )
+        XCTAssertTrue(streamerSource.contains("captureVideoOutput: Bool = true"))
+        XCTAssertTrue(streamerSource.contains("Self.shouldRegisterScreenOutput("))
+        XCTAssertTrue(streamerSource.contains("try stream?.addStreamOutput(streamOutput, type: .screen"))
+        XCTAssertTrue(streamerSource.contains("ScreenCaptureKit 系统音频采集启动：audio-only"))
+        XCTAssertTrue(streamerSource.contains("encodeCadenceFrameIfAvailable(from: sampleBuffer)"))
+        XCTAssertTrue(streamerSource.contains("latestVideoPixelBufferForCadence()"))
         XCTAssertTrue(streamerSource.contains("audioSequenceNumber = nativePCMChunk.sequenceNumber"))
         XCTAssertTrue(streamerSource.contains("SCK tx telemetry"))
         XCTAssertTrue(streamerSource.contains("captureFPS="))
@@ -1291,7 +1303,7 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         )
         XCTAssertTrue(viewSource.contains("private var submittedFrameVersion: UInt64 = 0"))
         XCTAssertTrue(viewSource.contains("submittedFrameVersion = frameVersion"))
-        XCTAssertTrue(viewSource.contains("DispatchSemaphore(value: 1)"))
+        XCTAssertTrue(viewSource.contains("DispatchSemaphore(value: 3)"))
         XCTAssertFalse(
             viewSource.contains("view.currentRenderPassDescriptor"),
             "The Metal renderer must not mix MTKView.currentRenderPassDescriptor with explicit currentDrawable ownership."
@@ -1307,33 +1319,39 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             return
         }
         XCTAssertLessThan(textureRange.lowerBound, returnRange.lowerBound)
-        guard let renderTextureRange = viewSource.range(of: "guard let renderTexture = makeRenderTexture("),
+        guard let framePathRange = viewSource.range(of: "let drawableWidth ="),
               let drawableTargetRange = viewSource.range(
                 of: "guard let renderTarget = makeDrawableRenderTarget(for: view)",
-                range: renderTextureRange.upperBound..<viewSource.endIndex
+                range: framePathRange.upperBound..<viewSource.endIndex
+              ),
+              let renderRange = viewSource.range(
+                of: "ciContext.render(",
+                range: drawableTargetRange.upperBound..<viewSource.endIndex
               ),
               let presentRange = viewSource.range(
                 of: "commandBuffer.present(renderTarget.drawable)",
-                range: drawableTargetRange.upperBound..<viewSource.endIndex
+                range: renderRange.upperBound..<viewSource.endIndex
               ) else {
-            XCTFail("The Metal renderer must preflight render texture before acquiring/presenting a CAMetalDrawable")
+            XCTFail("The Metal renderer must render directly into one owned CAMetalDrawable and present that drawable once")
             return
         }
-        XCTAssertLessThan(renderTextureRange.lowerBound, drawableTargetRange.lowerBound)
+        XCTAssertLessThan(drawableTargetRange.lowerBound, renderRange.lowerBound)
         XCTAssertLessThan(drawableTargetRange.lowerBound, presentRange.lowerBound)
-        XCTAssertTrue(viewSource.contains("commandBuffer.makeBlitCommandEncoder()"))
+        XCTAssertFalse(viewSource.contains("makeRenderTexture("))
+        XCTAssertFalse(viewSource.contains("commandBuffer.makeBlitCommandEncoder()"))
         XCTAssertTrue(viewSource.contains("metalView.enableSetNeedsDisplay = true"))
         XCTAssertTrue(viewSource.contains("metalView.isPaused = true"))
         XCTAssertTrue(viewSource.contains("view.setNeedsDisplay()"))
         XCTAssertTrue(viewSource.contains("view.draw()"))
         XCTAssertTrue(viewSource.contains("pendingRedraw"))
         XCTAssertTrue(viewSource.contains("requestFollowUpDrawIfPossible"))
-        XCTAssertTrue(viewSource.contains("let verticalFlipTransform = CGAffineTransform("))
-        XCTAssertTrue(viewSource.contains("d: -scaleY"))
+        XCTAssertTrue(viewSource.contains("let uprightTransform = CGAffineTransform("))
+        XCTAssertTrue(viewSource.contains("d: scaleY"))
+        XCTAssertFalse(viewSource.contains("d: -scaleY"))
         XCTAssertFalse(viewSource.contains("a: -scaleX"))
         XCTAssertTrue(viewSource.contains("Metal render telemetry"))
         XCTAssertTrue(viewSource.contains("frameAgeMs="))
-        XCTAssertTrue(viewSource.contains("orientation=verticalFlip"))
+        XCTAssertTrue(viewSource.contains("orientation=upright"))
         XCTAssertTrue(viewSource.contains("drawableAccess=single-late"))
         XCTAssertTrue(viewSource.contains("frameDriven=true"))
     }

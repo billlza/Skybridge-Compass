@@ -207,6 +207,7 @@ struct SkyBridgeCompassApp: App {
         let environment = ProcessInfo.processInfo.environment
         return environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-client"
             && environment["SKYBRIDGE_SMOKE_REQUIRE_NATIVE_VIDEO"] == "1"
+            && environment["SKYBRIDGE_SMOKE_USE_NATIVE_RENDER_OVERLAY"] == "1"
     }
     
     // MARK: - Scene Configuration
@@ -285,10 +286,11 @@ struct SkyBridgeCompassApp: App {
         // 配置日志系统
         SkyBridgeLogger.shared.configure(level: .debug)
 
-        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1" {
+        if LocalWebRTCSmokeHarness.shared.isEnabled || LocalP2PSmokeHarness.shared.isEnabled || shouldSkipInteractiveStartup {
             var smokeDefaults = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
-            smokeDefaults["pqc_allow_classic_fallback"] = true
+            smokeDefaults["pqc_allow_classic_fallback"] = false
             UserDefaults.standard.setVolatileDomain(smokeDefaults, forName: UserDefaults.argumentDomain)
+            UserDefaults.standard.set(false, forKey: "pqc_allow_classic_fallback")
         }
         
         // 请求必要的权限
@@ -905,6 +907,24 @@ private final class LocalP2PSmokeHarness {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_FILE_TRANSFER"] == "1"
     }
 
+    private var expectsRemoteDesktopSmoke: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_REMOTE_DESKTOP"] == "1"
+    }
+
+    private var requiresAudio: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_AUDIO"] == "1"
+    }
+
+    private var requiresVisibleRemoteView: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW"] == "1"
+    }
+
+    private var requiresExtremeMediaValidation: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXTREME_MEDIA"] == "1"
+            || ProcessInfo.processInfo.environment["SKYBRIDGE_WEBRTC_EXTREME_MEDIA"] == "1"
+            || ProcessInfo.processInfo.environment["SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK"] == "1"
+    }
+
     private var expectedHandshakeSuite: String {
         environmentValue("SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE") ?? "X-Wing"
     }
@@ -919,15 +939,31 @@ private final class LocalP2PSmokeHarness {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private func positiveEnvironmentInteger(_ name: String) -> Int? {
+        guard let raw = environmentValue(name),
+              let value = Int(raw),
+              value > 0 else {
+            return nil
+        }
+        return value
+    }
+
+    private func positiveEnvironmentDouble(_ name: String) -> Double? {
+        guard let raw = environmentValue(name),
+              let value = Double(raw),
+              value > 0 else {
+            return nil
+        }
+        return value
+    }
+
     func startIfNeeded() async {
         guard isEnabled, !didStart else { return }
         didStart = true
 
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
-        if expectsPQCRekey {
-            PQCCryptoManager.instance.allowClassicFallbackForCompatibility = true
-        }
+        PQCCryptoManager.instance.allowClassicFallbackForCompatibility = false
         await preseedPeerKEMTrustIfNeeded(reporter: reporter)
 
         guard !targetDeviceID.isEmpty else {
@@ -1059,7 +1095,18 @@ private final class LocalP2PSmokeHarness {
 
                     if expectsPQCRekey {
                         if sawClassicHandshake && sawRekey && normalizedSuite == "X-WING" {
-                            if expectsFileTransferSmoke {
+                            if expectsRemoteDesktopSmoke {
+                                do {
+                                    try await performRemoteDesktopSmoke(
+                                        to: target,
+                                        suite: "X-Wing",
+                                        reporter: reporter
+                                    )
+                                    reporter.append("success suite=X-Wing bootstrapRekey=1 remoteDesktop=1")
+                                } catch {
+                                    reporter.append("failed stage=remote-desktop error=\(Self.sanitize(error.localizedDescription))")
+                                }
+                            } else if expectsFileTransferSmoke {
                                 do {
                                     try await performBidirectionalFileTransferSmoke(
                                         to: target,
@@ -1078,7 +1125,20 @@ private final class LocalP2PSmokeHarness {
                               !sawRekey,
                               let stableSince = suiteStableSince,
                               Date().timeIntervalSince(stableSince) >= 1.0 {
-                        if expectsFileTransferSmoke {
+                        if expectsRemoteDesktopSmoke {
+                            do {
+                                try await performRemoteDesktopSmoke(
+                                    to: target,
+                                    suite: suite,
+                                    reporter: reporter
+                                )
+                                reporter.append(
+                                    "success suite=\(Self.sanitize(suite)) handshakeOnly=1 remoteDesktop=1"
+                                )
+                            } catch {
+                                reporter.append("failed stage=remote-desktop error=\(Self.sanitize(error.localizedDescription))")
+                            }
+                        } else if expectsFileTransferSmoke {
                             do {
                                 try await performBidirectionalFileTransferSmoke(
                                     to: target,
@@ -1251,6 +1311,181 @@ private final class LocalP2PSmokeHarness {
         reporter.append("pqc-preseed target-alias id=\(Self.sanitize(target.id))")
     }
 
+    private func performRemoteDesktopSmoke(
+        to target: DiscoveredDevice,
+        suite: String,
+        reporter: SmokeStatusReporter
+    ) async throws {
+        let manager = RemoteDesktopManager.instance
+        let minFPS = positiveEnvironmentDouble("SKYBRIDGE_SMOKE_MIN_FPS") ?? 30.0
+        let passSeconds = max(
+            1.0,
+            positiveEnvironmentDouble("SKYBRIDGE_SMOKE_MIN_PASS_SECONDS")
+                ?? positiveEnvironmentDouble("SKYBRIDGE_SMOKE_SOAK_SECONDS")
+                ?? 10.0
+        )
+        let timeoutSeconds = positiveEnvironmentDouble("SKYBRIDGE_SMOKE_REMOTE_DESKTOP_TIMEOUT_SECONDS")
+            ?? positiveEnvironmentDouble("SKYBRIDGE_SMOKE_TIMEOUT_SECONDS")
+            ?? 120.0
+        let requestedSize = requestedSmokeVideoSize()
+        let expectedSize = requestedSize.map { size in
+            requiresExtremeMediaValidation ? size : Self.normalizedVideoSizeForEncoder(size)
+        }
+        let expectedRenderOrientation = RemoteDesktopRenderOrientation(
+            rawValue: environmentValue("SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION") ?? "upright"
+        ) ?? .upright
+        let requestedSizeLabel = requestedSize.map { "\($0.width)x\($0.height)" } ?? "auto"
+        let expectedSizeLabel = expectedSize.map { "\($0.width)x\($0.height)" } ?? "auto"
+
+        reporter.append(
+            """
+            remote-desktop start target=\(Self.sanitize(target.id)) suite=\(Self.sanitize(suite)) \
+            minFps=\(String(format: "%.1f", minFPS)) passSeconds=\(Int(passSeconds.rounded())) \
+            requested=\(requestedSizeLabel) expected=\(expectedSizeLabel) audio=\(requiresAudio ? 1 : 0) \
+            visibleRemoteView=\(requiresVisibleRemoteView ? 1 : 0) expectedRenderOrientation=\(expectedRenderOrientation.rawValue)
+            """
+        )
+        reporter.append("remote-desktop p2p-active \(Self.sanitize(activeP2PSmokeSummary()))")
+
+        if requiresVisibleRemoteView {
+            reporter.append("remote-desktop ui-gate waiting-for-RemoteDesktopView")
+        } else {
+            try await manager.connect(to: target)
+        }
+
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var passStartedAt: Date?
+        var lastDiagnosticAt = Date.distantPast
+        var lastSummary = "remote desktop did not produce diagnostics"
+
+        while Date() < deadline {
+            let snapshot = await manager.smokeDiagnosticSnapshot()
+            let audio = snapshot.realtimeAudio
+            let audioPass = !requiresAudio || (
+                (audio?.datagramsSeen ?? 0) > 0
+                    && (audio?.receivedPackets ?? 0) > 0
+                    && (audio?.decodedPackets ?? 0) > 0
+                    && (audio?.playedPackets ?? 0) > 0
+                    && (audio?.renderedFrames ?? 0) > 0
+                    && (snapshot.audioChannelCount ?? 0) >= 2
+                    && (audio?.rejectedPackets ?? 0) == 0
+                    && (audio?.replayRejectedPackets ?? 0) == 0
+                    && (audio?.jitterEvictedPackets ?? 0) == 0
+                    && (audio?.playbackDroppedPackets ?? 0) == 0
+                    && (audio?.underflowEvents ?? 0) == 0
+                    && (audio?.rebufferEvents ?? 0) == 0
+            )
+            let resolutionPass: Bool = {
+                guard let expectedSize else {
+                    return snapshot.resolutionWidth > 0 && snapshot.resolutionHeight > 0
+                }
+                return snapshot.resolutionWidth == expectedSize.width
+                    && snapshot.resolutionHeight == expectedSize.height
+            }()
+            let pipelinePass: Bool = {
+                switch snapshot.renderPipeline {
+                case .metalRenderer:
+                    return true
+                case .sampleBufferDisplayLayer:
+                    return !self.requiresExtremeMediaValidation
+                case .waiting, .webrtcNativeVideo, .stillImageFallback:
+                    return false
+                }
+            }()
+            let renderOrientationPass = snapshot.renderPipeline != .metalRenderer
+                || snapshot.renderOrientation == expectedRenderOrientation
+            let recentFramePass = (snapshot.lastDisplayedFrameAgeSeconds ?? .infinity) < 2.5
+                || (snapshot.lastFrameArrivalAgeSeconds ?? .infinity) < 2.5
+            let uiPass = !requiresVisibleRemoteView || snapshot.hasActivePresentationOwner
+            let pass = snapshot.isStreaming
+                && !snapshot.isUsingCrossNetworkTransport
+                && uiPass
+                && snapshot.frameRate >= minFPS
+                && snapshot.receivedFramesInStream > 0
+                && resolutionPass
+                && pipelinePass
+                && renderOrientationPass
+                && recentFramePass
+                && audioPass
+
+            lastSummary = """
+            fps=\(String(format: "%.1f", snapshot.frameRate)) rxFps=\(String(format: "%.1f", snapshot.receivedFrameRate)) \
+            frame=\(snapshot.resolutionWidth)x\(snapshot.resolutionHeight) \
+            pipeline=\(snapshot.renderPipeline.rawValue) renderOrientation=\(snapshot.renderOrientation.rawValue) streaming=\(snapshot.isStreaming ? 1 : 0) \
+            crossNetwork=\(snapshot.isUsingCrossNetworkTransport ? 1 : 0) recvFrames=\(snapshot.receivedFramesInStream) \
+            uiSurface=\(snapshot.hasActivePresentationOwner ? "remoteDesktopView" : "none") uiOwnerCount=\(snapshot.presentationOwnerCount) \
+            audioRxRecv=\(audio?.receivedPackets ?? 0) audioRxDecoded=\(audio?.decodedPackets ?? 0) \
+            audioRxPlayed=\(audio?.playedPackets ?? 0) audioRxRendered=\(audio?.renderedFrames ?? 0) \
+            audioChannels=\(snapshot.audioChannelCount ?? 0) \
+            audioRxRejected=\(audio?.rejectedPackets ?? 0) audioRxPlaybackDrop=\(audio?.playbackDroppedPackets ?? 0) \
+            audioRxReplayRejected=\(audio?.replayRejectedPackets ?? 0) audioRxJitterEvicted=\(audio?.jitterEvictedPackets ?? 0) \
+            audioRxUnderflow=\(audio?.underflowEvents ?? 0) audioRxRebuffer=\(audio?.rebufferEvents ?? 0)
+            """
+
+            if Date().timeIntervalSince(lastDiagnosticAt) >= 1.0 {
+                lastDiagnosticAt = Date()
+                reporter.append("remote-desktop status \(lastSummary) pass=\(pass ? 1 : 0)")
+            }
+
+            if pass {
+                if passStartedAt == nil {
+                    passStartedAt = Date()
+                    reporter.append("remote-desktop pass-window-start \(lastSummary)")
+                }
+                if let passStartedAt,
+                   Date().timeIntervalSince(passStartedAt) >= passSeconds {
+                    reporter.append(
+                        "remote-desktop-pass seconds=\(Int(passSeconds.rounded())) \(lastSummary)"
+                    )
+                    return
+                }
+            } else {
+                passStartedAt = nil
+            }
+
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+
+        throw NSError(
+            domain: "SkyBridge.Smoke",
+            code: 1200,
+            userInfo: [NSLocalizedDescriptionKey: "P2P 远控 smoke 超时: \(lastSummary)"]
+        )
+    }
+
+    private func requestedSmokeVideoSize() -> (width: Int, height: Int)? {
+        guard let width = positiveEnvironmentInteger("SKYBRIDGE_SMOKE_VIDEO_WIDTH"),
+              let height = positiveEnvironmentInteger("SKYBRIDGE_SMOKE_VIDEO_HEIGHT") else {
+            return nil
+        }
+        return (width, height)
+    }
+
+    private static func normalizedVideoSizeForEncoder(
+        _ size: (width: Int, height: Int)
+    ) -> (width: Int, height: Int) {
+        func evenDimension(_ value: Int) -> Int {
+            let clamped = max(2, value)
+            return clamped.isMultiple(of: 2) ? clamped : clamped - 1
+        }
+        return (evenDimension(size.width), evenDimension(size.height))
+    }
+
+    @MainActor
+    private func activeP2PSmokeSummary() -> String {
+        let connections = P2PConnectionManager.instance.activeConnections
+        guard !connections.isEmpty else { return "none" }
+        return connections.map { connection in
+            [
+                "id=\(connection.device.id)",
+                "name=\(connection.device.name)",
+                "status=\(connection.status.rawValue)",
+                "ip=\(connection.device.ipAddress ?? "-")",
+                "remotePort=\(connection.device.remoteControlPort.map(String.init) ?? "-")"
+            ].joined(separator: ",")
+        }.joined(separator: ";")
+    }
+
     private func performBidirectionalFileTransferSmoke(
         to target: DiscoveredDevice,
         reporter: SmokeStatusReporter
@@ -1375,11 +1610,12 @@ private struct LocalWebRTCSmokeNativeRenderHost: View {
             ZStack {
                 Color.black.opacity(0.001)
 
-                if let track = manager.remoteVideoTrack {
-                    RemoteDesktopRTCVideoView(
-                        track: track,
-                        acceptsRenderEvidence: true
-                    )
+                    if let track = manager.remoteVideoTrack {
+                        RemoteDesktopRTCVideoView(
+                            track: track,
+                            acceptsRenderEvidence: true,
+                            uiSurface: "smokeOverlay"
+                        )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .onAppear {
                         SkyBridgeSmokeTraceWriter.appendStatus(
@@ -1463,6 +1699,11 @@ private final class LocalWebRTCSmokeHarness {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_NATIVE_VIDEO"] == "1"
     }
 
+    private var usesRealRemoteDesktopViewForNativeVideo: Bool {
+        requiresNativeVideo
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
+    }
+
     private var requiresExtremeMediaValidation: Bool {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXTREME_MEDIA"] == "1"
             || ProcessInfo.processInfo.environment["SKYBRIDGE_WEBRTC_EXTREME_MEDIA"] == "1"
@@ -1518,11 +1759,11 @@ private final class LocalWebRTCSmokeHarness {
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
         stopSmokeAudioReceiver()
+        PQCCryptoManager.instance.allowClassicFallbackForCompatibility = false
         if expectsPQCRekey {
-            PQCCryptoManager.instance.allowClassicFallbackForCompatibility = true
             do {
                 try await PQCCryptoManager.instance.initialize()
-                reporter.append("pqc policy allowClassicBootstrap=1 targetRekey=X-Wing")
+                reporter.append("pqc policy allowClassicBootstrap=0 targetRekey=X-Wing")
             } catch {
                 reporter.append("failed stage=pqc-policy error=\(Self.sanitize(error.localizedDescription))")
                 return
@@ -1572,7 +1813,6 @@ private final class LocalWebRTCSmokeHarness {
         var reportedPQCRekeyComplete = false
         var successReported = false
         var successHoldUntil: Date?
-        var lastNativeRenderHoldEvidenceAt: Date?
 
         func shouldFinishAfterSuccess(_ line: String) -> Bool {
             if !successReported {
@@ -1624,14 +1864,20 @@ private final class LocalWebRTCSmokeHarness {
                     "handshake session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite))"
                 )
                 if role == "ios-client" {
-                    if !streamConfigurationSent {
+                    if usesRealRemoteDesktopViewForNativeVideo {
+                        reporter.append(
+                            "remote-view required=1 uiSurface=remoteDesktopView streamOwner=RemoteDesktopView"
+                        )
+                    } else if !streamConfigurationSent {
                         streamConfigurationSent = await sendSmokeViewerStreamConfiguration(
                             manager: manager,
                             reporter: reporter,
                             sessionId: sessionId
                         )
                     }
-                    manager.startRemoteDesktopHeartbeat()
+                    if !usesRealRemoteDesktopViewForNativeVideo {
+                        manager.startRemoteDesktopHeartbeat()
+                    }
                 }
             }
 
@@ -1685,33 +1931,6 @@ private final class LocalWebRTCSmokeHarness {
                             "success session=\(sessionId) suite=\(suiteLabel) bootstrapRekey=\(expectsPQCRekey ? 1 : 0) frame=\(successDescriptor.width)x\(successDescriptor.height) bytes=\(successDescriptor.bytes) transport=\(successDescriptor.transport)"
                         ) {
                             return
-                        }
-                        if successDescriptor.transport.hasPrefix("webrtc-native"),
-                           successHoldUntil != nil {
-                            let now = Date()
-                            if lastNativeRenderHoldEvidenceAt.map({ now.timeIntervalSince($0) >= 5 }) ?? true {
-                                lastNativeRenderHoldEvidenceAt = now
-                                reporter.append(
-                                    "native-render-frame session=\(sessionId) size=\(successDescriptor.width)x\(successDescriptor.height) visibleSize=\(successDescriptor.width)x\(successDescriptor.height) codedSize=\(successDescriptor.width)x\(successDescriptor.height) source=rtc-mtl-video-view nativeRenderEvidenceSource=rtc-mtl-video-view nativePromotionState=smoke-hold"
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if successReported,
-                   successHoldUntil != nil,
-                   case .handshakeComplete(let sessionId, _) = manager.readiness {
-                    let nativeFrameSize = manager.remoteVideoTrackFrameSize
-                    if manager.remoteVideoTrackHasRenderedFrame,
-                       nativeFrameSize.width > 0,
-                       nativeFrameSize.height > 0 {
-                        let now = Date()
-                        if lastNativeRenderHoldEvidenceAt.map({ now.timeIntervalSince($0) >= 5 }) ?? true {
-                            lastNativeRenderHoldEvidenceAt = now
-                            reporter.append(
-                                "native-render-frame session=\(sessionId) size=\(Int(nativeFrameSize.width))x\(Int(nativeFrameSize.height)) visibleSize=\(Int(nativeFrameSize.width))x\(Int(nativeFrameSize.height)) codedSize=\(Int(nativeFrameSize.width))x\(Int(nativeFrameSize.height)) source=rtc-mtl-video-view nativeRenderEvidenceSource=rtc-mtl-video-view nativePromotionState=smoke-hold"
-                            )
                         }
                     }
                 }
@@ -2176,15 +2395,14 @@ private final class LocalWebRTCSmokeHarness {
         mediaAudioEndpoint: SkyBridgeMediaEndpoint?
     ) -> RemoteDesktopStreamConfigurationPayload {
         let supportedFormats = RemoteDesktopManager.supportedRemoteVideoFormats()
+            .filter { $0 != "jpeg" && $0 != "jpg" && $0 != "bgra" }
         let preferredCodec = supportedFormats.first {
             $0.caseInsensitiveCompare("hevc") == .orderedSame
                 || $0.caseInsensitiveCompare("h264") == .orderedSame
         } ?? supportedFormats.first ?? "jpeg"
         let audioEnabled = requiresAudio
         let targetFrameRate = requestedSmokeTargetFrameRate
-        let screenFrameTransport = requiresExtremeMediaValidation
-            ? "webrtc-native-main"
-            : "webrtc-native-main+sbrf-fallback"
+        let screenFrameTransport = "webrtc-native-main"
         let requestedVideoSize = requestedSmokeVideoSize
         return RemoteDesktopStreamConfigurationPayload(
             width: requestedVideoSize?.width,
@@ -2204,7 +2422,7 @@ private final class LocalWebRTCSmokeHarness {
             interactionOverlayChannelEnabled: false,
             jitterBufferFrames: 2,
             screenFrameTransport: screenFrameTransport,
-            screenDataChannelEnabled: !requiresExtremeMediaValidation,
+            screenDataChannelEnabled: false,
             nativeVideoTrackReady: false,
             nativeAudioTrackEnabled: false,
             audioRedirectionEnabled: audioEnabled,
@@ -2217,7 +2435,7 @@ private final class LocalWebRTCSmokeHarness {
             audioSampleRate: 48_000,
             audioChannelCount: 2,
             performanceValidationMode: requiresExtremeMediaValidation ? "extreme" : nil,
-            mediaFallbackPolicy: requiresExtremeMediaValidation ? "fail-fast" : "explicit-degraded",
+            mediaFallbackPolicy: "forbidden",
             streamRefreshToken: UInt64(Date().timeIntervalSince1970 * 1_000)
         )
     }

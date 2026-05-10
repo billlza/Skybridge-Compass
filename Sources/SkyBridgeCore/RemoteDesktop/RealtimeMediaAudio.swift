@@ -23,15 +23,21 @@ final class RemoteRealtimePCM16SubmissionPipe: @unchecked Sendable {
     private final class State: @unchecked Sendable {
         private let lock = NSLock()
         private let bufferedChunkLimit: Int
+        private let replayBufferedOnAttach: Bool
         private var sender: RemoteRealtimeMediaAudioSender?
         private var pendingBeforeAttach: [RemoteDesktopAudioChunkPayload] = []
         private var closed = false
         private var submittedBeforeAttach: UInt64 = 0
         private var droppedBeforeAttach: UInt64 = 0
 
-        init(sender: RemoteRealtimeMediaAudioSender?, bufferedChunkLimit: Int) {
+        init(
+            sender: RemoteRealtimeMediaAudioSender?,
+            bufferedChunkLimit: Int,
+            replayBufferedOnAttach: Bool
+        ) {
             self.sender = sender
             self.bufferedChunkLimit = max(1, bufferedChunkLimit)
+            self.replayBufferedOnAttach = replayBufferedOnAttach
         }
 
         func submit(_ chunk: RemoteDesktopAudioChunkPayload) -> SubmitAction {
@@ -52,7 +58,10 @@ final class RemoteRealtimePCM16SubmissionPipe: @unchecked Sendable {
         func attach(_ sender: RemoteRealtimeMediaAudioSender) -> [RemoteDesktopAudioChunkPayload] {
             lock.lock()
             self.sender = sender
-            let pending = pendingBeforeAttach
+            let pending = replayBufferedOnAttach ? pendingBeforeAttach : []
+            if !replayBufferedOnAttach {
+                droppedBeforeAttach &+= UInt64(pendingBeforeAttach.count)
+            }
             pendingBeforeAttach.removeAll(keepingCapacity: false)
             lock.unlock()
             return pending
@@ -95,8 +104,16 @@ final class RemoteRealtimePCM16SubmissionPipe: @unchecked Sendable {
     private let drainTask: Task<Void, Never>
     private let state: State
 
-    init(sender: RemoteRealtimeMediaAudioSender? = nil, bufferedChunkLimit: Int = 128) {
-        let state = State(sender: sender, bufferedChunkLimit: bufferedChunkLimit)
+    init(
+        sender: RemoteRealtimeMediaAudioSender? = nil,
+        bufferedChunkLimit: Int = 128,
+        replayBufferedOnAttach: Bool = true
+    ) {
+        let state = State(
+            sender: sender,
+            bufferedChunkLimit: bufferedChunkLimit,
+            replayBufferedOnAttach: replayBufferedOnAttach
+        )
         var continuation: AsyncStream<RemoteDesktopAudioChunkPayload>.Continuation?
         let stream = AsyncStream<RemoteDesktopAudioChunkPayload>(
             bufferingPolicy: .bufferingNewest(max(1, bufferedChunkLimit))

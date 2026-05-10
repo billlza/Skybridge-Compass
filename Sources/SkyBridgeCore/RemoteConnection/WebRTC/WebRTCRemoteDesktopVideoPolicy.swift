@@ -9,6 +9,27 @@ struct WebRTCRemoteDesktopVideoRequest: Sendable, Equatable {
     let lowLatencyMode: Bool
     let enableHardwareAcceleration: Bool
     let enableAppleSiliconOptimization: Bool
+    let preserveExactVisibleSize: Bool
+
+    init(
+        preferredSize: CGSize,
+        preferredCodec: PreferredVideoCodec,
+        requestedFrameRate: Int,
+        keyFrameInterval: Int,
+        lowLatencyMode: Bool,
+        enableHardwareAcceleration: Bool,
+        enableAppleSiliconOptimization: Bool,
+        preserveExactVisibleSize: Bool = false
+    ) {
+        self.preferredSize = preferredSize
+        self.preferredCodec = preferredCodec
+        self.requestedFrameRate = requestedFrameRate
+        self.keyFrameInterval = keyFrameInterval
+        self.lowLatencyMode = lowLatencyMode
+        self.enableHardwareAcceleration = enableHardwareAcceleration
+        self.enableAppleSiliconOptimization = enableAppleSiliconOptimization
+        self.preserveExactVisibleSize = preserveExactVisibleSize
+    }
 }
 
 struct WebRTCRemoteDesktopVideoPolicy: Sendable, Equatable {
@@ -25,6 +46,7 @@ struct WebRTCRemoteDesktopVideoPolicy: Sendable, Equatable {
             targetFrameRate: targetFrameRate,
             keyFrameInterval: keyFrameInterval,
             preferredSize: preferredSize,
+            preserveExactVisibleSize: false,
             reason: reason
         ).protectingRealtimeAudio()
         guard protectedPolicy.codec != codec
@@ -117,7 +139,8 @@ enum WebRTCRemoteDesktopVideoPolicySelector {
                 keyFrameInterval: request.keyFrameInterval,
                 lowLatencyMode: request.lowLatencyMode,
                 enableHardwareAcceleration: request.enableHardwareAcceleration,
-                enableAppleSiliconOptimization: request.enableAppleSiliconOptimization
+                enableAppleSiliconOptimization: request.enableAppleSiliconOptimization,
+                preserveExactVisibleSize: request.preserveExactVisibleSize
             ),
             peerFormats: peerFormats,
             thermalState: thermalState,
@@ -126,6 +149,7 @@ enum WebRTCRemoteDesktopVideoPolicySelector {
 
         guard transportPath == .direct else {
             if nativeVideoTrackEnabled, basePolicy.codec != .bgra {
+                let highFrameRateNativeStream = request.lowLatencyMode || request.requestedFrameRate >= 59
                 return WebRTCRemoteDesktopVideoPolicy(
                     codec: basePolicy.codec,
                     targetFrameRate: basePolicy.targetFrameRate,
@@ -133,7 +157,7 @@ enum WebRTCRemoteDesktopVideoPolicySelector {
                     preferredSize: nativeRTPPreferredSize(
                         for: request.preferredSize,
                         transportPath: transportPath,
-                        highFrameRate: request.lowLatencyMode
+                        highFrameRate: highFrameRateNativeStream
                     ),
                     usesHardwareEncoder: true,
                     reason: "\(transportPath == .relay ? "relay" : "unknown-path")-native-rtp-\(basePolicy.reason)"

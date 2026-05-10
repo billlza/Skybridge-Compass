@@ -337,9 +337,9 @@ struct PQCSecuritySettingsView: View {
             Section("安全选项") {
                 Toggle("强制 PQC 握手", isOn: $pqcManager.enforcePQCHandshake)
                 
-                Toggle("允许经典降级（兼容旧设备）", isOn: $pqcManager.allowClassicFallbackForCompatibility)
-                    .disabled(pqcManager.enforcePQCHandshake)
-                    .opacity(pqcManager.enforcePQCHandshake ? 0.5 : 1.0)
+                Toggle("允许经典降级（兼容旧设备）", isOn: .constant(false))
+                    .disabled(true)
+                    .opacity(0.5)
 
                 Toggle("优先 X-Wing 混合套件（iOS 26+）", isOn: $preferXWingHybrid)
                 

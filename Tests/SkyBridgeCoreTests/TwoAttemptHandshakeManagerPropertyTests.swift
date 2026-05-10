@@ -47,6 +47,15 @@ final class TwoAttemptHandshakeManagerPropertyTests: XCTestCase {
         XCTAssertTrue(policy.requirePQC)
         XCTAssertFalse(policy.allowClassicFallback, "requirePQC=true must force allowClassicFallback=false")
     }
+
+    func testRecommendedDefaultIsStrictPQCRegardlessOfCompatibilityMode() {
+        for compatibilityModeEnabled in [false, true] {
+            let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+            XCTAssertTrue(policy.requirePQC)
+            XCTAssertFalse(policy.allowClassicFallback)
+            XCTAssertEqual(policy.minimumTier, .nativePQC)
+        }
+    }
     
  // MARK: - Property 2.1.1: Timeout does NOT trigger fallback
     

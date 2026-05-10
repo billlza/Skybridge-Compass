@@ -32,7 +32,7 @@ public actor P2PKEMIdentityKeyStore {
     public func getOrCreateBootstrapPublicKeys() async throws -> [KEMPublicKeyInfo] {
         var bySuiteWireId: [UInt16: Data] = [:]
 
-        let provider = CryptoProviderFactory.make(policy: .preferPQC)
+        let provider = CryptoProviderFactory.make(policy: .requirePQC)
         for suite in provider.supportedSuites where suite.isPQCGroup {
             let (publicKey, _) = try await getOrCreateIdentityKey(for: suite, provider: provider)
             bySuiteWireId[suite.wireId] = publicKey

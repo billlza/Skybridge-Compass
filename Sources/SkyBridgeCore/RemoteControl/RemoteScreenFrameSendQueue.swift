@@ -13,7 +13,7 @@ struct RemoteScreenFrameSendQueue {
 
     let maxQueuedFrames: Int
 
-    init(maxQueuedFrames: Int = 3) {
+    init(maxQueuedFrames: Int = 12) {
         self.maxQueuedFrames = max(1, maxQueuedFrames)
     }
 

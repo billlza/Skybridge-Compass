@@ -13,6 +13,25 @@ private enum RemoteDesktopDiagnosticDefaults {
     static let showInteractionOverlayKey = "SkyBridgeRemoteDesktopShowInteractionOverlay"
 }
 
+#if canImport(UIKit)
+@MainActor
+private enum RemoteDesktopIdleTimerCoordinator {
+    private static var activeHolders = 0
+
+    static func acquire() {
+        activeHolders += 1
+        UIApplication.shared.isIdleTimerDisabled = true
+    }
+
+    static func release() {
+        activeHolders = max(0, activeHolders - 1)
+        if activeHolders == 0 {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+}
+#endif
+
 /// 远程桌面视图 - 支持触摸控制和手势操作
 @available(iOS 17.0, *)
 struct RemoteDesktopView: View {
@@ -25,11 +44,20 @@ struct RemoteDesktopView: View {
     @State private var lastAutoConnectedCrossNetworkSessionID: String?
     @State private var showRemoteDesktopSettings = false
     @State private var didAutoConnectUITestFixture = false
+    @State private var didAutoConnectP2PSmoke = false
     @State private var showUITestRemoteStream = false
     @State private var presentationOwnerToken = UUID()
 
     private var shouldAutoConnectUITestFixture: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_SCENARIO_REMOTE")
+    }
+
+    private var shouldAutoConnectP2PSmoke: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-p2p-client"
+            && environment["SKYBRIDGE_SMOKE_EXPECT_REMOTE_DESKTOP"] == "1"
+            && environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
+            && environment["SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW"] == "1"
     }
     
     var body: some View {
@@ -80,6 +108,7 @@ struct RemoteDesktopView: View {
             remoteDesktopManager.registerPresentationOwner(presentationOwnerToken)
             attemptAutoConnectCrossNetworkSession()
             attemptAutoConnectUITestFixture()
+            attemptAutoConnectP2PSmoke()
         }
         .onDisappear {
             let shouldDisconnect = remoteDesktopManager.unregisterPresentationOwner(presentationOwnerToken)
@@ -100,6 +129,7 @@ struct RemoteDesktopView: View {
         }
         .onChange(of: connectionManager.activeConnections.count) { _, _ in
             attemptAutoConnectUITestFixture()
+            attemptAutoConnectP2PSmoke()
         }
     }
     
@@ -251,6 +281,53 @@ struct RemoteDesktopView: View {
         connectToDevice(firstConnection)
     }
 
+    private func attemptAutoConnectP2PSmoke() {
+        guard shouldAutoConnectP2PSmoke else { return }
+        guard !didAutoConnectP2PSmoke else { return }
+        guard !remoteDesktopManager.isStreaming else { return }
+        guard selectedConnection == nil else { return }
+        guard let connection = smokeTargetLANConnection() else { return }
+
+        didAutoConnectP2PSmoke = true
+        SkyBridgeLogger.shared.info("🧪 P2P smoke RemoteDesktopView auto-connect: \(connection.device.id)")
+        connectToDevice(connection)
+    }
+
+    private func smokeTargetLANConnection() -> Connection? {
+        let environment = ProcessInfo.processInfo.environment
+        let targetID = environment["SKYBRIDGE_SMOKE_TARGET_DEVICE_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let targetName = environment["SKYBRIDGE_SMOKE_TARGET_NAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        return lanRemoteConnections.first { connection in
+            let deviceID = connection.device.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let deviceName = connection.device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let bonjourName = connection.device.bonjourServiceName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+
+            if let targetID, !targetID.isEmpty {
+                let aliases = PeerIdentityAliasResolver.lookupCandidates(for: connection.device.id)
+                if deviceID == targetID
+                    || deviceID == "id:\(targetID)"
+                    || aliases.contains(targetID)
+                    || aliases.contains("id:\(targetID)") {
+                    return true
+                }
+            }
+            if let targetName, !targetName.isEmpty {
+                return deviceName == targetName
+                    || deviceName.contains(targetName)
+                    || bonjourName == targetName
+                    || bonjourName?.contains(targetName) == true
+            }
+            return false
+        } ?? lanRemoteConnections.first
+    }
+
     private func isRemoteDesktopEligible(_ device: DiscoveredDevice) -> Bool {
         remoteDesktopManager.canPresentRemoteDesktopOption(for: device)
     }
@@ -278,6 +355,7 @@ struct RemoteDesktopStreamView: View {
     @State private var dragMouseDownSent = false
     @State private var lastScrollTranslationHeight: CGFloat = 0
     @State private var scrollAccumulator: CGFloat = 0
+    @State private var idleTimerHeld = false
     @AppStorage(RemoteDesktopDiagnosticDefaults.showInteractionOverlayKey)
     private var showInteractionOverlay = false
 
@@ -314,7 +392,11 @@ struct RemoteDesktopStreamView: View {
         .statusBarHidden(isFullScreen)
         .persistentSystemOverlays(isFullScreen ? .hidden : .visible)
         .onAppear {
+            acquireIdleTimer()
             resetControlsTimer()
+        }
+        .onDisappear {
+            releaseIdleTimer()
         }
         .onChange(of: touchMode) { _, _ in
             dragMouseDownSent = false
@@ -324,6 +406,22 @@ struct RemoteDesktopStreamView: View {
         .sheet(isPresented: $showStreamSettings) {
             RemoteDesktopStreamSettingsSheet()
         }
+    }
+
+    private func acquireIdleTimer() {
+        #if canImport(UIKit)
+        guard !idleTimerHeld else { return }
+        idleTimerHeld = true
+        RemoteDesktopIdleTimerCoordinator.acquire()
+        #endif
+    }
+
+    private func releaseIdleTimer() {
+        #if canImport(UIKit)
+        guard idleTimerHeld else { return }
+        idleTimerHeld = false
+        RemoteDesktopIdleTimerCoordinator.release()
+        #endif
     }
     
     private func remoteScreenView(geometry: GeometryProxy) -> some View {
@@ -874,7 +972,8 @@ private struct RemoteDesktopNativeVideoSurface: View {
             ZStack {
                 RemoteDesktopRTCVideoView(
                     track: track,
-                    acceptsRenderEvidence: acceptsRenderEvidence
+                    acceptsRenderEvidence: acceptsRenderEvidence,
+                    uiSurface: "remoteDesktopView"
                 )
                     .frame(width: canvasSize.width, height: canvasSize.height)
 
@@ -895,6 +994,7 @@ private struct RemoteDesktopNativeVideoSurface: View {
 struct RemoteDesktopRTCVideoView: UIViewRepresentable {
     let track: RTCVideoTrack
     let acceptsRenderEvidence: Bool
+    let uiSurface: String
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -904,6 +1004,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
         let view = ObservableRTCMTLVideoView(frame: .zero)
         view.diagnosticTrackId = track.trackId
         view.acceptsNativeRenderEvidence = acceptsRenderEvidence
+        view.uiSurface = uiSurface
         view.isOpaque = false
         view.backgroundColor = .clear
         view.layer.isOpaque = false
@@ -918,6 +1019,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                 CrossNetworkWebRTCManager.instance.noteRemoteVideoTrackRenderedFrame(
                     size,
                     source: ObservableRTCMTLVideoView.nativeRenderEvidenceSource,
+                    uiSurface: uiSurface,
                     trackId: trackId,
                     renderEpoch: renderEpoch
                 )
@@ -937,6 +1039,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
     func updateUIView(_ uiView: ObservableRTCMTLVideoView, context: Context) {
         uiView.diagnosticTrackId = track.trackId
         uiView.acceptsNativeRenderEvidence = acceptsRenderEvidence
+        uiView.uiSurface = uiSurface
         uiView.isOpaque = false
         uiView.backgroundColor = .clear
         uiView.layer.isOpaque = false
@@ -953,6 +1056,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                 CrossNetworkWebRTCManager.instance.noteRemoteVideoTrackRenderedFrame(
                     size,
                     source: ObservableRTCMTLVideoView.nativeRenderEvidenceSource,
+                    uiSurface: uiSurface,
                     trackId: trackId,
                     renderEpoch: renderEpoch
                 )
@@ -1087,6 +1191,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
         private static let diagnosticLogInterval: TimeInterval = 1.0
         var diagnosticTrackId = "-"
         var acceptsNativeRenderEvidence = false
+        var uiSurface = "remoteDesktopView"
         var renderEpoch: UInt64 = 0
         static let nativeRenderEvidenceSource = "rtc-mtl-video-view"
         var onRenderedFrame: ((CGSize) -> Void)?
@@ -1207,6 +1312,9 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                         "session": sessionId,
                         "session_id": sessionId,
                         "source": Self.nativeRenderEvidenceSource,
+                        "uiSurface": uiSurface,
+                        "metricSource": "rtc-mtl-render-frame",
+                        "renderPipeline": "webrtcNativeVideo",
                         "trackId": diagnosticTrackId,
                         "viewerDisplayFPS": fps,
                         "displayFPS": fps,
@@ -1487,6 +1595,11 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                         presentationTimeStamp: presentationTimeStamp
                     )
                 }
+            },
+            onRenderOrientation: { [remoteDesktopManager] orientation in
+                Task { @MainActor in
+                    remoteDesktopManager.handleMetalRendererOrientation(orientation)
+                }
             }
         )
     }
@@ -1501,7 +1614,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 
     @MainActor
     func updateUIView(_ uiView: MetalVideoContainerView, context: Context) {
-        context.coordinator.attach(to: uiView)
+        context.coordinator.bind(feed: feed, to: uiView)
 
         if context.coordinator.lastFlushVersion != flushVersion {
             context.coordinator.lastFlushVersion = flushVersion
@@ -1511,18 +1624,22 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             )
         }
 
+        guard !context.coordinator.isDirectFrameConsumerActive else {
+            return
+        }
         guard context.coordinator.lastFrameVersion != frameVersion else {
             return
         }
-        context.coordinator.lastFrameVersion = frameVersion
 
         // takeLatestFrame 不再清空帧，所以 nil 只会在从未 enqueue 过帧时出现
         if let frame = feed.takeLatestFrame() {
-            context.coordinator.display(
+            if context.coordinator.display(
                 frame: frame,
-                version: context.coordinator.lastFrameVersion,
+                version: frameVersion,
                 in: uiView
-            )
+            ) {
+                context.coordinator.lastFrameVersion = frameVersion
+            }
         }
         // 如果 takeLatestFrame 返回 nil，说明还没有帧到达，等待下一帧
         // 不要打印错误日志，这是正常现象（frameVersion 增加但帧尚未准备好）
@@ -1531,14 +1648,34 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
     @MainActor
     final class Coordinator {
         private let onFrameDisplayed: @Sendable (CMTime) -> Void
+        private let onRenderOrientation: @Sendable (RemoteDesktopRenderOrientation) -> Void
         private weak var attachedView: MetalVideoContainerView?
         let renderer = MetalVideoRenderer()
         var lastFrameVersion: UInt64 = 0
         var lastFlushVersion: UInt64 = 0
+        private weak var directFeed: RemoteMetalVideoFrameFeed?
+        private var directFeedConsumerID: UUID?
 
-        init(onFrameDisplayed: @escaping @Sendable (CMTime) -> Void) {
+        var isDirectFrameConsumerActive: Bool {
+            directFeedConsumerID != nil
+        }
+
+        init(
+            onFrameDisplayed: @escaping @Sendable (CMTime) -> Void,
+            onRenderOrientation: @escaping @Sendable (RemoteDesktopRenderOrientation) -> Void
+        ) {
             self.onFrameDisplayed = onFrameDisplayed
+            self.onRenderOrientation = onRenderOrientation
             renderer.onFrameDisplayed = onFrameDisplayed
+            renderer.onRenderOrientation = onRenderOrientation
+        }
+
+        deinit {
+            let feed = directFeed
+            let consumerID = directFeedConsumerID
+            Task { @MainActor in
+                feed?.removeFrameConsumer(consumerID)
+            }
         }
 
         func attach(to view: MetalVideoContainerView) {
@@ -1547,9 +1684,26 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             view.configureIfNeeded(renderer: renderer)
         }
 
-        func display(frame: DecodedPixelBufferFrame, version: UInt64, in view: MetalVideoContainerView) {
+        func bind(feed: RemoteMetalVideoFrameFeed, to view: MetalVideoContainerView) {
             attach(to: view)
-            renderer.display(frame: frame, version: version, in: view.metalView)
+            guard directFeed !== feed else { return }
+            directFeed?.removeFrameConsumer(directFeedConsumerID)
+            directFeed = feed
+            directFeedConsumerID = feed.addFrameConsumer { [weak self, weak view] frame, version in
+                guard let self, let view else { return }
+                if self.display(frame: frame, version: version, in: view) {
+                    self.lastFrameVersion = version
+                }
+            }
+            if let frame = feed.latestFrame,
+               self.display(frame: frame, version: feed.frameVersion, in: view) {
+                self.lastFrameVersion = feed.frameVersion
+            }
+        }
+
+        func display(frame: DecodedPixelBufferFrame, version: UInt64, in view: MetalVideoContainerView) -> Bool {
+            attach(to: view)
+            return renderer.display(frame: frame, version: version, in: view.metalView)
         }
 
         func flush(view: MetalVideoContainerView, removeDisplayedImage: Bool) {
@@ -1609,7 +1763,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         private var needsClear = true
         private weak var boundView: MTKView?
         private var pendingRedraw = false
-        private let inFlightSemaphore = DispatchSemaphore(value: 1)
+        private let inFlightSemaphore = DispatchSemaphore(value: 3)
         private var renderTelemetryWindowStartedAt = Date()
         private var renderSubmittedFrames = 0
         private var renderDisplayedFrames = 0
@@ -1619,6 +1773,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         private var renderFailureSkips = 0
         private var renderTotalMs: Double = 0
         var onFrameDisplayed: (@Sendable (CMTime) -> Void)?
+        var onRenderOrientation: (@Sendable (RemoteDesktopRenderOrientation) -> Void)?
 
         override init() {
             if let device = device {
@@ -1635,7 +1790,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
         }
 
         @MainActor
-        func display(frame: DecodedPixelBufferFrame, version: UInt64, in view: MTKView) {
+        @discardableResult
+        func display(frame: DecodedPixelBufferFrame, version: UInt64, in view: MTKView) -> Bool {
             stateLock.lock()
             boundView = view
             currentFrame = frame
@@ -1646,18 +1802,23 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             // 修复：确保 drawableSize 有效，避免 draw(in:) 因尺寸为零而跳过
             guard view.bounds.width > 0, view.bounds.height > 0 else {
                 // view 尚未布局完成，等待下一帧
-                return
+                return false
             }
 
             let drawableScale = view.window?.screen.scale ?? UIScreen.main.scale
-            view.contentScaleFactor = drawableScale
-            view.drawableSize = CGSize(
+            let nextDrawableSize = CGSize(
                 width: max(view.bounds.width * drawableScale, 1),
                 height: max(view.bounds.height * drawableScale, 1)
             )
+            if view.contentScaleFactor != drawableScale {
+                view.contentScaleFactor = drawableScale
+            }
+            if view.drawableSize != nextDrawableSize {
+                view.drawableSize = nextDrawableSize
+            }
 
-            view.setNeedsDisplay()
             view.draw()
+            return true
         }
 
         @MainActor
@@ -1752,14 +1913,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             }
             let drawableWidth = max(Int(view.drawableSize.width.rounded(.down)), 1)
             let drawableHeight = max(Int(view.drawableSize.height.rounded(.down)), 1)
-            guard let renderTexture = makeRenderTexture(
-                width: drawableWidth,
-                height: drawableHeight,
-                pixelFormat: view.colorPixelFormat
-            ) else {
-                recordRenderSkip(.failure, drawableSize: view.drawableSize)
-                return
-            }
             guard let renderTarget = makeDrawableRenderTarget(for: view) else {
                 recordRenderSkip(.drawableUnavailable, drawableSize: view.drawableSize)
                 return
@@ -1778,49 +1931,25 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
             let scaleX = drawableBounds.width / max(image.extent.width, 1)
             let scaleY = drawableBounds.height / max(image.extent.height, 1)
-            let verticalFlipTransform = CGAffineTransform(
+            let uprightTransform = CGAffineTransform(
                 a: scaleX,
                 b: 0,
                 c: 0,
-                d: -scaleY,
+                d: scaleY,
                 tx: -image.extent.minX * scaleX,
-                ty: drawableBounds.height + (image.extent.minY * scaleY)
+                ty: -image.extent.minY * scaleY
             )
             let renderedImage = image.transformed(
-                by: verticalFlipTransform
+                by: uprightTransform
             )
 
-            if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderTarget.renderPassDescriptor) {
-                encoder.endEncoding()
-            }
             ciContext.render(
                 renderedImage,
-                to: renderTexture,
+                to: renderTarget.texture,
                 commandBuffer: commandBuffer,
                 bounds: drawableBounds,
                 colorSpace: CGColorSpaceCreateDeviceRGB()
             )
-            if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
-                blitEncoder.copy(
-                    from: renderTexture,
-                    sourceSlice: 0,
-                    sourceLevel: 0,
-                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                    sourceSize: MTLSize(
-                        width: drawableWidth,
-                        height: drawableHeight,
-                        depth: 1
-                    ),
-                    to: renderTarget.texture,
-                    destinationSlice: 0,
-                    destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                )
-                blitEncoder.endEncoding()
-            } else {
-                recordRenderSkip(.failure, drawableSize: view.drawableSize)
-                return
-            }
 
             let presentationTimeStamp = frame.presentationTimeStamp
             let frameAgeMs = Self.frameAgeMilliseconds(for: presentationTimeStamp)
@@ -1845,10 +1974,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 }
                 self.renderTotalMs += renderMs
                 let shouldScheduleFollowUpDraw = self.pendingRedraw
-                    || (
-                        self.currentFrameVersion != 0
-                            && self.currentFrameVersion != self.lastDisplayedFrameVersion
-                    )
                 self.pendingRedraw = false
                 telemetrySnapshot = self.makeRenderTelemetrySnapshotIfNeededLocked(
                     now: Date(),
@@ -1927,23 +2052,6 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             let lastDisplayedFrameVersion: UInt64
         }
 
-        private func makeRenderTexture(
-            width: Int,
-            height: Int,
-            pixelFormat: MTLPixelFormat
-        ) -> MTLTexture? {
-            guard let device, width > 0, height > 0 else { return nil }
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: pixelFormat,
-                width: width,
-                height: height,
-                mipmapped: false
-            )
-            descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
-            descriptor.storageMode = .private
-            return device.makeTexture(descriptor: descriptor)
-        }
-
         private func recordRenderSkip(_ reason: RenderSkipReason, drawableSize: CGSize) {
             let telemetrySnapshot: RenderTelemetrySnapshot?
             stateLock.lock()
@@ -2006,8 +2114,9 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             let displayedFPS = String(format: "%.1f", Double(snapshot.displayed) / max(snapshot.interval, 0.001))
             let renderMs = String(format: "%.2f", snapshot.averageRenderMs)
             let frameAgeText = snapshot.frameAgeMs.map(String.init) ?? "-"
+            onRenderOrientation?(.upright)
             SkyBridgeLogger.shared.debug(
-                "📈 Metal render telemetry: submittedFPS=\(submittedFPS) displayFPS=\(displayedFPS) renderMs=\(renderMs) frameAgeMs=\(frameAgeText) orientation=verticalFlip drawableAccess=single-late frameDriven=true duplicateSkip=\(snapshot.duplicateSkips) drawableSkip=\(snapshot.drawableSkips) inflightSkip=\(snapshot.inFlightSkips) failureSkip=\(snapshot.failureSkips) drawable=\(Int(snapshot.drawableSize.width))x\(Int(snapshot.drawableSize.height)) submittedVersion=\(snapshot.submittedFrameVersion) displayedVersion=\(snapshot.lastDisplayedFrameVersion)"
+                "📈 Metal render telemetry: submittedFPS=\(submittedFPS) displayFPS=\(displayedFPS) renderMs=\(renderMs) frameAgeMs=\(frameAgeText) orientation=upright drawableAccess=single-late frameDriven=true duplicateSkip=\(snapshot.duplicateSkips) drawableSkip=\(snapshot.drawableSkips) inflightSkip=\(snapshot.inFlightSkips) failureSkip=\(snapshot.failureSkips) drawable=\(Int(snapshot.drawableSize.width))x\(Int(snapshot.drawableSize.height)) submittedVersion=\(snapshot.submittedFrameVersion) displayedVersion=\(snapshot.lastDisplayedFrameVersion)"
             )
         }
 

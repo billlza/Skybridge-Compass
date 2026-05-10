@@ -9,7 +9,8 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         gop: Int = 60,
         lowLatency: Bool = false,
         hardware: Bool = true,
-        appleSiliconOptimization: Bool = true
+        appleSiliconOptimization: Bool = true,
+        preserveExactVisibleSize: Bool = false
     ) -> RemoteControlStreamRequest {
         RemoteControlStreamRequest(
             preferredSize: size,
@@ -18,7 +19,8 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
             keyFrameInterval: gop,
             lowLatencyMode: lowLatency,
             enableHardwareAcceleration: hardware,
-            enableAppleSiliconOptimization: appleSiliconOptimization
+            enableAppleSiliconOptimization: appleSiliconOptimization,
+            preserveExactVisibleSize: preserveExactVisibleSize
         )
     }
 
@@ -65,6 +67,27 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertLessThanOrEqual(policy.keyFrameInterval, 30)
     }
 
+    func testSelectorUsesHEVCForLowLatencyExactOddVisibleDimensions() {
+        let policy = RemoteControlStreamPolicySelector.select(
+            request: makeRequest(
+                size: CGSize(width: 2056, height: 1329),
+                codec: .h264,
+                fps: 60,
+                gop: 60,
+                lowLatency: true,
+                preserveExactVisibleSize: true
+            ),
+            peerFormats: ["jpeg", "h264", "hevc"],
+            thermalState: .nominal,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(policy.codec, .hevc)
+        XCTAssertEqual(policy.reason, "low-latency-hevc-exact-visible")
+        XCTAssertEqual(policy.preferredSize.width, 2056)
+        XCTAssertEqual(policy.preferredSize.height, 1329)
+    }
+
     func testSelectorReducesFrameRateUnderThermalPressure() {
         let policy = RemoteControlStreamPolicySelector.select(
             request: makeRequest(size: CGSize(width: 5120, height: 2880), codec: .hevc, fps: 120),
@@ -88,6 +111,26 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertEqual(policy.codec, .h264)
         XCTAssertEqual(policy.preferredSize.width, 2056)
         XCTAssertEqual(policy.preferredSize.height, 1328)
+        XCTAssertFalse(policy.preserveExactVisibleSize)
+    }
+
+    func testSelectorPreservesExactExplicitVisibleDimensionsForStrictValidation() {
+        let policy = RemoteControlStreamPolicySelector.select(
+            request: makeRequest(
+                size: CGSize(width: 2056, height: 1329),
+                codec: .h264,
+                fps: 60,
+                preserveExactVisibleSize: true
+            ),
+            peerFormats: ["jpeg", "h264"],
+            thermalState: .nominal,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(policy.codec, .h264)
+        XCTAssertEqual(policy.preferredSize.width, 2056)
+        XCTAssertEqual(policy.preferredSize.height, 1329)
+        XCTAssertTrue(policy.preserveExactVisibleSize)
     }
 
     func testSelectorProbesHEVCForHighResolutionHighFPSLANWhenPeerSupportsIt() {
@@ -134,4 +177,5 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertEqual(protectedPolicy.preferredSize, policy.preferredSize)
         XCTAssertTrue(protectedPolicy.reason.contains("+audio-protect"))
     }
+
 }

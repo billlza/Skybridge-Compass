@@ -10,7 +10,8 @@ final class WebRTCRemoteDesktopVideoPolicyTests: XCTestCase {
         gop: Int = 60,
         lowLatency: Bool = false,
         hardware: Bool = true,
-        appleSiliconOptimization: Bool = true
+        appleSiliconOptimization: Bool = true,
+        preserveExactVisibleSize: Bool = false
     ) -> WebRTCRemoteDesktopVideoRequest {
         WebRTCRemoteDesktopVideoRequest(
             preferredSize: size,
@@ -19,7 +20,8 @@ final class WebRTCRemoteDesktopVideoPolicyTests: XCTestCase {
             keyFrameInterval: gop,
             lowLatencyMode: lowLatency,
             enableHardwareAcceleration: hardware,
-            enableAppleSiliconOptimization: appleSiliconOptimization
+            enableAppleSiliconOptimization: appleSiliconOptimization,
+            preserveExactVisibleSize: preserveExactVisibleSize
         )
     }
 
@@ -83,6 +85,24 @@ final class WebRTCRemoteDesktopVideoPolicyTests: XCTestCase {
     func testRelayNativeRTPKeepsExplicit2KHighFPSRequest() {
         let policy = WebRTCRemoteDesktopVideoPolicySelector.select(
             request: makeRequest(size: CGSize(width: 2056, height: 1329), codec: .h264, fps: 60, lowLatency: true),
+            transportPath: .relay,
+            peerFormats: ["jpeg", "h264"],
+            thermalState: .nominal,
+            isAppleSilicon: true,
+            nativeVideoTrackEnabled: true
+        )
+
+        XCTAssertEqual(policy.codec, .h264)
+        XCTAssertTrue(policy.usesHardwareEncoder)
+        XCTAssertEqual(policy.targetFrameRate, 60)
+        XCTAssertEqual(policy.preferredSize.width, 2056)
+        XCTAssertEqual(policy.preferredSize.height, 1329)
+        XCTAssertTrue(policy.reason.contains("relay-native-rtp"))
+    }
+
+    func testRelayNativeRTPKeepsExplicit2KSixtyFPSRequestWithoutLowLatencyToggle() {
+        let policy = WebRTCRemoteDesktopVideoPolicySelector.select(
+            request: makeRequest(size: CGSize(width: 2056, height: 1329), codec: .h264, fps: 60, lowLatency: false),
             transportPath: .relay,
             peerFormats: ["jpeg", "h264"],
             thermalState: .nominal,

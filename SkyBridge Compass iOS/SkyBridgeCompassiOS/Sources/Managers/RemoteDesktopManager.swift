@@ -727,6 +727,7 @@ final class RemoteMetalVideoFrameFeed: ObservableObject {
     private(set) var flushVersion: UInt64 = 0
     private(set) var hasDisplayedFrame = false
     private(set) var removeDisplayedImageOnFlush = true
+    private var frameConsumers: [UUID: (DecodedPixelBufferFrame, UInt64) -> Void] = [:]
 
     var hasFrame: Bool {
         hasDisplayedFrame || latestFrame != nil
@@ -735,6 +736,21 @@ final class RemoteMetalVideoFrameFeed: ObservableObject {
     func enqueue(frame: DecodedPixelBufferFrame) {
         latestFrame = frame
         frameVersion &+= 1
+        let version = frameVersion
+        for consumer in frameConsumers.values {
+            consumer(frame, version)
+        }
+    }
+
+    func addFrameConsumer(_ consumer: @escaping (DecodedPixelBufferFrame, UInt64) -> Void) -> UUID {
+        let id = UUID()
+        frameConsumers[id] = consumer
+        return id
+    }
+
+    func removeFrameConsumer(_ id: UUID?) {
+        guard let id else { return }
+        frameConsumers.removeValue(forKey: id)
     }
 
     func markDisplayedFrame() {
@@ -1154,7 +1170,7 @@ actor VideoDecoder {
 
         let decoderSpecification: CFDictionary = [
             kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true,
-            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: false
+            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true
         ] as CFDictionary
 
         let destinationAttributes: CFDictionary = [
@@ -2087,13 +2103,13 @@ public enum RemoteDesktopViewerCodec: String, CaseIterable, Codable, Sendable {
             if supportedFormats.contains("hevc") {
                 return "hevc"
             }
-            if supportedFormats.contains("jpeg") {
-                return "jpeg"
-            }
             return supportedFormats.first
+        case .jpeg:
+            return supportedFormats.first { $0 == "h264" || $0 == "hevc" }
+                ?? supportedFormats.first
         default:
             guard let raw = wireValue else { return nil }
-            return supportedFormats.contains(raw) || raw == "jpeg" ? raw : nil
+            return supportedFormats.contains(raw) ? raw : nil
         }
     }
 }
@@ -2358,6 +2374,30 @@ public struct RemoteDesktopViewerSettings: Codable, Sendable, Equatable {
             jitterBufferFrames: lowLatencyMode ? 1 : 2,
             lossRecoveryMode: lowLatencyMode ? "fast-retransmit" : "balanced"
         )
+    }
+}
+
+public struct RemoteDesktopSmokeDiagnosticSnapshot: Sendable, Equatable {
+    public let stateDescription: String
+    public let isStreaming: Bool
+    public let isUsingCrossNetworkTransport: Bool
+    public let transportStatusText: String?
+    public let presentationOwnerCount: Int
+    public let frameRate: Double
+    public let receivedFrameRate: Double
+    public let latencyMilliseconds: Double
+    public let resolutionWidth: Int
+    public let resolutionHeight: Int
+    public let renderPipeline: RemoteDesktopRenderPipeline
+    public let renderOrientation: RemoteDesktopRenderOrientation
+    public let receivedFramesInStream: Int
+    public let lastFrameArrivalAgeSeconds: Double?
+    public let lastDisplayedFrameAgeSeconds: Double?
+    public let realtimeAudio: RemoteDesktopSmokeAudioDiagnosticSnapshot?
+    public let audioChannelCount: Int?
+
+    public var hasActivePresentationOwner: Bool {
+        presentationOwnerCount > 0
     }
 }
 
@@ -3119,6 +3159,23 @@ private actor RemoteAudioPlaybackController {
     }
 }
 
+private final class RealtimeMediaAudioRelayTrafficCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var packets: UInt64 = 0
+
+    func increment() {
+        lock.lock()
+        packets &+= 1
+        lock.unlock()
+    }
+
+    func snapshot() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return packets
+    }
+}
+
 // MARK: - RemoteDesktopManager
 
 /// 远程桌面管理器 - iOS 作为查看器/控制端
@@ -3135,6 +3192,9 @@ public class RemoteDesktopManager: ObservableObject {
     private static let realtimeMediaAudioNoTrafficRecoveryDelay: Duration = .seconds(10)
     private static let realtimeMediaAudioNoTrafficRecoveryMaxAttempts: Int = 2
     private static let realtimeMediaAudioRelayRolloverGraceDelay: Duration = .seconds(15)
+    private static let realtimeMediaAudioRelayRolloverTrafficObservationTimeout: TimeInterval = 10
+    private static let realtimeMediaAudioRelayRolloverTrafficObservationPoll: Duration = .milliseconds(250)
+    private static let realtimeMediaAudioRelayRolloverMinimumObservedPackets: UInt64 = 4
     private static let realtimeMediaAudioEndpointRenewalLeadTime: TimeInterval = 12
     private static let viewerSettingsStore = CodablePersistenceStore<RemoteDesktopViewerSettings>(
         location: .protectedApplicationSupport(
@@ -3187,10 +3247,8 @@ public class RemoteDesktopManager: ObservableObject {
               !nativeVideoTrackHasRenderedFrame else {
             return false
         }
-        let normalizedFormat = format?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return normalizedFormat != "jpeg" && normalizedFormat != "jpg"
+        _ = format
+        return true
     }
 
     nonisolated static func shouldUseJPEGOnlyFallbackDuringNativeWarmup(
@@ -3198,9 +3256,10 @@ public class RemoteDesktopManager: ObservableObject {
         hasRemoteNativeVideoTrack: Bool,
         nativeVideoTrackHasRenderedFrame: Bool
     ) -> Bool {
-        activeTransportModeIsCrossNetwork
-            && hasRemoteNativeVideoTrack
-            && !nativeVideoTrackHasRenderedFrame
+        _ = activeTransportModeIsCrossNetwork
+        _ = hasRemoteNativeVideoTrack
+        _ = nativeVideoTrackHasRenderedFrame
+        return false
     }
 
     nonisolated static func shouldRequestExtremeMediaValidation(
@@ -3208,24 +3267,9 @@ public class RemoteDesktopManager: ObservableObject {
         viewerSettings: RemoteDesktopViewerSettings,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
-        if environment["SKYBRIDGE_WEBRTC_EXTREME_MEDIA"] == "1"
-            || environment["SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK"] == "1" {
-            return true
-        }
-        guard activeTransportModeIsCrossNetwork else { return false }
-        switch viewerSettings.activePreset {
-        case .clarity, .pro4k120, .pro5k120:
-            return true
-        case .custom:
-            return viewerSettings.targetFrameRate >= 60
-                && viewerSettings.preferredCodec != .jpeg
-                && viewerSettings.resolution != .hd720
-        case .automatic:
-            return viewerSettings.targetFrameRate >= 60
-                && viewerSettings.preferredCodec != .jpeg
-        case .fluid:
-            return false
-        }
+        environment["SKYBRIDGE_WEBRTC_EXTREME_MEDIA"] == "1"
+            || environment["SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK"] == "1"
+            || activeTransportModeIsCrossNetwork
     }
 
     private struct CurrentPathRemoteAuthority: Sendable {
@@ -3283,6 +3327,7 @@ public class RemoteDesktopManager: ObservableObject {
     /// 当前传输方式（用于 UI 提示）
     @Published public private(set) var transportStatusText: String?
     @Published public private(set) var renderPipelineStatus: RemoteDesktopRenderPipeline = .waiting
+    @Published public private(set) var renderOrientationStatus: RemoteDesktopRenderOrientation = .unknown
     @Published public private(set) var isUsingCrossNetworkTransport = false
     @Published public private(set) var lastDamageRectCount: Int = 0
     @Published public private(set) var lastDamageUsesFullFrameFallback: Bool = false
@@ -3359,7 +3404,9 @@ public class RemoteDesktopManager: ObservableObject {
     private var frameCount: Int = 0
     private var lastFrameTime: Date?
     private var lastRenderedFrameTime: Date?
-    private var lastFrameRateSmokeDiagnosticAt: Date?
+    private var lastSmokeFrameRateSampleAt: Date?
+    private var lastSmokeFrameRateSampleReceivedFrames: Int = 0
+    private var lastSmokeFrameRateSampleValue: Double = 0
     private var consecutiveDecodeMisses: Int = 0
     private var lastDecoderResetTime: Date?
     private var lastHeartbeatTime: Date?
@@ -3416,6 +3463,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var lastWaitingSyncDiagnosticLogTime: Date = .distantPast
     private var lastNativePrimaryIgnoredFallbackDiagnosticAt: Date = .distantPast
     private var lastNativeWarmupNonJPEGFallbackDropDiagnosticAt: Date = .distantPast
+    private let lanStreamRefreshMinimumInterval: TimeInterval = 2.0
     private let streamDecodeStallRefreshMinimumInterval: TimeInterval = 3.0
     private var codecGovernance = RemoteDesktopCodecGovernance()
     private var decodedVideoRendererPreference: DecodedVideoRendererPreference = .metal
@@ -3481,7 +3529,9 @@ public class RemoteDesktopManager: ObservableObject {
         frameCount = 0
         lastFrameTime = nil
         lastRenderedFrameTime = nil
-        lastFrameRateSmokeDiagnosticAt = nil
+        lastSmokeFrameRateSampleAt = nil
+        lastSmokeFrameRateSampleReceivedFrames = 0
+        lastSmokeFrameRateSampleValue = 0
         frameRate = 0
         lastFrameArrivalAt = nil
         lastDecodedFrameTime = nil
@@ -3504,6 +3554,7 @@ public class RemoteDesktopManager: ObservableObject {
         metalFallbackReason = nil
         stableSampleBufferFramesSinceMetalFallback = 0
         decodedVideoRendererPreference = preferredDecodedVideoRenderer()
+        renderOrientationStatus = .unknown
         metalAwaitingFirstDisplaySince = nil
         invalidateDecodePipelineState()
     }
@@ -3515,6 +3566,48 @@ public class RemoteDesktopManager: ObservableObject {
 
     private var maxLANWireMessageBytes: Int {
         maxMessageBytes + maxEncryptedLANMessageOverheadBytes
+    }
+
+    public func smokeDiagnosticSnapshot() async -> RemoteDesktopSmokeDiagnosticSnapshot {
+        let now = Date()
+        let receivedFrameRate = smokeReceivedFrameRateSample(at: now)
+        let audioSnapshot = await realtimeMediaAudioRenderer?.smokeDiagnosticSnapshot()
+        return RemoteDesktopSmokeDiagnosticSnapshot(
+            stateDescription: String(describing: state),
+            isStreaming: isStreaming,
+            isUsingCrossNetworkTransport: isUsingCrossNetworkTransport,
+            transportStatusText: transportStatusText,
+            presentationOwnerCount: activePresentationOwnerTokens.count,
+            frameRate: frameRate,
+            receivedFrameRate: receivedFrameRate,
+            latencyMilliseconds: latency,
+            resolutionWidth: Int(resolution.width),
+            resolutionHeight: Int(resolution.height),
+            renderPipeline: renderPipelineStatus,
+            renderOrientation: renderOrientationStatus,
+            receivedFramesInStream: receivedFrameCountInCurrentStream,
+            lastFrameArrivalAgeSeconds: lastFrameArrivalAt.map { now.timeIntervalSince($0) },
+            lastDisplayedFrameAgeSeconds: lastDisplayedFrameTime.map { now.timeIntervalSince($0) },
+            realtimeAudio: audioSnapshot,
+            audioChannelCount: lastSentStreamConfiguration?.audioChannelCount
+        )
+    }
+
+    private func smokeReceivedFrameRateSample(at now: Date) -> Double {
+        let currentFrames = receivedFrameCountInCurrentStream
+        guard let sampleAt = lastSmokeFrameRateSampleAt else {
+            lastSmokeFrameRateSampleAt = now
+            lastSmokeFrameRateSampleReceivedFrames = currentFrames
+            return 0
+        }
+
+        let elapsed = now.timeIntervalSince(sampleAt)
+        guard elapsed >= 0.5 else { return lastSmokeFrameRateSampleValue }
+        let delta = max(0, currentFrames - lastSmokeFrameRateSampleReceivedFrames)
+        lastSmokeFrameRateSampleAt = now
+        lastSmokeFrameRateSampleReceivedFrames = currentFrames
+        lastSmokeFrameRateSampleValue = Double(delta) / elapsed
+        return lastSmokeFrameRateSampleValue
     }
     
     // MARK: - Public Methods
@@ -3693,6 +3786,7 @@ public class RemoteDesktopManager: ObservableObject {
         lastGoodFrozenFrame = nil
         flushRenderedVideoFeeds()
         renderPipelineStatus = .waiting
+        renderOrientationStatus = .unknown
         lastDamageRectCount = 0
         lastDamageUsesFullFrameFallback = false
         currentCursorPayload = nil
@@ -4285,7 +4379,7 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     public static func supportedRemoteVideoFormats() -> [String] {
-        var formats = ["jpeg", "h264"]
+        var formats = ["h264"]
         if VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) {
             formats.insert("hevc", at: 0)
         }
@@ -4818,8 +4912,7 @@ public class RemoteDesktopManager: ObservableObject {
         let canSendOverWebRTC = activeTransportMode == .crossNetwork && currentConnection != nil
         let canSendOverLAN = activeTransportMode == .lan && networkConnection != nil
         guard canSendOverWebRTC || canSendOverLAN else { return }
-        let mediaAudioMode: SkyBridgeMediaAudioMode = viewerSettings.lowLatencyMode ? .lowLatency : .highFidelity
-        let mediaAudioBinding = currentRealtimeMediaAudioBindingIfUsable()
+        let mediaAudioMode = preferredRealtimeMediaAudioMode()
         if viewerSettings.audioRedirectionEnabled {
             ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mediaAudioMode)
         } else {
@@ -4827,7 +4920,24 @@ public class RemoteDesktopManager: ObservableObject {
             realtimeMediaAudioReceiverStartTask = nil
             stopRealtimeMediaAudioReceiver()
         }
-        let includeAudioEndpointInStreamConfig = !refreshStream
+        let mediaAudioBinding = currentRealtimeMediaAudioBindingIfUsable()
+        let strictValidationRequiresAudioEndpoint = activeTransportMode == .crossNetwork
+            && viewerSettings.audioRedirectionEnabled
+            && Self.shouldRequestExtremeMediaValidation(
+                activeTransportModeIsCrossNetwork: true,
+                viewerSettings: viewerSettings
+            )
+        if refreshStream,
+           strictValidationRequiresAudioEndpoint,
+           mediaAudioBinding == nil {
+            SkyBridgeSmokeTraceWriter.append(
+                "stream-config deferred session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") reason=await_audio_endpoint"
+            )
+            return
+        }
+        let includeAudioEndpointInStreamConfig = viewerSettings.audioRedirectionEnabled
+            && mediaAudioBinding != nil
+            && (activeTransportMode == .lan || !refreshStream || lastSentStreamConfiguration?.mediaAudioEndpoint == nil)
         let payload = makeViewerStreamConfigurationPayload(
             refreshStream: refreshStream,
             mediaAudioEndpoint: includeAudioEndpointInStreamConfig ? mediaAudioBinding?.endpoint : nil,
@@ -4873,7 +4983,7 @@ public class RemoteDesktopManager: ObservableObject {
         try await sendMessage(message)
         let retrySuffix = retryAttempt.map { " retryAttempt=\($0)" } ?? ""
         SkyBridgeLogger.shared.info(
-            "📤 已发送远控流配置: event=streamConfigSent\(retrySuffix) preset=\(viewerSettings.activePreset.displayName), preferred=\(payload.preferredCodec ?? "auto"), formats=\(payload.supportedVideoFormats.joined(separator: ",")), fps=\(payload.targetFrameRate), jitter=\(payload.jitterBufferFrames ?? 0), refresh=\(payload.streamRefreshToken != nil) token=\(payload.streamRefreshToken.map(String.init) ?? "-") transport=\(payload.screenFrameTransport ?? "legacy") screenChannel=\(payload.screenDataChannelEnabled == true) screenWire=\(payload.screenChannelWireFormat ?? "length-framed") nativeReady=\(payload.nativeVideoTrackReady == true) streamConfigIncludesAudio=\(payload.mediaAudioEndpoint != nil) audioTransport=\(payload.audioTransport ?? "nil") mediaSession=\(payload.mediaSessionId ?? "-") audioRelayToken=\(payload.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present")"
+            "📤 已发送远控流配置: event=streamConfigSent\(retrySuffix) preset=\(viewerSettings.activePreset.displayName), preferred=\(payload.preferredCodec ?? "auto"), formats=\(payload.supportedVideoFormats.joined(separator: ",")), fps=\(payload.targetFrameRate), jitter=\(payload.jitterBufferFrames ?? 0), lowLatency=\(payload.lowLatencyMode) audioMode=\(payload.audioMode ?? "nil") perf=\(payload.performanceValidationMode ?? "normal") refresh=\(payload.streamRefreshToken != nil) token=\(payload.streamRefreshToken.map(String.init) ?? "-") transport=\(payload.screenFrameTransport ?? "legacy") screenChannel=\(payload.screenDataChannelEnabled == true) screenWire=\(payload.screenChannelWireFormat ?? "length-framed") nativeReady=\(payload.nativeVideoTrackReady == true) streamConfigIncludesAudio=\(payload.mediaAudioEndpoint != nil) audioTransport=\(payload.audioTransport ?? "nil") mediaSession=\(payload.mediaSessionId ?? "-") audioRelayToken=\(payload.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present")"
         )
     }
 
@@ -4991,28 +5101,21 @@ public class RemoteDesktopManager: ObservableObject {
             activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
             viewerSettings: viewerSettings
         )
-        let nativeWarmupRequiresJPEGFallback: Bool
-#if canImport(WebRTC)
-        nativeWarmupRequiresJPEGFallback = !strictMediaValidationEnabled
-            && Self.shouldUseJPEGOnlyFallbackDuringNativeWarmup(
-            activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
-            hasRemoteNativeVideoTrack: crossNetwork.remoteVideoTrack != nil,
-            nativeVideoTrackHasRenderedFrame: crossNetwork.remoteVideoTrackHasRenderedFrame
+        let supportedFormats = effectiveSupportedRemoteVideoFormats(at: now)
+            .filter { $0 != "jpeg" && $0 != "jpg" && $0 != "bgra" }
+        let preferredCodec = codecGovernance.effectivePreferredCodec(
+            userPreference: viewerSettings.preferredCodec,
+            supportedFormats: supportedFormats,
+            at: now
         )
-#else
-        nativeWarmupRequiresJPEGFallback = false
-#endif
-        let supportedFormats = nativeWarmupRequiresJPEGFallback
-            ? ["jpeg"]
-            : effectiveSupportedRemoteVideoFormats(at: now)
-        let preferredCodec = nativeWarmupRequiresJPEGFallback
-            ? "jpeg"
-            : codecGovernance.effectivePreferredCodec(
-                userPreference: viewerSettings.preferredCodec,
-                supportedFormats: Self.supportedRemoteVideoFormats(),
-                at: now
-            )
-        let dimensions = viewerSettings.resolution.dimensions
+        let smokeDimensions = smokeRequestedStreamDimensions()
+        let dimensions = smokeDimensions ?? viewerSettings.resolution.dimensions
+        let targetFrameRate = smokeRequestedTargetFrameRate() ?? viewerSettings.targetFrameRate
+        let videoLowLatencyMode = viewerSettings.lowLatencyMode || strictMediaValidationEnabled
+        let realtimeMediaAudioMode = preferredRealtimeMediaAudioMode()
+        let keyFrameInterval = videoLowLatencyMode
+            ? max(15, targetFrameRate / 2)
+            : max(30, targetFrameRate)
         let transportTuning = viewerSettings.transportTuning
         return RemoteDesktopStreamConfigurationPayload(
             width: dimensions?.width,
@@ -5020,10 +5123,10 @@ public class RemoteDesktopManager: ObservableObject {
             preferredCodec: preferredCodec,
             supportedVideoFormats: supportedFormats,
             qualityPreset: transportTuning.qualityPresetWireValue,
-            adaptiveResolutionEnabled: viewerSettings.resolution == .auto,
-            targetFrameRate: viewerSettings.targetFrameRate,
-            keyFrameInterval: viewerSettings.keyFrameInterval,
-            lowLatencyMode: viewerSettings.lowLatencyMode,
+            adaptiveResolutionEnabled: smokeDimensions == nil && viewerSettings.resolution == .auto,
+            targetFrameRate: targetFrameRate,
+            keyFrameInterval: keyFrameInterval,
+            lowLatencyMode: videoLowLatencyMode,
             enableHardwareAcceleration: true,
             enableAppleSiliconOptimization: true,
             clipboardSyncEnabled: viewerSettings.clipboardSyncEnabled,
@@ -5034,12 +5137,9 @@ public class RemoteDesktopManager: ObservableObject {
             jitterBufferFrames: transportTuning.jitterBufferFrames,
             lossRecoveryMode: transportTuning.lossRecoveryMode,
             screenFrameTransport: activeTransportMode == .crossNetwork
-                ? (strictMediaValidationEnabled ? "webrtc-native-main" : "webrtc-native-main+sbrf-fallback")
+                ? "webrtc-native-main"
                 : "sbrf-v1",
-            // Keep fallback screen frames off the control channel. The iOS
-            // screen-channel receive loop is nonisolated; the control channel
-            // also carries handshake, heartbeat, input, rekey, and file traffic.
-            screenDataChannelEnabled: true,
+            screenDataChannelEnabled: activeTransportMode != .crossNetwork,
             screenChannelWireFormat: activeTransportMode == .crossNetwork
                 ? "sbc2-chunked-v1"
                 : nil,
@@ -5053,7 +5153,7 @@ public class RemoteDesktopManager: ObservableObject {
             nativeAudioTrackEnabled: Self.crossNetworkNativeAudioReceiveEnabled,
             audioRedirectionEnabled: viewerSettings.audioRedirectionEnabled,
             audioTransport: viewerSettings.audioRedirectionEnabled ? "pqc-media-v1" : "disabled",
-            audioMode: viewerSettings.lowLatencyMode ? "low-latency" : "high-fidelity",
+            audioMode: realtimeMediaAudioMode.rawValue,
             mediaSessionId: mediaSessionId,
             mediaAudioEndpoint: mediaAudioEndpoint,
             compatibilityAudioFallbackEnabled: false,
@@ -5061,9 +5161,40 @@ public class RemoteDesktopManager: ObservableObject {
             audioSampleRate: 48_000,
             audioChannelCount: 2,
             performanceValidationMode: strictMediaValidationEnabled ? "extreme" : nil,
-            mediaFallbackPolicy: strictMediaValidationEnabled ? "fail-fast" : "explicit-degraded",
+            mediaFallbackPolicy: activeTransportMode == .crossNetwork ? "forbidden" : "fail-fast",
             streamRefreshToken: refreshStream ? nextStreamRefreshToken() : nil
         )
+    }
+
+    private func preferredRealtimeMediaAudioMode() -> SkyBridgeMediaAudioMode {
+        viewerSettings.lowLatencyMode ? .lowLatency : .highFidelity
+    }
+
+    private func smokeRequestedStreamDimensions() -> (width: Int, height: Int)? {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil,
+              let width = positiveEnvironmentInteger("SKYBRIDGE_SMOKE_VIDEO_WIDTH"),
+              let height = positiveEnvironmentInteger("SKYBRIDGE_SMOKE_VIDEO_HEIGHT") else {
+            return nil
+        }
+        return (width, height)
+    }
+
+    private func smokeRequestedTargetFrameRate() -> Int? {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil,
+              let fps = positiveEnvironmentInteger("SKYBRIDGE_SMOKE_TARGET_FPS") else {
+            return nil
+        }
+        return max(1, min(fps, 120))
+    }
+
+    private func positiveEnvironmentInteger(_ name: String) -> Int? {
+        guard let raw = ProcessInfo.processInfo.environment[name]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            let value = Int(raw),
+            value > 0 else {
+            return nil
+        }
+        return value
     }
 
     private func nextStreamRefreshToken() -> UInt64 {
@@ -5380,9 +5511,11 @@ public class RemoteDesktopManager: ObservableObject {
                 ]
             )
         }
+        let renewalTrafficCounter = RealtimeMediaAudioRelayTrafficCounter()
         let relayTransport = SkyBridgeUDPRealtimeMediaTransport(
             endpoint: relayEndpoint,
-            receiveHandler: { [renderer] datagram in
+            receiveHandler: { [renderer, renewalTrafficCounter] datagram in
+                renewalTrafficCounter.increment()
                 Task.detached(priority: .utility) {
                     await renderer.handle(datagram: datagram)
                 }
@@ -5417,15 +5550,73 @@ public class RemoteDesktopManager: ObservableObject {
             await relayTransport.stop()
             return
         }
+        let payload = makeViewerStreamConfigurationPayload(
+            refreshStream: false,
+            mediaAudioEndpoint: relayEndpoint,
+            mediaSessionId: sessionId
+        )
+        do {
+            try await sendViewerStreamConfigurationPayload(payload, retryAttempt: nil)
+            lastSentStreamConfiguration = payload
+            SkyBridgeLogger.shared.info(
+                "🎧 PQC media audio renewal config sent: event=audioRenewalConfigSent session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) audioRelayToken=\(relayEndpoint.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append(
+                "stream-config audioRenewalSent session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port)"
+            )
+        } catch {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio relay renewal stream config failed: session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) error=\(error.localizedDescription)"
+            )
+            await relayTransport.stop()
+            scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: currentEndpoint, mode: mode)
+            return
+        }
+
+        let observedTotal = await waitForRealtimeMediaAudioRelayTraffic(
+            renewalTrafficCounter,
+            sessionId: sessionId,
+            relayEndpoint: relayEndpoint
+        )
+        guard activeTransportMode == .crossNetwork,
+              isStreaming,
+              viewerSettings.audioRedirectionEnabled,
+              realtimeMediaAudioReceiverSessionId == sessionId,
+              realtimeMediaAudioEndpoint == currentEndpoint else {
+            await relayTransport.stop()
+            return
+        }
+        guard observedTotal >= Self.realtimeMediaAudioRelayRolloverMinimumObservedPackets else {
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio relay renewal held old transport: event=relayLeaseRenewalTrafficMissing session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) newTransportRecvTotal=\(observedTotal) transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append(
+                "audio-rx relayLeaseRenewalTrafficMissing session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) newTransportRecvTotal=\(observedTotal)"
+            )
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxEndpointRenewalTrafficMissing",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "relay": "\(relayEndpoint.host):\(relayEndpoint.port)",
+                    "newTransportRecvTotal": observedTotal,
+                    "probable": "relay-renewal-no-post-renewal-rx"
+                ]
+            )
+            await relayTransport.stop()
+            scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: currentEndpoint, mode: mode)
+            return
+        }
+
         let oldTransport = realtimeMediaAudioRelayTransport
         realtimeMediaAudioRelayTransport = relayTransport
         realtimeMediaAudioEndpoint = relayEndpoint
         realtimeMediaAudioRelayBindState = .idle
         SkyBridgeLogger.shared.info(
-            "🎧 PQC media audio relay renewed: event=relayLeaseRenewed session=\(sessionId) role=\(relayEndpointPair.localRole) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=\(relayEndpoint.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
+            "🎧 PQC media audio relay renewed after traffic: event=relayLeaseRenewed session=\(sessionId) role=\(relayEndpointPair.localRole) relay=\(relayEndpoint.host):\(relayEndpoint.port) token=\(relayEndpoint.relayToken == nil ? "missing" : "present") newTransportRecvTotal=\(observedTotal) transport=\(activeTransportModeLabel())"
         )
         SkyBridgeSmokeTraceWriter.append(
-            "audio-rx relayLeaseRenewed session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port)"
+            "audio-rx relayLeaseRenewed session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) newTransportRecvTotal=\(observedTotal)"
         )
         SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
             [
@@ -5435,17 +5626,46 @@ public class RemoteDesktopManager: ObservableObject {
                 "relay": "\(relayEndpoint.host):\(relayEndpoint.port)",
                 "role": relayEndpointPair.localRole,
                 "relayTokenPresent": relayEndpoint.relayToken != nil,
-                "probable": "relay-lease-renewed"
+                "newTransportRecvTotal": observedTotal,
+                "probable": "relay-lease-renewed-after-traffic"
             ]
         )
         scheduleRealtimeMediaAudioEndpointRenewal(sessionId: sessionId, endpoint: relayEndpoint, mode: mode)
-        await pushViewerStreamConfiguration(force: true, refreshStream: false)
         if let oldTransport {
             Task(priority: .utility) {
                 try? await Task.sleep(for: Self.realtimeMediaAudioRelayRolloverGraceDelay)
                 await oldTransport.stop()
             }
         }
+    }
+
+    private func waitForRealtimeMediaAudioRelayTraffic(
+        _ trafficCounter: RealtimeMediaAudioRelayTrafficCounter,
+        sessionId: String,
+        relayEndpoint: SkyBridgeMediaEndpoint
+    ) async -> UInt64 {
+        let deadline = Date().addingTimeInterval(Self.realtimeMediaAudioRelayRolloverTrafficObservationTimeout)
+        var observedTotal = trafficCounter.snapshot()
+        while Date() < deadline {
+            observedTotal = trafficCounter.snapshot()
+            if observedTotal >= Self.realtimeMediaAudioRelayRolloverMinimumObservedPackets {
+                SkyBridgeSmokeTraceWriter.append(
+                    "audio-rx relayLeaseRenewalTrafficObserved session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) newTransportRecvTotal=\(observedTotal)"
+                )
+                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                    [
+                        "kind": "audioRxEndpointRenewalTrafficObserved",
+                        "session": sessionId,
+                        "session_id": sessionId,
+                        "relay": "\(relayEndpoint.host):\(relayEndpoint.port)",
+                        "newTransportRecvTotal": observedTotal
+                    ]
+                )
+                return observedTotal
+            }
+            try? await Task.sleep(for: Self.realtimeMediaAudioRelayRolloverTrafficObservationPoll)
+        }
+        return observedTotal
     }
 
     private func handleRealtimeMediaAudioRelayBindFailure(
@@ -6087,7 +6307,74 @@ public class RemoteDesktopManager: ObservableObject {
             }
         }
 
-        return best
+        return remoteDesktopDevicePreservingTrustedIdentity(
+            original: device,
+            endpointCandidate: best
+        )
+    }
+
+    private func remoteDesktopDevicePreservingTrustedIdentity(
+        original device: DiscoveredDevice,
+        endpointCandidate: DiscoveredDevice
+    ) -> DiscoveredDevice {
+        guard endpointCandidate.id != device.id,
+              Self.isStableRemoteDesktopIdentity(device.id),
+              hasReachableLANRemoteDesktopEndpoint(endpointCandidate),
+              hasActiveP2PSession(for: device) else {
+            return endpointCandidate
+        }
+
+        var merged = device
+        merged.name = Self.trimmedNonEmpty(endpointCandidate.name) ?? device.name
+        merged.modelName = Self.trimmedNonEmpty(endpointCandidate.modelName) ?? device.modelName
+        merged.platform = endpointCandidate.platform
+        merged.osVersion = Self.trimmedNonEmpty(endpointCandidate.osVersion) ?? device.osVersion
+        merged.ipAddress = endpointCandidate.ipAddress ?? device.ipAddress
+        merged.bonjourServiceName = endpointCandidate.bonjourServiceName ?? device.bonjourServiceName
+        merged.bonjourServiceType = endpointCandidate.bonjourServiceType ?? device.bonjourServiceType
+        merged.bonjourServiceDomain = endpointCandidate.bonjourServiceDomain ?? device.bonjourServiceDomain
+        merged.services = Self.mergingUniqueStrings(device.services, endpointCandidate.services)
+        merged.portMap = device.portMap.merging(endpointCandidate.portMap) { _, endpointPort in endpointPort }
+        merged.signalStrength = max(device.signalStrength, endpointCandidate.signalStrength)
+        merged.lastSeen = max(device.lastSeen, endpointCandidate.lastSeen)
+        merged.isConnected = device.isConnected || endpointCandidate.isConnected
+        merged.isTrusted = device.isTrusted || endpointCandidate.isTrusted
+        merged.publicKey = device.publicKey ?? endpointCandidate.publicKey
+        merged.advertisedCapabilities = Self.mergingUniqueStrings(
+            device.advertisedCapabilities,
+            endpointCandidate.advertisedCapabilities
+        )
+        merged.capabilities = Self.mergingUniqueStrings(device.capabilities, endpointCandidate.capabilities)
+
+        SkyBridgeLogger.shared.info(
+            "ℹ️ LAN 远控保留可信 P2P 身份并合并远控端点: \(device.id) endpoint=\(endpointCandidate.id)"
+        )
+        return merged
+    }
+
+    private func hasActiveP2PSession(for device: DiscoveredDevice) -> Bool {
+        let resolved = connectionManager.resolvedPeerDevice(for: device)
+        return connectionManager.resolvedConnectionStatus(for: device) == .connected
+            || connectionManager.resolvedConnectionStatus(for: resolved) == .connected
+            || activeP2PBootstrapDevice(for: device) != nil
+    }
+
+    private static func mergingUniqueStrings(_ primary: [String], _ secondary: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in primary + secondary {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            result.append(trimmed)
+        }
+        return result
+    }
+
+    private static func trimmedNonEmpty(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func deduplicatedRemoteDesktopCandidates(_ candidates: [DiscoveredDevice]) -> [DiscoveredDevice] {
@@ -6608,7 +6895,10 @@ public class RemoteDesktopManager: ObservableObject {
             return
         }
 
-        let bootstrapDevice = connectionManager.resolvedPeerDevice(for: device)
+        let resolvedDevice = connectionManager.resolvedPeerDevice(for: device)
+        let bootstrapDevice = activeP2PBootstrapDevice(for: device)
+            ?? activeP2PBootstrapDevice(for: resolvedDevice)
+            ?? resolvedDevice
         let bootstrapPeerId = bootstrapDevice.id
         let bootstrapStatus = connectionManager.resolvedConnectionStatus(for: bootstrapDevice)
 
@@ -6645,6 +6935,41 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
+    private func activeP2PBootstrapDevice(for device: DiscoveredDevice) -> DiscoveredDevice? {
+        let resolvedDevice = connectionManager.resolvedPeerDevice(for: device)
+        let targetAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: device))
+            .union(PeerIdentityAliasResolver.aliasKeys(for: resolvedDevice))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: resolvedDevice.id))
+        let normalizedName = normalizeDeviceName(resolvedDevice.name.isEmpty ? device.name : resolvedDevice.name)
+
+        var nameMatches: [DiscoveredDevice] = []
+        for connection in connectionManager.activeConnections where connection.status == .connected {
+            let candidate = connectionManager.resolvedPeerDevice(for: connection.device)
+            let candidateAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: connection.device))
+                .union(PeerIdentityAliasResolver.aliasKeys(for: candidate))
+                .union(PeerIdentityAliasResolver.lookupCandidates(for: connection.device.id))
+                .union(PeerIdentityAliasResolver.lookupCandidates(for: candidate.id))
+            if !targetAliases.isEmpty,
+               !candidateAliases.isDisjoint(with: targetAliases) {
+                return candidate
+            }
+
+            let candidateName = normalizeDeviceName(candidate.name.isEmpty ? connection.device.name : candidate.name)
+            let platformMatches = candidate.platform == resolvedDevice.platform
+                || candidate.platform == device.platform
+                || resolvedDevice.platform == .unknown
+                || device.platform == .unknown
+            if !normalizedName.isEmpty,
+               candidateName == normalizedName,
+               platformMatches {
+                nameMatches.append(candidate)
+            }
+        }
+
+        return nameMatches.count == 1 ? nameMatches[0] : nil
+    }
+
     private func establishLANSecureChannel(
         for device: DiscoveredDevice,
         over connection: NWConnection
@@ -6661,7 +6986,7 @@ public class RemoteDesktopManager: ObservableObject {
             )
         )
 
-        try await skyBridgeCore.initialize(policy: .preferPQC)
+        try await skyBridgeCore.initialize(policy: .requirePQC)
 
         let transport = NWConnectionTransport()
         await transport.setConnection(connection, for: trustedPeerId)
@@ -7368,7 +7693,12 @@ public class RemoteDesktopManager: ObservableObject {
             return
         }
         let now = Date()
-        let canRequestRefresh = lastRefreshRequestAt.map { now.timeIntervalSince($0) >= minimumInterval } ?? true
+        let effectiveMinimumInterval = activeTransportMode == .lan
+            ? max(minimumInterval, lanStreamRefreshMinimumInterval)
+            : minimumInterval
+        let canRequestRefresh = lastRefreshRequestAt.map {
+            now.timeIntervalSince($0) >= effectiveMinimumInterval
+        } ?? true
         guard canRequestRefresh else { return }
         lastRefreshRequestAt = now
         lastRequestedStreamRefreshReason = reason
@@ -7427,7 +7757,6 @@ public class RemoteDesktopManager: ObservableObject {
             let elapsed = now.timeIntervalSince(lastFrameTime)
             if elapsed >= 1.0 {
                 frameRate = Double(frameCount) / elapsed
-                appendVisibleRenderFrameRateSmokeDiagnosticIfNeeded(at: now)
                 frameCount = 0
                 self.lastFrameTime = now
             }
@@ -7436,33 +7765,6 @@ public class RemoteDesktopManager: ObservableObject {
             lastFrameTime = now
             frameRate = 0
         }
-    }
-
-    private func appendVisibleRenderFrameRateSmokeDiagnosticIfNeeded(at now: Date) {
-        guard frameRate > 0 else { return }
-        guard let sessionId = crossNetwork.activeRemoteDesktopSessionId?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !sessionId.isEmpty else {
-            return
-        }
-        guard lastFrameRateSmokeDiagnosticAt.map({ now.timeIntervalSince($0) >= 1.0 }) ?? true else {
-            return
-        }
-        lastFrameRateSmokeDiagnosticAt = now
-        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
-            [
-                "kind": "visibleNativeRenderFPS",
-                "session": sessionId,
-                "session_id": sessionId,
-                "source": "rtc-mtl-video-view",
-                "viewerDisplayFPS": frameRate,
-                "displayFPS": frameRate,
-                "visibleWidth": Int(resolution.width),
-                "visibleHeight": Int(resolution.height),
-                "renderPipeline": renderPipelineStatus.rawValue,
-                "transport": activeTransportModeLabel()
-            ]
-        )
     }
 
     private func noteReceivedFrame(at now: Date) {
@@ -7594,6 +7896,22 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func activateCGImageFallbackForDecodedVideo() {
+        guard !remoteDesktopRenderFallbackForbidden else {
+            decodedVideoRendererPreference = .sampleBuffer
+            metalAwaitingFirstDisplaySince = nil
+            stableSampleBufferFramesSinceMetalFallback = 0
+            consecutiveSampleBufferNoEnqueueWindows = 0
+            consecutiveSampleBufferDisplayStalls = 0
+            updateRenderPipeline(.sampleBufferDisplayLayer)
+            Task { @MainActor [weak self] in
+                await self?.requestStreamRefreshIfNeeded(
+                    reason: "cgimage-fallback-forbidden",
+                    minimumInterval: 0.25
+                )
+            }
+            SkyBridgeLogger.shared.warning("⚠️ 远控静态帧渲染兜底被当前媒体策略禁止，已请求关键帧刷新")
+            return
+        }
         guard decodedVideoRendererPreference != .cgImage else { return }
         decodedVideoRendererPreference = .cgImage
         metalAwaitingFirstDisplaySince = nil
@@ -7657,6 +7975,17 @@ public class RemoteDesktopManager: ObservableObject {
         frameRate = 0
         frameCount = 0
         lastFrameTime = now
+    }
+
+    private var remoteDesktopRenderFallbackForbidden: Bool {
+        switch lastSentStreamConfiguration?.mediaFallbackPolicy?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+        case "fail-fast", "forbidden":
+            return true
+        default:
+            return false
+        }
     }
 
     private func startStreamContinuityWatchdog(for epoch: UInt64) {
@@ -7857,6 +8186,11 @@ public class RemoteDesktopManager: ObservableObject {
         noteDisplayedFrame(at: Date())
     }
 
+    func handleMetalRendererOrientation(_ orientation: RemoteDesktopRenderOrientation) {
+        guard renderOrientationStatus != orientation else { return }
+        renderOrientationStatus = orientation
+    }
+
     @MainActor
     private func applyDecodedOutput(
         _ decoded: DecodeOutput,
@@ -7870,6 +8204,14 @@ public class RemoteDesktopManager: ObservableObject {
 
         switch decoded {
         case .image(let frame):
+            guard !remoteDesktopRenderFallbackForbidden else {
+                await requestStreamRefreshIfNeeded(
+                    reason: "static-image-fallback-forbidden",
+                    minimumInterval: 0.25
+                )
+                SkyBridgeLogger.shared.warning("⚠️ 已拒绝远控静态图像帧：当前媒体策略禁止 fallback")
+                return false
+            }
             metalAwaitingFirstDisplaySince = nil
             flushRenderedVideoFeeds()
             currentFrame = frame.image
@@ -7912,6 +8254,26 @@ public class RemoteDesktopManager: ObservableObject {
                     updateRenderPipeline(.metalRenderer)
                 }
             case .cgImage:
+                guard !remoteDesktopRenderFallbackForbidden else {
+                    decodedVideoRendererPreference = .sampleBuffer
+                    metalAwaitingFirstDisplaySince = nil
+                    if let displayFrame = await decoder.makeDisplaySampleBufferFrame(
+                        from: frame,
+                        format: format
+                    ) {
+                        metalVideoFrameFeed.flush(removeDisplayedImage: true)
+                        videoFrameFeed.enqueue(frame: displayFrame)
+                        updateRenderPipeline(.sampleBufferDisplayLayer)
+                        noteDecodedFrame(at: now)
+                        return true
+                    }
+                    await requestStreamRefreshIfNeeded(
+                        reason: "cgimage-pixelbuffer-fallback-forbidden",
+                        minimumInterval: 0.25
+                    )
+                    SkyBridgeLogger.shared.warning("⚠️ 已拒绝远控 CGImage 像素帧兜底：当前媒体策略禁止 fallback")
+                    return false
+                }
                 metalAwaitingFirstDisplaySince = nil
                 if independentlyDecodableFrame,
                    let image = frozenCandidate {
@@ -8085,4 +8447,12 @@ public enum RemoteDesktopRenderPipeline: String, Sendable {
         case .stillImageFallback: return "静态帧回退"
         }
     }
+}
+
+public enum RemoteDesktopRenderOrientation: String, Sendable {
+    case unknown
+    case upright
+    case verticalFlip
+    case horizontalFlip
+    case inverted
 }

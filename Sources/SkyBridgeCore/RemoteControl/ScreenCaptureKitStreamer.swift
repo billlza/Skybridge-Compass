@@ -68,6 +68,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var bitstreamFormat: EncodedBitstreamFormat = .native
     private var failFastOnMediaFallbacks = false
     private var captureCursorInVideo = true
+    private var captureVideoOutput = true
     private var captureSystemAudio = false
     private var hasEmittedParameterSets = false
     private var pendingForcedKeyFrames = 0
@@ -80,6 +81,10 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var lastEncodedFrameAt: Date = .distantPast
     private var lastDegradedFallbackJPEGAt: Date = .distantPast
     private var lastSceneCutRecoveryAt: Date = .distantPast
+    private var latestVideoPixelBuffer: CVPixelBuffer?
+    private var lastVideoEncodeSubmittedAtNanos: UInt64 = 0
+    private var lastVideoPresentationTimeStamp: CMTime?
+    private var videoCadenceTimer: DispatchSourceTimer?
     private var captureTelemetryWindowStartedAt = Date()
     private var telemetryCapturedSamples = 0
     private var telemetryMeaningfulSamples = 0
@@ -89,6 +94,10 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var telemetryEncodeFailures = 0
     private let sampleOutputQueue = DispatchQueue(
         label: "com.skybridge.compass.sck.output",
+        qos: .userInteractive
+    )
+    private let videoCadenceQueue = DispatchQueue(
+        label: "com.skybridge.compass.sck.video-cadence",
         qos: .userInteractive
     )
     private let rawFrameOutputQueue = DispatchQueue(
@@ -186,6 +195,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         targetFPS: Int = 60,
         keyFrameInterval: Int = 60,
         captureCursorInVideo: Bool = true,
+        captureVideoOutput: Bool = true,
         captureSystemAudio: Bool = false,
         audioEncoding: RemoteDesktopAudioChunkPayload.Encoding = .pcmS16LE,
         degradedFallbackJPEGProfile: WebRTCDegradedFallbackJPEGProfile? = nil,
@@ -199,6 +209,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         configuredFPS = max(1, targetFPS)
         configuredKeyInterval = keyFrameInterval
         self.captureCursorInVideo = captureCursorInVideo
+        self.captureVideoOutput = captureVideoOutput
         self.captureSystemAudio = captureSystemAudio
         self.requestedAudioEncoding = audioEncoding
         jpegFallbackProfile = degradedFallbackJPEGProfile ?? .emergency
@@ -213,6 +224,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         compressedAudioConverter = nil
         compressedAudioFormat = nil
         compressedAudioSignature = nil
+        clearLatestVideoPixelBuffer()
         didLogAudioCompressionFallback = false
         didLogStrictMediaFailure = false
         audioSequenceNumber = 0
@@ -271,7 +283,12 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         configuration.height = height
         configuration.pixelFormat = kCVPixelFormatType_32BGRA // 原始帧，后续由VTCompressionSession进行压缩
         configuration.minimumFrameInterval = Self.encodeFrameDuration(forConfiguredFPS: configuredFPS)
-        configuration.queueDepth = lowLatencyEnabled ? 3 : 5
+        configuration.queueDepth = Self.captureQueueDepth(
+            lowLatencyEnabled: lowLatencyEnabled,
+            targetFPS: configuredFPS,
+            width: width,
+            height: height
+        )
         let requestedSystemAudio = captureSystemAudio
         configuration.capturesAudio = requestedSystemAudio
         if requestedSystemAudio {
@@ -284,7 +301,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         output = StreamOutput(owner: self)
         let filter = SCContentFilter(display: display, excludingWindows: [])
         stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-        if !jpegMode && onEncodedFrame != nil {
+        if captureVideoOutput && !jpegMode && onEncodedFrame != nil {
             try setupCompressionSession(width: width, height: height, codec: codecType)
         }
 
@@ -293,7 +310,12 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             logger.error("StreamOutput 创建失败")
             throw CocoaError(.featureUnsupported)
         }
-        try stream?.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: sampleOutputQueue)
+        if Self.shouldRegisterScreenOutput(
+            captureVideoOutput: captureVideoOutput,
+            requestedSystemAudio: requestedSystemAudio
+        ) {
+            try stream?.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: sampleOutputQueue)
+        }
         if requestedSystemAudio {
             do {
                 try stream?.addStreamOutput(streamOutput, type: .audio, sampleHandlerQueue: audioSampleOutputQueue)
@@ -333,6 +355,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
                     targetFPS: targetFPS,
                     keyFrameInterval: keyFrameInterval,
                     captureCursorInVideo: captureCursorInVideo,
+                    captureVideoOutput: captureVideoOutput,
                     captureSystemAudio: false,
                     audioEncoding: audioEncoding,
                     degradedFallbackJPEGProfile: degradedFallbackJPEGProfile,
@@ -345,8 +368,11 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             }
             throw error
         }
+        startVideoCadenceTimerIfNeeded(captureVideoOutput: captureVideoOutput)
         registerDisplayObservers()
-        if jpegMode {
+        if !captureVideoOutput {
+            logger.info("🎧 ScreenCaptureKit 系统音频采集启动：audio-only")
+        } else if jpegMode {
             logger.info("🎥 ScreenCaptureKit 采集启动：\(self.width)x\(self.height), codec=JPEG(BGRA)")
         } else if emitsDegradedFallbackJPEGFrames {
             logger.info(
@@ -364,6 +390,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
 
     @MainActor
     private func resetPipelineAfterFailedStart() {
+        stopVideoCadenceTimer()
         stream?.stopCapture()
         stream = nil
         output = nil
@@ -387,6 +414,8 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         didLogAudioCompressionFallback = false
         didLogStrictMediaFailure = false
         audioSequenceNumber = 0
+        resetVideoCadenceState()
+        captureVideoOutput = true
     }
 
  /// 停止采集与编码
@@ -399,6 +428,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         lastMeaningfulSampleAt = .distantPast
         lastEncodedFrameAt = .distantPast
         stateLock.unlock()
+        stopVideoCadenceTimer()
         stream?.stopCapture()
         stream = nil
         output = nil
@@ -414,6 +444,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         pendingForcedKeyFrames = 0
         pendingParameterSetReannounce = false
         captureCursorInVideo = true
+        captureVideoOutput = true
         captureSystemAudio = false
         emitsDegradedFallbackJPEGFrames = false
         capturedDisplayID = nil
@@ -424,6 +455,8 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         compressedAudioConverter = nil
         compressedAudioFormat = nil
         compressedAudioSignature = nil
+        clearLatestVideoPixelBuffer()
+        resetVideoCadenceState()
         didLogAudioCompressionFallback = false
         didLogStrictMediaFailure = false
         audioSequenceNumber = 0
@@ -880,6 +913,48 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
     }
 
+    static func captureQueueDepth(
+        lowLatencyEnabled: Bool,
+        targetFPS: Int,
+        width: Int,
+        height: Int
+    ) -> Int {
+        let pixelCount = max(width, 1) * max(height, 1)
+        let highFrameRate = targetFPS >= 55
+        let highResolution = pixelCount >= 2_000_000
+        let depth: Int
+        if highFrameRate && highResolution {
+            depth = lowLatencyEnabled ? 6 : 7
+        } else if highFrameRate {
+            depth = lowLatencyEnabled ? 4 : 5
+        } else {
+            depth = lowLatencyEnabled ? 3 : 5
+        }
+        return min(8, max(1, depth))
+    }
+
+    static func shouldRunDisplayCadenceEncoder(
+        jpegMode: Bool,
+        hasEncodedFrameSink: Bool,
+        targetFPS: Int
+    ) -> Bool {
+        !jpegMode && hasEncodedFrameSink && targetFPS >= 55
+    }
+
+    static func shouldRegisterScreenOutput(
+        captureVideoOutput: Bool,
+        requestedSystemAudio: Bool
+    ) -> Bool {
+        // ScreenCaptureKit still drives a display stream for audio capture. Register a
+        // screen output for audio-only streams so SCK does not drop internal video queue frames.
+        captureVideoOutput || requestedSystemAudio
+    }
+
+    static func presentationTimeFromUptimeNanoseconds(_ nanoseconds: UInt64) -> CMTime {
+        let clamped = min(nanoseconds, UInt64(Int64.max))
+        return CMTime(value: CMTimeValue(clamped), timescale: 1_000_000_000)
+    }
+
     @MainActor
     func captureContextSnapshot() -> CaptureContextSnapshot? {
         guard started,
@@ -966,6 +1041,158 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         telemetryEncodeLatenciesMs = []
         telemetryEncodeFailures = 0
         stateLock.unlock()
+    }
+
+    private func resetVideoCadenceState() {
+        stateLock.lock()
+        lastVideoEncodeSubmittedAtNanos = 0
+        lastVideoPresentationTimeStamp = nil
+        stateLock.unlock()
+    }
+
+    private func rememberLatestVideoPixelBuffer(_ pixelBuffer: CVPixelBuffer) {
+        stateLock.lock()
+        latestVideoPixelBuffer = pixelBuffer
+        stateLock.unlock()
+    }
+
+    private func latestVideoPixelBufferForCadence() -> CVPixelBuffer? {
+        stateLock.lock()
+        let pixelBuffer = latestVideoPixelBuffer
+        stateLock.unlock()
+        return pixelBuffer
+    }
+
+    private func clearLatestVideoPixelBuffer() {
+        stateLock.lock()
+        latestVideoPixelBuffer = nil
+        stateLock.unlock()
+    }
+
+    private var shouldUseDisplayCadenceEncoder: Bool {
+        Self.shouldRunDisplayCadenceEncoder(
+            jpegMode: jpegMode,
+            hasEncodedFrameSink: onEncodedFrame != nil,
+            targetFPS: configuredFPS
+        )
+    }
+
+    private func startVideoCadenceTimerIfNeeded(captureVideoOutput: Bool) {
+        stopVideoCadenceTimer()
+        guard captureVideoOutput,
+              shouldUseDisplayCadenceEncoder,
+              compressionSession != nil else {
+            return
+        }
+        let timerIntervalNanos = Self.cadenceTimerIntervalNanoseconds(forConfiguredFPS: configuredFPS)
+        let timer = DispatchSource.makeTimerSource(queue: videoCadenceQueue)
+        timer.schedule(
+            deadline: .now() + .nanoseconds(Int(timerIntervalNanos)),
+            repeating: .nanoseconds(Int(timerIntervalNanos)),
+            leeway: .microseconds(configuredFPS >= 55 ? 100 : 500)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.encodeDisplayCadenceFrameIfDue()
+        }
+        videoCadenceTimer = timer
+        timer.resume()
+        logger.info(
+            "🕒 SCK display cadence encoder enabled: targetFPS=\(self.configuredFPS, privacy: .public)"
+        )
+    }
+
+    private func stopVideoCadenceTimer() {
+        videoCadenceTimer?.setEventHandler {}
+        videoCadenceTimer?.cancel()
+        videoCadenceTimer = nil
+    }
+
+    private func scheduleDisplayCadenceEncode() {
+        videoCadenceQueue.async { [weak self] in
+            self?.encodeDisplayCadenceFrameIfDue()
+        }
+    }
+
+    private static func frameIntervalNanoseconds(forConfiguredFPS fps: Int) -> UInt64 {
+        max(1, 1_000_000_000 / UInt64(max(1, fps)))
+    }
+
+    static func cadenceTimerIntervalNanoseconds(forConfiguredFPS fps: Int) -> UInt64 {
+        let frameInterval = frameIntervalNanoseconds(forConfiguredFPS: fps)
+        return fps >= 55 ? max(1, frameInterval / 2) : frameInterval
+    }
+
+    private func encodeDisplayCadenceFrameIfDue() {
+        guard shouldUseDisplayCadenceEncoder,
+              compressionSession != nil,
+              let pixelBuffer = latestVideoPixelBufferForCadence() else {
+            return
+        }
+        let nowNanos = DispatchTime.now().uptimeNanoseconds
+        let submissionTargets = cadenceSubmissionTargetUptimes(nowNanos: nowNanos)
+        guard !submissionTargets.isEmpty else { return }
+        for submissionTarget in submissionTargets {
+            encodeVideoPixelBuffer(
+                pixelBuffer,
+                presentationTimeStamp: Self.presentationTimeFromUptimeNanoseconds(submissionTarget),
+                duration: Self.encodeFrameDuration(forConfiguredFPS: configuredFPS),
+                submittedAtUptimeNanoseconds: submissionTarget
+            )
+        }
+    }
+
+    private func cadenceSubmissionTargetUptimes(nowNanos: UInt64) -> [UInt64] {
+        stateLock.lock()
+        let lastSubmittedAt = lastVideoEncodeSubmittedAtNanos
+        let hasPendingForcedKeyFrame = pendingForcedKeyFrames > 0
+        stateLock.unlock()
+        guard !hasPendingForcedKeyFrame else { return [nowNanos] }
+        return Self.cadenceSubmissionTargetUptimes(
+            lastSubmittedAt: lastSubmittedAt,
+            nowNanos: nowNanos,
+            configuredFPS: configuredFPS,
+            maxCatchUpFrames: configuredFPS >= 55 ? 3 : 1
+        )
+    }
+
+    static func cadenceSubmissionTargetUptimes(
+        lastSubmittedAt: UInt64,
+        nowNanos: UInt64,
+        configuredFPS fps: Int,
+        maxCatchUpFrames: Int
+    ) -> [UInt64] {
+        _ = maxCatchUpFrames
+        guard lastSubmittedAt > 0 else { return [nowNanos] }
+        guard nowNanos >= lastSubmittedAt else { return [] }
+        let frameIntervalNanos = frameIntervalNanoseconds(forConfiguredFPS: fps)
+        let elapsed = nowNanos - lastSubmittedAt
+        guard elapsed >= frameIntervalNanos else { return [] }
+        let dueFrames = max(1, Int(elapsed / frameIntervalNanos))
+        let latestDueFrame = lastSubmittedAt + (UInt64(dueFrames) * frameIntervalNanos)
+        return [min(latestDueFrame, nowNanos)]
+    }
+
+    private func nextVideoPresentationTimeStamp(
+        preferred preferredPTS: CMTime,
+        duration: CMTime,
+        submittedAtUptimeNanoseconds: UInt64
+    ) -> CMTime {
+        let fallbackPTS = Self.presentationTimeFromUptimeNanoseconds(DispatchTime.now().uptimeNanoseconds)
+        let sanitizedPreferred = preferredPTS.isValid && !preferredPTS.isIndefinite
+            ? preferredPTS
+            : fallbackPTS
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let nextPTS: CMTime
+        if let lastPTS = lastVideoPresentationTimeStamp,
+           CMTimeCompare(sanitizedPreferred, lastPTS) <= 0 {
+            nextPTS = CMTimeAdd(lastPTS, duration)
+        } else {
+            nextPTS = sanitizedPreferred
+        }
+        lastVideoPresentationTimeStamp = nextPTS
+        lastVideoEncodeSubmittedAtNanos = submittedAtUptimeNanoseconds
+        return nextPTS
     }
 
     private func captureTelemetrySnapshotIfNeeded(now: Date) -> ScreenCaptureTelemetrySnapshot? {
@@ -1342,6 +1569,53 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         return true
     }
 
+    private func encodeVideoPixelBuffer(
+        _ pixelBuffer: CVPixelBuffer,
+        presentationTimeStamp: CMTime,
+        duration: CMTime,
+        submittedAtUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) {
+        guard let cs = compressionSession else { return }
+        var flags = VTEncodeInfoFlags()
+        let encodeTimingRefcon = Self.makeEncodeFrameTimingRefcon()
+        let normalizedPresentationTimeStamp = nextVideoPresentationTimeStamp(
+            preferred: presentationTimeStamp,
+            duration: duration,
+            submittedAtUptimeNanoseconds: submittedAtUptimeNanoseconds
+        )
+        let status = VTCompressionSessionEncodeFrame(
+            cs,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: normalizedPresentationTimeStamp,
+            duration: duration,
+            frameProperties: nextFramePropertiesForEncode(),
+            sourceFrameRefcon: encodeTimingRefcon,
+            infoFlagsOut: &flags
+        )
+        if status != noErr {
+            _ = Self.consumeEncodeFrameTimingRefcon(encodeTimingRefcon)
+            noteEncodeFrameFailed()
+            logger.error("❌ VTCompressionSessionEncodeFrame failed: status=\(status, privacy: .public)")
+            onCaptureIssue?("encode-status-\(status)")
+        }
+    }
+
+    private func encodeCadenceFrameIfAvailable(from sampleBuffer: CMSampleBuffer) -> Bool {
+        guard shouldEmitIdleVideoFrames,
+              let pixelBuffer = latestVideoPixelBufferForCadence() else {
+            return false
+        }
+        let submissionTargets = cadenceSubmissionTargetUptimes(nowNanos: DispatchTime.now().uptimeNanoseconds)
+        guard let submissionTarget = submissionTargets.first else { return false }
+        encodeVideoPixelBuffer(
+            pixelBuffer,
+            presentationTimeStamp: Self.encodePresentationTimeStamp(from: sampleBuffer),
+            duration: Self.encodeFrameDuration(forConfiguredFPS: configuredFPS),
+            submittedAtUptimeNanoseconds: submissionTarget
+        )
+        return true
+    }
+
     private func handleCompressedSample(_ sampleBuffer: CMSampleBuffer, encodeLatencyMs: Double?) {
         guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         let totalLength = CMBlockBufferGetDataLength(dataBuffer)
@@ -1650,7 +1924,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         pixelBuffer: CVPixelBuffer
     ) -> Bool {
         if report.fullFrameFallback {
-            return true
+            return false
         }
 
         let totalArea = Double(max(CVPixelBufferGetWidth(pixelBuffer) * CVPixelBufferGetHeight(pixelBuffer), 1))
@@ -1737,16 +2011,29 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         return SCFrameStatus(rawValue: statusNumber.intValue)
     }
 
-    static func shouldProcessFrame(with status: SCFrameStatus?) -> Bool {
+    private var shouldEmitIdleVideoFrames: Bool {
+        !jpegMode && onEncodedFrame != nil && configuredFPS >= 30
+    }
+
+    static func shouldProcessFrame(
+        with status: SCFrameStatus?,
+        includeIdleFrames: Bool = false
+    ) -> Bool {
         guard let status else { return true }
         switch status {
-        case .idle, .blank, .suspended, .stopped:
+        case .idle:
+            return includeIdleFrames
+        case .blank, .suspended, .stopped:
             return false
         case .started, .complete:
             return true
         @unknown default:
             return false
         }
+    }
+
+    static func shouldReuseLatestFrameForCadence(with status: SCFrameStatus?) -> Bool {
+        status == .idle
     }
 
     private func fallbackDamageReport(for pixelBuffer: CVPixelBuffer) -> RemoteDesktopDamageReport {
@@ -1797,15 +2084,31 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
                 guard let owner = owner else { return }
                 switch outputType {
                 case .screen:
+                    guard owner.captureVideoOutput else { return }
                     owner.noteSampleBufferReceived()
-                    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-                    owner.emitDamageReportIfAvailable(sampleBuffer: sampleBuffer, pixelBuffer: pixelBuffer)
-
                     let frameStatus = owner.frameStatus(from: sampleBuffer)
-                    guard ScreenCaptureKitStreamer.shouldProcessFrame(with: frameStatus) else {
+                    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                        if ScreenCaptureKitStreamer.shouldReuseLatestFrameForCadence(with: frameStatus) {
+                            _ = owner.encodeCadenceFrameIfAvailable(from: sampleBuffer)
+                        }
+                        return
+                    }
+                    guard ScreenCaptureKitStreamer.shouldProcessFrame(
+                        with: frameStatus,
+                        includeIdleFrames: owner.shouldEmitIdleVideoFrames
+                    ) else {
+                        if ScreenCaptureKitStreamer.shouldReuseLatestFrameForCadence(with: frameStatus) {
+                            _ = owner.encodeCadenceFrameIfAvailable(from: sampleBuffer)
+                        }
                         return
                     }
                     owner.noteMeaningfulSampleReceived()
+                    owner.rememberLatestVideoPixelBuffer(pixelBuffer)
+                    owner.emitDamageReportIfAvailable(sampleBuffer: sampleBuffer, pixelBuffer: pixelBuffer)
+                    if owner.shouldUseDisplayCadenceEncoder {
+                        owner.scheduleDisplayCadenceEncode()
+                        return
+                    }
 
                     if owner.onRawFrame != nil {
                         owner.noteEncodedFrameEmitted(countForTelemetry: false)
@@ -1829,24 +2132,11 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
                         return
                     }
 
-                    guard let cs = owner.compressionSession else { return }
-                    var flags = VTEncodeInfoFlags()
-                    let encodeTimingRefcon = ScreenCaptureKitStreamer.makeEncodeFrameTimingRefcon()
-                    let status = VTCompressionSessionEncodeFrame(
-                        cs,
-                        imageBuffer: pixelBuffer,
+                    owner.encodeVideoPixelBuffer(
+                        pixelBuffer,
                         presentationTimeStamp: ScreenCaptureKitStreamer.encodePresentationTimeStamp(from: sampleBuffer),
-                        duration: ScreenCaptureKitStreamer.encodeFrameDuration(forConfiguredFPS: owner.configuredFPS),
-                        frameProperties: owner.nextFramePropertiesForEncode(),
-                        sourceFrameRefcon: encodeTimingRefcon,
-                        infoFlagsOut: &flags
+                        duration: ScreenCaptureKitStreamer.encodeFrameDuration(forConfiguredFPS: owner.configuredFPS)
                     )
-                    if status != noErr {
-                        _ = ScreenCaptureKitStreamer.consumeEncodeFrameTimingRefcon(encodeTimingRefcon)
-                        owner.noteEncodeFrameFailed()
-                        owner.logger.error("❌ VTCompressionSessionEncodeFrame failed: status=\(status, privacy: .public)")
-                        owner.onCaptureIssue?("encode-status-\(status)")
-                    }
                 case .audio:
                     owner.handleAudioSampleBuffer(sampleBuffer)
                 case .microphone:

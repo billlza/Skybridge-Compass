@@ -1133,7 +1133,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             keyFrameInterval: settings.keyFrameInterval,
             lowLatencyMode: settings.lowLatencyMode,
             enableHardwareAcceleration: settings.enableHardwareAcceleration,
-            enableAppleSiliconOptimization: settings.enableAppleSiliconOptimization
+            enableAppleSiliconOptimization: settings.enableAppleSiliconOptimization,
+            preserveExactVisibleSize: false
         )
     }
 
@@ -1160,7 +1161,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 keyFrameInterval: settings.keyFrameInterval,
                 lowLatencyMode: settings.lowLatencyMode,
                 enableHardwareAcceleration: settings.enableHardwareAcceleration,
-                enableAppleSiliconOptimization: settings.enableAppleSiliconOptimization
+                enableAppleSiliconOptimization: settings.enableAppleSiliconOptimization,
+                preserveExactVisibleSize: false
             )
         }
 
@@ -1213,7 +1215,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             keyFrameInterval: max(10, min(config.keyFrameInterval, 240)),
             lowLatencyMode: config.lowLatencyMode,
             enableHardwareAcceleration: config.enableHardwareAcceleration,
-            enableAppleSiliconOptimization: config.enableAppleSiliconOptimization
+            enableAppleSiliconOptimization: config.enableAppleSiliconOptimization,
+            preserveExactVisibleSize: explicitResolutionRequested
+                && config.requiresExtremePerformanceValidation
         )
     }
 
@@ -1493,11 +1497,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         nativeVideoTrackReady: Bool,
         format: String?
     ) -> Bool {
-        guard supportsNativeVideoTrack, !nativeVideoTrackReady else { return false }
-        let normalizedFormat = format?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return normalizedFormat != "jpeg" && normalizedFormat != "jpg"
+        supportsNativeVideoTrack && !nativeVideoTrackReady
     }
 
     static func streamConfigurationByPreservingAudioEndpointForVideoRefresh(
@@ -1586,8 +1586,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         remoteStreamConfiguration: RemoteDesktopStreamConfiguration?
     ) -> Bool {
         guard let remoteStreamConfiguration else { return false }
-        return remoteStreamConfiguration.requiresExtremePerformanceValidation
-            || !remoteStreamConfiguration.allowsDegradedMediaFallbacks
+        return !remoteStreamConfiguration.isStopRequest
     }
 
     static func policyByEnforcingStrictMediaFrameRateFloor(
@@ -4783,6 +4782,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         return "leaseRejected"
     }
 
+    private static func strictRealtimeAudioAttachRetryWindowSeconds() -> TimeInterval {
+        let rawValue = ProcessInfo.processInfo.environment["SKYBRIDGE_STRICT_AUDIO_ATTACH_RETRY_SECONDS"] ?? "45"
+        let parsed = Double(rawValue) ?? 45
+        return min(max(parsed, 0), 120)
+    }
+
     nonisolated private static func writeWebRTCAudioTxTransportEvent(
         _ event: SkyBridgeRealtimeMediaTransportEvent,
         sessionID: String,
@@ -6359,6 +6364,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 var directRealtimeAudioAttachTask: Task<Void, Never>?
                 var directRealtimeAudioAttachGeneration: UInt64 = 0
                 var directRealtimeAudioRetryAfter = Date.distantPast
+                var directRealtimeAudioStrictFirstAttachFailureAt: Date?
                 var directRealtimeAudioRenewalRetryAfter = Date.distantPast
                 var directRealtimePCMSubmissionPipe: RemoteRealtimePCM16SubmissionPipe?
                 var directSyntheticAudioToneSource: RemoteRealtimeSyntheticPCM16ToneSource?
@@ -6880,7 +6886,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }
                     func scheduleRealtimeAudioAttachIfNeeded() {
                         if shouldUseRealtimeAudio, directRealtimePCMSubmissionPipe == nil {
-                            directRealtimePCMSubmissionPipe = RemoteRealtimePCM16SubmissionPipe()
+                            directRealtimePCMSubmissionPipe = RemoteRealtimePCM16SubmissionPipe(
+                                replayBufferedOnAttach: false
+                            )
                             self.appendWebRTCSessionDiagnostic(
                                 "audioTxCapturePipeReady session=\(sessionID) leaseSource=localRoleLease state=pending-attach",
                                 sessionID: sessionID
@@ -6915,6 +6923,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     sessionID: sessionID
                                 )
                                 if failFastMediaFallbacks {
+                                    let now = Date()
+                                    let firstFailureAt = directRealtimeAudioStrictFirstAttachFailureAt ?? now
+                                    directRealtimeAudioStrictFirstAttachFailureAt = firstFailureAt
+                                    let retryWindow = Self.strictRealtimeAudioAttachRetryWindowSeconds()
+                                    let elapsed = now.timeIntervalSince(firstFailureAt)
+                                    if elapsed < retryWindow {
+                                        directRealtimeAudioRetryAfter = now.addingTimeInterval(1.0)
+                                        self.appendWebRTCSessionDiagnostic(
+                                            "audioTxAttachRetryScheduled session=\(sessionID) leaseSource=localRoleLease reason=main-path-transient elapsedMs=\(Int((elapsed * 1000).rounded())) retryWindowMs=\(Int((retryWindow * 1000).rounded())) retryAfterMs=1000",
+                                            sessionID: sessionID
+                                        )
+                                        if directRealtimeAudioAttachGeneration == attachGeneration {
+                                            directRealtimeAudioAttachTask = nil
+                                        }
+                                        return
+                                    }
                                     recordStrictMediaValidationFailure(
                                         reason: "realtime-audio-main-path-unavailable",
                                         probable: "pqc-media-audio-sender-unavailable",
@@ -6940,6 +6964,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             directRealtimeAudioSenderRelayEndpoint = realtimeSender.endpoint
                             directRealtimeAudioSenderRelayExpiresAt = realtimeSender.endpoint.expiresAt
                             directRealtimeAudioContinuityState = nil
+                            directRealtimeAudioStrictFirstAttachFailureAt = nil
                             directRealtimeAudioRetryAfter = .distantPast
                             realtimePCMSubmissionPipe.attach(sender: realtimeSender.sender)
                             let snapshot = realtimePCMSubmissionPipe.snapshot()
@@ -7958,13 +7983,33 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             break
                         }
                         continue
-                    } else if session.supportsNativeScreenVideoTrack && lastSentFormat.hasPrefix("webrtc-native-video") {
+                    } else if !failFastMediaFallbacks,
+                              session.supportsNativeScreenVideoTrack,
+                              lastSentFormat.hasPrefix("webrtc-native-video") {
                         self.logger.info(
                             "🫧 WebRTC 原生屏幕视频未获 RTP 正证据，SBRF/JPEG 继续作为主链: session=\(sessionID, privacy: .public) state=\(nativeVideoHealthState.rawValue, privacy: .public)"
                         )
                         lastSentFormat = ""
                     }
 #endif
+                    if failFastMediaFallbacks, session.supportsNativeScreenVideoTrack {
+                        if lastSentFormat != "webrtc-native-video-waiting" {
+                            self.appendSmokeStatus(
+                                "stream-format session=\(sessionID) format=webrtc-native-video-waiting nativeHealth=\(nativeVideoHealthState.rawValue) fallback=forbidden"
+                            )
+                            self.appendWebRTCSessionDiagnostic(
+                                "stream-format session=\(sessionID) format=webrtc-native-video-waiting nativeHealth=\(nativeVideoHealthState.rawValue) fallback=forbidden",
+                                sessionID: sessionID
+                            )
+                            lastSentFormat = "webrtc-native-video-waiting"
+                        }
+                        do {
+                            try await Task.sleep(for: .milliseconds(100))
+                        } catch {
+                            break
+                        }
+                        continue
+                    }
                     lastEncoderVideoPolicy = encoderVideoPolicy
                     do {
                         let frameIntervalNs = max(1_000_000_000 / budget.frameRate, 1_000_000)

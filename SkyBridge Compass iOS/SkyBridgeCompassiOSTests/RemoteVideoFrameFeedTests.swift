@@ -60,7 +60,7 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         )
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
 
-        XCTAssertTrue(source.contains("DispatchSemaphore(value: 1)"))
+        XCTAssertTrue(source.contains("DispatchSemaphore(value: 3)"))
         XCTAssertFalse(
             source.contains("view.currentRenderPassDescriptor"),
             "The Metal renderer must not mix MTKView.currentRenderPassDescriptor with currentDrawable; one draw should own one explicit drawable lifecycle."
@@ -76,33 +76,40 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
             return
         }
         XCTAssertLessThan(textureRange.lowerBound, returnRange.lowerBound)
-        guard let renderTextureRange = source.range(of: "guard let renderTexture = makeRenderTexture("),
+        guard let framePathRange = source.range(of: "let drawableWidth ="),
               let drawableRange = source.range(
                 of: "guard let renderTarget = makeDrawableRenderTarget(for: view)",
-                range: renderTextureRange.upperBound..<source.endIndex
+                range: framePathRange.upperBound..<source.endIndex
+              ),
+              let renderRange = source.range(
+                of: "ciContext.render(",
+                range: drawableRange.upperBound..<source.endIndex
               ),
               let presentRange = source.range(
                 of: "commandBuffer.present(renderTarget.drawable)",
-                range: drawableRange.upperBound..<source.endIndex
+                range: renderRange.upperBound..<source.endIndex
               ) else {
-            XCTFail("Metal renderer must preflight render texture before acquiring/presenting the CAMetalDrawable")
+            XCTFail("Metal renderer must render directly into one owned CAMetalDrawable")
             return
         }
-        XCTAssertLessThan(renderTextureRange.lowerBound, drawableRange.lowerBound)
+        XCTAssertLessThan(framePathRange.lowerBound, drawableRange.lowerBound)
+        XCTAssertLessThan(drawableRange.lowerBound, renderRange.lowerBound)
         XCTAssertLessThan(drawableRange.lowerBound, presentRange.lowerBound)
-        XCTAssertTrue(source.contains("commandBuffer.makeBlitCommandEncoder()"))
+        XCTAssertFalse(source.contains("makeRenderTexture("))
+        XCTAssertFalse(source.contains("commandBuffer.makeBlitCommandEncoder()"))
         XCTAssertTrue(source.contains("metalView.enableSetNeedsDisplay = true"))
         XCTAssertTrue(source.contains("metalView.isPaused = true"))
         XCTAssertTrue(source.contains("view.setNeedsDisplay()"))
         XCTAssertTrue(source.contains("view.draw()"))
         XCTAssertTrue(source.contains("pendingRedraw"))
         XCTAssertTrue(source.contains("requestFollowUpDrawIfPossible"))
-        XCTAssertTrue(source.contains("let verticalFlipTransform = CGAffineTransform("))
-        XCTAssertTrue(source.contains("d: -scaleY"))
+        XCTAssertTrue(source.contains("let uprightTransform = CGAffineTransform("))
+        XCTAssertTrue(source.contains("d: scaleY"))
+        XCTAssertFalse(source.contains("d: -scaleY"))
         XCTAssertFalse(source.contains("a: -scaleX"))
         XCTAssertTrue(source.contains("Metal render telemetry"))
         XCTAssertTrue(source.contains("frameAgeMs="))
-        XCTAssertTrue(source.contains("orientation=verticalFlip"))
+        XCTAssertTrue(source.contains("orientation=upright"))
         XCTAssertTrue(source.contains("drawableAccess=single-late"))
         XCTAssertTrue(source.contains("frameDriven=true"))
     }
@@ -149,6 +156,8 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         XCTAssertTrue(rtcVideoViewBody.contains("guard let frame else { return }"))
         XCTAssertTrue(rtcVideoViewBody.contains("minimumVisibleNativeRenderFrames = 1"))
         XCTAssertTrue(rtcVideoViewBody.contains("nativeRenderEvidenceSource"))
+        XCTAssertTrue(rtcVideoViewBody.contains("uiSurface"))
+        XCTAssertTrue(source.contains("uiSurface: \"remoteDesktopView\""))
         XCTAssertTrue(rtcVideoViewBody.contains("currentRemoteVideoTrackRenderToken(trackId: track.trackId)"))
         XCTAssertTrue(rtcVideoViewBody.contains("renderEpoch: renderEpoch"))
         XCTAssertTrue(source.contains("acceptsRenderEvidence: nativeVideoOwnsSurface"))

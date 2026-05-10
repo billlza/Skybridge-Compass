@@ -42,6 +42,20 @@ struct IOSRealtimeMediaAudioReceiverHeartbeatSnapshot: Sendable {
     let engineRunning: Bool?
 }
 
+public struct RemoteDesktopSmokeAudioDiagnosticSnapshot: Sendable, Equatable {
+    let datagramsSeen: UInt64
+    let receivedPackets: UInt64
+    let decodedPackets: UInt64
+    let playedPackets: UInt64
+    let rejectedPackets: UInt64
+    let replayRejectedPackets: UInt64
+    let jitterEvictedPackets: UInt64
+    let playbackDroppedPackets: UInt64
+    let renderedFrames: UInt64
+    let underflowEvents: UInt64
+    let rebufferEvents: UInt64
+}
+
 struct RemoteRealtimeMediaKeySnapshot: Sendable, Equatable {
     let sessionId: String
     let sendKey: Data
@@ -796,6 +810,23 @@ actor IOSRealtimeMediaAudioReceiver {
             rebufferEvents: playback?.rebufferEvents,
             startupSilenceFrames: playback?.startupSilenceFrames,
             engineRunning: playback?.isEngineRunning
+        )
+    }
+
+    func smokeDiagnosticSnapshot() async -> RemoteDesktopSmokeAudioDiagnosticSnapshot {
+        let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(reset: false)
+        return RemoteDesktopSmokeAudioDiagnosticSnapshot(
+            datagramsSeen: datagramsSeen,
+            receivedPackets: received,
+            decodedPackets: decoded,
+            playedPackets: played,
+            rejectedPackets: rejected,
+            replayRejectedPackets: replayRejected,
+            jitterEvictedPackets: jitterEvicted,
+            playbackDroppedPackets: playbackDropped,
+            renderedFrames: playback?.renderedFrames ?? 0,
+            underflowEvents: playback?.underflowEvents ?? 0,
+            rebufferEvents: playback?.rebufferEvents ?? 0
         )
     }
 

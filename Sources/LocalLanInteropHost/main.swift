@@ -32,6 +32,9 @@ private final class LocalLanInteropHostCoordinator {
     func start() async throws {
         reporter.reset()
         reporter.append("boot role=mac-host")
+        _ = try await DeviceIdentityKeyManager.shared.getOrCreateIdentityKey()
+        let protocolDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
+        reporter.append("identity ready device=\(sanitize(protocolDeviceId))")
         guard await discoveryManager.waitUntilInitialized(timeout: 5.0) else {
             throw HostStartupError.initializationTimedOut("DeviceDiscoveryManager")
         }

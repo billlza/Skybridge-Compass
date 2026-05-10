@@ -1,13 +1,26 @@
 import XCTest
 
 final class RemoteControlAudioSchedulingTests: XCTestCase {
-    func testP2PAudioDrainIsDecoupledFromVideoFramePump() throws {
+    private func remoteControlManagerSource() throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func screenCaptureKitStreamerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    func testP2PAudioDrainIsDecoupledFromVideoFramePump() throws {
+        let source = try remoteControlManagerSource()
 
         XCTAssertTrue(
             source.contains("scheduleAudioDrainIfNeeded()"),
@@ -52,6 +65,82 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
         XCTAssertFalse(
             source.contains("Task.detached(priority: .userInitiated) {\n                    await outboundFramePump.submitAudioPayload(wirePayload)"),
             "Audio chunk submission must not run at the same priority as latency-critical video."
+        )
+    }
+
+    func testStrictP2PMediaPolicyDisablesCaptureFallbacks() throws {
+        let source = try remoteControlManagerSource()
+
+        XCTAssertTrue(
+            source.contains("let strictMediaFallbacks = streamConfiguration?.allowsDegradedMediaFallbacks == false"),
+            "P2P strict media sessions must derive a sender-side fail-fast gate from the viewer stream policy."
+        )
+        XCTAssertTrue(
+            source.contains("failFastOnMediaFallbacks: strictMediaFallbacks"),
+            "ScreenCaptureKitStreamer must run in fail-fast mode when the viewer forbids degraded media fallback."
+        )
+        XCTAssertTrue(
+            source.contains("严格媒体策略禁止远控采集/编码降级或静默重启"),
+            "Strict P2P sessions should expose encoder/capture fallback attempts as failures instead of silently restarting."
+        )
+        XCTAssertTrue(
+            source.contains("if !strictMediaFallbacks {\n                    self.applyCaptureCompatibilityOverrideIfNeeded"),
+            "Codec compatibility downgrade must remain unavailable in strict media sessions."
+        )
+    }
+
+    func testP2PSyncRefreshIsThrottledUnderVideoBackpressure() throws {
+        let source = try remoteControlManagerSource()
+
+        XCTAssertTrue(
+            source.contains("private static let sendQueueOverflowSyncRefreshMinimumInterval: TimeInterval = 2.0"),
+            "A full P2P video send queue should not request a new forced keyframe on every dropped predictive frame."
+        )
+        XCTAssertTrue(
+            source.contains("private static let waitingForSyncFrameRefreshMinimumInterval: TimeInterval = 2.0"),
+            "Waiting-for-sync recovery should be slow enough to avoid an IDR storm on constrained LAN links."
+        )
+        XCTAssertTrue(
+            source.contains("requestSyncRefreshIfNeeded(\n                reason: \"send-queue-overflow\",\n                minimumInterval: Self.sendQueueOverflowSyncRefreshMinimumInterval\n            )"),
+            "Queue overflow recovery must use the shared throttle instead of bypassing it."
+        )
+        XCTAssertTrue(
+            source.contains("streamer?.requestKeyFrameRefresh(reason: \"outbound-frame-drop\", count: 1)"),
+            "A queue-overflow recovery request should force only one IDR frame."
+        )
+        XCTAssertTrue(
+            source.contains("var lastViewerStreamRefreshAt: Date = .distantPast"),
+            "Viewer-initiated refreshes should also be throttled on the Mac sender."
+        )
+        XCTAssertTrue(
+            source.contains("captureStreamer?.requestKeyFrameRefresh(reason: \"viewer-stream-refresh\", count: 1)"),
+            "Viewer refresh tokens should request one keyframe instead of compounding backpressure with multiple forced IDRs."
+        )
+        XCTAssertFalse(
+            source.contains("requestSyncRefreshIfNeeded(reason: \"send-queue-overflow\", minimumInterval: 0)"),
+            "Immediate keyframe retries can amplify backpressure into a video frame-rate collapse."
+        )
+        XCTAssertFalse(
+            source.contains("requestSyncRefreshIfNeeded(reason: \"waiting-for-sync-frame\", minimumInterval: 0.4)"),
+            "The recovery loop must not keep forcing large keyframes multiple times per second."
+        )
+    }
+
+    func testFullFrameDamageFallbackDoesNotForceContinuousSceneCutIDRs() throws {
+        let source = try screenCaptureKitStreamerSource()
+        let body = try sourceSlice(
+            from: "private func shouldTreatDamageAsSceneCut(",
+            to: "private func damageReport(",
+            in: source
+        )
+
+        XCTAssertTrue(
+            body.contains("if report.fullFrameFallback {\n            return false\n        }"),
+            "Full-frame damage fallback means damage tracking is coarse; it must not force IDR frames on every sample."
+        )
+        XCTAssertFalse(
+            body.contains("if report.fullFrameFallback {\n            return true\n        }"),
+            "Treating coarse full-frame damage as a scene cut creates a continuous keyframe storm."
         )
     }
 
@@ -139,5 +228,12 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             source.contains("系统音频 AAC 编码失败，已回退为 PCM 传输"),
             "PCM fallback can flood the shared P2P connection and collapse video frame rate."
         )
+    }
+
+    private func sourceSlice(from startMarker: String, to endMarker: String, in source: String) throws -> String {
+        let start = try XCTUnwrap(source.range(of: startMarker)?.lowerBound)
+        let suffix = source[start...]
+        let end = try XCTUnwrap(suffix.range(of: endMarker)?.lowerBound)
+        return String(suffix[..<end])
     }
 }

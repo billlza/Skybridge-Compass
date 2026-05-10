@@ -673,13 +673,17 @@ wait_for_ios_pattern() {
   local pattern="$3"
   local timeout_seconds="$4"
   local label="$5"
-  local failure_pattern='failed stage=|fallback-frame|transport=fallback-screen|strict-media-failed|screen-drop .*fallback|screenFallbackDrop|stream-native-warmup-fallback-main|fallbackProducerSwitch'
+  local failure_pattern='failed stage=|fallback-frame|transport=fallback-screen|strict-media-failed|screen-drop .*fallback|screenFallbackDrop|stream-native-warmup-fallback-main|fallbackProducerSwitch|uiSurface=smokeOverlay|nativePromotionState=smoke-hold'
   local started_at
   started_at="$(date +%s)"
   while true; do
     copy_ios_file "$remote" "$local_path"
     if [[ -f "$local_path" ]] && grep -qE "$failure_pattern" "$local_path"; then
       echo "iOS smoke failed while waiting for ${label}: $(tail -n 1 "$local_path")" >&2
+      return 1
+    fi
+    if [[ -f "$MAC_STATUS" ]] && grep -qE "$failure_pattern|failed stage=" "$MAC_STATUS"; then
+      echo "macOS smoke failed while waiting for ${label}: $(tail -n 1 "$MAC_STATUS")" >&2
       return 1
     fi
     if [[ -f "$local_path" ]] && grep -qE "$pattern" "$local_path"; then
@@ -691,33 +695,6 @@ wait_for_ios_pattern() {
     fi
     sleep 2
   done
-}
-
-wait_for_ios_pattern_or_mac_fallback() {
-  local local_path="$1"
-  local remote="$2"
-  local ios_pattern="$3"
-  local mac_pattern="$4"
-  local timeout_seconds="$5"
-  local label="$6"
-  local fallback_probe_seconds="${SKYBRIDGE_IOS_STATUS_MAC_FALLBACK_PROBE_SECONDS:-20}"
-  local started_at
-  started_at="$(date +%s)"
-  while true; do
-    if [[ -f "$local_path" ]] && grep -qE "$ios_pattern" "$local_path"; then
-      return 0
-    fi
-    if [[ -f "$MAC_STATUS" ]] && grep -qE "$mac_pattern" "$MAC_STATUS"; then
-      echo "    using macOS heartbeat fallback for ${label}; iOS status copy is not required" >&2
-      return 0
-    fi
-    if (( "$(date +%s)" - started_at >= fallback_probe_seconds )); then
-      break
-    fi
-    sleep 1
-  done
-
-  wait_for_ios_pattern "$local_path" "$remote" "$ios_pattern" "$timeout_seconds" "$label"
 }
 
 run_webrtc_media_doctor() {
@@ -897,11 +874,13 @@ if [[ ! -x "$MAC_APP_BIN" ]]; then
 fi
 
 echo "==> Building iOS app for real device"
+IOS_BUILD_DESTINATION="${SKYBRIDGE_IOS_BUILD_DESTINATION:-generic/platform=iOS}"
+echo "    build destination: $IOS_BUILD_DESTINATION"
 xcodebuild \
   -project "$IOS_PROJECT" \
   -scheme "$IOS_SCHEME" \
   -configuration Debug \
-  -destination "id=$IOS_DEVICE_ID" \
+  -destination "$IOS_BUILD_DESTINATION" \
   -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios" \
   build >"$IOS_BUILD_LOG"
 
@@ -996,6 +975,7 @@ IOS_ENV_JSON="$(
   SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS="$SMOKE_HOST_HOLD_AFTER_SUCCESS_SECONDS" \
   SKYBRIDGE_SMOKE_REQUIRE_AUDIO="$SMOKE_REQUIRE_AUDIO" \
   SKYBRIDGE_SMOKE_REQUIRE_NATIVE_VIDEO=1 \
+  SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB=1 \
   SKYBRIDGE_SMOKE_EXTREME_MEDIA="$SMOKE_EXTREME_MEDIA" \
   SKYBRIDGE_SMOKE_VIDEO_WIDTH="$SMOKE_VIDEO_WIDTH" \
   SKYBRIDGE_SMOKE_VIDEO_HEIGHT="$SMOKE_VIDEO_HEIGHT" \
@@ -1031,6 +1011,7 @@ keys = [
     "SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS",
     "SKYBRIDGE_SMOKE_REQUIRE_AUDIO",
     "SKYBRIDGE_SMOKE_REQUIRE_NATIVE_VIDEO",
+    "SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB",
     "SKYBRIDGE_SMOKE_EXTREME_MEDIA",
     "SKYBRIDGE_SMOKE_VIDEO_WIDTH",
     "SKYBRIDGE_SMOKE_VIDEO_HEIGHT",
@@ -1083,26 +1064,25 @@ if [[ -z "$SESSION_ID" ]]; then
 fi
 SESSION_REGEX="$(regex_escape "$SESSION_ID")"
 
-wait_for_ios_pattern_or_mac_fallback \
+wait_for_ios_pattern \
   "$IOS_STATUS_LOCAL" \
   "$IOS_STATUS_NAME" \
   "handshake session=${SESSION_REGEX} suite=(X25519(-Ed25519)?|X-Wing)" \
-  "app-heartbeat-recv session=${SESSION_REGEX}" \
   "$SMOKE_TIMEOUT_SECONDS" \
   "iOS bootstrap handshake"
-wait_for_ios_pattern_or_mac_fallback \
+wait_for_ios_pattern \
   "$IOS_STATUS_LOCAL" \
   "$IOS_STATUS_NAME" \
   'rekey complete suite=X-Wing' \
-  "app-heartbeat-recv session=${SESSION_REGEX}" \
   "$SMOKE_TIMEOUT_SECONDS" \
   "iOS X-Wing rekey"
 
 if [[ "$SMOKE_REQUIRE_AUDIO" == "1" ]]; then
   echo "==> Waiting for iOS audio receive evidence"
-  if ! wait_for_file_pattern \
-    "$MAC_STATUS" \
-    "audio-rx session=${SESSION_REGEX} source=remote-heartbeat .*audioRxRecv=[1-9][0-9]* .*audioRxPlayed=[1-9][0-9]*" \
+  if ! wait_for_ios_pattern \
+    "$IOS_TRACE_LOCAL" \
+    "$IOS_STATUS_NAME.trace.log" \
+    "audio-rx .*audioRxRecv=[1-9][0-9]* .*audioRxPlayed=[1-9][0-9]*" \
     "$SMOKE_AUDIO_BOOTSTRAP_TIMEOUT_SECONDS" \
     "iOS audio receive evidence"; then
     echo "==> Running WebRTC media doctor after audio bootstrap timeout" >&2

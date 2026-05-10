@@ -434,7 +434,7 @@ public class P2PConnectionManager: ObservableObject {
     /// - strictPQC must fail closed when the local runtime cannot provide a PQC implementation.
     private func effectiveSelectionPolicy(enforcePQC: Bool) -> CryptoProviderFactory.SelectionPolicy {
         guard enforcePQC else { return .classicOnly }
-        return pqcManager.allowClassicFallbackForCompatibility ? .preferPQC : .requirePQC
+        return .requirePQC
     }
 
     private func inboundResponderSelectionPolicy(
@@ -591,7 +591,7 @@ public class P2PConnectionManager: ObservableObject {
             return false
         }
 
-        return pqcManager.allowClassicFallbackForCompatibility
+        return false
     }
 
     private func performBootstrapAssistedPQCHandshake(
@@ -2355,31 +2355,7 @@ public class P2PConnectionManager: ObservableObject {
         after error: Error,
         for device: DiscoveredDevice
     ) async -> Bool {
-        guard pqcManager.allowClassicFallbackForCompatibility else { return false }
-        guard preferredTrustedPeerIdentifier(for: device) != nil
-            || TrustedDeviceStore.shared.isTrusted(deviceId: device.id) else {
-            return false
-        }
-        guard let trustedKEM = await trustedPeerKEM(for: device),
-              trustedKEM.suites.keys.contains(where: \.isPQCGroup) else {
-            return false
-        }
-        guard let reason = HandshakeErrorLocalizer.handshakeFailureReason(from: error) else {
-            let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-            return HandshakeErrorLocalizer.isCryptoKitAEADFailure(error)
-                || HandshakeErrorLocalizer.isPeerResetOrRefusedDetail(detail)
-        }
-        switch reason {
-        case .cryptoError(let detail):
-            return HandshakeErrorLocalizer.isAEADFailureDetail(detail)
-                || HandshakeErrorLocalizer.isCryptoKitAEADFailure(error)
-        case .timeout:
-            return true
-        case .transportError(let detail):
-            return HandshakeErrorLocalizer.isPeerResetOrRefusedDetail(detail)
-        default:
-            return false
-        }
+        return false
     }
 
     private func clearPeerKEMTrust(for device: DiscoveredDevice) async {

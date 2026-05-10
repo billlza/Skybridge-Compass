@@ -106,6 +106,8 @@ struct ScreenData: Codable, Sendable {
     private var telemetrySendLatencySamples = 0
     private var telemetrySendLatencyTotalMs: Double = 0
     private var telemetrySendLatencyMaxMs: Double = 0
+    private static let sendQueueOverflowSyncRefreshMinimumInterval: TimeInterval = 2.0
+    private static let waitingForSyncFrameRefreshMinimumInterval: TimeInterval = 2.0
 
     private struct FrameTelemetrySnapshot: Sendable {
         let interval: TimeInterval
@@ -172,7 +174,10 @@ struct ScreenData: Codable, Sendable {
             backpressure: wasBackpressured || enqueueResult != .enqueued ? 1 : 0
         )
         if enqueueResult == .droppedPredictiveFrameNeedsSyncRefresh {
-            requestSyncRefreshIfNeeded(reason: "send-queue-overflow", minimumInterval: 0)
+            requestSyncRefreshIfNeeded(
+                reason: "send-queue-overflow",
+                minimumInterval: Self.sendQueueOverflowSyncRefreshMinimumInterval
+            )
         }
         updateSyncRecoveryState()
         await drainIfNeeded()
@@ -472,7 +477,7 @@ struct ScreenData: Codable, Sendable {
             guard let self else { return }
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: .milliseconds(400))
+                    try await Task.sleep(for: .seconds(1))
                 } catch {
                     return
                 }
@@ -492,7 +497,10 @@ struct ScreenData: Codable, Sendable {
             waitingForSyncSince = nil
             return
         }
-        requestSyncRefreshIfNeeded(reason: "waiting-for-sync-frame", minimumInterval: 0.4)
+        requestSyncRefreshIfNeeded(
+            reason: "waiting-for-sync-frame",
+            minimumInterval: Self.waitingForSyncFrameRefreshMinimumInterval
+        )
     }
 
     private func requestSyncRefreshIfNeeded(reason: String, minimumInterval: TimeInterval) {
@@ -670,6 +678,7 @@ private final class PeerConnection {
     var remoteVideoFormats: Set<String>
     var requestedStreamConfiguration: RemoteDesktopStreamConfiguration?
     var captureCompatibilityOverride: RemoteFrameType?
+    var lastViewerStreamRefreshAt: Date = .distantPast
     let clipboardSessionId: UUID
     let audioSessionId: UUID
     let outboundFramePump: RemoteControlOutboundFramePump
@@ -822,6 +831,7 @@ public final class RemoteControlManager: BaseManager {
     }()
     private lazy var textureFeedDeliveryGate = LatestTextureDeliveryGate(feed: textureFeed)
     private var captureStreamer: ScreenCaptureKitStreamer?
+    private var realtimeAudioCaptureStreamer: ScreenCaptureKitStreamer?
     private var screenCaptureWatchdogTask: Task<Void, Never>?
     private var screenCaptureRestartInProgress = false
     private var screenCaptureStartupRetryCountByPeerId: [String: Int] = [:]
@@ -987,6 +997,8 @@ public final class RemoteControlManager: BaseManager {
         screenCaptureRestartInProgress = false
         captureStreamer?.stop()
         captureStreamer = nil
+        realtimeAudioCaptureStreamer?.stop()
+        realtimeAudioCaptureStreamer = nil
 
         deferredScreenSharingFallbackTasksByPeerId.values.forEach { $0.cancel() }
         deferredScreenSharingFallbackTasksByPeerId.removeAll()
@@ -1005,6 +1017,8 @@ public final class RemoteControlManager: BaseManager {
         screenCaptureRestartInProgress = false
         captureStreamer?.stop()
         captureStreamer = nil
+        realtimeAudioCaptureStreamer?.stop()
+        realtimeAudioCaptureStreamer = nil
         screenSharingActive = false
         stopInteractionTelemetry(for: peer.id)
         cancelDeferredScreenSharingFallback(for: peer.id)
@@ -1231,7 +1245,13 @@ public final class RemoteControlManager: BaseManager {
             hasInitialStreamConfiguration: hasInitialStreamConfiguration
         ) {
         case .startImmediately:
-            await startScreenSharing(to: peer)
+            if screenSharingActive || captureStreamer != nil {
+                logger.info(
+                    "ℹ️ viewer 配置已先行启动推流，跳过 secure-channel 后的重复启动: peer=\(peer.id, privacy: .public)"
+                )
+            } else {
+                await startScreenSharing(to: peer)
+            }
         case .awaitViewerConfiguration(let fallbackAfter):
             logger.info(
                 """
@@ -1307,6 +1327,8 @@ public final class RemoteControlManager: BaseManager {
             screenCaptureRestartInProgress = false
             captureStreamer?.stop()
             captureStreamer = nil
+            realtimeAudioCaptureStreamer?.stop()
+            realtimeAudioCaptureStreamer = nil
             screenSharingActive = false
             screenCaptureStartupRetryCountByPeerId.removeValue(forKey: previousPeer.id)
             invalidateScreenSharingStartupState(for: previousPeer.id)
@@ -1459,13 +1481,18 @@ public final class RemoteControlManager: BaseManager {
         screenCaptureWatchdogTask = nil
         captureStreamer?.stop()
         captureStreamer = nil
+        realtimeAudioCaptureStreamer?.stop()
+        realtimeAudioCaptureStreamer = nil
         screenSharingActive = false
 
         let streamer = ScreenCaptureKitStreamer()
         let request = effectiveStreamRequest(for: peer)
-        let audioRedirectionEnabled = peer.requestedStreamConfiguration?.audioRedirectionEnabled == true
-        let realtimeMediaAudioRequested = peer.requestedStreamConfiguration?.requestsRealtimeMediaAudio == true
-        let legacyAudioFallbackEnabled = peer.requestedStreamConfiguration?.allowsLegacyAudioChunkFallback == true
+        let streamConfiguration = peer.requestedStreamConfiguration
+        let strictMediaFallbacks = streamConfiguration?.allowsDegradedMediaFallbacks == false
+            || streamConfiguration?.requiresExtremePerformanceValidation == true
+        let audioRedirectionEnabled = streamConfiguration?.audioRedirectionEnabled == true
+        let realtimeMediaAudioRequested = streamConfiguration?.requestsRealtimeMediaAudio == true
+        let legacyAudioFallbackEnabled = streamConfiguration?.allowsLegacyAudioChunkFallback == true
         let existingRealtimeAudioSender: RemoteRealtimeMediaAudioSender?
         if #available(macOS 14.0, *) {
             existingRealtimeAudioSender = peer.realtimeAudioSender
@@ -1504,15 +1531,24 @@ public final class RemoteControlManager: BaseManager {
         if legacyAudioFallbackEnabled {
             policy = policy.protectingRealtimeAudio()
         }
-        streamer.onCaptureIssue = { [weak self, weak peer] reason in
+        streamer.onCaptureIssue = { [weak self, weak peer, strictMediaFallbacks] reason in
             guard let self, let peer else { return }
             Task { @MainActor [weak self, weak peer] in
                 guard let self, let peer else { return }
-                self.applyCaptureCompatibilityOverrideIfNeeded(
-                    for: peer,
-                    reason: reason,
-                    activePolicy: policy
-                )
+                if strictMediaFallbacks,
+                   reason.hasPrefix("strict-") || self.captureEncodeStatus(from: reason) != nil {
+                    self.logger.error(
+                        "⛔️ 严格媒体策略禁止远控采集/编码降级或静默重启: peer=\(peer.id, privacy: .public) reason=\(reason, privacy: .public)"
+                    )
+                    return
+                }
+                if !strictMediaFallbacks {
+                    self.applyCaptureCompatibilityOverrideIfNeeded(
+                        for: peer,
+                        reason: reason,
+                        activePolicy: policy
+                    )
+                }
                 await self.restartScreenSharingIfNeeded(for: peer.id, reason: reason)
             }
         }
@@ -1547,7 +1583,7 @@ public final class RemoteControlManager: BaseManager {
         }
         await outboundFramePump.setSyncRefreshHandler { [weak streamer] in
             Task { @MainActor [weak streamer] in
-                streamer?.requestKeyFrameRefresh(reason: "outbound-frame-drop")
+                streamer?.requestKeyFrameRefresh(reason: "outbound-frame-drop", count: 1)
             }
         }
         streamer.onDamageReport = { report in
@@ -1565,13 +1601,31 @@ public final class RemoteControlManager: BaseManager {
         } else {
             streamer.onCapturedAudioChunk = nil
         }
+        let realtimeAudioCaptureStreamerForAttempt: ScreenCaptureKitStreamer?
         if let realtimeAudioSender {
             peer.realtimeAudioSender = realtimeAudioSender
             let realtimePCMSubmissionPipe = RemoteRealtimePCM16SubmissionPipe(sender: realtimeAudioSender)
-            streamer.onCapturedPCM16AudioChunk = { [realtimePCMSubmissionPipe] chunk in
+            let audioStreamer = ScreenCaptureKitStreamer()
+            audioStreamer.onCapturedPCM16AudioChunk = { [realtimePCMSubmissionPipe] chunk in
                 realtimePCMSubmissionPipe.submit(chunk)
             }
+            audioStreamer.onCaptureIssue = { [weak self, weak peer, strictMediaFallbacks] reason in
+                guard let self, let peer else { return }
+                Task { @MainActor [weak self, weak peer] in
+                    guard let self, let peer else { return }
+                    if strictMediaFallbacks {
+                        self.logger.error(
+                            "⛔️ 严格媒体策略禁止 P2P realtime 音频采集降级或静默重启: peer=\(peer.id, privacy: .public) reason=\(reason, privacy: .public)"
+                        )
+                        return
+                    }
+                    await self.restartScreenSharingIfNeeded(for: peer.id, reason: "p2p-realtime-audio-\(reason)")
+                }
+            }
+            realtimeAudioCaptureStreamerForAttempt = audioStreamer
+            streamer.onCapturedPCM16AudioChunk = nil
         } else {
+            realtimeAudioCaptureStreamerForAttempt = nil
             streamer.onCapturedPCM16AudioChunk = nil
         }
         if audioRedirectionEnabled && realtimeMediaAudioRequested && !legacyAudioFallbackEnabled && realtimeAudioSender == nil {
@@ -1594,6 +1648,11 @@ public final class RemoteControlManager: BaseManager {
             legacyAudioFallback=\(legacyAudioFallbackEnabled, privacy: .public) \
             audioCodec=\(preferredAudioEncoding.rawValue, privacy: .public) \
             activeAudioPath=\(activeAudioPath, privacy: .public) \
+            videoCapturesAudio=\(legacyAudioFallbackEnabled, privacy: .public) \
+            realtimeAudioCapture=\(realtimeAudioCaptureStreamerForAttempt == nil ? "none" : "separate-sck", privacy: .public) \
+            mediaFallbackPolicy=\(streamConfiguration?.mediaFallbackPolicy ?? "default", privacy: .public) \
+            strictMediaFallbacks=\(strictMediaFallbacks, privacy: .public) \
+            preserveExactVisibleSize=\(policy.preserveExactVisibleSize, privacy: .public) \
             build=\(Self.remoteControlBuildFingerprint, privacy: .public)
             """
         )
@@ -1606,15 +1665,36 @@ public final class RemoteControlManager: BaseManager {
                 targetFPS: policy.targetFrameRate,
                 keyFrameInterval: policy.keyFrameInterval,
                 captureCursorInVideo: !(peer.requestedStreamConfiguration?.separateCursorChannelEnabled ?? false),
-                captureSystemAudio: legacyAudioFallbackEnabled || realtimeAudioSender != nil,
+                captureSystemAudio: legacyAudioFallbackEnabled,
                 audioEncoding: preferredAudioEncoding,
+                failFastOnMediaFallbacks: strictMediaFallbacks,
+                preserveExactVisibleSize: policy.preserveExactVisibleSize,
                 lowLatencyMode: peer.requestedStreamConfiguration?.lowLatencyMode
                     ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.lowLatencyMode,
                 bitstreamFormat: .annexB
             )
+            if let realtimeAudioCaptureStreamerForAttempt {
+                logger.info(
+                    "🎧 启动独立 P2P realtime 音频采集流，主视频流保持 capturesAudio=false: peer=\(peer.id, privacy: .public)"
+                )
+                try await realtimeAudioCaptureStreamerForAttempt.start(
+                    preferredCodec: .h264,
+                    preferredSize: CGSize(width: 16, height: 16),
+                    targetFPS: 1,
+                    keyFrameInterval: 10,
+                    captureCursorInVideo: false,
+                    captureVideoOutput: false,
+                    captureSystemAudio: true,
+                    audioEncoding: .pcmS16LE,
+                    failFastOnMediaFallbacks: strictMediaFallbacks,
+                    lowLatencyMode: true,
+                    bitstreamFormat: .annexB
+                )
+            }
             guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
                 logger.info("ℹ️ 已忽略过期的屏幕采集启动完成: peer=\(peer.id, privacy: .public)")
                 streamer.stop()
+                realtimeAudioCaptureStreamerForAttempt?.stop()
                 if #available(macOS 14.0, *), let realtimeAudioSender, !didReuseRealtimeAudioSender {
                     await realtimeAudioSender.close()
                     if peer.realtimeAudioSender === realtimeAudioSender {
@@ -1624,6 +1704,7 @@ public final class RemoteControlManager: BaseManager {
                 return
             }
             captureStreamer = streamer
+            realtimeAudioCaptureStreamer = realtimeAudioCaptureStreamerForAttempt
             screenSharingActive = true
             screenCaptureStartupRetryCountByPeerId[peer.id] = 0
             configureClipboardSync(for: peer)
@@ -1688,6 +1769,7 @@ public final class RemoteControlManager: BaseManager {
             guard isCurrentScreenSharingAttempt(attemptGeneration, for: peer) else {
                 logger.info("ℹ️ 已忽略过期的屏幕采集启动错误: peer=\(peer.id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
                 streamer.stop()
+                realtimeAudioCaptureStreamerForAttempt?.stop()
                 if #available(macOS 14.0, *), let realtimeAudioSender, !didReuseRealtimeAudioSender {
                     await realtimeAudioSender.close()
                     if peer.realtimeAudioSender === realtimeAudioSender {
@@ -1699,6 +1781,7 @@ public final class RemoteControlManager: BaseManager {
             logger.error(
                 "❌ 启动 ScreenCaptureKitStreamer 失败: \(error.localizedDescription, privacy: .public). 请确认已在“系统设置 > 隐私与安全 > 录屏与系统录音”中为当前运行的 App 条目授权，必要时完全退出后重开。"
             )
+            realtimeAudioCaptureStreamerForAttempt?.stop()
             if #available(macOS 14.0, *), let realtimeAudioSender, !didReuseRealtimeAudioSender {
                 await realtimeAudioSender.close()
                 if peer.realtimeAudioSender === realtimeAudioSender {
@@ -1825,6 +1908,8 @@ public final class RemoteControlManager: BaseManager {
         screenCaptureWatchdogTask = nil
         captureStreamer?.stop()
         captureStreamer = nil
+        realtimeAudioCaptureStreamer?.stop()
+        realtimeAudioCaptureStreamer = nil
 
         try? await Task.sleep(for: .milliseconds(150))
         await startScreenSharing(to: peer)
@@ -1841,13 +1926,15 @@ public final class RemoteControlManager: BaseManager {
 
         let normalizedSize = RemoteControlCaptureCompatibility.normalizedCaptureSize(
             selectedPolicy.preferredSize,
-            for: override
+            for: override,
+            preserveExactVisibleSize: selectedPolicy.preserveExactVisibleSize
         )
         return RemoteControlStreamPolicy(
             codec: override,
             targetFrameRate: selectedPolicy.targetFrameRate,
             keyFrameInterval: selectedPolicy.keyFrameInterval,
             preferredSize: normalizedSize,
+            preserveExactVisibleSize: selectedPolicy.preserveExactVisibleSize,
             reason: "\(selectedPolicy.reason)+compat-\(Self.codecName(override))"
         )
     }
@@ -2506,10 +2593,11 @@ public final class RemoteControlManager: BaseManager {
 
     private func effectiveStreamRequest(for peer: PeerConnection) -> RemoteControlStreamRequest {
         let settings = RemoteDesktopSettingsManager.shared.settings.displaySettings
-        let adaptiveResolutionEnabled = peer.requestedStreamConfiguration?.adaptiveResolutionEnabled
-            ?? (peer.requestedStreamConfiguration?.width == nil || peer.requestedStreamConfiguration?.height == nil)
+        let streamConfiguration = peer.requestedStreamConfiguration
+        let adaptiveResolutionEnabled = streamConfiguration?.adaptiveResolutionEnabled
+            ?? (streamConfiguration?.width == nil || streamConfiguration?.height == nil)
         let preferredCodec: PreferredVideoCodec = {
-            switch peer.requestedStreamConfiguration?.preferredCodec?.lowercased() {
+            switch streamConfiguration?.preferredCodec?.lowercased() {
             case "h264":
                 return .h264
             case "hevc":
@@ -2520,8 +2608,8 @@ public final class RemoteControlManager: BaseManager {
         }()
         let preferredSize: CGSize = {
             if !adaptiveResolutionEnabled,
-               let width = peer.requestedStreamConfiguration?.width,
-               let height = peer.requestedStreamConfiguration?.height,
+               let width = streamConfiguration?.width,
+               let height = streamConfiguration?.height,
                width > 0,
                height > 0 {
                 return CGSize(width: width, height: height)
@@ -2529,22 +2617,28 @@ public final class RemoteControlManager: BaseManager {
             if adaptiveResolutionEnabled {
                 return adaptiveCaptureSizeForDirectDisplay(
                     preferredCodec: preferredCodec,
-                    lowLatencyMode: peer.requestedStreamConfiguration?.lowLatencyMode ?? settings.lowLatencyMode,
-                    enableHardwareAcceleration: peer.requestedStreamConfiguration?.enableHardwareAcceleration ?? settings.enableHardwareAcceleration,
-                    enableAppleSiliconOptimization: peer.requestedStreamConfiguration?.enableAppleSiliconOptimization ?? settings.enableAppleSiliconOptimization
+                    lowLatencyMode: streamConfiguration?.lowLatencyMode ?? settings.lowLatencyMode,
+                    enableHardwareAcceleration: streamConfiguration?.enableHardwareAcceleration ?? settings.enableHardwareAcceleration,
+                    enableAppleSiliconOptimization: streamConfiguration?.enableAppleSiliconOptimization ?? settings.enableAppleSiliconOptimization
                 )
             }
             return preferredCaptureSize(for: settings.resolution)
         }()
+        let exactResolutionRequested = !adaptiveResolutionEnabled
+            && (streamConfiguration?.width ?? 0) > 0
+            && (streamConfiguration?.height ?? 0) > 0
+        let preserveExactVisibleSize = exactResolutionRequested
+            && streamConfiguration?.requiresExtremePerformanceValidation == true
 
         return RemoteControlStreamRequest(
             preferredSize: preferredSize,
             preferredCodec: preferredCodec,
-            targetFrameRate: max(12, min(peer.requestedStreamConfiguration?.targetFrameRate ?? settings.targetFrameRate, 120)),
-            keyFrameInterval: max(10, min(peer.requestedStreamConfiguration?.keyFrameInterval ?? settings.keyFrameInterval, 240)),
-            lowLatencyMode: peer.requestedStreamConfiguration?.lowLatencyMode ?? settings.lowLatencyMode,
-            enableHardwareAcceleration: peer.requestedStreamConfiguration?.enableHardwareAcceleration ?? settings.enableHardwareAcceleration,
-            enableAppleSiliconOptimization: peer.requestedStreamConfiguration?.enableAppleSiliconOptimization ?? settings.enableAppleSiliconOptimization
+            targetFrameRate: max(12, min(streamConfiguration?.targetFrameRate ?? settings.targetFrameRate, 120)),
+            keyFrameInterval: max(10, min(streamConfiguration?.keyFrameInterval ?? settings.keyFrameInterval, 240)),
+            lowLatencyMode: streamConfiguration?.lowLatencyMode ?? settings.lowLatencyMode,
+            enableHardwareAcceleration: streamConfiguration?.enableHardwareAcceleration ?? settings.enableHardwareAcceleration,
+            enableAppleSiliconOptimization: streamConfiguration?.enableAppleSiliconOptimization ?? settings.enableAppleSiliconOptimization,
+            preserveExactVisibleSize: preserveExactVisibleSize
         )
     }
 
@@ -3173,9 +3267,19 @@ public final class RemoteControlManager: BaseManager {
                     }
                     captureStreamer?.stop()
                     captureStreamer = nil
+                    realtimeAudioCaptureStreamer?.stop()
+                    realtimeAudioCaptureStreamer = nil
                     await startScreenSharing(to: peer)
                 } else if requestedRefresh {
-                    captureStreamer?.requestKeyFrameRefresh(reason: "viewer-stream-refresh")
+                    let now = Date()
+                    if now.timeIntervalSince(peer.lastViewerStreamRefreshAt) >= 2.0 {
+                        peer.lastViewerStreamRefreshAt = now
+                        captureStreamer?.requestKeyFrameRefresh(reason: "viewer-stream-refresh", count: 1)
+                    } else {
+                        logger.debug(
+                            "ℹ️ 已抑制过密 viewer 关键帧刷新请求: peer=\(peer.id, privacy: .public)"
+                        )
+                    }
                 }
                 startInteractionTelemetryIfNeeded(for: peer)
             }

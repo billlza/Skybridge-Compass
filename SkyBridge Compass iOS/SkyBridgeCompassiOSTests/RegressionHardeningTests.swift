@@ -368,6 +368,35 @@ final class RegressionHardeningTests: XCTestCase {
         return try String(contentsOf: sourceURL, encoding: .utf8)
     }
 
+    private func authenticationManagerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/AuthenticationManager.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func remoteDesktopViewSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func repositoryScriptSource(_ relativePath: String) throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repoRoot.appendingPathComponent(relativePath)
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
     private func webRTCSessionSource() throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -386,13 +415,7 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     func testRemoteDesktopSelectionOverlayIsDiagnosticOnlyByDefault() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let sourceURL = root.appendingPathComponent(
-            "SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"
-        )
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try remoteDesktopViewSource()
 
         XCTAssertTrue(
             source.contains("SkyBridgeRemoteDesktopShowInteractionOverlay"),
@@ -405,6 +428,115 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertFalse(
             source.contains("overlayPayload: remoteDesktopManager.currentOverlayPayload"),
             "Viewer must not pass selection rects straight into the renderer by default; this caused the visible brown/yellow box."
+        )
+    }
+
+    func testP2PRealDeviceSmokeRequiresVisibleRemoteDesktopView() throws {
+        let appSource = try skyBridgeCompassAppSource()
+        let authSource = try authenticationManagerSource()
+        let remoteViewSource = try remoteDesktopViewSource()
+        let scriptSource = try repositoryScriptSource("Scripts/run_real_device_p2p_remote_smoke.sh")
+
+        XCTAssertTrue(authSource.contains("shouldAutoAuthenticateAsGuestForP2PSmoke"))
+        XCTAssertTrue(authSource.contains("environment[\"SKYBRIDGE_SMOKE_ROLE\"] == \"ios-p2p-client\""))
+        XCTAssertTrue(authSource.contains("environment[\"SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB\"] == \"1\""))
+        XCTAssertTrue(authSource.contains("environment[\"SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW\"] == \"1\""))
+        XCTAssertTrue(authSource.contains("applyP2PSmokeGuestSession()"))
+
+        XCTAssertTrue(remoteViewSource.contains("shouldAutoConnectP2PSmoke"))
+        XCTAssertTrue(remoteViewSource.contains("attemptAutoConnectP2PSmoke()"))
+        XCTAssertTrue(remoteViewSource.contains("connectToDevice(connection)"))
+
+        XCTAssertTrue(appSource.contains("requiresVisibleRemoteView"))
+        XCTAssertTrue(appSource.contains("remote-desktop ui-gate waiting-for-RemoteDesktopView"))
+        XCTAssertTrue(appSource.contains("snapshot.hasActivePresentationOwner"))
+        XCTAssertTrue(appSource.contains("uiSurface=\\(snapshot.hasActivePresentationOwner ? \"remoteDesktopView\" : \"none\")"))
+
+        XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB\": \"1\""))
+        XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW\": \"1\""))
+    }
+
+    func testP2PRealDeviceSmokeRejectsFlippedMetalRenderOrientation() throws {
+        let appSource = try skyBridgeCompassAppSource()
+        let managerSource = try remoteDesktopManagerSource()
+        let remoteViewSource = try remoteDesktopViewSource()
+        let scriptSource = try repositoryScriptSource("Scripts/run_real_device_p2p_remote_smoke.sh")
+
+        XCTAssertTrue(managerSource.contains("public enum RemoteDesktopRenderOrientation"))
+        XCTAssertTrue(managerSource.contains("@Published public private(set) var renderOrientationStatus"))
+        XCTAssertTrue(managerSource.contains("renderOrientation: renderOrientationStatus"))
+        XCTAssertTrue(appSource.contains("expectedRenderOrientation"))
+        XCTAssertTrue(appSource.contains("snapshot.renderOrientation == expectedRenderOrientation"))
+        XCTAssertTrue(appSource.contains("renderOrientation=\\(snapshot.renderOrientation.rawValue)"))
+
+        XCTAssertTrue(remoteViewSource.contains("let uprightTransform = CGAffineTransform("))
+        XCTAssertTrue(remoteViewSource.contains("d: scaleY"))
+        XCTAssertFalse(remoteViewSource.contains("d: -scaleY"))
+        XCTAssertTrue(remoteViewSource.contains("orientation=upright"))
+
+        XCTAssertTrue(scriptSource.contains("SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION"))
+        XCTAssertTrue(scriptSource.contains("renderOrientation=${SMOKE_EXPECT_RENDER_ORIENTATION}"))
+        XCTAssertTrue(scriptSource.contains("orientation=verticalFlip"))
+        XCTAssertTrue(scriptSource.contains("renderOrientation=verticalFlip"))
+    }
+
+    func testStrictRemoteDesktopMediaPolicyRejectsStaticRenderFallbacks() throws {
+        let source = try remoteDesktopManagerSource()
+        let cgImageFallbackBody = try sourceSlice(
+            from: "private func activateCGImageFallbackForDecodedVideo()",
+            to: "private func maybeRestoreMetalRendererAfterStableSampleBuffer",
+            in: source
+        )
+        let decodedOutputBody = try sourceSlice(
+            from: "private func applyDecodedOutput(",
+            to: "private func startDecodeLoopIfNeeded()",
+            in: source
+        )
+        let cgImagePixelBufferBranch = try sourceSlice(
+            from: "case .cgImage:",
+            to: "case .sampleBuffer(let frame):",
+            in: decodedOutputBody
+        )
+
+        XCTAssertTrue(source.contains("private var remoteDesktopRenderFallbackForbidden"))
+        XCTAssertTrue(cgImageFallbackBody.contains("cgimage-fallback-forbidden"))
+        XCTAssertTrue(cgImageFallbackBody.contains("updateRenderPipeline(.sampleBufferDisplayLayer)"))
+        XCTAssertTrue(decodedOutputBody.contains("static-image-fallback-forbidden"))
+        XCTAssertTrue(cgImagePixelBufferBranch.contains("guard !remoteDesktopRenderFallbackForbidden else"))
+        XCTAssertTrue(cgImagePixelBufferBranch.contains("cgimage-pixelbuffer-fallback-forbidden"))
+
+        let guardIndex = try XCTUnwrap(
+            cgImagePixelBufferBranch.range(of: "guard !remoteDesktopRenderFallbackForbidden else")?.lowerBound
+        )
+        let stillImageIndex = try XCTUnwrap(
+            cgImagePixelBufferBranch.range(of: "updateRenderPipeline(.stillImageFallback)")?.lowerBound
+        )
+        XCTAssertLessThan(
+            guardIndex,
+            stillImageIndex,
+            "Strict media mode must reject CGImage pixel-buffer fallback before it can mark the pipeline as stillImageFallback."
+        )
+    }
+
+    func testLANStreamRefreshIsThrottledUnderDecodeBackpressure() throws {
+        let source = try remoteDesktopManagerSource()
+        let body = try sourceSlice(
+            from: "private func requestStreamRefreshIfNeeded(",
+            to: "private func handleCodecGovernanceEvent(",
+            in: source
+        )
+
+        XCTAssertTrue(
+            source.contains("private let lanStreamRefreshMinimumInterval: TimeInterval = 2.0"),
+            "LAN/P2P decode backpressure must not send refresh tokens several times per second."
+        )
+        XCTAssertTrue(
+            body.contains("activeTransportMode == .lan\n            ? max(minimumInterval, lanStreamRefreshMinimumInterval)"),
+            "LAN/P2P stream refreshes should enforce the shared minimum interval even when callers ask for 0.25s."
+        )
+        XCTAssertTrue(
+            source.contains("requestStreamRefreshIfNeeded(reason: \"decode-queue-overflow\", minimumInterval: 0.25)"),
+            "The decode overflow recovery path should still request a refresh, but the LAN throttle must bound it."
         )
     }
 
@@ -940,6 +1072,44 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(payload.audioChannelCount, 2)
     }
 
+    func testStrictVideoValidationDoesNotForceRealtimeAudioLowLatencyMode() throws {
+        let source = try remoteDesktopManagerSource()
+        let configBody = try sourceSlice(
+            from: "func makeViewerStreamConfigurationPayload(\n        refreshStream: Bool,",
+            to: "private func smokeRequestedStreamDimensions()",
+            in: source
+        )
+        let pushBody = try sourceSlice(
+            from: "private func pushViewerStreamConfiguration(",
+            to: "private func sendViewerStreamConfigurationPayload(",
+            in: source
+        )
+
+        XCTAssertTrue(configBody.contains("let videoLowLatencyMode = viewerSettings.lowLatencyMode || strictMediaValidationEnabled"))
+        XCTAssertTrue(configBody.contains("let realtimeMediaAudioMode = preferredRealtimeMediaAudioMode()"))
+        XCTAssertTrue(configBody.contains("audioMode: realtimeMediaAudioMode.rawValue"))
+        XCTAssertFalse(
+            configBody.contains("audioMode: lowLatencyMode ? \"low-latency\" : \"high-fidelity\""),
+            "Strict 2K60 video validation must not silently switch the host audio sender into duplicate low-latency datagram mode while the receiver is high-fidelity."
+        )
+        XCTAssertTrue(pushBody.contains("let mediaAudioMode = preferredRealtimeMediaAudioMode()"))
+    }
+
+    func testP2PRemoteSmokeRejectsDuplicateRealtimeAudioDatagrams() throws {
+        let source = try skyBridgeCompassAppSource()
+        let body = try sourceSlice(
+            from: "private func performRemoteDesktopSmoke(",
+            to: "private func activeP2PSmokeSummary()",
+            in: source
+        )
+
+        XCTAssertTrue(body.contains("(audio?.datagramsSeen ?? 0) > 0"))
+        XCTAssertTrue(body.contains("(audio?.replayRejectedPackets ?? 0) == 0"))
+        XCTAssertTrue(body.contains("(audio?.jitterEvictedPackets ?? 0) == 0"))
+        XCTAssertTrue(body.contains("audioRxReplayRejected="))
+        XCTAssertTrue(body.contains("audioRxJitterEvicted="))
+    }
+
     func testPQCRealtimeAudioReceiverUsesOpusRingBufferPath() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1127,7 +1297,7 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertTrue(handleScreenDataBody.contains("dropReason=native-warmup-non-jpeg-fallback"))
     }
 
-    func testNativeWarmupFallbackGuardAcceptsOnlyJPEGUntilVisibleNativeRender() {
+    func testNativeWarmupFallbackGuardDropsAllFallbackBeforeVisibleNativeRender() {
         XCTAssertTrue(
             RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 activeTransportModeIsCrossNetwork: true,
@@ -1144,7 +1314,7 @@ final class RegressionHardeningTests: XCTestCase {
                 format: "h264"
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 activeTransportModeIsCrossNetwork: true,
                 hasRemoteNativeVideoTrack: true,
@@ -1152,7 +1322,7 @@ final class RegressionHardeningTests: XCTestCase {
                 format: "jpeg"
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 activeTransportModeIsCrossNetwork: true,
                 hasRemoteNativeVideoTrack: true,
@@ -1239,6 +1409,9 @@ final class RegressionHardeningTests: XCTestCase {
             "Receiver stats, heartbeat renderer, and packet evidence must not set promotion-ready before actual visible native render evidence."
         )
         XCTAssertTrue(renderedFrameBody.contains("renderEpoch: UInt64?"))
+        XCTAssertTrue(renderedFrameBody.contains("uiSurface: String"))
+        XCTAssertTrue(renderedFrameBody.contains("nativeRenderUISurface = uiSurface"))
+        XCTAssertTrue(renderedFrameBody.contains("uiSurface=\\(uiSurface)"))
         XCTAssertTrue(renderedFrameBody.contains("guard let renderEpoch,"))
         XCTAssertTrue(renderedFrameBody.contains("renderEpoch == remoteVideoTrackRenderEpoch"))
         XCTAssertTrue(renderedFrameBody.contains("ignore stale native render evidence"))
@@ -1462,7 +1635,7 @@ final class RegressionHardeningTests: XCTestCase {
         )
     }
 
-    func testVideoRefreshPayloadOmitsAudioEndpointAndAdvertisesJPEGOnlyWarmupFallback() throws {
+    func testVideoRefreshPayloadPreservesLANAudioEndpointAndForbidsFallback() throws {
         let source = try remoteDesktopManagerSource()
         let pushBody = try sourceSlice(
             from: "private func pushViewerStreamConfiguration(force: Bool, refreshStream: Bool = false) async",
@@ -1475,15 +1648,18 @@ final class RegressionHardeningTests: XCTestCase {
             in: source
         )
 
-        XCTAssertTrue(pushBody.contains("let includeAudioEndpointInStreamConfig = !refreshStream"))
+        XCTAssertTrue(pushBody.contains("&& (activeTransportMode == .lan || !refreshStream || lastSentStreamConfiguration?.mediaAudioEndpoint == nil)"))
         XCTAssertTrue(pushBody.contains("mediaAudioEndpoint: includeAudioEndpointInStreamConfig ? mediaAudioBinding?.endpoint : nil"))
         XCTAssertTrue(pushBody.contains("mediaSessionId: includeAudioEndpointInStreamConfig ? mediaAudioBinding?.mediaSessionId : nil"))
         XCTAssertTrue(pushBody.contains("if includeAudioEndpointInStreamConfig, payload.mediaAudioEndpoint != nil"))
         XCTAssertTrue(source.contains("func handleCrossNetworkNativeVideoWarmupEvidence(reason: String)"))
         XCTAssertTrue(source.contains("await self?.pushViewerStreamConfiguration(force: true, refreshStream: true)"))
-        XCTAssertTrue(payloadBody.contains("shouldUseJPEGOnlyFallbackDuringNativeWarmup"))
-        XCTAssertTrue(payloadBody.contains("? [\"jpeg\"]"))
-        XCTAssertTrue(payloadBody.contains("? \"jpeg\""))
+        XCTAssertFalse(payloadBody.contains("shouldUseJPEGOnlyFallbackDuringNativeWarmup"))
+        XCTAssertFalse(payloadBody.contains("? [\"jpeg\"]"))
+        XCTAssertFalse(payloadBody.contains("? \"jpeg\""))
+        XCTAssertTrue(payloadBody.contains("screenFrameTransport: activeTransportMode == .crossNetwork\n                ? \"webrtc-native-main\""))
+        XCTAssertTrue(payloadBody.contains("screenDataChannelEnabled: activeTransportMode != .crossNetwork"))
+        XCTAssertTrue(payloadBody.contains("mediaFallbackPolicy: activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\""))
         XCTAssertTrue(payloadBody.contains("nativeVideoTrackReady: Self.advertisedCrossNetworkNativeVideoReadyFlag"))
     }
 
@@ -2347,7 +2523,7 @@ final class RegressionHardeningTests: XCTestCase {
 
         var fluid = RemoteDesktopViewerSettings()
         fluid.applyPreset(.fluid)
-        XCTAssertFalse(
+        XCTAssertTrue(
             RemoteDesktopManager.shouldRequestExtremeMediaValidation(
                 activeTransportModeIsCrossNetwork: true,
                 viewerSettings: fluid,

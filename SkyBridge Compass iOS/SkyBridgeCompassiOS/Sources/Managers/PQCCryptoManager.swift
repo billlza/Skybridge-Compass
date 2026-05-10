@@ -32,7 +32,12 @@ public class PQCCryptoManager: ObservableObject {
     }
     /// 兼容旧设备：允许在 PQC 握手失败时回退 classic（不推荐；论文/26.2 默认关闭）
     @Published public var allowClassicFallbackForCompatibility: Bool = false {
-        didSet { UserDefaults.standard.set(allowClassicFallbackForCompatibility, forKey: "pqc_allow_classic_fallback") }
+        didSet {
+            if allowClassicFallbackForCompatibility {
+                allowClassicFallbackForCompatibility = false
+            }
+            UserDefaults.standard.set(false, forKey: "pqc_allow_classic_fallback")
+        }
     }
     @Published public var autoKeyRotation: Bool = false
     @Published public var keyRotationDays: Int = 30
@@ -63,7 +68,8 @@ public class PQCCryptoManager: ObservableObject {
         self.currentSuite = cryptoProvider.activeSuite
         
         loadKeysFromKeychain()
-        allowClassicFallbackForCompatibility = UserDefaults.standard.bool(forKey: "pqc_allow_classic_fallback")
+        UserDefaults.standard.set(false, forKey: "pqc_allow_classic_fallback")
+        allowClassicFallbackForCompatibility = false
     }
     
     // MARK: - Public Methods
@@ -90,11 +96,7 @@ public class PQCCryptoManager: ObservableObject {
         allowClassicFallbackForCompatibility: Bool
     ) -> CryptoProviderFactory.SelectionPolicy {
         guard enforcePQC else { return .classicOnly }
-        // 26.2 默认严格：requirePQC（禁降级）。若用户启用兼容开关，则改为 preferPQC。
-        if #available(iOS 26.0, *) {
-            return allowClassicFallbackForCompatibility ? .preferPQC : .requirePQC
-        }
-        return .preferPQC
+        return .requirePQC
     }
 
     private nonisolated static func generateAndPersistPrimaryKeyPairs(

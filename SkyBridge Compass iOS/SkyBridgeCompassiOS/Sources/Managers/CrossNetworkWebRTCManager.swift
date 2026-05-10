@@ -1563,6 +1563,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var remoteVideoTrackHasRenderedFrame = false
     @Published public private(set) var remoteVideoTrackHasReceiverFrameEvidence = false
     @Published public private(set) var nativeRenderEvidenceSource: String?
+    @Published public private(set) var nativeRenderUISurface: String?
     @Published public private(set) var nativePromotionState = "idle"
     @Published public private(set) var nativeVideoProbeActive = false
     @Published public private(set) var remoteVideoTrackFrameSize: CGSize = .zero
@@ -3115,6 +3116,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteVideoTrackHasRenderedFrame = false
         remoteVideoTrackHasReceiverFrameEvidence = false
         nativeRenderEvidenceSource = nil
+        nativeRenderUISurface = nil
         nativePromotionState = "idle"
         nativeVideoProbeTask?.cancel()
         nativeVideoProbeTask = nil
@@ -3262,6 +3264,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteVideoTrackHasRenderedFrame = false
         remoteVideoTrackHasReceiverFrameEvidence = shouldPreservePacketEvidence ? preservedReceiverFrameEvidence : false
         nativeRenderEvidenceSource = nil
+        nativeRenderUISurface = nil
         nativePromotionState = shouldPreservePacketEvidence ? "track-rebound" : "track-installed"
         remoteVideoTrackFrameSize = shouldPreservePacketEvidence ? preservedFrameSize : .zero
         remoteVideoTrackHasReceivedFirstPacket = shouldPreservePacketEvidence ? preservedFirstPacket : false
@@ -3274,6 +3277,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             remoteVideoTrackReadyForPromotion = false
             remoteVideoTrackHasReceiverFrameEvidence = false
             nativeRenderEvidenceSource = nil
+            nativeRenderUISurface = nil
             nativePromotionState = "idle"
             remoteVideoTrackHasReceivedFirstPacket = false
             nativeVideoProbeActive = false
@@ -3412,18 +3416,31 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     @MainActor
     func noteRemoteVideoTrackRenderedFrame(_ size: CGSize, source: String) {
-        noteRemoteVideoTrackRenderedFrame(size, source: source, trackId: nil, renderEpoch: nil)
+        noteRemoteVideoTrackRenderedFrame(
+            size,
+            source: source,
+            uiSurface: "unknown",
+            trackId: nil,
+            renderEpoch: nil
+        )
     }
 
     @MainActor
     func noteRemoteVideoTrackRenderedFrame(_ size: CGSize, source: String, trackId: String?) {
-        noteRemoteVideoTrackRenderedFrame(size, source: source, trackId: trackId, renderEpoch: nil)
+        noteRemoteVideoTrackRenderedFrame(
+            size,
+            source: source,
+            uiSurface: "unknown",
+            trackId: trackId,
+            renderEpoch: nil
+        )
     }
 
     @MainActor
     func noteRemoteVideoTrackRenderedFrame(
         _ size: CGSize,
         source: String,
+        uiSurface: String,
         trackId: String?,
         renderEpoch: UInt64?
     ) {
@@ -3500,12 +3517,14 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         guard Self.isActualNativeRenderEvidence(source: source) else { return }
         nativeRenderEvidenceSource = source
+        nativeRenderUISurface = uiSurface
         nativePromotionState = "visible-render-evidence"
         finishNativeRenderProbeAfterVisibleFrame()
         appendNativeRenderFrameTraceIfNeeded(
             visibleSize: visibleSize,
             codedSize: codedSize,
-            source: source
+            source: source,
+            uiSurface: uiSurface
         )
         markRemoteVideoTrackReadyForPromotion(size: visibleSize, source: source)
         remoteVideoTrackConfirmationTask?.cancel()
@@ -3533,12 +3552,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private func appendNativeRenderFrameTraceIfNeeded(
         visibleSize: CGSize,
         codedSize: CGSize,
-        source: String
+        source: String,
+        uiSurface: String
     ) {
         guard remoteVideoTrackVisibleRenderTraceEpoch != remoteVideoTrackRenderEpoch else { return }
         remoteVideoTrackVisibleRenderTraceEpoch = remoteVideoTrackRenderEpoch
         SkyBridgeSmokeTraceWriter.appendStatus(
-            "native-render-frame session=\(currentSessionId ?? "-") size=\(Int(visibleSize.width))x\(Int(visibleSize.height)) visibleSize=\(Int(visibleSize.width))x\(Int(visibleSize.height)) codedSize=\(Int(codedSize.width))x\(Int(codedSize.height)) source=\(source) nativeRenderEvidenceSource=\(source) nativePromotionState=\(nativePromotionState)"
+            "native-render-frame session=\(currentSessionId ?? "-") size=\(Int(visibleSize.width))x\(Int(visibleSize.height)) visibleSize=\(Int(visibleSize.width))x\(Int(visibleSize.height)) codedSize=\(Int(codedSize.width))x\(Int(codedSize.height)) source=\(source) nativeRenderEvidenceSource=\(source) nativePromotionState=\(nativePromotionState) uiSurface=\(uiSurface)"
         )
     }
 
@@ -6613,16 +6633,9 @@ private extension CrossNetworkWebRTCManager {
                 break
             }
             let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty
-            let useClassicAuthorityBootstrap = Self.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
-                sessionId: sessionId,
-                authorityBoundBootstrapSessionIds: authorityBoundWebRTCBootstrapSessionIds,
-                expectedRemoteAuthorityAlgorithm: currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolSigningAlgorithm,
-                localConnectionSessionId: localConnectionSessionId
-            )
+            let useClassicAuthorityBootstrap = false
             let selection: CryptoProviderFactory.SelectionPolicy
-            if useClassicAuthorityBootstrap {
-                selection = .classicOnly
-            } else if !hasTrustedPeerKEMKey {
+            if !hasTrustedPeerKEMKey {
                 if strictPQCRequested {
                     let message =
                         "严格 PQC 已启用，但跨网对端缺少已信任的 KEM 公钥；当前已拒绝 classic bootstrap。peer=\(peerDeviceId)"
@@ -6650,7 +6663,7 @@ private extension CrossNetworkWebRTCManager {
                     )
                 }
             } else {
-                selection = .preferPQC
+                selection = .requirePQC
             }
             SkyBridgeLogger.shared.info(
                 "🤝 WebRTC handshake bootstrap: session=\(sessionId), policy=\(selection.rawValue), " +
@@ -6716,35 +6729,6 @@ private extension CrossNetworkWebRTCManager {
 
             self.sessionKeys = keys
             self.handshakeDriver = nil
-            let isStrictClassicAuthorityBootstrap =
-                strictPQCRequested && useClassicAuthorityBootstrap && !keys.negotiatedSuite.isPQCGroup
-            if isStrictClassicAuthorityBootstrap {
-                self.lastRekeyEvent = "bootstrapOnly suite=\(keys.negotiatedSuite.rawValue)"
-                self.markStrictPQCClassicBootstrapOnly(sessionId: sessionId, session: session)
-                SkyBridgeLogger.shared.warning(
-                    "⏳ WebRTC strictPQC classic authority bootstrap is bootstrap-only: session=\(sessionId), event=pqcRekeyPending suite=\(keys.negotiatedSuite.rawValue)"
-                )
-                do {
-                    try await sendPairingIdentityExchangeOverWebRTC(
-                        sessionId: sessionId,
-                        peerDeviceId: peerDeviceId,
-                        session: session,
-                        force: true
-                    )
-                } catch {
-                    SkyBridgeLogger.shared.warning(
-                        "⚠️ WebRTC strictPQC bootstrap pairingIdentityExchange send failed: session=\(sessionId), err=\(error.localizedDescription)"
-                    )
-                }
-                await maybeStartPQCRekeyOverWebRTC(
-                    sessionId: sessionId,
-                    peerDeviceId: peerDeviceId,
-                    session: session,
-                    strictPQCRequested: strictPQCRequested,
-                    trigger: "post_bootstrap"
-                )
-                return
-            }
             if self.currentSessionId == sessionId {
                 // Paper-aligned contract:
                 // WebRTC DataChannel ready is only transportReady; connected must wait for handshakeComplete.
@@ -6836,9 +6820,7 @@ private extension CrossNetworkWebRTCManager {
     }
 
     func shouldRequestStrictPQC(compatibilityModeEnabled: Bool) -> Bool {
-        if compatibilityModeEnabled { return false }
-        if #available(iOS 26.0, *) { return true }
-        return false
+        true
     }
 
     private static func shouldRetryClassicBootstrap(after error: Error) -> Bool {

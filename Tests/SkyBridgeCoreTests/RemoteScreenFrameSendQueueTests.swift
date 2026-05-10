@@ -2,6 +2,12 @@ import XCTest
 @testable import SkyBridgeCore
 
 final class RemoteScreenFrameSendQueueTests: XCTestCase {
+    func testDefaultQueueDepthAbsorbsHighFpsHevcSendJitter() {
+        let queue = RemoteScreenFrameSendQueue()
+
+        XCTAssertEqual(queue.maxQueuedFrames, 12)
+    }
+
     func testQueueRequestsSyncRefreshWhenPredictiveFrameOverflows() {
         var queue = RemoteScreenFrameSendQueue(maxQueuedFrames: 2)
 

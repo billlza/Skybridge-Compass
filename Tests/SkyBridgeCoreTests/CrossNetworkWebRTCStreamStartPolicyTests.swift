@@ -330,7 +330,7 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         )
         XCTAssertFalse(
             source.contains("format=webrtc-native-video-warmup"),
-            "Fallback should keep sending SBRF/JPEG frames instead of flapping the advertised stream format while native RTP is unhealthy."
+            "Strict WebRTC startup must wait for native video instead of advertising a warmup fallback format."
         )
         XCTAssertTrue(source.contains("shouldDropNativeWarmupNonJPEGFallbackFrame"))
         XCTAssertTrue(source.contains("dropReason=native-warmup-non-jpeg-fallback"))
@@ -349,11 +349,13 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("realtime-audio-main-path-unavailable"))
         XCTAssertTrue(source.contains("pqc-media-audio-sender-unavailable"))
         XCTAssertTrue(source.contains("if failFastMediaFallbacks {\n                            recordStrictMediaValidationFailure(\n                                reason: \"screen-frame-whole-budget-exceeded\""))
-        XCTAssertTrue(source.contains("if failFastMediaFallbacks {\n                                    recordStrictMediaValidationFailure(\n                                        reason: \"realtime-audio-main-path-unavailable\""))
+        XCTAssertTrue(source.contains("audioTxAttachRetryScheduled session="))
+        XCTAssertTrue(source.contains("strictRealtimeAudioAttachRetryWindowSeconds"))
+        XCTAssertTrue(source.contains("reason: \"realtime-audio-main-path-unavailable\""))
     }
 
     @MainActor
-    func testNativeWarmupScreenChannelFinalGateDropsOnlyNonJPEGFallback() {
+    func testNativeWarmupScreenChannelFinalGateDropsAllFallback() {
         XCTAssertTrue(
             CrossNetworkConnectionManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 supportsNativeVideoTrack: true,
@@ -368,14 +370,14 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
                 format: "h264"
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             CrossNetworkConnectionManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 supportsNativeVideoTrack: true,
                 nativeVideoTrackReady: false,
                 format: "jpeg"
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             CrossNetworkConnectionManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 supportsNativeVideoTrack: true,
                 nativeVideoTrackReady: false,
@@ -891,7 +893,7 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         )
         XCTAssertFalse(explicitDegradedConfig.requiresExtremePerformanceValidation)
         XCTAssertTrue(explicitDegradedConfig.allowsDegradedMediaFallbacks)
-        XCTAssertFalse(
+        XCTAssertTrue(
             CrossNetworkConnectionManager.shouldFailFastRemoteMediaFallbacks(
                 remoteStreamConfiguration: explicitDegradedConfig
             )

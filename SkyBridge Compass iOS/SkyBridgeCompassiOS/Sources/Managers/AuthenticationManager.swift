@@ -40,6 +40,21 @@ public class AuthenticationManager: ObservableObject {
         ProcessInfo.processInfo.arguments.contains("UITEST_AUTH_GUEST")
     }
 
+    private static var shouldUseSmokeRemoteDesktopSession: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-client"
+            && environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
+            && environment["SKYBRIDGE_ACCESS_TOKEN"]?.isEmpty == false
+    }
+
+    private static var shouldAutoAuthenticateAsGuestForP2PSmoke: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-p2p-client"
+            && environment["SKYBRIDGE_SMOKE_EXPECT_REMOTE_DESKTOP"] == "1"
+            && environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
+            && environment["SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW"] == "1"
+    }
+
     private static var appleSignInLaunchReady: Bool {
         if let override = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_SIGN_IN"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -80,6 +95,14 @@ public class AuthenticationManager: ObservableObject {
         }
         if Self.shouldAutoAuthenticateAsGuestForUITests {
             applyUITestGuestSession()
+            return
+        }
+        if Self.shouldUseSmokeRemoteDesktopSession {
+            applySmokeRemoteDesktopSession()
+            return
+        }
+        if Self.shouldAutoAuthenticateAsGuestForP2PSmoke {
+            applyP2PSmokeGuestSession()
             return
         }
         if Self.shouldResetStateForUITests {
@@ -724,6 +747,49 @@ public class AuthenticationManager: ObservableObject {
         isAuthenticated = true
         isGuestMode = true
         session = nil
+    }
+
+    private func applyP2PSmokeGuestSession() {
+        currentUser = User(
+            id: "p2p-smoke-guest",
+            email: "p2p-smoke@skybridge.local",
+            displayName: "P2P Smoke"
+        )
+        isAuthenticated = true
+        isGuestMode = true
+        session = nil
+        SkyBridgeLogger.shared.info("🧪 P2P smoke guest session installed for visible RemoteDesktopView path")
+    }
+
+    private func applySmokeRemoteDesktopSession() {
+        let environment = ProcessInfo.processInfo.environment
+        let deviceID = environment["SKYBRIDGE_DEVICE_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let userIdentifier = deviceID?.isEmpty == false ? deviceID! : "smoke-ios-viewer"
+        let accessToken = environment["SKYBRIDGE_ACCESS_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "smoke_access_token"
+        let tenantID = environment["SKYBRIDGE_TENANT_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = "Smoke Remote Viewer"
+
+        currentUser = User(
+            id: userIdentifier,
+            email: "smoke@skybridge.local",
+            displayName: displayName,
+            nebulaId: tenantID?.isEmpty == false ? tenantID : nil
+        )
+        session = AuthSession(
+            accessToken: accessToken,
+            refreshToken: nil,
+            userIdentifier: userIdentifier,
+            displayName: displayName,
+            email: "smoke@skybridge.local",
+            nebulaId: tenantID?.isEmpty == false ? tenantID : nil,
+            issuedAt: Date()
+        )
+        isAuthenticated = true
+        isGuestMode = false
+        SkyBridgeLogger.shared.info("🧪 Smoke remote desktop session installed for real Dashboard path")
     }
 
     private func applySession(_ session: AuthSession, emailFallback: String) {

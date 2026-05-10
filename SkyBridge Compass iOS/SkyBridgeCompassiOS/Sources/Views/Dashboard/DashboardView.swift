@@ -27,8 +27,8 @@ public struct DashboardView: View {
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @EnvironmentObject private var authManager: AuthenticationManager
 
-    @State private var selectedTab: DashboardTab = .home
-    @State private var loadedTabs: Set<DashboardTab> = [.home]
+    @State private var selectedTab: DashboardTab = Self.initialSelectedTab
+    @State private var loadedTabs: Set<DashboardTab> = [Self.initialSelectedTab]
     @State private var enableAnimatedBackground = false
     @State private var enableWeatherEffects = false
     @State private var showingQRScanner = false
@@ -41,6 +41,12 @@ public struct DashboardView: View {
 
     private var isUITesting: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
+    }
+
+    private static var initialSelectedTab: DashboardTab {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB"] == "1"
+            ? .remote
+            : .home
     }
     
     // MARK: - Body

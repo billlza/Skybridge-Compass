@@ -718,17 +718,11 @@ public struct HandshakePolicy: Sendable, Equatable, Codable {
         requireSecureEnclavePoP: false
     )
 
-    /// 推荐默认策略（用于 26.2 对齐）：
-    /// - macOS/iOS 26+ 且未开启兼容模式：strictPQC（禁止 classic fallback）
-    /// - 其他情况：default（允许 classic fallback）
+    /// 推荐默认策略：
+    /// - strictPQC（禁止 classic fallback）
+    /// - compatibilityModeEnabled 仅保留为调用点兼容参数，不再弱化握手策略。
     public static func recommendedDefault(compatibilityModeEnabled: Bool) -> HandshakePolicy {
-        if compatibilityModeEnabled {
-            return .default
-        }
-        if #available(iOS 26.0, macOS 26.0, *) {
-            return .strictPQC
-        }
-        return .default
+        .strictPQC
     }
 
  /// 确定性编码（用于 Transcript）

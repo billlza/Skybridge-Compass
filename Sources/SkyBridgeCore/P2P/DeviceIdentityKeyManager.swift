@@ -181,6 +181,7 @@ public actor DeviceIdentityKeyManager {
         static let mirroredDeviceIdDefaultsKey = "SkyBridge.P2P.DeviceIdentity.DeviceID"
         static let mirroredProtocolSigningPublicKeyDefaultsKey = "SkyBridge.P2P.DeviceIdentity.ProtocolSigningPublicKey"
         static let mirroredMLDSAPublicKeyDefaultsKey = "SkyBridge.P2P.DeviceIdentity.MLDSA65PublicKey"
+        static let inMemorySigningPrivateKey = "com.skybridge.p2p.identity.signing.inmemory.private"
     }
 
     private nonisolated static var useInMemoryKeychain: Bool {
@@ -309,6 +310,20 @@ public actor DeviceIdentityKeyManager {
  /// - Returns: 签名
     public func sign(data: Data) async throws -> Data {
         let keyInfo = try await getOrCreateIdentityKey()
+
+        if Self.useInMemoryKeychain {
+            guard let privateKeyData = Self.inMemoryGet(KeychainConstants.inMemorySigningPrivateKey) else {
+                throw DeviceIdentityKeyError.keyNotFound
+            }
+            do {
+                let privateKey = try P256.Signing.PrivateKey(rawRepresentation: privateKeyData)
+                let signature = try privateKey.signature(for: SHA256.hash(data: data))
+                SkyBridgeLogger.p2p.debug("Signed data with in-memory identity key: \(keyInfo.shortId)")
+                return signature.derRepresentation
+            } catch {
+                throw DeviceIdentityKeyError.invalidKeyData
+            }
+        }
         
  // 从 Keychain 获取私钥引用
         guard let privateKeyRef = try getPrivateKeyReference() else {
@@ -805,6 +820,22 @@ public actor DeviceIdentityKeyManager {
     /// 创建新的身份密钥
     private func createNewIdentityKey() async throws -> DeviceIdentityKeyInfo {
         let deviceId = await getDeviceId()
+        if Self.useInMemoryKeychain {
+            let privateKey = P256.Signing.PrivateKey()
+            let publicKeyData = privateKey.publicKey.x963Representation
+            Self.inMemorySet(privateKey.rawRepresentation, for: KeychainConstants.inMemorySigningPrivateKey)
+            let keyInfo = DeviceIdentityKeyInfo(
+                deviceId: deviceId,
+                pubKeyFP: computePublicKeyFingerprint(publicKeyData),
+                publicKey: publicKeyData,
+                keyType: .p256Signing,
+                isSecureEnclave: false
+            )
+            try saveKeyInfo(keyInfo)
+            SkyBridgeLogger.p2p.info("Created new in-memory device identity key: \(keyInfo.shortId)")
+            return keyInfo
+        }
+
         let preferSecureEnclave = shouldUseSecureEnclaveForSigning()
         var useSecureEnclave = preferSecureEnclave && isSecureEnclaveAvailable()
         if preferSecureEnclave && !useSecureEnclave {

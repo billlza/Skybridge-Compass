@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -114,6 +114,8 @@ enum SmokeSubcommand {
     LocalP2p(SmokeLocalP2pArgs),
     #[command(name = "real-device")]
     RealDevice(SmokeSuiteCommonArgs),
+    #[command(name = "real-device-p2p")]
+    RealDeviceP2p(SmokeSuiteCommonArgs),
     Suite(SmokeSuiteArgs),
     All(SmokeAllArgs),
     Faults(SmokeFaultsArgs),
@@ -166,6 +168,19 @@ struct SmokeSuiteCommonArgs {
     video_width: u32,
     #[arg(long, env = "SKYBRIDGE_SMOKE_VIDEO_HEIGHT", default_value_t = 1329)]
     video_height: u32,
+    #[arg(
+        long = "video-size",
+        env = "SKYBRIDGE_SMOKE_VIDEO_SIZES",
+        value_delimiter = ',',
+        value_name = "WIDTHxHEIGHT"
+    )]
+    video_sizes: Vec<String>,
+    #[arg(
+        long,
+        env = "SKYBRIDGE_SMOKE_MAINSTREAM_RESOLUTIONS",
+        default_value_t = false
+    )]
+    mainstream_resolutions: bool,
     #[command(flatten)]
     output: OutputOptions,
 }
@@ -237,6 +252,7 @@ enum SmokeSuiteProfile {
     IosConfig,
     LocalWebrtc,
     LocalP2p,
+    RealDeviceP2p,
     FaultInjection,
     Benchmarks,
     Release,
@@ -609,6 +625,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
             SmokeSubcommand::RealDevice(common) => {
                 smoke_suite(SmokeSuiteArgs {
                     profile: SmokeSuiteProfile::RealDevice,
+                    common,
+                })
+                .await
+            }
+            SmokeSubcommand::RealDeviceP2p(common) => {
+                smoke_suite(SmokeSuiteArgs {
+                    profile: SmokeSuiteProfile::RealDeviceP2p,
                     common,
                 })
                 .await
@@ -1681,11 +1704,8 @@ async fn smoke_webrtc_gate(args: WebRtcSmokeGateArgs) -> Result<()> {
 
     loop {
         let require_receiver = args.min_width > 0 && args.min_height > 0;
-        let gate_since_seconds = if min_pass_duration.is_zero() || pass_window_start_at.is_some() {
-            args.since_seconds
-        } else {
-            (args.poll_interval_seconds.saturating_mul(3)).max(10)
-        };
+        let gate_since_seconds =
+            webrtc_smoke_gate_doctor_since_seconds(args.since_seconds, args.poll_interval_seconds);
         let doctor_args = WebRtcMediaDoctorArgs {
             session_id: Some(session_id.clone()),
             latest: false,
@@ -1777,7 +1797,14 @@ async fn smoke_webrtc_gate(args: WebRtcSmokeGateArgs) -> Result<()> {
 }
 
 fn webrtc_smoke_gate_strict_fps_floor(min_fps: f64, min_pass_seconds: u64) -> bool {
-    min_pass_seconds > 0 || min_fps >= 59.0
+    min_pass_seconds > 0 || min_fps >= 30.0
+}
+
+fn webrtc_smoke_gate_doctor_since_seconds(
+    args_since_seconds: u64,
+    poll_interval_seconds: u64,
+) -> u64 {
+    args_since_seconds.max((poll_interval_seconds.saturating_mul(3)).max(10))
 }
 
 fn webrtc_smoke_gate_report_is_fresh(
@@ -1897,8 +1924,13 @@ async fn smoke_suite(args: SmokeSuiteArgs) -> Result<()> {
     if args.common.video_width == 0 || args.common.video_height == 0 {
         bail!("--video-width and --video-height must be greater than zero");
     }
-    if args.profile == SmokeSuiteProfile::RealDevice && args.common.skip_real_device {
-        bail!("--skip-real-device is not valid with --profile real-device");
+    let video_sizes = resolve_smoke_video_sizes(&args.common)?;
+    if matches!(
+        args.profile,
+        SmokeSuiteProfile::RealDevice | SmokeSuiteProfile::RealDeviceP2p
+    ) && args.common.skip_real_device
+    {
+        bail!("--skip-real-device is not valid with real-device profiles");
     }
 
     let root = resolve_repo_root()?;
@@ -1911,8 +1943,7 @@ async fn smoke_suite(args: SmokeSuiteArgs) -> Result<()> {
         args.common.min_fps,
         timeout_seconds,
         args.common.soak_seconds,
-        args.common.video_width,
-        args.common.video_height,
+        &video_sizes,
     )?;
     run_smoke_suite_plan(
         &root,
@@ -1921,6 +1952,59 @@ async fn smoke_suite(args: SmokeSuiteArgs) -> Result<()> {
         args.common.output.json,
         steps,
     )
+}
+
+fn resolve_smoke_video_sizes(common: &SmokeSuiteCommonArgs) -> Result<Vec<VideoDimensions>> {
+    if common.mainstream_resolutions && !common.video_sizes.is_empty() {
+        bail!("use either --mainstream-resolutions or --video-size, not both");
+    }
+    let sizes = if common.mainstream_resolutions {
+        MAINSTREAM_WEBRTC_VIDEO_SIZES.to_vec()
+    } else if !common.video_sizes.is_empty() {
+        common
+            .video_sizes
+            .iter()
+            .map(|value| parse_smoke_video_size(value))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        vec![VideoDimensions {
+            width: common.video_width,
+            height: common.video_height,
+        }]
+    };
+    dedupe_smoke_video_sizes(sizes)
+}
+
+fn parse_smoke_video_size(value: &str) -> Result<VideoDimensions> {
+    let trimmed = value.trim();
+    let Some((width, height)) = trimmed.split_once('x').or_else(|| trimmed.split_once('X')) else {
+        bail!("invalid --video-size '{value}', expected WIDTHxHEIGHT");
+    };
+    let width = width
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("invalid --video-size width in '{value}'"))?;
+    let height = height
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("invalid --video-size height in '{value}'"))?;
+    if width == 0 || height == 0 {
+        bail!("--video-size dimensions must be greater than zero: {value}");
+    }
+    Ok(VideoDimensions { width, height })
+}
+
+fn dedupe_smoke_video_sizes(sizes: Vec<VideoDimensions>) -> Result<Vec<VideoDimensions>> {
+    let mut deduped = Vec::new();
+    for size in sizes {
+        if !deduped.contains(&size) {
+            deduped.push(size);
+        }
+    }
+    if deduped.is_empty() {
+        bail!("at least one WebRTC smoke video size is required");
+    }
+    Ok(deduped)
 }
 
 async fn smoke_faults(args: SmokeFaultsArgs) -> Result<()> {
@@ -2093,8 +2177,7 @@ fn build_smoke_suite_steps(
     min_fps: f64,
     timeout_seconds: Option<u64>,
     soak_seconds: u64,
-    video_width: u32,
-    video_height: u32,
+    video_sizes: &[VideoDimensions],
 ) -> Result<Vec<SmokeSuiteStepSpec>> {
     let mut steps = Vec::new();
     match profile {
@@ -2106,6 +2189,15 @@ fn build_smoke_suite_steps(
         SmokeSuiteProfile::LocalP2p => {
             push_local_p2p_smoke_steps(root, &mut steps, SmokeLocalP2pOptions::default())
         }
+        SmokeSuiteProfile::RealDeviceP2p => push_real_device_p2p_remote_smoke_steps(
+            root,
+            &mut steps,
+            real_device_id,
+            min_fps,
+            timeout_seconds,
+            soak_seconds,
+            video_sizes,
+        ),
         SmokeSuiteProfile::FaultInjection => {
             push_fault_injection_steps(root, &mut steps, SmokeFaultOptions::default())
         }
@@ -2119,8 +2211,7 @@ fn build_smoke_suite_steps(
             min_fps,
             timeout_seconds,
             soak_seconds,
-            video_width,
-            video_height,
+            video_sizes,
         ),
         SmokeSuiteProfile::All => {
             push_full_smoke_steps(root, &mut steps);
@@ -2140,8 +2231,7 @@ fn build_smoke_suite_steps(
                     min_fps,
                     timeout_seconds,
                     soak_seconds,
-                    video_width,
-                    video_height,
+                    video_sizes,
                 );
             }
         }
@@ -2491,6 +2581,62 @@ fn push_real_device_smoke_steps(
     min_fps: f64,
     timeout_seconds: Option<u64>,
     soak_seconds: u64,
+    video_sizes: &[VideoDimensions],
+) {
+    let sizes = if video_sizes.is_empty() {
+        vec![VideoDimensions {
+            width: 2056,
+            height: 1329,
+        }]
+    } else {
+        video_sizes.to_vec()
+    };
+    for size in sizes {
+        push_real_device_webrtc_smoke_step(
+            root,
+            steps,
+            real_device_id,
+            auth_session_file,
+            min_fps,
+            timeout_seconds,
+            soak_seconds,
+            size.width,
+            size.height,
+        );
+    }
+
+    push_real_device_p2p_remote_smoke_steps(
+        root,
+        steps,
+        real_device_id,
+        min_fps,
+        timeout_seconds,
+        soak_seconds,
+        video_sizes,
+    );
+
+    let mut file_env = Vec::new();
+    if let Some(device_id) = real_device_id {
+        file_env.push(("SKYBRIDGE_REAL_DEVICE_ID".to_owned(), device_id.to_owned()));
+    }
+    steps.push(SmokeSuiteStepSpec {
+        name: "real_device_file_transfer_smoke",
+        description: "Real iPad file-transfer smoke",
+        program: "bash".to_owned(),
+        args: vec!["Scripts/run_real_device_file_transfer_smoke.sh".to_owned()],
+        env: file_env,
+        cwd: root.to_path_buf(),
+    });
+}
+
+fn push_real_device_webrtc_smoke_step(
+    root: &Path,
+    steps: &mut Vec<SmokeSuiteStepSpec>,
+    real_device_id: Option<&str>,
+    auth_session_file: Option<&Path>,
+    min_fps: f64,
+    timeout_seconds: Option<u64>,
+    soak_seconds: u64,
     video_width: u32,
     video_height: u32,
 ) {
@@ -2553,17 +2699,110 @@ fn push_real_device_smoke_steps(
         env: webrtc_env,
         cwd: root.to_path_buf(),
     });
+}
 
-    let mut file_env = Vec::new();
+fn push_real_device_p2p_remote_smoke_steps(
+    root: &Path,
+    steps: &mut Vec<SmokeSuiteStepSpec>,
+    real_device_id: Option<&str>,
+    min_fps: f64,
+    timeout_seconds: Option<u64>,
+    soak_seconds: u64,
+    video_sizes: &[VideoDimensions],
+) {
+    let sizes = if video_sizes.is_empty() {
+        vec![VideoDimensions {
+            width: 2056,
+            height: 1329,
+        }]
+    } else {
+        video_sizes.to_vec()
+    };
+    for size in sizes {
+        push_real_device_p2p_remote_smoke_step(
+            root,
+            steps,
+            real_device_id,
+            min_fps,
+            timeout_seconds,
+            soak_seconds,
+            size.width,
+            size.height,
+        );
+    }
+}
+
+fn push_real_device_p2p_remote_smoke_step(
+    root: &Path,
+    steps: &mut Vec<SmokeSuiteStepSpec>,
+    real_device_id: Option<&str>,
+    min_fps: f64,
+    timeout_seconds: Option<u64>,
+    soak_seconds: u64,
+    video_width: u32,
+    video_height: u32,
+) {
+    let mut env = Vec::new();
+    env.push((
+        "SKYBRIDGE_SMOKE_MIN_FPS".to_owned(),
+        format!("{min_fps:.2}"),
+    ));
+    let target_fps_floor = 60.0;
+    let target_fps = min_fps.ceil().max(target_fps_floor).clamp(1.0, 120.0) as u32;
+    env.push((
+        "SKYBRIDGE_SMOKE_TARGET_FPS".to_owned(),
+        target_fps.to_string(),
+    ));
+    env.push(("SKYBRIDGE_SMOKE_REQUIRE_AUDIO".to_owned(), "1".to_owned()));
+    env.push((
+        "SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB".to_owned(),
+        "1".to_owned(),
+    ));
+    env.push((
+        "SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW".to_owned(),
+        "1".to_owned(),
+    ));
+    env.push((
+        "SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY".to_owned(),
+        "0".to_owned(),
+    ));
+    env.push((
+        "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE".to_owned(),
+        "X-Wing".to_owned(),
+    ));
+    env.push((
+        "SKYBRIDGE_SMOKE_VIDEO_WIDTH".to_owned(),
+        video_width.to_string(),
+    ));
+    env.push((
+        "SKYBRIDGE_SMOKE_VIDEO_HEIGHT".to_owned(),
+        video_height.to_string(),
+    ));
+    env.push((
+        "SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION".to_owned(),
+        "upright".to_owned(),
+    ));
+    if let Some(timeout_seconds) = timeout_seconds {
+        env.push((
+            "SKYBRIDGE_SMOKE_TIMEOUT_SECONDS".to_owned(),
+            timeout_seconds.to_string(),
+        ));
+    }
+    if soak_seconds > 0 {
+        env.push((
+            "SKYBRIDGE_SMOKE_SOAK_SECONDS".to_owned(),
+            soak_seconds.to_string(),
+        ));
+    }
     if let Some(device_id) = real_device_id {
-        file_env.push(("SKYBRIDGE_REAL_DEVICE_ID".to_owned(), device_id.to_owned()));
+        env.push(("SKYBRIDGE_REAL_DEVICE_ID".to_owned(), device_id.to_owned()));
     }
     steps.push(SmokeSuiteStepSpec {
-        name: "real_device_file_transfer_smoke",
-        description: "Real iPad file-transfer smoke",
+        name: "real_device_p2p_remote_smoke",
+        description: "Real iPad same-Wi-Fi P2P remote desktop smoke with no fallback",
         program: "bash".to_owned(),
-        args: vec!["Scripts/run_real_device_file_transfer_smoke.sh".to_owned()],
-        env: file_env,
+        args: vec!["Scripts/run_real_device_p2p_remote_smoke.sh".to_owned()],
+        env,
         cwd: root.to_path_buf(),
     });
 }
@@ -3166,11 +3405,34 @@ struct ObservedMetric<T> {
     evidence: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VideoDimensions {
     width: u32,
     height: u32,
 }
+
+const MAINSTREAM_WEBRTC_VIDEO_SIZES: &[VideoDimensions] = &[
+    VideoDimensions {
+        width: 1728,
+        height: 1117,
+    },
+    VideoDimensions {
+        width: 1920,
+        height: 1200,
+    },
+    VideoDimensions {
+        width: 2056,
+        height: 1329,
+    },
+    VideoDimensions {
+        width: 2560,
+        height: 1600,
+    },
+    VideoDimensions {
+        width: 2992,
+        height: 1934,
+    },
+];
 
 #[derive(Debug, Clone, Copy)]
 struct ReceiverVideoDimensions {
@@ -3278,6 +3540,7 @@ struct WebRtcMediaEvidence {
     native_video_receiver_dimensions_are_visible: bool,
     native_video_render_frame: Option<ObservedMetric<String>>,
     native_video_render_source: Option<ObservedMetric<String>>,
+    native_video_render_surface: Option<ObservedMetric<String>>,
     native_video_render_dimensions: Option<ObservedMetric<VideoDimensions>>,
     native_video_render_dimensions_are_visible: bool,
     native_video_render_fps: Option<ObservedMetric<f64>>,
@@ -4475,7 +4738,8 @@ fn observe_webrtc_media_line(
     }
 
     if is_webrtc_native_video_render_line(trimmed, json.as_ref()) {
-        if let Some(render_frame) = find_webrtc_native_video_render_frame(json.as_ref(), trimmed) {
+        let render_frame = find_webrtc_native_video_render_frame(json.as_ref(), trimmed);
+        if let Some(render_frame) = render_frame {
             update_latest_metric(
                 &mut evidence.native_video_render_frame,
                 ObservedMetric {
@@ -4484,24 +4748,36 @@ fn observe_webrtc_media_line(
                     evidence: summary.clone(),
                 },
             );
-        }
-        if let Some(render_dimensions) =
-            find_webrtc_native_video_render_dimensions(json.as_ref(), trimmed)
-        {
-            let should_update_dimensions = render_dimensions.explicit_visible
-                || !evidence.native_video_render_dimensions_are_visible;
-            if should_update_dimensions {
+            if let Some(render_dimensions) =
+                find_webrtc_native_video_render_dimensions(json.as_ref(), trimmed)
+            {
+                let should_update_dimensions = render_dimensions.explicit_visible
+                    || !evidence.native_video_render_dimensions_are_visible;
+                if should_update_dimensions {
+                    update_latest_metric(
+                        &mut evidence.native_video_render_dimensions,
+                        ObservedMetric {
+                            value: render_dimensions.dimensions,
+                            sequence,
+                            evidence: summary.clone(),
+                        },
+                    );
+                    if render_dimensions.explicit_visible {
+                        evidence.native_video_render_dimensions_are_visible = true;
+                    }
+                }
+            }
+            if let Some(surface) =
+                find_webrtc_string_any(json.as_ref(), trimmed, &["uiSurface", "surface"])
+            {
                 update_latest_metric(
-                    &mut evidence.native_video_render_dimensions,
+                    &mut evidence.native_video_render_surface,
                     ObservedMetric {
-                        value: render_dimensions.dimensions,
+                        value: surface,
                         sequence,
                         evidence: summary.clone(),
                     },
                 );
-                if render_dimensions.explicit_visible {
-                    evidence.native_video_render_dimensions_are_visible = true;
-                }
             }
         }
         if let Some(source) = find_webrtc_string_any(
@@ -4539,6 +4815,61 @@ fn observe_webrtc_media_line(
         };
         update_latest_metric(&mut evidence.native_video_render_fps, observed.clone());
         update_lowest_f64(&mut evidence.native_video_lowest_render_fps, observed);
+        let source = find_webrtc_string(json.as_ref(), trimmed, "source").unwrap_or_default();
+        let ui_surface = find_webrtc_string(json.as_ref(), trimmed, "uiSurface")
+            .or_else(|| find_webrtc_string(json.as_ref(), trimmed, "surface"))
+            .unwrap_or_default();
+        if !source.is_empty() {
+            update_latest_metric(
+                &mut evidence.native_video_render_source,
+                ObservedMetric {
+                    value: source.clone(),
+                    sequence,
+                    evidence: summary.clone(),
+                },
+            );
+        }
+        if !ui_surface.is_empty() {
+            update_latest_metric(
+                &mut evidence.native_video_render_surface,
+                ObservedMetric {
+                    value: ui_surface.clone(),
+                    sequence,
+                    evidence: summary.clone(),
+                },
+            );
+        }
+        if let (Some(width), Some(height)) = (
+            find_webrtc_u64(json.as_ref(), trimmed, "visibleWidth"),
+            find_webrtc_u64(json.as_ref(), trimmed, "visibleHeight"),
+        ) {
+            if width > 0 && height > 0 {
+                update_latest_metric(
+                    &mut evidence.native_video_render_dimensions,
+                    ObservedMetric {
+                        value: VideoDimensions {
+                            width: width as u32,
+                            height: height as u32,
+                        },
+                        sequence,
+                        evidence: summary.clone(),
+                    },
+                );
+                evidence.native_video_render_dimensions_are_visible = true;
+            }
+        }
+        if source == "rtc-mtl-video-view" && ui_surface == "remoteDesktopView" {
+            update_latest_metric(
+                &mut evidence.native_video_render_frame,
+                ObservedMetric {
+                    value: format!(
+                        "source={source} uiSurface={ui_surface} visibleRenderFPS={fps:.1}"
+                    ),
+                    sequence,
+                    evidence: summary.clone(),
+                },
+            );
+        }
     }
 
     if let Some(reason) = find_webrtc_strict_media_failure_reason(json.as_ref(), trimmed) {
@@ -4556,7 +4887,7 @@ fn observe_webrtc_media_line(
         update_latest_metric(
             &mut evidence.stale_fallback,
             ObservedMetric {
-                value: "stale_fallback".to_owned(),
+                value: "forbidden_fallback".to_owned(),
                 sequence,
                 evidence: summary.clone(),
             },
@@ -4992,7 +5323,7 @@ fn is_webrtc_native_video_render_line(text: &str, json: Option<&serde_json::Valu
 }
 
 fn is_webrtc_visible_native_render_fps_line(text: &str, json: Option<&serde_json::Value>) -> bool {
-    text.contains("viewerDisplayFPS=")
+    let candidate = text.contains("viewerDisplayFPS=")
         || text.contains("displayFPS=")
         || text.contains("visibleNativeRenderFPS")
         || json
@@ -5007,7 +5338,20 @@ fn is_webrtc_visible_native_render_fps_line(text: &str, json: Option<&serde_json
                     event.as_str(),
                     "visibleNativeRenderFPS" | "viewerDisplayStats" | "visibleRenderFPS"
                 )
-            })
+            });
+    if !candidate {
+        return false;
+    }
+    let source = find_webrtc_string(json, text, "source").unwrap_or_default();
+    let ui_surface = find_webrtc_string(json, text, "uiSurface")
+        .or_else(|| find_webrtc_string(json, text, "surface"))
+        .unwrap_or_default();
+    let metric_source = find_webrtc_string(json, text, "metricSource").unwrap_or_default();
+    let render_pipeline = find_webrtc_string(json, text, "renderPipeline").unwrap_or_default();
+    source == "rtc-mtl-video-view"
+        && ui_surface == "remoteDesktopView"
+        && metric_source == "rtc-mtl-render-frame"
+        && (render_pipeline.is_empty() || render_pipeline == "webrtcNativeVideo")
 }
 
 fn find_webrtc_native_video_render_frame(
@@ -5032,8 +5376,14 @@ fn find_webrtc_native_video_render_frame(
         .unwrap_or_else(|| size.clone());
     let native_promotion_state =
         find_webrtc_string(json, text, "nativePromotionState").unwrap_or_else(|| "-".to_owned());
+    let ui_surface = find_webrtc_string(json, text, "uiSurface")
+        .or_else(|| find_webrtc_string(json, text, "surface"))
+        .unwrap_or_else(|| "-".to_owned());
+    if native_promotion_state == "smoke-hold" || ui_surface != "remoteDesktopView" {
+        return None;
+    }
     Some(format!(
-        "source={source} size={size} visibleSize={visible_size} codedSize={coded_size} nativePromotionState={native_promotion_state}"
+        "source={source} uiSurface={ui_surface} size={size} visibleSize={visible_size} codedSize={coded_size} nativePromotionState={native_promotion_state}"
     ))
 }
 
@@ -5359,6 +5709,9 @@ fn find_webrtc_audio_rx_relay_bind_failure(
                 .unwrap_or_else(|| "receiverStartFailed:relayBind".to_owned()),
         );
     }
+    if matches!(probable.as_str(), "relay-bind-ok" | "relay-bind-pending") {
+        return None;
+    }
     if receiver_context
         && (probable.contains("public-udp-relay-unreachable")
             || probable.contains("wrong-port")
@@ -5401,9 +5754,37 @@ fn is_stale_fallback_line(json: Option<&serde_json::Value>, text: &str) -> bool 
     let producer = find_webrtc_string(json, text, "producer")
         .or_else(|| find_webrtc_string(json, text, "fallbackProducer"))
         .unwrap_or_default();
+    let screen_transport = find_webrtc_string(json, text, "screenFrameTransport")
+        .or_else(|| find_webrtc_string(json, text, "transport"))
+        .unwrap_or_default();
+    let media_fallback_policy = find_webrtc_string(json, text, "mediaFallbackPolicy")
+        .or_else(|| find_webrtc_string(json, text, "fallbackPolicy"))
+        .unwrap_or_default();
+    let format = find_webrtc_string(json, text, "format").unwrap_or_default();
     let fallback_line =
         text.contains("fallback") || text.contains("Fallback") || text.contains("producer");
+    let lower = text.to_ascii_lowercase();
+    let producer_is_forbidden = matches!(
+        producer.as_str(),
+        "cgdisplaySync"
+            | "cgdisplayEmergency"
+            | "sckLatest"
+            | "directEncoder"
+            | "degradedJPEGWarmupMain"
+            | "boundedJPEGWarmupMain"
+    );
+    let format_is_forbidden_screen_data = (lower.contains("stream-format")
+        || lower.contains("screen-send"))
+        && matches!(format.as_str(), "jpeg" | "jpg" | "h264" | "hevc" | "bgra");
     text.contains("stream-native-warmup-fallback-main")
+        || text.contains("fallback-screen-frame-received")
+        || text.contains("screen-channel-control-fallback-forbidden")
+        || text.contains("degraded-screen-fallback-forbidden")
+        || text.contains("native-warmup-bounded-jpeg")
+        || screen_transport.contains("fallback")
+        || media_fallback_policy == "explicit-degraded"
+        || producer_is_forbidden
+        || format_is_forbidden_screen_data
         || text.contains("SCK latest fallback stale")
         || (fallback_line && reason.contains("stale"))
         || (producer == "cgdisplayEmergency"
@@ -5895,7 +6276,26 @@ fn check_webrtc_video_resolution(
     min_height: u32,
     exact_video_size: bool,
 ) -> DoctorCheck {
-    let Some(observed) = evidence.native_video_receiver_dimensions.as_ref() else {
+    let receiver_observed = evidence.native_video_receiver_dimensions.as_ref();
+    let render_observed = evidence
+        .native_video_render_dimensions
+        .as_ref()
+        .filter(|_| evidence.native_video_render_dimensions_are_visible);
+
+    let exact_receiver_visible_observed = receiver_observed
+        .filter(|_| exact_video_size && evidence.native_video_receiver_dimensions_are_visible);
+    let (observed, observed_is_visible) =
+        if let Some(receiver_observed) = exact_receiver_visible_observed {
+            (Some(receiver_observed), true)
+        } else if let Some(render_observed) = render_observed {
+            (Some(render_observed), true)
+        } else {
+            (
+                receiver_observed,
+                evidence.native_video_receiver_dimensions_are_visible,
+            )
+        };
+    let Some(observed) = observed else {
         let mode = if exact_video_size {
             "exactly"
         } else {
@@ -5906,7 +6306,7 @@ fn check_webrtc_video_resolution(
             ok: false,
             severity: "error",
             detail: format!(
-                "no iOS native receiver dimensions were observed; required {mode} {min_width}x{min_height}"
+                "no iOS visible render or native receiver dimensions were observed; required {mode} {min_width}x{min_height}"
             ),
             server_build_fingerprint: None,
             state_backend: None,
@@ -5916,7 +6316,7 @@ fn check_webrtc_video_resolution(
     let dimensions = observed.value;
     let dimensions_match = dimensions.width == min_width && dimensions.height == min_height;
     let ok = if exact_video_size {
-        dimensions_match && evidence.native_video_receiver_dimensions_are_visible
+        dimensions_match && observed_is_visible
     } else {
         dimensions.width >= min_width && dimensions.height >= min_height
     };
@@ -5926,20 +6326,17 @@ fn check_webrtc_video_resolution(
         severity: if ok { "info" } else { "error" },
         detail: if ok && exact_video_size {
             format!(
-                "iOS visible receiver dimensions {}x{} match exact target {}x{}",
+                "iOS visible render/receiver dimensions {}x{} match exact target {}x{}",
                 dimensions.width, dimensions.height, min_width, min_height
             )
-        } else if exact_video_size
-            && dimensions_match
-            && !evidence.native_video_receiver_dimensions_are_visible
-        {
+        } else if exact_video_size && dimensions_match && !observed_is_visible {
             format!(
                 "iOS receiver dimensions {}x{} match exact target {}x{} but were not reported as explicit visible dimensions; evidence {}",
                 dimensions.width, dimensions.height, min_width, min_height, observed.evidence
             )
         } else if ok {
             format!(
-                "iOS receiver dimensions {}x{} meet minimum {}x{}",
+                "iOS visible render/receiver dimensions {}x{} meet minimum {}x{}",
                 dimensions.width, dimensions.height, min_width, min_height
             )
         } else if exact_video_size {
@@ -6617,7 +7014,12 @@ fn check_webrtc_visible_native_render(
         .as_ref()
         .map(|metric| metric.value.as_str())
         .unwrap_or("-");
-    let source_ok = source == "rtc-mtl-video-view";
+    let ui_surface = evidence
+        .native_video_render_surface
+        .as_ref()
+        .map(|metric| metric.value.as_str())
+        .unwrap_or("-");
+    let source_ok = source == "rtc-mtl-video-view" && ui_surface == "remoteDesktopView";
     let dimensions_label = evidence
         .native_video_render_dimensions
         .as_ref()
@@ -6628,7 +7030,7 @@ fn check_webrtc_visible_native_render(
         ok: source_ok,
         severity: if source_ok { "info" } else { "error" },
         detail: format!(
-            "iOS visible native render source={source} dimensions={dimensions_label}; evidence {}",
+            "iOS visible native render source={source} uiSurface={ui_surface} dimensions={dimensions_label}; evidence {}",
             render_frame.evidence
         ),
         server_build_fingerprint: None,
@@ -6840,8 +7242,11 @@ fn check_webrtc_stale_fallback(evidence: &WebRtcMediaEvidence) -> DoctorCheck {
         return DoctorCheck {
             name: "stale_fallback",
             ok: false,
-            severity: "warn",
-            detail: format!("stale fallback evidence observed: {}", stale.evidence),
+            severity: "error",
+            detail: format!(
+                "forbidden WebRTC fallback evidence observed: {}",
+                stale.evidence
+            ),
             server_build_fingerprint: None,
             state_backend: None,
             reject_reason: None,
@@ -6851,7 +7256,7 @@ fn check_webrtc_stale_fallback(evidence: &WebRtcMediaEvidence) -> DoctorCheck {
         name: "stale_fallback",
         ok: true,
         severity: "info",
-        detail: "no stale SCK/fallback producer evidence observed".to_owned(),
+        detail: "no WebRTC fallback evidence observed".to_owned(),
         server_build_fingerprint: None,
         state_backend: None,
         reject_reason: None,
@@ -7589,6 +7994,7 @@ mod tests {
                 "local-webrtc",
                 "--min-fps",
                 "30",
+                "--mainstream-resolutions",
                 "--dry-run",
                 "--json",
             ])
@@ -7619,6 +8025,20 @@ mod tests {
                 "00008132-0006452C1138801C",
                 "--min-fps",
                 "30",
+                "--dry-run",
+                "--json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "skybridge",
+                "smoke",
+                "real-device",
+                "--video-size",
+                "1728x1117",
+                "--video-size",
+                "2056x1329",
                 "--dry-run",
                 "--json",
             ])
@@ -7707,10 +8127,16 @@ mod tests {
 
     #[test]
     fn smoke_webrtc_gate_uses_strict_fps_floor_for_high_fps_and_soak() {
-        assert!(!webrtc_smoke_gate_strict_fps_floor(30.0, 0));
+        assert!(webrtc_smoke_gate_strict_fps_floor(30.0, 0));
         assert!(webrtc_smoke_gate_strict_fps_floor(30.0, 60));
         assert!(webrtc_smoke_gate_strict_fps_floor(59.0, 0));
         assert!(webrtc_smoke_gate_strict_fps_floor(60.0, 0));
+    }
+
+    #[test]
+    fn smoke_webrtc_gate_uses_full_doctor_window_for_continuity() {
+        assert_eq!(webrtc_smoke_gate_doctor_since_seconds(600, 2), 600);
+        assert_eq!(webrtc_smoke_gate_doctor_since_seconds(5, 2), 10);
     }
 
     #[test]
@@ -7778,8 +8204,10 @@ mod tests {
             30.0,
             None,
             0,
-            2056,
-            1329,
+            &[VideoDimensions {
+                width: 2056,
+                height: 1329,
+            }],
         )?;
         let names = steps.iter().map(|step| step.name).collect::<Vec<_>>();
         assert!(names.contains(&"rust_workspace_tests"));
@@ -7886,8 +8314,10 @@ mod tests {
             30.0,
             Some(900),
             600,
-            2056,
-            1329,
+            &[VideoDimensions {
+                width: 2056,
+                height: 1329,
+            }],
         )?;
         let webrtc = steps
             .iter()
@@ -7958,6 +8388,82 @@ mod tests {
         assert!(webrtc.env.iter().any(|(name, value)| {
             name == "SKYBRIDGE_REAL_DEVICE_WEBRTC_LAB_RUN" && value == "0"
         }));
+        let p2p_remote = steps
+            .iter()
+            .find(|step| step.name == "real_device_p2p_remote_smoke")
+            .expect("real-device P2P remote step");
+        assert_eq!(
+            p2p_remote.args,
+            vec!["Scripts/run_real_device_p2p_remote_smoke.sh".to_owned()]
+        );
+        for (name, value) in [
+            ("SKYBRIDGE_REAL_DEVICE_ID", "00008132-0006452C1138801C"),
+            ("SKYBRIDGE_SMOKE_MIN_FPS", "30.00"),
+            ("SKYBRIDGE_SMOKE_TARGET_FPS", "60"),
+            ("SKYBRIDGE_SMOKE_REQUIRE_AUDIO", "1"),
+            ("SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB", "1"),
+            ("SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW", "1"),
+            ("SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY", "0"),
+            ("SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE", "X-Wing"),
+            ("SKYBRIDGE_SMOKE_TIMEOUT_SECONDS", "900"),
+            ("SKYBRIDGE_SMOKE_SOAK_SECONDS", "600"),
+            ("SKYBRIDGE_SMOKE_VIDEO_WIDTH", "2056"),
+            ("SKYBRIDGE_SMOKE_VIDEO_HEIGHT", "1329"),
+            ("SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION", "upright"),
+        ] {
+            assert!(
+                p2p_remote
+                    .env
+                    .iter()
+                    .any(|(actual_name, actual_value)| actual_name == name && actual_value == value),
+                "{name} should be passed to real-device P2P remote step"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn smoke_suite_real_device_can_expand_mainstream_resolution_matrix() -> Result<()> {
+        let root = PathBuf::from("/tmp/skybridge-test-root");
+        let steps = build_smoke_suite_steps(
+            &root,
+            SmokeSuiteProfile::RealDevice,
+            false,
+            None,
+            None,
+            30.0,
+            Some(900),
+            0,
+            MAINSTREAM_WEBRTC_VIDEO_SIZES,
+        )?;
+        let webrtc_steps = steps
+            .iter()
+            .filter(|step| step.name == "real_device_webrtc_smoke")
+            .collect::<Vec<_>>();
+        assert_eq!(webrtc_steps.len(), MAINSTREAM_WEBRTC_VIDEO_SIZES.len());
+        for size in MAINSTREAM_WEBRTC_VIDEO_SIZES {
+            assert!(webrtc_steps.iter().any(|step| {
+                step.env.iter().any(|(name, value)| {
+                    name == "SKYBRIDGE_SMOKE_VIDEO_WIDTH" && value == &size.width.to_string()
+                }) && step.env.iter().any(|(name, value)| {
+                    name == "SKYBRIDGE_SMOKE_VIDEO_HEIGHT" && value == &size.height.to_string()
+                })
+            }));
+        }
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step.name == "real_device_p2p_remote_smoke")
+                .count(),
+            MAINSTREAM_WEBRTC_VIDEO_SIZES.len()
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step.name == "real_device_file_transfer_smoke")
+                .count(),
+            1
+        );
         Ok(())
     }
 
@@ -8157,7 +8663,7 @@ native-video-health session=SESSION6 state=active
                  [{ts3}] native-video-health session=SESSION9 state=rtpFlowing\n\
                  [{ts4}] native-video-tx session=SESSION9 state=rtpFlowing fallbackMode=main visibleFrame=2056x1329 codedFrame=2056x1330 framesEncoded=120 framesSent=120 packetsSent=240 bytesSent=4096 codec=video/H264 encoder=VideoToolbox qualityLimit=none encodeFPS=32\n\
                  [{ts5}] native-receiver-frame session=SESSION9 size=2056x1329 visibleSize=2056x1329 codedSize=2056x1329 source=remote-heartbeat\n\
-                 [{ts5}] native-render-frame session=SESSION9 size=2056x1329 visibleSize=2056x1329 codedSize=2056x1329 source=rtc-mtl-video-view\n\
+                 [{ts5}] native-render-frame session=SESSION9 size=2056x1329 visibleSize=2056x1329 codedSize=2056x1329 source=rtc-mtl-video-view nativeRenderEvidenceSource=rtc-mtl-video-view nativePromotionState=visible-render-evidence uiSurface=remoteDesktopView\n\
                  [{ts6}] audio-rx session=SESSION9 source=remote-heartbeat audioRxDatagrams=100 audioRxRecv=50 audioRxDecoded=49 audioRxPlayed=49 recvTotal=50 decodeTotal=49 playTotal=49 renderedFrames=48000 underflow=0 rebuffer=0 playbackDrop=0 jitterEvicted=0 engineRunning=true\n\
                  [{ts8}] audio-rx session=SESSION9 source=remote-heartbeat audioRxDatagrams=240 audioRxRecv=120 audioRxDecoded=118 audioRxPlayed=119 recvTotal=120 decodeTotal=118 playTotal=119 renderedFrames=96000 underflow=0 rebuffer=0 playbackDrop=0 jitterEvicted=0 engineRunning=true\n"
             ),
@@ -8647,6 +9153,7 @@ audioTxUnavailable session=SESSION9 reason=missingViewerEndpoint mediaSession=SE
                     "session_id": "SESSION60",
                     "source": "rtc-mtl-video-view",
                     "nativeRenderEvidenceSource": "rtc-mtl-video-view",
+                    "uiSurface": "remoteDesktopView",
                     "nativePromotionState": "visible-render-evidence",
                     "size": "2056x1330",
                     "visibleSize": "2056x1329",
@@ -8724,6 +9231,7 @@ audioTxUnavailable session=SESSION9 reason=missingViewerEndpoint mediaSession=SE
                     "session_id": "SESSION60_MISSING",
                     "source": "rtc-mtl-video-view",
                     "nativeRenderEvidenceSource": "rtc-mtl-video-view",
+                    "uiSurface": "remoteDesktopView",
                     "nativePromotionState": "visible-render-evidence",
                     "size": "2056x1330",
                     "visibleSize": "2056x1329",
@@ -8811,6 +9319,7 @@ audioTxUnavailable session=SESSION9 reason=missingViewerEndpoint mediaSession=SE
                     "session_id": "SESSION60_SOFTWARE",
                     "source": "rtc-mtl-video-view",
                     "nativeRenderEvidenceSource": "rtc-mtl-video-view",
+                    "uiSurface": "remoteDesktopView",
                     "nativePromotionState": "visible-render-evidence",
                     "size": "2056x1330",
                     "visibleSize": "2056x1329",
@@ -8969,6 +9478,7 @@ audioTxUnavailable session=SESSION9 reason=missingViewerEndpoint mediaSession=SE
                     "session_id": "SESSION_VISIBLE_FPS_LOW",
                     "source": "rtc-mtl-video-view",
                     "nativeRenderEvidenceSource": "rtc-mtl-video-view",
+                    "uiSurface": "remoteDesktopView",
                     "size": "2056x1329",
                     "visibleSize": "2056x1329",
                     "codedSize": "2056x1330",
@@ -8979,6 +9489,9 @@ audioTxUnavailable session=SESSION9 reason=missingViewerEndpoint mediaSession=SE
                     "kind": "visibleNativeRenderFPS",
                     "session_id": "SESSION_VISIBLE_FPS_LOW",
                     "source": "rtc-mtl-video-view",
+                    "uiSurface": "remoteDesktopView",
+                    "metricSource": "rtc-mtl-render-frame",
+                    "renderPipeline": "webrtcNativeVideo",
                     "viewerDisplayFPS": 3.0,
                     "displayFPS": 3.0,
                     "visibleWidth": 2056,
@@ -9014,6 +9527,178 @@ audioTxUnavailable session=SESSION9 reason=missingViewerEndpoint mediaSession=SE
                 .detail
                 .contains("below min")
         );
+        assert!(ensure_webrtc_media_doctor_passed(&report).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_webrtc_media_rejects_fallback_visible_fps_and_screen_frames() -> Result<()> {
+        let artifact_dir = make_test_dir("doctor-webrtc-media-rejects-fallback-visible-fps")?;
+        std::fs::write(
+            artifact_dir.join("webrtc-media-SESSION_FALLBACK_FORBIDDEN.jsonl"),
+            [
+                json!({
+                    "kind": "videoStats",
+                    "session_id": "SESSION_FALLBACK_FORBIDDEN",
+                    "video_fps": 60.0,
+                    "nativeVideoHealth": "rtpFlowing",
+                    "submitted": 180,
+                    "framesEncoded": 178,
+                    "framesSent": 177,
+                    "keyFramesEncoded": 2,
+                    "packetsSent": 1180,
+                    "bytesSent": 2_920_000,
+                    "codec": "video/H264",
+                    "encoder": "VideoToolbox",
+                    "qualityLimit": "none",
+                    "encodeWidth": 2056,
+                    "encodeHeight": 1330,
+                    "encodeFPS": 60,
+                    "targetBitrate": 18_000_000,
+                    "availableOutgoingBitrate": 28_000_000
+                })
+                .to_string(),
+                json!({
+                    "kind": "nativeRenderFrame",
+                    "session_id": "SESSION_FALLBACK_FORBIDDEN",
+                    "source": "rtc-mtl-video-view",
+                    "nativeRenderEvidenceSource": "rtc-mtl-video-view",
+                    "uiSurface": "remoteDesktopView",
+                    "size": "2056x1329",
+                    "visibleSize": "2056x1329",
+                    "codedSize": "2056x1330",
+                    "nativePromotionState": "visible-render-evidence"
+                })
+                .to_string(),
+                json!({
+                    "kind": "visibleNativeRenderFPS",
+                    "session_id": "SESSION_FALLBACK_FORBIDDEN",
+                    "source": "rtc-mtl-video-view",
+                    "renderPipeline": "sampleBufferDisplayLayer",
+                    "viewerDisplayFPS": 60.0,
+                    "displayFPS": 60.0,
+                    "visibleWidth": 2056,
+                    "visibleHeight": 1329
+                })
+                .to_string(),
+                "stream-format session=SESSION_FALLBACK_FORBIDDEN format=jpeg channel=screen"
+                    .to_owned(),
+            ]
+            .join("\n"),
+        )?;
+
+        let report = build_webrtc_media_doctor_report_for_gate(
+            &WebRtcMediaDoctorArgs {
+                session_id: Some("SESSION_FALLBACK_FORBIDDEN".to_owned()),
+                latest: false,
+                artifact_dir: Some(artifact_dir),
+                log_file: None,
+                since_seconds: 120,
+                min_fps: 30.0,
+                require_audio: false,
+                output: OutputOptions { json: true },
+            },
+            "SESSION_FALLBACK_FORBIDDEN",
+            2056,
+            1329,
+            true,
+            true,
+            None,
+        )?;
+
+        assert!(doctor_check(&report, "video_fps").ok);
+        assert!(doctor_check(&report, "visible_native_render").ok);
+        assert!(!doctor_check(&report, "visible_render_fps").ok);
+        assert!(!doctor_check(&report, "stale_fallback").ok);
+        assert!(
+            doctor_check(&report, "stale_fallback")
+                .detail
+                .contains("forbidden WebRTC fallback")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_webrtc_media_rejects_smoke_overlay_render_evidence() -> Result<()> {
+        let artifact_dir = make_test_dir("doctor-webrtc-media-rejects-smoke-overlay")?;
+        std::fs::write(
+            artifact_dir.join("webrtc-media-SESSION_SMOKE_OVERLAY.jsonl"),
+            [
+                json!({
+                    "kind": "videoStats",
+                    "session_id": "SESSION_SMOKE_OVERLAY",
+                    "video_fps": 60.0,
+                    "nativeVideoHealth": "rtpFlowing",
+                    "submitted": 180,
+                    "framesEncoded": 178,
+                    "framesSent": 177,
+                    "packetsSent": 1180,
+                    "bytesSent": 2_920_000,
+                    "codec": "video/H264",
+                    "encoder": "VideoToolbox",
+                    "qualityLimit": "none",
+                    "encodeFPS": 60,
+                    "targetBitrate": 18_000_000,
+                    "availableOutgoingBitrate": 28_000_000
+                })
+                .to_string(),
+                json!({
+                    "kind": "remoteVideoFrameEvidence",
+                    "session_id": "SESSION_SMOKE_OVERLAY",
+                    "source": "receiver-stats",
+                    "framesReceived": 170,
+                    "framesDecoded": 168,
+                    "visibleSize": "2056x1329",
+                    "codedSize": "2056x1330"
+                })
+                .to_string(),
+                json!({
+                    "kind": "nativeRenderFrame",
+                    "session_id": "SESSION_SMOKE_OVERLAY",
+                    "source": "rtc-mtl-video-view",
+                    "nativeRenderEvidenceSource": "rtc-mtl-video-view",
+                    "uiSurface": "smokeOverlay",
+                    "nativePromotionState": "smoke-hold",
+                    "visibleSize": "2056x1329",
+                    "codedSize": "2056x1330"
+                })
+                .to_string(),
+                json!({
+                    "kind": "visibleNativeRenderFPS",
+                    "session_id": "SESSION_SMOKE_OVERLAY",
+                    "source": "rtc-mtl-video-view",
+                    "uiSurface": "smokeOverlay",
+                    "metricSource": "rtc-mtl-render-frame",
+                    "renderPipeline": "webrtcNativeVideo",
+                    "viewerDisplayFPS": 60.0,
+                    "displayFPS": 60.0
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )?;
+
+        let report = build_webrtc_media_doctor_report_for_gate(
+            &WebRtcMediaDoctorArgs {
+                session_id: Some("SESSION_SMOKE_OVERLAY".to_owned()),
+                latest: false,
+                artifact_dir: Some(artifact_dir),
+                log_file: None,
+                since_seconds: 120,
+                min_fps: 30.0,
+                require_audio: false,
+                output: OutputOptions { json: true },
+            },
+            "SESSION_SMOKE_OVERLAY",
+            2056,
+            1329,
+            true,
+            true,
+            None,
+        )?;
+
+        assert!(!doctor_check(&report, "visible_native_render").ok);
+        assert!(!doctor_check(&report, "visible_render_fps").ok);
         assert!(ensure_webrtc_media_doctor_passed(&report).is_err());
         Ok(())
     }
@@ -9145,6 +9830,7 @@ remote-video-frame-evidence session=SESSION9_SIZE_ONLY source=receiver-stats typ
 native-video-health session=SESSION9_VISIBLE state=rtpFlowing fallbackMode=main
 native-video-tx session=SESSION9_VISIBLE state=rtpFlowing submitted=120 framesSent=118 packetsSent=640 bytesSent=755000 codec=video/H264 encoder=VideoToolbox encodeSize=2056x1330
 native-receiver-frame session=SESSION9_VISIBLE size=2056x1329 visibleSize=2056x1329 codedSize=2056x1330 evenPadding=1 source=receiver-stats packets=606 bytes=689351 framesReceived=31 framesDecoded=24
+visibleNativeRenderFPS session=SESSION9_VISIBLE viewerDisplayFPS=59.8 visibleWidth=2056 visibleHeight=1330 source=rtc-mtl-video-view uiSurface=remoteDesktopView metricSource=rtc-mtl-render-frame renderPipeline=webrtcNativeVideo
 remote-video-frame-evidence session=SESSION9_VISIBLE source=receiver-stats type=inbound-rtp packets=900 bytes=900000 framesReceived=80 framesDecoded=80 size=2056x1330
 ",
         )?;
@@ -9172,6 +9858,46 @@ remote-video-frame-evidence session=SESSION9_VISIBLE source=receiver-stats type=
             doctor_check(&report, "native_video_receiver")
                 .detail
                 .contains("codedSize=2056x1330")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_webrtc_media_rejects_visible_receiver_mismatch_even_when_render_matches() -> Result<()>
+    {
+        let artifact_dir = make_test_dir("doctor-webrtc-media-visible-receiver-mismatch")?;
+        std::fs::write(
+            artifact_dir.join("webrtc-session-SESSION9_VISIBLE_MISMATCH.log"),
+            "\
+native-video-health session=SESSION9_VISIBLE_MISMATCH state=rtpFlowing fallbackMode=main
+native-video-tx session=SESSION9_VISIBLE_MISMATCH state=rtpFlowing submitted=120 framesSent=118 packetsSent=640 bytesSent=755000 codec=video/H264 encoder=VideoToolbox encodeSize=2056x1330
+native-receiver-frame session=SESSION9_VISIBLE_MISMATCH size=2056x1328 visibleSize=2056x1328 codedSize=2056x1330 evenPadding=1 source=receiver-stats packets=606 bytes=689351 framesReceived=31 framesDecoded=24
+visibleNativeRenderFPS session=SESSION9_VISIBLE_MISMATCH viewerDisplayFPS=59.8 visibleWidth=2056 visibleHeight=1329 source=rtc-mtl-video-view uiSurface=remoteDesktopView metricSource=rtc-mtl-render-frame renderPipeline=webrtcNativeVideo
+",
+        )?;
+
+        let report = build_webrtc_media_doctor_report_with_video_requirements(
+            &WebRtcMediaDoctorArgs {
+                session_id: Some("SESSION9_VISIBLE_MISMATCH".to_owned()),
+                latest: false,
+                artifact_dir: Some(artifact_dir),
+                log_file: None,
+                since_seconds: 120,
+                min_fps: 1.0,
+                require_audio: false,
+                output: OutputOptions { json: true },
+            },
+            "SESSION9_VISIBLE_MISMATCH",
+            2056,
+            1329,
+            true,
+        )?;
+
+        assert!(!doctor_check(&report, "video_resolution").ok);
+        assert!(
+            doctor_check(&report, "video_resolution")
+                .detail
+                .contains("2056x1328 do not match exact target 2056x1329")
         );
         Ok(())
     }
@@ -9233,7 +9959,7 @@ native-render-frame session=SESSION_MAC_STATUS size=2056x1329 visibleSize=2056x1
 ",
         )?;
 
-        let report = build_webrtc_media_doctor_report_with_video_requirements(
+        let report = build_webrtc_media_doctor_report_for_gate(
             &WebRtcMediaDoctorArgs {
                 session_id: Some("SESSION_MAC_STATUS".to_owned()),
                 latest: false,
@@ -9248,15 +9974,18 @@ native-render-frame session=SESSION_MAC_STATUS size=2056x1329 visibleSize=2056x1
             2056,
             1329,
             true,
+            true,
+            None,
         )?;
 
         assert!(report.target.contains("mac.status.log"));
         assert!(doctor_check(&report, "video_fps").ok);
         assert!(doctor_check(&report, "native_video_rtc_stats").ok);
         assert!(doctor_check(&report, "native_video_receiver").ok);
-        assert!(doctor_check(&report, "visible_native_render").ok);
+        assert!(!doctor_check(&report, "visible_native_render").ok);
+        assert!(!doctor_check(&report, "visible_render_fps").ok);
         assert!(doctor_check(&report, "video_resolution").ok);
-        ensure_webrtc_media_doctor_passed(&report)?;
+        assert!(ensure_webrtc_media_doctor_passed(&report).is_err());
         Ok(())
     }
 
@@ -9445,7 +10174,7 @@ native-video-tx session=SESSION11_MANY state=rtpFlowing submitted=7 framesSent=6
     }
 
     #[test]
-    fn doctor_webrtc_media_allows_rx_startup_zero_and_native_fallback_resilience() -> Result<()> {
+    fn doctor_webrtc_media_rejects_rx_startup_native_fallback_resilience() -> Result<()> {
         let artifact_dir = make_test_dir("doctor-webrtc-media-startup-resilience")?;
         std::fs::write(
             artifact_dir.join("webrtc-media-SESSION5.jsonl"),
@@ -9562,13 +10291,10 @@ native-video-tx session=SESSION11_MANY state=rtpFlowing submitted=7 framesSent=6
         assert!(doctor_check(&report, "audio_rendered_frames").ok);
         assert!(doctor_check(&report, "audio_activity_continuity").ok);
         assert!(doctor_check(&report, "audio_playback_continuity").ok);
-        assert!(doctor_check(&report, "native_video_health").ok);
-        assert_eq!(
-            doctor_check(&report, "native_video_health").severity,
-            "warn"
-        );
-        assert!(doctor_check(&report, "probable_fault_stage").ok);
-        assert!(report.fault_stage.is_none());
+        assert!(!doctor_check(&report, "native_video_health").ok);
+        assert!(!doctor_check(&report, "stale_fallback").ok);
+        assert!(!doctor_check(&report, "probable_fault_stage").ok);
+        assert!(report.fault_stage.is_some());
         Ok(())
     }
 
@@ -9811,7 +10537,7 @@ native-video-health session=SESSION4 state=active
 stream-stats session=SESSION4B fps=31.0
 native-video-health session=SESSION4B state=rtpFlowing submitted=120 framesSent=120 packetsSent=240 bytesSent=4096
 native-receiver-frame session=SESSION4B size=2056x1329 visibleSize=2056x1329 codedSize=2056x1329 source=receiver-stats
-native-render-frame session=SESSION4B size=2056x1329 visibleSize=2056x1329 codedSize=2056x1329 source=rtc-mtl-video-view
+	native-render-frame session=SESSION4B size=2056x1329 visibleSize=2056x1329 codedSize=2056x1329 source=rtc-mtl-video-view nativeRenderEvidenceSource=rtc-mtl-video-view nativePromotionState=visible-render-evidence uiSurface=remoteDesktopView
 audio event session=SESSION4B audioTxCaptured=20 audioTxEncoded=20 audioTxSent=20 audioRxRecv=10 audioRxDecoded=10 audioRxPlayed=10 recvTotal=10 decodeTotal=10 playTotal=10 renderedFrames=9600
 audio-rx session=SESSION4B source=remote-heartbeat audioRxDatagrams=0 audioRxRecv=0 audioRxDecoded=0 audioRxPlayed=0 recvTotal=0 decodeTotal=0 playTotal=0 rejected=0 jitterEvicted=0 playbackDrop=0 renderedFrames=- underflow=- rebuffer=- probable=audio-rx-no-positive-evidence
 audio event session=SESSION4B audioTxCaptured=20 audioTxEncoded=20 audioTxSent=20 audioRxRecv=12 audioRxDecoded=12 audioRxPlayed=12 recvTotal=22 decodeTotal=22 playTotal=22 renderedFrames=19200

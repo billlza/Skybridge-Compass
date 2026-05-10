@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import Security
 import SkyBridgeCore
 
@@ -10,6 +11,7 @@ struct LocalWebRTCSmokeHost {
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
         reporter.append("boot role=mac-host")
+        reporter.append(currentDisplayModeStatus())
         do {
             reporter.append("auth-start")
             try await configureAuthContext(reporter: reporter)
@@ -123,6 +125,13 @@ struct LocalWebRTCSmokeHost {
             return nil
         }
         return URL(fileURLWithPath: raw)
+    }
+
+    private static func currentDisplayModeStatus() -> String {
+        guard let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()) else {
+            return "display-mode current=unavailable"
+        }
+        return "display-mode current=\(mode.width)x\(mode.height) pixels=\(mode.pixelWidth)x\(mode.pixelHeight)"
     }
 
     private static func codeURL() -> URL? {
