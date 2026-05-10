@@ -31,14 +31,22 @@ public struct SkyBridgeMediaJitterBuffer<Payload: Sendable>: Sendable {
     public let targetDelayMs: Int
     public let maxDelayMs: Int
     public let packetDurationMs: Int
+    public let reorderGraceMs: Int
     private var frames: [UInt64: SkyBridgeMediaJitterFrame<Payload>]
     private var nextExpectedSequence: UInt64?
     private var missingSequenceFirstSeenAt: TimeInterval?
 
-    public init(targetDelayMs: Int, maxDelayMs: Int, packetDurationMs: Int = 20) {
+    public init(
+        targetDelayMs: Int,
+        maxDelayMs: Int,
+        packetDurationMs: Int = 20,
+        reorderGraceMs: Int? = nil
+    ) {
         self.targetDelayMs = max(0, targetDelayMs)
         self.maxDelayMs = max(maxDelayMs, targetDelayMs)
         self.packetDurationMs = max(1, packetDurationMs)
+        let defaultReorderGraceMs = min(max(self.packetDurationMs * 2, self.targetDelayMs), self.maxDelayMs)
+        self.reorderGraceMs = max(0, min(reorderGraceMs ?? defaultReorderGraceMs, self.maxDelayMs))
         self.frames = [:]
         self.nextExpectedSequence = nil
         self.missingSequenceFirstSeenAt = nil
@@ -109,6 +117,29 @@ public struct SkyBridgeMediaJitterBuffer<Payload: Sendable>: Sendable {
         return .frame(popped)
     }
 
+    public mutating func popReadyFrame(now: TimeInterval) -> SkyBridgeMediaJitterFrame<Payload>? {
+        guard !frames.isEmpty else { return nil }
+        let minSequence = frames.keys.min()!
+        if nextExpectedSequence == nil {
+            nextExpectedSequence = minSequence
+        }
+        guard let expected = nextExpectedSequence else { return nil }
+
+        if let frame = frames[expected],
+           now - frame.insertedAt >= Double(targetDelayMs) / 1_000.0 {
+            missingSequenceFirstSeenAt = nil
+            return pop(sequence: expected)
+        }
+
+        guard let oldest = frames[minSequence],
+              oldest.sequence <= expected,
+              now - oldest.insertedAt >= Double(maxDelayMs) / 1_000.0 else {
+            return nil
+        }
+        nextExpectedSequence = minSequence
+        return pop(sequence: minSequence)
+    }
+
     public mutating func popReady(now: TimeInterval) -> SkyBridgeMediaJitterFrame<Payload>? {
         while true {
             switch popReadyOrGap(now: now) {
@@ -126,7 +157,8 @@ public struct SkyBridgeMediaJitterBuffer<Payload: Sendable>: Sendable {
         var buffer = SkyBridgeMediaJitterBuffer<Payload>(
             targetDelayMs: targetDelayMs,
             maxDelayMs: maxDelayMs,
-            packetDurationMs: packetDurationMs
+            packetDurationMs: packetDurationMs,
+            reorderGraceMs: reorderGraceMs
         )
         buffer.frames = frames
         buffer.nextExpectedSequence = nextExpectedSequence
@@ -140,7 +172,4 @@ public struct SkyBridgeMediaJitterBuffer<Payload: Sendable>: Sendable {
         return frame
     }
 
-    private var reorderGraceMs: Int {
-        min(max(packetDurationMs * 2, targetDelayMs), maxDelayMs)
-    }
 }

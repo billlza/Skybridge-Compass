@@ -5,7 +5,7 @@ that import `stasel/WebRTC` (binary `WebRTC.xcframework`).
 
 ## Why it exists
 
-At the time of this artifact, the `WebRTC-M141.xcframework.zip` distribution’s **macOS slice**
+At the time of this artifact, the `WebRTC-M147.xcframework.zip` distribution's **macOS slice**
 may ship with an incomplete `WebRTC.framework/Headers/` set (only `WebRTC.h`), while the umbrella
 header still references many public headers such as:
 
@@ -19,8 +19,7 @@ add them via `-Xcc -I Sources/Vendor/WebRTCHeaders` for macOS builds in `Package
 
 ## What is included
 
-- `WebRTC/*.h`: a header set copied from the same WebRTC release (M141) to satisfy the umbrella imports.
-- `sdk/objc/base/RTCMacros.h`: a thin shim so includes of `"sdk/objc/base/RTCMacros.h"` resolve.
+- `WebRTC/*.h`: a header set copied from the same WebRTC release (M147) to satisfy the umbrella imports.
 - `WebRTC/RTCMTLNSVideoView.h`: a minimal shim used when the macOS slice omits this header.
 
 If the upstream binary distribution is fixed in a future update, this overlay can be removed.
@@ -28,4 +27,3 @@ If the upstream binary distribution is fixed in a future update, this overlay ca
 ## License
 
 These headers correspond to the WebRTC project and are covered by the license in `LICENSE`.
-

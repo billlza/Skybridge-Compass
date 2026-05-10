@@ -9,13 +9,13 @@
  * prefer updating the underlying WebRTC binary or replacing this shim with the
  * upstream header.
  */
- 
+
 #pragma once
 
 #import <Foundation/Foundation.h>
 
-#import "RTCVideoRenderer.h"
-#import "sdk/objc/base/RTCMacros.h"
+#import <WebRTC/RTCMacros.h>
+#import <WebRTC/RTCVideoRenderer.h>
 
 #if __has_include(<AppKit/AppKit.h>)
 #import <AppKit/AppKit.h>
@@ -34,4 +34,3 @@ RTC_OBJC_EXPORT
 NS_ASSUME_NONNULL_END
 
 #endif
-

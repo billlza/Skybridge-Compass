@@ -64,8 +64,8 @@ public struct SkyBridgeMediaAudioProfile: Codable, Equatable, Sendable {
                 minBitrate: 160_000,
                 targetBitrate: 224_000,
                 maxBitrate: 256_000,
-                jitterTargetMs: 80,
-                jitterMaxMs: 180,
+                jitterTargetMs: 140,
+                jitterMaxMs: 360,
                 opusComplexity: 10
             )
         }

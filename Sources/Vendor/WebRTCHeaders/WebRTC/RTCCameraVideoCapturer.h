@@ -11,8 +11,8 @@
 #import <AVFoundation/AVFoundation.h>
 #import <Foundation/Foundation.h>
 
-#import "RTCVideoCapturer.h"
-#import "sdk/objc/base/RTCMacros.h"
+#import <WebRTC/RTCVideoCapturer.h>
+#import <WebRTC/RTCMacros.h>
 
 NS_ASSUME_NONNULL_BEGIN
 

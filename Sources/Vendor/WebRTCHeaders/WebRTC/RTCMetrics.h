@@ -10,8 +10,8 @@
 
 #import <Foundation/Foundation.h>
 
-#import "RTCMetricsSampleInfo.h"
-#import "sdk/objc/base/RTCMacros.h"
+#import <WebRTC/RTCMetricsSampleInfo.h>
+#import <WebRTC/RTCMacros.h>
 
 /**
  * Enables gathering of metrics (which can be fetched with

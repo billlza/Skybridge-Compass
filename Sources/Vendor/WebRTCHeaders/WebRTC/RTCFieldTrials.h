@@ -10,7 +10,7 @@
 
 #import <Foundation/Foundation.h>
 
-#import "sdk/objc/base/RTCMacros.h"
+#import <WebRTC/RTCMacros.h>
 
 /** The only valid value for the following if set is kRTCFieldTrialEnabledValue.
  */

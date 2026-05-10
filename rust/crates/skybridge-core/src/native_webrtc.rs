@@ -1,21 +1,18 @@
+use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
-use bytes::Bytes;
+use bytes::BytesMut;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
-use webrtc::api::APIBuilder;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelMessage};
+use webrtc::peer_connection::{
+    MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
+    RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer,
+    RTCPeerConnectionState, RTCSessionDescription,
+};
 
 use crate::{
     ClassicHandleResult, ClassicInitiatorConfig, ClassicInitiatorHandshake, ClassicSessionKeys,
@@ -191,9 +188,10 @@ struct NativeWebRtcInner {
     session_id: String,
     local_device_id: String,
     role: RuntimeSessionRole,
-    peer: RTCPeerConnection,
+    peer: Arc<dyn PeerConnection>,
     events_tx: mpsc::Sender<NativeWebRtcEvent>,
-    data_channel: Mutex<Option<Arc<RTCDataChannel>>>,
+    data_channel: Mutex<Option<Arc<dyn DataChannel>>>,
+    gather_complete_rx: Mutex<mpsc::Receiver<()>>,
     state: Mutex<NativeWebRtcState>,
 }
 
@@ -202,19 +200,94 @@ pub struct NativeWebRtcSession {
     events_rx: mpsc::Receiver<NativeWebRtcEvent>,
 }
 
+struct NativeWebRtcEventRouter {
+    session_id: String,
+    role: RuntimeSessionRole,
+    data_channel_tx: mpsc::Sender<Arc<dyn DataChannel>>,
+    disconnect_tx: mpsc::Sender<Option<String>>,
+    gather_complete_tx: mpsc::Sender<()>,
+}
+
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for NativeWebRtcEventRouter {
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        debug!(
+            kind = "native_webrtc.ice_gathering.state_changed",
+            session_id = %self.session_id,
+            role = ?self.role,
+            state = ?state,
+            "native WebRTC ICE gathering state changed"
+        );
+        if state == RTCIceGatheringState::Complete {
+            let _ = self.gather_complete_tx.send(()).await;
+        }
+    }
+
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        info!(
+            kind = "native_webrtc.peer_connection.state_changed",
+            session_id = %self.session_id,
+            role = ?self.role,
+            state = ?state,
+            "peer connection state changed"
+        );
+        if matches!(
+            state,
+            RTCPeerConnectionState::Failed
+                | RTCPeerConnectionState::Disconnected
+                | RTCPeerConnectionState::Closed
+        ) {
+            let _ = self
+                .disconnect_tx
+                .send(Some(format!("peer_connection_state_{state:?}")))
+                .await;
+        }
+    }
+
+    async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
+        let label = data_channel.label().await.unwrap_or_default();
+        info!(
+            kind = "native_webrtc.data_channel.discovered",
+            session_id = %self.session_id,
+            role = ?self.role,
+            label = %label,
+            id = data_channel.id(),
+            "received remote-created data channel"
+        );
+        let _ = self.data_channel_tx.send(data_channel).await;
+    }
+}
+
 impl NativeWebRtcSession {
     pub async fn new(config: NativeWebRtcConfig) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs()?;
-        let api = APIBuilder::new().with_media_engine(media_engine).build();
-        let peer = api
-            .new_peer_connection(RTCConfiguration {
-                ice_servers: build_ice_servers(config.turn_credentials.as_ref()),
-                ..Default::default()
-            })
-            .await?;
+        let rtc_configuration = RTCConfigurationBuilder::new()
+            .with_ice_servers(build_ice_servers(config.turn_credentials.as_ref()))
+            .build();
 
         let (events_tx, events_rx) = mpsc::channel(128);
+        let (data_channel_tx, mut data_channel_rx) = mpsc::channel(16);
+        let (disconnect_tx, mut disconnect_rx) = mpsc::channel(16);
+        let (gather_complete_tx, gather_complete_rx) = mpsc::channel(8);
+        let handler = Arc::new(NativeWebRtcEventRouter {
+            session_id: config.session_id.clone(),
+            role: config.role,
+            data_channel_tx,
+            disconnect_tx,
+            gather_complete_tx,
+        });
+        let udp_bind_addrs = native_webrtc_udp_bind_addrs();
+        let peer = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(rtc_configuration)
+                .with_media_engine(media_engine)
+                .with_handler(handler)
+                .with_udp_addrs(udp_bind_addrs)
+                .build()
+                .await?,
+        ) as Arc<dyn PeerConnection>;
+
         let inner = Arc::new(NativeWebRtcInner {
             session_id: config.session_id,
             local_device_id: config.local_device_id,
@@ -222,6 +295,7 @@ impl NativeWebRtcSession {
             peer,
             events_tx,
             data_channel: Mutex::new(None),
+            gather_complete_rx: Mutex::new(gather_complete_rx),
             state: Mutex::new(NativeWebRtcState {
                 handshake: match (
                     config.classic_initiator,
@@ -242,7 +316,18 @@ impl NativeWebRtcSession {
                 ..NativeWebRtcState::default()
             }),
         });
-        inner.install_callbacks().await;
+        let remote_channel_inner = Arc::clone(&inner);
+        tokio::spawn(async move {
+            while let Some(data_channel) = data_channel_rx.recv().await {
+                remote_channel_inner.attach_data_channel(data_channel).await;
+            }
+        });
+        let disconnect_inner = Arc::clone(&inner);
+        tokio::spawn(async move {
+            while let Some(reason) = disconnect_rx.recv().await {
+                disconnect_inner.emit_transport_disconnected(reason).await;
+            }
+        });
 
         Ok(Self { inner, events_rx })
     }
@@ -335,59 +420,25 @@ impl NativeWebRtcSession {
 }
 
 impl NativeWebRtcInner {
-    async fn install_callbacks(self: &Arc<Self>) {
-        let on_data_channel_self = Arc::clone(self);
-        self.peer
-            .on_data_channel(Box::new(move |data_channel: Arc<RTCDataChannel>| {
-                let on_data_channel_self = Arc::clone(&on_data_channel_self);
-                Box::pin(async move {
-                    info!(
-                        kind = "native_webrtc.data_channel.discovered",
-                        session_id = %on_data_channel_self.session_id,
-                        role = ?on_data_channel_self.role,
-                        label = %data_channel.label(),
-                        id = data_channel.id(),
-                        "received remote-created data channel"
-                    );
-                    on_data_channel_self.attach_data_channel(data_channel).await;
-                })
-            }));
-
-        let on_state_self = Arc::clone(self);
-        self.peer.on_peer_connection_state_change(Box::new(
-            move |state: RTCPeerConnectionState| {
-                let on_state_self = Arc::clone(&on_state_self);
-                Box::pin(async move {
-                    info!(
-                        kind = "native_webrtc.peer_connection.state_changed",
-                        session_id = %on_state_self.session_id,
-                        role = ?on_state_self.role,
-                        state = ?state,
-                        "peer connection state changed"
-                    );
-                    if matches!(
-                        state,
-                        RTCPeerConnectionState::Failed
-                            | RTCPeerConnectionState::Disconnected
-                            | RTCPeerConnectionState::Closed
-                    ) {
-                        on_state_self
-                            .emit_transport_disconnected(Some(format!(
-                                "peer_connection_state_{state:?}"
-                            )))
-                            .await;
-                    }
-                })
-            },
-        ));
-    }
-
-    async fn attach_data_channel(self: &Arc<Self>, data_channel: Arc<RTCDataChannel>) {
+    async fn attach_data_channel(self: &Arc<Self>, data_channel: Arc<dyn DataChannel>) {
+        let label = data_channel.label().await.unwrap_or_default();
+        if !label.is_empty() && label != CONTROL_CHANNEL_LABEL {
+            warn!(
+                kind = "native_webrtc.data_channel.rejected",
+                session_id = %self.session_id,
+                role = ?self.role,
+                label = %label,
+                id = data_channel.id(),
+                expected_label = CONTROL_CHANNEL_LABEL,
+                "rejecting unexpected native WebRTC data channel"
+            );
+            return;
+        }
         info!(
             kind = "native_webrtc.data_channel.attached",
             session_id = %self.session_id,
             role = ?self.role,
-            label = %data_channel.label(),
+            label = %label,
             id = data_channel.id(),
             "attaching native WebRTC data channel callbacks"
         );
@@ -396,59 +447,105 @@ impl NativeWebRtcInner {
             *slot = Some(Arc::clone(&data_channel));
         }
 
-        let on_open_self = Arc::clone(self);
-        let on_open_channel = Arc::clone(&data_channel);
-        data_channel.on_open(Box::new(move || {
-            let on_open_self = Arc::clone(&on_open_self);
-            let on_open_channel = Arc::clone(&on_open_channel);
-            Box::pin(async move {
-                if let Err(error) = on_open_self.handle_data_channel_open(on_open_channel).await {
-                    warn!(
-                        kind = "native_webrtc.data_channel.open_failed",
-                        session_id = %on_open_self.session_id,
-                        role = ?on_open_self.role,
-                        error = %error,
-                        "failed while handling data channel open"
-                    );
+        let channel_self = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some(event) = data_channel.poll().await {
+                match event {
+                    DataChannelEvent::OnOpen => {
+                        if let Err(error) = channel_self
+                            .handle_data_channel_open(Arc::clone(&data_channel))
+                            .await
+                        {
+                            warn!(
+                                kind = "native_webrtc.data_channel.open_failed",
+                                session_id = %channel_self.session_id,
+                                role = ?channel_self.role,
+                                error = %error,
+                                "failed while handling data channel open"
+                            );
+                            channel_self
+                                .emit_transport_disconnected(Some(format!(
+                                    "data_channel_open_failed:{error}"
+                                )))
+                                .await;
+                            break;
+                        }
+                    }
+                    DataChannelEvent::OnMessage(message) => {
+                        if let Err(error) = channel_self.handle_data_channel_message(message).await
+                        {
+                            warn!(
+                                kind = "native_webrtc.data_channel.message_failed",
+                                session_id = %channel_self.session_id,
+                                role = ?channel_self.role,
+                                error = %error,
+                                "failed while handling data channel message"
+                            );
+                            channel_self
+                                .emit_transport_disconnected(Some(format!(
+                                    "data_channel_message_failed:{error}"
+                                )))
+                                .await;
+                            break;
+                        }
+                    }
+                    DataChannelEvent::OnClose => {
+                        let label = data_channel.label().await.unwrap_or_default();
+                        info!(
+                            kind = "native_webrtc.data_channel.closed",
+                            session_id = %channel_self.session_id,
+                            role = ?channel_self.role,
+                            label = %label,
+                            id = data_channel.id(),
+                            "native WebRTC data channel closed"
+                        );
+                        if channel_self
+                            .clear_data_channel_if_current(&data_channel)
+                            .await
+                        {
+                            channel_self
+                                .emit_transport_disconnected(Some("data_channel_closed".to_owned()))
+                                .await;
+                        }
+                        break;
+                    }
+                    DataChannelEvent::OnError => {
+                        warn!(
+                            kind = "native_webrtc.data_channel.error",
+                            session_id = %channel_self.session_id,
+                            role = ?channel_self.role,
+                            id = data_channel.id(),
+                            "native WebRTC data channel emitted an error"
+                        );
+                        if channel_self
+                            .clear_data_channel_if_current(&data_channel)
+                            .await
+                        {
+                            channel_self
+                                .emit_transport_disconnected(Some("data_channel_error".to_owned()))
+                                .await;
+                        }
+                        break;
+                    }
+                    DataChannelEvent::OnClosing
+                    | DataChannelEvent::OnBufferedAmountLow
+                    | DataChannelEvent::OnBufferedAmountHigh => {}
                 }
-            })
-        }));
+            }
+        });
+    }
 
-        let on_message_self = Arc::clone(self);
-        data_channel.on_message(Box::new(move |message: DataChannelMessage| {
-            let on_message_self = Arc::clone(&on_message_self);
-            Box::pin(async move {
-                if let Err(error) = on_message_self.handle_data_channel_message(message).await {
-                    warn!(
-                        kind = "native_webrtc.data_channel.message_failed",
-                        session_id = %on_message_self.session_id,
-                        role = ?on_message_self.role,
-                        error = %error,
-                        "failed while handling data channel message"
-                    );
-                }
-            })
-        }));
-
-        let on_close_self = Arc::clone(self);
-        let on_close_channel = Arc::clone(&data_channel);
-        data_channel.on_close(Box::new(move || {
-            let on_close_self = Arc::clone(&on_close_self);
-            let on_close_channel = Arc::clone(&on_close_channel);
-            Box::pin(async move {
-                info!(
-                    kind = "native_webrtc.data_channel.closed",
-                    session_id = %on_close_self.session_id,
-                    role = ?on_close_self.role,
-                    label = %on_close_channel.label(),
-                    id = on_close_channel.id(),
-                    "native WebRTC data channel closed"
-                );
-                on_close_self
-                    .emit_transport_disconnected(Some("data_channel_closed".to_owned()))
-                    .await;
-            })
-        }));
+    async fn clear_data_channel_if_current(&self, data_channel: &Arc<dyn DataChannel>) -> bool {
+        let mut slot = self.data_channel.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, data_channel))
+        {
+            *slot = None;
+            true
+        } else {
+            false
+        }
     }
 
     async fn start_offer_if_needed(&self) -> Result<()> {
@@ -462,11 +559,8 @@ impl NativeWebRtcInner {
 
         let result = async {
             let offer = self.peer.create_offer(None).await?;
-            let mut gather_complete = self.peer.gathering_complete_promise().await;
             self.peer.set_local_description(offer).await?;
-            let _ = timeout(Duration::from_secs(10), gather_complete.recv())
-                .await
-                .map_err(|_| anyhow!("ice_gathering_timeout"))?;
+            self.wait_for_ice_gathering_complete().await?;
             let local_description = self
                 .peer
                 .local_description()
@@ -516,11 +610,8 @@ impl NativeWebRtcInner {
 
         let result = async {
             let answer = self.peer.create_answer(None).await?;
-            let mut gather_complete = self.peer.gathering_complete_promise().await;
             self.peer.set_local_description(answer).await?;
-            let _ = timeout(Duration::from_secs(10), gather_complete.recv())
-                .await
-                .map_err(|_| anyhow!("ice_gathering_timeout"))?;
+            self.wait_for_ice_gathering_complete().await?;
             let local_description = self
                 .peer
                 .local_description()
@@ -547,6 +638,15 @@ impl NativeWebRtcInner {
         result
     }
 
+    async fn wait_for_ice_gathering_complete(&self) -> Result<()> {
+        let mut gather_complete_rx = self.gather_complete_rx.lock().await;
+        let _ = timeout(Duration::from_secs(10), gather_complete_rx.recv())
+            .await
+            .map_err(|_| anyhow!("ice_gathering_timeout"))?
+            .ok_or_else(|| anyhow!("ice_gathering_channel_closed"))?;
+        Ok(())
+    }
+
     async fn apply_remote_answer(&self, sdp: String) -> Result<()> {
         self.peer
             .set_remote_description(RTCSessionDescription::answer(sdp)?)
@@ -569,6 +669,7 @@ impl NativeWebRtcInner {
                 .sdp_m_line_index
                 .and_then(|value| u16::try_from(value).ok()),
             username_fragment: None,
+            url: None,
         };
 
         let remote_description_set = {
@@ -597,7 +698,7 @@ impl NativeWebRtcInner {
 
     async fn handle_data_channel_open(
         self: &Arc<Self>,
-        data_channel: Arc<RTCDataChannel>,
+        data_channel: Arc<dyn DataChannel>,
     ) -> Result<()> {
         let (should_emit_ready, outbound_message_a) = {
             let mut state = self.state.lock().await;
@@ -616,11 +717,15 @@ impl NativeWebRtcInner {
         };
 
         if should_emit_ready {
+            let label = data_channel.label().await.unwrap_or_default();
+            if !label.is_empty() && label != CONTROL_CHANNEL_LABEL {
+                bail!("unexpected_data_channel_label:{label}");
+            }
             info!(
                 kind = "native_webrtc.transport.ready",
                 session_id = %self.session_id,
                 role = ?self.role,
-                label = %data_channel.label(),
+                label = %label,
                 id = data_channel.id(),
                 "data channel opened; emitting transport_ready"
             );
@@ -645,7 +750,7 @@ impl NativeWebRtcInner {
 
     async fn handle_data_channel_message(
         self: &Arc<Self>,
-        message: DataChannelMessage,
+        message: RTCDataChannelMessage,
     ) -> Result<()> {
         if message.is_string {
             let preview = String::from_utf8_lossy(&message.data);
@@ -949,7 +1054,7 @@ impl NativeWebRtcInner {
 
     async fn send_framed_payload(
         &self,
-        data_channel: &Arc<RTCDataChannel>,
+        data_channel: &Arc<dyn DataChannel>,
         payload: &[u8],
     ) -> Result<()> {
         if payload.len() > MAX_FRAMED_PAYLOAD_BYTES {
@@ -959,7 +1064,7 @@ impl NativeWebRtcInner {
         framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         framed.extend_from_slice(payload);
         data_channel
-            .send(&Bytes::from(framed))
+            .send(BytesMut::from(framed.as_slice()))
             .await
             .map_err(|error| anyhow!("failed to send framed data channel payload: {error}"))?;
         Ok(())
@@ -1028,8 +1133,46 @@ fn build_ice_servers(turn_credentials: Option<&TurnCredentials>) -> Vec<RTCIceSe
             urls: credentials.uris.clone(),
             username: credentials.username.clone(),
             credential: credentials.password.clone(),
+            ..Default::default()
         }],
         _ => Vec::new(),
+    }
+}
+
+fn native_webrtc_udp_bind_addrs() -> Vec<String> {
+    if let Ok(raw_addrs) = std::env::var("SKYBRIDGE_NATIVE_WEBRTC_UDP_ADDRS") {
+        let configured = raw_addrs
+            .split(',')
+            .map(str::trim)
+            .filter(|addr| !addr.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !configured.is_empty() {
+            return configured;
+        }
+    }
+
+    let mut addrs = Vec::new();
+    push_unique_addr(&mut addrs, "127.0.0.1:0".to_owned());
+    if let Some(primary_addr) = primary_ipv4_udp_bind_addr() {
+        push_unique_addr(&mut addrs, primary_addr);
+    }
+    addrs
+}
+
+fn primary_ipv4_udp_bind_addr() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let local_addr = socket.local_addr().ok()?;
+    match local_addr.ip() {
+        IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(format!("{ip}:0")),
+        _ => None,
+    }
+}
+
+fn push_unique_addr(addrs: &mut Vec<String>, addr: String) {
+    if !addrs.iter().any(|existing| existing == &addr) {
+        addrs.push(addr);
     }
 }
 

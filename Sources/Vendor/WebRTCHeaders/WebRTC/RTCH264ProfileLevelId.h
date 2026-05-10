@@ -10,7 +10,7 @@
 
 #import <Foundation/Foundation.h>
 
-#import "sdk/objc/base/RTCMacros.h"
+#import <WebRTC/RTCMacros.h>
 
 RTC_EXTERN NSString *const kRTCVideoCodecH264Name;
 RTC_EXTERN NSString *const kRTCLevel31ConstrainedHigh;

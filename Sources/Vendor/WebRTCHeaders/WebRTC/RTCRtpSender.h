@@ -10,10 +10,10 @@
 
 #import <Foundation/Foundation.h>
 
-#import "RTCDtmfSender.h"
-#import "RTCMediaStreamTrack.h"
-#import "RTCRtpParameters.h"
-#import "sdk/objc/base/RTCMacros.h"
+#import <WebRTC/RTCDtmfSender.h>
+#import <WebRTC/RTCMediaStreamTrack.h>
+#import <WebRTC/RTCRtpParameters.h>
+#import <WebRTC/RTCMacros.h>
 
 NS_ASSUME_NONNULL_BEGIN
 

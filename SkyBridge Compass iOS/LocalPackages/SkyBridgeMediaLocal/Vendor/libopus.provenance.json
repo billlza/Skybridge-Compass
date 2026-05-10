@@ -1,0 +1,20 @@
+{
+  "name": "libopus",
+  "version": "1.6.1",
+  "upstream": {
+    "project": "Opus Codec",
+    "downloadsUrl": "https://opus-codec.org/downloads",
+    "sourceArchive": "opus-1.6.1.tar.gz",
+    "sourceSha256": "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1",
+    "releaseDate": "2026-01-14"
+  },
+  "localArtifact": {
+    "path": "SkyBridge Compass iOS/LocalPackages/SkyBridgeMediaLocal/Vendor/libopus.xcframework",
+    "verification": "strings <slice>/libopus.a contains 'libopus 1.6.1'",
+    "sliceSha256": {
+      "ios-arm64/libopus.a": "5ef567310adc726dbc877f47c5a86c6cb274b9ec3478c70c0975b75080ff1fd6",
+      "ios-arm64_x86_64-simulator/libopus.a": "4ee402312c099836e3b8bb397e866c9c5527430f997956c9d9cb3956b312e84c",
+      "macos-arm64_x86_64/libopus.a": "b0748351549eaf1fdab08ae6b3e95077634b5c11236dc1c4223323e1ee8fc148"
+    }
+  }
+}

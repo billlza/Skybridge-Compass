@@ -10,9 +10,9 @@
 
 #import <Foundation/Foundation.h>
 
-#import "RTCRtpReceiver.h"
-#import "RTCRtpSender.h"
-#import "sdk/objc/base/RTCMacros.h"
+#import <WebRTC/RTCRtpReceiver.h>
+#import <WebRTC/RTCRtpSender.h>
+#import <WebRTC/RTCMacros.h>
 
 NS_ASSUME_NONNULL_BEGIN
 

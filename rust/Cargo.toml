@@ -16,6 +16,7 @@ rust-version = "1.94"
 [workspace.dependencies]
 anyhow = "1.0.102"
 aes-gcm = "0.10.3"
+async-trait = "0.1.89"
 axum = { version = "0.8.6", features = ["http1", "json", "tokio"] }
 base64 = "0.22.1"
 bytes = "1.11.1"
@@ -48,5 +49,5 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 url = "2.5.8"
 uuid = { version = "1.22.0", features = ["serde", "v4", "v7"] }
 webbrowser = "1.2.0"
-webrtc = "0.17.1"
+webrtc = "0.20.0-alpha.1"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom"] }

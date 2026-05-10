@@ -4,6 +4,7 @@ import PackageDescription
 
 let packageRootPath = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let webRTCHeadersIncludePath = "\(packageRootPath)/Sources/Vendor/WebRTCHeaders"
+let macOSAppInfoPlistPath = "\(packageRootPath)/Sources/SkyBridgeCompassApp/Info.plist"
 
 // Build-time gate for Apple CryptoKit PQC types (iOS 26+/macOS 26+).
 //
@@ -67,9 +68,9 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections", from: "1.4.1"),
-        .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.12.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.13.0"),
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
-        .package(url: "https://github.com/apple/swift-asn1", from: "1.6.0"),
+        .package(url: "https://github.com/apple/swift-asn1", from: "1.7.0"),
         // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
         .package(url: "https://github.com/stasel/WebRTC", from: "147.0.0")
     ],
@@ -406,6 +407,16 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("AuthenticationServices"),
                 .linkedFramework("WebKit"),
+                .unsafeFlags([
+                    "-Xlinker",
+                    "-sectcreate",
+                    "-Xlinker",
+                    "__TEXT",
+                    "-Xlinker",
+                    "__info_plist",
+                    "-Xlinker",
+                    macOSAppInfoPlistPath
+                ], .when(platforms: [.macOS])),
                 // 中文注释：移除静默链接器告警，依赖库目标版本已统一为 14.0
             ]
         ),
