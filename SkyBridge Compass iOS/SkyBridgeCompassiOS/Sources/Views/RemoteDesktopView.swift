@@ -1096,6 +1096,8 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
         private var hasLoggedVisibleRenderEvidence = false
         private var hasLoggedViewSizeEvidence = false
         private var lastDiagnosticLogAt = Date.distantPast
+        private var visibleRenderFrameCount = 0
+        private var visibleRenderFrameWindowStart: Date?
 
         override func layoutSubviews() {
             super.layoutSubviews()
@@ -1134,6 +1136,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                 return
             }
             lastRenderedFrameTimestampNs = timestampNs
+            noteVisibleRenderFrameForDiagnostics(size: size)
             if lastVisibleRenderSize == size {
                 consecutiveVisibleRenderFrames += 1
             } else {
@@ -1183,6 +1186,38 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
             lastRenderedFrameTimestampNs = nil
             hasLoggedVisibleRenderEvidence = false
             hasLoggedViewSizeEvidence = false
+            visibleRenderFrameCount = 0
+            visibleRenderFrameWindowStart = nil
+        }
+
+        private func noteVisibleRenderFrameForDiagnostics(size: CGSize) {
+            let now = Date()
+            if let windowStart = visibleRenderFrameWindowStart {
+                visibleRenderFrameCount += 1
+                let elapsed = now.timeIntervalSince(windowStart)
+                guard elapsed >= 1.0 else { return }
+                let fps = Double(visibleRenderFrameCount) / elapsed
+                visibleRenderFrameCount = 0
+                visibleRenderFrameWindowStart = now
+                let sessionId = CrossNetworkWebRTCManager.instance.activeRemoteDesktopSessionId?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? "-"
+                SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                    [
+                        "kind": "visibleNativeRenderFPS",
+                        "session": sessionId,
+                        "session_id": sessionId,
+                        "source": Self.nativeRenderEvidenceSource,
+                        "trackId": diagnosticTrackId,
+                        "viewerDisplayFPS": fps,
+                        "displayFPS": fps,
+                        "visibleWidth": Int(size.width),
+                        "visibleHeight": Int(size.height)
+                    ]
+                )
+            } else {
+                visibleRenderFrameWindowStart = now
+                visibleRenderFrameCount = 1
+            }
         }
 
         private func logNativeRenderDiagnostic(_ phase: String, _ details: String) {

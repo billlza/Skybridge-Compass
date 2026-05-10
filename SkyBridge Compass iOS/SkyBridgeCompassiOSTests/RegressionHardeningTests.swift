@@ -178,6 +178,56 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertTrue(failureCases.contains("handleRealtimeMediaAudioRelayBindFailure"))
     }
 
+    func testStrictRealtimeAudioRenewalUsesMakeBeforeBreakInsteadOfInPlaceRebind() throws {
+        let source = try remoteDesktopManagerSource()
+        let renewalBody = try sourceSlice(
+            from: "private func renewRealtimeMediaAudioRelayEndpoint",
+            to: "private func handleRealtimeMediaAudioRelayBindFailure",
+            in: source
+        )
+
+        XCTAssertTrue(
+            source.contains("max(Self.realtimeMediaAudioEndpointRenewalLeadTime, 35)"),
+            "Strict receiver lease renewal should lead the macOS sender renewal margin instead of reacting after sender rollover."
+        )
+        XCTAssertTrue(
+            renewalBody.contains("let strictRenewalRequiresRollover = strictCrossNetworkMediaValidationActive && sameRelayAddress")
+        )
+        XCTAssertTrue(
+            renewalBody.contains("if !strictRenewalRequiresRollover,\n           sameRelayAddress,"),
+            "Strict cross-network media validation must not rebind the live audio receive transport in place."
+        )
+        XCTAssertTrue(renewalBody.contains("reason=strict-make-before-break"))
+        XCTAssertTrue(renewalBody.contains("\"probable\": \"strict-make-before-break\""))
+        XCTAssertTrue(renewalBody.contains("Task(priority: .utility)"))
+        XCTAssertTrue(renewalBody.contains("await oldTransport.stop()"))
+    }
+
+    func testStrictSmokeAudioRenewalUsesMakeBeforeBreakInsteadOfInPlaceRebind() throws {
+        let source = try skyBridgeCompassAppSource()
+        let renewalBody = try sourceSlice(
+            from: "private func renewSmokeAudioRelayEndpoint",
+            to: "private func promoteSmokeAudioRelayTransportAfterNewTraffic",
+            in: source
+        )
+
+        XCTAssertTrue(
+            source.contains("max(Self.audioRelayRenewalLeadTime, 35)"),
+            "Strict smoke audio renewal should start before the sender renewal margin so the viewer has a ready receive path."
+        )
+        XCTAssertTrue(
+            renewalBody.contains("let sameRelayAddress = skyBridgeIsSameRealtimeMediaRelayAddress(currentEndpoint, newEndpoint)")
+        )
+        XCTAssertTrue(
+            renewalBody.contains("if !requiresStrictAudioRelayRenewal,\n           sameRelayAddress,"),
+            "Strict smoke validation must not rebind the live audio receive transport in place."
+        )
+        XCTAssertTrue(renewalBody.contains("reason=strict-make-before-break"))
+        XCTAssertTrue(renewalBody.contains("\"probable\": \"strict-make-before-break\""))
+        XCTAssertTrue(renewalBody.contains("let renewalTrafficCounter = SmokeAudioRelayTrafficCounter()"))
+        XCTAssertTrue(renewalBody.contains("promoteSmokeAudioRelayTransportAfterNewTraffic("))
+    }
+
     func testRealtimeMediaAudioReceiverStartupFailureDoesNotRefreshVideoStream() throws {
         let source = try remoteDesktopManagerSource()
         let failureBody = try sourceSlice(
@@ -304,6 +354,16 @@ final class RegressionHardeningTests: XCTestCase {
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func skyBridgeCompassAppSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/App/SkyBridgeCompassApp.swift"
         )
         return try String(contentsOf: sourceURL, encoding: .utf8)
     }
@@ -2263,6 +2323,36 @@ final class RegressionHardeningTests: XCTestCase {
                 supportedFormats: ["jpeg", "h264"]
             ),
             "h264"
+        )
+    }
+
+    func testAutomaticCrossNetworkViewerRequestsFailFastNativeValidation() {
+        let automatic = RemoteDesktopViewerSettings()
+
+        XCTAssertEqual(automatic.activePreset, .automatic)
+        XCTAssertTrue(
+            RemoteDesktopManager.shouldRequestExtremeMediaValidation(
+                activeTransportModeIsCrossNetwork: true,
+                viewerSettings: automatic,
+                environment: [:]
+            )
+        )
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldRequestExtremeMediaValidation(
+                activeTransportModeIsCrossNetwork: false,
+                viewerSettings: automatic,
+                environment: [:]
+            )
+        )
+
+        var fluid = RemoteDesktopViewerSettings()
+        fluid.applyPreset(.fluid)
+        XCTAssertFalse(
+            RemoteDesktopManager.shouldRequestExtremeMediaValidation(
+                activeTransportModeIsCrossNetwork: true,
+                viewerSettings: fluid,
+                environment: [:]
+            )
         )
     }
 

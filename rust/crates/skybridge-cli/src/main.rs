@@ -3131,6 +3131,11 @@ fn build_webrtc_media_doctor_report_with_options(
         args.min_fps,
         strict_fps_floor,
     ));
+    checks.push(check_webrtc_visible_render_fps(
+        &evidence,
+        args.min_fps,
+        strict_fps_floor,
+    ));
     checks.push(check_webrtc_strict_media_failure(&evidence));
     checks.push(check_webrtc_stale_fallback(&evidence));
     checks.push(check_webrtc_backpressure(&evidence));
@@ -3275,6 +3280,8 @@ struct WebRtcMediaEvidence {
     native_video_render_source: Option<ObservedMetric<String>>,
     native_video_render_dimensions: Option<ObservedMetric<VideoDimensions>>,
     native_video_render_dimensions_are_visible: bool,
+    native_video_render_fps: Option<ObservedMetric<f64>>,
+    native_video_lowest_render_fps: Option<ObservedMetric<f64>>,
     strict_media_failure: Option<ObservedMetric<String>>,
     fallback_producer_failure: Option<ObservedMetric<String>>,
     stale_fallback: Option<ObservedMetric<String>>,
@@ -4513,6 +4520,27 @@ fn observe_webrtc_media_line(
         }
     }
 
+    if is_webrtc_visible_native_render_fps_line(trimmed, json.as_ref())
+        && let Some(fps) = find_webrtc_f64_any(
+            json.as_ref(),
+            trimmed,
+            &[
+                "viewerDisplayFPS",
+                "displayFPS",
+                "visibleRenderFPS",
+                "renderFPS",
+            ],
+        )
+    {
+        let observed = ObservedMetric {
+            value: fps,
+            sequence,
+            evidence: summary.clone(),
+        };
+        update_latest_metric(&mut evidence.native_video_render_fps, observed.clone());
+        update_lowest_f64(&mut evidence.native_video_lowest_render_fps, observed);
+    }
+
     if let Some(reason) = find_webrtc_strict_media_failure_reason(json.as_ref(), trimmed) {
         update_latest_metric(
             &mut evidence.strict_media_failure,
@@ -4959,6 +4987,25 @@ fn is_webrtc_native_video_render_line(text: &str, json: Option<&serde_json::Valu
                 matches!(
                     event.as_str(),
                     "native-render-frame" | "nativeRenderFrame" | "visibleNativeRender"
+                )
+            })
+}
+
+fn is_webrtc_visible_native_render_fps_line(text: &str, json: Option<&serde_json::Value>) -> bool {
+    text.contains("viewerDisplayFPS=")
+        || text.contains("displayFPS=")
+        || text.contains("visibleNativeRenderFPS")
+        || json
+            .and_then(|json| {
+                find_json_value(json, "event")
+                    .or_else(|| find_json_value(json, "name"))
+                    .or_else(|| find_json_value(json, "kind"))
+                    .and_then(json_value_to_string)
+            })
+            .is_some_and(|event| {
+                matches!(
+                    event.as_str(),
+                    "visibleNativeRenderFPS" | "viewerDisplayStats" | "visibleRenderFPS"
                 )
             })
 }
@@ -6584,6 +6631,59 @@ fn check_webrtc_visible_native_render(
             "iOS visible native render source={source} dimensions={dimensions_label}; evidence {}",
             render_frame.evidence
         ),
+        server_build_fingerprint: None,
+        state_backend: None,
+        reject_reason: None,
+    }
+}
+
+fn check_webrtc_visible_render_fps(
+    evidence: &WebRtcMediaEvidence,
+    min_fps: f64,
+    strict_fps_floor: bool,
+) -> DoctorCheck {
+    let Some(latest) = evidence.native_video_render_fps.as_ref() else {
+        let visible_fps_gate = strict_fps_floor && min_fps >= 30.0;
+        return DoctorCheck {
+            name: "visible_render_fps",
+            ok: !visible_fps_gate,
+            severity: if visible_fps_gate { "error" } else { "info" },
+            detail: if visible_fps_gate {
+                "iOS visible render FPS telemetry was not observed; strict native video gate requires sustained visible render FPS, not one-time render presence only".to_owned()
+            } else {
+                "iOS visible render FPS telemetry was not observed; falling back to native render presence evidence".to_owned()
+            },
+            server_build_fingerprint: None,
+            state_backend: None,
+            reject_reason: None,
+        };
+    };
+    let lowest = evidence
+        .native_video_lowest_render_fps
+        .as_ref()
+        .map(|metric| metric.value)
+        .unwrap_or(latest.value);
+    let ok = latest.value >= min_fps && (!strict_fps_floor || lowest >= min_fps);
+    DoctorCheck {
+        name: "visible_render_fps",
+        ok,
+        severity: if ok { "info" } else { "error" },
+        detail: if ok {
+            format!(
+                "iOS visible render FPS latest {:.1}, lowest {:.1}; evidence {}",
+                latest.value, lowest, latest.evidence
+            )
+        } else if strict_fps_floor {
+            format!(
+                "strict iOS visible render FPS floor failed: latest {:.1}, lowest {:.1}, min {:.1}; evidence {}",
+                latest.value, lowest, min_fps, latest.evidence
+            )
+        } else {
+            format!(
+                "iOS visible render FPS below min: latest {:.1}, lowest {:.1}, min {:.1}; evidence {}",
+                latest.value, lowest, min_fps, latest.evidence
+            )
+        },
         server_build_fingerprint: None,
         state_backend: None,
         reject_reason: None,
@@ -8821,6 +8921,98 @@ audioTxUnavailable session=SESSION9 reason=missingViewerEndpoint mediaSession=SE
             doctor_check(&report, "visible_native_render")
                 .detail
                 .contains("requires real visible rendering")
+        );
+        assert!(ensure_webrtc_media_doctor_passed(&report).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_webrtc_media_rejects_low_visible_render_fps() -> Result<()> {
+        let artifact_dir = make_test_dir("doctor-webrtc-media-low-visible-render-fps")?;
+        std::fs::write(
+            artifact_dir.join("webrtc-media-SESSION_VISIBLE_FPS_LOW.jsonl"),
+            [
+                json!({
+                    "kind": "videoStats",
+                    "session_id": "SESSION_VISIBLE_FPS_LOW",
+                    "video_fps": 60.0,
+                    "nativeVideoHealth": "rtpFlowing",
+                    "submitted": 180,
+                    "framesEncoded": 178,
+                    "framesSent": 177,
+                    "keyFramesEncoded": 2,
+                    "packetsSent": 1180,
+                    "bytesSent": 2_920_000,
+                    "codec": "video/H264",
+                    "encoder": "VideoToolbox",
+                    "qualityLimit": "none",
+                    "encodeWidth": 2056,
+                    "encodeHeight": 1330,
+                    "encodeFPS": 60,
+                    "targetBitrate": 18_000_000,
+                    "availableOutgoingBitrate": 28_000_000
+                })
+                .to_string(),
+                json!({
+                    "kind": "remoteVideoFrameEvidence",
+                    "session_id": "SESSION_VISIBLE_FPS_LOW",
+                    "source": "receiver-stats",
+                    "framesReceived": 170,
+                    "framesDecoded": 168,
+                    "size": "2056x1330",
+                    "visibleSize": "2056x1329",
+                    "codedSize": "2056x1330"
+                })
+                .to_string(),
+                json!({
+                    "kind": "nativeRenderFrame",
+                    "session_id": "SESSION_VISIBLE_FPS_LOW",
+                    "source": "rtc-mtl-video-view",
+                    "nativeRenderEvidenceSource": "rtc-mtl-video-view",
+                    "size": "2056x1329",
+                    "visibleSize": "2056x1329",
+                    "codedSize": "2056x1330",
+                    "nativePromotionState": "visible-render-evidence"
+                })
+                .to_string(),
+                json!({
+                    "kind": "visibleNativeRenderFPS",
+                    "session_id": "SESSION_VISIBLE_FPS_LOW",
+                    "source": "rtc-mtl-video-view",
+                    "viewerDisplayFPS": 3.0,
+                    "displayFPS": 3.0,
+                    "visibleWidth": 2056,
+                    "visibleHeight": 1329
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )?;
+
+        let report = build_webrtc_media_doctor_report_with_video_requirements(
+            &WebRtcMediaDoctorArgs {
+                session_id: Some("SESSION_VISIBLE_FPS_LOW".to_owned()),
+                latest: false,
+                artifact_dir: Some(artifact_dir),
+                log_file: None,
+                since_seconds: 120,
+                min_fps: 30.0,
+                require_audio: false,
+                output: OutputOptions { json: true },
+            },
+            "SESSION_VISIBLE_FPS_LOW",
+            2056,
+            1329,
+            true,
+        )?;
+
+        assert!(doctor_check(&report, "video_fps").ok);
+        assert!(doctor_check(&report, "visible_native_render").ok);
+        assert!(!doctor_check(&report, "visible_render_fps").ok);
+        assert!(
+            doctor_check(&report, "visible_render_fps")
+                .detail
+                .contains("below min")
         );
         assert!(ensure_webrtc_media_doctor_passed(&report).is_err());
         Ok(())

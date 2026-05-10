@@ -3220,7 +3220,10 @@ public class RemoteDesktopManager: ObservableObject {
             return viewerSettings.targetFrameRate >= 60
                 && viewerSettings.preferredCodec != .jpeg
                 && viewerSettings.resolution != .hd720
-        case .automatic, .fluid:
+        case .automatic:
+            return viewerSettings.targetFrameRate >= 60
+                && viewerSettings.preferredCodec != .jpeg
+        case .fluid:
             return false
         }
     }
@@ -3356,6 +3359,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var frameCount: Int = 0
     private var lastFrameTime: Date?
     private var lastRenderedFrameTime: Date?
+    private var lastFrameRateSmokeDiagnosticAt: Date?
     private var consecutiveDecodeMisses: Int = 0
     private var lastDecoderResetTime: Date?
     private var lastHeartbeatTime: Date?
@@ -3477,6 +3481,7 @@ public class RemoteDesktopManager: ObservableObject {
         frameCount = 0
         lastFrameTime = nil
         lastRenderedFrameTime = nil
+        lastFrameRateSmokeDiagnosticAt = nil
         frameRate = 0
         lastFrameArrivalAt = nil
         lastDecodedFrameTime = nil
@@ -5224,7 +5229,10 @@ public class RemoteDesktopManager: ObservableObject {
             return
         }
         let nowSeconds = Date().timeIntervalSince1970
-        let delaySeconds = max(1, expiresAt - nowSeconds - Self.realtimeMediaAudioEndpointRenewalLeadTime)
+        let renewalLeadTime = strictCrossNetworkMediaValidationActive
+            ? max(Self.realtimeMediaAudioEndpointRenewalLeadTime, 35)
+            : Self.realtimeMediaAudioEndpointRenewalLeadTime
+        let delaySeconds = max(1, expiresAt - nowSeconds - renewalLeadTime)
         let delayNanos = UInt64(delaySeconds * 1_000_000_000)
         let delayMs = Int((delaySeconds * 1000).rounded())
         let expiresInMs = Int(((expiresAt - nowSeconds) * 1000).rounded())
@@ -5313,7 +5321,10 @@ public class RemoteDesktopManager: ObservableObject {
         let relayEndpoint = relayEndpointPair.localEndpoint
         let relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy =
             strictCrossNetworkMediaValidationActive ? .requireAcknowledgement : .optimisticAfterSend
-        if Self.isSameRealtimeMediaRelayAddress(currentEndpoint, relayEndpoint),
+        let sameRelayAddress = Self.isSameRealtimeMediaRelayAddress(currentEndpoint, relayEndpoint)
+        let strictRenewalRequiresRollover = strictCrossNetworkMediaValidationActive && sameRelayAddress
+        if !strictRenewalRequiresRollover,
+           sameRelayAddress,
            let relayToken = relayEndpoint.relayToken,
            let currentTransport = realtimeMediaAudioRelayTransport {
             do {
@@ -5349,6 +5360,25 @@ public class RemoteDesktopManager: ObservableObject {
                     "⚠️ PQC media audio in-place relay renewal failed; falling back to transport rollover: session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) error=\(error.localizedDescription)"
                 )
             }
+        }
+        if strictRenewalRequiresRollover {
+            SkyBridgeLogger.shared.info(
+                "🎧 PQC media audio relay renewal using make-before-break: event=relayLeaseRenewalRollover session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) reason=strict-make-before-break transport=\(activeTransportModeLabel())"
+            )
+            SkyBridgeSmokeTraceWriter.append(
+                "audio-rx relayLeaseRenewalRollover session=\(sessionId) relay=\(relayEndpoint.host):\(relayEndpoint.port) reason=strict-make-before-break"
+            )
+            SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+                [
+                    "kind": "audioRxEndpointRenewalRollover",
+                    "session": sessionId,
+                    "session_id": sessionId,
+                    "relay": "\(relayEndpoint.host):\(relayEndpoint.port)",
+                    "role": relayEndpointPair.localRole,
+                    "relayTokenPresent": relayEndpoint.relayToken != nil,
+                    "probable": "strict-make-before-break"
+                ]
+            )
         }
         let relayTransport = SkyBridgeUDPRealtimeMediaTransport(
             endpoint: relayEndpoint,
@@ -7397,6 +7427,7 @@ public class RemoteDesktopManager: ObservableObject {
             let elapsed = now.timeIntervalSince(lastFrameTime)
             if elapsed >= 1.0 {
                 frameRate = Double(frameCount) / elapsed
+                appendVisibleRenderFrameRateSmokeDiagnosticIfNeeded(at: now)
                 frameCount = 0
                 self.lastFrameTime = now
             }
@@ -7405,6 +7436,33 @@ public class RemoteDesktopManager: ObservableObject {
             lastFrameTime = now
             frameRate = 0
         }
+    }
+
+    private func appendVisibleRenderFrameRateSmokeDiagnosticIfNeeded(at now: Date) {
+        guard frameRate > 0 else { return }
+        guard let sessionId = crossNetwork.activeRemoteDesktopSessionId?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty else {
+            return
+        }
+        guard lastFrameRateSmokeDiagnosticAt.map({ now.timeIntervalSince($0) >= 1.0 }) ?? true else {
+            return
+        }
+        lastFrameRateSmokeDiagnosticAt = now
+        SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
+            [
+                "kind": "visibleNativeRenderFPS",
+                "session": sessionId,
+                "session_id": sessionId,
+                "source": "rtc-mtl-video-view",
+                "viewerDisplayFPS": frameRate,
+                "displayFPS": frameRate,
+                "visibleWidth": Int(resolution.width),
+                "visibleHeight": Int(resolution.height),
+                "renderPipeline": renderPipelineStatus.rawValue,
+                "transport": activeTransportModeLabel()
+            ]
+        )
     }
 
     private func noteReceivedFrame(at now: Date) {

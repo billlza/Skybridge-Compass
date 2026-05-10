@@ -2232,7 +2232,7 @@ private final class LocalWebRTCSmokeHarness {
         guard requiresAudio, let expiresAt = endpoint.expiresAt else { return }
         let nowSeconds = Date().timeIntervalSince1970
         let renewalLeadTime = requiresStrictAudioRelayRenewal
-            ? max(Self.audioRelayRenewalLeadTime, 25)
+            ? max(Self.audioRelayRenewalLeadTime, 35)
             : Self.audioRelayRenewalLeadTime
         let delaySeconds = max(1, expiresAt - nowSeconds - renewalLeadTime)
         let delayMs = Int((delaySeconds * 1000).rounded())
@@ -2301,7 +2301,9 @@ private final class LocalWebRTCSmokeHarness {
         }
 
         let newEndpoint = endpointPair.localEndpoint
-        if skyBridgeIsSameRealtimeMediaRelayAddress(currentEndpoint, newEndpoint),
+        let sameRelayAddress = skyBridgeIsSameRealtimeMediaRelayAddress(currentEndpoint, newEndpoint)
+        if !requiresStrictAudioRelayRenewal,
+           sameRelayAddress,
            let relayToken = newEndpoint.relayToken,
            let currentTransport = smokeAudioRelayTransport {
             let bindPolicy = smokeAudioRelayRenewalBindPolicy
@@ -2360,9 +2362,9 @@ private final class LocalWebRTCSmokeHarness {
             }
         }
         if requiresStrictAudioRelayRenewal,
-           skyBridgeIsSameRealtimeMediaRelayAddress(currentEndpoint, newEndpoint) {
+           sameRelayAddress {
             SkyBridgeSmokeTraceWriter.append(
-                "audio-rx relayLeaseRenewalRollover session=\(sessionId) relay=\(newEndpoint.host):\(newEndpoint.port) reason=in-place-rebind-failed"
+                "audio-rx relayLeaseRenewalRollover session=\(sessionId) relay=\(newEndpoint.host):\(newEndpoint.port) reason=strict-make-before-break"
             )
             SkyBridgeSmokeTraceWriter.appendMediaDiagnostic(
                 [
@@ -2370,7 +2372,7 @@ private final class LocalWebRTCSmokeHarness {
                     "session": sessionId,
                     "session_id": sessionId,
                     "relay": "\(newEndpoint.host):\(newEndpoint.port)",
-                    "probable": "in-place-rebind-failed"
+                    "probable": "strict-make-before-break"
                 ]
             )
         }
