@@ -54,6 +54,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     private let networkDiscovery = DeviceDiscoveryManagerOptimized()
     private let usbDiscovery = USBDeviceDiscoveryManager()
     private var iCloudDiscovery: iCloudDeviceDiscoveryManager?
+    private var iCloudDiscoveryCancellable: AnyCancellable?
  /// 本机所有接口的 IPv4/IPv6 地址集合（缓存）
     private var localIPAddresses: Set<String> = []
  /// 本机物理网卡 MAC 地址集合（缓存）
@@ -100,6 +101,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if iCloudDiscovery == nil {
             iCloudDiscovery = iCloudDeviceDiscoveryManager()
         }
+        ensureICloudDiscoveryObserver()
         Task {
             await iCloudDiscovery?.startDiscovery()
         }
@@ -142,6 +144,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if iCloudDiscovery == nil {
             iCloudDiscovery = iCloudDeviceDiscoveryManager()
         }
+        ensureICloudDiscoveryObserver()
         Task { await iCloudDiscovery?.refreshDevices() }
     }
 
@@ -211,6 +214,31 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
 
         return scoredMatches.first?.record
+    }
+
+    /// Resolve the best live/local-discovery row for an iCloud device-chain entry.
+    /// iCloud heartbeat state can lag behind Bonjour/P2P discovery, so UI code should
+    /// prefer this result when deciding whether a peer is currently reachable.
+    public func resolvedOnlineDevice(for cloudDevice: iCloudDevice) -> OnlineDevice? {
+        let scoredMatches = onlineDevices
+            .filter { !$0.isLocalDevice }
+            .compactMap { device -> (score: Int, device: OnlineDevice)? in
+                let score = scoreCloudDeviceCandidate(device, cloudDevice: cloudDevice)
+                guard score > 0 else { return nil }
+                return (score, device)
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                if lhs.device.connectionStatus.priority != rhs.device.connectionStatus.priority {
+                    return lhs.device.connectionStatus.priority > rhs.device.connectionStatus.priority
+                }
+                if lhs.device.lastSeen != rhs.device.lastSeen {
+                    return lhs.device.lastSeen > rhs.device.lastSeen
+                }
+                return lhs.device.name < rhs.device.name
+            }
+
+        return scoredMatches.first?.device
     }
 
     public func resolvedApplePeerMetadata(
@@ -599,6 +627,15 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 self?.updateDevicesList()
             }
             .store(in: &cancellables)
+    }
+
+    private func ensureICloudDiscoveryObserver() {
+        guard iCloudDiscoveryCancellable == nil, let iCloudDiscovery else { return }
+        iCloudDiscoveryCancellable = iCloudDiscovery.$discoveredDevices
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] devices in
+                self?.handleiCloudDevicesUpdate(devices)
+            }
     }
 
  /// 将全局设置同步到网络设备发现器，以保证 UI 开关生效
@@ -2053,6 +2090,89 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         return score
+    }
+
+    private func scoreCloudDeviceCandidate(_ device: OnlineDevice, cloudDevice: iCloudDevice) -> Int {
+        let cloudFamily = Self.appleDeviceFamilyToken(preferredValues: [cloudDevice.model, cloudDevice.name])
+        let deviceFamily = Self.appleDeviceFamilyToken(preferredValues: [device.modelName, device.name, device.platformName])
+        if let cloudFamily, let deviceFamily, cloudFamily != deviceFamily {
+            return 0
+        }
+
+        var score = 0
+        var hasIdentityMatch = false
+
+        if let cloudStable = Self.normalizeStableIdentifier(cloudDevice.id) {
+            let deviceStable = Self.normalizedStableIdentifierPayload(from: device.uniqueIdentifier)
+                ?? Self.normalizeStableIdentifier(device.uniqueIdentifier)
+            if cloudStable == deviceStable {
+                score += 360
+                hasIdentityMatch = true
+            }
+        }
+
+        if let cloudIP = cloudDevice.ipAddress.map(Self.normalizeIPAddress), !cloudIP.isEmpty {
+            let deviceIPs = Set([device.ipv4, device.ipv6].compactMap { $0.map(Self.normalizeIPAddress) })
+            if deviceIPs.contains(cloudIP) {
+                score += 280
+                hasIdentityMatch = true
+            } else if device.uniqueIdentifier.hasPrefix("ip:") {
+                let identifierIP = Self.normalizeIPAddress(String(device.uniqueIdentifier.dropFirst("ip:".count)))
+                if identifierIP == cloudIP {
+                    score += 260
+                    hasIdentityMatch = true
+                }
+            }
+        }
+
+        if Self.namesRepresentSameDevice(cloudDevice.name, device.name) {
+            score += 120
+            hasIdentityMatch = true
+        }
+
+        guard hasIdentityMatch else { return 0 }
+
+        let cloudModel = Self.normalizedDedupeName(cloudDevice.model)
+        let deviceModel = Self.normalizedDedupeName(device.modelName ?? "")
+        if !cloudModel.isEmpty, !deviceModel.isEmpty {
+            if cloudModel == deviceModel || cloudModel.contains(deviceModel) || deviceModel.contains(cloudModel) {
+                score += 40
+            } else {
+                score -= 30
+            }
+        }
+
+        if device.connectionStatus == .connected {
+            score += 30
+        } else if device.connectionStatus == .online {
+            score += 20
+        }
+
+        if device.isConnectable {
+            score += 10
+        }
+
+        return score
+    }
+
+    private nonisolated static func appleDeviceFamilyToken(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty else { return nil }
+        if value.contains("ipad") || value.contains("ipados") { return "ipad" }
+        if value.contains("iphone") || value.contains("ios") { return "iphone" }
+        if value.contains("macbook") || value.contains("imac") || value.contains("macos") || value.contains("mac ") || value == "mac" {
+            return "mac"
+        }
+        return nil
+    }
+
+    private nonisolated static func appleDeviceFamilyToken(preferredValues: [String?]) -> String? {
+        for raw in preferredValues {
+            if let raw, let family = appleDeviceFamilyToken(raw) {
+                return family
+            }
+        }
+        return nil
     }
 
     private func scoreDiscoveredTrustRecordCandidate(

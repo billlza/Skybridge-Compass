@@ -17,6 +17,7 @@ struct CrossNetworkConnectionView: View {
     @State private var lastQRCodeErrorAt: Date = .distantPast
     @State private var hoveredMethod: ConnectionMethod? = nil
     @StateObject private var qrScannerManager = QRCodeScannerManager.shared
+    @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "CrossNetworkConnection")
 
     var body: some View {
@@ -50,6 +51,7 @@ struct CrossNetworkConnectionView: View {
         .navigationTitle(LocalizationManager.shared.localizedString("connection.crossNetwork.title"))
         .task {
  // 自动发现 iCloud 设备
+            unifiedDeviceManager.startDiscovery()
             try? await connectionManager.discoverCloudDevices()
         }
         .sheet(isPresented: $showingScanner) {
@@ -388,11 +390,19 @@ struct CrossNetworkConnectionView: View {
             }
         }
 
+        let liveDevice = unifiedDeviceManager.resolvedOnlineDevice(for: device)
+        let effectiveLastSeen: Date = {
+            guard let liveDevice, liveDevice.connectionStatus != .offline else {
+                return device.lastSeen
+            }
+            return max(device.lastSeen, liveDevice.lastSeen)
+        }()
+
         return CloudDevice(
             id: device.id,
             name: device.name,
             type: type,
-            lastSeen: device.lastSeen,
+            lastSeen: effectiveLastSeen,
             capabilities: mappedCapabilities.isEmpty ? [.remoteDesktop] : mappedCapabilities
         )
     }

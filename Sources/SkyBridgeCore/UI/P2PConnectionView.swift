@@ -228,16 +228,6 @@ public struct P2PConnectionView: View {
                     .foregroundColor(.blue)
                 }
                 
-                Button(action: showConnectionCode) {
-                    VStack(spacing: 4) {
-                        Image(systemName: "qrcode")
-                            .font(.title2)
-                        Text("我的连接码")
-                            .font(.caption)
-                    }
-                    .foregroundColor(.blue)
-                }
-                
                 Spacer()
                 
  // 网络质量指示器
@@ -375,11 +365,6 @@ public struct P2PConnectionView: View {
     private func showManualConnection() {
  // 打开手动连接表单，由用户输入连接参数后发起连接
         showingManualConnectSheet = true
-    }
-    
-    private func showConnectionCode() {
- // 说明：连接码功能涉及令牌生成与服务端校验，后续版本将提供完整支持。
-        showAlert("功能规划", "连接码功能将支持一次性令牌与有效期管理")
     }
     
     private func showAlert(_ title: String, _ message: String) {

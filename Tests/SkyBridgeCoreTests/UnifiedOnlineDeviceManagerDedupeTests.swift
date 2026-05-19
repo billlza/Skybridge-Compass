@@ -224,6 +224,94 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     }
 
     @MainActor
+    func testResolvedICloudDevicePrefersLiveBonjourRowOverOfflineHistory() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let old = Date(timeIntervalSinceNow: -3_600)
+        let staleHistory = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "serial:00008103-0011223344556677",
+            ipv4: nil,
+            status: .offline,
+            lastConnectedAt: old,
+            isConnectable: false,
+            connectionTypes: [.usb],
+            services: [],
+            portMap: [:],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: old
+        )
+        let liveBonjour = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro",
+            lastSeen: Date()
+        )
+        let cloudDevice = iCloudDevice(
+            id: "icloud-ipad",
+            name: "Ziang的iPad",
+            model: "iPad Pro",
+            osVersion: "26.5",
+            appVersion: "1.0.0",
+            lastSeen: old,
+            capabilities: [.remoteDesktop],
+            isOnline: false,
+            networkType: .wifi,
+            ipAddress: "192.168.0.103"
+        )
+
+        manager.replaceDevicesForTesting([staleHistory, liveBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        let matched = try XCTUnwrap(manager.resolvedOnlineDevice(for: cloudDevice))
+        XCTAssertEqual(matched.uniqueIdentifier, "bonjour:Ziang的iPad@local.")
+        XCTAssertEqual(matched.connectionStatus, .online)
+    }
+
+    @MainActor
+    func testResolvedICloudDeviceDoesNotCrossMatchDifferentAppleMobileFamilies() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let misleadingName = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPhone@local.",
+            ipv4: "192.168.0.104",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            platformName: "iOS",
+            osVersion: "26.5",
+            modelName: "iPhone 16 Pro"
+        )
+        let cloudDevice = iCloudDevice(
+            id: "icloud-ipad",
+            name: "Ziang的iPad",
+            model: "iPad Pro",
+            osVersion: "26.5",
+            appVersion: "1.0.0",
+            lastSeen: Date(timeIntervalSinceNow: -3_600),
+            capabilities: [.remoteDesktop],
+            isOnline: false,
+            networkType: .wifi,
+            ipAddress: nil
+        )
+
+        manager.replaceDevicesForTesting([misleadingName])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        XCTAssertNil(manager.resolvedOnlineDevice(for: cloudDevice))
+    }
+
+    @MainActor
     func testMarkDeviceAsConnectedUpdatesStableIdentityEvenWhenDisplayNameIsEphemeral() {
         let manager = UnifiedOnlineDeviceManager.shared
         let peerId = "id:550E8400-E29B-41D4-A716-446655440001"
@@ -302,7 +390,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         portMap: [String: Int] = ["_skybridge._tcp": 9527],
         platformName: String? = nil,
         osVersion: String? = nil,
-        modelName: String? = nil
+        modelName: String? = nil,
+        lastSeen: Date = Date()
     ) -> OnlineDevice {
         OnlineDevice(
             id: UUID(),
@@ -322,7 +411,7 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             uniqueIdentifier: uniqueIdentifier,
             sources: [.skybridgeBonjour],
             discoveredAt: Date(),
-            lastSeen: Date(),
+            lastSeen: lastSeen,
             connectionStatus: status,
             lastConnectedAt: lastConnectedAt,
             lastCryptoKind: "Apple PQC",

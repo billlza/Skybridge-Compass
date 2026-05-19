@@ -1185,7 +1185,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                             device: mapToCloudDevice(device),
                             currentDeviceId: deviceChainViewModel.currentDeviceId,
                             onConnect: {
-                                deviceChainViewModel.connectToDevice(device)
+                                connectToCloudDevice(device)
                             }
                         )
                     }
@@ -1750,16 +1750,7 @@ public struct EnhancedDeviceDiscoveryView: View {
 
  // 连接按钮
             Button(action: {
-                Task {
- // 将 iCloudDevice 转换为 CloudDevice 并调用跨网络连接管理器。
-                    let cloudDevice = mapToCloudDevice(device)
-                    do {
-                        _ = try await crossNetworkManager.connectToCloudDevice(cloudDevice)
-                    } catch {
- // 连接失败错误提示
-                        scannerErrorMessage = "iCloud 设备连接失败：\(userFacingConnectionErrorMessage(error))"
-                    }
-                }
+                connectToCloudDevice(device)
             }) {
                 HStack {
                     Image(systemName: "link")
@@ -1809,11 +1800,19 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
 
+        let liveDevice = unifiedDeviceManager.resolvedOnlineDevice(for: device)
+        let effectiveLastSeen: Date = {
+            guard let liveDevice, liveDevice.connectionStatus != .offline else {
+                return device.lastSeen
+            }
+            return max(device.lastSeen, liveDevice.lastSeen)
+        }()
+
         return CloudDevice(
             id: device.id,
             name: device.name,
             type: type,
-            lastSeen: device.lastSeen,
+            lastSeen: effectiveLastSeen,
             capabilities: mappedCapabilities.isEmpty ? [.remoteDesktop] : mappedCapabilities
         )
     }
@@ -2134,6 +2133,25 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
     }
 
+    private func connectToCloudDevice(_ device: iCloudDevice) {
+        if let liveDevice = unifiedDeviceManager.resolvedOnlineDevice(for: device),
+           liveDevice.connectionStatus != .offline {
+            connectToOnlineDevice(liveDevice)
+            return
+        }
+
+        Task {
+            let cloudDevice = mapToCloudDevice(device)
+            do {
+                _ = try await crossNetworkManager.connectToCloudDevice(cloudDevice)
+                connectionCodeErrorMessage = nil
+            } catch {
+                scannerErrorMessage = "iCloud 设备连接失败：\(userFacingConnectionErrorMessage(error))"
+                logger.error("❌ iCloud 设备连接失败: \(device.name, privacy: .public), \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
     private func isSameConnectTarget(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
         if let leftID = lhs.uniqueIdentifier, let rightID = rhs.uniqueIdentifier, !leftID.isEmpty, leftID == rightID {
             return true
@@ -2300,14 +2318,6 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
         let fallback = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         return fallback.isEmpty ? "连接失败" : fallback
-    }
-
-    private func connectToLocalDevice(_ device: DiscoveredDevice) {
- // 触发本地设备连接。使用异步任务避免阻塞主线程，遵循严格并发控制。
-        Task {
- // Swift 6.2: 移除不可达的catch块，简化代码结构
-            logger.info("✅ 本地设备连接成功: \(device.name)")
-        }
     }
 
     private func emptyStateView(icon: String, title: String, message: String) -> some View {
