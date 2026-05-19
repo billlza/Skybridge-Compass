@@ -120,7 +120,7 @@ public class DeviceDiscoveryManager: BaseManager {
 
  // 为每种服务类型创建独立的浏览器
         for serviceType in selected {
-            let descriptor = NWBrowser.Descriptor.bonjour(type: serviceType, domain: serviceDomain)
+            let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: serviceDomain)
             let parameters = NWParameters()
             parameters.includePeerToPeer = true  // 支持点对点（AWDL）
 
@@ -417,7 +417,10 @@ public class DeviceDiscoveryManager: BaseManager {
                 txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
                 txt["name"] = self.getDeviceName()
                 if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
-                if !snap.pubKeyFP.isEmpty { txt["pubKeyFP"] = snap.pubKeyFP }
+                if !snap.pubKeyFP.isEmpty {
+                    txt["pubKeyFP"] = snap.pubKeyFP
+                    txt["identityFingerprint"] = snap.pubKeyFP
+                }
                 txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
                 if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
@@ -632,8 +635,9 @@ public class DeviceDiscoveryManager: BaseManager {
     private func handleNewConnection(_ connection: NWConnection) {
         logger.info("🔗 收到新连接")
 
-        connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            Task { @MainActor [weak self, weak connection] in
+                guard let connection else { return }
                 self?.handleIncomingConnectionStateUpdate(state, connection: connection)
             }
         }
@@ -673,6 +677,7 @@ public class DeviceDiscoveryManager: BaseManager {
         switch state {
         case .ready:
             logger.info("✅ 传入连接就绪")
+            connection.stateUpdateHandler = nil
             // iOS 端会在此连接上发起 HandshakeDriver 握手；这里必须读取并回包，否则对端必然 timeout
             // 重要：DeviceDiscoveryManager 是 @MainActor；入站读取/握手必须放到后台，
             // 否则主线程繁忙时会“只打印启用通道”但永远读不到帧。
@@ -685,8 +690,10 @@ public class DeviceDiscoveryManager: BaseManager {
             } else {
                 logger.error("❌ 传入连接失败: \(error.localizedDescription, privacy: .public)")
             }
+            connection.stateUpdateHandler = nil
             connection.cancel()
         case .cancelled:
+            connection.stateUpdateHandler = nil
             logger.info("⏹️ 传入连接已取消")
         default:
             break
@@ -1011,6 +1018,48 @@ public class DeviceDiscoveryManager: BaseManager {
             }
         }
 
+        func handlePreHandshakePlaintextControl(_ frame: Data) async -> Bool {
+            guard let plaintextControl = try? JSONDecoder().decode(AppMessage.self, from: frame) else {
+                return false
+            }
+
+            guard let controlResponse = await P2PDiscoveryService.makeBootstrapControlResponse(for: plaintextControl) else {
+                return false
+            }
+            do {
+                let encoded = try JSONEncoder().encode(controlResponse.message)
+                try await sendFramed(encoded)
+            } catch {
+                logger.error("⛔️ failed to send bootstrap control response: \(error.localizedDescription, privacy: .public)")
+                connection.cancel()
+                return true
+            }
+
+            if let binding = controlResponse.protocolIdentityBindingPayload,
+               let code = controlResponse.protocolIdentityBindingCode {
+                await MainActor.run {
+                    PairingTrustApprovalService.shared.showProtocolIdentityBindingCode(
+                        peerEndpoint: endpointDescription,
+                        declaredDeviceId: binding.deviceId,
+                        displayName: binding.deviceName ?? presenceDisplayName(),
+                        model: "Mac",
+                        platform: "macOS",
+                        osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                        verificationCode: code,
+                        protocolIdentityFingerprint: binding.protocolIdentityFingerprint
+                    )
+                }
+            }
+            if controlResponse.isFailure {
+                logger.error("\(controlResponse.statusLine, privacy: .public)")
+            } else {
+                logger.info("\(controlResponse.statusLine, privacy: .public)")
+            }
+            RemoteControlSmokeStatusWriter.append(controlResponse.statusLine)
+            connection.cancel()
+            return true
+        }
+
         logger.info("🤝 入站连接：启用 HandshakeDriver 兼容通道（iOS 互通） endpoint=\(endpointDescription, privacy: .public) state=\(String(describing: connection.state), privacy: .public)")
 
         do {
@@ -1025,8 +1074,11 @@ public class DeviceDiscoveryManager: BaseManager {
                 logger.info("📥 入站帧: \(payload.count, privacy: .public) bytes")
                 // Phase C2: optional traffic padding (SBP2) — unwrap before handing to handshake driver.
                 // Phase C1: optional handshake padding (SBP1) — unwrap before decoding handshake frames.
-                let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
-                let frame = HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx")
+                let frame = P2PDiscoveryService.normalizeInboundControlFrame(payload)
+
+                if await handlePreHandshakePlaintextControl(frame) {
+                    return
+                }
 
                 if let messageA = try? HandshakeMessageA.decode(from: frame),
                    sessionKeys != nil,
@@ -1070,6 +1122,9 @@ public class DeviceDiscoveryManager: BaseManager {
                         let plaintext = try decryptAppPayload(frame, with: keys)
                         if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
                             switch msg {
+                            case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
+                                 .protocolIdentityBindingRequest, .signedProtocolIdentityBinding:
+                                break
                             case .pairingIdentityExchange(let payload):
                                 guard let payload = validatedPairingIdentityPayload(payload) else {
                                     break

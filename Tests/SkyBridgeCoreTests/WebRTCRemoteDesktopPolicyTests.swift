@@ -52,6 +52,30 @@ final class WebRTCRemoteDesktopPolicyTests: XCTestCase {
         XCTAssertTrue(policy.reason.contains("relay-native-rtp"))
     }
 
+    func testRelayNativeRTPKeepsHEVCForHighResolutionSixtyFPS() {
+        let policy = WebRTCRemoteDesktopVideoPolicySelector.select(
+            request: .init(
+                preferredSize: CGSize(width: 2056, height: 1328),
+                preferredCodec: .h264,
+                requestedFrameRate: 60,
+                keyFrameInterval: 60,
+                lowLatencyMode: true,
+                enableHardwareAcceleration: true,
+                enableAppleSiliconOptimization: true
+            ),
+            transportPath: .relay,
+            peerFormats: ["jpeg", "h264", "hevc"],
+            thermalState: .nominal,
+            isAppleSilicon: true,
+            nativeVideoTrackEnabled: true
+        )
+
+        XCTAssertEqual(policy.codec, .hevc)
+        XCTAssertEqual(policy.targetFrameRate, 60)
+        XCTAssertEqual(policy.preferredSize, CGSize(width: 2056, height: 1328))
+        XCTAssertTrue(policy.reason.contains("low-latency-high-fps-hevc"))
+    }
+
     func testLowLatencyRelayNativeRTPKeepsRequestedResolutionAtThirtyFPS() {
         let policy = WebRTCRemoteDesktopVideoPolicySelector.select(
             request: .init(
@@ -174,10 +198,15 @@ final class WebRTCRemoteDesktopPolicyTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let sourceURL = root.appendingPathComponent(
+        let streamerSourceURL = root.appendingPathComponent(
             "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift"
         )
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let jpegSourceURL = root.appendingPathComponent(
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer+JPEGEncoding.swift"
+        )
+        let streamerSource = try String(contentsOf: streamerSourceURL, encoding: .utf8)
+        let jpegSource = try String(contentsOf: jpegSourceURL, encoding: .utf8)
+        let source = [streamerSource, jpegSource].joined(separator: "\n")
 
         XCTAssertTrue(source.contains("jpegFallbackProfile.constrainedSize"))
         XCTAssertTrue(source.contains("emitsDegradedFallbackJPEGFrames"))
@@ -189,11 +218,11 @@ final class WebRTCRemoteDesktopPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("encodeDegradedFallbackJPEG"))
         XCTAssertTrue(source.contains("profile.maxEncodedFrameBytes"))
         XCTAssertTrue(source.contains("profile.qualityLadder"))
-        let rawFrameCallbackIndex = try XCTUnwrap(source.range(of: "guard let owner, let onRawFrame = owner.onRawFrame")?.lowerBound)
-        let jpegModeIndex = try XCTUnwrap(source.range(of: "if owner.jpegMode")?.lowerBound)
+        let rawFrameCallbackIndex = try XCTUnwrap(streamerSource.range(of: "guard let owner, let onRawFrame = owner.onRawFrame")?.lowerBound)
+        let jpegModeIndex = try XCTUnwrap(streamerSource.range(of: "if owner.jpegMode")?.lowerBound)
         XCTAssertLessThan(
-            source.distance(from: source.startIndex, to: rawFrameCallbackIndex),
-            source.distance(from: source.startIndex, to: jpegModeIndex),
+            streamerSource.distance(from: streamerSource.startIndex, to: rawFrameCallbackIndex),
+            streamerSource.distance(from: streamerSource.startIndex, to: jpegModeIndex),
             "JPEG fallback mode must still submit raw pixel buffers to the native WebRTC video sender."
         )
         XCTAssertFalse(

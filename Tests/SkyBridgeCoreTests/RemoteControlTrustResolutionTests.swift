@@ -194,7 +194,7 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
 
     func testDefaultHandshakeTrustProviderUsesSnapshotForKEMAndSecureEnclavePins() async {
         let deviceId = "id:11111111-2222-4333-8444-555555555555"
-        let kemPublicKey = Data([0x44, 0x55, 0x66])
+        let kemPublicKey = Data(repeating: 0x44, count: 1_184)
         let secureEnclavePublicKey = Data([0x77, 0x88, 0x99])
         let records = [
             TrustRecord(

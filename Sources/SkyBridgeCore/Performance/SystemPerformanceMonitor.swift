@@ -16,7 +16,12 @@ import Darwin
 public final class SystemPerformanceMonitor: ObservableObject {
     @Published public private(set) var cpuUsage: Double = 0
     @Published public private(set) var gpuUsage: Double = 0
+    @Published public private(set) var cpuPower: Double = 0
     @Published public private(set) var gpuPower: Double = 0
+    @Published public private(set) var anePower: Double = 0
+    @Published public private(set) var ramPower: Double = 0
+    @Published public private(set) var packagePower: Double = 0
+    @Published public private(set) var powerReadings: [PowerMetricsPowerReading] = []
     @Published public private(set) var memoryUsage: Double = 0
     @Published public private(set) var diskUsage: Double = 0
     @Published public private(set) var networkThroughputMbps: Double = 0
@@ -350,7 +355,12 @@ public final class SystemPerformanceMonitor: ObservableObject {
         loadAverage15Min = snapshot.loadAvg15
 
         gpuUsage = snapshot.gpuUsage
+        cpuPower = snapshot.cpuPower
         gpuPower = snapshot.gpuPower
+        anePower = snapshot.anePower
+        ramPower = snapshot.ramPower
+        packagePower = snapshot.packagePower
+        powerReadings = snapshot.powerReadings
         cpuTemperature = snapshot.cpuTemperature
         gpuTemperature = snapshot.gpuTemperature
         fanSpeed = snapshot.fanRPMs

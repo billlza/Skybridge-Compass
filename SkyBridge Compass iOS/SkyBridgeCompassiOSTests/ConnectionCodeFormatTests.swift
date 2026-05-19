@@ -77,7 +77,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
     }
 
     func testTenantIDPrefersJWTDerivedTenantBeforeUserIdentifierFallback() throws {
-        let source = try Self.crossNetworkWebRTCManagerSource()
+        let source = try Self.crossNetworkSignalServerClientSource()
 
         XCTAssertTrue(
             source.contains("deriveTenantIdentifier(accessToken: sessionAccessToken)"),
@@ -90,7 +90,10 @@ final class ConnectionCodeFormatTests: XCTestCase {
     }
 
     func testConnectionCodeLookupAllowsAuthenticatedAuthorityRotation() throws {
-        let source = try Self.crossNetworkWebRTCManagerSource()
+        let managerSource = try Self.crossNetworkWebRTCManagerSource()
+        let rebindPolicySource = try Self.crossNetworkWebRTCRebindPolicySource()
+        let handshakePolicySource = try Self.crossNetworkWebRTCPQCHandshakePolicySource()
+        let source = managerSource + "\n" + rebindPolicySource + "\n" + handshakePolicySource
 
         XCTAssertTrue(
             source.contains("? .verifiedQRCode\n                : .verifiedConnectionCode"),
@@ -199,6 +202,36 @@ final class ConnectionCodeFormatTests: XCTestCase {
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private static func crossNetworkWebRTCRebindPolicySource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkWebRTCManager+CurrentPathRebindPolicy.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private static func crossNetworkWebRTCPQCHandshakePolicySource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkWebRTCPQCHandshakePolicy.swift"
+        )
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private static func crossNetworkSignalServerClientSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift"
         )
         return try String(contentsOf: sourceURL, encoding: .utf8)
     }

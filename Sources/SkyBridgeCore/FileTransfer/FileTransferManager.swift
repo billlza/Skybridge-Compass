@@ -49,6 +49,8 @@ public class FileTransferManager: BaseManager {
     private let historyStore: CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>
     private let receiptWaitTimeoutSeconds: TimeInterval = 60
     private let resumeAckTimeoutSeconds: TimeInterval = 15
+    private let activeRouteReadinessTimeoutSeconds: TimeInterval = 8
+    private let activeRouteReadinessPollIntervalSeconds: TimeInterval = 0.25
     public var localServiceHealthCheck: (@MainActor () async throws -> Void)?
 
     #if canImport(UserNotifications)
@@ -184,39 +186,6 @@ public class FileTransferManager: BaseManager {
         let supportsClassicResume: Bool
     }
 
-    @available(macOS 14.0, iOS 17.0, *)
-    private struct ClassicTransferAuthenticatedSessionSource {
-        let candidate: ClassicTransferAuthenticatedPeerCandidate
-        let transferKey: SymmetricKey
-    }
-
-    @available(macOS 14.0, iOS 17.0, *)
-    struct ClassicTransferAuthenticatedPeerCandidate: Sendable, Equatable {
-        let matchDeviceId: String
-        let resolvedPeerDeviceId: String
-        let aliases: [String]
-        let endpointHostOrIP: String?
-        let capabilities: [String]
-    }
-
-    @available(macOS 14.0, iOS 17.0, *)
-    enum ClassicTransferPeerResolutionBranch: String, Sendable, Equatable {
-        case declaredSenderDeviceId = "declared_sender_device_id"
-        case aliasOrCanonicalDeviceId = "alias_or_canonical_device_id"
-        case endpointHostOrIP = "endpoint_host_or_ip"
-        case singleAuthenticatedFallback = "single_authenticated_fallback"
-    }
-
-    @available(macOS 14.0, iOS 17.0, *)
-    struct ClassicTransferPeerResolutionOutcome: Sendable, Equatable {
-        let matchDeviceId: String
-        let resolvedPeerDeviceId: String
-        let matchedBy: ClassicTransferPeerResolutionBranch
-        let declaredCandidates: [String]
-        let endpointCandidates: [String]
-        let supportsClassicResume: Bool
-    }
-
     private func currentSpeedLimitDescription() -> String {
         guard let limit = maxTransferSpeedBytesPerSecond, limit > 0 else {
             return "不限速"
@@ -291,87 +260,6 @@ public class FileTransferManager: BaseManager {
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    nonisolated static func resolveClassicTransferPeer(
-        peerContext: FileTransferPeerContext,
-        authenticatedPeers: [ClassicTransferAuthenticatedPeerCandidate]
-    ) -> ClassicTransferPeerResolutionOutcome? {
-        let exactDeclared = PeerTrustLookup.trimmedIdentifier(peerContext.declaredSenderDeviceId)
-        let declaredCandidates = normalizedClassicTransferLookupCandidates(
-            PeerTrustLookup.lookupCandidates(for: exactDeclared),
-            excluding: exactDeclared
-        )
-        let endpointCandidates = normalizedClassicTransferLookupCandidates(
-            PeerTrustLookup.lookupCandidates(for: peerContext.endpointHostOrIP)
-        )
-
-        func exactDeclaredMatch() -> ClassicTransferAuthenticatedPeerCandidate? {
-            guard let exactDeclared else { return nil }
-            let exactLower = exactDeclared.lowercased()
-            return authenticatedPeers.first { candidate in
-                candidate.matchDeviceId.caseInsensitiveCompare(exactDeclared) == .orderedSame
-                    || candidate.resolvedPeerDeviceId.caseInsensitiveCompare(exactDeclared) == .orderedSame
-                    || candidate.aliases.contains(where: { $0.lowercased() == exactLower })
-            }
-        }
-
-        func candidateMatch(for requestedCandidates: [String]) -> ClassicTransferAuthenticatedPeerCandidate? {
-            guard !requestedCandidates.isEmpty else { return nil }
-            let requestedLower = Set(requestedCandidates.map { $0.lowercased() })
-            let matches = authenticatedPeers.filter { candidate in
-                !requestedLower.isDisjoint(with: candidate.aliases.map { $0.lowercased() })
-            }
-            guard matches.count == 1 else { return nil }
-            return matches.first
-        }
-
-        if let exactMatch = exactDeclaredMatch() {
-            return ClassicTransferPeerResolutionOutcome(
-                matchDeviceId: exactMatch.matchDeviceId,
-                resolvedPeerDeviceId: exactMatch.resolvedPeerDeviceId,
-                matchedBy: .declaredSenderDeviceId,
-                declaredCandidates: declaredCandidates,
-                endpointCandidates: endpointCandidates,
-                supportsClassicResume: ClassicTransferCapability.supportsClassicResume(in: exactMatch.capabilities)
-            )
-        }
-
-        if let aliasMatch = candidateMatch(for: declaredCandidates) {
-            return ClassicTransferPeerResolutionOutcome(
-                matchDeviceId: aliasMatch.matchDeviceId,
-                resolvedPeerDeviceId: aliasMatch.resolvedPeerDeviceId,
-                matchedBy: .aliasOrCanonicalDeviceId,
-                declaredCandidates: declaredCandidates,
-                endpointCandidates: endpointCandidates,
-                supportsClassicResume: ClassicTransferCapability.supportsClassicResume(in: aliasMatch.capabilities)
-            )
-        }
-
-        if let endpointMatch = candidateMatch(for: endpointCandidates) {
-            return ClassicTransferPeerResolutionOutcome(
-                matchDeviceId: endpointMatch.matchDeviceId,
-                resolvedPeerDeviceId: endpointMatch.resolvedPeerDeviceId,
-                matchedBy: .endpointHostOrIP,
-                declaredCandidates: declaredCandidates,
-                endpointCandidates: endpointCandidates,
-                supportsClassicResume: ClassicTransferCapability.supportsClassicResume(in: endpointMatch.capabilities)
-            )
-        }
-
-        if authenticatedPeers.count == 1, let only = authenticatedPeers.first {
-            return ClassicTransferPeerResolutionOutcome(
-                matchDeviceId: only.matchDeviceId,
-                resolvedPeerDeviceId: only.resolvedPeerDeviceId,
-                matchedBy: .singleAuthenticatedFallback,
-                declaredCandidates: declaredCandidates,
-                endpointCandidates: endpointCandidates,
-                supportsClassicResume: ClassicTransferCapability.supportsClassicResume(in: only.capabilities)
-            )
-        }
-
-        return nil
-    }
-
-    @available(macOS 14.0, iOS 17.0, *)
     private func classicTransferSecurityContext(
         peerContext: FileTransferPeerContext
     ) async throws -> ClassicTransferSecurityContext {
@@ -387,6 +275,16 @@ public class FileTransferManager: BaseManager {
         }
         let authenticatedConnections = Array(deduped.values)
         var authenticatedSessionsByKey: [String: ClassicTransferAuthenticatedSessionSource] = [:]
+        func upsertAuthenticatedSessionSource(
+            _ source: ClassicTransferAuthenticatedSessionSource,
+            dedupeKey: String
+        ) {
+            if let existing = authenticatedSessionsByKey[dedupeKey],
+               !ClassicTransferPeerResolutionPolicy.isPreferredSource(source, over: existing) {
+                return
+            }
+            authenticatedSessionsByKey[dedupeKey] = source
+        }
         for connection in authenticatedConnections {
             guard let transferKey = try? connection.deriveClassicFileTransferKey(transferId: peerContext.transferId) else {
                 continue
@@ -396,9 +294,14 @@ public class FileTransferManager: BaseManager {
                 candidate.resolvedPeerDeviceId.lowercased(),
                 candidate.endpointHostOrIP?.lowercased() ?? "-"
             ].joined(separator: "|")
-            authenticatedSessionsByKey[dedupeKey] = ClassicTransferAuthenticatedSessionSource(
-                candidate: candidate,
-                transferKey: transferKey
+            upsertAuthenticatedSessionSource(
+                ClassicTransferAuthenticatedSessionSource(
+                    candidate: candidate,
+                    transferKey: transferKey,
+                    lastSeenAt: connection.lastActivity,
+                    sourceKind: .liveConnection
+                ),
+                dedupeKey: dedupeKey
             )
         }
         for snapshot in registrySessions {
@@ -407,27 +310,28 @@ public class FileTransferManager: BaseManager {
                 candidate.resolvedPeerDeviceId.lowercased(),
                 candidate.endpointHostOrIP?.lowercased() ?? "-"
             ].joined(separator: "|")
-            authenticatedSessionsByKey[dedupeKey] = ClassicTransferAuthenticatedSessionSource(
-                candidate: candidate,
-                transferKey: snapshot.deriveClassicFileTransferKey(transferId: peerContext.transferId)
+            upsertAuthenticatedSessionSource(
+                ClassicTransferAuthenticatedSessionSource(
+                    candidate: candidate,
+                    transferKey: snapshot.deriveClassicFileTransferKey(transferId: peerContext.transferId),
+                    lastSeenAt: snapshot.lastSeenAt,
+                    sourceKind: .sessionSnapshot
+                ),
+                dedupeKey: dedupeKey
             )
         }
-        let authenticatedSessions = Array(authenticatedSessionsByKey.values)
-        let declaredCandidates = Self.normalizedClassicTransferLookupCandidates(
+        let authenticatedSessions = ClassicTransferPeerResolutionPolicy.sortedSessionSources(Array(authenticatedSessionsByKey.values))
+        let declaredCandidates = ClassicTransferPeerResolutionPolicy.normalizedLookupCandidates(
             PeerTrustLookup.lookupCandidates(for: peerContext.declaredSenderDeviceId),
             excluding: peerContext.declaredSenderDeviceId
         )
-        let endpointCandidates = Self.normalizedClassicTransferLookupCandidates(
+        let endpointCandidates = ClassicTransferPeerResolutionPolicy.normalizedLookupCandidates(
             PeerTrustLookup.lookupCandidates(for: peerContext.endpointHostOrIP)
         )
 
-        let connectionCandidates = authenticatedSessions.map { source in
-            source.candidate
-        }
-
-        guard let resolution = Self.resolveClassicTransferPeer(
+        guard let resolvedSession = ClassicTransferPeerResolutionPolicy.resolveSessionSource(
             peerContext: peerContext,
-            authenticatedPeers: connectionCandidates
+            authenticatedSources: authenticatedSessions
         ) else {
             logger.error(
                 """
@@ -442,12 +346,8 @@ public class FileTransferManager: BaseManager {
             )
             throw FileTransferError.secureSessionRequired
         }
-
-        guard let sessionSource = authenticatedSessions.first(where: { source in
-            source.candidate.matchDeviceId == resolution.matchDeviceId
-        }) else {
-            throw FileTransferError.secureSessionRequired
-        }
+        let sessionSource = resolvedSession.source
+        let resolution = resolvedSession.resolution
 
         if resolution.matchedBy == .singleAuthenticatedFallback {
             logger.warning(
@@ -462,6 +362,15 @@ public class FileTransferManager: BaseManager {
                 """
             )
         }
+        logger.info(
+            """
+            🔐 文件传输安全会话已解析: transferId=\(peerContext.transferId, privacy: .public) \
+            sourceKind=\(sessionSource.sourceKind.logLabel, privacy: .public) \
+            matchedBy=\(resolution.matchedBy.rawValue, privacy: .public) \
+            resolvedPeerId=\(resolution.resolvedPeerDeviceId, privacy: .public) \
+            endpoint=\(peerContext.endpointHostOrIP ?? "-", privacy: .public)
+            """
+        )
 
         return ClassicTransferSecurityContext(
             transferKey: sessionSource.transferKey,
@@ -478,20 +387,14 @@ public class FileTransferManager: BaseManager {
     nonisolated static func classicTransferAuthenticatedPeerCandidate(
         for connection: P2PConnection
     ) -> ClassicTransferAuthenticatedPeerCandidate {
-        let resolvedPeerDeviceId = connection.device.persistentDeviceId
-            ?? PeerTrustLookup.persistentDeviceId(from: connection.device.deviceId)
-            ?? connection.device.deviceId
-        let aliases = normalizedClassicTransferLookupCandidates(
-            PeerTrustLookup.lookupCandidates(primary: connection.device.deviceId, persistent: connection.device.persistentDeviceId)
-                + PeerTrustLookup.lookupCandidates(for: connection.device.address)
-        )
-
         return ClassicTransferAuthenticatedPeerCandidate(
-            matchDeviceId: connection.device.deviceId,
-            resolvedPeerDeviceId: resolvedPeerDeviceId,
-            aliases: aliases,
-            endpointHostOrIP: connection.device.address,
-            capabilities: connection.device.capabilities
+            matchDeviceId: connection.classicTransferMatchDeviceId(),
+            resolvedPeerDeviceId: connection.classicTransferResolvedPeerDeviceId(),
+            aliases: ClassicTransferPeerResolutionPolicy.normalizedLookupCandidates(
+                connection.classicTransferPeerLookupAliases()
+            ),
+            endpointHostOrIP: connection.classicTransferEndpointHostOrIP(),
+            capabilities: connection.classicTransferCapabilities()
         )
     }
 
@@ -506,27 +409,6 @@ public class FileTransferManager: BaseManager {
             endpointHostOrIP: snapshot.endpointHostOrIP,
             capabilities: snapshot.capabilities
         )
-    }
-
-    @available(macOS 14.0, iOS 17.0, *)
-    nonisolated static func normalizedClassicTransferLookupCandidates(
-        _ candidates: [String],
-        excluding exactMatch: String? = nil
-    ) -> [String] {
-        var normalized: [String] = []
-        var seen = Set<String>()
-        let excluded = exactMatch?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-
-        for candidate in candidates {
-            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            let lowered = trimmed.lowercased()
-            guard lowered != excluded else { continue }
-            guard seen.insert(lowered).inserted else { continue }
-            normalized.append(trimmed)
-        }
-
-        return normalized
     }
 
     private func shouldAttemptAutomaticOutgoingResume(for error: Error, transferredBytes: Int64) -> Bool {
@@ -548,7 +430,7 @@ public class FileTransferManager: BaseManager {
             try await localServiceHealthCheck()
         }
 
-        let routes = await resolveActivePeerRoutes()
+        let routes = await resolveActivePeerRoutesWithReadinessWait()
         guard !routes.isEmpty else {
             throw NSError(
                 domain: "SkyBridge.FileTransfer",
@@ -557,47 +439,135 @@ public class FileTransferManager: BaseManager {
             )
         }
 
-        var lastError: Error?
-        for route in routes {
-            do {
-                logger.info(
-                    "📡 尝试活跃会话文件路由: peer=\(route.deviceName) addr=\(route.ipAddress):\(route.port)"
-                )
-                try await sendFile(
-                    at: url,
-                    to: route.deviceId,
-                    deviceName: route.deviceName,
-                    ipAddress: route.ipAddress,
-                    port: route.port
-                )
-                return
-            } catch {
-                lastError = error
-                logger.warning(
-                    "⚠️ 活跃会话文件路由失败，尝试下一条: peer=\(route.deviceName, privacy: .public) addr=\(route.ipAddress, privacy: .public):\(route.port) err=\(error.localizedDescription, privacy: .public)"
-                )
-            }
+        try await sendFile(at: url, over: routes)
+    }
+
+    /// Sends a file to a specific active P2P peer, instead of whichever active route happens to sort first.
+    public func sendFileToActivePeer(
+        at url: URL,
+        matchingPeerIds peerIds: [String],
+        preferredDeviceName: String? = nil
+    ) async throws {
+        if let localServiceHealthCheck {
+            try await localServiceHealthCheck()
         }
 
-        throw lastError ?? NSError(
-            domain: "SkyBridge.FileTransfer",
-            code: -1003,
-            userInfo: [NSLocalizedDescriptionKey: "已发现活跃连接，但无法解析可用传输路由"]
+        let routes = await resolveActivePeerRoutesWithReadinessWait(
+            matchingPeerIds: peerIds,
+            preferredDeviceName: preferredDeviceName
         )
+        guard !routes.isEmpty else {
+            throw NSError(
+                domain: "SkyBridge.FileTransfer",
+                code: -1004,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "未建立目标设备可用 P2P 连接 (No Authenticated Route for Target Peer)"
+                ]
+            )
+        }
+
+        try await sendFile(at: url, over: routes)
     }
 
-    struct ActivePeerRoute: Sendable, Equatable {
-        let deviceId: String
-        let deviceName: String
-        let ipAddress: String
-        let port: Int
-        let routeSource: String
+    public struct ActivePeerRoute: Sendable, Equatable {
+        public let deviceId: String
+        public let deviceName: String
+        public let ipAddress: String
+        public let port: Int
+        public let routeSource: String
+
+        public init(
+            deviceId: String,
+            deviceName: String,
+            ipAddress: String,
+            port: Int,
+            routeSource: String
+        ) {
+            self.deviceId = deviceId
+            self.deviceName = deviceName
+            self.ipAddress = ipAddress
+            self.port = port
+            self.routeSource = routeSource
+        }
     }
 
-    func resolveActivePeerRoutes() async -> [ActivePeerRoute] {
+    nonisolated static func activeRouteSourcePriority(_ routeSource: String) -> Int {
+        switch routeSource {
+        case "authenticated-session":
+            return 0
+        case "classic-session-registry":
+            return 1
+        case "presence:outbound":
+            return 2
+        case "presence:inbound":
+            return 3
+        case "unified":
+            return 4
+        default:
+            return 5
+        }
+    }
+
+    nonisolated static func sortedActivePeerRoutes(_ routes: [ActivePeerRoute]) -> [ActivePeerRoute] {
+        routes.sorted { lhs, rhs in
+            let lhsPriority = activeRouteSourcePriority(lhs.routeSource)
+            let rhsPriority = activeRouteSourcePriority(rhs.routeSource)
+            if lhsPriority != rhsPriority {
+                return lhsPriority < rhsPriority
+            }
+            if lhs.deviceId != rhs.deviceId {
+                return lhs.deviceId.localizedCaseInsensitiveCompare(rhs.deviceId) == .orderedAscending
+            }
+            if lhs.ipAddress != rhs.ipAddress {
+                return lhs.ipAddress.localizedCaseInsensitiveCompare(rhs.ipAddress) == .orderedAscending
+            }
+            return lhs.port < rhs.port
+        }
+    }
+
+    nonisolated static func deduplicatedActivePeerRoutes(_ routes: [ActivePeerRoute]) -> [ActivePeerRoute] {
+        var selectedIndexByEndpoint: [String: Int] = [:]
+        var selectedRoutes: [ActivePeerRoute] = []
+
+        for route in routes {
+            let key = "\(route.deviceId.lowercased())|\(route.ipAddress.lowercased()):\(route.port)"
+            if let existingIndex = selectedIndexByEndpoint[key] {
+                let existing = selectedRoutes[existingIndex]
+                if activeRouteSourcePriority(route.routeSource) < activeRouteSourcePriority(existing.routeSource) {
+                    selectedRoutes[existingIndex] = route
+                }
+                continue
+            }
+
+            selectedIndexByEndpoint[key] = selectedRoutes.count
+            selectedRoutes.append(route)
+        }
+
+        return selectedRoutes
+    }
+
+    public func resolveActivePeerRoutes(
+        matchingPeerIds targetPeerIds: [String] = [],
+        preferredDeviceName: String? = nil
+    ) async -> [ActivePeerRoute] {
         var routes: [ActivePeerRoute] = []
-        var dedupe = Set<String>()
         var usedCompatibilityFallback = false
+        let targetAliases = Self.normalizedActiveRouteAliases(for: targetPeerIds)
+        let normalizedPreferredName = Self.normalizedRouteDisplayName(preferredDeviceName)
+
+        func routeAliasMatchesTarget(_ route: ActivePeerRoute) -> Bool {
+            guard !targetAliases.isEmpty else { return false }
+            let routeAliases = Self.normalizedActiveRouteAliases(for: [
+                route.deviceId,
+                route.ipAddress
+            ])
+            return !routeAliases.isDisjoint(with: targetAliases)
+        }
+
+        func routeNameMatchesTarget(_ route: ActivePeerRoute) -> Bool {
+            !normalizedPreferredName.isEmpty
+                && Self.normalizedRouteDisplayName(route.deviceName) == normalizedPreferredName
+        }
 
         func appendRoute(
             deviceId: String,
@@ -608,9 +578,6 @@ public class FileTransferManager: BaseManager {
         ) {
             guard let address = sanitizeAddress(address) else { return }
             guard (1...65535).contains(port) else { return }
-            let key = "\(address.lowercased()):\(port)"
-            guard !dedupe.contains(key) else { return }
-            dedupe.insert(key)
             routes.append(
                 ActivePeerRoute(
                     deviceId: deviceId,
@@ -630,6 +597,50 @@ public class FileTransferManager: BaseManager {
                 address: route.transferAddress,
                 port: route.transferPort,
                 routeSource: "presence:\(route.routeSource.rawValue)"
+            )
+        }
+
+        func appendAuthenticatedRoute(
+            from candidate: ClassicTransferAuthenticatedPeerCandidate,
+            routeSource: String
+        ) {
+            let endpointAddress = sanitizeAddress(candidate.endpointHostOrIP)
+            let resolved = P2PDiscoveryService.resolveInboundPresenceRoute(
+                peerId: candidate.resolvedPeerDeviceId,
+                endpointLabel: endpointAddress.map { "host:\($0)" } ?? candidate.matchDeviceId,
+                discoveredDevices: P2PDiscoveryService.shared.discoveredDevices,
+                unifiedDevices: UnifiedOnlineDeviceManager.shared.onlineDevices
+            )
+            let port = ClassicTransferPeerResolutionPolicy.advertisedClassicTransferPort(in: candidate.capabilities)
+                ?? (resolved.transferPort > 0 ? resolved.transferPort : nil)
+            guard let port else { return }
+            appendRoute(
+                deviceId: candidate.resolvedPeerDeviceId,
+                deviceName: resolved.name.isEmpty ? "P2P Device" : resolved.name,
+                address: resolved.displayAddress ?? endpointAddress,
+                port: port,
+                routeSource: routeSource
+            )
+        }
+
+        let primaryAuthenticated = Array(P2PNetworkManager.shared.activeConnections.values)
+        let discoveryAuthenticated = P2PDiscoveryService.shared.activeAuthenticatedConnectionsForClassicTransfer()
+        let registryConnections = await ClassicTransferSessionRegistry.shared.activeConnections()
+        var seenConnections = Set<ObjectIdentifier>()
+        for connection in primaryAuthenticated + discoveryAuthenticated + registryConnections
+            where connection.status == .authenticated {
+            guard seenConnections.insert(ObjectIdentifier(connection)).inserted else { continue }
+            appendAuthenticatedRoute(
+                from: Self.classicTransferAuthenticatedPeerCandidate(for: connection),
+                routeSource: "authenticated-session"
+            )
+        }
+
+        let registrySessions = await ClassicTransferSessionRegistry.shared.activeSessions()
+        for snapshot in registrySessions {
+            appendAuthenticatedRoute(
+                from: Self.classicTransferAuthenticatedPeerCandidate(for: snapshot),
+                routeSource: "classic-session-registry"
             )
         }
 
@@ -657,7 +668,98 @@ public class FileTransferManager: BaseManager {
             logger.warning("⚠️ 文件传输路由解析回退到兼容路径；首选应来自 PresenceRouteDescriptor")
         }
 
-        return routes
+        let deduplicatedRoutes = Self.deduplicatedActivePeerRoutes(routes)
+        guard !targetAliases.isEmpty || !normalizedPreferredName.isEmpty else {
+            return Self.sortedActivePeerRoutes(deduplicatedRoutes)
+        }
+
+        let aliasMatches = deduplicatedRoutes.filter(routeAliasMatchesTarget)
+        if !aliasMatches.isEmpty {
+            return Self.sortedActivePeerRoutes(aliasMatches)
+        }
+
+        if !targetAliases.isEmpty {
+            logger.warning("⚠️ 指定 peer id 的文件传输路由未命中强身份，拒绝使用同名路由兜底")
+            return []
+        }
+
+        return Self.sortedActivePeerRoutes(deduplicatedRoutes.filter(routeNameMatchesTarget))
+    }
+
+    private func resolveActivePeerRoutesWithReadinessWait(
+        matchingPeerIds targetPeerIds: [String] = [],
+        preferredDeviceName: String? = nil
+    ) async -> [ActivePeerRoute] {
+        let deadline = Date().addingTimeInterval(activeRouteReadinessTimeoutSeconds)
+        var lastRoutes: [ActivePeerRoute] = []
+
+        repeat {
+            let routes = await resolveActivePeerRoutes(
+                matchingPeerIds: targetPeerIds,
+                preferredDeviceName: preferredDeviceName
+            )
+            if !routes.isEmpty {
+                return routes
+            }
+            lastRoutes = routes
+            try? await Task.sleep(for: .seconds(activeRouteReadinessPollIntervalSeconds))
+        } while Date() < deadline
+
+        return lastRoutes
+    }
+
+    private func sendFile(at url: URL, over routes: [ActivePeerRoute]) async throws {
+        var lastError: Error?
+        for route in routes {
+            do {
+                logger.info(
+                    "📡 尝试活跃会话文件路由: peer=\(route.deviceName) addr=\(route.ipAddress):\(route.port) source=\(route.routeSource)"
+                )
+                try await sendFile(
+                    at: url,
+                    to: route.deviceId,
+                    deviceName: route.deviceName,
+                    ipAddress: route.ipAddress,
+                    port: route.port
+                )
+                return
+            } catch {
+                lastError = error
+                logger.warning(
+                    "⚠️ 活跃会话文件路由失败，尝试下一条: peer=\(route.deviceName, privacy: .public) addr=\(route.ipAddress, privacy: .public):\(route.port) source=\(route.routeSource, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        throw lastError ?? NSError(
+            domain: "SkyBridge.FileTransfer",
+            code: -1003,
+            userInfo: [NSLocalizedDescriptionKey: "已发现活跃连接，但无法解析可用传输路由"]
+        )
+    }
+
+    nonisolated static func normalizedActiveRouteAliases(for values: [String?]) -> Set<String> {
+        var aliases = Set<String>()
+        for value in values {
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                continue
+            }
+            aliases.insert(trimmed.lowercased())
+            for candidate in PeerTrustLookup.lookupCandidates(for: trimmed) {
+                let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard !normalized.isEmpty else { continue }
+                aliases.insert(normalized)
+            }
+        }
+        return aliases
+    }
+
+    nonisolated static func normalizedRouteDisplayName(_ raw: String?) -> String {
+        raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "") ?? ""
     }
 
     private func parseAddressFromEndpoint(_ endpoint: NWEndpoint?) -> String? {
@@ -907,6 +1009,11 @@ public class FileTransferManager: BaseManager {
                 updateTransferringStatus()
                 return
             }
+        } catch FileTransferError.inboundConnectionClosedBeforeMetadata {
+            logger.info("📥 inbound file-transfer connection closed before metadata")
+            lastTransferActivityAt = Date()
+            updateTransferringStatus()
+            throw FileTransferError.inboundConnectionClosedBeforeMetadata
         } catch {
             logger.error("❌ 文件接收失败: \(error)")
             lastTransferActivityAt = Date()
@@ -920,6 +1027,13 @@ public class FileTransferManager: BaseManager {
         from connection: NWConnection,
         peerContext: FileTransferPeerContext
     ) async throws {
+        RemoteControlSmokeStatusWriter.append(
+            """
+            file-transfer metadata-received transfer=\(Self.sanitizeSmokeField(metadata.transferId)) \
+            sender=\(Self.sanitizeSmokeField(metadata.senderDeviceId ?? "-")) \
+            name=\(Self.sanitizeSmokeField(metadata.fileName)) bytes=\(metadata.fileSize)
+            """
+        )
         guard #available(macOS 14.0, iOS 17.0, *) else {
             throw FileTransferError.secureSessionRequired
         }
@@ -931,8 +1045,24 @@ public class FileTransferManager: BaseManager {
             logger.error(
                 "⚠️ failure receipt 未发送: transferId=\(metadata.transferId, privacy: .public) reason=no_security_context declaredSenderId=\(peerContext.declaredSenderDeviceId ?? "-", privacy: .public) endpointHostOrIP=\(peerContext.endpointHostOrIP ?? "-", privacy: .public)"
             )
+            RemoteControlSmokeStatusWriter.append(
+                """
+                failed stage=file-transfer phase=no_security_context \
+                transfer=\(Self.sanitizeSmokeField(metadata.transferId)) \
+                sender=\(Self.sanitizeSmokeField(peerContext.declaredSenderDeviceId ?? "-")) \
+                endpoint=\(Self.sanitizeSmokeField(peerContext.endpointHostOrIP ?? "-")) \
+                detail=\(Self.sanitizeSmokeField(error.localizedDescription))
+                """
+            )
             throw error
         }
+        RemoteControlSmokeStatusWriter.append(
+            """
+            file-transfer security-context transfer=\(Self.sanitizeSmokeField(metadata.transferId)) \
+            matchedBy=\(resolvedSecurityContext.matchedBy.rawValue) \
+            peer=\(Self.sanitizeSmokeField(resolvedSecurityContext.resolvedPeerDeviceId))
+            """
+        )
 
         guard isValidAuthenticationTag(
             metadata.metadataAuthTag,
@@ -1762,7 +1892,11 @@ public class FileTransferManager: BaseManager {
 
  /// 发送文件元数据
     private func receiveInitialTransferMessage(from connection: NWConnection) async throws -> InitialTransferMessage {
-        let headerData = try await receiveData(length: 8, from: connection)
+        let headerData = try await receiveData(
+            length: 8,
+            from: connection,
+            zeroByteDisconnectError: .inboundConnectionClosedBeforeMetadata
+        )
         let header = parseHeader(headerData)
         guard header.length >= 0, header.length <= maxMessageBytes else {
             throw FileTransferError.invalidHeader
@@ -2188,6 +2322,9 @@ public class FileTransferManager: BaseManager {
         do {
             try await sendData(header + payload, to: connection)
             logClassicReceiptPhase("receipt_send_succeeded", transferId: receipt.transferId)
+            RemoteControlSmokeStatusWriter.append(
+                "file-transfer receipt-sent transfer=\(Self.sanitizeSmokeField(receipt.transferId)) success=\(receipt.success ? 1 : 0)"
+            )
         } catch {
             logClassicReceiptPhase("receipt_send_failed", transferId: receipt.transferId, detail: error.localizedDescription)
             throw error
@@ -2263,6 +2400,10 @@ public class FileTransferManager: BaseManager {
         }
     }
 
+    private nonisolated static func sanitizeSmokeField(_ value: String) -> String {
+        value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+
  /// 发送数据
     private func sendData(_ data: Data, to connection: NWConnection) async throws {
         return try await withCheckedThrowingContinuation { continuation in
@@ -2277,7 +2418,12 @@ public class FileTransferManager: BaseManager {
     }
 
  /// 接收数据
-    private func receiveData(length: Int, from connection: NWConnection, timeout: TimeInterval? = nil) async throws -> Data {
+    private func receiveData(
+        length: Int,
+        from connection: NWConnection,
+        timeout: TimeInterval? = nil,
+        zeroByteDisconnectError: FileTransferError? = nil
+    ) async throws -> Data {
         return try await withCheckedThrowingContinuation { continuation in
             final class Once: @unchecked Sendable {
                 private let lock = NSLock()
@@ -2315,6 +2461,15 @@ public class FileTransferManager: BaseManager {
             }
             let accumulator = Accumulator()
 
+            @Sendable func mappedReceiveError(_ error: Error) -> Error {
+                if accumulator.count() == 0,
+                   let zeroByteDisconnectError,
+                   ClassicTransferPeerResolutionPolicy.isInboundPreMetadataDisconnect(error) {
+                    return zeroByteDisconnectError
+                }
+                return error
+            }
+
             if let timeout, timeout > 0 {
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
                     once.run {
@@ -2328,7 +2483,7 @@ public class FileTransferManager: BaseManager {
                 connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { data, _, isComplete, error in
                     if let error = error {
                         once.run {
-                            continuation.resume(throwing: error)
+                            continuation.resume(throwing: mappedReceiveError(error))
                         }
                         return
                     }
@@ -2344,7 +2499,7 @@ public class FileTransferManager: BaseManager {
                     }
                     if isComplete {
                         once.run {
-                            continuation.resume(throwing: FileTransferError.connectionClosed)
+                            continuation.resume(throwing: mappedReceiveError(FileTransferError.connectionClosed))
                         }
                         return
                     }
@@ -2436,7 +2591,7 @@ public class FileTransferManager: BaseManager {
     }
 
  /// 创建协议头部
-    private func createHeader(type: MessageType, length: Int) -> Data {
+    private func createHeader(type: FileTransferWireMessageType, length: Int) -> Data {
         var header = Data()
         header.append(contentsOf: withUnsafeBytes(of: type.rawValue.bigEndian) { Array($0) })
         header.append(contentsOf: withUnsafeBytes(of: UInt32(length).bigEndian) { Array($0) })
@@ -2444,11 +2599,11 @@ public class FileTransferManager: BaseManager {
     }
 
  /// 解析协议头部
-    private func parseHeader(_ data: Data) -> (type: MessageType, length: Int) {
-        let typeValue = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let length = data.suffix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+    private func parseHeader(_ data: Data) -> (type: FileTransferWireMessageType, length: Int) {
+        let typeValue = data.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+        let length = data.suffix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
 
-        let type = MessageType(rawValue: typeValue) ?? .unknown
+        let type = FileTransferWireMessageType(rawValue: typeValue) ?? .unknown
         return (type: type, length: Int(length))
     }
 
@@ -2797,488 +2952,6 @@ public class FileTransferManager: BaseManager {
         } else {
             let totalProgress = activeTransfers.values.reduce(0.0) { $0 + $1.progress }
             self.totalProgress = totalProgress / Double(activeTransfers.count)
-        }
-    }
-}
-
-// MARK: - 数据模型
-
-struct PersistedFileTransferHistoryEntry: Codable, Sendable {
-    let id: String
-    let fileName: String
-    let fileSize: Int64
-    let deviceId: String
-    let direction: TransferDirection
-    let createdAt: Date
-    let status: TransferStatus
-    let progress: Double
-    let transferredBytes: Int64
-    let transferSpeed: Double
-    let estimatedTimeRemaining: TimeInterval
-    let networkQuality: NetworkQuality
-    let averageSpeed: Double
-    let peakSpeed: Double
-    let completedAt: Date?
-    let error: String?
-    let fileHash: String?
-    let localPath: URL?
-    let compression: String?
-    let scanResult: FileScanResult?
-    let deviceIPAddress: String?
-    let devicePort: Int
-    let deviceName: String?
-    let resumeOffset: Int64
-    let resumeDataPath: URL?
-
-    init(_ transfer: FileTransfer) {
-        self.id = transfer.id
-        self.fileName = transfer.fileName
-        self.fileSize = transfer.fileSize
-        self.deviceId = transfer.deviceId
-        self.direction = transfer.direction
-        self.createdAt = transfer.createdAt
-        self.status = transfer.status
-        self.progress = transfer.progress
-        self.transferredBytes = transfer.transferredBytes
-        self.transferSpeed = transfer.transferSpeed
-        self.estimatedTimeRemaining = transfer.estimatedTimeRemaining
-        self.networkQuality = transfer.networkQuality
-        self.averageSpeed = transfer.averageSpeed
-        self.peakSpeed = transfer.peakSpeed
-        self.completedAt = transfer.completedAt
-        self.error = transfer.error
-        self.fileHash = transfer.fileHash
-        self.localPath = transfer.localPath
-        self.compression = transfer.compression
-        self.scanResult = transfer.scanResult
-        self.deviceIPAddress = transfer.deviceIPAddress
-        self.devicePort = transfer.devicePort
-        self.deviceName = transfer.deviceName
-        self.resumeOffset = transfer.resumeOffset
-        self.resumeDataPath = transfer.resumeDataPath
-    }
-
-    var asRuntimeTransfer: FileTransfer {
-        let transfer = FileTransfer(
-            id: id,
-            fileName: fileName,
-            fileSize: fileSize,
-            deviceId: deviceId,
-            direction: direction,
-            status: status,
-            createdAt: createdAt
-        )
-        transfer.progress = progress
-        transfer.transferredBytes = transferredBytes
-        transfer.transferSpeed = transferSpeed
-        transfer.estimatedTimeRemaining = estimatedTimeRemaining
-        transfer.networkQuality = networkQuality
-        transfer.averageSpeed = averageSpeed
-        transfer.peakSpeed = peakSpeed
-        transfer.completedAt = completedAt
-        transfer.error = error
-        transfer.fileHash = fileHash
-        transfer.localPath = localPath
-        transfer.compression = compression
-        transfer.scanResult = scanResult
-        transfer.deviceIPAddress = deviceIPAddress
-        transfer.devicePort = devicePort
-        transfer.deviceName = deviceName
-        transfer.resumeOffset = resumeOffset
-        transfer.resumeDataPath = resumeDataPath
-        return transfer
-    }
-}
-
-/// 文件传输对象
-public class FileTransfer: ObservableObject, Identifiable {
-    public let id: String
-    public let fileName: String
-    public let fileSize: Int64
-    public let deviceId: String
-    public let direction: TransferDirection
-    public let createdAt: Date
-
-    @Published public var status: TransferStatus = .preparing
-    @Published public var progress: Double = 0.0
-    @Published public var transferredBytes: Int64 = 0
-
- // 新增传输统计属性
-    @Published public var transferSpeed: Double = 0.0 // 字节/秒
-    @Published public var estimatedTimeRemaining: TimeInterval = 0.0 // 剩余时间（秒）
-    @Published public var networkQuality: NetworkQuality = .unknown // 网络质量
-    @Published public var averageSpeed: Double = 0.0 // 平均传输速度
-    @Published public var peakSpeed: Double = 0.0 // 峰值传输速度
-
-    public var completedAt: Date?
-    public var error: String?
-    public var fileHash: String?
-    public var localPath: URL?
-    /// 压缩算法：nil/"" 表示不压缩；当前支持 "zlib"
-    public var compression: String?
-
- // 扫描结果 - 用于 UI 显示扫描状态
-    @Published public var scanResult: FileScanResult?
-
- // 断点续传支持 - 利用macOS 26.x的改进持久化
-    public var deviceIPAddress: String? // 设备IP地址
-    public var devicePort: Int = 8080 // 设备端口
-    public var deviceName: String? // 设备名称
-    public var resumeOffset: Int64 = 0 // 断点续传偏移量（已传输字节数）
-    public var resumeDataPath: URL? // 断点续传数据保存路径
-
- // 内部统计数据
-    private var lastUpdateTime: Date = Date()
-    private var lastTransferredBytes: Int64 = 0
-    private var speedSamples: [Double] = []
-    private let maxSpeedSamples = 10 // 保留最近10个速度样本用于平均值计算
-
-    public init(
-        id: String,
-        fileName: String,
-        fileSize: Int64,
-        deviceId: String,
-        direction: TransferDirection,
-        status: TransferStatus,
-        createdAt: Date = Date()
-    ) {
-        self.id = id
-        self.fileName = fileName
-        self.fileSize = fileSize
-        self.deviceId = deviceId
-        self.direction = direction
-        self.status = status
-        self.createdAt = createdAt
-        self.lastUpdateTime = createdAt
-    }
-
- /// 更新传输进度和统计信息
-    public func updateProgress(transferredBytes: Int64) {
-        let now = Date()
-        let timeDelta = now.timeIntervalSince(lastUpdateTime)
-        let clampedBytes = max(0, min(transferredBytes, fileSize))
-
-        // Keep the visible byte counters moving even when we throttle speed
-        // statistics. Otherwise small/fast transfers can sit at 0% until the
-        // receipt phase finishes.
-        self.transferredBytes = clampedBytes
-        if fileSize > 0 {
-            self.progress = Double(clampedBytes) / Double(fileSize)
-        } else {
-            self.progress = 1.0
-        }
-
- // 避免过于频繁的更新
-        guard timeDelta >= 0.1 else { return }
-
-        let bytesDelta = clampedBytes - lastTransferredBytes
-
- // 计算当前传输速度
-        if timeDelta > 0 {
-            let currentSpeed = Double(bytesDelta) / timeDelta
-            self.transferSpeed = currentSpeed
-
- // 更新峰值速度
-            if currentSpeed > peakSpeed {
-                peakSpeed = currentSpeed
-            }
-
- // 添加到速度样本中
-            speedSamples.append(currentSpeed)
-            if speedSamples.count > maxSpeedSamples {
-                speedSamples.removeFirst()
-            }
-
- // 计算平均速度
-            if !speedSamples.isEmpty {
-                averageSpeed = speedSamples.reduce(0, +) / Double(speedSamples.count)
-            }
-        }
-
- // 计算剩余时间
-        if averageSpeed > 0 {
-            let remainingBytes = fileSize - clampedBytes
-            estimatedTimeRemaining = Double(remainingBytes) / averageSpeed
-        }
-
- // 评估网络质量
-        updateNetworkQuality()
-
- // 更新时间戳
-        lastUpdateTime = now
-        lastTransferredBytes = clampedBytes
-    }
-
- /// 评估网络质量
-    private func updateNetworkQuality() {
-        guard !speedSamples.isEmpty else {
-            networkQuality = .unknown
-            return
-        }
-
-        let avgSpeed = averageSpeed
-        let speedVariance = calculateSpeedVariance()
-
- // 基于平均速度和稳定性评估网络质量
-        if avgSpeed > 10_000_000 && speedVariance < 0.3 { // > 10MB/s 且稳定
-            networkQuality = .excellent
-        } else if avgSpeed > 5_000_000 && speedVariance < 0.5 { // > 5MB/s 且较稳定
-            networkQuality = .good
-        } else if avgSpeed > 1_000_000 && speedVariance < 0.7 { // > 1MB/s
-            networkQuality = .fair
-        } else if avgSpeed > 100_000 { // > 100KB/s
-            networkQuality = .poor
-        } else {
-            networkQuality = .veryPoor
-        }
-    }
-
- /// 计算速度方差（用于评估网络稳定性）
-    private func calculateSpeedVariance() -> Double {
-        guard speedSamples.count > 1 else { return 0.0 }
-
-        let mean = averageSpeed
-        let variance = speedSamples.reduce(0) { sum, speed in
-            let diff = speed - mean
-            return sum + (diff * diff)
-        } / Double(speedSamples.count)
-
-        return sqrt(variance) / mean // 变异系数
-    }
-
- /// 重置统计信息
-    public func resetStatistics() {
-        transferSpeed = 0.0
-        estimatedTimeRemaining = 0.0
-        networkQuality = .unknown
-        averageSpeed = 0.0
-        peakSpeed = 0.0
-        speedSamples.removeAll()
-        lastUpdateTime = Date()
-        lastTransferredBytes = 0
-    }
-
- /// 格式化传输速度显示
-    public var formattedSpeed: String {
-        return formatSpeed(transferSpeed)
-    }
-
- /// 格式化平均速度显示
-    public var formattedAverageSpeed: String {
-        return formatSpeed(averageSpeed)
-    }
-
- /// 格式化峰值速度显示
-    public var formattedPeakSpeed: String {
-        return formatSpeed(peakSpeed)
-    }
-
- /// 格式化剩余时间显示
-    public var formattedTimeRemaining: String {
-        return formatTimeInterval(estimatedTimeRemaining)
-    }
-
- /// 格式化速度
-    private func formatSpeed(_ speed: Double) -> String {
-        if speed >= 1_000_000_000 { // GB/s
-            return String(format: "%.1f GB/s", speed / 1_000_000_000)
-        } else if speed >= 1_000_000 { // MB/s
-            return String(format: "%.1f MB/s", speed / 1_000_000)
-        } else if speed >= 1_000 { // KB/s
-            return String(format: "%.1f KB/s", speed / 1_000)
-        } else { // B/s
-            return String(format: "%.0f B/s", speed)
-        }
-    }
-
- /// 格式化时间间隔
-    private func formatTimeInterval(_ interval: TimeInterval) -> String {
-        guard interval > 0 && interval.isFinite else { return "计算中..." }
-
-        let hours = Int(interval) / 3600
-        let minutes = Int(interval) % 3600 / 60
-        let seconds = Int(interval) % 60
-
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
-        } else if minutes > 0 {
-            return String(format: "%d:%02d", minutes, seconds)
-        } else {
-            return String(format: "%d秒", seconds)
-        }
-    }
-}
-
-/// 网络质量枚举
-public enum NetworkQuality: String, CaseIterable, Codable, Sendable {
-    case excellent = "优秀"
-    case good = "良好"
-    case fair = "一般"
-    case poor = "较差"
-    case veryPoor = "很差"
-    case unknown = "未知"
-
- /// 获取对应的颜色
-    public var color: String {
-        switch self {
-        case .excellent:
-            return "green"
-        case .good:
-            return "blue"
-        case .fair:
-            return "orange"
-        case .poor:
-            return "red"
-        case .veryPoor:
-            return "red"
-        case .unknown:
-            return "gray"
-        }
-    }
-
- /// 获取对应的图标
-    public var icon: String {
-        switch self {
-        case .excellent:
-            return "wifi"
-        case .good:
-            return "wifi"
-        case .fair:
-            return "wifi"
-        case .poor:
-            return "wifi.slash"
-        case .veryPoor:
-            return "wifi.slash"
-        case .unknown:
-            return "questionmark.circle"
-        }
-    }
-}
-
-/// 文件元数据
-private struct FileMetadata: Codable {
-    let transferId: String
-    let fileName: String
-    let fileSize: Int64
-    let fileHash: String
-    let chunkSize: Int
-    let securityVersion: Int?
-    let metadataAuthTag: Data?
-    /// 压缩算法：nil/"" 表示不压缩；当前支持 "zlib"
-    let compression: String?
-
-    // Sender metadata (optional; used for UI + trust flow)
-    let senderDeviceId: String?
-    let senderDeviceName: String?
-    let senderPlatform: String?
-    let senderOSVersion: String?
-    let senderModelName: String?
-    let senderChip: String?
-}
-
-/// 文件块
-private struct FileChunk: Codable {
-    let index: Int
-    let data: Data
-    let size: Int
-    let nonce: Data?
-    let authenticationTag: Data?
-}
-
-/// 传输完成回执（接收端 -> 发送端）
-private struct FileTransferReceipt: Codable {
-    let transferId: String
-    let success: Bool
-    let receivedBytes: Int64
-    let fileHash: String?
-    let error: String?
-    let securityVersion: Int?
-    let authTag: Data?
-}
-
-private struct ResumeRequestPayload: Codable {
-    let transferId: String
-    let senderDeviceId: String
-    let resumeOffset: Int64
-    let securityVersion: Int
-    let authTag: Data
-}
-
-private struct ResumeAckPayload: Codable {
-    let transferId: String
-    let accepted: Bool
-    let resumeOffset: Int64
-    let error: String?
-    let securityVersion: Int
-    let authTag: Data
-}
-
-/// 传输方向
-public enum TransferDirection: String, CaseIterable, Codable, Sendable {
-    case incoming = "接收"
-    case outgoing = "发送"
-}
-
-/// 传输状态
-public enum TransferStatus: String, CaseIterable, Codable, Sendable {
-    case preparing = "准备中"
-    case transferring = "传输中"
-    case paused = "已暂停"
-    case completed = "已完成"
-    case failed = "失败"
-    case cancelled = "已取消"
-}
-
-/// 消息类型
-private enum MessageType: UInt32 {
-    case metadata = 1
-    case chunk = 2
-    case complete = 3
-    case receipt = 4
-    case resumeRequest = 5
-    case resumeAck = 6
-    case unknown = 0
-}
-
-/// 文件传输错误
-public enum FileTransferError: Error, LocalizedError {
-    case invalidHeader
-    case integrityCheckFailed
-    case transferCancelled
-    case connectionClosed
-    case fileNotFound
-    case timeout
-    case receiptWaitFailed(stage: FileTransferReceiptWaitStage, details: String?)
-    case receiverNotConfirmed
-    case receiverRejected
-    case secureSessionRequired
-    case securityThreatDetected(threatName: String)
-
-    public var errorDescription: String? {
-        switch self {
-        case .invalidHeader:
-            return "无效的协议头部"
-        case .integrityCheckFailed:
-            return "文件完整性检查失败"
-        case .transferCancelled:
-            return "传输已取消"
-        case .connectionClosed:
-            return "连接已关闭"
-        case .fileNotFound:
-            return "文件未找到"
-        case .timeout:
-            return "等待超时"
-        case .receiptWaitFailed(let stage, let details):
-            let suffix = details.map { ": \($0)" } ?? ""
-            return "等待接收端落盘回执失败(\(stage.rawValue))\(suffix)"
-        case .receiverNotConfirmed:
-            return "接收端未确认文件已落盘"
-        case .receiverRejected:
-            return "接收端拒绝或处理失败"
-        case .secureSessionRequired:
-            return "经典文件传输需要已认证的安全会话"
-        case .securityThreatDetected(let threatName):
-            return "检测到安全威胁: \(threatName)"
         }
     }
 }

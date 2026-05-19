@@ -22,8 +22,6 @@ public struct P2PConnectionView: View {
     @State private var showingAlert = false
     @State private var alertMessage = ""
     @State private var showingP2PEndpoints = false
- // 二维码扫描器弹窗显示状态
-    @State private var showingQRCodeScanner = false
     
  // 防止频繁刷新的状态管理
     @State private var lastRefreshTime = Date()
@@ -63,30 +61,6 @@ public struct P2PConnectionView: View {
             if let device = selectedDevice {
                 ConnectionDetailsView(device: device)
             }
-        }
- // 二维码扫描器弹窗，通过统一扫描组件解析结果
-        .sheet(isPresented: $showingQRCodeScanner) {
-            QRCodeScannerView(
-                onResult: { content in
- // 解析二维码内容构造P2P设备并发起连接
-                    if let device = parseP2PDevice(fromQRCode: content) {
-                        networkManager.connectToDevice(device) {
-                            showAlert("连接成功", "已连接到 \(device.name)")
-                        } connectionFailed: { error in
-                            showAlert("连接失败", error.localizedDescription)
-                        }
-                    } else {
-                        showAlert("未识别的二维码", "二维码内容格式不正确或缺少必要信息")
-                    }
- // 关闭扫描器
-                    showingQRCodeScanner = false
-                },
-                onError: { message in
-                    showAlert("扫描失败", message)
-                    showingQRCodeScanner = false
-                }
-            )
-            .frame(minWidth: 500, minHeight: 320)
         }
  // 手动连接表单（输入主机与端口）
         .sheet(isPresented: $showingManualConnectSheet) {
@@ -243,18 +217,7 @@ public struct P2PConnectionView: View {
     
     private var bottomControlsView: some View {
         VStack(spacing: 12) {
- // 快速连接按钮
             HStack(spacing: 16) {
-                Button(action: showQRCodeScanner) {
-                    VStack(spacing: 4) {
-                        Image(systemName: "qrcode.viewfinder")
-                            .font(.title2)
-                        Text("扫码连接")
-                            .font(.caption)
-                    }
-                    .foregroundColor(.blue)
-                }
-                
                 Button(action: showManualConnection) {
                     VStack(spacing: 4) {
                         Image(systemName: "keyboard")
@@ -409,11 +372,6 @@ public struct P2PConnectionView: View {
         }
     }
     
-    private func showQRCodeScanner() {
- // 打开二维码扫描器弹窗
-        showingQRCodeScanner = true
-    }
-    
     private func showManualConnection() {
  // 打开手动连接表单，由用户输入连接参数后发起连接
         showingManualConnectSheet = true
@@ -429,198 +387,6 @@ public struct P2PConnectionView: View {
         showingAlert = true
     }
 
- // MARK: - 扫码解析
- /// 从二维码内容解析构造 P2PDevice
- /// 支持三种格式：
- /// 1) URL schema: skybridge://p2p?host=...&port=...&name=...&type=macOS
- /// 2) URL schema: skybridge://connect/eyJpZCI6ICIxLi4uIn0= （Base64 JSON，支持签名参数）
- /// - 可选 Query 参数：sig（Base64）、pk（Base64 公钥）、ts（时间戳）、fp（公钥指纹十六进制）
- /// 3) 纯 JSON：{"payload": {"id": "...", "name": "...", "address": "...", "port": 8081, "type": "macOS"}, "signatureBase64": "...", "publicKeyBase64": "...", "timestamp": 0, "publicKeyFingerprint": "hex"}
-    private func parseP2PDevice(fromQRCode content: String) -> P2PDevice? {
- // 尝试处理 skybridge://connect/<base64>[?sig=..&pk=..&ts=..&fp=..]
-        if content.hasPrefix("skybridge://connect/") {
- // 优先当作 URL 解析，获取 query 参数；若失败则回退到直接截取
-            if let url = URL(string: content), let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-                let pathPart = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                if let data = Data(base64Encoded: pathPart), let str = String(data: data, encoding: .utf8) {
- // 从 JSON 解析设备并尝试验签（若提供签名参数）
-                    var device = parseP2PDevice(fromJSON: str)
-                    if let d = device {
- // 读取签名相关参数
-                        let sigB64 = components.queryItems?.first(where: { $0.name.lowercased() == "sig" })?.value
-                        let pkB64 = components.queryItems?.first(where: { $0.name.lowercased() == "pk" })?.value
-                        let tsStr = components.queryItems?.first(where: { $0.name.lowercased() == "ts" })?.value
-                        let fpHex = components.queryItems?.first(where: { $0.name.lowercased() == "fp" })?.value
-                        let ts = tsStr.flatMap { Double($0) }
-                        if let pkB64, let sigB64 {
- // 使用统一安全管理器入口进行验签
-                            let verify = securityManager.verifyQRCodeSignature(for: d, publicKeyBase64: pkB64, signatureBase64: sigB64, timestamp: ts, fingerprintHex: fpHex)
-                            device = setVerification(for: d, ok: verify.ok, reason: verify.reason)
-                        }
-                        return device
-                    }
-                }
-            } else {
- // 回退处理：不含 query 的简单 Base64
-                let base64 = String(content.dropFirst("skybridge://connect/".count))
-                if let data = Data(base64Encoded: base64), let str = String(data: data, encoding: .utf8) {
-                    return parseP2PDevice(fromJSON: str)
-                }
-            }
-        }
- // 处理 skybridge://p2p 与通用 URL
-        if let url = URL(string: content), let scheme = url.scheme {
-            if scheme == "skybridge" {
- // 优先读取 query items
-                var host: String? = nil
-                var port: Int? = nil
-                var name: String? = nil
-                var type: P2PDeviceType = .macOS
-                if let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-                    if let items = components.queryItems {
-                        for item in items {
-                            switch item.name.lowercased() {
-                            case "host", "address":
-                                host = item.value
-                            case "port":
-                                if let v = item.value, let p = Int(v) { port = p }
-                            case "name", "device":
-                                name = item.value
-                            case "type":
-                                if let v = item.value, let t = P2PDeviceType(rawValue: v) {
-                                    type = t
-                                }
-                            default:
-                                break
-                            }
-                        }
-                    }
-                }
- // 如果 query 未提供主机，尝试使用 host 部分
-                if host == nil { host = url.host }
- // 构造设备
-                if let host, let p = port ?? 8081 as Int? {
-                    var device = P2PDevice(
-                        id: UUID().uuidString,
-                        name: (name?.isEmpty == false ? name! : host),
-                        type: type,
-                        address: host,
-                        port: UInt16(p),
-                        osVersion: "unknown",
-                        capabilities: [],
-                        publicKey: Data(),
-                        lastSeen: Date(),
-                        endpoints: ["\(host):\(p)"]
-                    )
- // 若提供签名参数，尝试验签（pk/sig/ts/fp）
-                    if let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-                        let sigB64 = components.queryItems?.first(where: { $0.name.lowercased() == "sig" })?.value
-                        let pkB64 = components.queryItems?.first(where: { $0.name.lowercased() == "pk" })?.value
-                        let tsStr = components.queryItems?.first(where: { $0.name.lowercased() == "ts" })?.value
-                        let fpHex = components.queryItems?.first(where: { $0.name.lowercased() == "fp" })?.value
-                        let ts = tsStr.flatMap { Double($0) }
-                        if let pkB64, let sigB64 {
- // 使用统一安全管理器入口进行验签
-                            let verify = securityManager.verifyQRCodeSignature(for: device, publicKeyBase64: pkB64, signatureBase64: sigB64, timestamp: ts, fingerprintHex: fpHex)
-                            device = setVerification(for: device, ok: verify.ok, reason: verify.reason)
-                        }
-                    }
-                    return device
-                }
-            }
-        }
- // 处理纯 JSON
-        if let device = parseP2PDevice(fromJSON: content) { return device }
-        return nil
-    }
-
- /// 尝试从简化 JSON 解析设备信息
-    private func parseP2PDevice(fromJSON json: String) -> P2PDevice? {
- // 支持两种 JSON 格式
- // A) 简化设备信息：直接字段在根对象
- // B) 带签名封装：{"payload": {...设备字段...}, "signatureBase64": "...", "publicKeyBase64": "...", "timestamp": 0, "publicKeyFingerprint": "hex"}
-        struct QRDevicePayload: Codable {
-            let id: String?
-            let name: String?
-            let type: String?
-            let address: String?
-            let port: Int?
-            let osVersion: String?
-            let capabilities: [String]?
-        }
-        struct QRSignatureEnvelope: Codable {
-            let payload: QRDevicePayload?
-            let signatureBase64: String?
-            let publicKeyBase64: String?
-            let timestamp: Double?
-            let publicKeyFingerprint: String?
-        }
-        guard let data = json.data(using: .utf8) else { return nil }
-        let decoder = JSONDecoder()
- // 优先尝试签名封装格式
-        if let env = try? decoder.decode(QRSignatureEnvelope.self, from: data), let payload = env.payload {
-            guard let host = payload.address, let p = payload.port ?? 8081 as Int? else { return nil }
-            let t = payload.type.flatMap { P2PDeviceType(rawValue: $0) } ?? .macOS
-            var device = P2PDevice(
-                id: payload.id ?? UUID().uuidString,
-                name: (payload.name?.isEmpty == false ? payload.name! : host),
-                type: t,
-                address: host,
-                port: UInt16(p),
-                osVersion: payload.osVersion ?? "unknown",
-                capabilities: payload.capabilities ?? [],
-                publicKey: Data(),
-                lastSeen: Date(),
-                endpoints: ["\(host):\(p)"]
-            )
-            if let pkB64 = env.publicKeyBase64, let sigB64 = env.signatureBase64 {
- // 使用统一安全管理器入口进行验签
-                let verify = securityManager.verifyQRCodeSignature(for: device, publicKeyBase64: pkB64, signatureBase64: sigB64, timestamp: env.timestamp, fingerprintHex: env.publicKeyFingerprint)
-                device = setVerification(for: device, ok: verify.ok, reason: verify.reason)
-            }
-            return device
-        }
- // 回退到简化根对象格式
-        if let payload = try? decoder.decode(QRDevicePayload.self, from: data) {
-            guard let host = payload.address, let p = payload.port ?? 8081 as Int? else { return nil }
-            let t = payload.type.flatMap { P2PDeviceType(rawValue: $0) } ?? .macOS
-            let device = P2PDevice(
-                id: payload.id ?? UUID().uuidString,
-                name: (payload.name?.isEmpty == false ? payload.name! : host),
-                type: t,
-                address: host,
-                port: UInt16(p),
-                osVersion: payload.osVersion ?? "unknown",
-                capabilities: payload.capabilities ?? [],
-                publicKey: Data(),
-                lastSeen: Date(),
-                endpoints: ["\(host):\(p)"]
-            )
-            return device
-        }
-        return nil
-    }
-
- // 已统一到 P2PSecurityManager.verifyQRCodeSignature(...)，此处不再实现本地逻辑
-
- /// 设置设备验签状态与失败原因（复制并返回新设备结构）
-    private func setVerification(for device: P2PDevice, ok: Bool, reason: String?) -> P2PDevice {
-        return P2PDevice(
-            id: device.id,
-            name: device.name,
-            type: device.deviceType,
-            address: device.address,
-            port: device.port,
-            osVersion: device.osVersion,
-            capabilities: device.capabilities,
-            publicKey: device.publicKey,
-            lastSeen: device.lastSeen,
-            endpoints: device.endpoints,
-            lastMessageTimestamp: device.lastMessageTimestamp,
-            isVerified: ok,
-            verificationFailedReason: ok ? nil : (reason ?? "未知原因")
-        )
-    }
 }
 
 // MARK: - 统计信息视图

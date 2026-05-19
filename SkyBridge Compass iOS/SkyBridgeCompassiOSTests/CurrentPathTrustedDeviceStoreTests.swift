@@ -67,6 +67,55 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         )
     }
 
+    func testVerifiedQRCodeCanReactivateQuarantinedAuthorityForSameDeviceOnly() {
+        let deviceId = "device-alpha-1234"
+        let otherDeviceId = "device-beta-1234"
+        let fingerprint = String(repeating: "a", count: 64)
+        let otherFingerprint = String(repeating: "b", count: 64)
+        TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: deviceId,
+            name: "Alpha",
+            protocolSigningAlgorithm: "Ed25519",
+            protocolPublicKeyFingerprint: fingerprint
+        )
+        XCTAssertTrue(TrustedDeviceStore.shared.markReverificationRequired(deviceId: deviceId))
+
+        let conflict = TrustedDeviceStore.shared.evaluateCurrentPathBinding(
+            deviceId: deviceId,
+            protocolPublicKeyFingerprint: fingerprint
+        )
+
+        XCTAssertEqual(conflict, .quarantinedIdentity)
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.shouldAllowVerifiedQRCodeRebind(
+                for: .quarantinedIdentity,
+                deviceId: deviceId,
+                protocolPublicKeyFingerprint: fingerprint
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.shouldAllowVerifiedQRCodeRebind(
+                for: .quarantinedIdentity,
+                deviceId: deviceId,
+                protocolPublicKeyFingerprint: otherFingerprint
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldAllowVerifiedQRCodeRebind(
+                for: .quarantinedIdentity,
+                deviceId: otherDeviceId,
+                protocolPublicKeyFingerprint: otherFingerprint
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.shouldAllowVerifiedQRCodeRebind(
+                for: .revokedIdentity,
+                deviceId: deviceId,
+                protocolPublicKeyFingerprint: fingerprint
+            )
+        )
+    }
+
     func testAuthenticatedAuthorityRebindPolicyBlocksGenericIdentityConflictHealing() {
         XCTAssertFalse(
             CrossNetworkWebRTCManager.shouldAllowAuthenticatedAuthorityRebind(for: .identityConflict)
@@ -388,6 +437,50 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         )
     }
 
+    func testReverificationRequiredRecordIsNotPresentedAsTrustedOrConnectable() {
+        let stableId = "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
+        let canonicalStableId = canonical(stableId)
+        let aliasDevice = DiscoveredDevice(
+            id: "bonjour:Lza的MacBook Pro@local.",
+            name: "Lza的MacBook Pro",
+            bonjourServiceName: "Lza的MacBook Pro",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.4.1",
+            ipAddress: nil,
+            bonjourServiceType: "_skybridge._tcp",
+            bonjourServiceDomain: "local.",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527]
+        )
+
+        TrustedDeviceStore.shared.trustResolvedPeer(aliasDevice, declaredDeviceId: stableId)
+
+        XCTAssertTrue(TrustedDeviceStore.shared.isTrusted(deviceId: aliasDevice.id))
+        XCTAssertEqual(TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: aliasDevice), canonicalStableId)
+        XCTAssertNotNil(TrustedDeviceStore.shared.resolvedConnectableDevice(for: aliasDevice))
+
+        XCTAssertTrue(TrustedDeviceStore.shared.markReverificationRequired(deviceId: stableId))
+
+        XCTAssertFalse(TrustedDeviceStore.shared.isTrusted(deviceId: aliasDevice.id))
+        XCTAssertNil(TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: aliasDevice))
+        XCTAssertNil(TrustedDeviceStore.shared.resolvedConnectableDevice(for: aliasDevice))
+        XCTAssertEqual(
+            TrustedDeviceStore.shared.trustedDevices.first?.currentPathLifecycleState,
+            .reverificationRequired
+        )
+
+        TrustedDeviceStore.shared.trustResolvedPeer(aliasDevice, declaredDeviceId: stableId)
+
+        XCTAssertTrue(TrustedDeviceStore.shared.isTrusted(deviceId: aliasDevice.id))
+        XCTAssertEqual(TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: aliasDevice), canonicalStableId)
+        XCTAssertNotNil(TrustedDeviceStore.shared.resolvedConnectableDevice(for: aliasDevice))
+        XCTAssertEqual(
+            TrustedDeviceStore.shared.trustedDevices.first?.currentPathLifecycleState,
+            .active
+        )
+    }
+
     func testRepairLegacyTrustedDeviceIdentityPromotesUniqueLiveStableId() async {
         let stableId = "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
         let canonicalStableId = canonical(stableId)
@@ -454,7 +547,7 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         let stableId = "id:e0715a9a-d0d3-47e6-b353-de0a30293e1f"
         let pollutedId = "id:lza的macbook pro"
         let legacyHostAlias = "host:id:lza的macbook pro"
-        let mlkemKey = Data([0xAA, 0xBB, 0xCC])
+        let mlkemKey = Data(repeating: 0xAA, count: 1_184)
 
         await KEMTrustStore.shared.clearForTesting()
         defer {

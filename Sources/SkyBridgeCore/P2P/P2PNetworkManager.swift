@@ -201,13 +201,22 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     
  /// 断开设备连接
     public func disconnectFromDevice(_ deviceId: String) {
-        guard let connection = activeConnections[deviceId] else { return }
+        guard let connection = activeConnections[deviceId]
+                ?? activeConnections.first(where: { entry in
+                    let key = entry.key
+                    let connection = entry.value
+                    let targetAliases = Set(PeerTrustLookup.lookupCandidates(for: deviceId))
+                    let connectionAliases = Set(
+                        PeerTrustLookup.lookupCandidates(primary: connection.device.deviceId, persistent: connection.device.persistentDeviceId)
+                    )
+                    return key == deviceId || !targetAliases.isDisjoint(with: connectionAliases)
+                })?.value else { return }
         
  // 关闭连接
         connection.disconnect()
         
  // 移除活跃连接
-        activeConnections.removeValue(forKey: deviceId)
+        removeActiveConnection(connection, additionalKeys: [deviceId])
         
  // 更新网络状态
         if activeConnections.isEmpty {
@@ -263,7 +272,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
                         }
 
                     case .failed(let error):
-                        p2p.markFailed()
+                        p2p.disconnect()
                         let shouldResume = resumed.withLock { hasResumed in
                             if !hasResumed {
                                 hasResumed = true
@@ -442,7 +451,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
             networkState = .connected
         case .disconnected, .failed:
  // 连接断开，从活跃连接中移除
-            activeConnections.removeValue(forKey: connection.device.deviceId)
+            removeActiveConnection(connection)
             
  // 如果没有活跃连接，更新网络状态
             if activeConnections.isEmpty {
@@ -451,6 +460,23 @@ public class P2PNetworkManager: ObservableObject, Sendable {
             
         default:
             break
+        }
+    }
+
+    private func removeActiveConnection(_ connection: P2PConnection, additionalKeys: [String] = []) {
+        let aliases = Set(
+            additionalKeys.flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
+                + PeerTrustLookup.lookupCandidates(primary: connection.device.deviceId, persistent: connection.device.persistentDeviceId)
+                + PeerTrustLookup.lookupCandidates(for: connection.device.address)
+        )
+        for key in Array(activeConnections.keys) {
+            guard let stored = activeConnections[key] else { continue }
+            let keyAliases = Set(PeerTrustLookup.lookupCandidates(for: key))
+            if stored === connection ||
+                additionalKeys.contains(key) ||
+                !keyAliases.isDisjoint(with: aliases) {
+                activeConnections.removeValue(forKey: key)
+            }
         }
     }
     

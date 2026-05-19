@@ -78,6 +78,66 @@ skybridge_notarytool_validate_credentials() {
   skybridge_notarytool_history >/dev/null 2>&1
 }
 
+skybridge_notarytool_submission_id_from_output() {
+  local output="$1"
+
+  printf '%s\n' "${output}" \
+    | awk '
+        /^[[:space:]]*id:[[:space:]]*/ { print $2; exit }
+        /^[[:space:]]*ID:[[:space:]]*/ { print $2; exit }
+	      '
+}
+
+skybridge_notarytool_output_has_upload_transport_error() {
+  local output="$1"
+
+  [[ "${output}" == *"abortedUpload"* \
+    || "${output}" == *"HTTPClientError.deadlineExceeded"* \
+    || "${output}" == *"HTTPClientError.connectTimeout"* ]]
+}
+
+skybridge_notarytool_wait_for_submission_id() {
+  local submission_id="$1"
+  local poll_seconds="${SKYBRIDGE_NOTARYTOOL_POLL_SECONDS:-30}"
+  local max_attempts="${SKYBRIDGE_NOTARYTOOL_MAX_POLL_ATTEMPTS:-40}"
+  local attempt=1
+  local output=""
+  local status_text=""
+
+  skybridge_notarytool_require_args || return 1
+
+  while (( attempt <= max_attempts )); do
+    if ! output="$(xcrun notarytool info "${submission_id}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" 2>&1)"; then
+      printf '%s\n' "${output}" >&2
+      return 1
+    fi
+
+    printf '%s\n' "${output}"
+    status_text="$(printf '%s\n' "${output}" | awk -F': ' '/^[[:space:]]*status:/ { print $2; exit }')"
+
+    case "${status_text}" in
+      Accepted)
+        return 0
+        ;;
+      Invalid|Rejected)
+        echo "notarytool submission ${submission_id} finished with status ${status_text}" >&2
+        return 1
+        ;;
+    esac
+
+    if (( attempt == max_attempts )); then
+      break
+    fi
+
+    echo "notarytool submission ${submission_id} still ${status_text:-unknown}; retrying in ${poll_seconds}s (${attempt}/${max_attempts})" >&2
+    sleep "${poll_seconds}"
+    attempt=$((attempt + 1))
+  done
+
+  echo "notarytool submission ${submission_id} did not finish after ${max_attempts} polls" >&2
+  return 1
+}
+
 skybridge_notarytool_submit_and_wait() {
   local artifact="$1"
   shift || true
@@ -108,14 +168,61 @@ skybridge_notarytool_submit_and_wait() {
   exit_code=$?
   printf '%s\n' "${output}" >&2
 
-  if [[ "${output}" == *"abortedUpload"* || "${output}" == *"HTTPClientError.deadlineExceeded"* ]]; then
+  local submission_id=""
+  submission_id="$(skybridge_notarytool_submission_id_from_output "${output}")"
+  local had_upload_transport_error=0
+  if skybridge_notarytool_output_has_upload_transport_error "${output}"; then
+    had_upload_transport_error=1
+  fi
+  local wait_status=0
+  if [[ -n "${submission_id}" ]]; then
+    echo "notarytool submit returned ${exit_code} after creating submission ${submission_id}; polling final status" >&2
+    if skybridge_notarytool_wait_for_submission_id "${submission_id}"; then
+      return 0
+    fi
+    wait_status=$?
+    if [[ "${had_upload_transport_error}" == "1" ]]; then
+      echo "notarytool submission ${submission_id} did not finish after upload transport error; retrying once with --no-s3-acceleration" >&2
+      cmd=(xcrun notarytool submit "${artifact}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" --wait --no-s3-acceleration)
+      if ((${#extra_args[@]} > 0)); then
+        cmd+=("${extra_args[@]}")
+      fi
+      if output="$("${cmd[@]}" 2>&1)"; then
+        printf '%s\n' "${output}"
+        return 0
+      fi
+      exit_code=$?
+      printf '%s\n' "${output}" >&2
+      submission_id="$(skybridge_notarytool_submission_id_from_output "${output}")"
+      if [[ -n "${submission_id}" ]]; then
+        echo "notarytool retry returned ${exit_code} after creating submission ${submission_id}; polling final status" >&2
+        skybridge_notarytool_wait_for_submission_id "${submission_id}"
+        return $?
+      fi
+      return "${exit_code}"
+    fi
+    return "${wait_status}"
+  fi
+
+  if [[ "${had_upload_transport_error}" == "1" ]]; then
     echo "notarytool upload timed out; retrying once with --no-s3-acceleration" >&2
     cmd=(xcrun notarytool submit "${artifact}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" --wait --no-s3-acceleration)
     if ((${#extra_args[@]} > 0)); then
       cmd+=("${extra_args[@]}")
     fi
-    "${cmd[@]}"
-    return $?
+    if output="$("${cmd[@]}" 2>&1)"; then
+      printf '%s\n' "${output}"
+      return 0
+    fi
+    exit_code=$?
+    printf '%s\n' "${output}" >&2
+    submission_id="$(skybridge_notarytool_submission_id_from_output "${output}")"
+    if [[ -n "${submission_id}" ]]; then
+      echo "notarytool retry returned ${exit_code} after creating submission ${submission_id}; polling final status" >&2
+      skybridge_notarytool_wait_for_submission_id "${submission_id}"
+      return $?
+    fi
+    return "${exit_code}"
   fi
 
   return "${exit_code}"
@@ -123,13 +230,30 @@ skybridge_notarytool_submit_and_wait() {
 
 skybridge_staple_artifact() {
   local artifact="$1"
+  local attempt=1
+  local max_attempts="${SKYBRIDGE_STAPLER_MAX_ATTEMPTS:-5}"
+  local delay_seconds="${SKYBRIDGE_STAPLER_RETRY_DELAY_SECONDS:-15}"
 
   if ! command -v xcrun >/dev/null 2>&1 || ! xcrun -f stapler >/dev/null 2>&1; then
     echo "未找到 xcrun stapler，无法执行 stapling。" >&2
     return 1
   fi
 
-  xcrun stapler staple "${artifact}"
+  while (( attempt <= max_attempts )); do
+    if xcrun stapler staple "${artifact}"; then
+      return 0
+    fi
+
+    if (( attempt == max_attempts )); then
+      break
+    fi
+
+    echo "stapler staple failed for ${artifact}; retrying in ${delay_seconds}s (${attempt}/${max_attempts})" >&2
+    sleep "${delay_seconds}"
+    attempt=$((attempt + 1))
+  done
+
+  return 1
 }
 
 skybridge_assess_gatekeeper() {

@@ -82,6 +82,11 @@ public class DeviceSecurityManager: BaseManager {
         trustedDeviceRecords.removeValue(forKey: deviceId)
         saveTrustedDevices()
         saveTrustRecords()
+        Task {
+            if #available(macOS 14.0, iOS 17.0, *) {
+                await PeerBootstrapTrustMaterialCleanup.forgetDevice(deviceIds: [deviceId])
+            }
+        }
         logger.info("设备已从受信任列表移除: \(deviceId)")
     }
     

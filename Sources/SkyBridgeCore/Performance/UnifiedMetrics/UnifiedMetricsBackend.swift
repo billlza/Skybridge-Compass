@@ -15,7 +15,12 @@ public struct UnifiedMetricsSnapshot: Sendable {
     public let loadAvg15: Double
 
     public let gpuUsage: Double
+    public let cpuPower: Double
     public let gpuPower: Double
+    public let anePower: Double
+    public let ramPower: Double
+    public let packagePower: Double
+    public let powerReadings: [PowerMetricsPowerReading]
     public let cpuTemperature: Double
     public let gpuTemperature: Double
     public let fanRPMs: [Int]
@@ -38,7 +43,12 @@ public struct UnifiedMetricsSnapshot: Sendable {
             loadAvg5: 0,
             loadAvg15: 0,
             gpuUsage: 0,
+            cpuPower: 0,
             gpuPower: 0,
+            anePower: 0,
+            ramPower: 0,
+            packagePower: 0,
+            powerReadings: [],
             cpuTemperature: 0,
             gpuTemperature: 0,
             fanRPMs: [],
@@ -117,7 +127,12 @@ public actor UnifiedMetricsBackend {
             loadAvg5: loadAverages.1,
             loadAvg15: loadAverages.2,
             gpuUsage: gpuUsageValue,
+            cpuPower: 0,
             gpuPower: 0,
+            anePower: 0,
+            ramPower: 0,
+            packagePower: 0,
+            powerReadings: [],
             cpuTemperature: 0,
             gpuTemperature: 0,
             fanRPMs: [],
@@ -166,7 +181,12 @@ public actor UnifiedMetricsBackend {
                         helperValue: helperSnapshot.gpuUsagePercent,
                         helperStale: helperStale
                     ).value,
+                    cpuPower: helperSnapshot.cpuPowerWatts ?? 0,
                     gpuPower: helperSnapshot.gpuPowerWatts ?? 0,
+                    anePower: helperSnapshot.anePowerWatts ?? 0,
+                    ramPower: helperSnapshot.ramPowerWatts ?? 0,
+                    packagePower: helperSnapshot.packagePowerWatts ?? 0,
+                    powerReadings: helperSnapshot.powerReadings ?? [],
                     cpuTemperature: helperSnapshot.cpuTemperatureC ?? 0,
                     gpuTemperature: helperSnapshot.gpuTemperatureC ?? 0,
                     fanRPMs: helperSnapshot.fanRPMs ?? [],
@@ -223,7 +243,12 @@ public actor UnifiedMetricsBackend {
                     loadAvg5: loadAverages.1,
                     loadAvg15: loadAverages.2,
                     gpuUsage: gpuUsageValue,
+                    cpuPower: 0,
                     gpuPower: 0,
+                    anePower: 0,
+                    ramPower: 0,
+                    packagePower: 0,
+                    powerReadings: [],
                     cpuTemperature: 0,
                     gpuTemperature: 0,
                     fanRPMs: [],

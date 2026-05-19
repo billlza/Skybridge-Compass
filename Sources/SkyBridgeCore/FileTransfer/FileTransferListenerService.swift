@@ -48,7 +48,7 @@ public final class FileTransferListenerService: ObservableObject {
         
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        parameters.includePeerToPeer = true
+        parameters.includePeerToPeer = false
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.enableKeepalive = true
             tcp.keepaliveIdle = 30
@@ -107,6 +107,7 @@ public final class FileTransferListenerService: ObservableObject {
         txt["capabilities"] = "file_transfer,\(ClassicTransferCapability.classicResume)"
         txt["transferPort"] = String(port)
         txt["port"] = String(port)
+        LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)
         // Mirror TXT for NetService fallback (Bonjour TXTRecord is [String: Data])
         let txtData = makeNetServiceTXTData(serviceName: serviceName, deviceId: nil, pubKeyFP: nil, port: port)
         
@@ -119,6 +120,7 @@ public final class FileTransferListenerService: ObservableObject {
                 if !snap.deviceId.isEmpty { updated["deviceId"] = snap.deviceId }
                 if !snap.pubKeyFP.isEmpty { updated["pubKeyFP"] = snap.pubKeyFP }
                 updated["uniqueId"] = (snap.deviceId.isEmpty ? serviceName : snap.deviceId)
+                LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &updated)
                 listener.service = NWListener.Service(name: serviceName, type: self.serviceType, domain: self.serviceDomain, txtRecord: updated)
 
                 // Keep NetService fallback TXT in sync (best-effort).
@@ -132,6 +134,7 @@ public final class FileTransferListenerService: ObservableObject {
                 if !snap.deviceId.isEmpty {
                     updatedData["uniqueId"] = snap.deviceId.data(using: .utf8) ?? Data()
                 }
+                LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &updatedData)
                 self.netService?.setTXTRecord(NetService.data(fromTXTRecord: updatedData))
             }
         }
@@ -168,6 +171,7 @@ public final class FileTransferListenerService: ObservableObject {
         let stableId = (deviceId?.isEmpty == false) ? deviceId! : serviceName
         d["deviceId"] = Data(stableId.utf8)
         d["uniqueId"] = Data(stableId.utf8)
+        LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &d)
         if let pubKeyFP, !pubKeyFP.isEmpty {
             d["pubKeyFP"] = Data(pubKeyFP.utf8)
         }
@@ -272,6 +276,9 @@ public final class FileTransferListenerService: ObservableObject {
         log.info(
             "📥 FileTransfer incoming connection accepted: peer=\(deviceId, privacy: .public) endpoint=\(endpointDescription, privacy: .public)"
         )
+        RemoteControlSmokeStatusWriter.append(
+            "file-transfer inbound-accepted endpoint=\(Self.sanitizeForSmoke(endpointDescription))"
+        )
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -302,6 +309,9 @@ public final class FileTransferListenerService: ObservableObject {
         Task { @MainActor in
             do {
                 self.log.info("📥 FileTransfer handing connection to receiveFile: peer=\(deviceId, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append(
+                    "file-transfer inbound-handler-start peer=\(Self.sanitizeForSmoke(deviceId))"
+                )
                 try await self.manager.receiveFile(
                     from: connection,
                     peerContext: FileTransferPeerContext(
@@ -311,11 +321,65 @@ public final class FileTransferListenerService: ObservableObject {
                         transferId: "pending"
                     )
                 )
+            } catch FileTransferError.inboundConnectionClosedBeforeMetadata {
+                self.log.info(
+                    "📥 FileTransfer inbound connection closed before metadata: peer=\(deviceId, privacy: .public)"
+                )
+                RemoteControlSmokeStatusWriter.append(
+                    """
+                    file-transfer inbound-pre-metadata-disconnect \
+                    fatal=0 phase=initial_header bytesRead=0 \
+                    peer=\(Self.sanitizeForSmoke(deviceId)) \
+                    endpoint=\(Self.sanitizeForSmoke(endpointDescription))
+                    """
+                )
+                connection.stateUpdateHandler = nil
+                connection.cancel()
             } catch {
                 self.log.error("❌ receiveFile failed: \(error.localizedDescription)")
+                let phase = Self.fileTransferFailurePhase(for: error)
+                RemoteControlSmokeStatusWriter.append(
+                    "failed stage=file-transfer phase=\(phase) detail=\(Self.sanitizeForSmoke(error.localizedDescription))"
+                )
                 connection.stateUpdateHandler = nil
                 connection.cancel()
             }
+        }
+    }
+
+    private nonisolated static func sanitizeForSmoke(_ value: String) -> String {
+        value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+
+    private nonisolated static func fileTransferFailurePhase(for error: Error) -> String {
+        guard let transferError = error as? FileTransferError else {
+            return "mac_receive_file_unknown"
+        }
+        switch transferError {
+        case .invalidHeader:
+            return "mac_receive_file_invalid_header"
+        case .integrityCheckFailed:
+            return "mac_receive_file_integrity_check_failed"
+        case .transferCancelled:
+            return "mac_receive_file_transfer_cancelled"
+        case .connectionClosed:
+            return "mac_receive_file_connection_closed"
+        case .inboundConnectionClosedBeforeMetadata:
+            return "mac_receive_file_pre_metadata_closed"
+        case .fileNotFound:
+            return "mac_receive_file_file_not_found"
+        case .timeout:
+            return "mac_receive_file_timeout"
+        case .receiptWaitFailed(let stage, _):
+            return "mac_receive_file_\(stage.rawValue)"
+        case .receiverNotConfirmed:
+            return "mac_receive_file_receiver_not_confirmed"
+        case .receiverRejected:
+            return "mac_receive_file_receiver_rejected"
+        case .secureSessionRequired:
+            return "mac_receive_file_secure_session_required"
+        case .securityThreatDetected:
+            return "mac_receive_file_security_threat_detected"
         }
     }
 }

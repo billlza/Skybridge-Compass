@@ -27,6 +27,11 @@ if ! command -v iconutil >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! xcrun -f actool >/dev/null 2>&1; then
+  echo "actool not found" >&2
+  exit 1
+fi
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -64,7 +69,11 @@ for imageset_dir in (mac_brand_imageset_dir, ios_brand_imageset_dir):
 contents_path = ios_appiconset_dir / "Contents.json"
 if contents_path.exists():
     ios_appiconset_dir.mkdir(parents=True, exist_ok=True)
-    ios_base = rounded.convert("RGB")
+    # iOS app icons must be full-square and opaque; the system applies the
+    # rounded mask. Reusing the macOS rounded icon here turns transparent
+    # corners black after RGB conversion.
+    ios_base = Image.new("RGB", img.size, (255, 255, 255))
+    ios_base.paste(img, (0, 0), img)
     contents = json.loads(contents_path.read_text())
     generated = set()
     for entry in contents.get("images", []):
@@ -82,7 +91,45 @@ PY
 mkdir -p "$ICON_DOC_ASSETS_DIR" "$ASSET_CATALOG_DIR" "$MAC_BRAND_IMAGESET_DIR" "$IOS_BRAND_IMAGESET_DIR"
 cp "$RES_DIR/AppIcon.png" "$ICON_DOC_ASSETS_DIR/Image.png"
 
-for base in AppIcon AppIconDock; do
+ICON_COMPOSER_OUT="$TMP_DIR/icon-composer-output"
+ICON_COMPOSER_LOG="$TMP_DIR/icon-composer-actool.log"
+mkdir -p "$ICON_COMPOSER_OUT"
+
+if ! xcrun actool \
+  "$ASSET_CATALOG_DIR" \
+  "$ICON_DOC_DIR" \
+  --compile "$ICON_COMPOSER_OUT" \
+  --output-format human-readable-text \
+  --notices \
+  --warnings \
+  --output-partial-info-plist "$ICON_COMPOSER_OUT/assetcatalog_generated_info.plist" \
+  --app-icon AppIcon \
+  --enable-on-demand-resources NO \
+  --development-region en \
+  --target-device mac \
+  --minimum-deployment-target 14.0 \
+  --platform macosx \
+  --bundle-identifier com.skybridge.compass.pro \
+  >"$ICON_COMPOSER_LOG" 2>&1; then
+  cat "$ICON_COMPOSER_LOG" >&2
+  echo "failed to compile AppIcon.icon" >&2
+  exit 1
+fi
+
+if grep -qi 'warning:' "$ICON_COMPOSER_LOG"; then
+  cat "$ICON_COMPOSER_LOG" >&2
+  echo "Icon Composer compilation emitted warnings" >&2
+  exit 1
+fi
+
+if [[ ! -f "$ICON_COMPOSER_OUT/AppIcon.icns" ]]; then
+  echo "actool did not produce AppIcon.icns" >&2
+  exit 1
+fi
+
+cp "$ICON_COMPOSER_OUT/AppIcon.icns" "$RES_DIR/AppIcon.icns"
+
+for base in AppIconDock; do
   ICONSET="$TMP_DIR/${base}.iconset"
   mkdir -p "$ICONSET"
   SRC="$RES_DIR/${base}.png"
@@ -99,4 +146,4 @@ for base in AppIcon AppIconDock; do
   iconutil -c icns "$ICONSET" -o "$RES_DIR/${base}.icns"
 done
 
-echo "regenerated app icons from $MASTER_SVG"
+echo "regenerated app icons from $MASTER_SVG with Icon Composer AppIcon.icns"

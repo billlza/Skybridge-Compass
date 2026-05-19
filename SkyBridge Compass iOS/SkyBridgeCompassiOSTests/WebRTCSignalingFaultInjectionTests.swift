@@ -193,6 +193,25 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         }.value
     }
 
+    func testSignalingFailureClassificationStaysInPolicy() {
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.classifySignalingFailureReason("token expired"),
+            .tokenExpired
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.classifySignalingFailureReason("socket is not connected"),
+            .transientNetwork
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.classifySignalingFailureReason("malformed signaling payload"),
+            .protocolViolation
+        )
+        XCTAssertTrue(CrossNetworkWebRTCManager.isFatalPreTransportFailure(.authBindRejected))
+        XCTAssertTrue(CrossNetworkWebRTCManager.isFatalPostTransportFailure(.protocolViolation))
+        XCTAssertFalse(CrossNetworkWebRTCManager.isFatalPreTransportFailure(.tokenExpired))
+        XCTAssertFalse(CrossNetworkWebRTCManager.isFatalPostTransportFailure(.transientNetwork))
+    }
+
     func testWebSocketSignalingClientParsesServerFramesAndRedactsTokenizedURL() async {
         await Task { @MainActor in
             let raw = #"{"type":"bound","sessionId":"ROOM1234","role":"initiator","clientId":"client-1"}"#

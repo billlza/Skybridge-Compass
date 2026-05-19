@@ -77,9 +77,9 @@ skybridge_default_macos_build_destination() {
     local build_arch
     build_arch="$(skybridge_default_macos_build_arch)" || return 1
 
-    # Swift package xcodebuild 的 build 动作依然要求显式 destination。
-    # 多匹配目的地告警由下方 allowlist 过滤器精准移除，避免掩盖其他真实 warning。
-    printf '%s\n' "platform=macOS,arch=${build_arch}"
+    # Build-only invocations should avoid physical device discovery.  The ARCHS
+    # build setting still carries the requested architecture.
+    printf '%s\n' "generic/platform=macOS"
 }
 
 skybridge_default_macos_destination() {
@@ -95,60 +95,6 @@ skybridge_default_xcode_derived_data_path() {
     printf '%s\n' "${HOME}/Library/Developer/Xcode/DerivedData/SkyBridgeCompassPro-Release"
 }
 
-skybridge_filter_xcodebuild_output() {
-    awk '
-        BEGIN {
-            skip_matching_destinations = 0
-        }
-
-        /IDERunDestination: Supported platforms for the buildables in the current scheme is empty\./ {
-            next
-        }
-
-        /^--- xcodebuild: WARNING: Using the first of multiple matching destinations:/ {
-            skip_matching_destinations = 1
-            next
-        }
-
-        skip_matching_destinations && /^\{ platform:/ {
-            next
-        }
-
-        skip_matching_destinations && /^$/ {
-            skip_matching_destinations = 0
-            next
-        }
-
-        {
-            skip_matching_destinations = 0
-            print
-        }
-    '
-}
-
 skybridge_run_xcodebuild() {
-    local temp_dir
-    local fifo_path
-    local filter_pid
-    local command_status
-
-    if [[ "${SKYBRIDGE_XCODEBUILD_KEEP_NOISE:-0}" == "1" ]]; then
-        xcodebuild "$@" 2>&1 | skybridge_filter_xcodebuild_output
-        return $?
-    fi
-
-    temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-xcodebuild.XXXXXX")"
-    fifo_path="${temp_dir}/output.fifo"
-    mkfifo "${fifo_path}"
-
-    skybridge_filter_xcodebuild_output < "${fifo_path}" &
-    filter_pid=$!
-
-    xcodebuild "$@" > "${fifo_path}" 2>&1
-    command_status=$?
-
-    wait "${filter_pid}" || true
-    rm -rf "${temp_dir}"
-
-    return "${command_status}"
+    xcodebuild "$@"
 }

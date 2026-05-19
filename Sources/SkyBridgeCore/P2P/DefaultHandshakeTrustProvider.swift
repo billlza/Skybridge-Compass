@@ -166,10 +166,24 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
     func trustedFingerprints(for deviceId: String) async -> Set<String> {
         let records = await trustRecords()
         let directRecord = directRecord(for: deviceId, in: records)
-        return resolvedTrustedFingerprints(
+        let trusted = resolvedTrustedFingerprints(
             directRecord: directRecord,
             matchingRecords: matchingTrustRecordsSnapshot(records, for: deviceId)
         )
+        guard !trusted.isEmpty else { return [] }
+
+        let cached = await PeerProtocolIdentityBootstrapStore.shared.trustedFingerprints(
+            forCandidates: trustLookupCandidates(for: deviceId)
+        )
+        guard !cached.isEmpty else { return trusted }
+        guard !trusted.isDisjoint(with: cached) else {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ cached protocol identity pins ignored because they are not bound to existing trust: device=\(deviceId, privacy: .public)"
+            )
+            return trusted
+        }
+
+        return trusted.union(cached)
     }
 
     private func trustRecords() async -> [TrustRecord] {

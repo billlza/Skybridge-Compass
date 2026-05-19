@@ -1,8 +1,12 @@
 #!/bin/bash
 #
-# SkyBridge Compass 构建脚本（包含 Widget Extension）
+# SkyBridge Compass 旧版开发构建脚本（包含 Widget Extension）
 #
-# 由于 SwiftPM 不支持构建 App Extensions，此脚本：
+# 该脚本保留给历史调试。发布/验收必须使用原生 Xcode app target：
+#   Scripts/build_dmg.sh
+#   Scripts/package_app.sh
+#
+# 由于 SwiftPM 不支持构建 App Extensions，旧脚本曾经：
 # 1. 使用 SwiftPM 构建主应用
 # 2. 使用 xcodebuild 构建 Widget Extension
 # 3. 将 Widget Extension 嵌入主应用
@@ -48,6 +52,13 @@ log_step() {
     echo "📦 $1"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
+
+if [ "${SKYBRIDGE_ALLOW_LEGACY_WIDGET_BUILD:-0}" != "1" ]; then
+    log_error "Scripts/build_with_widgets.sh 是旧的 SwiftPM 手工拼包脚本，不能作为发布或验收入口。"
+    log_error "请使用 Scripts/build_dmg.sh 或 Scripts/package_app.sh，它们会走原生 Xcode macOS app target 并校验 WebRTC.framework。"
+    log_error "如只做历史调试，可显式设置 SKYBRIDGE_ALLOW_LEGACY_WIDGET_BUILD=1。"
+    exit 1
+fi
 
 # ============================================================================
 # 步骤 1: 使用 SwiftPM 构建主应用
@@ -191,7 +202,7 @@ else
     WIDGET_BUILD_DIR="$PROJECT_ROOT/.build/widget-release"
     mkdir -p "$WIDGET_BUILD_DIR"
 
-    # 使用 xcodebuild 构建 Widget Extension
+    # 使用 xcodebuild 构建 Widget Extension；构建日志必须完整保留，失败即停止发布流程。
     xcodebuild -project "$XCODE_PROJECT" \
         -target SkyBridgeCompassWidgetsExtension \
         -configuration Release \
@@ -201,10 +212,7 @@ else
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGNING_ALLOWED=NO \
         CONFIGURATION_BUILD_DIR="$WIDGET_BUILD_DIR" \
-        build 2>&1 | tail -20 || {
-            log_info "Widget Extension 构建失败，跳过嵌入"
-            log_info "Widget 功能将不可用，但主应用仍可正常使用"
-        }
+        build
 
     # 如果构建成功，嵌入 Widget Extension
     WIDGET_APPEX="$WIDGET_BUILD_DIR/$WIDGET_EXT_NAME.appex"

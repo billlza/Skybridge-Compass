@@ -1,0 +1,63 @@
+use clap::Parser;
+
+use crate::Cli;
+
+#[test]
+fn check_subcommands_parse_with_json_flags() {
+    assert!(
+        Cli::try_parse_from(["skybridge", "check", "memory", "--pid", "123", "--json"]).is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "check",
+            "memory",
+            "--executable",
+            "/usr/bin/true",
+            "--arg",
+            "--help",
+            "--json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "check",
+            "performance",
+            "--kind",
+            "p2p-remote",
+            "--session-id",
+            "SESSION1",
+            "--artifact-dir",
+            "/tmp",
+            "--min-fps",
+            "59",
+            "--min-width",
+            "2056",
+            "--min-height",
+            "1329",
+            "--exact-video-size",
+            "--min-pass-window-seconds",
+            "10",
+            "--manual-artifact",
+            "--require-audio",
+            "true",
+            "--json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "check",
+            "coverage",
+            "--kind",
+            "operator-check-surface",
+            "--min-percent",
+            "88",
+            "--json",
+        ])
+        .is_ok()
+    );
+}

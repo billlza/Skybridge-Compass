@@ -14,7 +14,7 @@ final class BootstrapAssuranceTests: XCTestCase {
     }
 
     func testPairingIdentityBootstrapPayloadRejectsEmptyDeviceIdOrEmptyKEMKeys() {
-        let validKey = KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data([0xAA]))
+        let validKey = KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data(repeating: 0xAA, count: 1_184))
 
         XCTAssertNil(
             AppMessage.PairingIdentityExchangePayload(
@@ -150,6 +150,51 @@ final class BootstrapAssuranceTests: XCTestCase {
                 lastSentAt: now.addingTimeInterval(-11),
                 now: now
             )
+        )
+    }
+
+    func testPairingIdentityExchangeFreshRequestBypassesReplyRateLimit() {
+        let now = Date()
+        let lastReply = PairingIdentityExchangeReplyThrottleState(
+            requestKey: "old-request",
+            requestSentAt: now.addingTimeInterval(-2),
+            repliedAt: now.addingTimeInterval(-2)
+        )
+
+        XCTAssertFalse(
+            P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
+                lastReply: lastReply,
+                requestKey: "old-request",
+                requestSentAt: now.addingTimeInterval(-2),
+                now: now
+            )
+        )
+        XCTAssertTrue(
+            P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
+                lastReply: lastReply,
+                requestKey: "fresh-request",
+                requestSentAt: now,
+                now: now
+            )
+        )
+    }
+
+    func testPairingIdentityExchangeRequestKeyChangesWithSentAt() {
+        let kemKey = KEMPublicKeyInfo(suiteWireId: 1, publicKey: Data(repeating: 0xA5, count: 32))
+        let first = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "peer-device",
+            kemPublicKeys: [kemKey],
+            sentAt: Date(timeIntervalSince1970: 100)
+        )
+        let second = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "peer-device",
+            kemPublicKeys: [kemKey],
+            sentAt: Date(timeIntervalSince1970: 101)
+        )
+
+        XCTAssertNotEqual(
+            P2PDiscoveryService.pairingIdentityExchangeRequestKey(first),
+            P2PDiscoveryService.pairingIdentityExchangeRequestKey(second)
         )
     }
 }

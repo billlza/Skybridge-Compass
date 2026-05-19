@@ -133,6 +133,10 @@ bash Scripts/check_turn_tls_regression.sh https://api.nebula-technologies.net
 2. 选择 `SkyBridgeCompassApp` 作为运行目标
 3. 直接运行
 
+正式 macOS 发布包不要手工拼装；按
+[`Docs/ops/macos-release-packaging-runbook.md`](Docs/ops/macos-release-packaging-runbook.md)
+执行打包、公证、WebRTC payload、TCC plist 与图标资源校验。
+
 命令行测试：
 
 ```bash
@@ -348,6 +352,7 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 
 详细说明见：
 
+- [`Docs/ops/macos-release-packaging-runbook.md`](Docs/ops/macos-release-packaging-runbook.md)
 - [`Docs/ops/notary-credential-bootstrap.md`](</Users/bill/Desktop/SkyBridge Compass Pro release/Docs/ops/notary-credential-bootstrap.md>)
 - [`Scripts/ensure_notarytool_credentials.sh`](</Users/bill/Desktop/SkyBridge Compass Pro release/Scripts/ensure_notarytool_credentials.sh>)
 
@@ -357,36 +362,57 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 - 当前本机凭据缺失：自动调用 `Scripts/bootstrap_notarytool_credentials.sh`
 - bootstrap 完成后再次验证，成功才进入真正的发版链
 
+发布 DMG 还会在 `package_app.sh` 前自动执行 Developer ID provisioning profile 自检：
+
+- 主应用与 Widget Extension 会分别校验 bundle id、Team ID、Developer ID direct distribution、过期时间、当前 Developer ID 证书以及 App Groups entitlement。
+- 若本机已安装合格 profile：直接继续。
+- 若 profile 缺失或过期：`build_dmg.sh` 会调用 `Scripts/ensure_developer_id_profiles.sh --create`，通过本机 App Store Connect API key 重新生成并安装。
+- 若首次配置时 Apple Developer 里还没把具体 App Group 关联到 Bundle ID，先交互式执行一次：
+
+```bash
+SKYBRIDGE_ASSOCIATE_DEVELOPER_ID_APP_GROUPS=1 \
+./Scripts/ensure_developer_id_profiles.sh --create --associate-app-groups
+```
+
+这一步可能触发 Apple 2FA。关联完成后，后续 DMG 打包只需要常规命令；脚本会继续强校验 profile 中是否真的包含 `group.com.skybridge.compass`。
+
 ```bash
 SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session \
 SKYBRIDGE_REQUIRE_APP_GROUPS=1 \
 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
-SKYBRIDGE_XCODEBUILD_KEEP_NOISE=1 \
-./Scripts/build_dmg.sh --notarize-app --notarize-dmg --require-notarization
+./Scripts/build_dmg.sh --notarize-dmg --require-notarization
 ```
 
 当前发布约束：
 
-- 发布 DMG 只接受 `Xcode Release` 产物。
-- `package_app.sh` 在 `release_dmg` 上下文下会拒绝 `SwiftPM release fallback`。
-- `build_dmg.sh --use-existing-app` 也会校验现有 `.app` 的构建来源，非 `xcode_release` 会直接失败。
+- 发布 DMG 只接受 Xcode workspace Release 的 `SkyBridgeCompassApp` executable 产物（`xcode_release` provenance），最终 `.app` 由 `package_app.sh` 组装；禁止把 `SkyBridgeCompassMac.app` native app bundle 当作发布 runtime。
+- `package_app.sh` 在 `release_dmg` 上下文下会校验构建来源，禁止隐式 fallback。
+- `build_dmg.sh --use-existing-app` 也会校验现有 `.app` 的构建来源，非 Release provenance 会直接失败。
 - 正式发布必须使用 `Developer ID Application` 证书签名；`ad-hoc` 仅适合本地调试，不适合稳定复用 macOS TCC 授权。
 - `Developer ID + notarized DMG` 发布链下，Apple 登录固定走 `web_session`（`ASWebAuthenticationSession` + Services ID）；原生 `Sign in with Apple` 仅适用于 Apple 官方支持的分发通道。
 - 最终发布要求 `Widget Extension` 与 `App Groups` 全部随签名产物交付。
-- 主应用与 Widget Extension 需要分别准备匹配的 macOS provisioning profile。
+- 主应用与 Widget Extension 需要分别准备匹配的 macOS Developer ID provisioning profile；`build_dmg.sh` 默认会自检并在可用 API key 下自动创建/刷新。
 - 主应用 profile 可通过 `SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH` 指定，Widget Extension profile 可通过 `SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH` 指定。
+- 若要完全跳过 profile 自检，可显式设置 `SKYBRIDGE_ENSURE_DEVELOPER_ID_PROFILES=0`；正式发布不建议这样做。
 - 若要执行本地 notarization，需要提供 `notarytool` 凭据（例如 `NOTARYTOOL_KEY` / `NOTARYTOOL_KEY_ID` / `NOTARYTOOL_ISSUER` 或 keychain profile）。
 
 推荐的最终校验命令：
 
 ```bash
 SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 \
-./Scripts/check_macos_release_readiness.sh --require-notarization
+./Scripts/check_macos_release_readiness.sh \
+  --require-notarization \
+  --p2p-remote-artifact-dir "Artifacts/<real-device-p2p-remote-smoke>" \
+  --file-transfer-artifact-dir "Artifacts/<real-device-file-transfer-smoke>"
 ```
+
+该发布门禁会运行 Rust CLI 的 memory/performance/coverage 检查；coverage
+为 operator check-surface 覆盖率，默认阈值 88%，不是 Rust 行/分支覆盖率。
 
 脚本自检：
 
 ```bash
+./Scripts/test_check_manual_p2p_remote_artifact.sh
 ./Scripts/test_package_build_policy.sh
 ./Scripts/test_signing_entitlements_helpers.sh
 ```

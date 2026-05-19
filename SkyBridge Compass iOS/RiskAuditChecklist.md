@@ -97,7 +97,11 @@ Scope: Crypto / Handshake / Networking / UI
 | `SkyBridgeCompassiOS/Sources/Core/P2P/P2PConnectionService.swift` | R4 | N1,N2,N3,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/P2P/P2PConnectionService.swift:2`) |
 | `SkyBridgeCompassiOS/Sources/Core/P2P/P2PModels.swift` | R2 | N1,N6 | Pending |
 | `SkyBridgeCompassiOS/Sources/Core/QRCode/QRCodeManager.swift` | R2 | N1,N5,N6 | Pending |
+| `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkFileTransferIntegrity.swift` | R4 | N1,N4,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkFileTransferIntegrity.swift:75`) |
 | `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkFileTransferWire.swift` | R4 | N1,N2,N4,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkFileTransferWire.swift:14`) |
+| `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkInboundChunkQueue.swift` | R3 | N2,N3,N4 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkInboundChunkQueue.swift:4`) |
+| `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkServerConfig.swift` | R4 | N1,N2,N3,N4,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkServerConfig.swift:4`) |
+| `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift` | R4 | N1,N2,N3,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift:5`) |
 | `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSession.swift` | R4 | N1,N2,N3,N4,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSession.swift:9`) |
 | `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSignalingEnvelope.swift` | R3 | N1,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSignalingEnvelope.swift:1`) |
 | `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebSocketSignalingClient.swift` | R3 | N1,N2,N3,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebSocketSignalingClient.swift:6`) |

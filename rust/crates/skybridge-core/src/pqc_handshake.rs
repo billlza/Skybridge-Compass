@@ -6,10 +6,7 @@ use anyhow::{Result, anyhow, bail};
 use getrandom::fill as fill_random;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use serde::Serialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
-use time::OffsetDateTime;
 
 use crate::{
     ClassicHandleResult, ClassicSessionKeys, CryptoSuite, ProtocolIdentityBinding,
@@ -18,16 +15,25 @@ use crate::{
     xwing_encapsulate,
 };
 
+use crate::handshake_app_frame;
+pub use crate::handshake_app_frame::HeartbeatPayload;
+use crate::handshake_wire::{
+    append_u16_le, encode_string, encode_string_array, unwrap_handshake_padding,
+};
+use wire::{
+    DecodedMessageA, DecodedMessageB, decode_identity_public_key, decode_message_a,
+    decode_message_b, encode_hpke_sealed_box, encode_identity_public_key,
+    message_b_encoded_without_signature,
+};
+
+mod wire;
+
 const HANDSHAKE_VERSION: u8 = 1;
 const HANDSHAKE_A_DOMAIN: &[u8] = b"SkyBridge-A";
 const HANDSHAKE_B_DOMAIN: &[u8] = b"SkyBridge-B";
 const FINISHED_MAGIC: &[u8; 4] = b"FIN1";
 const KDF_COMPOSITION_LABEL: &[u8] = b"v1-single";
 const HANDSHAKE_PAYLOAD_INFO: &[u8] = b"handshake-payload";
-const IDENTITY_ALGORITHM_MLDSA65: u8 = 0x02;
-const HEARTBEAT_PLATFORM: &str = std::env::consts::OS;
-const HEARTBEAT_REMOTE_VIDEO_FORMAT: &str = "bgra";
-const REFERENCE_UNIX_SECONDS: i64 = 978_307_200;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -99,81 +105,6 @@ struct FinishedFrame {
 enum FinishedDirection {
     ResponderToInitiator,
     InitiatorToResponder,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct HeartbeatPayload {
-    #[serde(rename = "sentAt")]
-    pub sent_at: f64,
-    #[serde(rename = "deviceId", skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
-    #[serde(rename = "deviceName", skip_serializing_if = "Option::is_none")]
-    pub device_name: Option<String>,
-    #[serde(rename = "platform")]
-    pub platform: String,
-    #[serde(rename = "remoteVideoFormats")]
-    pub remote_video_formats: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct HeartbeatEnvelope {
-    heartbeat: HeartbeatPayload,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PongEnvelope {
-    pong: PongPayload,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PingEnvelope {
-    ping: PingPayload,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PingPayload {
-    id: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PongPayload {
-    id: u64,
-}
-
-#[derive(Debug, Clone)]
-struct DecodedMessageB {
-    selected_suite: CryptoSuite,
-    responder_share: Vec<u8>,
-    server_nonce: [u8; 32],
-    encrypted_payload_combined: Vec<u8>,
-    encrypted_payload_encapsulated_key: Vec<u8>,
-    encrypted_payload_nonce: Vec<u8>,
-    encrypted_payload_ciphertext: Vec<u8>,
-    encrypted_payload_tag: Vec<u8>,
-    identity_public_key: Vec<u8>,
-    signature: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct DecodedIdentityPublicKey {
-    algorithm: ProtocolSigningAlgorithm,
-    public_key: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct DecodedHpkeSealedBox {
-    encapsulated_key: Vec<u8>,
-    nonce: Vec<u8>,
-    ciphertext: Vec<u8>,
-    tag: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct DecodedMessageA {
-    offered_suites: Vec<CryptoSuite>,
-    key_shares: BTreeMap<CryptoSuite, Vec<u8>>,
-    client_nonce: [u8; 32],
-    transcript_hash_a: [u8; 32],
 }
 
 impl PqcInitiatorHandshake {
@@ -299,15 +230,18 @@ impl PqcInitiatorHandshake {
                 Ok(result)
             }
             PqcInitiatorState::WaitingForFinished(waiting) => {
-                if let Some(message) =
-                    try_handle_encrypted_app_message(&unwrapped, &waiting.session_keys)?
-                {
+                if let Some(message) = handshake_app_frame::try_handle_encrypted_app_message(
+                    &unwrapped,
+                    &waiting.session_keys,
+                )? {
                     return Ok(message);
                 }
                 bail!("unexpected frame while waiting for PQC Finished")
             }
             PqcInitiatorState::Established(keys) => {
-                if let Some(message) = try_handle_encrypted_app_message(&unwrapped, keys)? {
+                if let Some(message) =
+                    handshake_app_frame::try_handle_encrypted_app_message(&unwrapped, keys)?
+                {
                     return Ok(message);
                 }
                 Ok(ClassicHandleResult::default())
@@ -320,40 +254,25 @@ impl PqcInitiatorHandshake {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("PQC handshake is not established"))?;
-        let payload = HeartbeatEnvelope {
-            heartbeat: HeartbeatPayload {
-                sent_at: apple_reference_seconds_now(),
-                device_id: Some(self.config.local_binding.device_id.clone()),
-                device_name: self.config.local_device_name.clone(),
-                platform: HEARTBEAT_PLATFORM.to_owned(),
-                remote_video_formats: vec![HEARTBEAT_REMOTE_VIDEO_FORMAT.to_owned()],
-            },
-        };
-        build_encrypted_app_frame(session_keys, &payload)
+        handshake_app_frame::build_heartbeat_frame(
+            session_keys,
+            &self.config.local_binding.device_id,
+            self.config.local_device_name.as_deref(),
+        )
     }
 
     pub fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("PQC handshake is not established"))?;
-        build_encrypted_app_frame(
-            session_keys,
-            &PongEnvelope {
-                pong: PongPayload { id },
-            },
-        )
+        handshake_app_frame::build_pong_frame(session_keys, id)
     }
 
     pub fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("PQC handshake is not established"))?;
-        build_encrypted_app_frame(
-            session_keys,
-            &PingEnvelope {
-                ping: PingPayload { id },
-            },
-        )
+        handshake_app_frame::build_ping_frame(session_keys, id)
     }
 
     pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
@@ -445,15 +364,18 @@ impl PqcResponderHandshake {
                 })
             }
             PqcResponderState::WaitingForFinished(waiting) => {
-                if let Some(message) =
-                    try_handle_encrypted_app_message(&unwrapped, &waiting.session_keys)?
-                {
+                if let Some(message) = handshake_app_frame::try_handle_encrypted_app_message(
+                    &unwrapped,
+                    &waiting.session_keys,
+                )? {
                     return Ok(message);
                 }
                 bail!("unexpected frame while waiting for initiator Finished")
             }
             PqcResponderState::Established(keys) => {
-                if let Some(message) = try_handle_encrypted_app_message(&unwrapped, keys)? {
+                if let Some(message) =
+                    handshake_app_frame::try_handle_encrypted_app_message(&unwrapped, keys)?
+                {
                     return Ok(message);
                 }
                 Ok(ClassicHandleResult::default())
@@ -465,40 +387,25 @@ impl PqcResponderHandshake {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("PQC responder handshake is not established"))?;
-        let payload = HeartbeatEnvelope {
-            heartbeat: HeartbeatPayload {
-                sent_at: apple_reference_seconds_now(),
-                device_id: Some(self.config.local_binding.device_id.clone()),
-                device_name: self.config.local_device_name.clone(),
-                platform: HEARTBEAT_PLATFORM.to_owned(),
-                remote_video_formats: vec![HEARTBEAT_REMOTE_VIDEO_FORMAT.to_owned()],
-            },
-        };
-        build_encrypted_app_frame(session_keys, &payload)
+        handshake_app_frame::build_heartbeat_frame(
+            session_keys,
+            &self.config.local_binding.device_id,
+            self.config.local_device_name.as_deref(),
+        )
     }
 
     pub fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("PQC responder handshake is not established"))?;
-        build_encrypted_app_frame(
-            session_keys,
-            &PongEnvelope {
-                pong: PongPayload { id },
-            },
-        )
+        handshake_app_frame::build_pong_frame(session_keys, id)
     }
 
     pub fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("PQC responder handshake is not established"))?;
-        build_encrypted_app_frame(
-            session_keys,
-            &PingEnvelope {
-                ping: PingPayload { id },
-            },
-        )
+        handshake_app_frame::build_ping_frame(session_keys, id)
     }
 
     pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
@@ -603,72 +510,6 @@ fn process_message_b(
     )
 }
 
-fn decode_message_a(frame: &[u8]) -> Result<DecodedMessageA> {
-    let mut offset = 0usize;
-    let version = *frame
-        .get(offset)
-        .ok_or_else(|| anyhow!("MessageA too short"))?;
-    offset += 1;
-    if version != HANDSHAKE_VERSION {
-        bail!("MessageA version mismatch");
-    }
-
-    let offered_count = read_u16_le(frame, &mut offset)? as usize;
-    let mut offered_suites = Vec::with_capacity(offered_count);
-    for _ in 0..offered_count {
-        offered_suites.push(CryptoSuite::from_wire_id(read_u16_le(frame, &mut offset)?));
-    }
-
-    let keyshare_count = read_u16_le(frame, &mut offset)? as usize;
-    let mut key_shares = BTreeMap::new();
-    for _ in 0..keyshare_count {
-        let suite = CryptoSuite::from_wire_id(read_u16_le(frame, &mut offset)?);
-        let share_len = read_u16_le(frame, &mut offset)? as usize;
-        key_shares.insert(suite, read_exact(frame, &mut offset, share_len)?.to_vec());
-    }
-
-    let client_nonce_bytes = read_exact(frame, &mut offset, 32)?;
-    let mut client_nonce = [0u8; 32];
-    client_nonce.copy_from_slice(client_nonce_bytes);
-    let capabilities_len = read_u16_le(frame, &mut offset)? as usize;
-    let _capabilities = read_exact(frame, &mut offset, capabilities_len)?;
-    let policy_len = read_u16_le(frame, &mut offset)? as usize;
-    let _policy = read_exact(frame, &mut offset, policy_len)?;
-    let identity_public_key_len = read_u16_le(frame, &mut offset)? as usize;
-    let identity_public_key = read_exact(frame, &mut offset, identity_public_key_len)?.to_vec();
-    let unsigned_end = offset;
-    let signature_len = read_u16_le(frame, &mut offset)? as usize;
-    let signature = read_exact(frame, &mut offset, signature_len)?.to_vec();
-
-    if offset < frame.len() {
-        let se_signature_len = read_u16_le(frame, &mut offset)? as usize;
-        let _ = read_exact(frame, &mut offset, se_signature_len)?;
-    }
-    if offset != frame.len() {
-        bail!("unexpected trailing bytes in PQC MessageA");
-    }
-
-    let unsigned = &frame[..unsigned_end];
-    let transcript_hash_a = Sha256::digest(unsigned);
-    let mut transcript_hash_a_bytes = [0u8; 32];
-    transcript_hash_a_bytes.copy_from_slice(transcript_hash_a.as_ref());
-
-    let initiator_identity = decode_identity_public_key(&identity_public_key)?;
-    if initiator_identity.algorithm != ProtocolSigningAlgorithm::MlDsa65 {
-        bail!("unsupported PQC initiator identity algorithm");
-    }
-    let mut preimage = Vec::from(HANDSHAKE_A_DOMAIN);
-    preimage.extend_from_slice(unsigned);
-    mldsa65_verify_detached(&preimage, &signature, &initiator_identity.public_key)?;
-
-    Ok(DecodedMessageA {
-        offered_suites,
-        key_shares,
-        client_nonce,
-        transcript_hash_a: transcript_hash_a_bytes,
-    })
-}
-
 fn build_responder_message_b_and_keys(
     config: &PqcResponderConfig,
     message_a: &DecodedMessageA,
@@ -759,55 +600,6 @@ fn build_responder_message_b_and_keys(
     Ok((message_b, responder_session_keys))
 }
 
-fn decode_message_b(frame: &[u8]) -> Result<DecodedMessageB> {
-    let mut offset = 0usize;
-    let version = *frame
-        .get(offset)
-        .ok_or_else(|| anyhow!("MessageB too short"))?;
-    offset += 1;
-    if version != HANDSHAKE_VERSION {
-        bail!("MessageB version mismatch");
-    }
-
-    let selected_suite = CryptoSuite::from_wire_id(read_u16_le(frame, &mut offset)?);
-    let responder_share_len = read_u16_le(frame, &mut offset)? as usize;
-    let responder_share = read_exact(frame, &mut offset, responder_share_len)?.to_vec();
-    let server_nonce_bytes = read_exact(frame, &mut offset, 32)?;
-    let mut server_nonce = [0u8; 32];
-    server_nonce.copy_from_slice(server_nonce_bytes);
-
-    let payload_len = read_u16_le(frame, &mut offset)? as usize;
-    let encrypted_payload_combined = read_exact(frame, &mut offset, payload_len)?.to_vec();
-    let payload = decode_hpke_sealed_box(&encrypted_payload_combined)?;
-
-    let identity_public_key_len = read_u16_le(frame, &mut offset)? as usize;
-    let identity_public_key = read_exact(frame, &mut offset, identity_public_key_len)?.to_vec();
-
-    let signature_len = read_u16_le(frame, &mut offset)? as usize;
-    let signature = read_exact(frame, &mut offset, signature_len)?.to_vec();
-
-    if offset < frame.len() {
-        let se_signature_len = read_u16_le(frame, &mut offset)? as usize;
-        let _ = read_exact(frame, &mut offset, se_signature_len)?;
-    }
-    if offset != frame.len() {
-        bail!("unexpected trailing bytes in PQC MessageB");
-    }
-
-    Ok(DecodedMessageB {
-        selected_suite,
-        responder_share,
-        server_nonce,
-        encrypted_payload_combined,
-        encrypted_payload_encapsulated_key: payload.encapsulated_key,
-        encrypted_payload_nonce: payload.nonce,
-        encrypted_payload_ciphertext: payload.ciphertext,
-        encrypted_payload_tag: payload.tag,
-        identity_public_key,
-        signature,
-    })
-}
-
 fn pqc_capabilities_bytes(offered_suites: &[CryptoSuite]) -> Vec<u8> {
     let mut kem_algorithms = Vec::new();
     if offered_suites.iter().any(|suite| suite.wire_id == 0x0001) {
@@ -826,7 +618,7 @@ fn pqc_capabilities_bytes(offered_suites: &[CryptoSuite]) -> Vec<u8> {
     encode_string_array(&mut encoded, &["PQC"]);
     encode_string_array(&mut encoded, &["AES-256-GCM", "ChaCha20-Poly1305"]);
     encoded.push(0x01);
-    encode_string(&mut encoded, HEARTBEAT_PLATFORM);
+    encode_string(&mut encoded, handshake_app_frame::HEARTBEAT_PLATFORM);
     encode_string(&mut encoded, "liboqs");
     encoded
 }
@@ -838,76 +630,6 @@ fn pqc_policy_bytes() -> Vec<u8> {
     encode_string(&mut encoded, "liboqsPQC");
     encoded.push(0x00);
     encoded
-}
-
-fn encode_identity_public_key(
-    algorithm: ProtocolSigningAlgorithm,
-    public_key: &[u8],
-) -> Result<Vec<u8>> {
-    if algorithm != ProtocolSigningAlgorithm::MlDsa65 {
-        bail!("PQC handshake only supports ML-DSA-65 protocol identities");
-    }
-    let mut encoded = Vec::new();
-    encoded.push(IDENTITY_ALGORITHM_MLDSA65);
-    append_u16_le(&mut encoded, public_key.len() as u16);
-    encoded.extend_from_slice(public_key);
-    encoded.push(0x00);
-    Ok(encoded)
-}
-
-fn decode_identity_public_key(data: &[u8]) -> Result<DecodedIdentityPublicKey> {
-    if data.len() < 1 + 2 + 1 {
-        bail!("identity public key payload too short");
-    }
-    let algorithm = match data[0] {
-        IDENTITY_ALGORITHM_MLDSA65 => ProtocolSigningAlgorithm::MlDsa65,
-        _ => bail!("unsupported identity public key algorithm"),
-    };
-    let mut offset = 1usize;
-    let key_len = read_u16_le(data, &mut offset)? as usize;
-    let public_key = read_exact(data, &mut offset, key_len)?.to_vec();
-    let has_secure_enclave = *data
-        .get(offset)
-        .ok_or_else(|| anyhow!("missing secure enclave identity flag"))?;
-    if has_secure_enclave != 0x00 {
-        bail!("secure enclave identity keys are not supported in PQC rust initiator");
-    }
-    Ok(DecodedIdentityPublicKey {
-        algorithm,
-        public_key,
-    })
-}
-
-fn decode_hpke_sealed_box(data: &[u8]) -> Result<DecodedHpkeSealedBox> {
-    if data.len() < 17 {
-        bail!("hpke sealed box too short");
-    }
-    if &data[..4] != b"HPKE" {
-        bail!("invalid hpke sealed box magic");
-    }
-    let version = data[4];
-    if version != 1 && version != 2 {
-        bail!("unsupported hpke sealed box version");
-    }
-    let enc_len = u16::from_le_bytes([data[9], data[10]]) as usize;
-    let nonce_len = data[11] as usize;
-    let tag_len = data[12] as usize;
-    let ciphertext_len = u32::from_le_bytes([data[13], data[14], data[15], data[16]]) as usize;
-    let expected_len = 17 + enc_len + nonce_len + ciphertext_len + tag_len;
-    if data.len() != expected_len {
-        bail!("hpke sealed box length mismatch");
-    }
-    let mut offset = 17usize;
-    let encapsulated_key = read_exact(data, &mut offset, enc_len)?.to_vec();
-    let nonce = read_exact(data, &mut offset, nonce_len)?.to_vec();
-    let ciphertext = read_exact(data, &mut offset, ciphertext_len)?.to_vec();
-    let tag = read_exact(data, &mut offset, tag_len)?.to_vec();
-    Ok(DecodedHpkeSealedBox {
-        encapsulated_key,
-        nonce,
-        ciphertext,
-        tag,
-    })
 }
 
 fn open_payload_with_shared_secret(
@@ -1029,105 +751,6 @@ fn derive_responder_session_keys(
     Ok(keys)
 }
 
-fn message_b_encoded_without_signature(message_b: &DecodedMessageB) -> Vec<u8> {
-    let mut encoded = Vec::new();
-    encoded.push(HANDSHAKE_VERSION);
-    append_u16_le(&mut encoded, message_b.selected_suite.wire_id);
-    append_u16_le(&mut encoded, message_b.responder_share.len() as u16);
-    encoded.extend_from_slice(&message_b.responder_share);
-    encoded.extend_from_slice(&message_b.server_nonce);
-    append_u16_le(
-        &mut encoded,
-        message_b.encrypted_payload_combined.len() as u16,
-    );
-    encoded.extend_from_slice(&message_b.encrypted_payload_combined);
-    append_u16_le(&mut encoded, message_b.identity_public_key.len() as u16);
-    encoded.extend_from_slice(&message_b.identity_public_key);
-    encoded
-}
-
-fn encode_hpke_sealed_box(
-    suite: CryptoSuite,
-    encapsulated_key: &[u8],
-    nonce: &[u8],
-    ciphertext: &[u8],
-    tag: &[u8],
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"HPKE");
-    let version = if nonce.is_empty() && tag.is_empty() {
-        2
-    } else {
-        1
-    };
-    out.push(version);
-    out.push((suite.wire_id & 0xFF) as u8);
-    out.push((suite.wire_id >> 8) as u8);
-    out.extend_from_slice(&[0, 0]);
-    out.push((encapsulated_key.len() & 0xFF) as u8);
-    out.push((encapsulated_key.len() >> 8) as u8);
-    out.push((nonce.len() & 0xFF) as u8);
-    out.push((tag.len() & 0xFF) as u8);
-    out.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
-    out.extend_from_slice(encapsulated_key);
-    out.extend_from_slice(nonce);
-    out.extend_from_slice(ciphertext);
-    out.extend_from_slice(tag);
-    out
-}
-
-fn build_encrypted_app_frame<T: Serialize>(
-    session_keys: &ClassicSessionKeys,
-    payload: &T,
-) -> Result<Vec<u8>> {
-    let plaintext = serde_json::to_vec(payload)?;
-    let cipher = Aes256Gcm::new_from_slice(&session_keys.send_key)
-        .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
-    let mut nonce_bytes = [0u8; 12];
-    fill_random(&mut nonce_bytes)?;
-    let ciphertext_and_tag = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
-        .map_err(|error| anyhow!("failed to encrypt app payload: {error}"))?;
-    let mut combined = nonce_bytes.to_vec();
-    combined.extend_from_slice(&ciphertext_and_tag);
-    Ok(combined)
-}
-
-fn try_handle_encrypted_app_message(
-    frame: &[u8],
-    session_keys: &ClassicSessionKeys,
-) -> Result<Option<ClassicHandleResult>> {
-    if frame.len() < 12 + 16 {
-        return Ok(None);
-    }
-    let cipher = Aes256Gcm::new_from_slice(&session_keys.receive_key)
-        .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
-    let plaintext = match cipher.decrypt(Nonce::from_slice(&frame[..12]), &frame[12..]) {
-        Ok(plaintext) => plaintext,
-        Err(_) => return Ok(None),
-    };
-    let value: Value = match serde_json::from_slice(&plaintext) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let pong_id = value
-        .get("ping")
-        .and_then(|ping| ping.get("id"))
-        .and_then(Value::as_u64);
-    let observed_pong_id = value
-        .get("pong")
-        .and_then(|pong| pong.get("id"))
-        .and_then(Value::as_u64);
-    Ok(Some(ClassicHandleResult {
-        outbound_frames: Vec::new(),
-        established: None,
-        heartbeat_requested: value.get("heartbeat").is_some(),
-        pong_id,
-        observed_pong_id,
-        observed_heartbeat: value.get("heartbeat").is_some(),
-    }))
-}
-
 fn encode_finished_frame(
     direction: FinishedDirection,
     mac_key: &[u8],
@@ -1197,56 +820,6 @@ fn compute_finished_mac(
     let mut encoded = [0u8; 32];
     encoded.copy_from_slice(&output);
     Ok(encoded)
-}
-
-fn unwrap_handshake_padding(data: &[u8]) -> Vec<u8> {
-    const HANDSHAKE_PADDING_MAGIC: &[u8; 4] = b"SBP1";
-    if data.len() < 8 || &data[..4] != HANDSHAKE_PADDING_MAGIC {
-        return data.to_vec();
-    }
-    let actual_len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
-    if actual_len > data.len().saturating_sub(8) {
-        return data.to_vec();
-    }
-    data[8..(8 + actual_len)].to_vec()
-}
-
-fn encode_string(out: &mut Vec<u8>, value: &str) {
-    let bytes = value.as_bytes();
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(bytes);
-}
-
-fn encode_string_array(out: &mut Vec<u8>, values: &[&str]) {
-    out.extend_from_slice(&(values.len() as u32).to_le_bytes());
-    for value in values {
-        encode_string(out, value);
-    }
-}
-
-fn append_u16_le(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn read_u16_le(data: &[u8], offset: &mut usize) -> Result<u16> {
-    let bytes = read_exact(data, offset, 2)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_exact<'a>(data: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8]> {
-    let end = offset
-        .checked_add(len)
-        .ok_or_else(|| anyhow!("length overflow"))?;
-    let slice = data
-        .get(*offset..end)
-        .ok_or_else(|| anyhow!("truncated frame"))?;
-    *offset = end;
-    Ok(slice)
-}
-
-fn apple_reference_seconds_now() -> f64 {
-    let now = OffsetDateTime::now_utc().unix_timestamp_nanos() as f64 / 1_000_000_000.0;
-    now - REFERENCE_UNIX_SECONDS as f64
 }
 
 impl FinishedDirection {

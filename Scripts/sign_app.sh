@@ -255,6 +255,10 @@ function notarize_app_bundle() {
   rm -rf "${temp_dir}"
 }
 
+function app_has_stapled_ticket() {
+  xcrun stapler validate "${APP_PATH}" >/dev/null 2>&1
+}
+
 prepare_widget_signing_inputs
 
 log "开始签名嵌入式代码"
@@ -285,7 +289,9 @@ else
   log "Gatekeeper 评估未通过: ${GATEKEEPER_OUTPUT//$'\n'/ | }"
 fi
 
-if [[ "${REQUIRE_NOTARIZATION}" == "1" ]] && ! skybridge_gatekeeper_is_notarized "${GATEKEEPER_OUTPUT}"; then
+if [[ "${REQUIRE_NOTARIZATION}" == "1" ]] && \
+   ! skybridge_gatekeeper_is_notarized "${GATEKEEPER_OUTPUT}" && \
+   ! app_has_stapled_ticket; then
   echo "错误：当前签名产物尚未通过 notarization/stapling，无法满足 REQUIRE_NOTARIZATION=1。" >&2
   exit 1
 fi

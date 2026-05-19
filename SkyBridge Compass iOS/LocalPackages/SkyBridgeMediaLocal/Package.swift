@@ -1,10 +1,13 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
+let latestCStandardFlags = ["-std=gnu23"]
+
 let package = Package(
     name: "SkyBridgeMediaLocal",
     platforms: [
-        .iOS(.v17)
+        .iOS(.v17),
+        .macOS(.v14)
     ],
     products: [
         .library(name: "SkyBridgeOpus", targets: ["SkyBridgeOpus"]),
@@ -19,7 +22,10 @@ let package = Package(
             name: "CSkyBridgeOpusShim",
             dependencies: ["libopus"],
             path: "Sources/CSkyBridgeOpusShim",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(latestCStandardFlags)
+            ]
         ),
         .target(
             name: "SkyBridgeOpus",

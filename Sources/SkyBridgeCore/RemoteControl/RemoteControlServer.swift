@@ -19,7 +19,7 @@ public final class RemoteControlServer: ObservableObject {
     private let preferredPort: UInt16
     
     private var listener: NWListener?
-    private let queue = DispatchQueue(label: "com.skybridge.remote.server", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.skybridge.remote.server", qos: .userInteractive)
     
     private let serviceType = "_skybridge-remote._tcp"
     private let serviceDomain = "local."
@@ -37,8 +37,10 @@ public final class RemoteControlServer: ObservableObject {
         
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        parameters.includePeerToPeer = true
+        parameters.includePeerToPeer = false
+        parameters.serviceClass = .interactiveVideo
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.noDelay = true
             tcp.enableKeepalive = true
             tcp.keepaliveIdle = 30
             tcp.keepaliveInterval = 15
@@ -84,6 +86,7 @@ public final class RemoteControlServer: ObservableObject {
         txt["capabilities"] = "remote_desktop"
         txt["remotePort"] = String(port)
         txt["port"] = String(port)
+        LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)
 
         var txtData = makeNetServiceTXTData(
             serviceName: serviceName,
@@ -144,6 +147,7 @@ public final class RemoteControlServer: ObservableObject {
         let stableId = (deviceId?.isEmpty == false) ? deviceId! : serviceName
         txt["deviceId"] = Data(stableId.utf8)
         txt["uniqueId"] = Data(stableId.utf8)
+        LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)
         if let pubKeyFP, !pubKeyFP.isEmpty {
             txt["pubKeyFP"] = Data(pubKeyFP.utf8)
         }

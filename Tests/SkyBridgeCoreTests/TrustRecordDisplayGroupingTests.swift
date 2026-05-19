@@ -337,8 +337,8 @@ final class TrustRecordDisplayGroupingTests: XCTestCase {
         XCTAssertEqual(groups[0].displayRecord.deviceName, "iPad")
     }
 
-    func testStrictPQCBootstrapDecisionRequiresSuiteNegotiationFailureAndMissingKEM() {
-        XCTAssertTrue(
+    func testStrictPQCBootstrapDecisionNeverUsesClassicBootstrap() {
+        XCTAssertFalse(
             P2PConnection.shouldAttemptStrictPQCBootstrap(
                 policy: .strictPQC,
                 error: HandshakeError.failed(.suiteNegotiationFailed),
@@ -363,8 +363,8 @@ final class TrustRecordDisplayGroupingTests: XCTestCase {
         )
     }
 
-    func testStrictPQCKeyRefreshBootstrapDecisionRequiresCryptoFailureWithExistingKEM() {
-        XCTAssertTrue(
+    func testStrictPQCKeyRefreshBootstrapDecisionNeverUsesClassicBootstrap() {
+        XCTAssertFalse(
             P2PConnection.shouldAttemptStrictPQCKeyRefreshBootstrap(
                 policy: .strictPQC,
                 error: HandshakeError.failed(.cryptoError("CryptoKit.CryptoKitError error 0")),
@@ -372,7 +372,7 @@ final class TrustRecordDisplayGroupingTests: XCTestCase {
             )
         )
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             P2PConnection.shouldAttemptStrictPQCKeyRefreshBootstrap(
                 policy: .strictPQC,
                 error: HandshakeError.failed(.timeout),
@@ -380,7 +380,7 @@ final class TrustRecordDisplayGroupingTests: XCTestCase {
             )
         )
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             P2PConnection.shouldAttemptStrictPQCKeyRefreshBootstrap(
                 policy: .strictPQC,
                 error: HandshakeError.failed(.transportError("Connection reset by peer")),

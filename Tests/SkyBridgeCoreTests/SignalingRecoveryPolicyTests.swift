@@ -45,4 +45,20 @@ final class SignalingRecoveryPolicyTests: XCTestCase {
             )
         )
     }
+
+    func testSignalingFailureClassificationStaysInPolicy() throws {
+        let frame = try JSONDecoder().decode(
+            WebSocketSignalingClient.SignalingServerFrame.self,
+            from: Data(#"{"type":"error","error":"token expired","sessionId":"session-a"}"#.utf8)
+        )
+
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.classifySignalingFailure(from: frame),
+            .tokenExpired
+        )
+        XCTAssertTrue(CrossNetworkConnectionManager.isFatalPreTransportFailure(.authBindRejected))
+        XCTAssertTrue(CrossNetworkConnectionManager.isFatalPostTransportFailure(.protocolViolation))
+        XCTAssertFalse(CrossNetworkConnectionManager.isFatalPreTransportFailure(.tokenExpired))
+        XCTAssertFalse(CrossNetworkConnectionManager.isFatalPostTransportFailure(.transientNetwork))
+    }
 }

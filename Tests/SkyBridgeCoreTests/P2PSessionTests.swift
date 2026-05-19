@@ -49,9 +49,57 @@ final class P2PSessionTests: XCTestCase {
         XCTAssertEqual(decoded.protocolSigningAlgorithm, original.protocolSigningAlgorithm)
         XCTAssertEqual(decoded.protocolPublicKeyBytes, original.protocolPublicKeyBytes)
         XCTAssertEqual(decoded.protocolPublicKeyFingerprint, original.protocolPublicKeyFingerprint)
+        XCTAssertEqual(decoded.kemPublicKeys, original.kemPublicKeys)
         XCTAssertEqual(decoded.signature, original.signature)
         XCTAssertEqual(decoded.signatureTimestampMs, original.signatureTimestampMs)
         XCTAssertEqual(decoded.expiresAt.timeIntervalSince1970, original.expiresAt.timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testVersion7DynamicQRCodeDataRoundTripPreservesKEMKeys() throws {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let publicKey = privateKey.publicKey.rawRepresentation
+        let fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .ed25519,
+            publicKeyBytes: publicKey
+        )
+        let original = DynamicQRCodeData(
+            version: 7,
+            sessionID: UUID().uuidString,
+            qrBootstrapToken: "bootstrap-token",
+            signalingServerOrigin: "https://api.example.com",
+            deviceID: "12345678-1234-1234-1234-1234567890ab",
+            deviceName: "Test Device",
+            deviceType: P2PDeviceType.macOS.rawValue,
+            osVersion: "macOS-test",
+            capabilities: ["cross-network", "p2p"],
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyBytes: publicKey,
+            protocolPublicKeyFingerprint: fingerprint,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: Data(repeating: 0x31, count: 1216)
+                ),
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: Data(repeating: 0x32, count: 1184)
+                )
+            ],
+            signature: nil,
+            signatureTimestampMs: Int64(Date().timeIntervalSince1970 * 1000),
+            expiresAt: Date().addingTimeInterval(300)
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+
+        let data = try encoder.encode(original)
+        let decoded = try decoder.decode(DynamicQRCodeData.self, from: data)
+
+        XCTAssertEqual(decoded.version, original.version)
+        XCTAssertEqual(decoded.normalizedKEMPublicKeys, original.normalizedKEMPublicKeys)
     }
 
     func testDynamicQRCodeDataExpirationField() {

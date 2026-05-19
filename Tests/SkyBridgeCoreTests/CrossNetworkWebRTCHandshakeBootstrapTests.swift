@@ -5,16 +5,16 @@ import XCTest
 final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     func testInitialWebRTCHandshakeStartsFromOffererOnly() {
         XCTAssertTrue(
-            CrossNetworkConnectionManager.shouldInitiateInitialWebRTCHandshake(role: .offerer)
+            WebRTCPQCHandshakePolicy.shouldInitiateInitialWebRTCHandshake(role: .offerer)
         )
         XCTAssertFalse(
-            CrossNetworkConnectionManager.shouldInitiateInitialWebRTCHandshake(role: .answerer)
+            WebRTCPQCHandshakePolicy.shouldInitiateInitialWebRTCHandshake(role: .answerer)
         )
     }
 
     func testInitialWebRTCHandshakeUsesClassicForAuthorityBoundQRAndCodeSessions() {
         XCTAssertTrue(
-            CrossNetworkConnectionManager.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
                 sessionID: "qr-session",
                 authorityBoundBootstrapSessionIds: ["qr-session"],
                 expectedRemoteAuthorityAlgorithm: nil,
@@ -22,7 +22,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             )
         )
         XCTAssertTrue(
-            CrossNetworkConnectionManager.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
                 sessionID: "code-session",
                 authorityBoundBootstrapSessionIds: [],
                 expectedRemoteAuthorityAlgorithm: nil,
@@ -30,7 +30,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             )
         )
         XCTAssertTrue(
-            CrossNetworkConnectionManager.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
                 sessionID: "answerer-session",
                 authorityBoundBootstrapSessionIds: [],
                 expectedRemoteAuthorityAlgorithm: .ed25519,
@@ -38,7 +38,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             )
         )
         XCTAssertFalse(
-            CrossNetworkConnectionManager.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
                 sessionID: "pqc-session",
                 authorityBoundBootstrapSessionIds: [],
                 expectedRemoteAuthorityAlgorithm: .mlDSA65,
@@ -47,30 +47,60 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
     }
 
-    func testStrictInboundInitialAllowsVerifiedAuthorityClassicBootstrapOnly() {
-        XCTAssertTrue(
-            CrossNetworkConnectionManager.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+    func testStrictPQCInitialWebRTCHandshakeDoesNotUseClassicAuthorityBootstrap() {
+        XCTAssertFalse(
+            WebRTCPQCHandshakePolicy.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionID: "qr-session",
+                authorityBoundBootstrapSessionIds: ["qr-session"],
+                expectedRemoteAuthorityAlgorithm: nil,
+                activeConnectionCodeSessionID: nil,
+                strictPQCRequested: true
+            )
+        )
+        XCTAssertFalse(
+            WebRTCPQCHandshakePolicy.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionID: "code-session",
+                authorityBoundBootstrapSessionIds: [],
+                expectedRemoteAuthorityAlgorithm: nil,
+                activeConnectionCodeSessionID: "code-session",
+                strictPQCRequested: true
+            )
+        )
+        XCTAssertFalse(
+            WebRTCPQCHandshakePolicy.shouldUseClassicAuthorityBootstrapForInitialWebRTCHandshake(
+                sessionID: "answerer-session",
+                authorityBoundBootstrapSessionIds: [],
+                expectedRemoteAuthorityAlgorithm: .ed25519,
+                activeConnectionCodeSessionID: nil,
+                strictPQCRequested: true
+            )
+        )
+    }
+
+    func testStrictInboundInitialRejectsClassicAuthorityBootstrap() {
+        XCTAssertFalse(
+            WebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
                 supportedSuites: [.x25519Ed25519],
                 strictPQCRequested: true,
                 expectedRemoteAuthorityAlgorithm: .ed25519
             )
         )
         XCTAssertFalse(
-            CrossNetworkConnectionManager.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
                 supportedSuites: [.x25519Ed25519],
                 strictPQCRequested: true,
                 expectedRemoteAuthorityAlgorithm: nil
             )
         )
         XCTAssertFalse(
-            CrossNetworkConnectionManager.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
                 supportedSuites: [.x25519Ed25519],
                 strictPQCRequested: true,
                 expectedRemoteAuthorityAlgorithm: .mlDSA65
             )
         )
         XCTAssertFalse(
-            CrossNetworkConnectionManager.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
                 supportedSuites: [.mlkem768MLDSA65],
                 strictPQCRequested: true,
                 expectedRemoteAuthorityAlgorithm: .ed25519
@@ -79,7 +109,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     }
 
     func testInitialWebRTCHandshakePeerResolutionPrefersConcreteRemoteDeviceId() {
-        let resolution = CrossNetworkConnectionManager.initialWebRTCHandshakePeerResolution(
+        let resolution = WebRTCPQCHandshakePolicy.initialWebRTCHandshakePeerResolution(
             expectedRemoteDeviceId: nil,
             learnedRemoteDeviceId: "E0715A9A-D0D3-47E6-B353-DE0A30293E1F",
             endpointDescription: "webrtc:session-1"
@@ -94,21 +124,21 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
 
     func testStrictPQCHandshakeWaitsUntilRemoteIdentityAndTrustedKEMAreReady() {
         XCTAssertTrue(
-            CrossNetworkConnectionManager.shouldWaitForStrictPQCInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldWaitForStrictPQCInitialWebRTCHandshake(
                 strictPQCRequested: true,
                 resolvedPeerDeviceId: nil,
                 hasTrustedPeerKEM: false
             )
         )
         XCTAssertTrue(
-            CrossNetworkConnectionManager.shouldWaitForStrictPQCInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldWaitForStrictPQCInitialWebRTCHandshake(
                 strictPQCRequested: true,
                 resolvedPeerDeviceId: "peer-1",
                 hasTrustedPeerKEM: false
             )
         )
         XCTAssertFalse(
-            CrossNetworkConnectionManager.shouldWaitForStrictPQCInitialWebRTCHandshake(
+            WebRTCPQCHandshakePolicy.shouldWaitForStrictPQCInitialWebRTCHandshake(
                 strictPQCRequested: true,
                 resolvedPeerDeviceId: "peer-1",
                 hasTrustedPeerKEM: true
@@ -123,7 +153,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             osVersion: "test"
         )
 
-        let mlkemOnlyPlans = CrossNetworkConnectionManager.webRTCPQCRekeyProviderPlans(
+        let mlkemOnlyPlans = WebRTCPQCHandshakePolicy.webRTCPQCRekeyProviderPlans(
             capability: capability,
             prefersLiboqsForPeer: false,
             peerHasXWing: false,
@@ -132,7 +162,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertEqual(mlkemOnlyPlans.first?.label, "native-pqc")
         XCTAssertEqual(mlkemOnlyPlans.first?.suites, [.mlkem768MLDSA65FS, .mlkem768MLDSA65])
 
-        let xwingPlans = CrossNetworkConnectionManager.webRTCPQCRekeyProviderPlans(
+        let xwingPlans = WebRTCPQCHandshakePolicy.webRTCPQCRekeyProviderPlans(
             capability: capability,
             prefersLiboqsForPeer: false,
             peerHasXWing: true,
@@ -149,7 +179,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             osVersion: "test"
         )
 
-        let plans = CrossNetworkConnectionManager.webRTCPQCRekeyProviderPlans(
+        let plans = WebRTCPQCHandshakePolicy.webRTCPQCRekeyProviderPlans(
             capability: capability,
             prefersLiboqsForPeer: true,
             peerHasXWing: false,
@@ -168,7 +198,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             osVersion: "test"
         )
 
-        let plans = CrossNetworkConnectionManager.webRTCPQCRekeyProviderPlans(
+        let plans = WebRTCPQCHandshakePolicy.webRTCPQCRekeyProviderPlans(
             capability: capability,
             prefersLiboqsForPeer: true,
             peerHasXWing: false,
@@ -231,13 +261,13 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     }
 
     func testWebRTCPQCRekeySharedSuitesCanonicalizeMLKEMForwardSecureKeys() {
-        let sharedFromBaseKey = CrossNetworkConnectionManager.webRTCPQCRekeySharedSuites(
+        let sharedFromBaseKey = WebRTCPQCHandshakePolicy.webRTCPQCRekeySharedSuites(
             localPQCSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65],
             with: [CryptoSuite.mlkem768MLDSA65.wireId: Data([0x99])]
         )
         XCTAssertEqual(sharedFromBaseKey, [.mlkem768MLDSA65FS, .mlkem768MLDSA65])
 
-        let sharedFromFSKey = CrossNetworkConnectionManager.webRTCPQCRekeySharedSuites(
+        let sharedFromFSKey = WebRTCPQCHandshakePolicy.webRTCPQCRekeySharedSuites(
             localPQCSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65],
             with: [CryptoSuite.mlkem768MLDSA65FS.wireId: Data([0x98])]
         )
@@ -245,7 +275,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     }
 
     func testWebRTCPQCRekeySharedSuitesDoNotTreatXWingAsMLKEM() {
-        let shared = CrossNetworkConnectionManager.webRTCPQCRekeySharedSuites(
+        let shared = WebRTCPQCHandshakePolicy.webRTCPQCRekeySharedSuites(
             localPQCSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65],
             with: [CryptoSuite.xwingMLDSA.wireId: Data([0x42])]
         )
@@ -367,22 +397,234 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
     }
 
-    func testStrictBootstrapOnlyAcceptsOnlyLivenessControlsBeforeRekey() throws {
+    func testLocalP2PKEMBootstrapQRCodePathIsRemoved() throws {
         let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
-        let bootstrapFilter = try sourceSlice(
-            from: "let messageKind = bootstrapAppMessageKind(msg)",
-            to: "case .pairingIdentityExchange(let rawPayload):",
-            in: source
+        let harness = try readSource("Sources/SkyBridgeCompassApp/LocalP2PFileTransferSmokeHarness.swift")
+
+        XCTAssertFalse(
+            source.contains("generateSignedP2PKEMBootstrapQRCode"),
+            "P2P KEM recovery must not expose an offline QR generator; stale KEM repair must use SKR-1."
+        )
+        XCTAssertTrue(source.contains("isP2PKEMBootstrapCapability"))
+        XCTAssertTrue(source.contains("P2P KEM QR bootstrap has been removed"))
+        XCTAssertTrue(
+            source.contains("logVerifiedQRCodeKEMIgnored"),
+            "Verified QR material may support route setup, but it must not be persisted as P2P KEM trust."
+        )
+        XCTAssertTrue(source.contains("不会导入 KEM trust"))
+        XCTAssertFalse(
+            source.contains("persistVerifiedQRCodeKEMTrust"),
+            "A verified QR must not write KEM trust; stale KEM repair must use signed LAN refresh evidence."
+        )
+        XCTAssertFalse(
+            harness.contains("qr-connect-link mode=offline-p2p-kem"),
+            "The local file-transfer smoke host must not emit an offline P2P KEM QR link."
+        )
+        XCTAssertFalse(
+            harness.contains("SKYBRIDGE_SMOKE_QR_CONNECT_LINK_FILE"),
+            "The smoke host must not accept a QR output path for KEM recovery."
+        )
+    }
+
+    func testMacFileTransferSmokeRequiresSignedKEMRefreshInsteadOfQRCode() throws {
+        let scriptSource = try readSource("Scripts/run_real_device_file_transfer_smoke.sh")
+        XCTAssertTrue(
+            scriptSource.contains("SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH"),
+            "The real-device smoke script must require signed KEM refresh evidence instead of relying on QR bootstrap."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("SKR-1 signed LAN KEM refresh served"),
+            "The real-device smoke script must wait for Mac-side SKR-1 served evidence."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("SKR-1 signed LAN KEM refresh verified and imported"),
+            "The real-device smoke script must wait for iOS-side SKR-1 verified import evidence."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("SKYBRIDGE_SMOKE_USE_OOB_QR_BOOTSTRAP has been removed"),
+            "Smoke must reject legacy QR KEM bootstrap so a QR path cannot mask KEM recovery."
+        )
+        XCTAssertFalse(
+            scriptSource.contains("qr-connect-link mode=offline-p2p-kem file="),
+            "Smoke must not wait for an offline P2P KEM QR link."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("SKYBRIDGE_SMOKE_PIB_APPROVAL_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS"),
+            "The real-device smoke script must fail PIB-1 approval as its own stage before the outer smoke timeout hides the cause."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("approve on Mac first if prompted, then approve on iOS within ${PIB_APPROVAL_TIMEOUT_SECONDS}s"),
+            "The operator prompt must report the actual bounded PIB-1 approval window and both approval sides."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("requester protocol identity pinned"),
+            "The real-device smoke script must wait for Mac-side requester pinning before SKR-1."
         )
 
-        XCTAssertTrue(bootstrapFilter.contains("case .heartbeat(let payload):"))
-        XCTAssertTrue(bootstrapFilter.contains("case .ping(let payload):"))
-        XCTAssertTrue(bootstrapFilter.contains("case .pong, .peerDisconnecting:"))
-        XCTAssertTrue(bootstrapFilter.contains("accepted control app message before PQC rekey"))
-        XCTAssertTrue(bootstrapFilter.contains("type=\\(messageKind"))
+        let p2pSource = try [
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift",
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryService+BootstrapControl.swift"
+        ].map { path in
+            try readSource(path)
+        }.joined(separator: "\n")
+        XCTAssertTrue(p2pSource.contains("makeBootstrapControlResponse"))
+        XCTAssertTrue(p2pSource.contains("RemoteControlSmokeStatusWriter.append(controlResponse.statusLine)"))
+
+        let legacyDiscoverySource = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManager.swift")
+        XCTAssertTrue(
+            legacyDiscoverySource.contains("handlePreHandshakePlaintextControl"),
+            "LocalLanInteropHost uses DeviceDiscoveryManager, so its inbound control channel must serve SKR-1 before the handshake."
+        )
+        XCTAssertTrue(legacyDiscoverySource.contains("P2PDiscoveryService.makeBootstrapControlResponse"))
+        XCTAssertTrue(legacyDiscoverySource.contains("RemoteControlSmokeStatusWriter.append(controlResponse.statusLine)"))
+
+        let localHostSource = try readSource("Sources/LocalLanInteropHost/main.swift")
+        XCTAssertTrue(localHostSource.contains("timer.schedule(deadline: .now(), repeating: .milliseconds(8)"))
+        XCTAssertTrue(localHostSource.contains("import QuartzCore"))
+        XCTAssertTrue(localHostSource.contains("private let accentLayer = CALayer()"))
+        XCTAssertTrue(localHostSource.contains("CATransaction.setDisableActions(true)"))
+        XCTAssertTrue(localHostSource.contains("CATransaction.flush()"))
+        XCTAssertTrue(localHostSource.contains("let window = NSPanel("))
+        XCTAssertTrue(localHostSource.contains("window.hidesOnDeactivate = false"))
+        XCTAssertTrue(localHostSource.contains("window.level = .floating"))
+        XCTAssertTrue(localHostSource.contains("window.displayIfNeeded()"))
+        XCTAssertTrue(localHostSource.contains("application.updateWindows()"))
+        XCTAssertTrue(localHostSource.contains("let mainDisplayID = CGMainDisplayID()"))
+        XCTAssertTrue(localHostSource.contains("Self.screen(for: mainDisplayID)"))
+        XCTAssertTrue(localHostSource.contains("displayID=\\(displayID)"))
+        XCTAssertTrue(localHostSource.contains("windowVisible=\\(visible)"))
+        XCTAssertTrue(localHostSource.contains("windowOcclusionVisible=\\(occlusionVisible)"))
+        XCTAssertTrue(localHostSource.contains("windowLevel=\\(level)"))
+        XCTAssertTrue(localHostSource.contains("windowFrame=\\(Int(windowFrame.origin.x))"))
         XCTAssertFalse(
-            bootstrapFilter.contains("startScreenStreamingIfNeeded"),
-            "Liveness/control messages may keep bootstrap alive, but must not start the media path before PQC rekey."
+            localHostSource.contains("window.level = .screenSaver"),
+            "The smoke source must stay in a capture-compatible app window level; screen-saver level can be invisible to display capture."
+        )
+        XCTAssertFalse(
+            localHostSource.contains("MTKView"),
+            "The smoke capture source must use deterministic Core Animation updates, not a throttled MTKView display link."
+        )
+
+        let remoteSmokeSource = try readSource("Scripts/run_real_device_p2p_remote_smoke.sh")
+        XCTAssertTrue(remoteSmokeSource.contains("verify_mac_smoke_capture_source_visible()"))
+        XCTAssertTrue(remoteSmokeSource.contains("screencapture -x \"$first\""))
+        XCTAssertTrue(remoteSmokeSource.contains("changedRatio"))
+        XCTAssertTrue(remoteSmokeSource.contains("smoke-capture-source captureVerified=1"))
+        XCTAssertTrue(remoteSmokeSource.contains("verify_mac_smoke_capture_source_visible\nwait_for_file_pattern \"$HOST_PQC_REPORT\""))
+    }
+
+    func testBonjourDiscoveryDoesNotImportKEMPublicKeysFromTXT() throws {
+        let discoverySource = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let identitySlice = try sourceSlice(
+            from: "private func extractStrongIdentity(from result: NWBrowser.Result)",
+            to: "private func extractSOAFlag(from result: NWBrowser.Result)",
+            in: discoverySource
+        )
+        XCTAssertFalse(identitySlice.localizedCaseInsensitiveContains("kem"))
+        XCTAssertFalse(identitySlice.contains("KEMTrustStore"))
+        XCTAssertFalse(identitySlice.contains("PeerKEMBootstrapStore"))
+
+        let txtParserSource = try readSource("Sources/SkyBridgeCore/P2P/P2PDeviceDiscovery.swift")
+        let createDeviceSlice = try sourceSlice(
+            from: "public static func createDevice(",
+            to: "public static func validate(_ txtRecord: [String: String])",
+            in: txtParserSource
+        )
+        XCTAssertFalse(createDeviceSlice.localizedCaseInsensitiveContains("kemPublic"))
+        XCTAssertFalse(createDeviceSlice.contains("KEMPublicKeyInfo"))
+
+        let advertiserSource = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift")
+        XCTAssertTrue(advertiserSource.contains("record[\"kemRefreshVersion\"] = \"1\""))
+        XCTAssertTrue(advertiserSource.contains("record[\"kemKeyDigest\"] = kemKeyDigest"))
+        XCTAssertTrue(advertiserSource.contains("record[\"identityFingerprint\"] = snap.pubKeyFP"))
+        XCTAssertFalse(advertiserSource.contains("record[\"kemPublicKey\"]"))
+        XCTAssertFalse(advertiserSource.contains("record[\"kemPublicKeys\"]"))
+    }
+
+    func testStrictBootstrapOnlyAcceptsOnlyBootstrapSecurityAndLivenessBeforeRekey() {
+        let kemKey = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+            publicKey: Data(repeating: 0x42, count: 1_216)
+        )
+        let pairing = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "device-a",
+            kemPublicKeys: [kemKey]
+        )
+        let kemRefreshRequest = AppMessage.KEMRefreshRequestPayload(
+            requesterDeviceId: "device-a",
+            targetDeviceId: "device-b",
+            requestedSuiteWireIds: [CryptoSuite.xwingMLDSA.wireId],
+            nonce: Data(repeating: 0x01, count: 16)
+        )
+        let signedKEMRefresh = AppMessage.SignedKEMRefreshPayload(
+            deviceId: "device-a",
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+            protocolIdentityPublicKey: Data([0x02]),
+            protocolIdentityFingerprint: "fingerprint-a",
+            kemPublicKeys: [kemKey],
+            keyId: "key-a",
+            generation: 1,
+            expiresAt: Date(timeIntervalSince1970: 2_000),
+            requestNonce: Data(repeating: 0x03, count: 16),
+            signature: Data([0x04])
+        )
+        let kemRefreshFailure = AppMessage.KEMRefreshFailurePayload(
+            requesterDeviceId: "device-a",
+            targetDeviceId: "device-b",
+            stage: "test",
+            reasonCode: "test_reason",
+            reason: "test"
+        )
+        let bindingRequest = AppMessage.ProtocolIdentityBindingRequestPayload(
+            requesterDeviceId: "device-a",
+            targetDeviceId: "device-b",
+            requestedProtocolSigningAlgorithms: [ProtocolSigningAlgorithm.ed25519.rawValue],
+            nonce: Data(repeating: 0x05, count: 16)
+        )
+        let signedBinding = AppMessage.SignedProtocolIdentityBindingPayload(
+            deviceId: "device-a",
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            protocolIdentityPublicKey: Data([0x06]),
+            protocolIdentityFingerprint: "fingerprint-b",
+            expiresAt: Date(timeIntervalSince1970: 2_000),
+            requestNonce: Data(repeating: 0x07, count: 16),
+            signature: Data([0x08])
+        )
+
+        let bootstrapSecurityMessages: [AppMessage] = [
+            .pairingIdentityExchange(pairing),
+            .kemRefreshRequest(kemRefreshRequest),
+            .signedKEMRefresh(signedKEMRefresh),
+            .kemRefreshFailure(kemRefreshFailure),
+            .protocolIdentityBindingRequest(bindingRequest),
+            .signedProtocolIdentityBinding(signedBinding)
+        ]
+        for message in bootstrapSecurityMessages {
+            XCTAssertEqual(
+                WebRTCBootstrapAppMessagePolicy.admission(for: message),
+                .continueBootstrapSecurityFlow
+            )
+        }
+
+        let livenessMessages: [AppMessage] = [
+            .heartbeat(.init(deviceId: "device-a")),
+            .ping(.init(id: 1)),
+            .pong(.init(id: 1)),
+            .peerDisconnecting(.init(deviceId: "device-a"))
+        ]
+        for message in livenessMessages {
+            XCTAssertEqual(
+                WebRTCBootstrapAppMessagePolicy.admission(for: message),
+                .consumeLivenessLocally
+            )
+        }
+
+        XCTAssertEqual(
+            WebRTCBootstrapAppMessagePolicy.admission(
+                for: .clipboard(.init(mimeType: "text/plain", dataBase64: "dGVzdA=="))
+            ),
+            .dropUntilPQCRekey,
+            "Business payloads must not start the media/control path before PQC rekey."
         )
     }
 
@@ -480,6 +722,38 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(source.contains("PairingTrustApprovalService.policyBindingKey"))
         XCTAssertTrue(source.contains("policyBindingKey: policyBindingKey"))
         XCTAssertTrue(source.contains("PairingTrustApprovalService.shared.updateVerificationCode"))
+    }
+
+    func testSignedAppSmokeHasAppLevelPairingApprovalSurface() throws {
+        let appSource = try readSource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
+        let scriptSource = try readSource("Scripts/run_real_device_file_transfer_smoke.sh")
+
+        let windowGroupPrefix = try sourceSlice(
+            from: "WindowGroup(localizationManager.localizedString(\"app.name\"))",
+            to: ".task {",
+            in: appSource
+        )
+        let rootContainerSource = try sourceSlice(
+            from: "private struct RootContainerView: View",
+            to: "@available(macOS 14.0, *)\nprivate struct SupabasePasswordResetSheet",
+            in: appSource
+        )
+
+        XCTAssertTrue(
+            windowGroupPrefix.contains("PairingTrustApprovalSheet"),
+            "PIB-1/SKR-1 approval must be app-level so signed-app smoke, startup, and unauthenticated states can present it."
+        )
+        XCTAssertFalse(
+            rootContainerSource.contains("PairingTrustApprovalSheet"),
+            "Approval must not be trapped behind Dashboard/RootContainer startup state."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("foregrounding signed app so PIB-1 requester approval is visible"),
+            "User-realistic signed-app smoke must launch foreground when operator approval is required."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("OPEN_ARGS=(-n --stdout \"$HOST_STDOUT\" --stderr \"$HOST_STDERR\")")
+        )
     }
 
     private func readSource(_ relativePath: String) throws -> String {

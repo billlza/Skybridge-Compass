@@ -406,6 +406,11 @@ public class P2PSecurityManager: ObservableObject, Sendable {
  // 清理相关数据
         sessionKeys.removeValue(forKey: deviceId)
         permissionManager.clearAllPermissions(for: deviceId)
+        Task {
+            if #available(macOS 14.0, iOS 17.0, *) {
+                await PeerBootstrapTrustMaterialCleanup.forgetDevice(deviceIds: [deviceId])
+            }
+        }
         saveTrustedDevices()
     }
     

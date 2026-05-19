@@ -39,7 +39,7 @@ final class PeerTrustLookupTests: XCTestCase {
             deviceId: canonicalId,
             pubKeyFP: String(repeating: "a", count: 64),
             publicKey: Data([0x01]),
-            kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data([0xAA]))],
+            kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data(repeating: 0xAA, count: 1_184))],
             capabilities: ["peerEndpoint=\(canonicalId)"],
             signature: Data([0x02]),
             deviceName: "Lza's iPhone",
@@ -62,7 +62,7 @@ final class PeerTrustLookupTests: XCTestCase {
         let canonicalId = "id:\(UUID().uuidString)"
         let hostAlias = "host:fe80::81d:bb45:8c18:6d6a%en0"
         let normalizedHostAlias = "host:fe80::81d:bb45:8c18:6d6a"
-        let expectedKey = Data([0xAB, 0xCD, 0xEF])
+        let expectedKey = Data(repeating: 0xAB, count: 1_184)
         let bootstrapStore = PeerKEMBootstrapStore.shared
         await bootstrapStore.clearForTesting()
         defer {
@@ -117,7 +117,7 @@ final class PeerTrustLookupTests: XCTestCase {
     func testDefaultHandshakeTrustProviderPrefersBootstrapCacheWhenTrustedKEMKeysConflict() async throws {
         let alias = "bonjour:office ipad@local."
         let suite = CryptoSuite(wireId: 257)
-        let cachedKey = Data([0xCC, 0xDD, 0xEE])
+        let cachedKey = Data(repeating: 0xCC, count: 1_184)
         let trust = TrustSyncService.shared
         let bootstrapStore = PeerKEMBootstrapStore.shared
         let cleanupIds = ["id:conflict-a", "id:conflict-b"]
@@ -141,7 +141,7 @@ final class PeerTrustLookupTests: XCTestCase {
                 deviceId: cleanupIds[0],
                 pubKeyFP: String(repeating: "1", count: 64),
                 publicKey: Data([0x01]),
-                kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: Data([0xAA]))],
+                kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: Data(repeating: 0xAA, count: 1_184))],
                 signature: Data(),
                 deviceName: "Office iPad",
                 currentDeviceId: cleanupIds[0],
@@ -153,7 +153,7 @@ final class PeerTrustLookupTests: XCTestCase {
                 deviceId: cleanupIds[1],
                 pubKeyFP: String(repeating: "2", count: 64),
                 publicKey: Data([0x02]),
-                kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: Data([0xBB]))],
+                kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: Data(repeating: 0xBB, count: 1_184))],
                 signature: Data(),
                 deviceName: "Office iPad",
                 currentDeviceId: cleanupIds[1],
@@ -214,5 +214,109 @@ final class PeerTrustLookupTests: XCTestCase {
         )
 
         XCTAssertNil(resolved)
+    }
+
+    @MainActor
+    func testP2PDiscoveryKEMAliasRepairFindsUniqueDisplayNameBackedTrustRecord() {
+        let scannedDevice = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang's iPhone 16 Pro",
+            ipv4: "192.168.0.106",
+            ipv6: "fe80::c55:97f0:7246:915%en0",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 50873],
+            uniqueIdentifier: "recent:bonjour:Ziang's iPhone 16 Pro@local.",
+            source: .skybridgeBonjour
+        )
+        let trustedRecord = TrustRecord(
+            deviceId: "id:ios-protocol-device",
+            pubKeyFP: String(repeating: "b", count: 64),
+            publicKey: Data([0x01]),
+            kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 0x0001, publicKey: Data(repeating: 0xAA, count: 1_216))],
+            signature: Data([0x02]),
+            deviceName: "Ziang's iPhone 16 Pro",
+            currentDeviceId: "id:ios-protocol-device",
+            knownDeviceIds: ["host:fe80::c55:97f0:7246:915"]
+        )
+
+        let selected = P2PDiscoveryService.uniqueKEMTrustRecordForAliasRepair(
+            device: scannedDevice,
+            records: [trustedRecord]
+        )
+
+        XCTAssertEqual(selected?.deviceId, trustedRecord.deviceId)
+        let aliases = P2PDiscoveryService.kemBootstrapAliasRepairCandidates(for: scannedDevice)
+        XCTAssertTrue(aliases.contains("recent:bonjour:Ziang's iPhone 16 Pro@local."))
+        XCTAssertTrue(aliases.contains("host:fe80::c55:97f0:7246:915"))
+    }
+
+    @MainActor
+    func testP2PDiscoveryKEMAliasRepairToleratesOSVersionSuffixInDiscoveryName() {
+        let scannedDevice = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang's iPhone 16 Pro - iOS 26.5",
+            ipv4: "192.168.0.106",
+            ipv6: "fe80::c55:97f0:7246:915%en0",
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 50873],
+            uniqueIdentifier: "recent:bonjour:Ziang's iPhone 16 Pro - Version 26.5 (Build 23F77)@local.",
+            source: .skybridgeBonjour
+        )
+        let trustedRecord = TrustRecord(
+            deviceId: "id:ios-protocol-device",
+            pubKeyFP: String(repeating: "e", count: 64),
+            publicKey: Data([0x01]),
+            kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 0x0001, publicKey: Data(repeating: 0xCC, count: 1_216))],
+            signature: Data([0x02]),
+            deviceName: "Ziang's iPhone 16 Pro",
+            currentDeviceId: "id:ios-protocol-device",
+            knownDeviceIds: ["host:fe80::c55:97f0:7246:915"]
+        )
+
+        let selected = P2PDiscoveryService.uniqueKEMTrustRecordForAliasRepair(
+            device: scannedDevice,
+            records: [trustedRecord]
+        )
+
+        XCTAssertEqual(selected?.deviceId, trustedRecord.deviceId)
+    }
+
+    @MainActor
+    func testP2PDiscoveryKEMAliasRepairRejectsAmbiguousDisplayNameMatches() {
+        let scannedDevice = DiscoveredDevice(
+            id: UUID(),
+            name: "Office iPhone",
+            ipv4: "192.168.0.110",
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 50873],
+            uniqueIdentifier: "recent:name:Office iPhone",
+            source: .skybridgeBonjour
+        )
+        let firstRecord = TrustRecord(
+            deviceId: "id:office-iphone-a",
+            pubKeyFP: String(repeating: "c", count: 64),
+            publicKey: Data([0x01]),
+            kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 0x0001, publicKey: Data(repeating: 0xA1, count: 1_216))],
+            signature: Data([0x02]),
+            deviceName: "Office iPhone",
+            currentDeviceId: "id:office-iphone-a"
+        )
+        let secondRecord = TrustRecord(
+            deviceId: "id:office-iphone-b",
+            pubKeyFP: String(repeating: "d", count: 64),
+            publicKey: Data([0x03]),
+            kemPublicKeys: [KEMPublicKeyInfo(suiteWireId: 0x0001, publicKey: Data(repeating: 0xB1, count: 1_216))],
+            signature: Data([0x04]),
+            deviceName: "Office iPhone",
+            currentDeviceId: "id:office-iphone-b"
+        )
+
+        let selected = P2PDiscoveryService.uniqueKEMTrustRecordForAliasRepair(
+            device: scannedDevice,
+            records: [firstRecord, secondRecord]
+        )
+
+        XCTAssertNil(selected)
     }
 }

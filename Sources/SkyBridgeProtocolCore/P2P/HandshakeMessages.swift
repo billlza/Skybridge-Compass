@@ -549,7 +549,11 @@ public struct HandshakeMessageA: Sendable {
         supportedSuites.reserveCapacity(Int(supportedCount))
         for _ in 0..<supportedCount {
             let suiteId = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
-            supportedSuites.append(CryptoSuite(wireId: suiteId))
+            let suite = CryptoSuite(wireId: suiteId)
+            guard suite.isKnown else {
+                throw HandshakeError.failed(.suiteNotSupported)
+            }
+            supportedSuites.append(suite)
         }
 
  // keyShares
@@ -575,6 +579,9 @@ public struct HandshakeMessageA: Sendable {
             offset += Int(shareLen)
 
             let suite = CryptoSuite(wireId: suiteId)
+            guard suite.isKnown else {
+                throw HandshakeError.failed(.suiteNotSupported)
+            }
             try HandshakeEncoding.validateKeyShareLength(shareBytes.count, for: suite)
             keyShares.append(HandshakeKeyShare(suite: suite, shareBytes: Data(shareBytes)))
         }
@@ -1026,6 +1033,9 @@ public struct HandshakeMessageB: Sendable {
  // selectedSuiteWireId
         let suiteWireId = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         let selectedSuite = CryptoSuite(wireId: suiteWireId)
+        guard selectedSuite.isKnown else {
+            throw HandshakeError.failed(.suiteNotSupported)
+        }
 
  // responderShare
         let shareLen = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)

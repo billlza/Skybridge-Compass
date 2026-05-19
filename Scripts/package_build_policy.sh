@@ -59,6 +59,17 @@ skybridge_release_framework_binary_path() {
 SKYBRIDGE_RELEASE_BUILD_VALIDATION_REASON=""
 SKYBRIDGE_RELEASE_BUILD_VALIDATION_DETAIL=""
 
+skybridge_assert_no_smoke_auto_approval_for_release_context() {
+  local release_context="${1:-release}"
+
+  if [[ "${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-0}" == "1" ]]; then
+    echo "错误：SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=1 is smoke-only and is forbidden for ${release_context}" >&2
+    return 1
+  fi
+
+  return 0
+}
+
 skybridge_validate_release_build_dir() {
   local build_dir="$1"
   local executable_name="$2"
@@ -107,13 +118,22 @@ skybridge_assert_package_build_policy() {
   local package_context="$1"
   local build_source="$2"
 
-  if [[ "$package_context" == "release_dmg" && "$build_source" == "swiftpm_release" ]]; then
-    cat >&2 <<'EOF'
-错误：发布 DMG 禁止使用 SwiftPM release fallback 产物打包。
-请先完成 Xcode Release 构建，再重新运行 package_app.sh / build_dmg.sh。
-EOF
+  if [[ "$package_context" == "release_dmg" ]]; then
+    skybridge_assert_no_smoke_auto_approval_for_release_context "release_dmg packaging" || return 1
+
+    if [[ "$build_source" == "xcode_release" ]]; then
+      return 0
+    fi
+
+    echo "错误：发布 DMG 只接受明确的 Xcode Release 产物，当前构建来源：${build_source}" >&2
     return 1
   fi
+
+  case "$build_source" in
+    xcode_release|swiftpm_release)
+      return 0
+      ;;
+  esac
 
   return 0
 }

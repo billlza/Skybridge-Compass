@@ -1,43 +1,44 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-use directories::ProjectDirs;
+use anyhow::{Result, anyhow};
 use skybridge_core::{
-    AgentHealthSnapshot, AgentRuntimeStatus, CryptoSuite, EventLevel, InboundMessage,
-    LocalIdentityState, ManagedSessionControl, NativeWebRtcConfig, NativeWebRtcEvent,
-    NativeWebRtcSession, PqcInitiatorConfig, PqcResponderConfig, RuntimeSessionRole,
-    RuntimeSessionState, RuntimeSessionTransportEvent, SignalServerClient, SignalingConnection,
-    SignalingLifecyclePhase, SignalingRuntimeEvent, StructuredEvent, make_join_envelope,
+    AgentHealthSnapshot, AgentRuntimeStatus, EventLevel, InboundMessage, LocalIdentityState,
+    ManagedSessionControl, NativeWebRtcConfig, NativeWebRtcEvent, NativeWebRtcSession,
+    RuntimeSessionRole, RuntimeSessionState, RuntimeSessionTransportEvent, SignalServerClient,
+    SignalingConnection, SignalingLifecyclePhase, SignalingRuntimeEvent, StructuredEvent,
+    make_join_envelope,
 };
 use time::OffsetDateTime;
-use tokio::fs;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::time::UtcTime;
 
 use crate::state::{
-    DeviceIdentityMaterial, apply_signaling_event, apply_transport_event,
-    disconnect_session_if_active, ensure_device_identity, ensure_rust_pqc_identity,
-    load_managed_session_controls, load_session_registry, remove_managed_session_control,
-    signing_binding, update_session_remote_peer,
+    apply_signaling_event, apply_transport_event, disconnect_session_if_active,
+    ensure_device_identity, load_managed_session_controls, load_session_registry,
+    remove_managed_session_control, signing_binding, update_session_remote_peer,
 };
 
-static TRACING_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
+mod fs_io;
+mod options;
+mod paths;
+mod pqc_config;
+#[cfg(test)]
+mod tests;
+mod tracing_setup;
 
-const ENV_PEER_MLKEM768_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64";
-const ENV_PEER_XWING_PUBLIC_KEY_B64: &str = "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64";
-const ENV_PQC_PREFERRED_SUITE: &str = "SKYBRIDGE_PQC_PREFERRED_SUITE";
-const ENV_PQC_BRIDGE_IDENTITY: &str = "SKYBRIDGE_PQC_BRIDGE_IDENTITY";
+pub use options::AgentRuntimeOptions;
+pub use paths::{AgentPaths, resolve_paths};
+
+use fs_io::{append_event_line, ensure_layout, load_json, write_json};
+use pqc_config::{build_pqc_initiator_config_from_env, build_pqc_responder_config};
+use tracing_setup::init_tracing;
+
+pub(crate) use fs_io::{restrict_dir_permissions, restrict_file_permissions};
 
 #[derive(Debug)]
 struct ManagedSessionWorker {
@@ -57,58 +58,6 @@ impl ManagedSessionWorker {
     fn is_finished(&self) -> bool {
         self.handle.is_finished()
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentRuntimeOptions {
-    pub state_dir: Option<PathBuf>,
-    pub heartbeat_interval: Duration,
-}
-
-impl Default for AgentRuntimeOptions {
-    fn default() -> Self {
-        Self {
-            state_dir: None,
-            heartbeat_interval: Duration::from_secs(2),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentPaths {
-    pub root: PathBuf,
-    pub identity_dir: PathBuf,
-    pub runtime_dir: PathBuf,
-    pub logs_dir: PathBuf,
-    pub identity_file: PathBuf,
-    pub session_controls_file: PathBuf,
-    pub health_file: PathBuf,
-    pub log_file: PathBuf,
-}
-
-pub fn resolve_paths(state_dir_override: Option<PathBuf>) -> Result<AgentPaths> {
-    let root = if let Some(explicit) = state_dir_override {
-        explicit
-    } else if let Some(from_env) = std::env::var_os("SKYBRIDGE_STATE_DIR") {
-        PathBuf::from(from_env)
-    } else {
-        let dirs = ProjectDirs::from("com", "SkyBridge", "skybridge")
-            .ok_or_else(|| anyhow!("failed to resolve platform state directory"))?;
-        dirs.state_dir()
-            .ok_or_else(|| anyhow!("platform state directory is unavailable"))?
-            .to_path_buf()
-    };
-
-    Ok(AgentPaths {
-        identity_dir: root.join("identity"),
-        runtime_dir: root.join("runtime"),
-        logs_dir: root.join("logs"),
-        identity_file: root.join("identity").join("device.json"),
-        session_controls_file: root.join("runtime").join("session-controls.json"),
-        health_file: root.join("runtime").join("health.json"),
-        log_file: root.join("logs").join("agent.log"),
-        root,
-    })
 }
 
 pub async fn run_agent(options: AgentRuntimeOptions) -> Result<()> {
@@ -174,68 +123,6 @@ pub async fn load_identity_state(paths: &AgentPaths) -> Result<Option<LocalIdent
 
 pub async fn load_health_snapshot(paths: &AgentPaths) -> Result<Option<AgentHealthSnapshot>> {
     load_json::<AgentHealthSnapshot>(&paths.health_file).await
-}
-
-async fn ensure_layout(paths: &AgentPaths) -> Result<()> {
-    ensure_dir(&paths.root).await?;
-    ensure_dir(&paths.identity_dir).await?;
-    ensure_dir(&paths.runtime_dir).await?;
-    ensure_dir(&paths.logs_dir).await?;
-    Ok(())
-}
-
-async fn ensure_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .await
-        .with_context(|| format!("failed to create directory {}", path.display()))?;
-    restrict_dir_permissions(path).await
-}
-
-async fn write_json<T>(path: &Path, value: &T) -> Result<()>
-where
-    T: serde::Serialize,
-{
-    let body = serde_json::to_vec_pretty(value).context("failed to encode json")?;
-    fs::write(path, body)
-        .await
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    restrict_file_permissions(path).await
-}
-
-async fn append_event_line(path: &Path, event: StructuredEvent) -> Result<()> {
-    let body = serde_json::to_vec(&event).context("failed to encode structured event")?;
-    let mut line = body;
-    line.push(b'\n');
-    use tokio::io::AsyncWriteExt;
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    file.write_all(&line)
-        .await
-        .with_context(|| format!("failed to append {}", path.display()))?;
-    file.flush()
-        .await
-        .with_context(|| format!("failed to flush {}", path.display()))?;
-    restrict_file_permissions(path).await
-}
-
-async fn load_json<T>(path: &Path) -> Result<Option<T>>
-where
-    T: for<'de> serde::Deserialize<'de>,
-{
-    match fs::read_to_string(path).await {
-        Ok(body) => {
-            let decoded = serde_json::from_str(&body)
-                .with_context(|| format!("failed to decode {}", path.display()))?;
-            Ok(Some(decoded))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
-    }
 }
 
 fn spawn_heartbeat(
@@ -398,169 +285,6 @@ async fn shutdown_managed_session_workers(workers: &mut BTreeMap<String, Managed
     }
 }
 
-fn pqc_bridge_identity_enabled() -> bool {
-    std::env::var(ENV_PQC_BRIDGE_IDENTITY)
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-}
-
-async fn build_pqc_initiator_config_from_env(
-    paths: &AgentPaths,
-    identity: &DeviceIdentityMaterial,
-    local_binding: &skybridge_core::ProtocolIdentityBinding,
-    role: RuntimeSessionRole,
-) -> Result<Option<PqcInitiatorConfig>> {
-    if role != RuntimeSessionRole::Initiator {
-        return Ok(None);
-    }
-
-    let mut peer_kem_public_keys = BTreeMap::new();
-    if let Some(value) = std::env::var(ENV_PEER_XWING_PUBLIC_KEY_B64)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        peer_kem_public_keys.insert(
-            CryptoSuite::XWING_MLDSA,
-            STANDARD
-                .decode(value.trim().as_bytes())
-                .map_err(|error| anyhow!("invalid X-Wing peer public key: {error}"))?,
-        );
-    }
-    if let Some(value) = std::env::var(ENV_PEER_MLKEM768_PUBLIC_KEY_B64)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        peer_kem_public_keys.insert(
-            CryptoSuite::MLKEM768_MLDSA65,
-            STANDARD
-                .decode(value.trim().as_bytes())
-                .map_err(|error| anyhow!("invalid ML-KEM-768 peer public key: {error}"))?,
-        );
-    }
-
-    let bridge_identity = pqc_bridge_identity_enabled();
-
-    if peer_kem_public_keys.is_empty() {
-        if local_binding.protocol_signing_algorithm
-            == skybridge_core::ProtocolSigningAlgorithm::MlDsa65
-            || bridge_identity
-        {
-            bail!(
-                "ML-DSA-65 protocol identity selected but no peer PQC public keys are configured via {} or {}",
-                ENV_PEER_XWING_PUBLIC_KEY_B64,
-                ENV_PEER_MLKEM768_PUBLIC_KEY_B64
-            );
-        }
-        return Ok(None);
-    }
-
-    let (pqc_binding, signing_secret_key) = if local_binding.protocol_signing_algorithm
-        == skybridge_core::ProtocolSigningAlgorithm::MlDsa65
-    {
-        let signing_secret_key = identity
-            .signing_key
-            .mldsa65_secret_key_bytes()
-            .ok_or_else(|| anyhow!("missing ML-DSA-65 signing secret key"))?;
-        (local_binding.clone(), signing_secret_key)
-    } else if bridge_identity {
-        let pqc_identity = ensure_rust_pqc_identity(paths).await?;
-        warn!(
-            kind = "agent.session.pqc_bridge_identity_enabled",
-            device_id = %local_binding.device_id,
-            control_plane_algorithm = %local_binding.protocol_signing_algorithm,
-            handshake_algorithm = %pqc_identity.signing_algorithm,
-            "using bridge PQC handshake identity separate from control-plane identity"
-        );
-        (
-            skybridge_core::ProtocolIdentityBinding::new(
-                local_binding.device_id.clone(),
-                pqc_identity.signing_algorithm,
-                pqc_identity.signing_public_key.clone(),
-                None,
-            )
-            .map_err(anyhow::Error::from)?,
-            pqc_identity.signing_secret_key,
-        )
-    } else {
-        bail!(
-            "peer PQC public keys are configured, but the local protocol identity is {}; set SKYBRIDGE_PROTOCOL_SIGNING_ALGORITHM=ML-DSA-65 first",
-            local_binding.protocol_signing_algorithm
-        );
-    };
-    let preferred_suite = std::env::var(ENV_PQC_PREFERRED_SUITE)
-        .ok()
-        .and_then(|value| CryptoSuite::from_name(&value));
-    let mut preferred_suites = Vec::new();
-    if let Some(preferred_suite) = preferred_suite {
-        if peer_kem_public_keys.contains_key(&preferred_suite) {
-            preferred_suites.push(preferred_suite);
-        }
-    }
-    for candidate in [CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65] {
-        if peer_kem_public_keys.contains_key(&candidate) && !preferred_suites.contains(&candidate) {
-            preferred_suites.push(candidate);
-        }
-    }
-
-    Ok(Some(PqcInitiatorConfig {
-        local_binding: pqc_binding,
-        signing_secret_key,
-        local_device_name: Some(identity.state.device.device_name.clone()),
-        preferred_suites,
-        peer_kem_public_keys,
-    }))
-}
-
-async fn build_pqc_responder_config(
-    paths: &AgentPaths,
-    identity: &DeviceIdentityMaterial,
-    local_binding: &skybridge_core::ProtocolIdentityBinding,
-    role: RuntimeSessionRole,
-) -> Result<Option<PqcResponderConfig>> {
-    if role != RuntimeSessionRole::Responder {
-        return Ok(None);
-    }
-    let bridge_identity = pqc_bridge_identity_enabled();
-    if local_binding.protocol_signing_algorithm != skybridge_core::ProtocolSigningAlgorithm::MlDsa65
-        && !bridge_identity
-    {
-        return Ok(None);
-    }
-
-    let pqc_identity = ensure_rust_pqc_identity(paths).await?;
-    let pqc_binding = if local_binding.protocol_signing_algorithm
-        == skybridge_core::ProtocolSigningAlgorithm::MlDsa65
-    {
-        local_binding.clone()
-    } else {
-        warn!(
-            kind = "agent.session.pqc_bridge_identity_enabled",
-            device_id = %local_binding.device_id,
-            control_plane_algorithm = %local_binding.protocol_signing_algorithm,
-            handshake_algorithm = %pqc_identity.signing_algorithm,
-            "using bridge PQC responder identity separate from control-plane identity"
-        );
-        skybridge_core::ProtocolIdentityBinding::new(
-            local_binding.device_id.clone(),
-            pqc_identity.signing_algorithm,
-            pqc_identity.signing_public_key.clone(),
-            None,
-        )
-        .map_err(anyhow::Error::from)?
-    };
-    Ok(Some(PqcResponderConfig {
-        local_binding: pqc_binding,
-        local_device_name: Some(identity.state.device.device_name.clone()),
-        identity: pqc_identity,
-        supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
-    }))
-}
-
 async fn reconcile_managed_sessions(
     paths: &AgentPaths,
     root_cancel: &CancellationToken,
@@ -570,7 +294,7 @@ async fn reconcile_managed_sessions(
         paths,
         root_cancel,
         workers,
-        |paths, control, cancel| spawn_managed_session_worker(paths, control, cancel),
+        spawn_managed_session_worker,
     )
     .await
 }
@@ -607,10 +331,9 @@ where
         if workers
             .get(&session_id)
             .is_some_and(ManagedSessionWorker::is_finished)
+            && let Some(worker) = workers.remove(&session_id)
         {
-            if let Some(worker) = workers.remove(&session_id) {
-                await_managed_session_worker_exit(session_id.clone(), worker).await;
-            }
+            await_managed_session_worker_exit(session_id.clone(), worker).await;
         }
         if workers.contains_key(&session_id) {
             continue;
@@ -956,127 +679,5 @@ async fn wait_for_shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
-fn init_tracing(paths: &AgentPaths) -> Result<()> {
-    if TRACING_GUARD.get().is_some() {
-        return Ok(());
-    }
-
-    let file_appender = tracing_appender::rolling::never(&paths.logs_dir, "agent.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    TRACING_GUARD
-        .set(guard)
-        .map_err(|_| anyhow!("tracing guard already initialised"))?;
-
-    let timer = UtcTime::rfc_3339();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,skybridge_agent=info")),
-        )
-        .with_timer(timer)
-        .with_writer(non_blocking)
-        .json()
-        .with_current_span(false)
-        .with_span_list(false)
-        .try_init()
-        .map_err(|error| anyhow!("failed to initialize tracing subscriber: {error}"))?;
-    Ok(())
-}
-
-pub(crate) async fn restrict_dir_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let permissions = std::fs::Permissions::from_mode(0o700);
-        fs::set_permissions(path, permissions)
-            .await
-            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
-    }
-
-    Ok(())
-}
-
-pub(crate) async fn restrict_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let permissions = std::fs::Permissions::from_mode(0o600);
-        fs::set_permissions(path, permissions)
-            .await
-            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    fn test_paths(name: &str) -> AgentPaths {
-        resolve_paths(Some(std::env::temp_dir().join(format!(
-            "skybridge-agent-runtime-{name}-{}",
-            uuid::Uuid::now_v7()
-        ))))
-        .expect("temporary paths should resolve")
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reconcile_respawns_finished_worker_for_active_control() {
-        let paths = test_paths("reconcile-respawn");
-        crate::state::upsert_managed_session_control(
-            &paths,
-            ManagedSessionControl::new(
-                "session-1",
-                RuntimeSessionRole::Initiator,
-                skybridge_core::RuntimeSessionSource::Code,
-                "local-device",
-                "https://signal.example.com",
-                "session-token",
-                None,
-            ),
-        )
-        .await
-        .expect("managed session control should persist");
-
-        let finished_cancel = CancellationToken::new();
-        let finished_handle = tokio::spawn(async {});
-        tokio::task::yield_now().await;
-
-        let mut workers = BTreeMap::from([(
-            "session-1".to_owned(),
-            ManagedSessionWorker::new(finished_cancel, finished_handle),
-        )]);
-        let spawn_count = Arc::new(AtomicUsize::new(0));
-        let root_cancel = CancellationToken::new();
-
-        reconcile_managed_sessions_with_spawner(&paths, &root_cancel, &mut workers, {
-            let spawn_count = Arc::clone(&spawn_count);
-            move |_paths, _control, cancel| {
-                spawn_count.fetch_add(1, Ordering::SeqCst);
-                let worker_cancel = cancel.clone();
-                let handle = tokio::spawn(async move {
-                    worker_cancel.cancelled().await;
-                });
-                ManagedSessionWorker::new(cancel, handle)
-            }
-        })
-        .await
-        .expect("reconcile should respawn finished worker");
-
-        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
-        assert_eq!(workers.len(), 1);
-        assert!(workers.contains_key("session-1"));
-        assert!(!workers["session-1"].is_finished());
-
-        shutdown_managed_session_workers(&mut workers).await;
-        let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 }

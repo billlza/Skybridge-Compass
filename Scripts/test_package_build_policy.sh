@@ -21,14 +21,22 @@ mkdir -p "${xcode_dir}/PackageFrameworks" "${swiftpm_dir}/PackageFrameworks"
   || fail "swiftpm build dir should map to swiftpm_release"
 
 skybridge_assert_package_build_policy "app" "swiftpm_release" \
-  || fail "non-DMG packaging should not reject swiftpm fallback"
+  || fail "non-DMG packaging should allow swiftpm_release"
 
-if skybridge_assert_package_build_policy "release_dmg" "swiftpm_release"; then
-  fail "release_dmg packaging must reject swiftpm fallback"
+if skybridge_assert_package_build_policy "release_dmg" "swiftpm_release" >/dev/null 2>&1; then
+  fail "release_dmg packaging must reject swiftpm_release"
 fi
 
 skybridge_assert_package_build_policy "release_dmg" "xcode_release" \
   || fail "release_dmg packaging should allow xcode_release"
+
+if SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=1 skybridge_assert_package_build_policy "release_dmg" "xcode_release" >/dev/null 2>&1; then
+  fail "release_dmg packaging must reject smoke auto-approve trust"
+fi
+
+if skybridge_assert_package_build_policy "release_dmg" "unknown" >/dev/null 2>&1; then
+  fail "release_dmg packaging must reject unknown build source"
+fi
 
 printf '#!/bin/sh\nexit 0\n' > "${xcode_dir}/SkyBridgeCompassApp"
 chmod +x "${xcode_dir}/SkyBridgeCompassApp"

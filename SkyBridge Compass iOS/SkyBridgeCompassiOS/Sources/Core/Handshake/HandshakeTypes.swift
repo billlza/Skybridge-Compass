@@ -448,7 +448,7 @@ public struct DeterministicDecoder {
             throw TranscriptError.decodingError("Unexpected end of data")
         }
         let value = data.subdata(in: offset..<(offset + 4)).withUnsafeBytes {
-            $0.load(as: UInt32.self).littleEndian
+            $0.loadUnaligned(as: UInt32.self).littleEndian
         }
         offset += 4
         return value

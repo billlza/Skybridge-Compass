@@ -3,7 +3,7 @@
 # SkyBridge Compass DMG Builder
 #
 # 功能：
-# 1. 构建 Release 版本应用（发布 DMG 仅接受 Xcode Release 产物）
+# 1. 构建 Release 版本应用（发布 DMG 仅接受 Xcode workspace Release app executable 产物）
 # 2. 复用 package_app.sh 生成兼容 SMAppService 的 .app（含 PowerMetricsHelper）
 # 3. （可选）重新签名
 # 4. 创建 DMG 磁盘映像（带背景与 Applications 快捷方式）
@@ -13,8 +13,8 @@
 #
 # 发布策略：
 # - build_dmg.sh 会强制 package_app.sh 进入 release_dmg 上下文
-# - release_dmg 上下文禁止 SwiftPM release fallback
-# - 复用已有 .app 时也必须是 xcode_release provenance
+# - release_dmg 上下文只接受明确 Release 构建产物
+# - 复用已有 .app 时也必须带有可验证的 release provenance
 #
 
 set -euo pipefail
@@ -27,6 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$PROJECT_ROOT/Scripts/apple_pqc_sdk_probe.sh"
 source "$PROJECT_ROOT/Scripts/notarytool_helpers.sh"
+source "$PROJECT_ROOT/Scripts/package_build_policy.sh"
 source "$PROJECT_ROOT/Scripts/xcodebuild_helpers.sh"
 XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
 INFO_PLIST_PATH="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
@@ -40,18 +41,20 @@ BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
 BG_NAME="background.png"
 BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_build_destination)}"
 BUILD_ARCH="${BUILD_ARCH:-$(skybridge_default_macos_build_arch)}"
-XCODE_WORKSPACE="$PROJECT_ROOT/.swiftpm/xcode/package.xcworkspace"
-USE_XCODE_WORKSPACE=false
-
-if [[ -d "$XCODE_WORKSPACE" ]]; then
-    USE_XCODE_WORKSPACE=true
-fi
+XCODE_PROJECT="$PROJECT_ROOT/SkyBridgeWidgets.xcodeproj"
+XCODE_MAC_SCHEME="${SKYBRIDGE_MACOS_APP_SCHEME:-SkyBridgeCompassMac}"
+XCODE_PACKAGE_SCHEME="${SKYBRIDGE_MACOS_PACKAGE_SCHEME:-SkyBridgeCompassApp}"
+XCODE_APP_BUNDLE="${SKYBRIDGE_XCODE_APP_BUNDLE:-$XCODE_DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app}"
+XCODE_PACKAGE_WORKSPACE="$PROJECT_ROOT/.swiftpm/xcode/package.xcworkspace"
+XCODE_PACKAGE_EXECUTABLE="$XCODE_DERIVED_DATA_PATH/Build/Products/Release/SkyBridgeCompassApp"
 
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 NOTARIZE_APP="${NOTARIZE_APP:-0}"
 NOTARIZE_DMG="${NOTARIZE_DMG:-0}"
 REQUIRE_NOTARIZATION="${REQUIRE_NOTARIZATION:-0}"
 NOTARYTOOL_KEYCHAIN_PROFILE="${NOTARYTOOL_KEYCHAIN_PROFILE:-}"
+ENSURE_DEVELOPER_ID_PROFILES="${SKYBRIDGE_ENSURE_DEVELOPER_ID_PROFILES:-1}"
+ASSOCIATE_DEVELOPER_ID_APP_GROUPS="${SKYBRIDGE_ASSOCIATE_DEVELOPER_ID_APP_GROUPS:-0}"
 
 SKIP_BUILD=false
 SKIP_SIGN=false
@@ -97,13 +100,15 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "选项:"
             echo "  --skip-build         跳过构建步骤"
-            echo "  --skip-sign          跳过签名步骤（将保留 package_app.sh 产物签名）"
+            echo "  --skip-sign          仅配合 --use-existing-app 跳过重签名（新构建发布包仍必须签名）"
             echo "  --use-existing-app   复用 dist/ 下已存在的 .app"
             echo "  --identity ID        指定签名身份（Developer ID / Apple Development）"
             echo "  --notarize-app       对 .app 执行 Apple notarization 并 staple"
             echo "  --notarize-dmg       生成 DMG 后提交 Apple notarization 并 staple"
             echo "  --require-notarization  若产物未 notarized，则以失败退出"
             echo "  --notarytool-keychain-profile <profile>  使用指定 notarytool keychain profile"
+            echo "  SKYBRIDGE_ENSURE_DEVELOPER_ID_PROFILES=0 可跳过发布前 provisioning profile 自检"
+            echo "  SKYBRIDGE_ASSOCIATE_DEVELOPER_ID_APP_GROUPS=1 允许首次配置时交互式关联 App Groups"
             echo "  --help, -h           显示帮助信息"
             exit 0
             ;;
@@ -114,9 +119,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ("${NOTARIZE_APP}" == "1" || "${NOTARIZE_DMG}" == "1" || "${REQUIRE_NOTARIZATION}" == "1") && -z "${SKYBRIDGE_XCODEBUILD_KEEP_NOISE+x}" ]]; then
-    export SKYBRIDGE_XCODEBUILD_KEEP_NOISE=1
+if [[ "$SKIP_SIGN" == true && "$USE_EXISTING_APP" != true ]]; then
+    echo "❌ --skip-sign 只允许配合 --use-existing-app 使用；新构建的 release_dmg 必须经过 Developer ID 签名。" >&2
+    exit 1
 fi
+
+skybridge_assert_no_smoke_auto_approval_for_release_context "release_dmg build" || exit 1
+
 if [[ -z "${SKYBRIDGE_REQUIRE_APP_GROUPS+x}" ]]; then
     export SKYBRIDGE_REQUIRE_APP_GROUPS=1
 fi
@@ -167,22 +176,59 @@ assess_and_report_gatekeeper() {
 
 artifact_has_stapled_ticket() {
     local artifact="$1"
-    xcrun stapler validate "$artifact" >/dev/null 2>&1
+    local attempt
+
+    for attempt in {1..5}; do
+        if xcrun stapler validate "$artifact" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+
+    return 1
 }
 
 verify_app_bundle_build_source() {
     local app_bundle="$1"
     local info_plist="$app_bundle/Contents/Info.plist"
     local build_source=""
+    local build_scheme=""
+    local build_configuration=""
 
     if [[ -f "$info_plist" ]]; then
         build_source=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildSource' "$info_plist" 2>/dev/null || true)
+        build_scheme=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildScheme' "$info_plist" 2>/dev/null || true)
+        build_configuration=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildConfiguration' "$info_plist" 2>/dev/null || true)
     fi
 
-    if [[ "$build_source" != "xcode_release" ]]; then
-        log_error "发布 DMG 仅允许使用 Xcode Release 产物打包。当前 App Bundle 构建来源: ${build_source:-missing}"
-        log_error "请重新执行 build_dmg.sh（不要复用 SwiftPM fallback 生成的 .app）。"
+    if [[ "$build_source" == "xcode_release" \
+        && "$build_scheme" == "$XCODE_PACKAGE_SCHEME" \
+        && "$build_configuration" == "Release" ]]; then
+        return 0
+    fi
+
+    log_error "发布 DMG 仅允许使用明确 Release 产物打包。当前 App Bundle 构建来源: ${build_source:-missing}"
+    log_error "期望 scheme/config: ${XCODE_PACKAGE_SCHEME}/Release；当前: ${build_scheme:-missing}/${build_configuration:-missing}"
+    log_error "请重新执行 build_dmg.sh（不要复用未知来源生成的 .app）。"
+    exit 1
+}
+
+verify_release_executable_runtime_inputs() {
+    local executable_path="$1"
+    local build_dir
+    build_dir="$(dirname "$executable_path")"
+
+    if [[ ! -x "$executable_path" ]]; then
+        log_error "Xcode workspace 未产出主可执行文件：$executable_path"
         exit 1
+    fi
+
+    if otool -L "$executable_path" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
+        if [[ ! -e "$build_dir/WebRTC.framework/WebRTC" && ! -e "$build_dir/PackageFrameworks/WebRTC.framework/WebRTC" ]]; then
+            log_error "主可执行文件依赖 WebRTC.framework，但 Release 构建目录缺少 WebRTC.framework"
+            exit 1
+        fi
+        log_info "Release executable 校验通过: 主二进制链接 WebRTC.framework，且构建目录包含 WebRTC"
     fi
 }
 
@@ -190,7 +236,6 @@ verify_app_runtime_layout() {
     local app_bundle="$1"
     local app_bin="$app_bundle/Contents/MacOS/SkyBridgeCompassApp"
     local frameworks_webrtc="$app_bundle/Contents/Frameworks/WebRTC.framework/WebRTC"
-    local compat_webrtc="$app_bundle/Contents/lib/WebRTC.framework/WebRTC"
 
     if [[ ! -x "$app_bin" ]]; then
         log_error "主可执行文件不存在或不可执行: $app_bin"
@@ -202,14 +247,11 @@ verify_app_runtime_layout() {
             log_error "App 依赖 WebRTC.framework，但 Frameworks 内缺少: $frameworks_webrtc"
             exit 1
         fi
-        if [[ ! -e "$compat_webrtc" ]]; then
-            log_error "App 依赖 WebRTC.framework，但兼容路径缺少: $compat_webrtc"
-            exit 1
-        fi
         if otool -l "$app_bin" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
-            log_info "运行时校验通过: 主二进制包含 Frameworks rpath，且 WebRTC 可通过 Frameworks/lib 双路径命中"
+            log_info "运行时校验通过: 主二进制包含 Frameworks rpath，且 WebRTC 位于标准 Frameworks 目录"
         else
-            log_info "运行时校验提示: 主二进制未显式包含 Frameworks rpath，将依赖 Contents/lib 兼容路径"
+            log_error "App 依赖 WebRTC.framework，但主二进制缺少 @executable_path/../Frameworks rpath"
+            exit 1
         fi
     fi
 }
@@ -220,7 +262,7 @@ verify_app_embedded_privacy_info_plist() {
     local app_bin="$app_bundle/Contents/MacOS/SkyBridgeCompassApp"
     local embedded_info_plist
 
-    embedded_info_plist="$(mktemp "${TMPDIR:-/tmp}/skybridge-embedded-info.XXXXXX.plist")"
+    embedded_info_plist="$(mktemp "${TMPDIR:-/tmp}/skybridge-embedded-info.XXXXXX")"
     python3 - "$app_bin" "$embedded_info_plist" "$app_info_plist" <<'PY'
 import plistlib
 import re
@@ -243,6 +285,18 @@ required_keys = [
     "NSUSBUsageDescription",
 ]
 
+with app_info_path.open("rb") as fh:
+    app_info = plistlib.load(fh)
+
+
+def validate_bundle_privacy_keys():
+    for key in required_keys:
+        app_value = app_info.get(key)
+        if not isinstance(app_value, str) or not app_value.strip():
+            print(f"bundle Info.plist missing required privacy usage description: {key}", file=sys.stderr)
+            raise SystemExit(1)
+
+
 proc = subprocess.run(
     ["otool", "-X", "-s", "__TEXT", "__info_plist", str(app_bin)],
     check=False,
@@ -250,8 +304,8 @@ proc = subprocess.run(
     text=True,
 )
 if proc.returncode != 0:
-    print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
-    raise SystemExit(1)
+    validate_bundle_privacy_keys()
+    raise SystemExit(0)
 
 section_bytes = bytearray()
 for line in proc.stdout.splitlines():
@@ -259,13 +313,21 @@ for line in proc.stdout.splitlines():
     if len(parts) < 2:
         continue
     for word in parts[1:]:
-        if re.fullmatch(r"[0-9a-fA-F]{8}", word):
-            section_bytes.extend(bytes.fromhex(word)[::-1])
+        if not re.fullmatch(r"[0-9a-fA-F]{2,8}", word) or len(word) % 2 != 0:
+            continue
+        raw = bytes.fromhex(word)
+        if len(raw) == 4:
+            # otool prints full 32-bit words in target byte order.
+            section_bytes.extend(raw[::-1])
+        else:
+            # The final partial word is printed as byte-sized chunks on newer
+            # Xcode toolchains; keep those bytes in display order.
+            section_bytes.extend(raw)
 
 payload = bytes(section_bytes).rstrip(b"\x00")
 if not payload:
-    print("missing __TEXT,__info_plist section", file=sys.stderr)
-    raise SystemExit(1)
+    validate_bundle_privacy_keys()
+    raise SystemExit(0)
 
 start = payload.find(b"<?xml")
 if start == -1:
@@ -274,8 +336,6 @@ if start > 0:
     payload = payload[start:]
 
 embedded = plistlib.loads(payload)
-with app_info_path.open("rb") as fh:
-    app_info = plistlib.load(fh)
 
 for key in required_keys:
     app_value = app_info.get(key)
@@ -294,7 +354,7 @@ for key in required_keys:
 embedded_path.write_bytes(payload)
 PY
     rm -f "$embedded_info_plist"
-    log_info "隐私用途说明校验通过: 主二进制嵌入 Info.plist 与 App Bundle 保持一致"
+    log_info "隐私用途说明校验通过: App Bundle Info.plist 覆盖必需用途说明"
 }
 
 verify_app_release_features() {
@@ -327,6 +387,56 @@ verify_app_release_features() {
     fi
 }
 
+ensure_release_developer_id_profiles() {
+    local app_bundle="$1"
+    local identity="$2"
+    local app_info_plist="$app_bundle/Contents/Info.plist"
+    local widget_info_plist="$app_bundle/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex/Contents/Info.plist"
+    local app_bundle_identifier=""
+    local widget_bundle_identifier=""
+    local -a ensure_args=()
+
+    if [[ "$ENSURE_DEVELOPER_ID_PROFILES" != "1" ]]; then
+        log_info "按 SKYBRIDGE_ENSURE_DEVELOPER_ID_PROFILES=0 跳过 Developer ID provisioning profile 自检"
+        return 0
+    fi
+
+    [[ -f "$app_info_plist" ]] || {
+        log_error "无法读取 App Info.plist 以自检 provisioning profile: $app_info_plist"
+        exit 1
+    }
+    [[ -f "$widget_info_plist" ]] || {
+        log_error "无法读取 Widget Info.plist 以自检 provisioning profile: $widget_info_plist"
+        exit 1
+    }
+
+    app_bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_info_plist" 2>/dev/null || true)
+    widget_bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$widget_info_plist" 2>/dev/null || true)
+    [[ -n "$app_bundle_identifier" ]] || {
+        log_error "App Info.plist 缺少 CFBundleIdentifier"
+        exit 1
+    }
+    [[ -n "$widget_bundle_identifier" ]] || {
+        log_error "Widget Info.plist 缺少 CFBundleIdentifier"
+        exit 1
+    }
+
+    ensure_args=(
+        --create
+        --app-bundle-id "$app_bundle_identifier"
+        --widget-bundle-id "$widget_bundle_identifier"
+    )
+    if [[ -n "$identity" ]]; then
+        ensure_args+=(--identity "$identity")
+    fi
+    if [[ "$ASSOCIATE_DEVELOPER_ID_APP_GROUPS" == "1" ]]; then
+        ensure_args+=(--associate-app-groups)
+    fi
+
+    log_info "自检 Developer ID provisioning profiles（App=${app_bundle_identifier}, Widget=${widget_bundle_identifier}）"
+    "$PROJECT_ROOT/Scripts/ensure_developer_id_profiles.sh" "${ensure_args[@]}"
+}
+
 scrub_bundle_custom_icon() {
     local bundle_path="$1"
     local bundle_icon_path
@@ -344,6 +454,13 @@ extract_helper_version() {
     local bin_path="$1"
     if [[ -x "$bin_path" ]]; then
         strings "$bin_path" 2>/dev/null | grep -m1 'SKYBRIDGE_HELPER_VERSION=' | cut -d= -f2 || true
+    fi
+}
+
+extract_source_helper_version() {
+    local source_path="$PROJECT_ROOT/Sources/PowerMetricsHelper/main.swift"
+    if [[ -f "$source_path" ]]; then
+        awk -F '"' '/private static let helperVersion =/ { print $2; exit }' "$source_path" 2>/dev/null || true
     fi
 }
 
@@ -396,17 +513,31 @@ sign_dmg_artifact() {
 
 assert_existing_app_bundle_is_fresh() {
     local app_bundle_path="$1"
-    local freshness_reference="$app_bundle_path"
+    local executable_reference="$app_bundle_path"
+    local info_reference="$app_bundle_path"
     local stale_source=""
 
-    if [[ ! -e "$freshness_reference" ]]; then
+    if [[ -d "$app_bundle_path" && -x "$app_bundle_path/Contents/MacOS/SkyBridgeCompassApp" ]]; then
+        executable_reference="$app_bundle_path/Contents/MacOS/SkyBridgeCompassApp"
+    fi
+    if [[ -d "$app_bundle_path" && -f "$app_bundle_path/Contents/Info.plist" ]]; then
+        info_reference="$app_bundle_path/Contents/Info.plist"
+    fi
+
+    if [[ ! -e "$executable_reference" ]]; then
         return 0
     fi
 
-    if [[ "$PROJECT_ROOT/Package.swift" -nt "$freshness_reference" ]]; then
+    if [[ "$PROJECT_ROOT/Package.swift" -nt "$executable_reference" ]]; then
         stale_source="$PROJECT_ROOT/Package.swift"
+    elif [[ "$PROJECT_ROOT/project.yml" -nt "$info_reference" ]]; then
+        stale_source="$PROJECT_ROOT/project.yml"
+    elif [[ "$PROJECT_ROOT/XcodeSupport/SkyBridgeCompassMac/BundleModule.swift" -nt "$executable_reference" ]]; then
+        stale_source="$PROJECT_ROOT/XcodeSupport/SkyBridgeCompassMac/BundleModule.swift"
+    elif [[ "$PROJECT_ROOT/XcodeSupport/SkyBridgeCompassMac/Info.plist" -nt "$info_reference" ]]; then
+        stale_source="$PROJECT_ROOT/XcodeSupport/SkyBridgeCompassMac/Info.plist"
     else
-        stale_source="$(find "$PROJECT_ROOT/Sources" -type f -newer "$freshness_reference" -print -quit 2>/dev/null || true)"
+        stale_source="$(find "$PROJECT_ROOT/Sources" -type f \( -name "*.swift" -o -name "*.c" -o -name "*.cc" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" -o -name "*.m" -o -name "*.mm" \) -newer "$executable_reference" -print -quit 2>/dev/null || true)"
     fi
 
     if [[ -n "$stale_source" && "${ALLOW_STALE_BUILD:-0}" != "1" ]]; then
@@ -453,36 +584,48 @@ if [[ "$SKIP_BUILD" == false ]]; then
         fi
     fi
 
-    log_info "使用 Xcode Release 构建..."
-    if [[ "$USE_XCODE_WORKSPACE" != true ]]; then
-        log_info "未找到 package.xcworkspace，直接从 Swift package 根目录构建"
+    if [[ ! -d "$XCODE_PROJECT" ]]; then
+        log_error "缺少 Xcode 工程：$XCODE_PROJECT"
+        exit 1
     fi
-    if [[ "$USE_XCODE_WORKSPACE" == true ]]; then
-        skybridge_run_xcodebuild -workspace "$XCODE_WORKSPACE" \
-            -scheme SkyBridgeCompassApp \
-            -configuration Release \
-            -destination "$BUILD_DESTINATION" \
-            -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
-            -skipPackageUpdates \
-            -disableAutomaticPackageResolution \
-            ARCHS="$BUILD_ARCH" \
-            ONLY_ACTIVE_ARCH=YES \
-            CODE_SIGNING_ALLOWED=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            build
-    else
-        skybridge_run_xcodebuild \
-            -scheme SkyBridgeCompassApp \
-            -configuration Release \
-            -destination "$BUILD_DESTINATION" \
-            -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
-            -skipPackageUpdates \
-            -disableAutomaticPackageResolution \
-            ARCHS="$BUILD_ARCH" \
-            ONLY_ACTIVE_ARCH=YES \
-            CODE_SIGNING_ALLOWED=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            build
+
+    if [[ ! -d "$XCODE_PACKAGE_WORKSPACE" ]]; then
+        log_error "缺少 SwiftPM Xcode workspace：$XCODE_PACKAGE_WORKSPACE"
+        exit 1
+    fi
+
+    log_info "使用 Xcode workspace Release executable 构建主应用（scheme=${XCODE_PACKAGE_SCHEME}, arch=${BUILD_ARCH}）..."
+    skybridge_run_xcodebuild -workspace "$XCODE_PACKAGE_WORKSPACE" \
+        -scheme "$XCODE_PACKAGE_SCHEME" \
+        -configuration Release \
+        -destination "$BUILD_DESTINATION" \
+        -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
+        -skipPackageUpdates \
+        -disableAutomaticPackageResolution \
+        CODE_SIGNING_ALLOWED=NO \
+        COMPILER_INDEX_STORE_ENABLE=NO \
+        ARCHS="$BUILD_ARCH" \
+        ONLY_ACTIVE_ARCH=YES \
+        build
+
+    verify_release_executable_runtime_inputs "$XCODE_PACKAGE_EXECUTABLE"
+
+    log_info "构建原生 Xcode app target 以产出 Widget Extension（scheme=${XCODE_MAC_SCHEME}, arch=${BUILD_ARCH}）..."
+    skybridge_run_xcodebuild -project "$XCODE_PROJECT" \
+        -scheme "$XCODE_MAC_SCHEME" \
+        -configuration Release \
+        -destination "$BUILD_DESTINATION" \
+        -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
+        -skipPackageUpdates \
+        -disableAutomaticPackageResolution \
+        CODE_SIGNING_ALLOWED=NO \
+        COMPILER_INDEX_STORE_ENABLE=NO \
+        ARCHS="$BUILD_ARCH" \
+        ONLY_ACTIVE_ARCH=YES \
+        build
+
+    if [[ -x "$XCODE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp" ]]; then
+        verify_app_runtime_layout "$XCODE_APP_BUNDLE"
     fi
 
     log_success "Release 构建完成"
@@ -510,14 +653,13 @@ else
         PACKAGE_APP_ALLOW_STALE_BUILD=1
     fi
 
-    if [[ "$SKIP_SIGN" == true ]]; then
-        log_info "按 --skip-sign 要求，以 ad-hoc 模式打包 App Bundle"
-        SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="-" "$PROJECT_ROOT/Scripts/package_app.sh"
-    elif [[ -n "$SIGNING_IDENTITY" ]]; then
+    ensure_release_developer_id_profiles "$XCODE_APP_BUNDLE" "$SIGNING_IDENTITY"
+
+    if [[ -n "$SIGNING_IDENTITY" ]]; then
         log_info "使用指定签名身份执行 package_app.sh: $SIGNING_IDENTITY"
-        SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKYBRIDGE_XCODE_APP_BUNDLE="$XCODE_APP_BUNDLE" SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/package_app.sh"
     else
-        SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKYBRIDGE_XCODE_APP_BUNDLE="$XCODE_APP_BUNDLE" SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg "$PROJECT_ROOT/Scripts/package_app.sh"
     fi
 fi
 
@@ -537,6 +679,11 @@ if [[ -f "$HELPER_PLIST" && -x "$HELPER_BIN" ]]; then
         log_error "App 内 PowerMetricsHelper 版本 marker 缺失，禁止发布 version unknown 的 DMG"
         exit 1
     fi
+    SOURCE_HELPER_VERSION="$(extract_source_helper_version)"
+    if [[ -n "${SOURCE_HELPER_VERSION:-}" && "${APP_HELPER_VERSION}" != "${SOURCE_HELPER_VERSION}" ]]; then
+        log_error "App 内 PowerMetricsHelper 版本与源码不一致：app=${APP_HELPER_VERSION}, source=${SOURCE_HELPER_VERSION}"
+        exit 1
+    fi
     log_info "App 内 Helper 版本: ${APP_HELPER_VERSION}"
 else
     log_error "未检测到完整 PowerMetricsHelper（高级监控功能不可用），禁止发布"
@@ -554,11 +701,15 @@ if [[ "$SKIP_SIGN" == false ]]; then
     fi
 
     if [[ -n "$SIGNING_IDENTITY" ]]; then
+        SIGN_APP_REQUIRE_NOTARIZATION="0"
+        if [[ "$NOTARIZE_APP" == "1" && "$REQUIRE_NOTARIZATION" == "1" ]]; then
+            SIGN_APP_REQUIRE_NOTARIZATION="1"
+        fi
         log_step "步骤 3: 规范化重签名"
         APP_PATH="$APP_BUNDLE" \
         IDENTITY="$SIGNING_IDENTITY" \
         NOTARIZE_APP="$NOTARIZE_APP" \
-        REQUIRE_NOTARIZATION="$REQUIRE_NOTARIZATION" \
+        REQUIRE_NOTARIZATION="$SIGN_APP_REQUIRE_NOTARIZATION" \
         NOTARYTOOL_KEYCHAIN_PROFILE="$NOTARYTOOL_KEYCHAIN_PROFILE" \
         "$PROJECT_ROOT/Scripts/sign_app.sh"
     else
@@ -735,14 +886,20 @@ echo ""
 log_success "所有步骤完成！"
 
 if [[ "$REQUIRE_NOTARIZATION" == "1" ]]; then
-    if ! skybridge_gatekeeper_is_notarized "$APP_GATEKEEPER_OUTPUT" && \
+    if [[ "$NOTARIZE_APP" == "1" ]] && \
+       ! skybridge_gatekeeper_is_notarized "$APP_GATEKEEPER_OUTPUT" && \
        ! artifact_has_stapled_ticket "$APP_BUNDLE"; then
         log_error "REQUIRE_NOTARIZATION=1，但 App Bundle 尚未显示为 notarized"
         exit 1
     fi
-    if ! skybridge_gatekeeper_is_notarized "$DMG_GATEKEEPER_OUTPUT" && \
+    if [[ "$NOTARIZE_DMG" == "1" ]] && \
+       ! skybridge_gatekeeper_is_notarized "$DMG_GATEKEEPER_OUTPUT" && \
        ! artifact_has_stapled_ticket "$DMG_PATH"; then
         log_error "REQUIRE_NOTARIZATION=1，但 DMG 尚未显示为 notarized"
+        exit 1
+    fi
+    if [[ "$NOTARIZE_APP" != "1" && "$NOTARIZE_DMG" != "1" ]]; then
+        log_error "REQUIRE_NOTARIZATION=1，但未请求 --notarize-app 或 --notarize-dmg"
         exit 1
     fi
 fi

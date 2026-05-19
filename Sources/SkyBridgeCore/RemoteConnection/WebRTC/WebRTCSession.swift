@@ -2,541 +2,9 @@ import Foundation
 import OSLog
 import SkyBridgeProtocolCore
 import CoreVideo
-import VideoToolbox
 
 #if canImport(WebRTC)
 @preconcurrency import WebRTC
-#endif
-
-#if canImport(WebRTCAudioDeviceBridge)
-import WebRTCAudioDeviceBridge
-#endif
-
-#if canImport(WebRTC)
-/// Global SSL lifecycle guard for WebRTC.
-///
-/// `RTCInitializeSSL()` / `RTCCleanupSSL()` manage process-wide OpenSSL state. Calling cleanup per-session can
-/// break other live sessions. We therefore retain/release with reference counting and only cleanup when the
-/// last session is closed.
-private enum WebRTCSSL {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var refCount: Int = 0
-
-    static func retain() {
-        lock.lock()
-        defer { lock.unlock() }
-        if refCount == 0 {
-            RTCInitializeSSL()
-        }
-        refCount += 1
-    }
-
-    static func release() {
-        lock.lock()
-        defer { lock.unlock() }
-        refCount = max(0, refCount - 1)
-        if refCount == 0 {
-            RTCCleanupSSL()
-        }
-    }
-}
-#endif
-
-#if canImport(WebRTC)
-/// Shared RTCPeerConnectionFactory provider.
-///
-/// A long-lived factory avoids repeated native stack bring-up/tear-down and prevents
-/// edge-case creation failures when short-lived local factories race with session lifecycle.
-private enum WebRTCPeerConnectionFactoryProvider {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var sharedFactory: RTCPeerConnectionFactory?
-    nonisolated(unsafe) private static var sharedFactoryWithCustomAudioDevice: RTCPeerConnectionFactory?
-
-    private static func makeDefaultFactory() -> RTCPeerConnectionFactory {
-        let encoderFactory = RTCDefaultVideoEncoderFactory()
-        if let preferredCodec = preferredHardwareVideoEncoderCodec() {
-            encoderFactory.preferredCodec = preferredCodec
-        }
-        return RTCPeerConnectionFactory(
-            encoderFactory: encoderFactory,
-            decoderFactory: RTCDefaultVideoDecoderFactory()
-        )
-    }
-
-    private static func preferredHardwareVideoEncoderCodec() -> RTCVideoCodecInfo? {
-        RTCDefaultVideoEncoderFactory.supportedCodecs()
-            .enumerated()
-            .sorted { lhs, rhs in
-                let lhsRank = hardwareVideoCodecPreferenceRank(lhs.element.name)
-                let rhsRank = hardwareVideoCodecPreferenceRank(rhs.element.name)
-                if lhsRank != rhsRank {
-                    return lhsRank < rhsRank
-                }
-                return lhs.offset < rhs.offset
-            }
-            .map(\.element)
-            .first { hardwareVideoCodecPreferenceRank($0.name) < 10 }
-    }
-
-    private static func hardwareVideoCodecPreferenceRank(_ codecName: String) -> Int {
-        let normalized = codecName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if normalized.contains("h265") || normalized.contains("hevc") {
-            return 0
-        }
-        if normalized.contains("h264") || normalized.contains("avc") {
-            return 1
-        }
-        return 10
-    }
-
-    static func factory(useCustomAudioDevice: Bool) -> RTCPeerConnectionFactory {
-        lock.lock()
-        defer { lock.unlock() }
-        if useCustomAudioDevice {
-#if os(macOS)
-            if let sharedFactoryWithCustomAudioDevice {
-                return sharedFactoryWithCustomAudioDevice
-            }
-            let factory = SBWebRTCPeerConnectionFactoryBridge.makePeerConnectionFactoryWithSystemAudioDevice()
-            sharedFactoryWithCustomAudioDevice = factory
-            return factory
-#endif
-        }
-        if let sharedFactory {
-            return sharedFactory
-        }
-        let factory = makeDefaultFactory()
-        sharedFactory = factory
-        return factory
-    }
-}
-#endif
-
-#if canImport(WebRTC)
-private actor WebRTCOutboundFrameGate {
-    private var isLocked = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func run<T>(_ operation: @Sendable () async throws -> T) async rethrows -> T {
-        await acquire()
-        defer { release() }
-        return try await operation()
-    }
-
-    private func acquire() async {
-        if !isLocked {
-            isLocked = true
-            return
-        }
-
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
-        }
-    }
-
-    private func release() {
-        if waiters.isEmpty {
-            isLocked = false
-            return
-        }
-        let next = waiters.removeFirst()
-        next.resume()
-    }
-}
-#endif
-
-#if canImport(WebRTC)
-private final class WebRTCNativeScreenVideoFrameNormalizer: @unchecked Sendable {
-    private struct PixelBufferPoolKey: Hashable {
-        let width: Int
-        let height: Int
-        let pixelFormat: OSType
-    }
-
-    struct NormalizedFrame {
-        let pixelBuffer: CVPixelBuffer
-        let visibleWidth: Int
-        let visibleHeight: Int
-        let rawPixelFormat: OSType
-        let submittedPixelFormat: OSType
-        let wasNormalized: Bool
-
-        var requiresVisibleCrop: Bool {
-            visibleWidth != CVPixelBufferGetWidth(pixelBuffer)
-                || visibleHeight != CVPixelBufferGetHeight(pixelBuffer)
-        }
-    }
-
-    private let lock = NSLock()
-    private var pools: [PixelBufferPoolKey: CVPixelBufferPool] = [:]
-    private var transferSession: VTPixelTransferSession?
-    private let supportedPixelFormats: Set<OSType>
-    private let preferredNormalizedPixelFormat: OSType
-    private var cachedRawPixelBuffer: CVPixelBuffer?
-    private var cachedRawPixelBufferIdentity: ObjectIdentifier?
-    private var cachedRawTimestampNs: Int64?
-    private var cachedRawPixelFormat: OSType?
-    private var cachedVisibleWidth: Int?
-    private var cachedVisibleHeight: Int?
-    private var cachedNormalizedFrame: NormalizedFrame?
-
-    init() {
-        let supported = Set(RTCCVPixelBuffer.supportedPixelFormats().map { OSType(truncating: $0) })
-        supportedPixelFormats = supported
-        preferredNormalizedPixelFormat = Self.selectPreferredNormalizedPixelFormat(supportedPixelFormats: supported)
-    }
-
-    func normalize(_ pixelBuffer: CVPixelBuffer, rawTimestampNs: Int64? = nil) throws -> NormalizedFrame {
-        let rawPixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        let visibleWidth = CVPixelBufferGetWidth(pixelBuffer)
-        let visibleHeight = CVPixelBufferGetHeight(pixelBuffer)
-        let pixelBufferIdentity = ObjectIdentifier(pixelBuffer)
-        if let cached = cachedFrame(
-            pixelBufferIdentity: pixelBufferIdentity,
-            rawTimestampNs: rawTimestampNs,
-            rawPixelFormat: rawPixelFormat,
-            visibleWidth: visibleWidth,
-            visibleHeight: visibleHeight
-        ) {
-            return cached
-        }
-        if shouldSubmitDirectly(pixelFormat: rawPixelFormat, width: visibleWidth, height: visibleHeight) {
-            let frame = NormalizedFrame(
-                pixelBuffer: pixelBuffer,
-                visibleWidth: visibleWidth,
-                visibleHeight: visibleHeight,
-                rawPixelFormat: rawPixelFormat,
-                submittedPixelFormat: rawPixelFormat,
-                wasNormalized: false
-            )
-            storeCachedFrame(
-                frame,
-                rawPixelBuffer: pixelBuffer,
-                pixelBufferIdentity: pixelBufferIdentity,
-                rawTimestampNs: rawTimestampNs
-            )
-            return frame
-        }
-
-        let submittedPixelFormat = preferredNormalizedPixelFormat
-        let submittedWidth = Self.evenBackingDimension(for: visibleWidth)
-        let submittedHeight = Self.evenBackingDimension(for: visibleHeight)
-        if submittedWidth == visibleWidth && submittedHeight == visibleHeight {
-            let output = try normalizedPixelBuffer(
-                width: visibleWidth,
-                height: visibleHeight,
-                pixelFormat: submittedPixelFormat
-            )
-            try transferImage(from: pixelBuffer, to: output)
-            let frame = NormalizedFrame(
-                pixelBuffer: output,
-                visibleWidth: visibleWidth,
-                visibleHeight: visibleHeight,
-                rawPixelFormat: rawPixelFormat,
-                submittedPixelFormat: submittedPixelFormat,
-                wasNormalized: true
-            )
-            storeCachedFrame(
-                frame,
-                rawPixelBuffer: pixelBuffer,
-                pixelBufferIdentity: pixelBufferIdentity,
-                rawTimestampNs: rawTimestampNs
-            )
-            return frame
-        }
-
-        let visibleOutput = try normalizedPixelBuffer(
-            width: visibleWidth,
-            height: visibleHeight,
-            pixelFormat: submittedPixelFormat
-        )
-        try transferImage(from: pixelBuffer, to: visibleOutput)
-        let output = try normalizedPixelBuffer(
-            width: submittedWidth,
-            height: submittedHeight,
-            pixelFormat: submittedPixelFormat
-        )
-        try copyVisibleFrame(from: visibleOutput, to: output)
-        let frame = NormalizedFrame(
-            pixelBuffer: output,
-            visibleWidth: visibleWidth,
-            visibleHeight: visibleHeight,
-            rawPixelFormat: rawPixelFormat,
-            submittedPixelFormat: submittedPixelFormat,
-            wasNormalized: true
-        )
-        storeCachedFrame(
-            frame,
-            rawPixelBuffer: pixelBuffer,
-            pixelBufferIdentity: pixelBufferIdentity,
-            rawTimestampNs: rawTimestampNs
-        )
-        return frame
-    }
-
-    private func cachedFrame(
-        pixelBufferIdentity: ObjectIdentifier,
-        rawTimestampNs: Int64?,
-        rawPixelFormat: OSType,
-        visibleWidth: Int,
-        visibleHeight: Int
-    ) -> NormalizedFrame? {
-        guard let rawTimestampNs else { return nil }
-        lock.lock()
-        defer { lock.unlock() }
-        guard cachedRawPixelBufferIdentity == pixelBufferIdentity,
-              cachedRawTimestampNs == rawTimestampNs,
-              cachedRawPixelFormat == rawPixelFormat,
-              cachedVisibleWidth == visibleWidth,
-              cachedVisibleHeight == visibleHeight else {
-            return nil
-        }
-        return cachedNormalizedFrame
-    }
-
-    private func storeCachedFrame(
-        _ frame: NormalizedFrame,
-        rawPixelBuffer: CVPixelBuffer,
-        pixelBufferIdentity: ObjectIdentifier,
-        rawTimestampNs: Int64?
-    ) {
-        guard let rawTimestampNs else { return }
-        lock.lock()
-        cachedRawPixelBuffer = rawPixelBuffer
-        cachedRawPixelBufferIdentity = pixelBufferIdentity
-        cachedRawTimestampNs = rawTimestampNs
-        cachedRawPixelFormat = frame.rawPixelFormat
-        cachedVisibleWidth = frame.visibleWidth
-        cachedVisibleHeight = frame.visibleHeight
-        cachedNormalizedFrame = frame
-        lock.unlock()
-    }
-
-    private func shouldSubmitDirectly(pixelFormat: OSType, width: Int, height: Int) -> Bool {
-        supportedPixelFormats.contains(pixelFormat)
-            && pixelFormat != kCVPixelFormatType_32BGRA
-            && width.isMultiple(of: 2)
-            && height.isMultiple(of: 2)
-    }
-
-    private static func evenBackingDimension(for visibleDimension: Int) -> Int {
-        let sanitized = max(1, visibleDimension)
-        return sanitized.isMultiple(of: 2) ? sanitized : sanitized + 1
-    }
-
-    private static func selectPreferredNormalizedPixelFormat(supportedPixelFormats: Set<OSType>) -> OSType {
-        if supportedPixelFormats.contains(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
-            return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        }
-        if supportedPixelFormats.contains(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
-            return kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        }
-        return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-    }
-
-    private func normalizedPixelBuffer(width: Int, height: Int, pixelFormat: OSType) throws -> CVPixelBuffer {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let key = PixelBufferPoolKey(width: width, height: height, pixelFormat: pixelFormat)
-        if pools[key] == nil {
-            pools[key] = try Self.makePixelBufferPool(width: width, height: height, pixelFormat: pixelFormat)
-        }
-
-        let allocationAttributes: [String: Any] = [
-            kCVPixelBufferPoolAllocationThresholdKey as String: 8
-        ]
-        var output: CVPixelBuffer?
-        let status = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(
-            kCFAllocatorDefault,
-            pools[key]!,
-            allocationAttributes as CFDictionary,
-            &output
-        )
-        guard status == kCVReturnSuccess, let output else {
-            throw NSError(
-                domain: "com.skybridge.webrtc.video-normalizer",
-                code: Int(status),
-                userInfo: [NSLocalizedDescriptionKey: "CVPixelBufferPoolCreatePixelBuffer failed with status \(status)"]
-            )
-        }
-        return output
-    }
-
-    private func copyVisibleFrame(from source: CVPixelBuffer, to destination: CVPixelBuffer) throws {
-        guard CVPixelBufferGetPixelFormatType(source) == CVPixelBufferGetPixelFormatType(destination) else {
-            throw Self.copyError("source and destination pixel formats differ")
-        }
-
-        let sourceLockStatus = CVPixelBufferLockBaseAddress(source, .readOnly)
-        guard sourceLockStatus == kCVReturnSuccess else {
-            throw Self.copyError("CVPixelBufferLockBaseAddress(source) failed with status \(sourceLockStatus)")
-        }
-        var destinationLocked = false
-        defer {
-            if destinationLocked {
-                CVPixelBufferUnlockBaseAddress(destination, [])
-            }
-            CVPixelBufferUnlockBaseAddress(source, .readOnly)
-        }
-
-        let destinationLockStatus = CVPixelBufferLockBaseAddress(destination, [])
-        guard destinationLockStatus == kCVReturnSuccess else {
-            throw Self.copyError("CVPixelBufferLockBaseAddress(destination) failed with status \(destinationLockStatus)")
-        }
-        destinationLocked = true
-
-        if CVPixelBufferIsPlanar(source), CVPixelBufferIsPlanar(destination) {
-            let planeCount = min(CVPixelBufferGetPlaneCount(source), CVPixelBufferGetPlaneCount(destination))
-            guard planeCount > 0 else {
-                throw Self.copyError("planar pixel buffer has no planes")
-            }
-            for plane in 0..<planeCount {
-                guard let sourceBase = CVPixelBufferGetBaseAddressOfPlane(source, plane),
-                      let destinationBase = CVPixelBufferGetBaseAddressOfPlane(destination, plane) else {
-                    throw Self.copyError("missing base address for plane \(plane)")
-                }
-                Self.copyPlaneRows(
-                    sourceBase: sourceBase,
-                    sourceBytesPerRow: CVPixelBufferGetBytesPerRowOfPlane(source, plane),
-                    sourceHeight: CVPixelBufferGetHeightOfPlane(source, plane),
-                    destinationBase: destinationBase,
-                    destinationBytesPerRow: CVPixelBufferGetBytesPerRowOfPlane(destination, plane),
-                    destinationHeight: CVPixelBufferGetHeightOfPlane(destination, plane),
-                    neutralFill: plane == 0 ? 0 : 128
-                )
-            }
-            return
-        }
-
-        guard let sourceBase = CVPixelBufferGetBaseAddress(source),
-              let destinationBase = CVPixelBufferGetBaseAddress(destination) else {
-            throw Self.copyError("missing base address for non-planar pixel buffer")
-        }
-        Self.copyPlaneRows(
-            sourceBase: sourceBase,
-            sourceBytesPerRow: CVPixelBufferGetBytesPerRow(source),
-            sourceHeight: CVPixelBufferGetHeight(source),
-            destinationBase: destinationBase,
-            destinationBytesPerRow: CVPixelBufferGetBytesPerRow(destination),
-            destinationHeight: CVPixelBufferGetHeight(destination),
-            neutralFill: 0
-        )
-    }
-
-    private static func copyPlaneRows(
-        sourceBase: UnsafeMutableRawPointer,
-        sourceBytesPerRow: Int,
-        sourceHeight: Int,
-        destinationBase: UnsafeMutableRawPointer,
-        destinationBytesPerRow: Int,
-        destinationHeight: Int,
-        neutralFill: Int32
-    ) {
-        let copiedHeight = min(sourceHeight, destinationHeight)
-        let copiedBytesPerRow = min(sourceBytesPerRow, destinationBytesPerRow)
-        guard destinationHeight > 0, destinationBytesPerRow > 0 else { return }
-        guard copiedHeight > 0, copiedBytesPerRow > 0 else {
-            memset(destinationBase, neutralFill, destinationBytesPerRow * destinationHeight)
-            return
-        }
-
-        for row in 0..<copiedHeight {
-            let sourceRow = sourceBase.advanced(by: row * sourceBytesPerRow)
-            let destinationRow = destinationBase.advanced(by: row * destinationBytesPerRow)
-            memcpy(destinationRow, sourceRow, copiedBytesPerRow)
-            if destinationBytesPerRow > copiedBytesPerRow {
-                memset(
-                    destinationRow.advanced(by: copiedBytesPerRow),
-                    neutralFill,
-                    destinationBytesPerRow - copiedBytesPerRow
-                )
-            }
-        }
-
-        guard destinationHeight > copiedHeight else { return }
-        let lastVisibleRow = destinationBase.advanced(by: (copiedHeight - 1) * destinationBytesPerRow)
-        for row in copiedHeight..<destinationHeight {
-            memcpy(
-                destinationBase.advanced(by: row * destinationBytesPerRow),
-                lastVisibleRow,
-                destinationBytesPerRow
-            )
-        }
-    }
-
-    private static func copyError(_ description: String) -> NSError {
-        NSError(
-            domain: "com.skybridge.webrtc.video-normalizer",
-            code: -1,
-            userInfo: [NSLocalizedDescriptionKey: description]
-        )
-    }
-
-    private func transferImage(from source: CVPixelBuffer, to destination: CVPixelBuffer) throws {
-        lock.lock()
-        defer { lock.unlock() }
-
-        if transferSession == nil {
-            transferSession = try Self.makePixelTransferSession()
-        }
-
-        let status = VTPixelTransferSessionTransferImage(transferSession!, from: source, to: destination)
-        guard status == noErr else {
-            throw NSError(
-                domain: "com.skybridge.webrtc.video-normalizer",
-                code: Int(status),
-                userInfo: [NSLocalizedDescriptionKey: "VTPixelTransferSessionTransferImage failed with status \(status)"]
-            )
-        }
-    }
-
-    private static func makePixelTransferSession() throws -> VTPixelTransferSession {
-        var created: VTPixelTransferSession?
-        let status = VTPixelTransferSessionCreate(
-            allocator: kCFAllocatorDefault,
-            pixelTransferSessionOut: &created
-        )
-        guard status == noErr, let created else {
-            throw NSError(
-                domain: "com.skybridge.webrtc.video-normalizer",
-                code: Int(status),
-                userInfo: [NSLocalizedDescriptionKey: "VTPixelTransferSessionCreate failed with status \(status)"]
-            )
-        }
-        VTSessionSetProperty(created, key: kVTPixelTransferPropertyKey_ScalingMode, value: kVTScalingMode_Normal)
-        return created
-    }
-
-    private static func makePixelBufferPool(width: Int, height: Int, pixelFormat: OSType) throws -> CVPixelBufferPool {
-        let pixelBufferAttributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
-            kCVPixelBufferWidthKey as String: width,
-            kCVPixelBufferHeightKey as String: height,
-            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
-            kCVPixelBufferMetalCompatibilityKey as String: true
-        ]
-        let poolAttributes: [String: Any] = [
-            kCVPixelBufferPoolMinimumBufferCountKey as String: 3,
-            kCVPixelBufferPoolMaximumBufferAgeKey as String: 0
-        ]
-        var pool: CVPixelBufferPool?
-        let status = CVPixelBufferPoolCreate(
-            kCFAllocatorDefault,
-            poolAttributes as CFDictionary,
-            pixelBufferAttributes as CFDictionary,
-            &pool
-        )
-        guard status == kCVReturnSuccess, let pool else {
-            throw NSError(
-                domain: "com.skybridge.webrtc.video-normalizer",
-                code: Int(status),
-                userInfo: [NSLocalizedDescriptionKey: "CVPixelBufferPoolCreate failed with status \(status)"]
-            )
-        }
-        return pool
-    }
-}
 #endif
 
 /// WebRTC 会话：负责 PeerConnection + DataChannel + ICE 收发
@@ -665,12 +133,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         height: Int,
         fps: Int
     ) -> Int {
-        let clampedWidth = max(1, width)
-        let clampedHeight = max(1, height)
-        let clampedFPS = max(1, fps)
-        let pixelsPerSecond = Double(clampedWidth) * Double(clampedHeight) * Double(clampedFPS)
-        let target = Int((pixelsPerSecond * 0.18).rounded())
-        return max(8_000_000, min(85_000_000, target))
+        WebRTCNativeScreenVideoValuePolicy.recommendedBitrateBps(
+            width: width,
+            height: height,
+            fps: fps
+        )
     }
 
     public static func minimumExtremeNativeScreenVideoBitrateBps(
@@ -678,46 +145,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         height: Int,
         fps: Int
     ) -> UInt64 {
-        let recommended = recommendedNativeScreenVideoBitrateBps(
+        WebRTCNativeScreenVideoValuePolicy.minimumExtremeBitrateBps(
             width: width,
             height: height,
             fps: fps
         )
-        return UInt64(max(8_000_000, (recommended * 3) / 5))
-    }
-
-    static let extremeNativeScreenVideoSDPWidth = 2_056
-    static let extremeNativeScreenVideoSDPHeight = 1_329
-    static let extremeNativeScreenVideoSDPFPS = 60
-    static let extremeNativeScreenVideoH264LevelHex = "33"
-    static var extremeNativeScreenVideoH264MaxFS: Int {
-        nativeScreenVideoH264MacroblockFrameSize(
-            width: extremeNativeScreenVideoSDPWidth,
-            height: extremeNativeScreenVideoSDPHeight
-        )
-    }
-    static var extremeNativeScreenVideoH264MaxMBPS: Int {
-        extremeNativeScreenVideoH264MaxFS * extremeNativeScreenVideoSDPFPS
-    }
-
-    static func nativeScreenVideoH264MacroblockFrameSize(width: Int, height: Int) -> Int {
-        let clampedWidth = max(1, width)
-        let clampedHeight = max(1, height)
-        let macroblockWidth = (clampedWidth + 15) / 16
-        let macroblockHeight = (clampedHeight + 15) / 16
-        return macroblockWidth * macroblockHeight
-    }
-
-    static func nativeScreenVideoH264SDPConstraintsEnabled(
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> Bool {
-        environment["SKYBRIDGE_WEBRTC_EXTREME_MEDIA"] == "1"
-            || environment["SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK"] == "1"
-    }
-
-    static func nativeScreenVideoEvenBackingDimension(_ visibleDimension: Int) -> Int {
-        let sanitized = max(1, visibleDimension)
-        return sanitized.isMultiple(of: 2) ? sanitized : sanitized + 1
     }
 
     public typealias ICEConfig = SkyBridgeICEConfiguration
@@ -751,37 +183,6 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
 
-    enum StateAccessPlan: Equatable {
-        case executeInline
-        case syncOnStateQueue
-    }
-
-    enum CallbackDispatchPlan: Equatable {
-        case executeInline
-        case asyncOffStateQueue
-    }
-
-    enum PendingInboundFlushPlan: Equatable {
-        case keepBuffered
-        case dispatchBuffered(count: Int)
-    }
-
-    enum PendingInboundDeliveryPlan: Equatable {
-        case bufferIncoming(nextPendingCount: Int)
-        case dispatch(bufferedCount: Int)
-    }
-
-    enum PendingInboundBufferLimitPlan: Equatable {
-        case append(nextPendingCount: Int, nextPendingBytes: Int)
-        case overflow
-    }
-
-    enum PendingRemoteICEPlan: Equatable {
-        case ignoreDuplicate
-        case queueCandidate(nextPendingCount: Int)
-        case applyImmediately
-    }
-    
     private let logger = Logger(subsystem: "com.skybridge.webrtc", category: "WebRTCSession")
     private static let publicFallbackSTUNURL = "stun:stun.l.google.com:19302"
     private static let controlChannelLabel = "skybridge"
@@ -960,67 +361,6 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
 
-    nonisolated static func stateAccessPlan(isOnStateQueue: Bool) -> StateAccessPlan {
-        isOnStateQueue ? .executeInline : .syncOnStateQueue
-    }
-
-    nonisolated static func callbackDispatchPlan(isOnStateQueue: Bool) -> CallbackDispatchPlan {
-        isOnStateQueue ? .asyncOffStateQueue : .executeInline
-    }
-
-    nonisolated static func nativeOutgoingAudioTrackPreference(environment: [String: String]) -> Bool {
-        if let raw = environment["SKYBRIDGE_ENABLE_WEBRTC_NATIVE_AUDIO_TRACK"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !raw.isEmpty {
-            return raw == "1"
-        }
-        return false
-    }
-
-    nonisolated static func lifecycleGuardAllowsCallback(
-        peerConnectionMatches: Bool,
-        isClosed: Bool,
-        currentLifecycleToken: UInt64,
-        expectedLifecycleToken: UInt64
-    ) -> Bool {
-        peerConnectionMatches && !isClosed && currentLifecycleToken == expectedLifecycleToken
-    }
-
-    nonisolated static func pendingInboundFlushPlan(
-        hasHandlerInstalled: Bool,
-        pendingCount: Int
-    ) -> PendingInboundFlushPlan {
-        guard hasHandlerInstalled, pendingCount > 0 else {
-            return .keepBuffered
-        }
-        return .dispatchBuffered(count: pendingCount)
-    }
-
-    nonisolated static func pendingInboundDeliveryPlan(
-        hasHandlerInstalled: Bool,
-        pendingCount: Int
-    ) -> PendingInboundDeliveryPlan {
-        guard hasHandlerInstalled else {
-            return .bufferIncoming(nextPendingCount: pendingCount + 1)
-        }
-        return .dispatch(bufferedCount: pendingCount)
-    }
-
-    nonisolated static func pendingInboundBufferLimitPlan(
-        pendingCount: Int,
-        pendingBytes: Int,
-        incomingBytes: Int,
-        maxCount: Int,
-        maxBytes: Int
-    ) -> PendingInboundBufferLimitPlan {
-        let nextPendingCount = pendingCount + 1
-        let nextPendingBytes = pendingBytes + incomingBytes
-        guard nextPendingCount <= maxCount, nextPendingBytes <= maxBytes else {
-            return .overflow
-        }
-        return .append(nextPendingCount: nextPendingCount, nextPendingBytes: nextPendingBytes)
-    }
-
     public nonisolated static let screenChunkedWireFormat = "sbc2-chunked-v1"
     public nonisolated static let screenChunkHeaderByteCount = 36
 
@@ -1117,20 +457,6 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
     }
 
-    nonisolated static func pendingRemoteICEPlan(
-        isDuplicate: Bool,
-        hasRemoteDescription: Bool,
-        pendingCount: Int
-    ) -> PendingRemoteICEPlan {
-        if isDuplicate {
-            return .ignoreDuplicate
-        }
-        if hasRemoteDescription {
-            return .applyImmediately
-        }
-        return .queueCandidate(nextPendingCount: pendingCount + 1)
-    }
-    
     /// 关闭 WebRTC 会话并释放所有资源（PeerConnection / DataChannel / SSL）。
     ///
     /// 符合 IEEE TDSC 安全生命周期管理要求：
@@ -1965,8 +1291,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let clampedFPS = max(1, fps)
         let targetWidth = max(1, width)
         let targetHeight = max(1, height)
-        let adaptedWidth = Self.nativeScreenVideoEvenBackingDimension(targetWidth)
-        let adaptedHeight = Self.nativeScreenVideoEvenBackingDimension(targetHeight)
+        let adaptedWidth = WebRTCNativeScreenVideoValuePolicy.evenBackingDimension(targetWidth)
+        let adaptedHeight = WebRTCNativeScreenVideoValuePolicy.evenBackingDimension(targetHeight)
         var shouldUpdateNativeVideoFormat = false
         withState {
             shouldUpdateNativeVideoFormat =
@@ -2575,79 +1901,16 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         )
     }
 
-    static func nativeScreenVideoCodecPreferenceRank(_ codecName: String) -> Int {
-        let normalized = codecName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if normalized.contains("h265") || normalized.contains("hevc") {
-            return 0
-        }
-        if normalized.contains("h264") || normalized.contains("avc") {
-            return 1
-        }
-        if normalized == "vp8"
-            || normalized == "vp9"
-            || normalized == "av1"
-            || normalized.contains("vp8")
-            || normalized.contains("vp9")
-            || normalized.contains("av1")
-            || normalized.contains("vpx") {
-            return 10
-        }
-        return 5
-    }
-
-    static func nativeScreenVideoCodecIsHardwarePreferred(_ codecName: String) -> Bool {
-        let normalized = codecName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized.contains("h264")
-            || normalized.contains("avc")
-            || normalized.contains("h265")
-            || normalized.contains("hevc")
-    }
-
     private func preferNativeScreenVideoCodecIfPossible(
         factory: RTCPeerConnectionFactory,
         transceiver: RTCRtpTransceiver
     ) {
         let capabilities = factory.rtpSenderCapabilities(forKind: kRTCMediaStreamTrackKindVideo)
-        let preferred = Self.nativeScreenVideoCodecPreferences(from: capabilities.codecs)
+        let preferred = WebRTCNativeScreenVideoValuePolicy.codecPreferences(from: capabilities.codecs)
         guard !preferred.isEmpty else { return }
         if let codecError = setCodecPreferences(preferred, on: transceiver) {
             logger.debug("ℹ️ failed to set H264/HEVC-only screen video codec preferences: \(codecError.localizedDescription, privacy: .public)")
         }
-    }
-
-    static func nativeScreenVideoCodecPreferences(from codecs: [RTCRtpCodecCapability]) -> [RTCRtpCodecCapability] {
-        let sorted = codecs.enumerated().sorted { lhs, rhs in
-            let lhsRank = Self.nativeScreenVideoCodecPreferenceRank(lhs.element.name)
-            let rhsRank = Self.nativeScreenVideoCodecPreferenceRank(rhs.element.name)
-            if lhsRank != rhsRank {
-                return lhsRank < rhsRank
-            }
-            return lhs.offset < rhs.offset
-        }.map(\.element)
-        let hardwarePreferredPrimary = sorted.filter {
-            Self.nativeScreenVideoCodecIsHardwarePreferred($0.name)
-        }
-        guard !hardwarePreferredPrimary.isEmpty else { return sorted }
-
-        let hardwarePayloadTypes = Set(
-            hardwarePreferredPrimary.compactMap { $0.preferredPayloadType?.stringValue }
-        )
-        return sorted.filter { codec in
-            if Self.nativeScreenVideoCodecIsHardwarePreferred(codec.name) {
-                return true
-            }
-            guard Self.nativeScreenVideoCodecIsRTX(codec.name) else {
-                return false
-            }
-            guard let apt = codec.parameters["apt"], !hardwarePayloadTypes.isEmpty else {
-                return true
-            }
-            return hardwarePayloadTypes.contains(apt)
-        }
-    }
-
-    static func nativeScreenVideoCodecIsRTX(_ codecName: String) -> Bool {
-        codecName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "rtx"
     }
 
     private func configureOutgoingScreenSenderParametersIfNeeded(_ sender: RTCRtpSender) {
@@ -2661,12 +1924,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let targetWidth = max(1, lastOutgoingNativeVideoTargetWidth)
         let targetHeight = max(1, lastOutgoingNativeVideoTargetHeight)
         let targetFPS = max(1, lastOutgoingNativeVideoTargetFPS)
-        let targetBitrate = Self.recommendedNativeScreenVideoBitrateBps(
+        let targetBitrate = WebRTCNativeScreenVideoValuePolicy.recommendedBitrateBps(
             width: targetWidth,
             height: targetHeight,
             fps: targetFPS
         )
-        let strictMinimumBitrate = Self.minimumExtremeNativeScreenVideoBitrateBps(
+        let strictMinimumBitrate = WebRTCNativeScreenVideoValuePolicy.minimumExtremeBitrateBps(
             width: targetWidth,
             height: targetHeight,
             fps: targetFPS
@@ -2875,13 +2138,13 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         logger.info("🔄 absorbed ICE candidates from duplicate SDP. sessionId=\(self.sessionId, privacy: .public) count=\(absorbed, privacy: .public)")
     }
 
-    private struct NormalizedRemoteSDP {
-        let sdp: String
-        let droppedSessionLevelCandidateLines: Int
-        let deduplicatedCandidateLines: Int
-    }
-
-    private static func normalizedRemoteSDP(_ sdp: String) -> NormalizedRemoteSDP {
+    private static func normalizedRemoteSDP(
+        _ sdp: String
+    ) -> (
+        sdp: String,
+        droppedSessionLevelCandidateLines: Int,
+        deduplicatedCandidateLines: Int
+    ) {
         let normalizedNewlines = sdp.replacingOccurrences(of: "\r\n", with: "\n")
         let rawLines = normalizedNewlines
             .split(separator: "\n", omittingEmptySubsequences: false)
@@ -2951,7 +2214,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
 
         let rendered = flattened.joined(separator: "\r\n") + "\r\n"
-        return NormalizedRemoteSDP(
+        return (
             sdp: rendered,
             droppedSessionLevelCandidateLines: droppedSessionLevelCandidateLines,
             deduplicatedCandidateLines: deduplicatedCandidateLines
@@ -2998,193 +2261,24 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         kind: String
     ) -> String {
         guard prefersNativeOutgoingScreenTrack,
-              Self.nativeScreenVideoH264SDPConstraintsEnabled() else { return sdp }
+              WebRTCNativeScreenVideoValuePolicy.h264SDPConstraintsEnabled() else { return sdp }
         let constrained = Self.sdpWithNativeScreenH264LevelSupport(
             sdp,
-            requiredLevelHex: Self.extremeNativeScreenVideoH264LevelHex,
-            maxFS: Self.extremeNativeScreenVideoH264MaxFS,
-            maxMBPS: Self.extremeNativeScreenVideoH264MaxMBPS
+            requiredLevelHex: WebRTCNativeScreenVideoValuePolicy.extremeH264LevelHex,
+            maxFS: WebRTCNativeScreenVideoValuePolicy.extremeH264MaxFS,
+            maxMBPS: WebRTCNativeScreenVideoValuePolicy.extremeH264MaxMBPS
         )
         guard constrained != sdp else { return sdp }
         _onTrace?(
             """
             local-sdp-h264-extreme-constraints session=\(sessionId) \
             kind=\(kind) \
-            level=\(Self.extremeNativeScreenVideoH264LevelHex) \
-            maxFS=\(Self.extremeNativeScreenVideoH264MaxFS) \
-            maxMBPS=\(Self.extremeNativeScreenVideoH264MaxMBPS)
+            level=\(WebRTCNativeScreenVideoValuePolicy.extremeH264LevelHex) \
+            maxFS=\(WebRTCNativeScreenVideoValuePolicy.extremeH264MaxFS) \
+            maxMBPS=\(WebRTCNativeScreenVideoValuePolicy.extremeH264MaxMBPS)
             """
         )
         return constrained
-    }
-
-    static func sdpWithNativeScreenH264LevelSupport(
-        _ sdp: String,
-        requiredLevelHex: String,
-        maxFS: Int,
-        maxMBPS: Int
-    ) -> String {
-        let newline = sdp.contains("\r\n") ? "\r\n" : "\n"
-        let hasTrailingNewline = sdp.hasSuffix("\r\n") || sdp.hasSuffix("\n")
-        var lines = sdp
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-        if lines.last == "" {
-            lines.removeLast()
-        }
-
-        var prefix: [String] = []
-        var sections: [[String]] = []
-        var currentSection: [String]?
-        for line in lines {
-            if line.hasPrefix("m=") {
-                if let currentSection {
-                    sections.append(currentSection)
-                }
-                currentSection = [line]
-            } else if currentSection != nil {
-                currentSection?.append(line)
-            } else {
-                prefix.append(line)
-            }
-        }
-        if let currentSection {
-            sections.append(currentSection)
-        }
-
-        let rewrittenSections = sections.map {
-            sdpSectionWithNativeScreenH264LevelSupport(
-                $0,
-                requiredLevelHex: requiredLevelHex,
-                maxFS: maxFS,
-                maxMBPS: maxMBPS
-            )
-        }
-        let renderedLines = prefix + rewrittenSections.flatMap { $0 }
-        let rendered = renderedLines.joined(separator: newline)
-        return hasTrailingNewline ? rendered + newline : rendered
-    }
-
-    private static func sdpSectionWithNativeScreenH264LevelSupport(
-        _ section: [String],
-        requiredLevelHex: String,
-        maxFS: Int,
-        maxMBPS: Int
-    ) -> [String] {
-        guard section.first?.hasPrefix("m=video ") == true else { return section }
-        let h264Payloads = Set(
-            section.compactMap { line -> String? in
-                guard let parsed = sdpAttributePayloadAndValue(line, prefix: "a=rtpmap:") else {
-                    return nil
-                }
-                let codecName = parsed.value
-                    .split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
-                    .first
-                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
-                guard codecName == "h264" || codecName == "avc" else { return nil }
-                return parsed.payload
-            }
-        )
-        guard !h264Payloads.isEmpty else { return section }
-
-        return section.map { line in
-            guard let parsed = sdpAttributePayloadAndValue(line, prefix: "a=fmtp:"),
-                  h264Payloads.contains(parsed.payload) else { return line }
-            let updated = h264FmtpParametersWithNativeScreenLevelSupport(
-                parsed.value,
-                requiredLevelHex: requiredLevelHex,
-                maxFS: maxFS,
-                maxMBPS: maxMBPS
-            )
-            return "a=fmtp:\(parsed.payload) \(updated)"
-        }
-    }
-
-    private static func sdpAttributePayloadAndValue(
-        _ line: String,
-        prefix: String
-    ) -> (payload: String, value: String)? {
-        guard line.hasPrefix(prefix) else { return nil }
-        let body = String(line.dropFirst(prefix.count))
-        let parts = body.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-        guard let payload = parts.first else { return nil }
-        return (
-            String(payload).trimmingCharacters(in: .whitespacesAndNewlines),
-            parts.dropFirst().first.map(String.init) ?? ""
-        )
-    }
-
-    static func h264FmtpParametersWithNativeScreenLevelSupport(
-        _ fmtp: String,
-        requiredLevelHex: String,
-        maxFS: Int,
-        maxMBPS: Int
-    ) -> String {
-        var entries = fmtp
-            .split(separator: ";", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        var seenKeys = Set<String>()
-
-        for index in entries.indices {
-            let parts = entries[index].split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            let key = parts.first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
-            let value = parts.dropFirst().first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-            guard !key.isEmpty else { continue }
-            seenKeys.insert(key)
-            switch key {
-            case "profile-level-id":
-                entries[index] = "profile-level-id=\(h264ProfileLevelID(value, upgradedToAtLeast: requiredLevelHex))"
-            case "level-asymmetry-allowed":
-                entries[index] = "level-asymmetry-allowed=1"
-            case "packetization-mode":
-                entries[index] = value.isEmpty ? "packetization-mode=1" : "packetization-mode=\(value)"
-            case "max-fs":
-                entries[index] = "max-fs=\(maxFmtpInteger(value, minimum: maxFS))"
-            case "max-mbps":
-                entries[index] = "max-mbps=\(maxFmtpInteger(value, minimum: maxMBPS))"
-            default:
-                break
-            }
-        }
-
-        if !seenKeys.contains("level-asymmetry-allowed") {
-            entries.append("level-asymmetry-allowed=1")
-        }
-        if !seenKeys.contains("packetization-mode") {
-            entries.append("packetization-mode=1")
-        }
-        if !seenKeys.contains("max-fs") {
-            entries.append("max-fs=\(maxFS)")
-        }
-        if !seenKeys.contains("max-mbps") {
-            entries.append("max-mbps=\(maxMBPS)")
-        }
-        return entries.joined(separator: ";")
-    }
-
-    static func h264ProfileLevelID(
-        _ profileLevelID: String,
-        upgradedToAtLeast requiredLevelHex: String
-    ) -> String {
-        let cleaned = profileLevelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let required = requiredLevelHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard cleaned.count == 6,
-              required.count == 2,
-              let currentLevel = Int(cleaned.suffix(2), radix: 16),
-              let requiredLevel = Int(required, radix: 16) else {
-            return cleaned.isEmpty ? profileLevelID : cleaned
-        }
-        guard currentLevel < requiredLevel else { return cleaned }
-        return "\(cleaned.prefix(4))\(required)"
-    }
-
-    private static func maxFmtpInteger(_ value: String, minimum: Int) -> Int {
-        guard let parsed = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return minimum
-        }
-        return max(parsed, minimum)
     }
 
     private func createOffer() {
@@ -3312,188 +2406,28 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
 
-    struct SDPMediaSummary: Equatable {
-        let kind: String
-        let port: String
-        let mid: String
-        let direction: String
-        let codecs: [String]
-        let codecParameters: [String]
-        let hasMSID: Bool
-        let hasSSRC: Bool
-        let rejected: Bool
-    }
-
-    static func mediaSummaries(from sdp: String) -> [SDPMediaSummary] {
-        let normalized = sdp.replacingOccurrences(of: "\r\n", with: "\n")
-        var summaries: [SDPMediaSummary] = []
-        var current: [String] = []
-
-        func flushCurrent() {
-            guard let first = current.first,
-                  first.hasPrefix("m=") else { return }
-            let mediaParts = first.split(separator: " ", omittingEmptySubsequences: true)
-            guard let media = mediaParts.first?.dropFirst(2),
-                  !media.isEmpty else { return }
-            let port = mediaParts.dropFirst().first.map(String.init) ?? "-"
-            var payloadTypes: [String] = []
-            if mediaParts.count > 3 {
-                payloadTypes = mediaParts.dropFirst(3).map(String.init)
-            }
-            var mid = "-"
-            var direction = "unspecified"
-            var rtpmapByPayload: [String: String] = [:]
-            var fmtpByPayload: [String: String] = [:]
-            var hasMSID = false
-            var hasSSRC = false
-            for line in current.dropFirst() {
-                if line.hasPrefix("a=mid:") {
-                    mid = String(line.dropFirst(6))
-                } else if line == "a=sendrecv" || line == "a=sendonly" || line == "a=recvonly" || line == "a=inactive" {
-                    direction = String(line.dropFirst(2))
-                } else if line.hasPrefix("a=rtpmap:") {
-                    let rtpmap = String(line.dropFirst(9))
-                    let parts = rtpmap.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-                    if let payload = parts.first,
-                       let codec = parts.dropFirst().first {
-                        rtpmapByPayload[String(payload)] = String(codec)
-                    }
-                } else if line.hasPrefix("a=fmtp:") {
-                    let fmtp = String(line.dropFirst(7))
-                    let parts = fmtp.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-                    guard let payload = parts.first else { continue }
-                    fmtpByPayload[String(payload)] = parts.dropFirst().first.map(String.init) ?? ""
-                } else if line.hasPrefix("a=msid:") {
-                    hasMSID = true
-                } else if line.hasPrefix("a=ssrc:") {
-                    hasSSRC = true
-                }
-            }
-            let codecs = payloadTypes.compactMap { payload -> String? in
-                guard let codec = rtpmapByPayload[payload] else { return nil }
-                return "\(payload):\(codec)"
-            }
-            let codecParameters = payloadTypes.compactMap { payload -> String? in
-                guard let codec = rtpmapByPayload[payload],
-                      Self.nativeScreenVideoCodecIsHardwarePreferred(codec),
-                      let fmtp = fmtpByPayload[payload] else { return nil }
-                let codecName = codec.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
-                    .first
-                    .map(String.init) ?? codec
-                let compactFmtp = Self.conciseSDPFmtpParameters(fmtp)
-                return "\(payload):\(codecName)(\(compactFmtp.isEmpty ? "-" : compactFmtp))"
-            }
-            summaries.append(
-                SDPMediaSummary(
-                    kind: String(media),
-                    port: port,
-                    mid: mid,
-                    direction: direction,
-                    codecs: codecs,
-                    codecParameters: codecParameters,
-                    hasMSID: hasMSID,
-                    hasSSRC: hasSSRC,
-                    rejected: port == "0"
-                )
-            )
-        }
-
-        for line in normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
-            if line.hasPrefix("m=") {
-                flushCurrent()
-                current = [line]
-            } else if !current.isEmpty {
-                current.append(line)
-            }
-        }
-        flushCurrent()
-        return summaries
-    }
-
-    static func conciseSDPFmtpParameters(_ fmtp: String) -> String {
-        let prioritizedKeys = [
-            "profile-level-id",
-            "level-asymmetry-allowed",
-            "packetization-mode",
-            "max-fs",
-            "max-mbps",
-            "x-google-start-bitrate",
-            "x-google-max-bitrate",
-            "x-google-min-bitrate"
-        ]
-        let entries = fmtp
-            .split(separator: ";", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        var valueByKey: [String: String] = [:]
-        var originalEntryByKey: [String: String] = [:]
-        for entry in entries {
-            let parts = entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            let key = parts.first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
-            guard !key.isEmpty else { continue }
-            if let value = parts.dropFirst().first {
-                valueByKey[key] = String(value).trimmingCharacters(in: .whitespacesAndNewlines)
-            } else {
-                valueByKey[key] = ""
-            }
-            originalEntryByKey[key] = entry
-        }
-
-        var emittedKeys = Set<String>()
-        var compact: [String] = []
-        for key in prioritizedKeys {
-            guard let value = valueByKey[key] else { continue }
-            emittedKeys.insert(key)
-            compact.append(value.isEmpty ? key : "\(key)=\(value)")
-        }
-        let extras = entries.compactMap { entry -> (key: String, entry: String)? in
-            let key = entry
-                .split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                .first
-                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
-            guard !key.isEmpty, !emittedKeys.contains(key) else { return nil }
-            return (key, originalEntryByKey[key] ?? entry)
-        }
-        for extra in extras.prefix(max(0, 8 - compact.count)) {
-            emittedKeys.insert(extra.key)
-            compact.append(extra.entry)
-        }
-        return compact.joined(separator: ";")
-    }
-
-    private static func conciseSDPMediaSummary(_ summary: SDPMediaSummary) -> String {
-        let codecList = summary.codecs.prefix(8).joined(separator: ",")
-        let parameterList = summary.codecParameters.prefix(8).joined(separator: ",")
-        return "kind=\(summary.kind) mid=\(summary.mid) port=\(summary.port) rejected=\(summary.rejected) direction=\(summary.direction) codecs=\(codecList.isEmpty ? "-" : codecList) fmtp=\(parameterList.isEmpty ? "-" : parameterList) msid=\(summary.hasMSID) ssrc=\(summary.hasSSRC)"
-    }
-
     private func logLocalSDPSummary(kind: String, sdp: String) {
-        let mediaSummaries = Self.mediaSummaries(from: sdp)
-        let videoSummary = mediaSummaries.first { $0.kind == "video" }
-        let hasVideoMedia = videoSummary != nil
-        let direction = videoSummary?.direction ?? "unspecified"
-        let videoSection = videoSummary.map(Self.conciseSDPMediaSummary) ?? "-"
+        let videoSummary = Self.videoSDPMediaSummary(from: sdp)
         logger.info(
             """
             📄 local SDP ready. sessionId=\(self.sessionId, privacy: .public) \
             kind=\(kind, privacy: .public) \
-            hasVideo=\(hasVideoMedia, privacy: .public) \
-            direction=\(direction, privacy: .public) \
-            video=\(videoSection, privacy: .public) \
+            hasVideo=\(videoSummary.hasVideo, privacy: .public) \
+            direction=\(videoSummary.direction, privacy: .public) \
+            video=\(videoSummary.description, privacy: .public) \
             nativeTrack=\(self.localVideoTrack != nil, privacy: .public) \
             nativeTransceiver=\(self.localVideoTransceiver != nil, privacy: .public)
             """
         )
-        onTrace?("local-sdp-summary session=\(sessionId) kind=\(kind) video=\(videoSection)")
+        onTrace?("local-sdp-summary session=\(sessionId) kind=\(kind) video=\(videoSummary.description)")
     }
 
     private func logRemoteSDPSummary(kind: String, sdp: String) {
-        let videoSummary = Self.mediaSummaries(from: sdp).first { $0.kind == "video" }
-        let videoSection = videoSummary.map(Self.conciseSDPMediaSummary) ?? "-"
+        let videoSummary = Self.videoSDPMediaSummary(from: sdp)
         logger.info(
-            "📄 remote SDP applied. sessionId=\(self.sessionId, privacy: .public) kind=\(kind, privacy: .public) video=\(videoSection, privacy: .public)"
+            "📄 remote SDP applied. sessionId=\(self.sessionId, privacy: .public) kind=\(kind, privacy: .public) video=\(videoSummary.description, privacy: .public)"
         )
-        onTrace?("remote-sdp-summary session=\(sessionId) kind=\(kind) video=\(videoSection)")
+        onTrace?("remote-sdp-summary session=\(sessionId) kind=\(kind) video=\(videoSummary.description)")
     }
 
     private func emitCompletedLocalDescriptionIfNeeded() {

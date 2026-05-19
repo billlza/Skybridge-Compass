@@ -161,4 +161,88 @@ final class HandshakeMessagesWireEncodingTests: XCTestCase {
             }
         }
     }
+
+    func testMessageADecodeRejectsUnknownSupportedSuite() throws {
+        var encoded = makeClassicMessageA().encoded
+        encoded[3] = 0x00
+        encoded[4] = 0x00
+
+        assertThrowsSuiteNotSupported {
+            _ = try HandshakeMessageA.decode(from: encoded)
+        }
+    }
+
+    func testMessageADecodeRejectsUnknownKeyShareSuite() throws {
+        var encoded = makeClassicMessageA().encoded
+        encoded[7] = 0x00
+        encoded[8] = 0x00
+
+        assertThrowsSuiteNotSupported {
+            _ = try HandshakeMessageA.decode(from: encoded)
+        }
+    }
+
+    func testMessageBDecodeRejectsUnknownSelectedSuite() throws {
+        var encoded = makeClassicMessageB().encoded
+        encoded[1] = 0x00
+        encoded[2] = 0x00
+
+        assertThrowsSuiteNotSupported {
+            _ = try HandshakeMessageB.decode(from: encoded)
+        }
+    }
+
+    private func makeClassicMessageA() -> HandshakeMessageA {
+        let capabilities = CryptoCapabilities(
+            supportedKEM: ["X25519"],
+            supportedSignature: ["P-256"],
+            supportedAuthProfiles: [AuthProfile.classic.displayName],
+            supportedAEAD: ["AES-GCM"],
+            pqcAvailable: false,
+            platformVersion: "14.0",
+            providerType: .classic
+        )
+        return HandshakeMessageA(
+            supportedSuites: [.x25519Ed25519],
+            keyShares: [
+                HandshakeKeyShare(suite: .x25519Ed25519, shareBytes: Data(repeating: 0x11, count: 32))
+            ],
+            clientNonce: Data(repeating: 0x22, count: 32),
+            policy: HandshakePolicy(requirePQC: false, allowClassicFallback: true, minimumTier: .classic),
+            capabilities: capabilities,
+            signature: Data(repeating: 0xA5, count: 64),
+            identityPublicKey: Data(repeating: 0xB7, count: 32)
+        )
+    }
+
+    private func makeClassicMessageB() -> HandshakeMessageB {
+        let sealedBox = HPKESealedBox(
+            encapsulatedKey: Data(repeating: 0x33, count: 32),
+            nonce: Data(repeating: 0x44, count: 12),
+            ciphertext: Data(repeating: 0x55, count: 16),
+            tag: Data(repeating: 0x66, count: 16)
+        )
+        return HandshakeMessageB(
+            selectedSuite: .x25519Ed25519,
+            responderShare: Data(repeating: 0x77, count: 32),
+            serverNonce: Data(repeating: 0x88, count: 32),
+            encryptedPayload: sealedBox,
+            signature: Data(repeating: 0xC3, count: 64),
+            identityPublicKey: Data(repeating: 0xD4, count: 32)
+        )
+    }
+
+    private func assertThrowsSuiteNotSupported(
+        _ expression: () throws -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(try expression(), file: file, line: line) { error in
+            guard case HandshakeError.failed(let reason) = error else {
+                XCTFail("Expected HandshakeError.failed", file: file, line: line)
+                return
+            }
+            XCTAssertEqual(reason, .suiteNotSupported, file: file, line: line)
+        }
+    }
 }

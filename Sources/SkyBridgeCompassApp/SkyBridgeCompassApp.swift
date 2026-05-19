@@ -16,6 +16,7 @@ struct SkyBridgeCompassApp: App {
     @StateObject private var supabaseConfiguration = SupabaseConfiguration.shared
     @StateObject private var vncLaunchContext = VNCLaunchContext.shared
     @StateObject private var sshLaunchContext = SSHLaunchContext.shared
+    @StateObject private var pairingTrustApproval = PairingTrustApprovalService.shared
 
  /// 天气服务 - 提供天气数据和位置服务
     @StateObject private var weatherDataService = WeatherDataService()
@@ -35,6 +36,7 @@ struct SkyBridgeCompassApp: App {
     private let renderConfig: DMGBackgroundRenderConfig?
     private let iconApplied: Bool
     private let localWebRTCSmokeHarness = LocalWebRTCSmokeHarness()
+    private let localP2PFileTransferSmokeHarness = LocalP2PFileTransferSmokeHarness()
 
     var body: some Scene {
         WindowGroup(localizationManager.localizedString("app.name")) {
@@ -84,8 +86,25 @@ struct SkyBridgeCompassApp: App {
                 SupabasePasswordResetSheet()
                     .environmentObject(authModel)
             }
+            .sheet(item: Binding(get: { pairingTrustApproval.pendingRequest }, set: { newValue in
+                if newValue == nil {
+                    pairingTrustApproval.userDismissedCurrentPrompt()
+                }
+            })) { req in
+                PairingTrustApprovalSheet(
+                    request: req,
+                    onDecision: { decision in
+                        pairingTrustApproval.resolve(req, decision: decision)
+                    }
+                )
+            }
             .task {
                 if renderConfig == nil {
+                    if localP2PFileTransferSmokeHarness.isEnabledForCurrentEnvironment {
+                        await localP2PFileTransferSmokeHarness.startIfNeeded()
+                        return
+                    }
+
                     await localPeerServices.startIfNeeded()
 
                     await MainActor.run {
@@ -341,6 +360,13 @@ struct SkyBridgeCompassApp: App {
         Self.configureNotificationsUnified()
         let applied = Self.applyAppIconIfAvailable()
         self.iconApplied = applied
+
+        if localP2PFileTransferSmokeHarness.isEnabledForCurrentEnvironment {
+            let smokeHarness = localP2PFileTransferSmokeHarness
+            Task { @MainActor in
+                await smokeHarness.startIfNeeded()
+            }
+        }
 
  // 🔧 修复命令行启动时的键盘输入问题
  // 确保应用能够接收键盘输入和焦点事件
@@ -622,7 +648,6 @@ private struct RootContainerView: View {
     @EnvironmentObject private var authModel: AuthenticationViewModel
     @EnvironmentObject private var localPeerServices: LocalPeerServiceCoordinator
     @Environment(\.iconMissingHint) private var iconMissingHint
-    @StateObject private var pairingTrustApproval = PairingTrustApprovalService.shared
 
     var body: some View {
  // 移除调试日志以减少重复渲染的日志噪音
@@ -666,18 +691,6 @@ private struct RootContainerView: View {
                     .padding(12)
                     .zIndex(0) // 避免遮挡右上角工具按钮
             }
-        }
-        .sheet(item: Binding(get: { pairingTrustApproval.pendingRequest }, set: { newValue in
-            if newValue == nil {
-                pairingTrustApproval.userDismissedCurrentPrompt()
-            }
-        })) { req in
-            PairingTrustApprovalSheet(
-                request: req,
-                onDecision: { decision in
-                    pairingTrustApproval.resolve(req, decision: decision)
-                }
-            )
         }
     }
 }

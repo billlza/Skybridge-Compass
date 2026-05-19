@@ -66,6 +66,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // USB设备管理器
     private var usbManager: USBCConnectionManager?
     private var usbCancellable: AnyCancellable?
+    /// Network discovery owns network-reachable endpoints. USB presence is owned by
+    /// UnifiedOnlineDeviceManager so it cannot overwrite Bonjour identity or ports.
+    public var publishesUSBPresenceInDiscoveredDevices = false
 
  // 服务类型瘦身 - 默认仅SkyBridge，兼容/调试模式可扩展其余类型
     // 服务类型分类 - 核心服务（默认扫描）
@@ -157,6 +160,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  /// 处理USB设备更新
     private func handleUSBDevicesUpdate(_ usbDevices: [USBDeviceInfo]) async {
         logger.info("🔌 收到USB设备更新，共 \(usbDevices.count) 台设备")
+        guard publishesUSBPresenceInDiscoveredDevices else {
+            logger.debug("↪️ USB presence 由 UnifiedOnlineDeviceManager 合并，网络发现器不发布 USB-only 设备")
+            return
+        }
 
         for usbDevice in usbDevices {
  // 将USB设备转换为DiscoveredDevice
@@ -172,9 +179,6 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
  /// 将USB设备信息转换为DiscoveredDevice
     private func convertUSBDeviceToDiscoveredDevice(_ usbDevice: USBDeviceInfo) -> DiscoveredDevice {
- // 使用序列号作为唯一标识符，如果没有序列号则使用设备ID
-        let uniqueId = usbDevice.serialNumber ?? usbDevice.deviceID
-
         return DiscoveredDevice(
             id: UUID(),
             name: usbDevice.name,
@@ -185,7 +189,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             services: [],
             portMap: [:],
             connectionTypes: [.usb],
-            uniqueIdentifier: uniqueId,
+            uniqueIdentifier: Self.usbPresenceIdentifier(
+                serialNumber: usbDevice.serialNumber,
+                deviceID: usbDevice.deviceID
+            ),
             signalStrength: nil,
             source: .skybridgeUSB,  // USB 设备来源
             isLocalDevice: false  // 初始化为 false，由 applyLocalFlag 统一判定
@@ -200,7 +207,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             logger.debug("startScanning() 忽略：已经在扫描中")
             return
         }
-        logger.info("🔍 开始高性能扫描（包括USB设备）")
+        logger.info("🔍 开始高性能网络扫描")
         isScanning = true
 
  // 改为事件驱动 + 防抖，无需定时器
@@ -218,9 +225,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
 
- // 扫描USB设备
-        Task { @MainActor [weak self] in
-            await self?.scanUSBDevices()
+        if publishesUSBPresenceInDiscoveredDevices {
+ // Legacy opt-in only. The normal path keeps USB presence out of network discoveredDevices.
+            Task { @MainActor [weak self] in
+                await self?.scanUSBDevices()
+            }
         }
     }
 
@@ -704,7 +713,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  /// 启动单个浏览器（在后台队列）
  /// 根据 enableIPv6Support 设置配置网络参数
     private func startSingleBrowser(serviceType: String) async {
-        let descriptor = NWBrowser.Descriptor.bonjour(type: serviceType, domain: serviceDomain)
+        let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: serviceDomain)
         let parameters = NWParameters()
         parameters.includePeerToPeer = true
 
@@ -794,21 +803,40 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     let existingDevice = discoveredDevices[index]
                     let betterName = sanitized.name.count > existingDevice.name.count ? sanitized.name : existingDevice.name
                     let mergedConnectionTypes = sanitized.connectionTypes.union(existingDevice.connectionTypes)
+                    let sanitizedIsUSBPresence =
+                        sanitized.source == .skybridgeUSB
+                        || (sanitized.connectionTypes == [.usb] && sanitized.services.isEmpty && sanitized.portMap.isEmpty)
+                    let existingHasSkyBridgeEndpoint =
+                        existingDevice.services.contains(where: { $0.lowercased().contains("skybridge") })
+                        || existingDevice.portMap.keys.contains(where: { $0.lowercased().contains("skybridge") })
+                    let preserveExistingNetworkIdentity = sanitizedIsUSBPresence && existingHasSkyBridgeEndpoint
 
                     let updatedDevice = DiscoveredDevice(
                         id: existingDevice.id,
                         name: betterName,
                         ipv4: sanitized.ipv4 ?? existingDevice.ipv4,
                         ipv6: sanitized.ipv6 ?? existingDevice.ipv6,
-                        services: Array(Set(sanitized.services + existingDevice.services)),
-                        portMap: sanitized.portMap.merging(existingDevice.portMap) { new, _ in new },
+                        platformName: sanitized.platformName ?? existingDevice.platformName,
+                        osVersion: sanitized.osVersion ?? existingDevice.osVersion,
+                        modelName: sanitized.modelName ?? existingDevice.modelName,
+                        chip: sanitized.chip ?? existingDevice.chip,
+                        services: preserveExistingNetworkIdentity
+                            ? existingDevice.services
+                            : Array(Set(sanitized.services + existingDevice.services)),
+                        portMap: preserveExistingNetworkIdentity
+                            ? existingDevice.portMap
+                            : sanitized.portMap.merging(existingDevice.portMap) { new, _ in new },
+                        remoteVideoFormats: sanitized.remoteVideoFormats.union(existingDevice.remoteVideoFormats),
                         connectionTypes: mergedConnectionTypes,
-                        uniqueIdentifier: sanitized.uniqueIdentifier ?? existingDevice.uniqueIdentifier,
+                        uniqueIdentifier: preserveExistingNetworkIdentity
+                            ? existingDevice.uniqueIdentifier
+                            : (sanitized.uniqueIdentifier ?? existingDevice.uniqueIdentifier),
                         signalStrength: sanitized.signalStrength ?? existingDevice.signalStrength,
+                        source: preserveExistingNetworkIdentity ? existingDevice.source : sanitized.source,
                         isLocalDevice: false, // 强制非本机
-                        deviceId: nil,
-                        pubKeyFP: nil,
-                        macSet: []
+                        deviceId: preserveExistingNetworkIdentity ? existingDevice.deviceId : nil,
+                        pubKeyFP: preserveExistingNetworkIdentity ? existingDevice.pubKeyFP : nil,
+                        macSet: preserveExistingNetworkIdentity ? existingDevice.macSet : []
                     )
                     discoveredDevices[index] = updatedDevice
                 } else {
@@ -1180,7 +1208,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 在后台异步解析网络信息
         Task.detached(priority: .utility) { [weak self] in
             guard let self = self else { return }
-            let (ipv4, ipv6, port) = await self.extractNetworkInfoAsync(from: result)
+            let (ipv4, ipv6, port) = await self.extractNetworkInfoAsync(
+                from: result,
+                serviceType: serviceType
+            )
 
  // 更新设备信息
             let updatedDevice = DiscoveredDevice(
@@ -1226,14 +1257,17 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
  /// 异步提取网络信息（使用NWConnection而非同步DNS）
-    private func extractNetworkInfoAsync(from result: NWBrowser.Result) async -> (ipv4: String?, ipv6: String?, port: Int) {
+    private func extractNetworkInfoAsync(
+        from result: NWBrowser.Result,
+        serviceType: String
+    ) async -> (ipv4: String?, ipv6: String?, port: Int) {
         var port: Int = 0
 
         if case .service(_, _, let servicePort, _) = result.endpoint {
             port = Int(servicePort) ?? 0
         }
         if port == 0 {
-            port = Self.extractAdvertisedServicePort(from: result) ?? 0
+            port = Self.extractAdvertisedServicePort(from: result, serviceType: serviceType) ?? 0
         }
 
  // 服务端点场景下，不应把 result.interfaces 映射成“远端地址”；
@@ -1400,7 +1434,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         let deviceName = metadata?.displayName ?? extractDeviceNameQuick(from: result)
         let strong = extractStrongIdentityQuick(from: result)
         let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
-        let (ipv4, ipv6, port) = await extractNetworkInfoAsync(from: result)
+        let (ipv4, ipv6, port) = await extractNetworkInfoAsync(
+            from: result,
+            serviceType: serviceType
+        )
 
         await MainActor.run {
  // 查找现有设备
@@ -1485,19 +1522,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         return info
     }
 
-    private static func extractAdvertisedServicePort(from result: NWBrowser.Result) -> Int? {
+    private static func extractAdvertisedServicePort(from result: NWBrowser.Result, serviceType: String) -> Int? {
         guard case .bonjour(let txtRecord) = result.metadata else { return nil }
         let dict = BonjourTXTParser.parse(txtRecord)
-        let raw = dict["fileTransferPort"]
-            ?? dict["transferPort"]
-            ?? dict["file_transfer_port"]
-            ?? dict["port"]
-        guard let raw,
-              let port = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-              (1...65535).contains(port) else {
-            return nil
-        }
-        return port
+        return P2PDiscoveryBonjourPolicy.advertisedServicePort(from: dict, serviceType: serviceType)
     }
 
     nonisolated private static func preferredUniqueIdentifier(
@@ -1521,6 +1549,20 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         if let ipv6 = ipv6?.trimmingCharacters(in: .whitespacesAndNewlines), !ipv6.isEmpty {
             return "ip:\(ipv6)"
+        }
+        return nil
+    }
+
+    nonisolated static func usbPresenceIdentifier(
+        serialNumber: String?,
+        deviceID: String?
+    ) -> String? {
+        for raw in [serialNumber, deviceID] {
+            guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else {
+                continue
+            }
+            return "serial:\(value)"
         }
         return nil
     }
@@ -1596,7 +1638,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
                 txt["name"] = Self.resolveDeviceName()
                 if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
-                if !snap.pubKeyFP.isEmpty { txt["pubKeyFP"] = snap.pubKeyFP }
+                if !snap.pubKeyFP.isEmpty {
+                    txt["pubKeyFP"] = snap.pubKeyFP
+                    txt["identityFingerprint"] = snap.pubKeyFP
+                }
                 // model/chip are optional; keep best-effort and cheap.
                 let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
                 if !model.isEmpty { txt["modelName"] = model }
@@ -1653,7 +1698,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
             txt["name"] = Self.resolveDeviceName()
             if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
-            if !snap.pubKeyFP.isEmpty { txt["pubKeyFP"] = snap.pubKeyFP }
+            if !snap.pubKeyFP.isEmpty {
+                txt["pubKeyFP"] = snap.pubKeyFP
+                txt["identityFingerprint"] = snap.pubKeyFP
+            }
             let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
             if !model.isEmpty { txt["modelName"] = model }
             txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
@@ -2178,6 +2226,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         let plaintext = try decryptAppPayload(frame, with: keys)
                         if let msg = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
                             switch msg {
+                            case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
+                                 .protocolIdentityBindingRequest, .signedProtocolIdentityBinding:
+                                break
                             case .heartbeat(let hb):
                                 // Best-effort: use heartbeat metadata to resolve the real device name/id.
                                 let suite = keys.negotiatedSuite

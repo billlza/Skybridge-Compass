@@ -13,7 +13,7 @@ struct RemoteScreenFrameSendQueue {
 
     let maxQueuedFrames: Int
 
-    init(maxQueuedFrames: Int = 12) {
+    init(maxQueuedFrames: Int = 6) {
         self.maxQueuedFrames = max(1, maxQueuedFrames)
     }
 
@@ -31,7 +31,7 @@ struct RemoteScreenFrameSendQueue {
         }
 
         if waitingForSyncFrame {
-            guard frame.isSyncFrame == true else {
+            guard frame.isIndependentlyDecodableFrame else {
                 return .droppedPredictiveFrameWaitingForSync
             }
             pendingFrames.removeAll(keepingCapacity: true)

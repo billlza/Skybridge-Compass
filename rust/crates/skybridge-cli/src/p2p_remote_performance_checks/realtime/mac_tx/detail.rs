@@ -1,0 +1,51 @@
+use super::selected::MacTxSelectedEvidence;
+use super::verdict::MacTxVerdict;
+
+pub(super) fn format_mac_tx_detail(
+    selected: &MacTxSelectedEvidence,
+    verdict: &MacTxVerdict,
+) -> String {
+    format!(
+        "finalWindow={} latestSentFPS={:?} latestEncodedFPS={:?} minSentFPS={:?} minEncodedFPS={:?} maxSendMs={:.1} maxAllowedSendMs={:.1} writerClockSamples={}/{} sendSchedulerSamples={}/{} maxFramesPerDrain={:?} maxFramesPerDrainSamples={}/{} scheduleBudgetMax={:?} missedCadenceSlotsMax={:?} contentBacklogFull={} contentBacklogMax={:?} contentBacklogLimit={:?} contentBacklogBytesMax={:?} contentBacklogByteLimit={:?} dropped={} backpressure={} rawBackpressure={} waitingForSyncSamples={} sbc2TransportSamples={}/{} chunkCapBytesMax={:?} maxChunksPerFrame={:?} wireBatchSingleFrames={} wireBatchMultiFrames={} wireSingleUnbatchedFrames={} wireSendFrames={} txSentFrames={} wireSendAll={} queuedMax={:?} queuedLimit={} staleQueueCatchUp={} queueBacklogMax={:?} queueAgeMaxMs={:?}",
+        selected.uses_final_window,
+        selected.latest_sent_fps,
+        selected.latest_encoded_fps,
+        selected.min_sent_fps,
+        selected.min_encoded_fps,
+        selected.max_send_ms,
+        verdict.max_allowed_send_ms,
+        selected.writer_clock_samples,
+        selected.tx_samples,
+        selected.send_scheduler_samples,
+        selected.tx_samples,
+        selected.max_frames_per_drain_limit_max,
+        selected.max_frames_per_drain_samples,
+        selected.tx_samples,
+        selected.schedule_budget_max,
+        selected.missed_cadence_slots_max,
+        selected.content_backlog_full_total,
+        selected.content_backlog_max,
+        selected.content_backlog_limit_max,
+        selected.content_backlog_bytes_max,
+        selected.content_backlog_byte_limit_max,
+        selected.dropped_total,
+        selected.backpressure_total,
+        selected.raw_backpressure_total,
+        selected.waiting_for_sync_samples,
+        selected.sbc2_transport_samples,
+        selected.tx_samples,
+        selected.chunk_cap_bytes_max,
+        selected.max_chunks_per_frame_max,
+        selected.wire_batch_single_frames,
+        selected.wire_batch_multi_frames,
+        selected.wire_single_unbatched_frames,
+        selected.wire_send_frames_total,
+        selected.tx_sent_frames_total,
+        verdict.wire_send_all,
+        selected.queued_frames_max,
+        verdict.strict_queued_frame_limit,
+        selected.stale_queue_catch_up_total,
+        selected.queue_backlog_max,
+        selected.queue_age_max_ms
+    )
+}

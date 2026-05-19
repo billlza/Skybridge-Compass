@@ -141,4 +141,27 @@ final class SignalingLifecycleContractTests: XCTestCase {
             15
         )
     }
+
+    func testSignalingLifecycleStateLivesInCoordinator() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let managerSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
+            encoding: .utf8
+        )
+        let coordinatorSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/CrossNetworkSignalingLifecycleCoordinator.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(managerSource.contains("signalingGenerationBySessionId"))
+        XCTAssertFalse(managerSource.contains("activeSignalingHandle"))
+        XCTAssertFalse(managerSource.contains("signalingRecoveryTasksBySessionId"))
+        XCTAssertTrue(managerSource.contains("private let signalingLifecycle = CrossNetworkSignalingLifecycleCoordinator()"))
+        XCTAssertTrue(coordinatorSource.contains("private var generationBySessionId: [String: Int]"))
+        XCTAssertTrue(coordinatorSource.contains("private var activeHandle: HandleID?"))
+        XCTAssertTrue(coordinatorSource.contains("private var recoveryTasksBySessionId: [String: Task<Void, Never>]"))
+    }
 }

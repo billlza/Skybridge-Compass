@@ -137,6 +137,56 @@ public struct SystemMonitorView: View {
         return formatNumericMetric(valueText, state: state)
     }
 
+    @ViewBuilder
+    private func powerBreakdownRows(for monitor: SystemPerformanceMonitor) -> some View {
+        let readings = orderedPowerReadings(monitor.powerReadings)
+        if readings.isEmpty {
+            HStack {
+                Text("GPU功耗:")
+                Spacer()
+                Text(formatPower(monitor.gpuPower, state: monitor.gpuPowerState))
+            }
+        } else {
+            ForEach(Array(readings.enumerated()), id: \.offset) { _, reading in
+                HStack {
+                    Text("\(powerComponentLabel(reading.component))功耗:")
+                    Spacer()
+                    Text(formatPowerReading(reading, monitor: monitor))
+                }
+            }
+        }
+    }
+
+    private func orderedPowerReadings(_ readings: [PowerMetricsPowerReading]) -> [PowerMetricsPowerReading] {
+        let preferredOrder: [PowerMetricsPowerComponent] = [.cpu, .gpu, .ane, .ram, .package]
+        return preferredOrder.compactMap { component in
+            readings.first { $0.component == component }
+        }
+    }
+
+    private func powerComponentLabel(_ component: PowerMetricsPowerComponent) -> String {
+        switch component {
+        case .cpu:
+            return "CPU"
+        case .gpu:
+            return "GPU"
+        case .ane:
+            return "ANE"
+        case .ram:
+            return "RAM"
+        case .package:
+            return "Package"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    private func formatPowerReading(_ reading: PowerMetricsPowerReading, monitor: SystemPerformanceMonitor) -> String {
+        let valueText = "\(String(format: "%.1f", reading.watts))W"
+        guard monitor.gpuPowerState.availability == .stale else { return valueText }
+        return "\(valueText) \(LocalizationManager.shared.localizedString("monitor.metric.staleSuffix"))"
+    }
+
     private func formatPercent(_ value: Double, state: MetricState) -> String {
         let valueText = value >= 0 ? "\(String(format: "%.1f", value))%" : nil
         return formatNumericMetric(valueText, state: state)
@@ -578,10 +628,11 @@ public struct SystemMonitorView: View {
             Text(LocalizationManager.shared.localizedString("monitor.mode.title"))
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Picker(LocalizationManager.shared.localizedString("monitor.mode.title"), selection: modeSelection) {
+            Picker("", selection: modeSelection) {
                 Text(modeLabel(.standardPublic)).tag(MonitoringMode.standardPublic)
                 Text(modeLabel(.expertPrivate)).tag(MonitoringMode.expertPrivate)
             }
+            .labelsHidden()
             .pickerStyle(.segmented)
         }
         .padding(10)
@@ -916,11 +967,7 @@ public struct SystemMonitorView: View {
                         Text(formatTemperature(monitor.gpuTemperature, state: monitor.gpuTemperatureState))
                 }
                 
-                HStack {
-                        Text("功耗:")
-                    Spacer()
-                        Text(formatPower(monitor.gpuPower, state: monitor.gpuPowerState))
-                    }
+                    powerBreakdownRows(for: monitor)
                 }
                 .font(.caption)
             }

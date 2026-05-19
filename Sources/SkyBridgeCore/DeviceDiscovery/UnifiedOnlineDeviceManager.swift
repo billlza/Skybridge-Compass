@@ -1129,6 +1129,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     private nonisolated static func normalizedRecentIdentifier(from uniqueIdentifier: String) -> String? {
         guard uniqueIdentifier.hasPrefix("recent:") else { return nil }
         let peerId = String(uniqueIdentifier.dropFirst("recent:".count))
+        if let stable = normalizeStableIdentifier(peerId) {
+            return "recent:\(normalizedPeerIdentifier(stable))"
+        }
         return "recent:\(normalizedPeerIdentifier(peerId))"
     }
 
@@ -1550,11 +1553,16 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         let collapsedRecentDevices = recentByNormalizedId.values.filter { recent in
             !Self.shouldCollapseRecentDevice(recent, against: normalDevices)
         }
-        uniqueDevices = normalDevices + collapsedRecentDevices
+        let coalesced = coalesceEquivalentPhysicalDevices(normalDevices + collapsedRecentDevices)
+        uniqueDevices = coalesced.devices
 
-        // Remove deduped-out duplicates from the map so they don't keep resurfacing.
-        let retainedIds = Set(uniqueDevices.map(\.id))
-        deviceMap = deviceMap.filter { _, device in retainedIds.contains(device.id) }
+        // Rewrite aliases for coalesced devices back to the winning row. This keeps stale
+        // persisted identities from resurfacing as separate "recent" rows on the next refresh.
+        deviceMap = deviceMap.reduce(into: [:]) { result, element in
+            guard let replacement = coalesced.replacementByOriginalId[element.value.id] else { return }
+            result[element.key] = replacement
+            result[replacement.uniqueIdentifier] = replacement
+        }
 
         // Update device status:
         // - Preserve "connected" for active secure sessions (ConnectionPresenceService)
@@ -1745,6 +1753,229 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             connected: onlineDevices.filter { $0.connectionStatus == .connected }.count,
             authorized: onlineDevices.filter { $0.isAuthorized }.count
         )
+    }
+
+    private func coalesceEquivalentPhysicalDevices(
+        _ devices: [OnlineDevice]
+    ) -> (devices: [OnlineDevice], replacementByOriginalId: [UUID: OnlineDevice]) {
+        guard devices.count > 1 else {
+            let replacements = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+            return (devices, replacements)
+        }
+
+        var parent = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0.id) })
+
+        func find(_ id: UUID) -> UUID {
+            var current = id
+            while let next = parent[current], next != current {
+                current = next
+            }
+            return current
+        }
+
+        func union(_ lhs: UUID, _ rhs: UUID) {
+            let lhsRoot = find(lhs)
+            let rhsRoot = find(rhs)
+            guard lhsRoot != rhsRoot else { return }
+            parent[rhsRoot] = lhsRoot
+        }
+
+        for lhsIndex in devices.indices {
+            for rhsIndex in devices.index(after: lhsIndex)..<devices.endIndex {
+                if Self.shouldCoalesceEquivalentPhysicalDevices(devices[lhsIndex], devices[rhsIndex]) {
+                    union(devices[lhsIndex].id, devices[rhsIndex].id)
+                }
+            }
+        }
+
+        var groups: [UUID: [OnlineDevice]] = [:]
+        for device in devices {
+            groups[find(device.id), default: []].append(device)
+        }
+
+        var replacements: [UUID: OnlineDevice] = [:]
+        let mergedDevices = groups.values.map { group in
+            let merged = mergeEquivalentDeviceGroup(group)
+            for device in group {
+                replacements[device.id] = merged
+            }
+            return merged
+        }
+
+        return (mergedDevices, replacements)
+    }
+
+    private func mergeEquivalentDeviceGroup(_ group: [OnlineDevice]) -> OnlineDevice {
+        guard var merged = group.sorted(by: shouldPreferCoalescedDevice).first else {
+            fatalError("mergeEquivalentDeviceGroup requires at least one device")
+        }
+
+        for device in group where device.id != merged.id {
+            merged = mergeDeviceInfo(existing: merged, new: device)
+        }
+
+        if let strongestIdentifier = group
+            .map(\.uniqueIdentifier)
+            .max(by: { Self.identifierStrength($0) < Self.identifierStrength($1) }),
+           strongestIdentifier != merged.uniqueIdentifier {
+            merged = Self.copyDevice(merged, uniqueIdentifier: strongestIdentifier)
+        }
+
+        if group.contains(where: { $0.connectionStatus == .connected }) {
+            merged.connectionStatus = .connected
+        } else if group.contains(where: { $0.connectionStatus == .online }) {
+            merged.connectionStatus = .online
+        } else {
+            merged.connectionStatus = .offline
+        }
+
+        merged.lastSeen = group.map(\.lastSeen).max() ?? merged.lastSeen
+        merged.lastConnectedAt = group.compactMap(\.lastConnectedAt).max()
+        merged.isAuthorized = group.contains(where: \.isAuthorized)
+        merged.isConnectable = group.contains(where: \.isConnectable)
+        merged.isLocalDevice = group.contains(where: \.isLocalDevice)
+
+        if let newestCryptoSource = group
+            .filter({ $0.lastCryptoKind != nil || $0.lastCryptoSuite != nil || $0.guardStatus != nil })
+            .max(by: { ($0.lastConnectedAt ?? $0.lastSeen) < ($1.lastConnectedAt ?? $1.lastSeen) }) {
+            merged.lastCryptoKind = newestCryptoSource.lastCryptoKind ?? merged.lastCryptoKind
+            merged.lastCryptoSuite = newestCryptoSource.lastCryptoSuite ?? merged.lastCryptoSuite
+            merged.guardStatus = newestCryptoSource.guardStatus ?? merged.guardStatus
+        }
+
+        return merged
+    }
+
+    private func shouldPreferCoalescedDevice(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> Bool {
+        if lhs.connectionStatus.priority != rhs.connectionStatus.priority {
+            return lhs.connectionStatus.priority > rhs.connectionStatus.priority
+        }
+        let lhsStrength = Self.identifierStrength(lhs.uniqueIdentifier)
+        let rhsStrength = Self.identifierStrength(rhs.uniqueIdentifier)
+        if lhsStrength != rhsStrength {
+            return lhsStrength > rhsStrength
+        }
+        if lhs.isConnectable != rhs.isConnectable {
+            return lhs.isConnectable
+        }
+        let lhsConnected = lhs.lastConnectedAt ?? .distantPast
+        let rhsConnected = rhs.lastConnectedAt ?? .distantPast
+        if lhsConnected != rhsConnected {
+            return lhsConnected > rhsConnected
+        }
+        if lhs.lastSeen != rhs.lastSeen {
+            return lhs.lastSeen > rhs.lastSeen
+        }
+        return lhs.name.count >= rhs.name.count
+    }
+
+    nonisolated static func shouldCoalesceEquivalentPhysicalDevices(
+        _ lhs: OnlineDevice,
+        _ rhs: OnlineDevice
+    ) -> Bool {
+        guard lhs.id != rhs.id else { return true }
+        guard !lhs.isLocalDevice, !rhs.isLocalDevice else { return false }
+
+        let lhsHard = hardIdentityTokensByKind(for: lhs)
+        let rhsHard = hardIdentityTokensByKind(for: rhs)
+        var hasSharedHardIdentityMatch = false
+        for kind in Set(lhsHard.keys).intersection(rhsHard.keys) {
+            if lhsHard[kind]?.isDisjoint(with: rhsHard[kind] ?? []) == false {
+                hasSharedHardIdentityMatch = true
+            } else {
+                return false
+            }
+        }
+        if hasSharedHardIdentityMatch {
+            return true
+        }
+
+        let lhsNetwork = normalizedPeerAliases(for: lhs)
+        let rhsNetwork = normalizedPeerAliases(for: rhs)
+        if !lhsNetwork.isEmpty, !lhsNetwork.isDisjoint(with: rhsNetwork) {
+            return true
+        }
+
+        guard shouldAllowAppleMobileNameCoalescing(lhs, rhs) else { return false }
+        return namesRepresentSameDevice(lhs.name, rhs.name)
+    }
+
+    private nonisolated static func hardIdentityTokensByKind(
+        for device: OnlineDevice
+    ) -> [String: Set<String>] {
+        var tokens: [String: Set<String>] = [:]
+
+        func insert(_ value: String?, kind: String) {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                  !value.isEmpty else {
+                return
+            }
+            tokens[kind, default: []].insert(value)
+        }
+
+        if let stableId = normalizedStableIdentifierPayload(from: device.uniqueIdentifier) {
+            insert(stableId, kind: "stable")
+        }
+        if device.uniqueIdentifier.hasPrefix("fp:") {
+            insert(String(device.uniqueIdentifier.dropFirst("fp:".count)), kind: "fingerprint")
+        }
+        if device.uniqueIdentifier.hasPrefix("serial:") {
+            insert(String(device.uniqueIdentifier.dropFirst("serial:".count)), kind: "serial")
+        }
+        if device.uniqueIdentifier.hasPrefix("mac:") {
+            insert(String(device.uniqueIdentifier.dropFirst("mac:".count)), kind: "mac")
+        }
+
+        insert(device.serialNumber, kind: "serial")
+        insert(device.macAddress, kind: "mac")
+        return tokens
+    }
+
+    private nonisolated static func shouldAllowAppleMobileNameCoalescing(
+        _ lhs: OnlineDevice,
+        _ rhs: OnlineDevice
+    ) -> Bool {
+        guard isAppleMobilePresentation(lhs), isAppleMobilePresentation(rhs) else { return false }
+        guard appleMetadataCompatible(lhs.modelName, rhs.modelName) else { return false }
+        guard appleMetadataCompatible(lhs.platformName, rhs.platformName) else { return false }
+
+        return lhs.lastConnectedAt != nil
+            || rhs.lastConnectedAt != nil
+            || lhs.isAuthorized
+            || rhs.isAuthorized
+            || lhs.connectionStatus != .offline
+            || rhs.connectionStatus != .offline
+    }
+
+    private nonisolated static func isAppleMobilePresentation(_ device: OnlineDevice) -> Bool {
+        let haystack = [
+            device.name,
+            device.modelName ?? "",
+            device.platformName ?? ""
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        return haystack.contains("iphone")
+            || haystack.contains("ipad")
+            || haystack.contains("ios")
+            || haystack.contains("ipados")
+    }
+
+    private nonisolated static func appleMetadataCompatible(_ lhs: String?, _ rhs: String?) -> Bool {
+        let lhs = normalizedDedupeName(lhs ?? "")
+        let rhs = normalizedDedupeName(rhs ?? "")
+        guard !lhs.isEmpty, !rhs.isEmpty else { return true }
+        return lhs == rhs
+    }
+
+    private nonisolated static func namesRepresentSameDevice(_ lhs: String, _ rhs: String) -> Bool {
+        let lhs = normalizedDedupeName(lhs)
+        let rhs = normalizedDedupeName(rhs)
+        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        if lhs == rhs { return true }
+        let minLength = min(lhs.count, rhs.count)
+        guard minLength >= 8 else { return false }
+        return lhs.contains(rhs) || rhs.contains(lhs)
     }
 
     private struct CandidateMatchingContext {
@@ -2042,6 +2273,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             let normalized = Self.normalizeIPAddress(payload)
             return normalized.isEmpty ? nil : "ip:\(normalized)"
         }
+        if Self.looksLikeAppleUSBDeviceIdentifier(raw) {
+            return "serial:\(raw)"
+        }
         if let stable = Self.normalizeStableIdentifier(raw) {
             return "id:\(stable)"
         }
@@ -2050,6 +2284,24 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             return "ip:\(normalizedIP)"
         }
         return nil
+    }
+
+    private nonisolated static func looksLikeAppleUSBDeviceIdentifier(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        if value.range(
+            of: "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}$",
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
+        if value.range(
+            of: "^[0-9A-Fa-f]{24,40}$",
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
+        return false
     }
 
     private func normalizedMACAddress(_ raw: String?) -> String? {

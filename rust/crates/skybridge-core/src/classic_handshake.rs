@@ -9,12 +9,14 @@ use hpke::aead::ChaCha20Poly1305;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use hpke::{Deserializable, Kem as KemTrait, OpModeR, Serializable, setup_receiver};
-use serde::Serialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
-use time::OffsetDateTime;
 
-use crate::{ProtocolIdentityBinding, ProtocolSigningAlgorithm};
+pub use crate::handshake_app_frame::HeartbeatPayload;
+use crate::handshake_wire::{
+    append_u16_le, encode_string, encode_string_array, read_exact, read_u16_le,
+    unwrap_handshake_padding,
+};
+use crate::{ProtocolIdentityBinding, ProtocolSigningAlgorithm, handshake_app_frame};
 
 const HANDSHAKE_VERSION: u8 = 1;
 const HANDSHAKE_A_DOMAIN: &[u8] = b"SkyBridge-A";
@@ -30,10 +32,6 @@ const FINISHED_R2I_INFO: &[u8] = b"SkyBridge-FINISHED|R2I|";
 const IDENTITY_ALGORITHM_ED25519: u8 = 0x01;
 const IDENTITY_ALGORITHM_MLDSA65: u8 = 0x02;
 const IDENTITY_ALGORITHM_P256: u8 = 0x03;
-const HEARTBEAT_PLATFORM: &str = std::env::consts::OS;
-const HEARTBEAT_REMOTE_VIDEO_FORMAT: &str = "bgra";
-const REFERENCE_UNIX_SECONDS: i64 = 978_307_200;
-
 type ClassicKem = X25519HkdfSha256;
 type ClassicAead = ChaCha20Poly1305;
 type ClassicKdf = HkdfSha256;
@@ -62,45 +60,6 @@ pub struct ClassicHandleResult {
     pub pong_id: Option<u64>,
     pub observed_pong_id: Option<u64>,
     pub observed_heartbeat: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct HeartbeatPayload {
-    #[serde(rename = "sentAt")]
-    pub sent_at: f64,
-    #[serde(rename = "deviceId", skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
-    #[serde(rename = "deviceName", skip_serializing_if = "Option::is_none")]
-    pub device_name: Option<String>,
-    #[serde(rename = "platform")]
-    pub platform: String,
-    #[serde(rename = "remoteVideoFormats")]
-    pub remote_video_formats: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct HeartbeatEnvelope {
-    heartbeat: HeartbeatPayload,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PongEnvelope {
-    pong: PongPayload,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PingEnvelope {
-    ping: PingPayload,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PingPayload {
-    id: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PongPayload {
-    id: u64,
 }
 
 enum InitiatorState {
@@ -265,15 +224,18 @@ impl ClassicInitiatorHandshake {
                 Ok(result)
             }
             InitiatorState::WaitingForFinished(waiting) => {
-                if let Some(message) =
-                    try_handle_encrypted_app_message(&unwrapped, &waiting.session_keys)?
-                {
+                if let Some(message) = handshake_app_frame::try_handle_encrypted_app_message(
+                    &unwrapped,
+                    &waiting.session_keys,
+                )? {
                     return Ok(message);
                 }
                 bail!("unexpected frame while waiting for Finished")
             }
             InitiatorState::Established(keys) => {
-                if let Some(message) = try_handle_encrypted_app_message(&unwrapped, keys)? {
+                if let Some(message) =
+                    handshake_app_frame::try_handle_encrypted_app_message(&unwrapped, keys)?
+                {
                     return Ok(message);
                 }
                 Ok(ClassicHandleResult::default())
@@ -286,40 +248,25 @@ impl ClassicInitiatorHandshake {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("classic handshake is not established"))?;
-        let payload = HeartbeatEnvelope {
-            heartbeat: HeartbeatPayload {
-                sent_at: apple_reference_seconds_now(),
-                device_id: Some(self.config.local_binding.device_id.clone()),
-                device_name: self.config.local_device_name.clone(),
-                platform: HEARTBEAT_PLATFORM.to_owned(),
-                remote_video_formats: vec![HEARTBEAT_REMOTE_VIDEO_FORMAT.to_owned()],
-            },
-        };
-        build_encrypted_app_frame(session_keys, &payload)
+        handshake_app_frame::build_heartbeat_frame(
+            session_keys,
+            &self.config.local_binding.device_id,
+            self.config.local_device_name.as_deref(),
+        )
     }
 
     pub fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("classic handshake is not established"))?;
-        build_encrypted_app_frame(
-            session_keys,
-            &PongEnvelope {
-                pong: PongPayload { id },
-            },
-        )
+        handshake_app_frame::build_pong_frame(session_keys, id)
     }
 
     pub fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
         let session_keys = self
             .established_session_keys()
             .ok_or_else(|| anyhow!("classic handshake is not established"))?;
-        build_encrypted_app_frame(
-            session_keys,
-            &PingEnvelope {
-                ping: PingPayload { id },
-            },
-        )
+        handshake_app_frame::build_ping_frame(session_keys, id)
     }
 
     pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
@@ -371,18 +318,6 @@ impl ClassicInitiatorHandshake {
             InitiatorState::Idle => bail!("received Finished before classic handshake started"),
         }
     }
-}
-
-fn unwrap_handshake_padding(data: &[u8]) -> Vec<u8> {
-    const HANDSHAKE_PADDING_MAGIC: &[u8; 4] = b"SBP1";
-    if data.len() < 8 || &data[..4] != HANDSHAKE_PADDING_MAGIC {
-        return data.to_vec();
-    }
-    let actual_len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
-    if actual_len > data.len().saturating_sub(8) {
-        return data.to_vec();
-    }
-    data[8..(8 + actual_len)].to_vec()
 }
 
 struct DecodedMessageB {
@@ -694,58 +629,6 @@ fn decode_finished_frame(frame: &[u8]) -> Result<FinishedFrame> {
     Ok(FinishedFrame { direction, mac })
 }
 
-fn build_encrypted_app_frame<T: Serialize>(
-    session_keys: &ClassicSessionKeys,
-    payload: &T,
-) -> Result<Vec<u8>> {
-    let plaintext = serde_json::to_vec(payload)?;
-    let cipher = Aes256Gcm::new_from_slice(&session_keys.send_key)
-        .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
-    let mut nonce_bytes = [0u8; 12];
-    fill_random(&mut nonce_bytes)?;
-    let ciphertext_and_tag = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
-        .map_err(|error| anyhow!("failed to encrypt app payload: {error}"))?;
-    let mut combined = nonce_bytes.to_vec();
-    combined.extend_from_slice(&ciphertext_and_tag);
-    Ok(combined)
-}
-
-fn try_handle_encrypted_app_message(
-    frame: &[u8],
-    session_keys: &ClassicSessionKeys,
-) -> Result<Option<ClassicHandleResult>> {
-    if frame.len() < 12 + 16 {
-        return Ok(None);
-    }
-    let cipher = Aes256Gcm::new_from_slice(&session_keys.receive_key)
-        .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
-    let plaintext = match cipher.decrypt(Nonce::from_slice(&frame[..12]), &frame[12..]) {
-        Ok(plaintext) => plaintext,
-        Err(_) => return Ok(None),
-    };
-    let value: Value = match serde_json::from_slice(&plaintext) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let pong_id = value
-        .get("ping")
-        .and_then(|ping| ping.get("id"))
-        .and_then(Value::as_u64);
-    let observed_pong_id = value
-        .get("pong")
-        .and_then(|pong| pong.get("id"))
-        .and_then(Value::as_u64);
-    Ok(Some(ClassicHandleResult {
-        outbound_frames: Vec::new(),
-        established: None,
-        heartbeat_requested: value.get("heartbeat").is_some(),
-        pong_id,
-        observed_pong_id,
-        observed_heartbeat: value.get("heartbeat").is_some(),
-    }))
-}
-
 fn classic_capabilities_bytes() -> Vec<u8> {
     let mut encoded = Vec::new();
     encode_string_array(&mut encoded, &["X25519"]);
@@ -753,7 +636,7 @@ fn classic_capabilities_bytes() -> Vec<u8> {
     encode_string_array(&mut encoded, &["Classic"]);
     encode_string_array(&mut encoded, &["AES-256-GCM", "ChaCha20-Poly1305"]);
     encoded.push(0x00);
-    encode_string(&mut encoded, HEARTBEAT_PLATFORM);
+    encode_string(&mut encoded, handshake_app_frame::HEARTBEAT_PLATFORM);
     encode_string(&mut encoded, "CryptoKit-Classic");
     encoded
 }
@@ -862,49 +745,11 @@ fn decode_hpke_sealed_box(data: &[u8]) -> Result<DecodedHpkeSealedBox> {
     })
 }
 
-fn encode_string(out: &mut Vec<u8>, value: &str) {
-    let bytes = value.as_bytes();
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(bytes);
-}
-
-fn encode_string_array(out: &mut Vec<u8>, values: &[&str]) {
-    out.extend_from_slice(&(values.len() as u32).to_le_bytes());
-    for value in values {
-        encode_string(out, value);
-    }
-}
-
-fn append_u16_le(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn read_u16_le(data: &[u8], offset: &mut usize) -> Result<u16> {
-    let bytes = read_exact(data, offset, 2)?;
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_exact<'a>(data: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8]> {
-    let end = offset
-        .checked_add(len)
-        .ok_or_else(|| anyhow!("length overflow"))?;
-    let slice = data
-        .get(*offset..end)
-        .ok_or_else(|| anyhow!("truncated frame"))?;
-    *offset = end;
-    Ok(slice)
-}
-
 fn signing_key_from_bytes(bytes: &[u8]) -> Result<SigningKey> {
     let secret: [u8; 32] = bytes
         .try_into()
         .map_err(|_| anyhow!("invalid ed25519 secret key length"))?;
     Ok(SigningKey::from_bytes(&secret))
-}
-
-fn apple_reference_seconds_now() -> f64 {
-    let now = OffsetDateTime::now_utc().unix_timestamp_nanos() as f64 / 1_000_000_000.0;
-    now - REFERENCE_UNIX_SECONDS as f64
 }
 
 #[cfg(test)]
@@ -942,7 +787,7 @@ mod tests {
             local_device_name: Some("Rust Agent".to_owned()),
         };
         let handshake = ClassicInitiatorHandshake::new(config)?;
-        let timestamp = apple_reference_seconds_now();
+        let timestamp = handshake_app_frame::apple_reference_seconds_now();
         assert!(timestamp > 700_000_000.0);
         assert!(handshake.established_session_keys().is_none());
         Ok(())
@@ -956,20 +801,13 @@ mod tests {
             negotiated_suite: CLASSIC_SUITE_NAME.to_owned(),
             transcript_hash: vec![0x24; 32],
         };
-        let frame = build_encrypted_app_frame(
+        let frame = handshake_app_frame::build_heartbeat_frame(
             &session_keys,
-            &HeartbeatEnvelope {
-                heartbeat: HeartbeatPayload {
-                    sent_at: 123.0,
-                    device_id: Some("device-1234567890abcd".to_owned()),
-                    device_name: Some("Rust Agent".to_owned()),
-                    platform: "macos".to_owned(),
-                    remote_video_formats: vec!["bgra".to_owned()],
-                },
-            },
+            "device-1234567890abcd",
+            Some("Rust Agent"),
         )?;
 
-        let parsed = try_handle_encrypted_app_message(&frame, &session_keys)?
+        let parsed = handshake_app_frame::try_handle_encrypted_app_message(&frame, &session_keys)?
             .ok_or_else(|| anyhow!("expected encrypted heartbeat payload to parse"))?;
         assert!(parsed.heartbeat_requested);
         assert!(parsed.observed_heartbeat);
@@ -986,26 +824,18 @@ mod tests {
             negotiated_suite: CLASSIC_SUITE_NAME.to_owned(),
             transcript_hash: vec![0x11; 32],
         };
-        let ping = build_encrypted_app_frame(
-            &session_keys,
-            &PingEnvelope {
-                ping: PingPayload { id: 9 },
-            },
-        )?;
-        let pong = build_encrypted_app_frame(
-            &session_keys,
-            &PongEnvelope {
-                pong: PongPayload { id: 9 },
-            },
-        )?;
+        let ping = handshake_app_frame::build_ping_frame(&session_keys, 9)?;
+        let pong = handshake_app_frame::build_pong_frame(&session_keys, 9)?;
 
-        let parsed_ping = try_handle_encrypted_app_message(&ping, &session_keys)?
-            .ok_or_else(|| anyhow!("expected encrypted ping payload to parse"))?;
+        let parsed_ping =
+            handshake_app_frame::try_handle_encrypted_app_message(&ping, &session_keys)?
+                .ok_or_else(|| anyhow!("expected encrypted ping payload to parse"))?;
         assert_eq!(parsed_ping.pong_id, Some(9));
         assert_eq!(parsed_ping.observed_pong_id, None);
 
-        let parsed_pong = try_handle_encrypted_app_message(&pong, &session_keys)?
-            .ok_or_else(|| anyhow!("expected encrypted pong payload to parse"))?;
+        let parsed_pong =
+            handshake_app_frame::try_handle_encrypted_app_message(&pong, &session_keys)?
+                .ok_or_else(|| anyhow!("expected encrypted pong payload to parse"))?;
         assert_eq!(parsed_pong.pong_id, None);
         assert_eq!(parsed_pong.observed_pong_id, Some(9));
         Ok(())

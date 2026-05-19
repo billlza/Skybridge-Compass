@@ -1,10 +1,13 @@
 // swift-tools-version: 6.3
 import PackageDescription
 
+let latestCXXStandardFlags = ["-std=gnu++23"]
+
 let package = Package(
     name: "OQSRAIILocal",
     platforms: [
-        .iOS(.v17)
+        .iOS(.v17),
+        .macOS(.v14)
     ],
     products: [
         .library(name: "OQSRAII", targets: ["OQSRAII"])
@@ -20,7 +23,7 @@ let package = Package(
             path: "Sources/OQSRAII",
             publicHeadersPath: "include",
             cxxSettings: [
-                .unsafeFlags(["-std=c++23"])
+                .unsafeFlags(latestCXXStandardFlags)
             ]
         )
     ]

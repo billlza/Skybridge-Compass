@@ -13,6 +13,7 @@
 import Foundation
 import OSLog
 import Network
+import CryptoKit
 
 // MARK: - 公共配置选项
 
@@ -390,6 +391,7 @@ public actor ServiceAdvertiserCenter {
         serviceType: String,
         txtRecord: NWTXTRecord? = nil,
         owner: String? = nil,
+        includePeerToPeer: Bool = true,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
     ) async throws -> UInt16 {
@@ -400,7 +402,7 @@ public actor ServiceAdvertiserCenter {
         }
 
         let parameters = NWParameters.tcp
-        parameters.includePeerToPeer = true
+        parameters.includePeerToPeer = includePeerToPeer
         parameters.allowLocalEndpointReuse = true
         if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcpOptions.enableKeepalive = true
@@ -439,7 +441,11 @@ public actor ServiceAdvertiserCenter {
                let actualPort,
                actualPort > 0 {
                 var updatedTXT = baseTXTForReady
-                updatedTXT["port"] = String(actualPort)
+                Self.attachAdvertisedPort(
+                    UInt16(actualPort),
+                    serviceType: resolvedServiceType,
+                    to: &updatedTXT
+                )
                 listener.service = NWListener.Service(
                     name: resolvedServiceName,
                     type: resolvedServiceType,
@@ -469,7 +475,11 @@ public actor ServiceAdvertiserCenter {
         listener.start(queue: .global(qos: .utility))
         let port = listener.port?.rawValue ?? 0
         if port > 0 {
-            finalTXT["port"] = String(port)
+            Self.attachAdvertisedPort(
+                UInt16(port),
+                serviceType: serviceType,
+                to: &finalTXT
+            )
             listener.service = NWListener.Service(
                 name: serviceName,
                 type: serviceType,
@@ -479,9 +489,9 @@ public actor ServiceAdvertiserCenter {
             records[serviceType]?.port = UInt16(port)
         }
         if port > 0 {
-            logger.info("📡 广播服务启动: \(serviceType, privacy: .public) 端口 \(port, privacy: .public)")
+            logger.info("📡 广播服务启动: \(serviceType, privacy: .public) 端口 \(port, privacy: .public) peerToPeer=\(includePeerToPeer, privacy: .public)")
         } else {
-            logger.info("📡 广播服务启动: \(serviceType, privacy: .public) 系统分配端口")
+            logger.info("📡 广播服务启动: \(serviceType, privacy: .public) 系统分配端口 peerToPeer=\(includePeerToPeer, privacy: .public)")
         }
         return UInt16(port)
     }
@@ -492,6 +502,7 @@ public actor ServiceAdvertiserCenter {
         serviceType: String,
         txtRecord: NWTXTRecord? = nil,
         owner: String? = nil,
+        includePeerToPeer: Bool = true,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
         stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
     ) async throws -> UInt16 {
@@ -503,6 +514,7 @@ public actor ServiceAdvertiserCenter {
             serviceType: serviceType,
             txtRecord: txtRecord,
             owner: owner,
+            includePeerToPeer: includePeerToPeer,
             connectionHandler: connectionHandler,
             stateHandler: stateHandler
         )
@@ -513,6 +525,7 @@ public actor ServiceAdvertiserCenter {
         record["platform"] = "macos"
         record["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
         record["name"] = Host.current().localizedName ?? "Mac"
+        LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &record)
 
         if #available(macOS 14.0, *) {
             let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
@@ -522,7 +535,12 @@ public actor ServiceAdvertiserCenter {
             }
             if !snap.pubKeyFP.isEmpty {
                 record["pubKeyFP"] = snap.pubKeyFP
+                record["identityFingerprint"] = snap.pubKeyFP
             }
+        }
+        record["kemRefreshVersion"] = "1"
+        if let kemKeyDigest = await currentKEMKeyDigestHex() {
+            record["kemKeyDigest"] = kemKeyDigest
         }
 
         // Best-effort: advertise crypto suites/capabilities for cross-platform peers.
@@ -553,6 +571,51 @@ public actor ServiceAdvertiserCenter {
         }
         record["hs_soa"] = "1"
         return record
+    }
+
+    private nonisolated static func attachAdvertisedPort(
+        _ port: UInt16,
+        serviceType: String,
+        to record: inout NWTXTRecord
+    ) {
+        let portValue = String(port)
+        record["port"] = portValue
+
+        switch serviceType {
+        case "_skybridge._tcp", "_skybridge._udp":
+            record["skybridgePort"] = portValue
+            record["p2pPort"] = portValue
+            record["controlPort"] = portValue
+            record["controlPortSource"] = "listener"
+        case "_skybridge-transfer._tcp":
+            record["transferPort"] = portValue
+            record["fileTransferPort"] = portValue
+        case "_skybridge-remote._tcp":
+            record["remotePort"] = portValue
+            record["remoteControlPort"] = portValue
+        default:
+            break
+        }
+    }
+
+    private func currentKEMKeyDigestHex() async -> String? {
+        guard #available(macOS 14.0, *) else { return nil }
+        let provider = CryptoProviderFactory.make(policy: .requirePQC)
+        guard let rawKeys = try? await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(using: provider) else {
+            return nil
+        }
+        let keys = KEMPublicKeyInfo.normalizedValidKeys(rawKeys)
+            .filter { CryptoSuite(wireId: $0.suiteWireId).isPQCGroup }
+            .sorted { $0.suiteWireId < $1.suiteWireId }
+        guard !keys.isEmpty else { return nil }
+
+        var material = Data()
+        for key in keys {
+            var wireId = key.suiteWireId.bigEndian
+            material.append(Data(bytes: &wireId, count: MemoryLayout<UInt16>.size))
+            material.append(key.publicKey)
+        }
+        return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
     }
 
  /// 查询指定服务类型是否正在广播

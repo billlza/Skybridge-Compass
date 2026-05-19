@@ -15,6 +15,10 @@
     <string>1.0.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
     <key>CFBundleExecutable</key>
     <string>SkyBridgeCompassApp</string>
     <key>CFBundleURLTypes</key>
@@ -118,14 +122,10 @@
                 <key>NSExceptionAllowsInsecureHTTPLoads</key>
                 <true/>
                 <key>NSExceptionMinimumTLSVersion</key>
-                <string>TLSv1.0</string>
+                <string>TLSv1.3</string>
             </dict>
         </dict>
     </dict>
-
-    <!-- 支持的设备类型 -->
-    <key>LSRequiresIPhoneOS</key>
-    <false/>
 
     <!-- 最低系统版本要求 -->
     <key>LSMinimumSystemVersion</key>
@@ -164,8 +164,6 @@
 
     <!-- 应用图标文件 -->
     <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIconName</key>
     <string>AppIcon</string>
 
 </dict>

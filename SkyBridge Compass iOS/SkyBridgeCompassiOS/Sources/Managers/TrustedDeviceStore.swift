@@ -102,13 +102,13 @@ public final class TrustedDeviceStore: ObservableObject {
     public func isTrusted(deviceId: String) -> Bool {
         let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
         guard !candidates.isEmpty else { return false }
-        return trustedDevices.contains(where: { matches($0, candidates: candidates) })
+        return trustedDevices.contains(where: { isActive($0) && matches($0, candidates: candidates) })
     }
 
     public func canonicalTrustedDeviceId(for deviceId: String) -> String? {
         let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
         guard !candidates.isEmpty else { return nil }
-        guard let matched = trustedDevices.first(where: { matches($0, candidates: candidates) }) else {
+        guard let matched = trustedDevices.first(where: { isActive($0) && matches($0, candidates: candidates) }) else {
             return nil
         }
         return resolvedCurrentDeviceId(for: matched)
@@ -121,7 +121,7 @@ public final class TrustedDeviceStore: ObservableObject {
             candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
         }
 
-        if let matched = trustedDevices.first(where: { matches($0, candidates: candidates) }) {
+        if let matched = trustedDevices.first(where: { isActive($0) && matches($0, candidates: candidates) }) {
             return resolvedCurrentDeviceId(for: matched)
         }
 
@@ -129,7 +129,8 @@ public final class TrustedDeviceStore: ObservableObject {
         guard !normalizedDeviceName.isEmpty else { return nil }
 
         let sameNameMatches = trustedDevices.filter { trusted in
-            normalizedNameToken(trusted.name) == normalizedDeviceName
+            guard isActive(trusted) else { return false }
+            return normalizedNameToken(trusted.name) == normalizedDeviceName
                 && (trusted.platform == .unknown || device.platform == .unknown || trusted.platform == device.platform)
         }
 
@@ -144,7 +145,7 @@ public final class TrustedDeviceStore: ObservableObject {
             candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
         }
 
-        guard let matched = trustedDevices.first(where: { matches($0, candidates: candidates) }) else {
+        guard let matched = trustedDevices.first(where: { isActive($0) && matches($0, candidates: candidates) }) else {
             return nil
         }
 
@@ -294,6 +295,39 @@ public final class TrustedDeviceStore: ObservableObject {
         }
     }
 
+    public func currentPathFingerprints(forAny deviceIds: [String]) -> Set<String> {
+        let candidates = Set(deviceIds.flatMap { PeerIdentityAliasResolver.lookupCandidates(for: $0) })
+        guard !candidates.isEmpty else { return [] }
+        return Set(trustedDevices.compactMap { device in
+            guard (device.currentPathLifecycleState ?? .active) == .active else { return nil }
+            guard matches(device, candidates: candidates) else { return nil }
+            return normalizedFingerprint(device.protocolPublicKeyFingerprint)
+        })
+    }
+
+    func hasCurrentPathAuthorityFingerprint(
+        _ fingerprint: String,
+        lifecycleStates: [CurrentPathLifecycleState]
+    ) -> Bool {
+        guard let normalized = normalizedFingerprint(fingerprint) else { return false }
+        return trustedDevices.contains { device in
+            guard device.protocolPublicKeyFingerprint == normalized else { return false }
+            let state = device.currentPathLifecycleState ?? .active
+            return lifecycleStates.contains(state)
+        }
+    }
+
+    func hasCurrentPathAuthorityDevice(
+        _ deviceId: String,
+        lifecycleStates: [CurrentPathLifecycleState]
+    ) -> Bool {
+        trustedDevices.contains { device in
+            guard currentPathDeviceMatches(device, deviceId: deviceId) else { return false }
+            let state = device.currentPathLifecycleState ?? .active
+            return lifecycleStates.contains(state)
+        }
+    }
+
     public func evaluateCurrentPathBinding(
         deviceId: String,
         protocolPublicKeyFingerprint: String
@@ -350,6 +384,25 @@ public final class TrustedDeviceStore: ObservableObject {
         return nil
     }
 
+    @discardableResult
+    public func markReverificationRequired(deviceId: String) -> Bool {
+        let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+        guard !candidates.isEmpty else { return false }
+
+        var changed = false
+        for index in trustedDevices.indices where matches(trustedDevices[index], candidates: candidates) {
+            if trustedDevices[index].currentPathLifecycleState != .reverificationRequired {
+                trustedDevices[index].currentPathLifecycleState = .reverificationRequired
+                changed = true
+            }
+        }
+
+        if changed {
+            save()
+        }
+        return changed
+    }
+
     public func trust(_ device: DiscoveredDevice) {
         let id = device.id
         var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: id))
@@ -361,6 +414,7 @@ public final class TrustedDeviceStore: ObservableObject {
             trustedDevices[idx].name = device.name
             trustedDevices[idx].platform = device.platform
             trustedDevices[idx].ipAddress = device.ipAddress
+            trustedDevices[idx].currentPathLifecycleState = .active
             trustedDevices[idx].connectableContext = mergedConnectableContext(
                 trustedDevices[idx].connectableContext,
                 with: latestConnectableContext
@@ -381,6 +435,7 @@ public final class TrustedDeviceStore: ObservableObject {
                     ipAddress: device.ipAddress,
                     currentDeviceId: PeerIdentityAliasResolver.persistentDeviceId(from: id),
                     knownDeviceIds: Array(candidates).sorted(),
+                    currentPathLifecycleState: .active,
                     connectableContext: latestConnectableContext
                 )
             )
@@ -399,7 +454,6 @@ public final class TrustedDeviceStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedFingerprint = normalizedFingerprint(protocolPublicKeyFingerprint)
         guard !normalizedDeclaredDeviceId.isEmpty else {
-            trust(device)
             return
         }
 
@@ -417,6 +471,7 @@ public final class TrustedDeviceStore: ObservableObject {
             trustedDevices[idx].platform = device.platform
             trustedDevices[idx].ipAddress = device.ipAddress
             trustedDevices[idx].currentDeviceId = normalizedDeclaredDeviceId
+            trustedDevices[idx].currentPathLifecycleState = .active
             trustedDevices[idx].connectableContext = mergedConnectableContext(
                 trustedDevices[idx].connectableContext,
                 with: latestConnectableContext
@@ -442,6 +497,7 @@ public final class TrustedDeviceStore: ObservableObject {
                     protocolPublicKeyFingerprint: normalizedFingerprint,
                     currentDeviceId: normalizedDeclaredDeviceId,
                     knownDeviceIds: Array(candidates).sorted(),
+                    currentPathLifecycleState: .active,
                     connectableContext: latestConnectableContext
                 )
             )
@@ -597,9 +653,36 @@ public final class TrustedDeviceStore: ObservableObject {
         }
     }
 
-    public func untrust(deviceId: String) {
-        trustedDevices.removeAll { $0.id == deviceId }
-        save()
+    @discardableResult
+    public func untrust(deviceId: String) -> [String] {
+        var removalCandidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+        let trimmedDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedDeviceId.isEmpty {
+            removalCandidates.insert(trimmedDeviceId)
+        }
+
+        let matchedRecords = trustedDevices.filter { record in
+            record.id == deviceId || matches(record, candidates: removalCandidates)
+        }
+        for record in matchedRecords {
+            removalCandidates.formUnion(trustedAliasCandidates(for: record))
+            removalCandidates.insert(record.id)
+            if let currentDeviceId = record.currentDeviceId {
+                removalCandidates.insert(currentDeviceId)
+            }
+            for knownDeviceId in record.knownDeviceIds ?? [] {
+                removalCandidates.insert(knownDeviceId)
+            }
+        }
+
+        let beforeCount = trustedDevices.count
+        trustedDevices.removeAll { record in
+            record.id == deviceId || !trustedAliasCandidates(for: record).isDisjoint(with: removalCandidates)
+        }
+        if trustedDevices.count != beforeCount {
+            save()
+        }
+        return Array(removalCandidates).sorted()
     }
 
     public func clearAll() {
@@ -835,6 +918,10 @@ public final class TrustedDeviceStore: ObservableObject {
 
     private func mergedKnownDeviceIds(existing: [String]?, adding newValues: [String]) -> [String] {
         Array(Set((existing ?? []) + newValues.filter { !$0.isEmpty })).sorted()
+    }
+
+    private func isActive(_ device: TrustedDevice) -> Bool {
+        (device.currentPathLifecycleState ?? .active) == .active
     }
 
     private func matches(_ device: TrustedDevice, candidates: Set<String>) -> Bool {

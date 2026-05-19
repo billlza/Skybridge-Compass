@@ -7,6 +7,7 @@
 //
 
 import XCTest
+import Darwin
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -47,6 +48,37 @@ final class TwoAttemptHandshakeManagerTests: XCTestCase {
             throw CryptoProviderError.notImplemented("Mock")
         }
         
+        func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+    }
+
+    private final class MockLiboqsPQCProvider: CryptoProvider, @unchecked Sendable {
+        let providerName = "MockLiboqsPQCProvider"
+        let tier: CryptoTier = .liboqsPQC
+        let activeSuite: CryptoSuite = .mlkem768MLDSA65
+        let supportedSuites: [CryptoSuite] = [.mlkem768MLDSA65]
+
+        func supportsSuite(_ suite: CryptoSuite) -> Bool {
+            supportedSuites.contains { $0.wireId == suite.wireId }
+        }
+
+        func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+
+        func hpkeOpen(sealedBox: HPKESealedBox, privateKey: SecureBytes, info: Data) async throws -> Data {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+
+        func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+
+        func verify(data: Data, signature: Data, publicKey: Data) async throws -> Bool {
+            throw CryptoProviderError.notImplemented("Mock")
+        }
+
         func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
             throw CryptoProviderError.notImplemented("Mock")
         }
@@ -112,6 +144,21 @@ final class TwoAttemptHandshakeManagerTests: XCTestCase {
         )) { error in
             guard case AttemptPreparationError.pqcProviderUnavailable = error else {
                 XCTFail("Expected pqcProviderUnavailable error")
+                return
+            }
+        }
+    }
+
+    func testPrepareAttemptExplicitXWingPreferenceDoesNotSilentlyOfferMLKEM() {
+        setenv("SB_PQC_PREFERRED_SUITE", "xwing", 1)
+        defer { unsetenv("SB_PQC_PREFERRED_SUITE") }
+
+        XCTAssertThrowsError(try TwoAttemptHandshakeManager.prepareAttempt(
+            strategy: .pqcOnly,
+            cryptoProvider: MockLiboqsPQCProvider()
+        )) { error in
+            guard case AttemptPreparationError.pqcProviderUnavailable = error else {
+                XCTFail("Expected pqcProviderUnavailable error, got \(error)")
                 return
             }
         }

@@ -410,8 +410,8 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
 
  /// 解析消息头
     private func parseMessageHeader(_ data: Data) -> (type: MessageType, length: Int) {
-        let typeValue = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let lengthValue = data.suffix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let typeValue = data.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+        let lengthValue = data.suffix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
 
         let type = MessageType(rawValue: typeValue) ?? .unknown
         return (type: type, length: Int(lengthValue))

@@ -225,19 +225,19 @@ from pathlib import Path
 
 
 def load_profile(path: Path):
+    payload = path.read_bytes()
     try:
-        with path.open("rb") as fh:
-            payload = fh.read()
         return plistlib.loads(payload)
     except Exception:
-        completed = subprocess.run(
-            ["security", "cms", "-D", "-i", str(path)],
-            check=False,
-            capture_output=True,
-        )
-        if completed.returncode != 0 or not completed.stdout:
-            raise SystemExit(1)
-        return plistlib.loads(completed.stdout)
+        pass
+    for command in (
+        ["security", "cms", "-D", "-i", str(path)],
+        ["openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
+    ):
+        completed = subprocess.run(command, check=False, capture_output=True)
+        if completed.returncode == 0 and completed.stdout:
+            return plistlib.loads(completed.stdout)
+    raise SystemExit(1)
 
 
 profile_path = Path(sys.argv[1])
@@ -267,19 +267,19 @@ from pathlib import Path
 
 
 def load_profile(path: Path):
+    payload = path.read_bytes()
     try:
-        with path.open("rb") as fh:
-            payload = fh.read()
         return plistlib.loads(payload)
     except Exception:
-        completed = subprocess.run(
-            ["security", "cms", "-D", "-i", str(path)],
-            check=False,
-            capture_output=True,
-        )
-        if completed.returncode != 0 or not completed.stdout:
-            raise SystemExit(1)
-        return plistlib.loads(completed.stdout)
+        pass
+    for command in (
+        ["security", "cms", "-D", "-i", str(path)],
+        ["openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
+    ):
+        completed = subprocess.run(command, check=False, capture_output=True)
+        if completed.returncode == 0 and completed.stdout:
+            return plistlib.loads(completed.stdout)
+    raise SystemExit(1)
 
 
 profile_arg = sys.argv[1].strip()
@@ -341,19 +341,19 @@ from pathlib import Path
 
 
 def load_profile(path: Path):
+    payload = path.read_bytes()
     try:
-        with path.open("rb") as fh:
-            payload = fh.read()
         return plistlib.loads(payload)
     except Exception:
-        completed = subprocess.run(
-            ["security", "cms", "-D", "-i", str(path)],
-            check=False,
-            capture_output=True,
-        )
-        if completed.returncode != 0 or not completed.stdout:
-            raise SystemExit(1)
-        return plistlib.loads(completed.stdout)
+        pass
+    for command in (
+        ["security", "cms", "-D", "-i", str(path)],
+        ["openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
+    ):
+        completed = subprocess.run(command, check=False, capture_output=True)
+        if completed.returncode == 0 and completed.stdout:
+            return plistlib.loads(completed.stdout)
+    raise SystemExit(1)
 
 
 profile_arg = sys.argv[1].strip()
@@ -427,20 +427,20 @@ from pathlib import Path
 
 
 def load_profile(path: Path):
+    payload = path.read_bytes()
     try:
-        with path.open("rb") as fh:
-            payload = fh.read()
         return plistlib.loads(payload)
     except Exception:
-        completed = subprocess.run(
-            ["security", "cms", "-D", "-i", str(path)],
-            check=False,
-            capture_output=True,
-        )
-        if completed.returncode != 0 or not completed.stdout:
-            print(f"无法解码 provisioning profile: {path}", file=sys.stderr)
-            raise SystemExit(1)
-        return plistlib.loads(completed.stdout)
+        pass
+    for command in (
+        ["security", "cms", "-D", "-i", str(path)],
+        ["openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
+    ):
+        completed = subprocess.run(command, check=False, capture_output=True)
+        if completed.returncode == 0 and completed.stdout:
+            return plistlib.loads(completed.stdout)
+    print(f"无法解码 provisioning profile: {path}", file=sys.stderr)
+    raise SystemExit(1)
 
 
 profile_path = Path(sys.argv[1])

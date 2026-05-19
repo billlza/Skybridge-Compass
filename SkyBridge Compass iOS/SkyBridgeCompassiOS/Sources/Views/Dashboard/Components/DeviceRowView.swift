@@ -574,7 +574,8 @@ struct DeviceDetailSheet: View {
                 dismiss()
             } catch {
                 isConnecting = false
-                connectError = error.localizedDescription
+                connectError = connectionManager.resolvedConnectionError(for: device)
+                    ?? P2PConnectionManager.localizedConnectionErrorMessage(error)
             }
         }
     }

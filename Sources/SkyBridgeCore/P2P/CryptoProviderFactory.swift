@@ -11,6 +11,27 @@
 
 import Foundation
 
+#if HAS_APPLE_PQC_SDK
+@available(macOS 14.0, iOS 17.0, *)
+private enum ApplePQCAvailabilityCache {
+    // Apple PQC self-tests generate real PQC key material. They are capability probes,
+    // not per-request checks, so keep them off handshake/control-channel hot paths.
+    static let applePQC: Bool = {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return ApplePQCCryptoProvider.selfTest()
+        }
+        return false
+    }()
+
+    static let xwing: Bool = {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return AppleXWingCryptoProvider.selfTest()
+        }
+        return false
+    }()
+}
+#endif
+
 // MARK: - CryptoProviderFactory
 
 /// Provider 工厂 - 单一事实来源
@@ -150,11 +171,10 @@ public enum CryptoProviderFactory {
 
     private static func isAppleXWingAvailable() -> Bool {
         #if HAS_APPLE_PQC_SDK
-        if #available(iOS 26.0, macOS 26.0, *) {
-            return AppleXWingCryptoProvider.selfTest()
-        }
-        #endif
+        return ApplePQCAvailabilityCache.xwing
+        #else
         return false
+        #endif
     }
 
     private static func nativeSuitePreference() -> NativeSuitePreference {
@@ -346,12 +366,10 @@ public struct SystemCryptoEnvironment: CryptoEnvironment, Sendable {
  /// Requirements: 4.3
     public func checkApplePQCAvailable() -> Bool {
         #if HAS_APPLE_PQC_SDK
-        if #available(iOS 26.0, macOS 26.0, *) {
- // 执行轻量 self-test 验证 API 可用
-            return ApplePQCCryptoProvider.selfTest()
-        }
-        #endif
+        return ApplePQCAvailabilityCache.applePQC
+        #else
         return false
+        #endif
     }
 
     public func checkLiboqsAvailable() -> Bool {

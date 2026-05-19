@@ -1,0 +1,129 @@
+import Foundation
+
+#if canImport(WebRTC)
+@preconcurrency import WebRTC
+#endif
+
+@available(iOS 17.0, *)
+extension WebRTCSession {
+    enum RemoteVideoTrackRefreshAction: Equatable {
+        case noOp
+        case rebind
+    }
+
+    enum StateAccessPlan: Equatable {
+        case executeInline
+        case syncOnStateQueue
+    }
+
+    enum CallbackDispatchPlan: Equatable {
+        case executeInline
+        case asyncOffStateQueue
+    }
+
+    enum PendingInboundFlushPlan: Equatable {
+        case keepBuffered
+        case dispatchBuffered(count: Int)
+    }
+
+    enum PendingInboundDeliveryPlan: Equatable {
+        case bufferIncoming(nextPendingCount: Int)
+        case dispatch(bufferedCount: Int)
+    }
+
+    enum PendingInboundBufferLimitPlan: Equatable {
+        case append(nextPendingCount: Int, nextPendingBytes: Int)
+        case overflow
+    }
+
+    enum PendingRemoteICEPlan: Equatable {
+        case ignoreDuplicate
+        case queueCandidate(nextPendingCount: Int)
+        case applyImmediately
+    }
+
+    nonisolated static func receiverStatsProbeRemoteVideoTrackRefreshAction(
+        currentTrackId: String?,
+        receiverTrackId: String?,
+        hasCurrentRemoteVideoTrack: Bool
+    ) -> RemoteVideoTrackRefreshAction {
+        guard hasCurrentRemoteVideoTrack else { return .rebind }
+
+        let current = normalizedRemoteVideoTrackId(currentTrackId)
+        let incoming = normalizedRemoteVideoTrackId(receiverTrackId)
+        if current != incoming {
+            return .rebind
+        }
+        return .noOp
+    }
+
+    nonisolated static func normalizedRemoteVideoTrackId(_ trackId: String?) -> String {
+        trackId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    nonisolated static func stateAccessPlan(isOnStateQueue: Bool) -> StateAccessPlan {
+        isOnStateQueue ? .executeInline : .syncOnStateQueue
+    }
+
+    nonisolated static func callbackDispatchPlan(isOnStateQueue: Bool) -> CallbackDispatchPlan {
+        isOnStateQueue ? .asyncOffStateQueue : .executeInline
+    }
+
+    nonisolated static func lifecycleGuardAllowsCallback(
+        peerConnectionMatches: Bool,
+        isClosed: Bool,
+        currentLifecycleToken: UInt64,
+        expectedLifecycleToken: UInt64
+    ) -> Bool {
+        peerConnectionMatches && !isClosed && currentLifecycleToken == expectedLifecycleToken
+    }
+
+    nonisolated static func pendingInboundFlushPlan(
+        hasHandlerInstalled: Bool,
+        pendingCount: Int
+    ) -> PendingInboundFlushPlan {
+        guard hasHandlerInstalled, pendingCount > 0 else {
+            return .keepBuffered
+        }
+        return .dispatchBuffered(count: pendingCount)
+    }
+
+    nonisolated static func pendingInboundDeliveryPlan(
+        hasHandlerInstalled: Bool,
+        pendingCount: Int
+    ) -> PendingInboundDeliveryPlan {
+        guard hasHandlerInstalled else {
+            return .bufferIncoming(nextPendingCount: pendingCount + 1)
+        }
+        return .dispatch(bufferedCount: pendingCount)
+    }
+
+    nonisolated static func pendingInboundBufferLimitPlan(
+        pendingCount: Int,
+        pendingBytes: Int,
+        incomingBytes: Int,
+        maxCount: Int,
+        maxBytes: Int
+    ) -> PendingInboundBufferLimitPlan {
+        let nextPendingCount = pendingCount + 1
+        let nextPendingBytes = pendingBytes + incomingBytes
+        guard nextPendingCount <= maxCount, nextPendingBytes <= maxBytes else {
+            return .overflow
+        }
+        return .append(nextPendingCount: nextPendingCount, nextPendingBytes: nextPendingBytes)
+    }
+
+    nonisolated static func pendingRemoteICEPlan(
+        isDuplicate: Bool,
+        hasRemoteDescription: Bool,
+        pendingCount: Int
+    ) -> PendingRemoteICEPlan {
+        if isDuplicate {
+            return .ignoreDuplicate
+        }
+        if hasRemoteDescription {
+            return .applyImmediately
+        }
+        return .queueCandidate(nextPendingCount: pendingCount + 1)
+    }
+}

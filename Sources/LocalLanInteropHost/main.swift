@@ -1,5 +1,7 @@
 import Foundation
 import Darwin
+import AppKit
+import QuartzCore
 import SkyBridgeCore
 
 @MainActor
@@ -9,6 +11,7 @@ private final class LocalLanInteropHostCoordinator {
     private let remoteControlManager = RemoteControlManager()
     private lazy var reporter = SmokeStatusReporter(statusURL: self.statusURL())
     private var monitorTask: Task<Void, Never>?
+    private var smokeCaptureSource: SmokeCaptureAnimationSource?
 
     private lazy var fileTransferListener = FileTransferListenerService(manager: fileTransferManager)
     private lazy var remoteControlServer = RemoteControlServer(manager: remoteControlManager)
@@ -32,7 +35,13 @@ private final class LocalLanInteropHostCoordinator {
     func start() async throws {
         reporter.reset()
         reporter.append("boot role=mac-host")
-        _ = try await DeviceIdentityKeyManager.shared.getOrCreateIdentityKey()
+        reporter.append("identity start storage=persistent-keychain")
+        do {
+            _ = try await DeviceIdentityKeyManager.shared.getOrCreateIdentityKey()
+        } catch {
+            reporter.append("failed stage=identity error=\(sanitize(error.localizedDescription))")
+            throw error
+        }
         let protocolDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
         reporter.append("identity ready device=\(sanitize(protocolDeviceId))")
         guard await discoveryManager.waitUntilInitialized(timeout: 5.0) else {
@@ -51,6 +60,7 @@ private final class LocalLanInteropHostCoordinator {
         try await fileTransferListener.start()
         try await remoteControlServer.start()
         try await exportLocalPQCIdentityIfRequested(reporter: reporter)
+        startSmokeCaptureSourceIfRequested()
 
         let settingsPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.SkyBridge.Compass/settings.json")
@@ -65,6 +75,15 @@ private final class LocalLanInteropHostCoordinator {
 
         reporter.append("ready discovery=_skybridge._tcp port=9527")
         monitorPresence()
+    }
+
+    private func startSmokeCaptureSourceIfRequested() {
+        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REMOTE_ANIMATION"] == "1" else {
+            return
+        }
+        let source = SmokeCaptureAnimationSource(reporter: reporter)
+        source.start()
+        smokeCaptureSource = source
     }
 
     private func emit(_ line: String) {
@@ -540,6 +559,203 @@ private final class BonjourFileTransferRouteResolver: NSObject, @preconcurrency 
             let trimmed = data.prefix { $0 != 0 }
             return String(decoding: trimmed, as: UTF8.self)
         }
+    }
+}
+
+@MainActor
+private final class SmokeCaptureAnimationSource {
+    private let reporter: SmokeStatusReporter
+    private var size = NSSize(width: 640, height: 360)
+    private var window: NSWindow?
+    private var animationView: SmokeCaptureAnimationView?
+    private var timer: DispatchSourceTimer?
+    private var frameIndex: UInt64 = 0
+    private var displayID: CGDirectDisplayID = 0
+
+    init(reporter: SmokeStatusReporter) {
+        self.reporter = reporter
+    }
+
+    func start() {
+        guard window == nil else { return }
+
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        application.finishLaunching()
+
+        let mainDisplayID = CGMainDisplayID()
+        let targetScreen = Self.screen(for: mainDisplayID) ?? NSScreen.main
+        displayID = targetScreen.flatMap(Self.displayID(for:)) ?? mainDisplayID
+        let visibleFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        size = Self.captureWindowSize(for: visibleFrame)
+        let view = SmokeCaptureAnimationView(frame: NSRect(origin: .zero, size: size))
+        let window = NSPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "SkyBridge Remote Smoke Source"
+        window.isReleasedWhenClosed = false
+        window.isFloatingPanel = true
+        window.hidesOnDeactivate = false
+        window.canHide = false
+        window.backgroundColor = .black
+        window.isOpaque = true
+        window.hasShadow = false
+        window.level = .floating
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        window.contentView = view
+        placeWindow(window, visibleFrame: visibleFrame)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        application.activate(ignoringOtherApps: true)
+        window.displayIfNeeded()
+        application.updateWindows()
+
+        self.window = window
+        self.animationView = view
+
+        reportSourceStatus(frame: 0)
+
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in
+            Task { @MainActor in
+                self?.tick()
+            }
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    private static func captureWindowSize(for visibleFrame: NSRect) -> NSSize {
+        let width = max(640, floor(visibleFrame.width - 64))
+        let height = max(360, floor(visibleFrame.height - 64))
+        return NSSize(width: width, height: height)
+    }
+
+    private static func screen(for displayID: CGDirectDisplayID) -> NSScreen? {
+        NSScreen.screens.first { screen in
+            self.displayID(for: screen) == displayID
+        }
+    }
+
+    private static func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        guard let number = screen.deviceDescription[key] as? NSNumber else { return nil }
+        return CGDirectDisplayID(number.uint32Value)
+    }
+
+    private func placeWindow(_ window: NSWindow, visibleFrame: NSRect) {
+        let origin = NSPoint(
+            x: visibleFrame.minX + max(32, floor((visibleFrame.width - size.width) / 2)),
+            y: visibleFrame.minY + max(32, floor((visibleFrame.height - size.height) / 2))
+        )
+        window.setFrame(NSRect(origin: origin, size: size), display: true)
+    }
+
+    private func tick() {
+        frameIndex &+= 1
+        animationView?.render(frame: frameIndex)
+        window?.displayIfNeeded()
+        if frameIndex % 120 == 0 {
+            reportSourceStatus(frame: frameIndex)
+        }
+    }
+
+    private func reportSourceStatus(frame: UInt64) {
+        let window = self.window
+        let windowFrame = window?.frame ?? .zero
+        let windowNumber = window?.windowNumber ?? 0
+        let visible = window?.isVisible == true ? 1 : 0
+        let occlusionVisible = window?.occlusionState.contains(.visible) == true ? 1 : 0
+        let level = Int(window?.level.rawValue ?? 0)
+        reporter.append(
+            "smoke-capture-source active=1 fps=120 targetCaptureFPS=60 frame=\(frame) displayID=\(displayID) windowID=\(windowNumber) window=\(Int(size.width))x\(Int(size.height)) windowVisible=\(visible) windowOcclusionVisible=\(occlusionVisible) windowLevel=\(level) windowFrame=\(Int(windowFrame.origin.x)),\(Int(windowFrame.origin.y)),\(Int(windowFrame.size.width)),\(Int(windowFrame.size.height))"
+        )
+    }
+}
+
+@MainActor
+private final class SmokeCaptureAnimationView: NSView {
+    private var currentFrame: UInt64 = 0
+    private let backgroundLayer = CALayer()
+    private let accentLayer = CALayer()
+    private let labelLayer = CATextLayer()
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureLayers()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureLayers()
+    }
+
+    override func layout() {
+        super.layout()
+        render(frame: currentFrame)
+    }
+
+    func render(frame: UInt64) {
+        currentFrame = frame
+        let width = max(bounds.width, 1)
+        let height = max(bounds.height, 1)
+        let phase = Double(frame % 240) / 240.0
+        let stripeWidth = max(24, width * 0.08)
+        let stripeX = CGFloat(phase) * max(1, width - stripeWidth)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backgroundLayer.frame = bounds
+        backgroundLayer.backgroundColor = NSColor(
+            calibratedRed: 0.05 + 0.85 * phase,
+            green: 0.20 + 0.60 * (1.0 - phase),
+            blue: 0.35 + 0.40 * abs(0.5 - phase),
+            alpha: 1.0
+        ).cgColor
+        accentLayer.frame = CGRect(x: stripeX, y: 0, width: stripeWidth, height: height)
+        accentLayer.backgroundColor = NSColor(
+            calibratedRed: 0.95 - 0.65 * phase,
+            green: 0.15 + 0.70 * phase,
+            blue: 0.85 - 0.30 * abs(0.5 - phase),
+            alpha: 1.0
+        ).cgColor
+        labelLayer.frame = CGRect(x: width * 0.08, y: height * 0.38, width: width * 0.84, height: height * 0.18)
+        labelLayer.string = NSAttributedString(
+            string: "SKYBRIDGE REMOTE SMOKE \(frame)",
+            attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: max(36, min(width, height) * 0.08), weight: .bold),
+                .foregroundColor: NSColor.white
+            ]
+        )
+        CATransaction.commit()
+        CATransaction.flush()
+    }
+
+    private func configureLayers() {
+        wantsLayer = true
+        let rootLayer = CALayer()
+        rootLayer.backgroundColor = NSColor.black.cgColor
+        rootLayer.needsDisplayOnBoundsChange = true
+        layer = rootLayer
+
+        backgroundLayer.needsDisplayOnBoundsChange = true
+        accentLayer.needsDisplayOnBoundsChange = true
+        labelLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        labelLayer.alignmentMode = .left
+        labelLayer.truncationMode = .end
+        labelLayer.isWrapped = false
+
+        rootLayer.addSublayer(backgroundLayer)
+        rootLayer.addSublayer(accentLayer)
+        rootLayer.addSublayer(labelLayer)
     }
 }
 

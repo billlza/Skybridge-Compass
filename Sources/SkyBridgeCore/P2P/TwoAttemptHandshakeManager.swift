@@ -272,6 +272,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
 // PQC 准备失败，尝试 fallback
                 if case .pqcProviderUnavailable = error {
                     if enablePQCBridgeRetry,
+                       !policy.requirePQC,
                        let bridged = try await attemptPQCBridgeRetry(
                             deviceId: deviceId,
                             reason: .pqcProviderUnavailable,
@@ -297,7 +298,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             } catch let error as HandshakeError {
 // 检查是否允许 fallback
                 if case .failed(let reason) = error {
-                    if enablePQCBridgeRetry {
+                    if enablePQCBridgeRetry, !policy.requirePQC {
                         do {
                             if let bridged = try await attemptPQCBridgeRetry(
                                 deviceId: deviceId,
@@ -518,7 +519,11 @@ public struct TwoAttemptHandshakeManager: Sendable {
         using cryptoProvider: any CryptoProvider
     ) -> [CryptoSuite] {
         var suites = cryptoProvider.supportedSuites
+        let explicitXWingPreference = explicitlyPrefersXWingHybridSuite()
         guard cryptoProvider.tier == .nativePQC else {
+            if explicitXWingPreference {
+                return []
+            }
             return deduplicatedSuitesByWire(suites)
         }
 
@@ -530,7 +535,14 @@ public struct TwoAttemptHandshakeManager: Sendable {
             suite.wireId == CryptoSuite.mlkem768MLDSA65.wireId
         }
 
-        if preferXWing, xwingAvailable {
+        if preferXWing {
+            guard xwingAvailable else {
+                if explicitXWingPreference {
+                    return []
+                }
+                suites.insert(.mlkem768MLDSA65, at: 0)
+                return deduplicatedSuitesByWire(suites)
+            }
             suites.insert(.xwingMLDSA, at: 0)
             suites.insert(.mlkem768MLDSA65, at: 1)
         } else {
@@ -554,6 +566,14 @@ public struct TwoAttemptHandshakeManager: Sendable {
     }
 
     private static func prefersXWingHybridSuite() -> Bool {
+        if explicitlyPrefersXWingHybridSuite() {
+            return true
+        }
+
+        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
+    }
+
+    private static func explicitlyPrefersXWingHybridSuite() -> Bool {
         if let raw = ProcessInfo.processInfo.environment["SB_PQC_PREFERRED_SUITE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased(),
@@ -561,7 +581,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return true
         }
 
-        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
+        return false
     }
 
     private static func isAppleXWingAvailable() -> Bool {

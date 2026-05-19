@@ -4,6 +4,200 @@ import CryptoKit
 
 @available(iOS 17.0, *)
 final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
+    func testControlChannelCodecLabelsBootstrapAppMessageKinds() {
+        XCTAssertEqual(
+            CrossNetworkWebRTCControlChannelCodec.bootstrapAppMessageKind(.heartbeat(.init())),
+            "heartbeat"
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCControlChannelCodec.bootstrapAppMessageKind(.peerDisconnecting(.init(deviceId: "peer"))),
+            "peerDisconnecting"
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCControlChannelCodec.bootstrapAppMessageKind(.ping(.init(id: 7))),
+            "ping"
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCControlChannelCodec.bootstrapAppMessageKind(.pong(.init(id: 7))),
+            "pong"
+        )
+    }
+
+    func testControlChannelCodecRecognizesFinishedHandshakePacket() {
+        let finished = HandshakeFinished(
+            direction: .responderToInitiator,
+            mac: Data(repeating: 0x11, count: 32)
+        )
+
+        XCTAssertTrue(CrossNetworkWebRTCControlChannelCodec.isLikelyCompleteHandshakeControlPacket(finished.encoded))
+        XCTAssertTrue(CrossNetworkWebRTCControlChannelCodec.isActiveHandshakeDriverFrame(finished.encoded))
+        XCTAssertFalse(CrossNetworkWebRTCControlChannelCodec.isLikelyCompleteHandshakeControlPacket(Data()))
+        XCTAssertFalse(CrossNetworkWebRTCControlChannelCodec.isLikelyCompleteHandshakeControlPacket(Data([0xff, 0, 0, 0, 0])))
+    }
+
+    func testFileTransferIntegrityMerkleRootUsesOrderedSha256Tree() throws {
+        let leafA = CrossNetworkCryptoCompat.sha256(Data("a".utf8))
+        let leafB = CrossNetworkCryptoCompat.sha256(Data("b".utf8))
+        let leafC = CrossNetworkCryptoCompat.sha256(Data("c".utf8))
+
+        XCTAssertNil(CrossNetworkMerkleCompat.root(leaves: []))
+        XCTAssertNil(CrossNetworkMerkleCompat.root(leaves: [Data([0x01])]))
+        XCTAssertEqual(CrossNetworkMerkleCompat.root(leaves: [leafA]), leafA)
+
+        let expectedPairRoot = CrossNetworkCryptoCompat.sha256(leafA + leafB)
+        XCTAssertEqual(CrossNetworkMerkleCompat.root(leaves: [leafA, leafB]), expectedPairRoot)
+
+        let leftParent = CrossNetworkCryptoCompat.sha256(leafA + leafB)
+        let duplicatedRightParent = CrossNetworkCryptoCompat.sha256(leafC + leafC)
+        let expectedOddRoot = CrossNetworkCryptoCompat.sha256(leftParent + duplicatedRightParent)
+        XCTAssertEqual(
+            CrossNetworkMerkleCompat.root(leaves: [leafA, leafB, leafC]),
+            expectedOddRoot
+        )
+    }
+
+    func testFileTransferMerkleAuthPreimageAndHMACAreStable() throws {
+        let transferId = "transfer-1"
+        let merkleRoot = Data(repeating: 0x11, count: 32)
+        let fileSha256 = Data(repeating: 0x22, count: 32)
+        let preimage = CrossNetworkMerkleAuthCompat.preimage(
+            transferId: transferId,
+            merkleRoot: merkleRoot,
+            fileSha256: fileSha256
+        )
+
+        var expected = Data("SkyBridge-MerkleRoot|v1|".utf8)
+        let transferIdBytes = Data(transferId.utf8)
+        expected.append(littleEndianUInt16(transferIdBytes.count))
+        expected.append(transferIdBytes)
+        expected.append(littleEndianUInt16(merkleRoot.count))
+        expected.append(merkleRoot)
+        expected.append(littleEndianUInt16(fileSha256.count))
+        expected.append(fileSha256)
+
+        XCTAssertEqual(CrossNetworkMerkleAuthCompat.signatureAlgV1, "hmac-sha256-session-v1")
+        XCTAssertEqual(preimage, expected)
+
+        let key = Data(repeating: 0x33, count: 32)
+        let expectedMac = Data(HMAC<SHA256>.authenticationCode(
+            for: expected,
+            using: SymmetricKey(data: key)
+        ))
+        XCTAssertEqual(CrossNetworkMerkleAuthCompat.hmacSha256(key: key, data: preimage), expectedMac)
+    }
+
+    func testFileTransferIntegrityValidatorRejectsMissingProofAndChunkHashMismatch() throws {
+        let payload = Data("file-chunk".utf8)
+        let payloadHash = CrossNetworkCryptoCompat.sha256(payload)
+
+        XCTAssertEqual(
+            try CrossNetworkFileTransferIntegrityValidator.verifiedChunkHash(
+                data: payload,
+                expectedChunkSha256: payloadHash
+            ).get(),
+            payloadHash
+        )
+
+        if case .failure(.chunkHashMismatch) = CrossNetworkFileTransferIntegrityValidator.verifiedChunkHash(
+            data: payload,
+            expectedChunkSha256: Data(repeating: 0x44, count: 32)
+        ) {
+            // Expected.
+        } else {
+            XCTFail("Chunk hash mismatches must be rejected before writing inbound file data.")
+        }
+
+        XCTAssertEqual(
+            CrossNetworkFileTransferIntegrityValidator.requiredProofFailure(
+                fileSha256: nil,
+                merkleRoot: nil,
+                merkleRootSignature: nil,
+                merkleRootSignatureAlg: nil
+            ),
+            .missingIntegrityProof
+        )
+        XCTAssertNil(
+            CrossNetworkFileTransferIntegrityValidator.requiredProofFailure(
+                fileSha256: payloadHash,
+                merkleRoot: nil,
+                merkleRootSignature: nil,
+                merkleRootSignatureAlg: nil
+            )
+        )
+    }
+
+    func testFileTransferIntegrityValidatorRejectsMerkleRootAndSignatureFailures() throws {
+        let transferId = "transfer-2"
+        let leaves = [
+            CrossNetworkCryptoCompat.sha256(Data("chunk-0".utf8)),
+            CrossNetworkCryptoCompat.sha256(Data("chunk-1".utf8))
+        ]
+        let merkleRoot = try XCTUnwrap(CrossNetworkMerkleCompat.root(leaves: leaves))
+        let fileSha256 = Data(repeating: 0x22, count: 32)
+        let receiveKey = Data(repeating: 0x33, count: 32)
+        let validSignature = CrossNetworkMerkleAuthCompat.hmacSha256(
+            key: receiveKey,
+            data: CrossNetworkMerkleAuthCompat.preimage(
+                transferId: transferId,
+                merkleRoot: merkleRoot,
+                fileSha256: fileSha256
+            )
+        )
+        let chunkHashes = [0: leaves[0], 1: leaves[1]]
+
+        XCTAssertNil(
+            CrossNetworkFileTransferIntegrityValidator.validateMerkleProof(
+                transferId: transferId,
+                totalChunks: 2,
+                chunkHashes: chunkHashes,
+                expectedMerkleRoot: merkleRoot,
+                merkleRootSignature: validSignature,
+                merkleRootSignatureAlg: CrossNetworkMerkleAuthCompat.signatureAlgV1,
+                expectedFileSha256: fileSha256,
+                receiveKey: receiveKey
+            )
+        )
+        XCTAssertEqual(
+            CrossNetworkFileTransferIntegrityValidator.validateMerkleProof(
+                transferId: transferId,
+                totalChunks: 2,
+                chunkHashes: chunkHashes,
+                expectedMerkleRoot: Data(repeating: 0x55, count: 32),
+                merkleRootSignature: validSignature,
+                merkleRootSignatureAlg: CrossNetworkMerkleAuthCompat.signatureAlgV1,
+                expectedFileSha256: fileSha256,
+                receiveKey: receiveKey
+            ),
+            .merkleRootMismatch
+        )
+        XCTAssertEqual(
+            CrossNetworkFileTransferIntegrityValidator.validateMerkleProof(
+                transferId: transferId,
+                totalChunks: 2,
+                chunkHashes: chunkHashes,
+                expectedMerkleRoot: merkleRoot,
+                merkleRootSignature: validSignature,
+                merkleRootSignatureAlg: "hmac-sha1-legacy",
+                expectedFileSha256: fileSha256,
+                receiveKey: receiveKey
+            ),
+            .unknownMerkleSignatureAlgorithm
+        )
+        XCTAssertEqual(
+            CrossNetworkFileTransferIntegrityValidator.validateMerkleProof(
+                transferId: transferId,
+                totalChunks: 2,
+                chunkHashes: chunkHashes,
+                expectedMerkleRoot: merkleRoot,
+                merkleRootSignature: Data(repeating: 0x66, count: 32),
+                merkleRootSignatureAlg: CrossNetworkMerkleAuthCompat.signatureAlgV1,
+                expectedFileSha256: fileSha256,
+                receiveKey: receiveKey
+            ),
+            .merkleSignatureMismatch
+        )
+    }
+
     @MainActor
     func testDirectProbeDecryptsRawCiphertextPayload() throws {
         let keys = makeSessionKeys()
@@ -62,16 +256,12 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
 
         XCTAssertEqual(payload.screenDataChannelEnabled, true)
 
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let sourceURL = root.appendingPathComponent(
-            "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+        let source = try readRepositorySource(
+            "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopViewerStreamConfigurationFactory.swift"
         )
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
         XCTAssertTrue(source.contains("screenDataChannelEnabled: activeTransportMode != .crossNetwork"))
         XCTAssertTrue(source.contains("mediaFallbackPolicy: activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\""))
-        XCTAssertTrue(source.contains("screenChannelWireFormat: activeTransportMode == .crossNetwork"))
+        XCTAssertTrue(source.contains("screenChannelWireFormat: activeTransportMode == .crossNetwork || activeTransportMode == .lan"))
         XCTAssertTrue(source.contains("\"sbc2-chunked-v1\""))
     }
 
@@ -448,5 +638,27 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
     private func appendUInt64(_ value: UInt64, to data: inout Data) {
         var bigEndian = value.bigEndian
         withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+
+    private func littleEndianUInt16(_ value: Int) -> Data {
+        var littleEndian = UInt16(value).littleEndian
+        return Data(bytes: &littleEndian, count: 2)
+    }
+
+    private func readRepositorySource(_ relativePath: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(relativePath)
+        if FileManager.default.fileExists(atPath: sourceURL.path) {
+            return try String(contentsOf: sourceURL, encoding: .utf8)
+        }
+        #if os(iOS) && !targetEnvironment(simulator)
+        throw XCTSkip(
+            "Repository source files are not mounted inside the physical-device test sandbox; run source-shape regression tests on macOS or iOS Simulator."
+        )
+        #else
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+        #endif
     }
 }

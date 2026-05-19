@@ -51,10 +51,10 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
     func testSelectorPrefersH264WhenLowLatencyIsEnabled() {
         let policy = RemoteControlStreamPolicySelector.select(
             request: makeRequest(
-                size: CGSize(width: 2560, height: 1440),
+                size: CGSize(width: 1920, height: 1080),
                 codec: .hevc,
-                fps: 120,
-                gop: 120,
+                fps: 60,
+                gop: 60,
                 lowLatency: true
             ),
             peerFormats: ["jpeg", "h264", "hevc"],
@@ -65,6 +65,26 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertEqual(policy.codec, .h264)
         XCTAssertEqual(policy.targetFrameRate, 60)
         XCTAssertLessThanOrEqual(policy.keyFrameInterval, 30)
+    }
+
+    func testSelectorKeepsHEVCForLowLatencyHighResolutionHighFPS() {
+        let policy = RemoteControlStreamPolicySelector.select(
+            request: makeRequest(
+                size: CGSize(width: 2056, height: 1328),
+                codec: .h264,
+                fps: 60,
+                gop: 60,
+                lowLatency: true
+            ),
+            peerFormats: ["jpeg", "h264", "hevc"],
+            thermalState: .nominal,
+            isAppleSilicon: true
+        )
+
+        XCTAssertEqual(policy.codec, .hevc)
+        XCTAssertEqual(policy.targetFrameRate, 60)
+        XCTAssertEqual(policy.keyFrameInterval, 60)
+        XCTAssertEqual(policy.reason, "low-latency-high-fps-hevc")
     }
 
     func testSelectorUsesHEVCForLowLatencyExactOddVisibleDimensions() {
@@ -83,7 +103,8 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(policy.codec, .hevc)
-        XCTAssertEqual(policy.reason, "low-latency-hevc-exact-visible")
+        XCTAssertEqual(policy.reason, "low-latency-high-fps-hevc-exact-visible")
+        XCTAssertEqual(policy.keyFrameInterval, 60)
         XCTAssertEqual(policy.preferredSize.width, 2056)
         XCTAssertEqual(policy.preferredSize.height, 1329)
     }

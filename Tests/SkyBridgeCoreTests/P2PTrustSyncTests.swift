@@ -266,7 +266,7 @@ final class P2PTrustSyncTests: XCTestCase {
             kemPublicKeys: [
                 KEMPublicKeyInfo(
                     suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
-                    publicKey: Data([0xAA, 0xBB])
+                    publicKey: Data(repeating: 0xAA, count: 1_184)
                 )
             ],
             attestationLevel: .none,
@@ -301,7 +301,7 @@ final class P2PTrustSyncTests: XCTestCase {
             [
                 KEMPublicKeyInfo(
                     suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
-                    publicKey: Data([0xAA, 0xBB])
+                    publicKey: Data(repeating: 0xAA, count: 1_184)
                 )
             ]
         )

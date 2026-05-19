@@ -130,8 +130,10 @@ static kern_return_t sb_smc_read_raw(const char *key, SMCKeyData_t *output, char
     memset(&value_in, 0, sizeof(SMCKeyData_t));
     memset(&value_out, 0, sizeof(SMCKeyData_t));
 
+    SMCKeyData_keyInfo_t key_info = output->keyInfo;
+
     value_in.key = input.key;
-    value_in.keyInfo.dataSize = output->keyInfo.dataSize;
+    value_in.keyInfo.dataSize = key_info.dataSize;
     value_in.data8 = SMC_CMD_READ_BYTES;
 
     status = sb_smc_call(&value_in, &value_out);
@@ -140,7 +142,8 @@ static kern_return_t sb_smc_read_raw(const char *key, SMCKeyData_t *output, char
     }
 
     *output = value_out;
-    sb_uint32_to_key(output->keyInfo.dataType, type_out);
+    output->keyInfo = key_info;
+    sb_uint32_to_key(key_info.dataType, type_out);
     return kIOReturnSuccess;
 }
 
@@ -186,6 +189,24 @@ static kern_return_t sb_decode_value(const SMCKeyData_t *data, const char type[5
 
     if (strncmp(type, "si16", 4) == 0 && data_size >= 2) {
         int16_t raw = (int16_t) (((uint16_t) data->bytes[0] << 8) | (uint16_t) data->bytes[1]);
+        *value_out = (double) raw;
+        return kIOReturnSuccess;
+    }
+
+    if (strncmp(type, "ui32", 4) == 0 && data_size >= 4) {
+        uint32_t raw = ((uint32_t) data->bytes[0] << 24) |
+                       ((uint32_t) data->bytes[1] << 16) |
+                       ((uint32_t) data->bytes[2] << 8) |
+                       ((uint32_t) data->bytes[3]);
+        *value_out = (double) raw;
+        return kIOReturnSuccess;
+    }
+
+    if (strncmp(type, "si32", 4) == 0 && data_size >= 4) {
+        int32_t raw = (int32_t) (((uint32_t) data->bytes[0] << 24) |
+                                 ((uint32_t) data->bytes[1] << 16) |
+                                 ((uint32_t) data->bytes[2] << 8) |
+                                 ((uint32_t) data->bytes[3]));
         *value_out = (double) raw;
         return kIOReturnSuccess;
     }

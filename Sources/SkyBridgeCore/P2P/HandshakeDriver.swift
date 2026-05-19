@@ -739,6 +739,11 @@ public actor HandshakeDriver {
 
  // MARK: - Private Methods
 
+    private enum HandshakeWireMessageKind {
+        case messageA
+        case messageB
+    }
+
  /// 处理 MessageA（响应方）
     private func handleMessageA(_ data: Data, from peer: PeerIdentifier) async {
         currentPeer = peer
@@ -923,7 +928,7 @@ public actor HandshakeDriver {
             }
 
         } catch {
-            await transitionToFailed(.invalidMessageFormat(error.localizedDescription))
+            await handleHandshakeError(error, rawHandshakeData: data, messageKind: .messageA)
         }
     }
 
@@ -1032,7 +1037,7 @@ public actor HandshakeDriver {
             }
 
         } catch {
-            await handleHandshakeError(error, context: ctx)
+            await handleHandshakeError(error, context: ctx, rawHandshakeData: data, messageKind: .messageB)
         }
     }
 
@@ -1429,7 +1434,12 @@ public actor HandshakeDriver {
         return resolvedIdentity
     }
 
-    private func handleHandshakeError(_ error: Error, context: HandshakeContext? = nil) async {
+    private func handleHandshakeError(
+        _ error: Error,
+        context: HandshakeContext? = nil,
+        rawHandshakeData: Data? = nil,
+        messageKind: HandshakeWireMessageKind? = nil
+    ) async {
         let negotiatedSuite = await context?.negotiatedSuite
         if let ctx = context {
             await ctx.zeroize()
@@ -1439,6 +1449,11 @@ public actor HandshakeDriver {
         if let handshakeError = error as? HandshakeError {
             switch handshakeError {
             case .failed(let reason):
+                if case .suiteNotSupported = reason,
+                   let rawHandshakeData,
+                   let messageKind {
+                    await emitUnknownSuiteRejectedIfPresent(in: rawHandshakeData, messageKind: messageKind)
+                }
                 await transitionToFailed(reason, negotiatedSuite: negotiatedSuite)
             default:
                 await transitionToFailed(.cryptoError(handshakeError.localizedDescription), negotiatedSuite: negotiatedSuite)
@@ -1447,6 +1462,95 @@ public actor HandshakeDriver {
         }
 
         await transitionToFailed(.cryptoError(error.localizedDescription), negotiatedSuite: negotiatedSuite)
+    }
+
+    private func emitUnknownSuiteRejectedIfPresent(
+        in rawHandshakeData: Data,
+        messageKind: HandshakeWireMessageKind
+    ) async {
+        guard let unknown = firstUnknownSuite(in: rawHandshakeData, messageKind: messageKind) else {
+            return
+        }
+        let wireHex = String(format: "0x%04X", unknown.wireId)
+        await SecurityEventEmitter.shared.emit(SecurityEvent(
+            type: .handshakeFailed,
+            severity: .warning,
+            message: "suite_rejected_unknown",
+            context: [
+                "reason": "suite_rejected_unknown",
+                "wireId": wireHex,
+                "stage": unknown.stage,
+                "fallbackEligible": "0",
+                "peer": currentPeer?.deviceId ?? "unknown"
+            ]
+        ))
+    }
+
+    private nonisolated func firstUnknownSuite(
+        in rawHandshakeData: Data,
+        messageKind: HandshakeWireMessageKind
+    ) -> (wireId: UInt16, stage: String)? {
+        let data = HandshakePadding.unwrapIfNeeded(rawHandshakeData, label: "unknown-suite-audit")
+        switch messageKind {
+        case .messageA:
+            guard data.count >= 5, data.first == HandshakeConstants.protocolVersion else {
+                return nil
+            }
+            var offset = 1
+            guard let supportedCount = Self.readUInt16LE(from: data, offset: &offset),
+                  supportedCount > 0,
+                  supportedCount <= HandshakeConstants.maxSupportedSuites else {
+                return nil
+            }
+            for _ in 0..<Int(supportedCount) {
+                guard let suiteId = Self.readUInt16LE(from: data, offset: &offset) else {
+                    return nil
+                }
+                if !CryptoSuite(wireId: suiteId).isKnown {
+                    return (suiteId, "decode.messageA.supportedSuites")
+                }
+            }
+            guard let keyShareCount = Self.readUInt16LE(from: data, offset: &offset),
+                  keyShareCount <= HandshakeConstants.maxKeyShareCount,
+                  keyShareCount <= supportedCount else {
+                return nil
+            }
+            for _ in 0..<Int(keyShareCount) {
+                guard let suiteId = Self.readUInt16LE(from: data, offset: &offset),
+                      let shareLen = Self.readUInt16LE(from: data, offset: &offset) else {
+                    return nil
+                }
+                if !CryptoSuite(wireId: suiteId).isKnown {
+                    return (suiteId, "decode.messageA.keyShares")
+                }
+                guard offset + Int(shareLen) <= data.count else {
+                    return nil
+                }
+                offset += Int(shareLen)
+            }
+            return nil
+        case .messageB:
+            guard data.count >= 3, data.first == HandshakeConstants.protocolVersion else {
+                return nil
+            }
+            var offset = 1
+            guard let suiteId = Self.readUInt16LE(from: data, offset: &offset) else {
+                return nil
+            }
+            guard !CryptoSuite(wireId: suiteId).isKnown else {
+                return nil
+            }
+            return (suiteId, "decode.messageB.selectedSuite")
+        }
+    }
+
+    private nonisolated static func readUInt16LE(from data: Data, offset: inout Int) -> UInt16? {
+        guard offset + 2 <= data.count else {
+            return nil
+        }
+        let value = UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+        offset += 2
+        return value
     }
 
     private func resolveOutboundSOAMetadata(for _: PeerIdentifier) -> HandshakeSOAMetadata? {

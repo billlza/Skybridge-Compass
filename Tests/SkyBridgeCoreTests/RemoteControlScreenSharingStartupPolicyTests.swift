@@ -36,4 +36,33 @@ final class RemoteControlScreenSharingStartupPolicyTests: XCTestCase {
 
         XCTAssertFalse(gate.isCurrentAttempt(secondAttempt, for: "peer-1"))
     }
+
+    func testAttemptGateSuppressesDuplicateStartWhileCurrentStartIsInFlight() {
+        var gate = RemoteControlScreenSharingAttemptGate()
+
+        let firstAttempt = gate.beginAttemptIfIdle(for: "peer-1")
+        XCTAssertNotNil(firstAttempt)
+        XCTAssertNil(gate.beginAttemptIfIdle(for: "peer-1"))
+
+        if let firstAttempt {
+            gate.finishAttempt(firstAttempt, for: "peer-1")
+        }
+
+        let secondAttempt = gate.beginAttemptIfIdle(for: "peer-1")
+        XCTAssertNotNil(secondAttempt)
+        XCTAssertNotEqual(firstAttempt, secondAttempt)
+    }
+
+    func testAttemptGateAllowsFreshStartAfterInvalidatingInFlightStart() {
+        var gate = RemoteControlScreenSharingAttemptGate()
+
+        let firstAttempt = gate.beginAttemptIfIdle(for: "peer-1")
+        XCTAssertNotNil(firstAttempt)
+
+        gate.invalidateAttempts(for: "peer-1")
+
+        let secondAttempt = gate.beginAttemptIfIdle(for: "peer-1")
+        XCTAssertNotNil(secondAttempt)
+        XCTAssertNotEqual(firstAttempt, secondAttempt)
+    }
 }

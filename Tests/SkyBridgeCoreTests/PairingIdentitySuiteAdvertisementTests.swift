@@ -64,7 +64,7 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
         let payload = AppMessage.PairingIdentityExchangePayload(
             deviceId: "peer-1",
             kemPublicKeys: [
-                KEMPublicKeyInfo(suiteWireId: CryptoSuite.xwingMLDSA.wireId, publicKey: Data(repeating: 0x33, count: 32))
+                KEMPublicKeyInfo(suiteWireId: CryptoSuite.xwingMLDSA.wireId, publicKey: Data(repeating: 0x33, count: 1_216))
             ],
             protocolIdentityPublicKeys: protocolKeys
         )

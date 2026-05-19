@@ -1,0 +1,10 @@
+[2026-05-16T01:00:00.000Z] strictPQC trust preflight failed: missing peer KEM suite=X-Wing reason=missing_pinned_identity_requires_oob
+[2026-05-16T01:00:00.010Z] PIB-1 protocol identity binding request: peer=mac lifecycle=identity-oob>request
+[2026-05-16T01:00:00.200Z] PIB-1 protocol identity binding signature verified: peer=mac fingerprint=abc code=123456 lifecycle=identity-oob>verified
+[2026-05-16T01:00:00.240Z] PIB-1 protocol identity binding pinned: peer=mac deviceId=id:mac fingerprint=abc lifecycle=identity-oob>pinned
+[2026-05-16T01:00:00.260Z] SKR-1 signed LAN KEM refresh request peer=mac endpoint=192.168.0.2:51234 selectedEndpointClass=direct-host selectedEndpointDirect=1 directHostCandidate=1 suites=X-Wing suiteWireIds=0x0001 pinnedProtocolIdentity=1 lifecycle=missing-kem>request
+[2026-05-16T01:00:00.360Z] boot role=ios-p2p-client target=mac
+[2026-05-16T01:00:00.520Z] SKR-1 signed LAN KEM refresh verified and imported peer=mac suites=X-Wing wireId=0x0001 pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=72.0 jitterMs=2.0 successRatePct=100.0 applicationLossPct=0 retryCount=0 lifecycle=served>verified
+[2026-05-16T01:00:00.600Z] file-transfer outbound-complete name=ios-smoke-GOLDEN.txt
+[2026-05-16T01:00:00.610Z] file-transfer inbound-complete name=mac-smoke-GOLDEN.txt
+[2026-05-16T01:00:00.620Z] success suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0

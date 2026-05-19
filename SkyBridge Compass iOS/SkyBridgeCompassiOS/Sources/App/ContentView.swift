@@ -93,13 +93,34 @@ private struct PairingTrustRequestSheet: View {
                     }
                     LabeledContent(RuntimeLocalization.string("系统"), value: request.osVersion)
                 }
+
+                if request.purpose == .protocolIdentityBinding,
+                   let code = request.verificationCode,
+                   !code.isEmpty {
+                    Section {
+                        Text(code)
+                            .font(.system(size: 34, weight: .bold, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("pairing.verificationCode")
+                        if let fingerprint = request.protocolIdentityFingerprint, !fingerprint.isEmpty {
+                            LabeledContent(RuntimeLocalization.string("协议身份指纹"), value: fingerprint)
+                        }
+                    } header: {
+                        Text(RuntimeLocalization.string("设备确认码"))
+                    } footer: {
+                        Text(RuntimeLocalization.string("请确认 Mac 上显示的 6 位确认码完全一致后再允许。该流程只绑定协议身份；KEM 仍会通过 SKR-1 签名刷新导入。"))
+                    }
+                }
                 
                 Section(RuntimeLocalization.string("识别信息")) {
                     LabeledContent(RuntimeLocalization.string("Peer ID"), value: request.peerId)
                     if !request.declaredDeviceId.isEmpty {
                         LabeledContent(RuntimeLocalization.string("声明的 Device ID"), value: request.declaredDeviceId)
                     }
-                    LabeledContent(RuntimeLocalization.string("KEM Keys"), value: "\(request.kemKeyCount)")
+                    if request.kemKeyCount > 0 {
+                        LabeledContent(RuntimeLocalization.string("KEM Keys"), value: "\(request.kemKeyCount)")
+                    }
                 }
                 
                 Section {
@@ -127,7 +148,9 @@ private struct PairingTrustRequestSheet: View {
                     }
                     .accessibilityIdentifier("pairing.reject")
                 } footer: {
-                    Text(RuntimeLocalization.string("这是对端发起的配对/受信任申请。若选择“始终允许”，系统会记住该设备并允许后续的 PQC 引导流程。"))
+                    Text(request.purpose == .protocolIdentityBinding
+                         ? RuntimeLocalization.string("这是协议身份重新绑定申请。允许后系统会重新固定该设备身份，然后通过 SKR-1 刷新 KEM；不会启用 classic fallback。")
+                         : RuntimeLocalization.string("这是对端发起的配对/受信任申请。若选择“始终允许”，系统会记住该设备并允许后续的 PQC 引导流程。"))
                 }
             }
             .accessibilityIdentifier("pairing.sheet")

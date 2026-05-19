@@ -62,6 +62,7 @@ out/
 # Logs
 logs
 *.log
+!rust/crates/skybridge-cli/tests/fixtures/**/*.log
 
 # Python caches
 __pycache__/

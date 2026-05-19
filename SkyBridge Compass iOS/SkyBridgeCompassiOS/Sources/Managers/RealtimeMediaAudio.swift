@@ -909,7 +909,9 @@ actor IOSRealtimeMediaAudioReceiver {
         let renderDeficitFrames = await IOSRealtimeMediaAudioPlayer.shared.renderQueueDeficitPacketCount(
             profile: profile
         )
+        let bufferedFrameCount = jitterBuffer.bufferedFrameCount
         let allowPLCGap = renderDeficitFrames >= gapPlayoutDeficitThresholdPacketCount
+            || bufferedFrameCount >= gapPlayoutBufferedThresholdPacketCount
         let frameLimit = max(1, min(playoutBurstFrameLimit, dueFrames + renderDeficitFrames))
         while scheduledFrames < frameLimit {
             guard await playoutNextFrame(allowPLCGap: allowPLCGap) else { return }
@@ -930,8 +932,21 @@ actor IOSRealtimeMediaAudioReceiver {
         return max(8, min(96, deficitMs / frameDurationMs))
     }
 
+    private var gapPlayoutBufferedThresholdPacketCount: Int {
+        let frameDurationMs = max(1, profile.frameDurationMs)
+        return max(4, min(96, orderingJitterTargetMs / frameDurationMs))
+    }
+
     private var playoutBurstFrameLimit: Int {
         max(2, min(32, effectiveJitterMaxMs / profile.frameDurationMs))
+    }
+
+    private var decodeStallMinimumReceivedPackets: UInt64 {
+        UInt64(max(10, gapPlayoutBufferedThresholdPacketCount))
+    }
+
+    private var playbackStallMinimumDecodedPackets: UInt64 {
+        UInt64(max(10, gapPlayoutBufferedThresholdPacketCount))
     }
 
     private var maxConsecutivePLCFrameCount: Int {
@@ -1236,14 +1251,20 @@ actor IOSRealtimeMediaAudioReceiver {
         let lateRatioText = String(format: "%.3f", lateRatio)
         let plcRatioText = String(format: "%.3f", plcRatio)
         let audioPath = playback?.audioPath ?? "pqc-opus-source-node-ring"
+        let bufferedFrameCount = jitterBuffer.bufferedFrameCount
         let probable: String? = {
             if played > 0 && window.received == 0 {
                 return "zero-rx-after-playback"
             }
-            if window.received > 0 && window.decoded == 0 {
+            if window.received > 0,
+               window.decoded == 0,
+               bufferedFrameCount >= gapPlayoutBufferedThresholdPacketCount {
+                return "rx-ordering-gap-wait"
+            }
+            if window.received >= decodeStallMinimumReceivedPackets && window.decoded == 0 {
                 return "rx-decode-stalled"
             }
-            if window.decoded > 0 && window.played == 0 {
+            if window.decoded >= playbackStallMinimumDecodedPackets && window.played == 0 {
                 return "rx-playback-stalled"
             }
             if window.datagramsSeen > 0 && window.received == 0 {

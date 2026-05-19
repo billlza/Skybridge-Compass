@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>SkyBridge Compass Pro</string>
+    <key>CFBundleDisplayName</key>
+    <string>SkyBridge Compass Pro</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.skybridge.compass.pro</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
+    <key>CFBundleExecutable</key>
+    <string>SkyBridgeCompassApp</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.skybridge.compass.pro</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>skybridge</string>
+            </array>
+        </dict>
+    </array>
+
+    <key>SKYBRIDGE_AUTH_BASEURL</key>
+    <string>https://hloqytmhjludmuhwyyzb.supabase.co</string>
+    <key>SUPABASE_URL</key>
+    <string>https://hloqytmhjludmuhwyyzb.supabase.co</string>
+    <key>SUPABASE_ANON_KEY</key>
+    <string>sb_publishable_SonH4HoPQBQxHG_1KQZH-A_Om5mY6RR</string>
+    <key>TURNSTILE_SITE_KEY</key>
+    <string>0x4AAAAAAC9EZ7Tok9ixRxad</string>
+    <key>SKYBRIDGE_ENABLE_APPLE_SIGN_IN</key>
+    <true/>
+    <key>SKYBRIDGE_APPLE_SIGN_IN_MODE</key>
+    <string>web_session</string>
+    <key>SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN</key>
+    <false/>
+    <key>NEBULA_BASE_URL</key>
+    <string>https://nebula.skybridge.com</string>
+    <key>NEBULA_CLIENT_ID</key>
+    <string>skybridge_compass_pro</string>
+    <key>NEBULA_CLIENT_SECRET</key>
+    <string></string>
+
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问本地网络以发现和连接附近设备，实现安全的点对点通信和文件传输功能。</string>
+    <key>NSCameraUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问摄像头以扫描跨设备连接二维码。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问麦克风以支持远程音频功能。</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问系统音频以支持远程桌面时的远端音频重定向。</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要使用蓝牙来发现和连接附近的设备，提供无缝的设备间通信体验。</string>
+    <key>NSUSBUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问USB设备以检测和管理连接的设备，包括iPhone、iPad、Android设备和存储设备。</string>
+
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_skybridge._tcp</string>
+        <string>_skybridge._udp</string>
+        <string>_skybridge-transfer._tcp</string>
+        <string>_skybridge-remote._tcp</string>
+        <string>_companion-link._tcp</string>
+        <string>_services._dns-sd._udp</string>
+        <string>_airplay._tcp</string>
+        <string>_rdlink._tcp</string>
+        <string>_sftp-ssh._tcp</string>
+        <string>_http._tcp</string>
+        <string>_https._tcp</string>
+    </array>
+
+    <key>NSLocationUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要访问您的位置以显示天气并优化附近设备发现与连接性能。</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>SkyBridge Compass Pro 需要位置信息来优化本地网络设备发现和连接性能。</string>
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>app-proxy-provider</string>
+        <string>content-filter-provider</string>
+        <string>packet-tunnel-provider</string>
+    </array>
+
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <false/>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>localhost</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSExceptionMinimumTLSVersion</key>
+                <string>TLSv1.3</string>
+            </dict>
+        </dict>
+    </dict>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>All Files</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.data</string>
+            </array>
+        </dict>
+    </array>
+
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+</dict>
+</plist>

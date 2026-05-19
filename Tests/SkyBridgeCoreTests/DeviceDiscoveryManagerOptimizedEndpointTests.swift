@@ -3,6 +3,13 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class DeviceDiscoveryManagerOptimizedEndpointTests: XCTestCase {
+    @MainActor
+    func testNetworkDiscoveryDoesNotPublishUSBPresenceByDefault() {
+        let manager = DeviceDiscoveryManagerOptimized()
+
+        XCTAssertFalse(manager.publishesUSBPresenceInDiscoveredDevices)
+    }
+
     func testPreferredBonjourEndpointPrefersStableBonjourIdentifierOverIPAddressLikeName() {
         let device = DiscoveredDevice(
             id: UUID(),
@@ -65,5 +72,23 @@ final class DeviceDiscoveryManagerOptimizedEndpointTests: XCTestCase {
                 )
             )
         }
+    }
+
+    func testUSBPresenceIdentifierIsNamespacedAsSerial() {
+        XCTAssertEqual(
+            DeviceDiscoveryManagerOptimized.usbPresenceIdentifier(
+                serialNumber: "00008140-000E788401C0801C",
+                deviceID: "fallback"
+            ),
+            "serial:00008140-000E788401C0801C"
+        )
+
+        XCTAssertEqual(
+            DeviceDiscoveryManagerOptimized.usbPresenceIdentifier(
+                serialNumber: " ",
+                deviceID: "00008140-000E788401C0801D"
+            ),
+            "serial:00008140-000E788401C0801D"
+        )
     }
 }

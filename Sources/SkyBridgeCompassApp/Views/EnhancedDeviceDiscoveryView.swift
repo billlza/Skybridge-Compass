@@ -183,16 +183,24 @@ public struct EnhancedDeviceDiscoveryView: View {
                             }
                         }
                     },
+                    onRepairP2PTrust: { idsToRepair in
+                        Task { @MainActor in
+                            await PeerBootstrapTrustMaterialCleanup.repairP2PTrust(deviceIds: idsToRepair)
+                            selectedTrustedGroupSelection = nil
+                        }
+                    },
                     onRemoveTrust: { idsToRevoke, declaredDeviceId in
                         Task { @MainActor in
+                            let idsToForget = Array(Set(idsToRevoke + [declaredDeviceId].compactMap { $0 }))
                             // Clear policy first so future requests prompt again.
                             if let declaredDeviceId {
                                 PairingTrustApprovalService.shared.clearPolicy(for: declaredDeviceId)
                             }
                             // Revoke all related ids (canonical + alias).
-                            for id in idsToRevoke {
+                            for id in idsToForget {
                                 try? await TrustSyncService.shared.revokeTrustRecord(deviceId: id)
                             }
+                            await PeerBootstrapTrustMaterialCleanup.forgetDevice(deviceIds: idsToForget)
                             // Close sheet
                             selectedTrustedGroupSelection = nil
                         }
@@ -1034,6 +1042,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                         }
                         .buttonStyle(.plain)
                     }
+
                 }
 
                 Divider()
@@ -2090,12 +2099,12 @@ public struct EnhancedDeviceDiscoveryView: View {
                     connectingOnlineDeviceIds.remove(device.id)
                 }
             }
-            let preferUSBRoute = device.connectionTypes.contains(.usb)
             var discoveredCandidates = unifiedDeviceManager.resolvedDiscoveredCandidates(for: device, limit: 6)
-            let fallback = fallbackDiscoveredDevice(for: device)
-            if !discoveredCandidates.contains(where: { isSameConnectTarget($0, fallback) }) {
+            if let fallback = fallbackDiscoveredDevice(for: device),
+               !discoveredCandidates.contains(where: { isSameConnectTarget($0, fallback) }) {
                 discoveredCandidates.append(fallback)
             }
+            let preferUSBRoute = shouldPreferUSBRoute(for: device, candidates: discoveredCandidates)
             let routePreference: P2PDiscoveryService.ConnectionRoutePreference = {
                 if !SettingsManager.shared.enableP2PDirectConnection {
                     return .managedRelayOnly
@@ -2142,14 +2151,43 @@ public struct EnhancedDeviceDiscoveryView: View {
         return lhs.name == rhs.name && Set(lhs.services) == Set(rhs.services)
     }
 
-    private func fallbackDiscoveredDevice(for device: OnlineDevice) -> DiscoveredDevice {
+    private func shouldPreferUSBRoute(for device: OnlineDevice, candidates: [DiscoveredDevice]) -> Bool {
+        guard device.connectionTypes.contains(.usb) else { return false }
+        return candidates.contains { candidate in
+            candidate.connectionTypes.contains(.usb)
+                && ((candidate.portMap["_skybridge._tcp"] ?? 0) > 0
+                    || (candidate.portMap["_skybridge._udp"] ?? 0) > 0
+                    || candidate.uniqueIdentifier?.hasPrefix("bonjour:") == true
+                    || candidate.uniqueIdentifier?.hasPrefix("recent:bonjour:") == true)
+        }
+    }
+
+    private func fallbackDiscoveredDevice(for device: OnlineDevice) -> DiscoveredDevice? {
         var normalizedServices = device.services
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { $0.hasPrefix("_") && ($0.hasSuffix("._tcp") || $0.hasSuffix("._udp")) }
-        if normalizedServices.isEmpty,
-           device.sources.contains(.skybridgeBonjour) || device.sources.contains(.skybridgeP2P) {
+
+        let hasSkyBridgeSource = device.sources.contains(.skybridgeBonjour) || device.sources.contains(.skybridgeP2P)
+        let hasBonjourIdentifier = device.uniqueIdentifier.hasPrefix("bonjour:")
+            || device.uniqueIdentifier.hasPrefix("recent:bonjour:")
+        let hasSkyBridgeControlPort = (device.portMap["_skybridge._tcp"] ?? 0) > 0
+            || (device.portMap["_skybridge._udp"] ?? 0) > 0
+        let hasSkyBridgeControlService = normalizedServices.contains("_skybridge._tcp")
+            || normalizedServices.contains("_skybridge._udp")
+
+        if normalizedServices.isEmpty, hasSkyBridgeSource, hasBonjourIdentifier {
             normalizedServices = ["_skybridge._tcp"]
         }
+        guard hasSkyBridgeControlService
+            || hasSkyBridgeControlPort
+            || (hasSkyBridgeSource && hasBonjourIdentifier)
+        else {
+            logger.warning(
+                "⚠️ 跳过在线设备 fallback 候选：缺少真实 SkyBridge 控制端点 device=\(device.name, privacy: .public) id=\(device.uniqueIdentifier, privacy: .public)"
+            )
+            return nil
+        }
+
         let mappedDeviceId: String? = {
             guard device.uniqueIdentifier.hasPrefix("id:") else { return nil }
             return String(device.uniqueIdentifier.dropFirst("id:".count))
@@ -2165,6 +2203,11 @@ public struct EnhancedDeviceDiscoveryView: View {
             guard device.uniqueIdentifier.hasPrefix("fp:") else { return nil }
             return String(device.uniqueIdentifier.dropFirst("fp:".count))
         }()
+        let source: DeviceSource = {
+            if device.sources.contains(.skybridgeP2P) { return .skybridgeP2P }
+            if device.sources.contains(.skybridgeBonjour) { return .skybridgeBonjour }
+            return .unknown
+        }()
         return DiscoveredDevice(
             id: device.id,
             name: device.name,
@@ -2175,7 +2218,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             connectionTypes: device.connectionTypes,
             uniqueIdentifier: device.uniqueIdentifier,
             signalStrength: device.signalStrength,
-            source: .skybridgeBonjour,
+            source: source,
             isLocalDevice: device.isLocalDevice,
             deviceId: mappedDeviceId ?? inferredDeviceId,
             pubKeyFP: mappedPubKeyFP

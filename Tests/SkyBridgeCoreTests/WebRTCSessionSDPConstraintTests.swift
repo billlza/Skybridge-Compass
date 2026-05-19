@@ -44,17 +44,20 @@ struct WebRTCSessionSDPConstraintTests {
 
     @Test("原生屏幕视频优先选择 HEVC/H.265，其次 H.264，再避开 VP8/VP9")
     func testNativeScreenVideoCodecPreferenceRank() {
-        #expect(WebRTCSession.nativeScreenVideoCodecPreferenceRank("HEVC") < WebRTCSession.nativeScreenVideoCodecPreferenceRank("H264"))
-        #expect(WebRTCSession.nativeScreenVideoCodecPreferenceRank("video/H265") < WebRTCSession.nativeScreenVideoCodecPreferenceRank("AVC"))
-        #expect(WebRTCSession.nativeScreenVideoCodecPreferenceRank("H264") < WebRTCSession.nativeScreenVideoCodecPreferenceRank("VP8"))
-        #expect(WebRTCSession.nativeScreenVideoCodecPreferenceRank("video/H265") < WebRTCSession.nativeScreenVideoCodecPreferenceRank("VP9"))
-        #expect(WebRTCSession.nativeScreenVideoCodecPreferenceRank("H264") < WebRTCSession.nativeScreenVideoCodecPreferenceRank("video/AV1"))
-        #expect(WebRTCSession.nativeScreenVideoCodecPreferenceRank("AVC") == 1)
-        #expect(WebRTCSession.nativeScreenVideoCodecIsHardwarePreferred("video/H264"))
-        #expect(WebRTCSession.nativeScreenVideoCodecIsHardwarePreferred("HEVC"))
-        #expect(!WebRTCSession.nativeScreenVideoCodecIsHardwarePreferred("AV1"))
-        #expect(WebRTCSession.nativeScreenVideoCodecIsRTX("rtx"))
-        #expect(!WebRTCSession.nativeScreenVideoCodecIsRTX("red"))
+        #expect(WebRTCNativeScreenVideoValuePolicy.encoderCodecPreferenceRank("HEVC") == 0)
+        #expect(WebRTCNativeScreenVideoValuePolicy.encoderCodecPreferenceRank("H264") == 1)
+        #expect(WebRTCNativeScreenVideoValuePolicy.encoderCodecPreferenceRank("video/AV1") == 10)
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("HEVC") < WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("H264"))
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("video/H265") < WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("AVC"))
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("H264") < WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("VP8"))
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("video/H265") < WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("VP9"))
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("H264") < WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("video/AV1"))
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecPreferenceRank("AVC") == 1)
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecIsHardwarePreferred("video/H264"))
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecIsHardwarePreferred("HEVC"))
+        #expect(!WebRTCNativeScreenVideoValuePolicy.codecIsHardwarePreferred("AV1"))
+        #expect(WebRTCNativeScreenVideoValuePolicy.codecIsRTX("rtx"))
+        #expect(!WebRTCNativeScreenVideoValuePolicy.codecIsRTX("red"))
     }
 
     @Test("SDP video summary is scoped to the video m-section")
@@ -75,15 +78,13 @@ struct WebRTCSessionSDPConstraintTests {
         a=msid:screen stream
         a=ssrc:1234 cname:screen
         """
-        let video = WebRTCSession.mediaSummaries(from: sdp).first { $0.kind == "video" }
-        #expect(video?.port == "9")
-        #expect(video?.mid == "1")
-        #expect(video?.direction == "sendonly")
-        #expect(video?.codecs == ["96:VP8/90000", "97:H264/90000"])
-        #expect(video?.codecParameters == ["97:H264(profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1;max-fs=3600;max-mbps=108000)"])
-        #expect(video?.hasMSID == true)
-        #expect(video?.hasSSRC == true)
-        #expect(video?.rejected == false)
+        let video = WebRTCSession.videoSDPMediaSummary(from: sdp)
+        #expect(video.hasVideo)
+        #expect(video.direction == "sendonly")
+        #expect(
+            video.description == "kind=video mid=1 port=9 rejected=false direction=sendonly codecs=96:VP8/90000,97:H264/90000 fmtp=97:H264(profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1;max-fs=3600;max-mbps=108000) msid=true ssrc=true"
+        )
+        #expect(!video.description.contains("opus"))
     }
 
     @Test("SDP fmtp summary prioritizes H264 level and bitrate constraints")
@@ -98,24 +99,24 @@ struct WebRTCSessionSDPConstraintTests {
 
     @Test("extreme native H264 SDP constraints cover 2056x1329 at 60 fps")
     func testExtremeNativeH264SDPConstraintBudgetCoversTargetResolution() {
-        #expect(WebRTCSession.nativeScreenVideoH264MacroblockFrameSize(width: 2_056, height: 1_329) == 10_836)
-        #expect(WebRTCSession.extremeNativeScreenVideoH264MaxFS == 10_836)
-        #expect(WebRTCSession.extremeNativeScreenVideoH264MaxMBPS == 650_160)
-        #expect(WebRTCSession.extremeNativeScreenVideoH264LevelHex == "33")
-        #expect(WebRTCSession.nativeScreenVideoEvenBackingDimension(1_329) == 1_330)
-        #expect(WebRTCSession.nativeScreenVideoEvenBackingDimension(2_056) == 2_056)
+        #expect(WebRTCNativeScreenVideoValuePolicy.h264MacroblockFrameSize(width: 2_056, height: 1_329) == 10_836)
+        #expect(WebRTCNativeScreenVideoValuePolicy.extremeH264MaxFS == 10_836)
+        #expect(WebRTCNativeScreenVideoValuePolicy.extremeH264MaxMBPS == 650_160)
+        #expect(WebRTCNativeScreenVideoValuePolicy.extremeH264LevelHex == "33")
+        #expect(WebRTCNativeScreenVideoValuePolicy.evenBackingDimension(1_329) == 1_330)
+        #expect(WebRTCNativeScreenVideoValuePolicy.evenBackingDimension(2_056) == 2_056)
     }
 
     @Test("extreme native H264 SDP constraints are gated to strict media modes")
     func testNativeH264SDPConstraintsAreStrictModeOnly() {
-        #expect(WebRTCSession.nativeScreenVideoH264SDPConstraintsEnabled(environment: [:]) == false)
+        #expect(WebRTCNativeScreenVideoValuePolicy.h264SDPConstraintsEnabled(environment: [:]) == false)
         #expect(
-            WebRTCSession.nativeScreenVideoH264SDPConstraintsEnabled(
+            WebRTCNativeScreenVideoValuePolicy.h264SDPConstraintsEnabled(
                 environment: ["SKYBRIDGE_WEBRTC_EXTREME_MEDIA": "1"]
             )
         )
         #expect(
-            WebRTCSession.nativeScreenVideoH264SDPConstraintsEnabled(
+            WebRTCNativeScreenVideoValuePolicy.h264SDPConstraintsEnabled(
                 environment: ["SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK": "1"]
             )
         )

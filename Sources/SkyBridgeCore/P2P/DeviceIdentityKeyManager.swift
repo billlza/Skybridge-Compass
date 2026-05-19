@@ -250,10 +250,16 @@ public actor DeviceIdentityKeyManager {
             return cached
         }
         
- // 尝试从 Keychain 加载
-        if let existing = try? await loadExistingKey() {
-            cachedKeyInfo = existing
-            return existing
+        do {
+            if let existing = try await loadExistingKey() {
+                cachedKeyInfo = existing
+                return existing
+            }
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "❌ 加载设备身份密钥失败: \(error.localizedDescription, privacy: .public)"
+            )
+            throw error
         }
         
  // 创建新密钥
@@ -268,8 +274,10 @@ public actor DeviceIdentityKeyManager {
             return deviceId
         }
         
- // 尝试从 Keychain 加载
-        if let stored = loadStoredDeviceId() {
+ // 优先尝试 Data Protection Keychain。legacy Keychain fallback can be very slow on
+ // upgraded macOS installations, so only use it after the non-secret UserDefaults
+ // mirror has had a chance to satisfy startup.
+        if let stored = loadStoredDeviceId(allowLegacyFallback: false) {
             _deviceId = stored
             return stored
         }
@@ -277,6 +285,11 @@ public actor DeviceIdentityKeyManager {
         if let mirrored = loadMirroredDeviceId() {
             _deviceId = mirrored
             return mirrored
+        }
+
+        if let migrated = loadStoredDeviceId(allowLegacyFallback: true) {
+            _deviceId = migrated
+            return migrated
         }
         
 // 生成新的设备 ID
@@ -685,9 +698,14 @@ public actor DeviceIdentityKeyManager {
     }
 
     public func pairingIdentityKEMPublicKeys(
-        using provider: any CryptoProvider
+        using provider: any CryptoProvider,
+        limitingTo requestedSuites: [CryptoSuite]? = nil
     ) async throws -> [KEMPublicKeyInfo] {
-        let suites = Self.pairingIdentityAdvertisedPQCSuites(using: provider)
+        var suites = Self.pairingIdentityAdvertisedPQCSuites(using: provider)
+        if let requestedSuites {
+            let requestedWireIds = Set(requestedSuites.map(\.wireId))
+            suites = suites.filter { requestedWireIds.contains($0.wireId) }
+        }
         guard !suites.isEmpty else { return [] }
 
         let primaryWireIds = Set(provider.supportedSuites.filter { $0.isPQCGroup }.map(\.wireId))
@@ -1168,7 +1186,7 @@ public actor DeviceIdentityKeyManager {
     }
     
  /// 加载存储的设备 ID
-    private func loadStoredDeviceId() -> String? {
+    private func loadStoredDeviceId(allowLegacyFallback: Bool = true) -> String? {
         if Self.useInMemoryKeychain {
             let key = KeychainConstants.service + "|" + KeychainConstants.deviceIdKey
             Self.inMemoryLock.lock()
@@ -1206,6 +1224,10 @@ public actor DeviceIdentityKeyManager {
             SkyBridgeLogger.p2p.warning(
                 "⚠️ Data Protection Keychain 读取设备 ID 失败: status=\(status, privacy: .public)"
             )
+        }
+
+        guard allowLegacyFallback else {
+            return nil
         }
 
         do {

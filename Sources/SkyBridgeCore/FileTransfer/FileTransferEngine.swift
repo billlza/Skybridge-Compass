@@ -1087,8 +1087,8 @@ public class FileTransferEngine: ObservableObject {
                 throw FileTransferEngineError.networkError(underlying: nil)
             }
             
-            let messageType = headerData.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            let dataLength = headerData.suffix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            let messageType = headerData.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
+            let dataLength = headerData.suffix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
             
             guard messageType == 0x01 else { // METADATA
                 throw FileTransferEngineError.networkError(underlying: nil)
@@ -1168,15 +1168,15 @@ public class FileTransferEngine: ObservableObject {
         offset += 36
         
  // 解析chunkIndex (4字节)
-        let chunkIndex = headerData.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let chunkIndex = headerData.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
         offset += 4
         
  // 解析totalChunks (4字节)
-        let totalChunks = headerData.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let totalChunks = headerData.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
         offset += 4
         
  // 解析dataLength (8字节)
-        let dataLength = headerData.subdata(in: offset..<(offset + 8)).withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
+        let dataLength = headerData.subdata(in: offset..<(offset + 8)).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).bigEndian }
         offset += 8
         
  // 解析checksum (64字节，SHA256 hex字符串)
@@ -1193,7 +1193,7 @@ public class FileTransferEngine: ObservableObject {
         offset += 1
         
  // 解析timestamp (8字节) - 符合Swift 6.2.1最佳实践：未使用的值使用 _ 忽略
-        let _ = headerData.subdata(in: offset..<(offset + 8)).withUnsafeBytes { $0.load(as: TimeInterval.self) }
+        let _ = headerData.subdata(in: offset..<(offset + 8)).withUnsafeBytes { $0.loadUnaligned(as: TimeInterval.self) }
         
  // 接收数据块
         let dataLengthInt = Int(dataLength)
@@ -1265,7 +1265,7 @@ public class FileTransferEngine: ObservableObject {
         }
         
  // 验证chunkIndex
-        let receivedChunkIndex = ackData.subdata(in: 36..<40).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let receivedChunkIndex = ackData.subdata(in: 36..<40).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
         guard Int(receivedChunkIndex) == chunkIndex else {
             throw FileTransferEngineError.networkError(underlying: nil)
         }
@@ -1291,7 +1291,7 @@ public class FileTransferEngine: ObservableObject {
         do {
             let extHeader = try await receiveData(length: 38, from: nwConnection)
             let tid = String(data: extHeader.prefix(36), encoding: .utf8)?.trimmingCharacters(in: CharacterSet(charactersIn: "\0")) ?? ""
-            let tagLen = extHeader.suffix(2).withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
+            let tagLen = extHeader.suffix(2).withUnsafeBytes { $0.loadUnaligned(as: UInt16.self).bigEndian }
             var tag = Data()
             if tagLen > 0 { tag = try await receiveData(length: Int(tagLen), from: nwConnection) }
             let hex = hexString(tag)

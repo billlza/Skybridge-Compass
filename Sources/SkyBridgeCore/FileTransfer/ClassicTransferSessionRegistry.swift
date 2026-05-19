@@ -10,6 +10,27 @@ struct ClassicTransferSessionSnapshot: Sendable {
     let endpointHostOrIP: String?
     let capabilities: [String]
     let sessionKeys: SessionKeys
+    let lastSeenAt: Date
+
+    init(
+        sessionId: String,
+        matchDeviceId: String,
+        resolvedPeerDeviceId: String,
+        aliases: [String],
+        endpointHostOrIP: String?,
+        capabilities: [String],
+        sessionKeys: SessionKeys,
+        lastSeenAt: Date = Date()
+    ) {
+        self.sessionId = sessionId
+        self.matchDeviceId = matchDeviceId
+        self.resolvedPeerDeviceId = resolvedPeerDeviceId
+        self.aliases = aliases
+        self.endpointHostOrIP = endpointHostOrIP
+        self.capabilities = capabilities
+        self.sessionKeys = sessionKeys
+        self.lastSeenAt = lastSeenAt
+    }
 
     func deriveClassicFileTransferKey(transferId: String) -> SymmetricKey {
         sessionKeys.deriveClassicFileTransferKey(transferId: transferId)
@@ -38,6 +59,7 @@ extension SessionKeys {
 @available(macOS 14.0, iOS 17.0, *)
 actor ClassicTransferSessionRegistry {
     static let shared = ClassicTransferSessionRegistry()
+    static let sessionSnapshotTimeToLive: TimeInterval = 120
 
     private var connectionsByKey: [String: P2PConnection] = [:]
     private var sessionsById: [String: ClassicTransferSessionSnapshot] = [:]
@@ -57,14 +79,21 @@ actor ClassicTransferSessionRegistry {
     }
 
     func remove(peerKeys: [String]) {
+        var normalizedPeerKeys = Set<String>()
         for key in peerKeys {
             let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             for candidate in PeerTrustLookup.lookupCandidates(for: trimmed) {
                 let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 guard !normalized.isEmpty else { continue }
+                normalizedPeerKeys.insert(normalized)
                 connectionsByKey.removeValue(forKey: normalized)
             }
+        }
+
+        guard !normalizedPeerKeys.isEmpty else { return }
+        sessionsById = sessionsById.filter { _, snapshot in
+            normalizedPeerKeys.isDisjoint(with: normalizedLookupCandidates(for: snapshot))
         }
     }
 
@@ -84,7 +113,35 @@ actor ClassicTransferSessionRegistry {
         sessionsById.removeValue(forKey: sessionId)
     }
 
-    func activeSessions() -> [ClassicTransferSessionSnapshot] {
-        Array(sessionsById.values)
+    func activeSessions(now: Date = Date()) -> [ClassicTransferSessionSnapshot] {
+        pruneExpiredSessions(now: now)
+        return sessionsById.values.sorted { lhs, rhs in
+            if lhs.lastSeenAt != rhs.lastSeenAt {
+                return lhs.lastSeenAt > rhs.lastSeenAt
+            }
+            return lhs.sessionId > rhs.sessionId
+        }
+    }
+
+    private func pruneExpiredSessions(now: Date) {
+        sessionsById = sessionsById.filter { _, snapshot in
+            now.timeIntervalSince(snapshot.lastSeenAt) <= Self.sessionSnapshotTimeToLive
+        }
+    }
+
+    private func normalizedLookupCandidates(for snapshot: ClassicTransferSessionSnapshot) -> Set<String> {
+        let values = [
+            [snapshot.sessionId, snapshot.matchDeviceId, snapshot.resolvedPeerDeviceId],
+            snapshot.aliases,
+            [snapshot.endpointHostOrIP].compactMap { $0 }
+        ].flatMap { $0 }
+
+        return values.reduce(into: Set<String>()) { result, value in
+            for candidate in PeerTrustLookup.lookupCandidates(for: value) {
+                let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard !normalized.isEmpty else { continue }
+                result.insert(normalized)
+            }
+        }
     }
 }

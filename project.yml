@@ -17,12 +17,70 @@ settings:
     CODE_SIGNING_REQUIRED: NO
     CODE_SIGNING_ALLOWED: NO
     ONLY_ACTIVE_ARCH: YES
+    ARCHS: arm64
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1.0.0"
 
 packages:
   SkyBridgeCompassApp:
     path: .
+  swift-collections:
+    url: https://github.com/apple/swift-collections
+    from: "1.4.1"
 
 targets:
+  SkyBridgeCompassMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/SkyBridgeCompassApp
+        excludes:
+          - "**/*.plist"
+          - "**/*.entitlements"
+          - "Resources/AppIcon.icon/**"
+      - path: XcodeSupport/SkyBridgeCompassMac/BundleModule.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.pro
+        PRODUCT_NAME: SkyBridge Compass Pro
+        EXECUTABLE_NAME: SkyBridgeCompassApp
+        INFOPLIST_FILE: XcodeSupport/SkyBridgeCompassMac/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        CODE_SIGN_ENTITLEMENTS: Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/../Frameworks"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APPLE_SILICON_OPTIMIZED ARM64_NATIVE"
+        OTHER_SWIFT_FLAGS: "$(inherited) -Xcc -I -Xcc $(PROJECT_DIR)/Sources/Vendor/WebRTCHeaders"
+        OTHER_CFLAGS: "$(inherited)"
+        OTHER_CPLUSPLUSFLAGS: "$(inherited)"
+    dependencies:
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeCore
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeUI
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeVisualParity
+      - package: SkyBridgeCompassApp
+        product: SkyBridgeProtocolCore
+      - package: swift-collections
+        product: OrderedCollections
+      - target: SkyBridgeCompassWidgetsExtension
+        embed: true
+      - framework: AppIntents.framework
+        embed: false
+      - framework: WidgetKit.framework
+        embed: false
+      - framework: SwiftUI.framework
+        embed: false
+      - framework: AuthenticationServices.framework
+        embed: false
+      - framework: WebKit.framework
+        embed: false
+      - framework: UserNotifications.framework
+        embed: false
+
   SkyBridgeCompassWidgetsExtension:
     type: app-extension
     platform: macOS
@@ -33,7 +91,7 @@ targets:
           - "**/*.entitlements"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.widgets
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.pro.widgets
         INFOPLIST_FILE: Sources/SkyBridgeCompassWidgets/Info.plist
         SKIP_INSTALL: YES
         LD_RUNPATH_SEARCH_PATHS:
@@ -52,6 +110,15 @@ targets:
         embed: false
 
 schemes:
+  SkyBridgeCompassMac:
+    build:
+      targets:
+        SkyBridgeCompassMac: all
+    run:
+      config: Release
+    archive:
+      config: Release
+
   SkyBridgeCompassWidgetsExtension:
     build:
       targets:

@@ -20,7 +20,8 @@ final class MonitoringNoSyntheticDataGuardTests: XCTestCase {
             "Sources/SkyBridgeCore/Performance/HardwareMonitorService.swift",
             "Sources/SkyBridgeCore/SystemMonitor/SimpleSystemMonitor.swift",
             "Sources/SkyBridgeCore/SystemMonitor/SystemMonitorManager.swift",
-            "Sources/SkyBridgeCore/Performance/SystemPerformanceMonitor.swift"
+            "Sources/SkyBridgeCore/Performance/SystemPerformanceMonitor.swift",
+            "Sources/SkyBridgeCompassApp/Dashboard/Sections/PerformanceMonitoringPanelView.swift"
         ]
 
         let forbiddenPatterns = [
@@ -43,5 +44,22 @@ final class MonitoringNoSyntheticDataGuardTests: XCTestCase {
                 )
             }
         }
+    }
+
+    func testDashboardPerformancePanelDoesNotRenderUnavailableMetricsAsHealthyDefaults() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests/SkyBridgeCoreTests
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // repo root
+
+        let url = root.appendingPathComponent("Sources/SkyBridgeCompassApp/Dashboard/Sections/PerformanceMonitoringPanelView.swift")
+        let content = try String(contentsOf: url, encoding: .utf8)
+
+        XCTAssertFalse(content.contains("String(format: \"%.1f°C\", monitor.cpuTemperature)"))
+        XCTAssertFalse(content.contains("String(format: \"%.1f°C\", monitor.gpuTemperature)"))
+        XCTAssertFalse(content.contains("Text(thermalStateDescription)"))
+        XCTAssertFalse(content.contains("Text(powerStateDescription)"))
+        XCTAssertTrue(content.contains("metricValueText("))
+        XCTAssertTrue(content.contains("monitor.metric.availability.unavailable"))
     }
 }

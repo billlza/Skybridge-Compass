@@ -1,0 +1,47 @@
+pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
+    (
+        "check_source_catalog/source_fragments.rs",
+        include_str!("../source_fragments.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/catalog.rs",
+        include_str!("catalog.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/check_coverage.rs",
+        include_str!("check_coverage.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/core_cli.rs",
+        include_str!("core_cli.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/p2p_remote.rs",
+        include_str!("p2p_remote.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/performance_tests.rs",
+        include_str!("performance_tests.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/smoke_suite.rs",
+        include_str!("smoke_suite.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/webrtc_media.rs",
+        include_str!("webrtc_media.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/webrtc_media_doctor.rs",
+        include_str!("webrtc_media_doctor.rs"),
+    ),
+    (
+        "check_source_catalog/source_fragments/webrtc_media_doctor_tests.rs",
+        include_str!("webrtc_media_doctor_tests.rs"),
+    ),
+    ("check_source_catalog/tests.rs", include_str!("../tests.rs")),
+    (
+        "check_source_catalog.rs",
+        include_str!("../../check_source_catalog.rs"),
+    ),
+];

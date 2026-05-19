@@ -508,7 +508,6 @@ public struct HandshakeMessageA: Sendable {
             let suiteId = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
             let suite = CryptoSuite(wireId: suiteId)
             guard suite.isKnown else {
-                emitUnknownSuiteRejectedAudit(wireId: suiteId, stage: "decode.messageA.supportedSuites")
                 throw HandshakeError.failed(.unknownSuite(wireId: suiteId))
             }
             supportedSuites.append(suite)
@@ -538,7 +537,6 @@ public struct HandshakeMessageA: Sendable {
             
             let suite = CryptoSuite(wireId: suiteId)
             guard suite.isKnown else {
-                emitUnknownSuiteRejectedAudit(wireId: suiteId, stage: "decode.messageA.keyShares")
                 throw HandshakeError.failed(.unknownSuite(wireId: suiteId))
             }
             try HandshakeEncoding.validateKeyShareLength(shareBytes.count, for: suite)
@@ -851,7 +849,6 @@ public struct HandshakeMessageB: Sendable {
         let suiteWireId = try HandshakeEncoding.readUInt16LE(from: data, offset: &offset)
         let selectedSuite = CryptoSuite(wireId: suiteWireId)
         guard selectedSuite.isKnown else {
-            emitUnknownSuiteRejectedAudit(wireId: suiteWireId, stage: "decode.messageB.selectedSuite")
             throw HandshakeError.failed(.unknownSuite(wireId: suiteWireId))
         }
         

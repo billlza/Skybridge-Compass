@@ -7,11 +7,13 @@ import SkyBridgeProtocolCore
 @MainActor
 final class CrossNetworkQRCodeSecurityTests: XCTestCase {
     private func makeSignedQRCode(
+        version: Int = 6,
         sessionID: String = "session-123",
         qrBootstrapToken: String = "bootstrap-token",
         expiresAt: Date = Date().addingTimeInterval(300),
         signalingServerOrigin: String = "https://api.example.com",
-        deviceId: String = "12345678-1234-1234-1234-1234567890ab"
+        deviceId: String = "12345678-1234-1234-1234-1234567890ab",
+        kemPublicKeys: [KEMPublicKeyInfo] = []
     ) async throws -> DynamicQRCodeData {
         let signingKey = Curve25519.Signing.PrivateKey()
         let publicKey = signingKey.publicKey.rawRepresentation
@@ -20,7 +22,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             publicKeyBytes: publicKey
         )
         let unsigned = DynamicQRCodeData(
-            version: 6,
+            version: version,
             sessionID: sessionID,
             qrBootstrapToken: qrBootstrapToken,
             signalingServerOrigin: signalingServerOrigin,
@@ -32,6 +34,7 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
             protocolSigningAlgorithm: .ed25519,
             protocolPublicKeyBytes: publicKey,
             protocolPublicKeyFingerprint: fingerprint,
+            kemPublicKeys: kemPublicKeys,
             signature: nil,
             signatureTimestampMs: Int64(Date().timeIntervalSince1970 * 1000),
             expiresAt: expiresAt
@@ -106,6 +109,100 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         )
         let tamperedExpiryResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(tamperedExpiry)
         XCTAssertFalse(tamperedExpiryResult.ok)
+    }
+
+    func testVersion7QRCodeRequiresSignedKEMPublicKey() async throws {
+        let missingKEM = try await makeSignedQRCode(version: 7)
+        let missingResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(missingKEM)
+
+        XCTAssertFalse(missingResult.ok)
+        XCTAssertEqual(missingResult.reason, "二维码缺少 PQC KEM 公钥")
+
+        let signedKEM = try await makeSignedQRCode(
+            version: 7,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: Data(repeating: 0x41, count: 1216)
+                )
+            ]
+        )
+        let signedResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(signedKEM)
+
+        XCTAssertTrue(signedResult.ok, signedResult.reason ?? "")
+
+        let tamperedKEM = DynamicQRCodeData(
+            version: signedKEM.version,
+            sessionID: signedKEM.sessionID,
+            qrBootstrapToken: signedKEM.qrBootstrapToken,
+            signalingServerOrigin: signedKEM.signalingServerOrigin,
+            deviceID: signedKEM.deviceID,
+            deviceName: signedKEM.deviceName,
+            deviceType: signedKEM.deviceType,
+            osVersion: signedKEM.osVersion,
+            capabilities: signedKEM.capabilities,
+            protocolSigningAlgorithm: signedKEM.protocolSigningAlgorithm,
+            protocolPublicKeyBytes: signedKEM.protocolPublicKeyBytes,
+            protocolPublicKeyFingerprint: signedKEM.protocolPublicKeyFingerprint,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: Data(repeating: 0x42, count: 1216)
+                )
+            ],
+            signature: signedKEM.signature,
+            signatureTimestampMs: signedKEM.signatureTimestampMs,
+            expiresAt: signedKEM.expiresAt
+        )
+        let tamperedResult = await CrossNetworkConnectionManager.verifyDynamicQRCode(tamperedKEM)
+
+        XCTAssertFalse(tamperedResult.ok)
+        XCTAssertEqual(tamperedResult.reason, "二维码签名验证失败")
+    }
+
+    func testVerifiedQRCodeWithSignedKEMDoesNotPersistP2PKEMTrustMaterial() async throws {
+        let store = PeerKEMBootstrapStore.shared
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        await store.clearForTesting()
+        defer {
+            Task { await store.clearForTesting() }
+        }
+
+        let signedKEM = try await makeSignedQRCode(
+            version: 7,
+            deviceId: deviceId,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: Data(repeating: 0x41, count: 1216)
+                )
+            ]
+        )
+        let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(signedKEM)
+
+        XCTAssertTrue(result.ok, result.reason ?? "")
+        let persisted = await store.mergedKEMPublicKeys(forCandidates: [deviceId])
+        XCTAssertTrue(
+            persisted.isEmpty,
+            "Verified QR KEM material must remain diagnostic/connect-link content; SKR-1 is the only P2P KEM import path."
+        )
+    }
+
+    func testLegacyQRCodeCannotSmuggleKEMPublicKey() async throws {
+        let legacyWithKEM = try await makeSignedQRCode(
+            version: 6,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: Data(repeating: 0x51, count: 1216)
+                )
+            ]
+        )
+
+        let result = await CrossNetworkConnectionManager.verifyDynamicQRCode(legacyWithKEM)
+
+        XCTAssertFalse(result.ok)
+        XCTAssertEqual(result.reason, "二维码 KEM 公钥需要 v7 协议")
     }
 
     func testCrossNetworkQRCodeRejectsOriginMismatch() async throws {

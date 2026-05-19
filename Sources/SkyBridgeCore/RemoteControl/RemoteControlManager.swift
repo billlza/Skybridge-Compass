@@ -15,659 +15,8 @@ import CoreGraphics
 import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
-import VideoToolbox
 import CryptoKit
 import SkyBridgeRealtimeMedia
-
-private enum RemoteControlWireLimits {
-    static let aesGCMCombinedOverheadBytes = 28
-
-    static func maxWireMessageBytes(for plaintextLimit: Int) -> Int {
-        plaintextLimit + aesGCMCombinedOverheadBytes
-    }
-}
-
-// MARK: - 基础模型：消息/事件/屏幕帧
-
-/// 远程消息“信封”：所有消息都走它，避免裸 Data 粘包
-private struct RemoteMessage: Codable, Sendable {
-    let type: MessageType
-    let payload: Data
-
-    enum MessageType: String, Codable {
-        case screenData
-        case mouseEvent
-        case keyboardEvent
-        case clipboard
-        case streamConfiguration
-        case damageReport
-        case cursorUpdate
-        case overlayUpdate
-    }
-}
-
-/// 屏幕数据（近距镜像主载体）
-/// imageData 通常为压缩后的视频帧（H.264 / HEVC），或者退化为静态图像字节
-struct ScreenData: Codable, Sendable {
-    let width: Int
-    let height: Int
-    let imageData: Data
-    let timestamp: TimeInterval
- /// "hevc" / "h264" / 其他（静态图像）
-    let format: String?
- /// 压缩视频帧是否为关键帧；对 JPEG/BGRA 等独立帧固定视为 true。
-    let isSyncFrame: Bool?
-}
-
-    private actor RemoteControlOutboundFramePump {
-    struct HealthSnapshot: Sendable {
-        let lastSentFrameAt: Date
-        let waitingForSyncFrame: Bool
-        let waitingForSyncSince: Date?
-    }
-
-    private enum FrameTransport: Sendable {
-        case legacyJSON
-        case binaryWire
-    }
-
-    private let peerId: String
-    private let connection: NWConnection
-    private let maxFramedMessageBytes: Int
-    private let logger = Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-
-    private var frameTransport: FrameTransport = .legacyJSON
-    private var streamingEnabled = true
-    private var damageTrackingEnabled = true
-    private var allowsInsecureLegacy = false
-    private var sessionKeys: SessionKeys?
-    private var frameQueue = RemoteScreenFrameSendQueue()
-    private var audioPayloadQueue: [Data] = []
-    private var latestDamageReport: RemoteDesktopDamageReport?
-    private var sending = false
-    private var sendingAudio = false
-    private var audioDrainGeneration: UInt64 = 0
-    private var audioDrainTask: Task<Void, Never>?
-    private var closed = false
-    private var onNeedsSyncRefresh: (@Sendable () -> Void)?
-    private var lastSentFrameAt: Date = .distantPast
-    private var waitingForSyncSince: Date?
-    private var lastSyncRefreshRequestAt: Date = .distantPast
-    private var lastAudioDropLogAt: Date = .distantPast
-    private var syncRecoveryTask: Task<Void, Never>?
-    private let maxQueuedAudioPayloads = 3
-    private let maxAudioVideoFrameGap: TimeInterval = 0.08
-    private var frameTelemetryWindowStartedAt = Date()
-    private var telemetrySubmittedFrames = 0
-    private var telemetrySentFrames = 0
-    private var telemetryDroppedFrames = 0
-    private var telemetryBackpressureEvents = 0
-    private var telemetrySentBytes = 0
-    private var telemetrySendLatencySamples = 0
-    private var telemetrySendLatencyTotalMs: Double = 0
-    private var telemetrySendLatencyMaxMs: Double = 0
-    private static let sendQueueOverflowSyncRefreshMinimumInterval: TimeInterval = 2.0
-    private static let waitingForSyncFrameRefreshMinimumInterval: TimeInterval = 2.0
-
-    private struct FrameTelemetrySnapshot: Sendable {
-        let interval: TimeInterval
-        let submittedFrames: Int
-        let sentFrames: Int
-        let droppedFrames: Int
-        let backpressureEvents: Int
-        let sentBytes: Int
-        let sendLatencySamples: Int
-        let averageSendLatencyMs: Double
-        let maxSendLatencyMs: Double
-        let transport: String
-        let queuedFrames: Int
-        let waitingForSyncFrame: Bool
-    }
-
-    init(peerId: String, connection: NWConnection, maxFramedMessageBytes: Int) {
-        self.peerId = peerId
-        self.connection = connection
-        self.maxFramedMessageBytes = maxFramedMessageBytes
-    }
-
-    func updateTransportState(
-        requestedStreamConfiguration: RemoteDesktopStreamConfiguration?,
-        sessionKeys: SessionKeys?,
-        allowsInsecureLegacy: Bool
-    ) {
-        streamingEnabled = requestedStreamConfiguration?.isStopRequest != true
-        frameTransport = requestedStreamConfiguration?.screenFrameTransport == "sbrf-v1"
-            ? .binaryWire
-            : .legacyJSON
-        damageTrackingEnabled = requestedStreamConfiguration?.damageTrackingEnabled ?? true
-        self.allowsInsecureLegacy = allowsInsecureLegacy
-        self.sessionKeys = sessionKeys
-        if !streamingEnabled {
-            noteFrameTelemetry(dropped: frameQueue.pendingFrames.count)
-            frameQueue.clear()
-            audioPayloadQueue.removeAll(keepingCapacity: true)
-            latestDamageReport = nil
-            waitingForSyncSince = nil
-            audioDrainGeneration &+= 1
-            audioDrainTask?.cancel()
-            audioDrainTask = nil
-            sendingAudio = false
-            syncRecoveryTask?.cancel()
-            syncRecoveryTask = nil
-        }
-    }
-
-    func submitDamageReport(_ report: RemoteDesktopDamageReport) async {
-        guard !closed, streamingEnabled else { return }
-        latestDamageReport = report
-        await drainIfNeeded()
-    }
-
-    func submitFrame(_ frame: ScreenData) async {
-        guard !closed, streamingEnabled else { return }
-        let wasBackpressured = sending || !frameQueue.pendingFrames.isEmpty || frameQueue.waitingForSyncFrame
-        let pendingFramesBeforeEnqueue = frameQueue.pendingFrames.count
-        let enqueueResult = frameQueue.enqueue(frame)
-        noteFrameTelemetry(
-            submitted: 1,
-            dropped: droppedFrameCount(for: enqueueResult, pendingFramesBeforeEnqueue: pendingFramesBeforeEnqueue),
-            backpressure: wasBackpressured || enqueueResult != .enqueued ? 1 : 0
-        )
-        if enqueueResult == .droppedPredictiveFrameNeedsSyncRefresh {
-            requestSyncRefreshIfNeeded(
-                reason: "send-queue-overflow",
-                minimumInterval: Self.sendQueueOverflowSyncRefreshMinimumInterval
-            )
-        }
-        updateSyncRecoveryState()
-        await drainIfNeeded()
-    }
-
-    func submitAudioPayload(_ plaintext: Data) async {
-        guard !closed, streamingEnabled else { return }
-        guard canSendAudioWithoutCompetingWithVideo else {
-            logAudioDropIfNeeded(droppedCount: 1, reason: "video-priority")
-            return
-        }
-        guard plaintext.count <= maxFramedMessageBytes else {
-            Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-                .warning(
-                    "⚠️ 已丢弃超限远控音频块: peer=\(self.peerId, privacy: .public) bytes=\(plaintext.count, privacy: .public)"
-                )
-            return
-        }
-        audioPayloadQueue.append(plaintext)
-        if audioPayloadQueue.count > maxQueuedAudioPayloads {
-            let overflow = audioPayloadQueue.count - maxQueuedAudioPayloads
-            audioPayloadQueue.removeFirst(overflow)
-            logAudioDropIfNeeded(droppedCount: overflow, reason: "queue-overflow")
-        }
-        scheduleAudioDrainIfNeeded()
-    }
-
-    func setSyncRefreshHandler(_ handler: (@Sendable () -> Void)?) {
-        onNeedsSyncRefresh = handler
-    }
-
-    func close() {
-        closed = true
-        noteFrameTelemetry(dropped: frameQueue.pendingFrames.count)
-        frameQueue.clear()
-        audioPayloadQueue.removeAll(keepingCapacity: false)
-        latestDamageReport = nil
-        onNeedsSyncRefresh = nil
-        waitingForSyncSince = nil
-        audioDrainGeneration &+= 1
-        audioDrainTask?.cancel()
-        audioDrainTask = nil
-        sendingAudio = false
-        syncRecoveryTask?.cancel()
-        syncRecoveryTask = nil
-    }
-
-    func healthSnapshot() -> HealthSnapshot {
-        HealthSnapshot(
-            lastSentFrameAt: lastSentFrameAt,
-            waitingForSyncFrame: frameQueue.waitingForSyncFrame,
-            waitingForSyncSince: waitingForSyncSince
-        )
-    }
-
-    private func droppedFrameCount(
-        for result: RemoteScreenFrameQueueEnqueueResult,
-        pendingFramesBeforeEnqueue: Int
-    ) -> Int {
-        switch result {
-        case .enqueued:
-            return 0
-        case .droppedStaleIndependentFrame:
-            return max(1, pendingFramesBeforeEnqueue - frameQueue.maxQueuedFrames + 1)
-        case .droppedPredictiveFrameWaitingForSync:
-            return 1
-        case .droppedPredictiveFrameNeedsSyncRefresh:
-            return max(1, pendingFramesBeforeEnqueue + 1)
-        }
-    }
-
-    private func noteFrameTelemetry(
-        submitted: Int = 0,
-        sent: Int = 0,
-        dropped: Int = 0,
-        backpressure: Int = 0,
-        sentBytes: Int = 0,
-        sendLatencyMs: Double? = nil
-    ) {
-        telemetrySubmittedFrames += max(0, submitted)
-        telemetrySentFrames += max(0, sent)
-        telemetryDroppedFrames += max(0, dropped)
-        telemetryBackpressureEvents += max(0, backpressure)
-        telemetrySentBytes += max(0, sentBytes)
-        if let sendLatencyMs {
-            telemetrySendLatencySamples += 1
-            telemetrySendLatencyTotalMs += max(0, sendLatencyMs)
-            telemetrySendLatencyMaxMs = max(telemetrySendLatencyMaxMs, sendLatencyMs)
-        }
-        emitFrameTelemetryIfNeeded()
-    }
-
-    private func emitFrameTelemetryIfNeeded(now: Date = Date()) {
-        let interval = now.timeIntervalSince(frameTelemetryWindowStartedAt)
-        guard interval >= 1 else { return }
-        let averageLatency = telemetrySendLatencySamples > 0
-            ? telemetrySendLatencyTotalMs / Double(telemetrySendLatencySamples)
-            : 0
-        let snapshot = FrameTelemetrySnapshot(
-            interval: interval,
-            submittedFrames: telemetrySubmittedFrames,
-            sentFrames: telemetrySentFrames,
-            droppedFrames: telemetryDroppedFrames,
-            backpressureEvents: telemetryBackpressureEvents,
-            sentBytes: telemetrySentBytes,
-            sendLatencySamples: telemetrySendLatencySamples,
-            averageSendLatencyMs: averageLatency,
-            maxSendLatencyMs: telemetrySendLatencyMaxMs,
-            transport: frameTelemetryTransportName,
-            queuedFrames: frameQueue.pendingFrames.count,
-            waitingForSyncFrame: frameQueue.waitingForSyncFrame
-        )
-        frameTelemetryWindowStartedAt = now
-        telemetrySubmittedFrames = 0
-        telemetrySentFrames = 0
-        telemetryDroppedFrames = 0
-        telemetryBackpressureEvents = 0
-        telemetrySentBytes = 0
-        telemetrySendLatencySamples = 0
-        telemetrySendLatencyTotalMs = 0
-        telemetrySendLatencyMaxMs = 0
-        logFrameTelemetry(snapshot)
-    }
-
-    private var frameTelemetryTransportName: String {
-        switch frameTransport {
-        case .legacyJSON:
-            return "legacy-json"
-        case .binaryWire:
-            return "sbrf-v1"
-        }
-    }
-
-    private func logFrameTelemetry(_ snapshot: FrameTelemetrySnapshot) {
-        let interval = max(snapshot.interval, 0.001)
-        let submittedFPS = String(format: "%.1f", Double(snapshot.submittedFrames) / interval)
-        let sentFPS = String(format: "%.1f", Double(snapshot.sentFrames) / interval)
-        let averageLatency = String(format: "%.1f", snapshot.averageSendLatencyMs)
-        let maxLatency = String(format: "%.1f", snapshot.maxSendLatencyMs)
-        logger.info(
-            """
-            📊 Remote frame tx telemetry: peer=\(self.peerId, privacy: .public) \
-            transport=\(snapshot.transport, privacy: .public) \
-            submittedFPS=\(submittedFPS, privacy: .public) \
-            sentFPS=\(sentFPS, privacy: .public) \
-            sent=\(snapshot.sentFrames, privacy: .public) \
-            dropped=\(snapshot.droppedFrames, privacy: .public) \
-            backpressure=\(snapshot.backpressureEvents, privacy: .public) \
-            bytes=\(snapshot.sentBytes, privacy: .public) \
-            avgSendMs=\(averageLatency, privacy: .public) \
-            maxSendMs=\(maxLatency, privacy: .public) \
-            latencySamples=\(snapshot.sendLatencySamples, privacy: .public) \
-            queued=\(snapshot.queuedFrames, privacy: .public) \
-            waitingForSync=\(String(snapshot.waitingForSyncFrame), privacy: .public)
-            """
-        )
-    }
-
-    private func drainIfNeeded() async {
-        guard streamingEnabled else { return }
-        guard !sending else { return }
-        sending = true
-        defer { sending = false }
-
-        while !closed {
-            guard streamingEnabled else {
-                frameQueue.clear()
-                audioPayloadQueue.removeAll(keepingCapacity: true)
-                latestDamageReport = nil
-                return
-            }
-
-            guard let nextFrame = frameQueue.dequeue() else { return }
-
-            do {
-                if damageTrackingEnabled,
-                   let report = latestDamageReport {
-                    latestDamageReport = nil
-                    try await sendControlPayload(report, type: .damageReport)
-                }
-
-                let payload = try makeScreenPayload(for: nextFrame)
-                guard payload.count <= maxFramedMessageBytes else {
-                    noteFrameTelemetry(dropped: 1)
-                    logger.warning(
-                        """
-                        ⚠️ 已丢弃超限远控屏幕帧: peer=\(self.peerId, privacy: .public) \
-                        bytes=\(payload.count, privacy: .public) \
-                        max=\(self.maxFramedMessageBytes, privacy: .public) \
-                        format=\(nextFrame.format ?? "unknown", privacy: .public) \
-                        resolution=\(nextFrame.width, privacy: .public)x\(nextFrame.height, privacy: .public)
-                        """
-                    )
-                    continue
-                }
-
-                let sendStartedAt = Date()
-                try await sendRemoteFrame(payload)
-                let sendLatencyMs = Date().timeIntervalSince(sendStartedAt) * 1_000
-                noteFrameTelemetry(
-                    sent: 1,
-                    sentBytes: payload.count,
-                    sendLatencyMs: sendLatencyMs
-                )
-                lastSentFrameAt = Date()
-                updateSyncRecoveryState()
-            } catch {
-                noteFrameTelemetry(dropped: 1)
-                logger.error(
-                    "❌ 发送屏幕数据失败: peer=\(self.peerId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-                )
-                break
-            }
-        }
-    }
-
-    private func scheduleAudioDrainIfNeeded() {
-        guard !sendingAudio else { return }
-        guard !closed, streamingEnabled, !audioPayloadQueue.isEmpty else { return }
-        sendingAudio = true
-        let generation = audioDrainGeneration
-        audioDrainTask = Task(priority: .utility) { [weak self] in
-            guard let self else { return }
-            await self.drainQueuedAudioPayloads(generation: generation)
-        }
-    }
-
-    private func drainQueuedAudioPayloads(generation: UInt64) async {
-        defer {
-            if audioDrainGeneration == generation {
-                sendingAudio = false
-                audioDrainTask = nil
-                if !closed, streamingEnabled, !audioPayloadQueue.isEmpty {
-                    scheduleAudioDrainIfNeeded()
-                }
-            }
-        }
-        while !Task.isCancelled,
-              audioDrainGeneration == generation,
-              !closed,
-              streamingEnabled,
-              !audioPayloadQueue.isEmpty {
-            guard canSendAudioWithoutCompetingWithVideo else {
-                let dropped = audioPayloadQueue.count
-                audioPayloadQueue.removeAll(keepingCapacity: true)
-                logAudioDropIfNeeded(droppedCount: dropped, reason: "video-backlog")
-                break
-            }
-            let payload = audioPayloadQueue.removeFirst()
-            do {
-                try await sendRemoteFrame(payload)
-                guard audioDrainGeneration == generation else { break }
-            } catch {
-                Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-                    .debug(
-                        "ℹ️ 远控音频块发送失败: peer=\(self.peerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
-                    )
-                break
-            }
-        }
-    }
-
-    private var canSendAudioWithoutCompetingWithVideo: Bool {
-        !sending
-            && !frameQueue.waitingForSyncFrame
-            && frameQueue.pendingFrames.isEmpty
-            && Date().timeIntervalSince(lastSentFrameAt) <= maxAudioVideoFrameGap
-    }
-
-    private func logAudioDropIfNeeded(droppedCount: Int, reason: String) {
-        guard droppedCount > 0 else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastAudioDropLogAt) >= 2 else { return }
-        lastAudioDropLogAt = now
-        Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-            .debug(
-                "ℹ️ 远控音频发送已让路给视频: peer=\(self.peerId, privacy: .public) dropped=\(droppedCount, privacy: .public) reason=\(reason, privacy: .public)"
-            )
-    }
-
-    private func updateSyncRecoveryState() {
-        if frameQueue.waitingForSyncFrame {
-            if waitingForSyncSince == nil {
-                waitingForSyncSince = Date()
-            }
-            ensureSyncRecoveryTaskRunning()
-        } else {
-            waitingForSyncSince = nil
-            syncRecoveryTask?.cancel()
-            syncRecoveryTask = nil
-        }
-    }
-
-    private func ensureSyncRecoveryTaskRunning() {
-        guard syncRecoveryTask == nil else { return }
-        syncRecoveryTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: .seconds(1))
-                } catch {
-                    return
-                }
-                await self.driveSyncRecoveryTick()
-            }
-        }
-    }
-
-    private func driveSyncRecoveryTick() {
-        guard !closed else {
-            syncRecoveryTask = nil
-            return
-        }
-        guard frameQueue.waitingForSyncFrame else {
-            syncRecoveryTask?.cancel()
-            syncRecoveryTask = nil
-            waitingForSyncSince = nil
-            return
-        }
-        requestSyncRefreshIfNeeded(
-            reason: "waiting-for-sync-frame",
-            minimumInterval: Self.waitingForSyncFrameRefreshMinimumInterval
-        )
-    }
-
-    private func requestSyncRefreshIfNeeded(reason: String, minimumInterval: TimeInterval) {
-        let now = Date()
-        guard now.timeIntervalSince(lastSyncRefreshRequestAt) >= minimumInterval else { return }
-        lastSyncRefreshRequestAt = now
-        Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-            .warning("⚠️ 发送队列等待关键帧，已请求刷新: peer=\(self.peerId, privacy: .public) reason=\(reason, privacy: .public)")
-        onNeedsSyncRefresh?()
-    }
-
-    private func makeScreenPayload(for frame: ScreenData) throws -> Data {
-        switch frameTransport {
-        case .binaryWire:
-            return RemoteDesktopScreenFrameWire.encode(
-                width: frame.width,
-                height: frame.height,
-                imageData: frame.imageData,
-                timestamp: frame.timestamp,
-                format: frame.format,
-                isSyncFrame: frame.isSyncFrame
-            )
-        case .legacyJSON:
-            let encodedScreen = try JSONEncoder().encode(frame)
-            let message = RemoteMessage(type: .screenData, payload: encodedScreen)
-            return try JSONEncoder().encode(message)
-        }
-    }
-
-    func sendControlPayload<T: Encodable & Sendable>(
-        _ payload: T,
-        type: RemoteMessage.MessageType
-    ) async throws {
-        let encodedPayload = try JSONEncoder().encode(payload)
-        let message = RemoteMessage(type: type, payload: encodedPayload)
-        let framedMessage = try JSONEncoder().encode(message)
-        guard framedMessage.count <= maxFramedMessageBytes else {
-            throw RemoteControlError.invalidMessageLength(framedMessage.count)
-        }
-        try await sendRemoteFrame(framedMessage)
-    }
-
-    func sendRawPayload(_ plaintext: Data) async throws {
-        guard plaintext.count <= maxFramedMessageBytes else {
-            throw RemoteControlError.invalidMessageLength(plaintext.count)
-        }
-        try await sendRemoteFrame(plaintext)
-    }
-
-    private func sendRemoteFrame(_ plaintext: Data) async throws {
-        let outboundData: Data
-        if #available(macOS 14.0, *), let sessionKeys {
-            outboundData = try Self.encryptRemotePayload(plaintext, with: sessionKeys)
-        } else if #available(macOS 14.0, *), !allowsInsecureLegacy {
-            throw RemoteControlError.handshakeInitializationFailed("secure channel not established")
-        } else {
-            outboundData = plaintext
-        }
-        guard outboundData.count <= RemoteControlWireLimits.maxWireMessageBytes(for: maxFramedMessageBytes) else {
-            throw RemoteControlError.invalidMessageLength(outboundData.count)
-        }
-        try await Self.sendFramed(outboundData, over: connection)
-    }
-
-    @available(macOS 14.0, *)
-    private static func encryptRemotePayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
-        let key = SymmetricKey(data: keys.sendKey)
-        let sealed = try AES.GCM.seal(plaintext, using: key)
-        return sealed.combined ?? Data()
-    }
-
-    private static func sendFramed(_ data: Data, over connection: NWConnection) async throws {
-        var length = UInt32(data.count).bigEndian
-        var frame = Data(bytes: &length, count: 4)
-        frame.append(data)
-
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            connection.send(content: frame, completion: .contentProcessed { error in
-                if let error {
-                    cont.resume(throwing: error)
-                } else {
-                    cont.resume()
-                }
-            })
-        }
-    }
-}
-
-/// 鼠标事件类型
-public enum MouseEventType: String, Codable, Sendable {
-    case leftMouseDown
-    case leftMouseUp
-    case rightMouseDown
-    case rightMouseUp
-    case mouseMoved
-    case scrollUp
-    case scrollDown
-}
-
-/// 键盘事件类型
-public enum KeyboardEventType: String, Codable, Sendable {
-    case keyDown
-    case keyUp
-}
-
-/// 远程鼠标事件
-public struct RemoteMouseEvent: Codable, Sendable {
-    public let type: MouseEventType
-    public let x: Double
-    public let y: Double
-    public let timestamp: TimeInterval
-
-    public init(type: MouseEventType, x: Double, y: Double, timestamp: TimeInterval) {
-        self.type = type
-        self.x = x
-        self.y = y
-        self.timestamp = timestamp
-    }
-}
-
-/// 远程键盘事件
-public struct RemoteKeyboardEvent: Codable, Sendable {
-    public let type: KeyboardEventType
-    public let keyCode: Int
-    public let timestamp: TimeInterval
-
-    public init(type: KeyboardEventType, keyCode: Int, timestamp: TimeInterval) {
-        self.type = type
-        self.keyCode = keyCode
-        self.timestamp = timestamp
-    }
-}
-
-/// 远程控制错误
-public enum RemoteControlError: Error, LocalizedError {
-    case deviceNotConnected
-    case connectionClosed
-    case invalidMessageLength(Int)
-    case permissionDenied
-    case screenCaptureFailed
-    case handshakeInitializationFailed(String)
-    case untrustedPeer(String)
-
-    public var errorDescription: String? {
-        switch self {
-        case .deviceNotConnected:
-            return "设备未连接"
-        case .connectionClosed:
-            return "连接已关闭"
-        case .invalidMessageLength(let length):
-            return "消息长度异常: \(length)"
-        case .permissionDenied:
-            return "权限被拒绝"
-        case .screenCaptureFailed:
-            return "屏幕捕获失败"
-        case .handshakeInitializationFailed(let reason):
-            return "远控握手初始化失败: \(reason)"
-        case .untrustedPeer(let peerId):
-            return "远控目标未建立受信任身份: \(peerId)"
-        }
-    }
-}
-
-enum RemoteControlSessionRole: String, Sendable {
-    case controlling
-    case beingControlled
-}
 
 // MARK: - 连接状态封装（每个设备一条 NWConnection）
 
@@ -804,8 +153,7 @@ public final class RemoteControlManager: BaseManager {
     private let historyCapacity = 120
 
     private func emitSmokeTrace(_ message: String) {
-        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
-        print("🧪 \(message)")
+        RemoteControlSmokeStatusWriter.append(message)
     }
 
  // MARK: 内部组件
@@ -1464,7 +812,15 @@ public final class RemoteControlManager: BaseManager {
             return
         }
         cancelDeferredScreenSharingFallback(for: peer.id)
-        let attemptGeneration = screenSharingAttemptGate.beginAttempt(for: peer.id)
+        guard let attemptGeneration = screenSharingAttemptGate.beginAttemptIfIdle(for: peer.id) else {
+            logger.info(
+                "ℹ️ 忽略重复的远控推流启动：peer=\(peer.id, privacy: .public) reason=start-already-in-progress"
+            )
+            return
+        }
+        defer {
+            screenSharingAttemptGate.finishAttempt(attemptGeneration, for: peer.id)
+        }
         logger.info("📺 开始屏幕共享（ScreenCaptureKit + 硬件编码） -> \(peer.id, privacy: .public)")
 
         if !(await ensureScreenCapturePermission()) {
@@ -1525,7 +881,7 @@ public final class RemoteControlManager: BaseManager {
             request: request,
             peerFormats: effectiveRemoteVideoFormats(for: peer),
             thermalState: ProcessInfo.processInfo.thermalState,
-            isAppleSilicon: Self.isAppleSiliconRuntime
+            isAppleSilicon: RemoteControlStreamRequestPolicy.isAppleSiliconRuntime
         )
         policy = effectiveCapturePolicy(policy, for: peer)
         if legacyAudioFallbackEnabled {
@@ -1554,6 +910,7 @@ public final class RemoteControlManager: BaseManager {
         }
 
         let outboundFramePump = peer.outboundFramePump
+        let videoFrameSequence = RemoteControlFrameSequenceGenerator()
         streamer.onEncodedFrame = { data, width, height, frameType, isSyncFrame in
             let fmt: String
             switch frameType {
@@ -1567,18 +924,18 @@ public final class RemoteControlManager: BaseManager {
                     fmt = "bgra"
                 }
             }
-            peer.queue.async {
-                let frame = ScreenData(
-                    width: width,
-                    height: height,
-                    imageData: data,
-                    timestamp: Date().timeIntervalSince1970,
-                    format: fmt,
-                    isSyncFrame: isSyncFrame
-                )
-                Task {
-                    await outboundFramePump.submitFrame(frame)
-                }
+            let encodedAt = Date().timeIntervalSince1970
+            let frame = ScreenData(
+                width: width,
+                height: height,
+                imageData: data,
+                timestamp: encodedAt,
+                format: fmt,
+                isSyncFrame: isSyncFrame,
+                sequenceNumber: videoFrameSequence.next()
+            )
+            Task(priority: .userInitiated) {
+                await outboundFramePump.submitFrame(frame)
             }
         }
         await outboundFramePump.setSyncRefreshHandler { [weak streamer] in
@@ -2088,45 +1445,26 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private static var allowsInsecureLegacyRemoteControl: Bool {
-        let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_ALLOW_INSECURE_REMOTE_CONTROL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return raw == "1" || raw == "true" || raw == "yes"
+        RemoteControlSOABindingPolicy.allowsInsecureLegacyRemoteControl
     }
 
     @available(macOS 14.0, *)
-    private nonisolated static func remoteControlSOAPeerId(for identifier: String?) -> Data? {
-        RemoteControlInboundTrustResolver.soaPeerId(for: identifier)
-    }
-
-    @available(macOS 14.0, *)
-    struct RemoteControlSOABinding: Sendable, Equatable {
-        let localPeerId: Data
-        let expectedRemotePeerId: Data
-    }
+    typealias RemoteControlSOABinding = RemoteControlSOABindingPolicy.Binding
 
     @available(macOS 14.0, *)
     nonisolated static func remoteControlSOABinding(
         localDeviceId: String?,
         remoteDeviceId: String?
     ) -> RemoteControlSOABinding? {
-        guard let localPeerId = remoteControlSOAPeerId(for: localDeviceId),
-              let expectedRemotePeerId = remoteControlSOAPeerId(for: remoteDeviceId) else {
-            return nil
-        }
-        return RemoteControlSOABinding(
-            localPeerId: localPeerId,
-            expectedRemotePeerId: expectedRemotePeerId
+        RemoteControlSOABindingPolicy.binding(
+            localDeviceId: localDeviceId,
+            remoteDeviceId: remoteDeviceId
         )
     }
 
     @available(macOS 14.0, *)
     private nonisolated static func randomRemoteControlAttemptId() -> Data {
-        var bytes = [UInt8](repeating: 0, count: HandshakeSOAExtension.attemptIdLength)
-        for index in bytes.indices {
-            bytes[index] = UInt8.random(in: UInt8.min...UInt8.max)
-        }
-        return Data(bytes)
+        RemoteControlSOABindingPolicy.randomAttemptId()
     }
 
     private func ensureSecureChannelEstablished(for peer: PeerConnection) throws {
@@ -2435,7 +1773,7 @@ public final class RemoteControlManager: BaseManager {
     private func sendViewerStreamConfigurationIfPossible(to peer: PeerConnection) async {
         let settings = RemoteDesktopSettingsManager.shared.settings
         let dimensions = settings.displaySettings.resolution.dimensions
-        let supportedVideoFormats = supportedViewerVideoFormats()
+        let supportedVideoFormats = RemoteControlStreamRequestPolicy.supportedViewerVideoFormats()
         let mediaAudioMode = settings.displaySettings.lowLatencyMode
             ? SkyBridgeMediaAudioMode.lowLatency
             : SkyBridgeMediaAudioMode.highFidelity
@@ -2511,69 +1849,6 @@ public final class RemoteControlManager: BaseManager {
         }
     }
 
-    private func supportedViewerVideoFormats() -> [String] {
-        var formats = ["jpeg", "h264"]
-        if VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) {
-            formats.insert("hevc", at: 0)
-        }
-        var seen: Set<String> = []
-        return formats.filter { seen.insert($0).inserted }
-    }
-
-    private func preferredCaptureSize(for resolution: ResolutionSetting) -> CGSize {
-        if let dim = resolution.dimensions {
-            return CGSize(width: dim.width, height: dim.height)
-        }
-
-        let settings = RemoteDesktopSettingsManager.shared.settings.displaySettings
-        return adaptiveCaptureSizeForDirectDisplay(
-            preferredCodec: settings.preferredCodec,
-            lowLatencyMode: settings.lowLatencyMode,
-            enableHardwareAcceleration: settings.enableHardwareAcceleration,
-            enableAppleSiliconOptimization: settings.enableAppleSiliconOptimization
-        )
-    }
-
-    private func adaptiveCaptureSizeForDirectDisplay(
-        preferredCodec: PreferredVideoCodec,
-        lowLatencyMode: Bool,
-        enableHardwareAcceleration: Bool,
-        enableAppleSiliconOptimization: Bool
-    ) -> CGSize {
-        let fallback = CGSize(width: 1920, height: 1080)
-        guard let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()) else {
-            return fallback
-        }
-
-        let nativeWidth = CGFloat(mode.width)
-        let nativeHeight = CGFloat(mode.height)
-        guard nativeWidth > 0, nativeHeight > 0 else {
-            return fallback
-        }
-
-        let longEdge = max(nativeWidth, nativeHeight)
-        let prefersHEVC = preferredCodec == .hevc
-        let canPushHighRes = prefersHEVC && enableHardwareAcceleration
-            && enableAppleSiliconOptimization && Self.isAppleSiliconRuntime
-
-        let targetLongEdge: CGFloat
-        if longEdge <= 1920 {
-            return CGSize(width: nativeWidth, height: nativeHeight)
-        } else if longEdge <= 2560 {
-            targetLongEdge = lowLatencyMode ? 1920 : longEdge
-        } else if longEdge <= 3840 {
-            targetLongEdge = lowLatencyMode ? 1920 : (canPushHighRes ? 2560 : 1920)
-        } else {
-            targetLongEdge = lowLatencyMode ? 1920 : (canPushHighRes ? 3200 : 2560)
-        }
-
-        let scale = min(1.0, targetLongEdge / longEdge)
-        return CGSize(
-            width: max(960, floor(nativeWidth * scale)),
-            height: max(540, floor(nativeHeight * scale))
-        )
-    }
-
     private func effectiveRemoteVideoFormats(for peer: PeerConnection) -> Set<String> {
         if let config = peer.requestedStreamConfiguration,
            config.preferredCodec?.lowercased() == "jpeg" {
@@ -2592,53 +1867,9 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func effectiveStreamRequest(for peer: PeerConnection) -> RemoteControlStreamRequest {
-        let settings = RemoteDesktopSettingsManager.shared.settings.displaySettings
-        let streamConfiguration = peer.requestedStreamConfiguration
-        let adaptiveResolutionEnabled = streamConfiguration?.adaptiveResolutionEnabled
-            ?? (streamConfiguration?.width == nil || streamConfiguration?.height == nil)
-        let preferredCodec: PreferredVideoCodec = {
-            switch streamConfiguration?.preferredCodec?.lowercased() {
-            case "h264":
-                return .h264
-            case "hevc":
-                return .hevc
-            default:
-                return settings.preferredCodec
-            }
-        }()
-        let preferredSize: CGSize = {
-            if !adaptiveResolutionEnabled,
-               let width = streamConfiguration?.width,
-               let height = streamConfiguration?.height,
-               width > 0,
-               height > 0 {
-                return CGSize(width: width, height: height)
-            }
-            if adaptiveResolutionEnabled {
-                return adaptiveCaptureSizeForDirectDisplay(
-                    preferredCodec: preferredCodec,
-                    lowLatencyMode: streamConfiguration?.lowLatencyMode ?? settings.lowLatencyMode,
-                    enableHardwareAcceleration: streamConfiguration?.enableHardwareAcceleration ?? settings.enableHardwareAcceleration,
-                    enableAppleSiliconOptimization: streamConfiguration?.enableAppleSiliconOptimization ?? settings.enableAppleSiliconOptimization
-                )
-            }
-            return preferredCaptureSize(for: settings.resolution)
-        }()
-        let exactResolutionRequested = !adaptiveResolutionEnabled
-            && (streamConfiguration?.width ?? 0) > 0
-            && (streamConfiguration?.height ?? 0) > 0
-        let preserveExactVisibleSize = exactResolutionRequested
-            && streamConfiguration?.requiresExtremePerformanceValidation == true
-
-        return RemoteControlStreamRequest(
-            preferredSize: preferredSize,
-            preferredCodec: preferredCodec,
-            targetFrameRate: max(12, min(streamConfiguration?.targetFrameRate ?? settings.targetFrameRate, 120)),
-            keyFrameInterval: max(10, min(streamConfiguration?.keyFrameInterval ?? settings.keyFrameInterval, 240)),
-            lowLatencyMode: streamConfiguration?.lowLatencyMode ?? settings.lowLatencyMode,
-            enableHardwareAcceleration: streamConfiguration?.enableHardwareAcceleration ?? settings.enableHardwareAcceleration,
-            enableAppleSiliconOptimization: streamConfiguration?.enableAppleSiliconOptimization ?? settings.enableAppleSiliconOptimization,
-            preserveExactVisibleSize: preserveExactVisibleSize
+        RemoteControlStreamRequestPolicy.request(
+            streamConfiguration: peer.requestedStreamConfiguration,
+            settings: RemoteDesktopSettingsManager.shared.settings.displaySettings
         )
     }
 
@@ -2678,14 +1909,6 @@ public final class RemoteControlManager: BaseManager {
         } catch {
             logger.error("❌ 会话剪贴板发送失败: \(error.localizedDescription, privacy: .public)")
         }
-    }
-
-    private static var isAppleSiliconRuntime: Bool {
-        #if arch(arm64) || arch(arm64e)
-        true
-        #else
-        false
-        #endif
     }
 
     private static var remoteControlBuildFingerprint: String {
@@ -2779,7 +2002,8 @@ public final class RemoteControlManager: BaseManager {
                     imageData: screenData.imageData,
                     timestamp: screenData.timestamp,
                     format: screenData.format,
-                    isSyncFrame: screenData.isSyncFrame
+                    isSyncFrame: screenData.isSyncFrame,
+                    sequenceNumber: screenData.sequenceNumber
                 )
             )
             return
@@ -3248,12 +2472,21 @@ public final class RemoteControlManager: BaseManager {
                 recovery=\(config.lossRecoveryMode ?? "unknown", privacy: .public)
                 """
             )
+            RemoteControlSmokeStatusWriter.append(
+                """
+                mac-stream-config peer=\(peer.id) transport=\(config.screenFrameTransport ?? "legacy") \
+                codec=\(config.preferredCodec ?? "auto") fps=\(config.targetFrameRate) \
+                damage=\(config.damageTrackingEnabled ?? false) \
+                perf=\(config.performanceValidationMode ?? "normal") \
+                fallback=\(config.mediaFallbackPolicy ?? "default")
+                """
+            )
             configureClipboardSync(for: peer)
             cancelDeferredScreenSharingFallback(for: peer.id)
             if !screenSharingActive {
                 await startScreenSharing(to: peer)
             } else {
-                let requiresRestart = shouldRestartCapture(
+                let requiresRestart = RemoteControlStreamRequestPolicy.shouldRestartCapture(
                     previous: previousConfig,
                     current: config
                 )
@@ -3288,29 +2521,6 @@ public final class RemoteControlManager: BaseManager {
         }
     }
 
-    private func shouldRestartCapture(
-        previous: RemoteDesktopStreamConfiguration?,
-        current: RemoteDesktopStreamConfiguration
-    ) -> Bool {
-        guard let previous else { return true }
-        return previous.width != current.width
-            || previous.height != current.height
-            || previous.preferredCodec != current.preferredCodec
-            || previous.supportedVideoFormats != current.supportedVideoFormats
-            || previous.adaptiveResolutionEnabled != current.adaptiveResolutionEnabled
-            || previous.targetFrameRate != current.targetFrameRate
-            || previous.keyFrameInterval != current.keyFrameInterval
-            || previous.lowLatencyMode != current.lowLatencyMode
-            || previous.enableHardwareAcceleration != current.enableHardwareAcceleration
-            || previous.enableAppleSiliconOptimization != current.enableAppleSiliconOptimization
-            || previous.separateCursorChannelEnabled != current.separateCursorChannelEnabled
-            || previous.audioRedirectionEnabled != current.audioRedirectionEnabled
-            || previous.audioTransport != current.audioTransport
-            || previous.audioMode != current.audioMode
-            || previous.mediaSessionId != current.mediaSessionId
-            || previous.mediaAudioEndpoint != current.mediaAudioEndpoint
-    }
-
     private func sendRemoteFrame(_ plaintext: Data, to peer: PeerConnection) async throws {
         if #available(macOS 14.0, *), let keys = peer.sessionKeys {
             let enc = try encryptRemotePayload(plaintext, with: keys)
@@ -3334,63 +2544,26 @@ public final class RemoteControlManager: BaseManager {
 
     private func handleRemoteMouseEvent(_ event: RemoteMouseEvent) async {
         logger.debug("🖱️ 处理远程鼠标事件: \(event.type.rawValue, privacy: .public)")
-        guard ensureAccessibilityPermission() else {
+        guard RemoteControlInputEventInjector.ensureAccessibilityPermission() else {
             logger.warning("⚠️ 未获得辅助功能权限，无法注入鼠标事件")
             return
         }
 
-        // Viewer input and stream-side cursor/damage telemetry already share a top-left
-        // display coordinate space. Do not flip Y again on injection, or taps in the
-        // upper half land in the lower half (and vice versa).
-        let point = Self.mouseInjectionPoint(for: event)
-
-        func post(_ cgEvent: CGEvent?) {
-            guard let cgEvent else { return }
-            cgEvent.post(tap: .cghidEventTap)
-        }
-
-        switch event.type {
-        case .mouseMoved:
-            post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left))
-        case .leftMouseDown:
-            post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left))
-        case .leftMouseUp:
-            post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left))
-        case .rightMouseDown:
-            post(CGEvent(mouseEventSource: nil, mouseType: .rightMouseDown, mouseCursorPosition: point, mouseButton: .right))
-        case .rightMouseUp:
-            post(CGEvent(mouseEventSource: nil, mouseType: .rightMouseUp, mouseCursorPosition: point, mouseButton: .right))
-        case .scrollUp:
-            post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 24, wheel2: 0, wheel3: 0))
-        case .scrollDown:
-            post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -24, wheel2: 0, wheel3: 0))
-        }
+        RemoteControlInputEventInjector.postMouseEvent(event)
     }
 
     nonisolated static func mouseInjectionPoint(for event: RemoteMouseEvent) -> CGPoint {
-        CGPoint(x: event.x, y: event.y)
+        RemoteControlInputEventInjector.mouseInjectionPoint(for: event)
     }
 
     private func handleRemoteKeyboardEvent(_ event: RemoteKeyboardEvent) async {
         logger.debug("⌨️ 处理远程键盘事件: keyCode=\(event.keyCode)")
-        guard ensureAccessibilityPermission() else {
+        guard RemoteControlInputEventInjector.ensureAccessibilityPermission() else {
             logger.warning("⚠️ 未获得辅助功能权限，无法注入键盘事件")
             return
         }
 
-        let down = (event.type == .keyDown)
-        let code = CGKeyCode(event.keyCode)
-        let cgEvent = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)
-        cgEvent?.post(tap: .cghidEventTap)
-    }
-
-    private func ensureAccessibilityPermission() -> Bool {
-        if AXIsProcessTrusted() { return true }
-        // 触发系统弹窗（用户需要在系统设置中手动勾选）
-        // 避免在严格并发下直接引用非 Sendable 的全局 CFStringRef
-        let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(opts)
-        return AXIsProcessTrusted()
+        RemoteControlInputEventInjector.postKeyboardEvent(event)
     }
 
  // MARK: - 性能指标更新

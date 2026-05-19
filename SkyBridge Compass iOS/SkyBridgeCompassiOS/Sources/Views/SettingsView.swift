@@ -503,36 +503,77 @@ struct DiscoverySettingsView: View {
 struct TrustedDevicesView: View {
     @EnvironmentObject private var discoveryManager: DeviceDiscoveryManager
     @StateObject private var store = TrustedDeviceStore.shared
+    @State private var pairingDeviceIds: Set<String> = []
+    @State private var pairingError: String?
+
+    private var activeTrustedDevices: [TrustedDeviceStore.TrustedDevice] {
+        store.trustedDevices.filter { lifecycleState(for: $0) == .active }
+    }
+
+    private var inactiveTrustedDevices: [TrustedDeviceStore.TrustedDevice] {
+        store.trustedDevices.filter { lifecycleState(for: $0) != .active }
+    }
 
     var body: some View {
         List {
             if store.trustedDevices.isEmpty {
                 Section {
-                    Text("暂无受信任设备。你可以在设备验证成功后自动加入，或在下面从已发现设备手动加入。")
+                    Text("暂无受信任设备。你可以在设备验证成功后自动加入，或在下面从已发现设备发起设备确认码配对。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             } else {
                 Section("受信任设备") {
-                    ForEach(store.trustedDevices) { dev in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(dev.name).font(.headline)
-                            HStack(spacing: 8) {
-                                Text(dev.platform.displayName)
-                                if let ip = dev.ipAddress { Text(ip) }
-                            }
+                    if activeTrustedDevices.isEmpty {
+                        Text("暂无有效受信任设备。")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                            Text("\(RuntimeLocalization.string("设备标识")): \(dev.id)")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
+                } else {
+                    ForEach(activeTrustedDevices) { dev in
+                        VStack(alignment: .leading, spacing: 8) {
+                            trustedDeviceRow(dev)
+                            Button {
+                                repairP2PTrust(dev)
+                            } label: {
+                                Text("修复 P2P 信任")
+                            }
+                            .font(.caption)
                         }
                     }
                     .onDelete { idxSet in
+                        let devices = activeTrustedDevices
                         for idx in idxSet {
-                            let id = store.trustedDevices[idx].id
-                            store.untrust(deviceId: id)
+                            forgetTrustedDevice(devices[idx])
+                            }
+                        }
+                    }
+                }
+
+                if !inactiveTrustedDevices.isEmpty {
+                    Section("需要处理的设备") {
+                        ForEach(inactiveTrustedDevices) { dev in
+                            VStack(alignment: .leading, spacing: 8) {
+                                trustedDeviceRow(dev, status: lifecycleLabel(for: dev))
+                                HStack {
+                                    Button {
+                                        repairP2PTrust(dev)
+                                    } label: {
+                                        Text("修复 P2P 信任")
+                                    }
+                                    Button(role: .destructive) {
+                                        forgetTrustedDevice(dev)
+                                    } label: {
+                                        Text("彻底忘记设备")
+                                    }
+                                }
+                                .font(.caption)
+                            }
+                        }
+                        .onDelete { idxSet in
+                            let devices = inactiveTrustedDevices
+                            for idx in idxSet {
+                                forgetTrustedDevice(devices[idx])
+                            }
                         }
                     }
                 }
@@ -546,24 +587,42 @@ struct TrustedDevicesView: View {
                 } else {
                     ForEach(candidates) { dev in
                         Button {
-                            store.trust(dev)
+                            startDeviceConfirmationPairing(dev)
                         } label: {
                             HStack {
                                 Text(dev.name)
                                 Spacer()
+                                if pairingDeviceIds.contains(dev.id) {
+                                    ProgressView()
+                                }
+                                Text("设备确认码配对")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                                 Text(dev.platform.displayName)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
                         }
+                        .disabled(pairingDeviceIds.contains(dev.id))
                     }
+                }
+                if let pairingError {
+                    Text(pairingError)
+                        .font(.caption)
+                        .foregroundColor(.red)
                 }
             }
 
             if !store.trustedDevices.isEmpty {
                 Section {
                     Button(role: .destructive) {
+                        let aliases = store.trustedDevices.flatMap { store.untrust(deviceId: $0.id) }
                         store.clearAll()
+                        Task {
+                            await P2PConnectionManager.instance.clearTrustMaterialForForgottenDevice(
+                                deviceIds: aliases
+                            )
+                        }
                     } label: {
                         Text("清空受信任设备")
                     }
@@ -573,6 +632,83 @@ struct TrustedDevicesView: View {
             .scrollContentBackground(.hidden)
             .background(DashboardView.QuantumGlassBackground())
             .navigationTitle("受信任的设备")
+    }
+
+    private func forgetTrustedDevice(_ device: TrustedDeviceStore.TrustedDevice) {
+        let aliases = store.untrust(deviceId: device.id)
+        Task {
+            await P2PConnectionManager.instance.clearTrustMaterialForForgottenDevice(deviceIds: aliases)
+        }
+    }
+
+    private func repairP2PTrust(_ device: TrustedDeviceStore.TrustedDevice) {
+        Task {
+            await P2PConnectionManager.instance.repairP2PTrustForTrustedDevice(deviceIds: [device.id])
+        }
+    }
+
+    @MainActor
+    private func startDeviceConfirmationPairing(_ device: DiscoveredDevice) {
+        guard !pairingDeviceIds.contains(device.id) else { return }
+        pairingDeviceIds.insert(device.id)
+        pairingError = nil
+
+        Task {
+            do {
+                try await P2PConnectionManager.instance.connect(to: device)
+            } catch {
+                let message = P2PConnectionManager.localizedConnectionErrorMessage(error)
+                await MainActor.run {
+                    pairingError = message
+                }
+            }
+            await MainActor.run {
+                _ = pairingDeviceIds.remove(device.id)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func trustedDeviceRow(
+        _ dev: TrustedDeviceStore.TrustedDevice,
+        status: String? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(dev.name).font(.headline)
+            HStack(spacing: 8) {
+                Text(dev.platform.displayName)
+                if let ip = dev.ipAddress { Text(ip) }
+                if let status {
+                    Text(status)
+                        .foregroundColor(.orange)
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            Text("\(RuntimeLocalization.string("设备标识")): \(dev.id)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private func lifecycleState(
+        for dev: TrustedDeviceStore.TrustedDevice
+    ) -> TrustedDeviceStore.CurrentPathLifecycleState {
+        dev.currentPathLifecycleState ?? .active
+    }
+
+    private func lifecycleLabel(for dev: TrustedDeviceStore.TrustedDevice) -> String {
+        switch lifecycleState(for: dev) {
+        case .active:
+            return "已受信任"
+        case .reverificationRequired:
+            return "需要重新验证"
+        case .quarantined:
+            return "已隔离"
+        case .revoked:
+            return "已撤销"
+        }
     }
 }
 

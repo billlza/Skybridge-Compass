@@ -39,7 +39,8 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(path: "LocalPackages/OQSRAIILocal")
+        .package(path: "LocalPackages/OQSRAIILocal"),
+        .package(path: "LocalPackages/SkyBridgeMediaLocal")
     ],
     targets: [
         .binaryTarget(
@@ -52,7 +53,8 @@ let package = Package(
             name: "SkyBridgeCompassiOS",
             dependencies: [
                 "WebRTC",
-                .product(name: "OQSRAII", package: "OQSRAIILocal")
+                .product(name: "OQSRAII", package: "OQSRAIILocal"),
+                .product(name: "SkyBridgeRealtimeMedia", package: "SkyBridgeMediaLocal")
             ],
             path: "SkyBridgeCompassiOS",
             sources: ["Sources"],

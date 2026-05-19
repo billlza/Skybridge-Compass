@@ -266,8 +266,45 @@ public class PQCCryptoManager: ObservableObject {
             throw PQCError.verificationFailed
         }
 
-        // 先落一个“可信设备持久化”闭环：验证成功即加入可信列表（设置页可见、可撤销）
-        TrustedDeviceStore.shared.trust(device)
+        var trustCandidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
+        trustCandidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
+        if let ipAddress = device.ipAddress {
+            trustCandidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
+        }
+        if let canonicalTrustedId = TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: device) {
+            trustCandidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: canonicalTrustedId))
+        }
+        if let persistentDeviceId = PeerIdentityAliasResolver.persistentDeviceId(from: device.id) {
+            trustCandidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: persistentDeviceId))
+        }
+
+        let protocolFingerprints = await ProtocolIdentityTrustStore.shared.trustedFingerprints(
+            forAny: Array(trustCandidates)
+        )
+        let currentPathFingerprints = TrustedDeviceStore.shared.currentPathFingerprints(
+            forAny: Array(trustCandidates)
+        )
+        let pinnedFingerprints = protocolFingerprints.union(currentPathFingerprints)
+        guard pinnedFingerprints.count == 1, let protocolFingerprint = pinnedFingerprints.first else {
+            SkyBridgeLogger.shared.warning(
+                "❌ 设备验证码通过但缺少唯一 protocol identity pin: device=\(device.name) fingerprints=\(pinnedFingerprints.count)"
+            )
+            throw PQCError.verificationFailed
+        }
+
+        let declaredDeviceId =
+            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: device)
+            ?? PeerIdentityAliasResolver.persistentDeviceId(from: device.id)
+            ?? device.id
+        TrustedDeviceStore.shared.trustResolvedPeer(
+            device,
+            declaredDeviceId: declaredDeviceId,
+            protocolPublicKeyFingerprint: protocolFingerprint
+        )
+        await ProtocolIdentityTrustStore.shared.upsert(
+            deviceId: declaredDeviceId,
+            fingerprints: [protocolFingerprint]
+        )
         
         SkyBridgeLogger.shared.info("✅ 设备验证成功: \(device.name)")
     }

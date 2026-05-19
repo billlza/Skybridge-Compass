@@ -37,7 +37,7 @@ platform :mac do
     UI.message("使用签名身份: #{signing_identity}")
     
     # 低层步骤：生成带 Widget 的正式签名 .app，供单独排查签名/公证问题使用。
-    sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 SKYBRIDGE_XCODEBUILD_KEEP_NOISE=1 IDENTITY='#{signing_identity}' ./Scripts/package_app.sh")
+    sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 IDENTITY='#{signing_identity}' ./Scripts/package_app.sh")
     sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 APP_PATH='dist/SkyBridge Compass Pro.app' IDENTITY='#{signing_identity}' ./Scripts/sign_app.sh")
     
     UI.success("✅ 应用构建并签名完成！")
@@ -77,7 +77,7 @@ platform :mac do
       release_args << "--use-existing-app"
     end
 
-    sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 SKYBRIDGE_XCODEBUILD_KEEP_NOISE=1 ./Scripts/build_dmg.sh #{release_args.join(' ')}")
+    sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 ./Scripts/build_dmg.sh #{release_args.join(' ')}")
     sh("cd .. && SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 ./Scripts/check_macos_release_readiness.sh --require-notarization")
 
     UI.success("✅ 最终发布版本已准备好，DMG 已完成严格校验并复制到桌面！")

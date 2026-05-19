@@ -1038,7 +1038,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         let displayName = txtValue(txtRecord, "name") ?? displayBonjourName
         
         // 提取 Bonjour service 信息 / IP 地址
-        let ipAddress = extractIPAddress(from: endpoint)
+        let ipAddress = extractIPAddress(from: endpoint, txtRecord: txtRecord)
         let (bonjourType, bonjourDomain) = extractBonjourService(from: endpoint, fallbackServiceType: serviceType)
         
         // 提取 PQC 支持信息（当前仅解析，后续可用于 UI 展示/能力协商）
@@ -1219,8 +1219,13 @@ public class DeviceDiscoveryManager: ObservableObject {
         if isUnknownValue(merged.osVersion) && !isUnknownValue(update.osVersion) { merged.osVersion = update.osVersion }
         if isUnknownValue(merged.modelName) && !isUnknownValue(update.modelName) { merged.modelName = update.modelName }
 
-        // 最新 IP / Bonjour type/domain（优先保留已有的主服务类型，缺省时补齐）
-        if merged.ipAddress == nil { merged.ipAddress = update.ipAddress }
+        // 最新 IP / Bonjour type/domain（优先保留可路由 LAN 地址，避免 Bonjour service 解析退回 link-local）。
+        if let bestAddress = ConnectableAddressCanonicalizer.bestLANAddress([
+            merged.ipAddress,
+            update.ipAddress
+        ]) {
+            merged.ipAddress = bestAddress
+        }
         if merged.bonjourServiceType == nil
             || update.bonjourServiceType == DiscoveryServiceType.skybridge.rawValue {
             merged.bonjourServiceType = update.bonjourServiceType
@@ -1521,7 +1526,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     }
     
     /// 提取 IP 地址
-    private func extractIPAddress(from endpoint: NWEndpoint) -> String? {
+    private func extractIPAddress(from endpoint: NWEndpoint, txtRecord: [String: String]) -> String? {
         switch endpoint {
         case .hostPort(let host, _):
             switch host {
@@ -1533,8 +1538,13 @@ public class DeviceDiscoveryManager: ObservableObject {
                 return nil
             }
         case .service(_, _, _, _):
-            // 服务端点需要解析才能获取 IP
-            return nil
+            return ConnectableAddressCanonicalizer.bestLANAddress([
+                txtValue(txtRecord, "lanHost", "host", "ip", "ipv4", "address", "hostAddress"),
+                txtValue(txtRecord, "lanIPv4"),
+                txtValue(txtRecord, "lanIPv6", "ipv6")
+            ]).flatMap {
+                ConnectableAddressCanonicalizer.isRoutableLANAddress($0) ? $0 : nil
+            }
         default:
             return nil
         }
@@ -1720,6 +1730,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         
         // 协议版本
         record["version"] = "1"
+        record["kemRefreshVersion"] = "1"
         record["hs_soa"] = "1"
         record["name"] = deviceName
         if port > 0 {
@@ -2035,13 +2046,16 @@ extension NWTXTRecord {
             "platform", "osVersion", "os_version", "platformVersion", "platform_version", "os", "systemVersion",
             "model", "hardwareModel", "hwModel", "name",
             // features
-            "capabilities", "pqc", "version",
+            "capabilities", "pqc", "version", "kemRefreshVersion", "kemKeyDigest",
             // signal
             "rssi", "signalStrength", "signal_strength", "signal",
             // ports (for UI)
+            "skybridgePort", "p2pPort", "controlPort", "controlPortSource",
             "transferPort", "fileTransferPort", "file_transfer_port",
             "remotePort", "remoteControlPort", "remote_port",
-            "port"
+            "port",
+            // routable LAN route hints advertised by macOS listeners
+            "lanHost", "lanIPv4", "lanIPv6", "host", "ip", "ipv4", "ipv6", "address", "hostAddress"
         ]
         
         for key in knownKeys {

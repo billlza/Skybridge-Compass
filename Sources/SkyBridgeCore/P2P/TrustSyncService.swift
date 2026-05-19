@@ -361,6 +361,21 @@ public final class TrustSyncService: ObservableObject {
         static let recordsKey = "com.skybridge.p2p.trust.fallback.records.v1"
     }
 
+    private static let protectedFallbackRecordStore: CodablePersistenceStore<[TrustRecord]> = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        return CodablePersistenceStore(
+            location: .protectedApplicationSupport(
+                path: "P2PTrust/fallback-records.json",
+                legacyUserDefaultsKey: FallbackStorageConstants.recordsKey
+            ),
+            encoder: encoder,
+            decoder: decoder
+        )
+    }()
+
     private nonisolated static func forbidKeychainAuthenticationUI(_ query: inout [String: Any]) {
         let context = LAContext()
         context.interactionNotAllowed = true
@@ -888,8 +903,8 @@ public final class TrustSyncService: ObservableObject {
                 SkyBridgeLogger.p2p.debug("Trust records load skipped (errSecParam=-50)")
             } else if let e = error as? TrustSyncError,
                       case .keychainError(let status) = e,
-                      isKeychainEntitlementUnavailable(status) {
-                SkyBridgeLogger.p2p.warning("⚠️ Trust records keychain unavailable (\(status)); falling back to local storage")
+                      shouldMirrorTrustRecordAfterKeychainFailure(status) {
+                SkyBridgeLogger.p2p.warning("⚠️ Trust records keychain unavailable (\(status)); loading protected local trust mirror")
             } else {
                 SkyBridgeLogger.p2p.error("Failed to load trust records: \(error.localizedDescription)")
             }
@@ -1101,44 +1116,59 @@ public final class TrustSyncService: ObservableObject {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
         let data = try encoder.encode(record)
-        
-        var query: [String: Any] = [
+
+        var matchQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: KeychainConstants.service,
+            kSecAttrAccount as String: KeychainConstants.recordPrefix + record.deviceId,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
+        ]
+        Self.forbidKeychainAuthenticationUI(&matchQuery)
+
+        let updateStatus = SecItemUpdate(
+            matchQuery as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            removeFallbackRecord(deviceId: record.deviceId)
+            return
+        }
+
+        if updateStatus != errSecItemNotFound {
+            if shouldMirrorTrustRecordAfterKeychainFailure(updateStatus) {
+                upsertFallbackRecord(record)
+                SkyBridgeLogger.p2p.warning(
+                    "⚠️ Trust record keychain update unavailable (\(updateStatus)); persisted to protected local trust mirror: \(record.deviceId, privacy: .public)"
+                )
+                return
+            }
+            throw TrustSyncError.keychainError(updateStatus)
+        }
+
+        var addQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: KeychainConstants.service,
             kSecAttrAccount as String: KeychainConstants.recordPrefix + record.deviceId,
             kSecValueData as String: data,
             kSecAttrSynchronizable as String: synchronizable ? kCFBooleanTrue! : kCFBooleanFalse!
         ]
-        Self.forbidKeychainAuthenticationUI(&query)
-        
- // 先删除旧的
-        var deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecAttrAccount as String: KeychainConstants.recordPrefix + record.deviceId,
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny
-        ]
-        Self.forbidKeychainAuthenticationUI(&deleteQuery)
-        SecItemDelete(deleteQuery as CFDictionary)
-        
-// 添加新的
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status == errSecSuccess {
+        Self.forbidKeychainAuthenticationUI(&addQuery)
+
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        if addStatus == errSecSuccess {
             removeFallbackRecord(deviceId: record.deviceId)
             return
         }
 
-        if isKeychainEntitlementUnavailable(status) {
+        if shouldMirrorTrustRecordAfterKeychainFailure(addStatus) || addStatus == errSecDuplicateItem {
             upsertFallbackRecord(record)
             SkyBridgeLogger.p2p.warning(
-                "⚠️ Trust record keychain unavailable (\(status)); persisted to fallback storage: \(record.deviceId, privacy: .public)"
+                "⚠️ Trust record keychain add unavailable (\(addStatus)); persisted to protected local trust mirror: \(record.deviceId, privacy: .public)"
             )
             return
         }
 
-        guard status == errSecSuccess else {
-            throw TrustSyncError.keychainError(status)
-        }
+        throw TrustSyncError.keychainError(addStatus)
     }
     
  /// 从 Keychain 加载所有记录
@@ -1275,21 +1305,22 @@ public final class TrustSyncService: ObservableObject {
         status == errSecMissingEntitlement || status == -34018
     }
 
-    private func loadFallbackRecords() -> [TrustRecord] {
-        guard let data = UserDefaults.standard.data(forKey: FallbackStorageConstants.recordsKey) else {
-            return []
-        }
+    private func shouldMirrorTrustRecordAfterKeychainFailure(_ status: OSStatus) -> Bool {
+        isKeychainEntitlementUnavailable(status) || status == errSecInteractionNotAllowed
+    }
 
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .millisecondsSince1970
-        return (try? decoder.decode([TrustRecord].self, from: data)) ?? []
+    private func loadFallbackRecords() -> [TrustRecord] {
+        Self.protectedFallbackRecordStore.load() ?? []
     }
 
     private func storeFallbackRecords(_ records: [TrustRecord]) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .millisecondsSince1970
-        guard let data = try? encoder.encode(records) else { return }
-        UserDefaults.standard.set(data, forKey: FallbackStorageConstants.recordsKey)
+        do {
+            try Self.protectedFallbackRecordStore.save(records)
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "Failed to persist protected local trust mirror: \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func upsertFallbackRecord(_ record: TrustRecord) {
@@ -1307,7 +1338,11 @@ public final class TrustSyncService: ObservableObject {
         let originalCount = records.count
         records.removeAll { $0.deviceId == deviceId }
         guard records.count != originalCount else { return }
-        storeFallbackRecords(records)
+        if records.isEmpty {
+            try? Self.protectedFallbackRecordStore.remove()
+        } else {
+            storeFallbackRecords(records)
+        }
     }
 
 #if DEBUG

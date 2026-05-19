@@ -82,6 +82,13 @@ public final class PairingTrustApprovalService: ObservableObject {
     private var policyByDeviceId: [String: String] = [:]
     
     private var continuationByRequestId: [UUID: [CheckedContinuation<Decision, Never>]] = [:]
+    private struct ProtocolIdentityPinContext: Sendable {
+        let deviceIds: [String]
+        let fingerprint: String
+        let verificationCode: String
+    }
+
+    private var protocolIdentityPinContextByRequestId: [UUID: ProtocolIdentityPinContext] = [:]
     
     private init() {
         policyByDeviceId = Self.loadPolicy()
@@ -207,6 +214,178 @@ public final class PairingTrustApprovalService: ObservableObject {
         pendingVerificationUpdatedAt = Date()
     }
 
+    /// Display a pre-handshake PIB-1 short authentication string. This is
+    /// informational only; the peer that imports the protocol identity must
+    /// still require its local operator approval before pinning it.
+    public func showProtocolIdentityBindingCode(
+        peerEndpoint: String,
+        declaredDeviceId: String,
+        displayName: String,
+        model: String? = nil,
+        platform: String? = nil,
+        osVersion: String? = nil,
+        verificationCode: String,
+        protocolIdentityFingerprint: String
+    ) {
+        let request = Request(
+            peerEndpoint: peerEndpoint,
+            declaredDeviceId: declaredDeviceId,
+            policyBindingKey: "PIB-1|\(declaredDeviceId)|\(protocolIdentityFingerprint.lowercased())",
+            displayName: displayName,
+            model: model,
+            platform: platform,
+            osVersion: osVersion,
+            kemKeyCount: 0
+        )
+        pendingRequest = request
+        pendingDecision = .allowOnce
+        pendingVerificationCode = verificationCode
+        pendingVerificationSuite = "PIB-1"
+        pendingVerificationUpdatedAt = Date()
+        logger.info(
+            "🔐 PIB-1 verification code displayed: deviceId=\(declaredDeviceId, privacy: .public) fp=\(protocolIdentityFingerprint, privacy: .public)"
+        )
+    }
+
+    public func stageProtocolIdentityBindingRequesterApproval(
+        peerEndpoint: String,
+        requesterDeviceIds: [String],
+        displayName: String,
+        model: String? = nil,
+        platform: String? = nil,
+        osVersion: String? = nil,
+        verificationCode: String,
+        requesterProtocolIdentityFingerprint: String
+    ) async -> Decision {
+        let normalizedIds = normalizedUniqueDeviceIds(requesterDeviceIds)
+        let normalizedFingerprint = requesterProtocolIdentityFingerprint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalizedIds.isEmpty,
+              normalizedFingerprint.count == 64,
+              normalizedFingerprint.allSatisfy(\.isHexDigit) else {
+            return .reject
+        }
+
+        let declaredDeviceId = normalizedIds.first ?? "unknown"
+        let policyBindingKey = "PIB-1-requester|\(declaredDeviceId)|\(normalizedFingerprint)"
+        if let raw = policyByDeviceId[policyBindingKey],
+           let policy = Decision(rawValue: raw) {
+            switch policy {
+            case .alwaysAllow:
+                await pinProtocolIdentityRequester(
+                    deviceIds: normalizedIds,
+                    fingerprint: normalizedFingerprint,
+                    verificationCode: verificationCode,
+                    operatorLabel: "stored-policy"
+                )
+                return policy
+            case .reject:
+                return policy
+            case .allowOnce:
+                break
+            }
+        }
+        if let raw = policyByDeviceId[declaredDeviceId],
+           let policy = Decision(rawValue: raw) {
+            switch policy {
+            case .alwaysAllow:
+                await pinProtocolIdentityRequester(
+                    deviceIds: normalizedIds,
+                    fingerprint: normalizedFingerprint,
+                    verificationCode: verificationCode,
+                    operatorLabel: "stored-policy"
+                )
+                return policy
+            case .reject:
+                return policy
+            case .allowOnce:
+                break
+            }
+        }
+
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING"] == "1" {
+            await pinProtocolIdentityRequester(
+                deviceIds: normalizedIds,
+                fingerprint: normalizedFingerprint,
+                verificationCode: verificationCode,
+                operatorLabel: "smoke-auto-approve"
+            )
+            return .alwaysAllow
+        }
+
+        let request = Request(
+            peerEndpoint: peerEndpoint,
+            declaredDeviceId: declaredDeviceId,
+            policyBindingKey: policyBindingKey,
+            displayName: displayName,
+            model: model,
+            platform: platform,
+            osVersion: osVersion,
+            kemKeyCount: 0
+        )
+        if let pendingRequest {
+            if isSameTrustRequest(pendingRequest, request) {
+                if let pendingDecision {
+                    return pendingDecision
+                }
+                logger.info("PIB-1 requester approval coalesced with pending prompt for deviceId=\(declaredDeviceId, privacy: .public)")
+                return await withCheckedContinuation { cont in
+                    continuationByRequestId[pendingRequest.id, default: []].append(cont)
+                }
+            }
+            logger.warning("PIB-1 requester approval rejected because another prompt is pending. deviceId=\(declaredDeviceId, privacy: .public)")
+            return .reject
+        }
+        protocolIdentityPinContextByRequestId[request.id] = ProtocolIdentityPinContext(
+            deviceIds: normalizedIds,
+            fingerprint: normalizedFingerprint,
+            verificationCode: verificationCode
+        )
+        pendingDecision = nil
+        pendingVerificationCode = verificationCode
+        pendingVerificationSuite = "PIB-1"
+        pendingVerificationUpdatedAt = Date()
+        pendingRequest = request
+        logger.info(
+            "🔐 PIB-1 requester protocol identity approval required: requester=\(declaredDeviceId, privacy: .public) fp=\(normalizedFingerprint, privacy: .public) code=\(verificationCode, privacy: .public)"
+        )
+        RemoteControlSmokeStatusWriter.append(
+            "🔐 PIB-1 requester protocol identity approval required: requester=\(declaredDeviceId) fingerprint=\(normalizedFingerprint) code=\(verificationCode) lifecycle=identity-oob>awaiting-requester-approval"
+        )
+        return await withCheckedContinuation { cont in
+            continuationByRequestId[request.id, default: []].append(cont)
+        }
+    }
+
+    private func pinProtocolIdentityRequester(
+        deviceIds: [String],
+        fingerprint: String,
+        verificationCode: String,
+        operatorLabel: String
+    ) async {
+        await PeerProtocolIdentityBootstrapStore.shared.upsert(
+            deviceIds: deviceIds,
+            fingerprints: [fingerprint]
+        )
+        let line = "🔐 PIB-1 requester protocol identity pinned: requester=\(deviceIds.first ?? "-") fingerprint=\(fingerprint) code=\(verificationCode) operator=\(operatorLabel) lifecycle=identity-oob>requester-pinned"
+        logger.info("\(line, privacy: .public)")
+        RemoteControlSmokeStatusWriter.append(line)
+    }
+
+    private func normalizedUniqueDeviceIds(_ rawIds: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for raw in rawIds {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if seen.insert(trimmed).inserted {
+                result.append(trimmed)
+            }
+        }
+        return result
+    }
+
     /// Called when the user dismisses the sheet (ESC/click outside/close button).
     /// If the request hasn't been resolved yet, treat dismissal as `reject`.
     public func userDismissedCurrentPrompt() {
@@ -216,6 +395,7 @@ public final class PairingTrustApprovalService: ObservableObject {
             return
         }
 
+        protocolIdentityPinContextByRequestId.removeValue(forKey: req.id)
         pendingRequest = nil
         pendingDecision = nil
         pendingVerificationCode = nil
@@ -223,27 +403,13 @@ public final class PairingTrustApprovalService: ObservableObject {
         pendingVerificationUpdatedAt = nil
     }
 
-    /// Resolve a pending request from UI.
-    public func resolve(_ request: Request, decision: Decision) {
-        switch decision {
-        case .alwaysAllow, .reject:
-            let deviceId = request.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !deviceId.isEmpty {
-                policyByDeviceId[deviceId] = decision.rawValue
-            }
-            if let bindingKey = request.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !bindingKey.isEmpty {
-                policyByDeviceId[bindingKey] = decision.rawValue
-            }
-            savePolicy()
-        case .allowOnce:
-            break
-        }
-        
-        if let continuations = continuationByRequestId.removeValue(forKey: request.id) {
-            for cont in continuations {
-                cont.resume(returning: decision)
-            }
+    private func finishResolution(
+        request: Request,
+        decision: Decision,
+        continuations: [CheckedContinuation<Decision, Never>]
+    ) {
+        for cont in continuations {
+            cont.resume(returning: decision)
         }
 
         pendingDecision = decision
@@ -259,5 +425,48 @@ public final class PairingTrustApprovalService: ObservableObject {
         }
 
         logger.info("Pairing/trust decision: \(decision.rawValue, privacy: .public) deviceId=\(request.declaredDeviceId, privacy: .public)")
+    }
+
+    /// Resolve a pending request from UI.
+    public func resolve(_ request: Request, decision: Decision) {
+        let protocolIdentityContext = protocolIdentityPinContextByRequestId.removeValue(forKey: request.id)
+        switch decision {
+        case .alwaysAllow, .reject:
+            let deviceId = request.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !deviceId.isEmpty {
+                policyByDeviceId[deviceId] = decision.rawValue
+            }
+            if let bindingKey = request.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !bindingKey.isEmpty {
+                policyByDeviceId[bindingKey] = decision.rawValue
+            }
+            savePolicy()
+        case .allowOnce:
+            break
+        }
+
+        let continuations = continuationByRequestId.removeValue(forKey: request.id) ?? []
+        if let protocolIdentityContext, decision != .reject {
+            Task { @MainActor in
+                await self.pinProtocolIdentityRequester(
+                    deviceIds: protocolIdentityContext.deviceIds,
+                    fingerprint: protocolIdentityContext.fingerprint,
+                    verificationCode: protocolIdentityContext.verificationCode,
+                    operatorLabel: "local-user"
+                )
+                self.finishResolution(
+                    request: request,
+                    decision: decision,
+                    continuations: continuations
+                )
+            }
+            return
+        }
+
+        finishResolution(
+            request: request,
+            decision: decision,
+            continuations: continuations
+        )
     }
 }

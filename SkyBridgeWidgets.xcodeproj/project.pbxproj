@@ -7,25 +7,287 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		04C415DA7E1F652E680E5D0C /* PerformanceMetricRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA118FAF4446AA7A926A272 /* PerformanceMetricRow.swift */; };
+		09AC369A1BA081BB3C128EE7 /* EmptyStateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F82B594F9E6F32F8BBED768E /* EmptyStateView.swift */; };
+		0B678571CB3B88CBD991C927 /* CustomBackgroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 825CF90D2A0365C9B9F0A7F5 /* CustomBackgroundView.swift */; };
+		1107809D175EC5DE28930559 /* RemoteDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B1FB7AA1712E13D6F941B63 /* RemoteDisplayView.swift */; };
+		14F0E1D218B84170A8F10BCE /* GlobalHazeShaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = CFCE049A1A7724672405473E /* GlobalHazeShaders.metal */; };
+		1648DA143122FEAE697FC7F8 /* app_icon.png in Resources */ = {isa = PBXBuildFile; fileRef = BFFF0177072A08B62103F153 /* app_icon.png */; };
+		195373F5C2826F2164ADA210 /* QuickActionButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27F1FDDA6E8134F99044B055 /* QuickActionButton.swift */; };
+		19B6F9FEF50AFBB2F2389FC5 /* WindowFocusManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F08A9E6530CC6C2AB42A1164 /* WindowFocusManager.swift */; };
+		1B615D30B7949E25F0242CB4 /* AppIcon.png in Resources */ = {isa = PBXBuildFile; fileRef = EB79A9CD6CDE01E4D03B7052 /* AppIcon.png */; };
+		1CD6D2548A45F0CE0B868CAE /* UserNotifications.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9842147459203026BBF10390 /* UserNotifications.framework */; };
+		21C986C5254A1432048CEC23 /* AppleSiliconOptimizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96EC655F5DBE77E1A3D0BFBD /* AppleSiliconOptimizer.swift */; };
+		222CA52844563ADD78381D08 /* AppIconMaster.svg in Resources */ = {isa = PBXBuildFile; fileRef = F059831D58B7E74D438B7946 /* AppIconMaster.svg */; };
+		254927ADE12338ECAA061354 /* OrderedCollections in Frameworks */ = {isa = PBXBuildFile; productRef = 40C692463D61FF3FD0CFD937 /* OrderedCollections */; };
+		2924D972BBAC27169E7EE8F6 /* EventMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 271098ACD4DC0594546D9468 /* EventMonitor.swift */; };
+		2A3B800F46EE5850165847B5 /* SkyBridgeProtocolCore in Frameworks */ = {isa = PBXBuildFile; productRef = E0E308E97B432D86D27EEC34 /* SkyBridgeProtocolCore */; };
+		2CA33118A7F89D5B3CBDEFBD /* TopNavigationBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C06FBCEF936A2D2849046F52 /* TopNavigationBarView.swift */; };
+		2CA6F6A18970D83F186488CE /* WeatherStatCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3193C5594A0A8D869E8AFC70 /* WeatherStatCard.swift */; };
+		2E251BC35BA073961CBEF59F /* CurrentPathDeviceActivationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */; };
+		2F9EFBC936751A50E4539FC5 /* PreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B94E56E85A4296340AE2361F /* PreferencesView.swift */; };
 		306A4A889A8ECD7F0D631141 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */; };
+		33AB642A10F5D94F285B83FC /* MetricChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06339FDDB8B71E52F8BD41F9 /* MetricChartView.swift */; };
+		3685AE9894ADAC0AC97FAE1C /* DashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0310489E5FE84E88C2AA09 /* DashboardViewModel.swift */; };
+		3718C6A09071B63D5A584DC2 /* USBDeviceManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72CCFF8EFF1A7A7B473878F4 /* USBDeviceManagementView.swift */; };
+		37D0AB8ABBF69CB961977B17 /* ThemeConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D1E1B2B213D3C7CA21D24F /* ThemeConfiguration.swift */; };
+		3E1E8CDD5E02C9D0EBFE7DC2 /* PerformanceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4A43A751BE9D7EF1691A7E4 /* PerformanceMonitor.swift */; };
+		4195DB68957C37F2112E4114 /* MetalPerformanceOptimizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC73A329850D8E20553B4C60 /* MetalPerformanceOptimizer.swift */; };
+		4202FE43689DB0FAFA65F335 /* EnhancedDeviceDiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */; };
+		460A1A9C2CD7B05278490283 /* NavigationItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC06DE625F848AA1986847EB /* NavigationItem.swift */; };
 		46232BE959AC8B34E517C798 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */; };
+		46E9BD8263B340621DE3E145 /* UserProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39D2A37D92B82FBD25E719A3 /* UserProfileView.swift */; };
+		46F3D5F3C45056CD18AE4355 /* about-main-icon.svg in Resources */ = {isa = PBXBuildFile; fileRef = D759DFEDD41AB404216F0021 /* about-main-icon.svg */; };
+		4950910AF6588D333D47018B /* DashboardContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74DF29B58CA8ADE6A6AD3F74 /* DashboardContentView.swift */; };
+		4DF7982B3966C816E9E52BC0 /* SystemMetricsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD76C79AD9E56BFA57C1F041 /* SystemMetricsPanelView.swift */; };
+		4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FD3678EA90CE43D8B206FD5 /* RealTimeWeatherService.swift */; };
+		508D04834661A08F8BCF47C4 /* DeviceChainViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9EF4C7CF9BE849F017EDA /* DeviceChainViewModel.swift */; };
+		513D63C5FD6A64DCFB0E0437 /* CloudDeviceListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */; };
+		56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCCDC5283DA30812C545D629 /* OnlineDeviceRow.swift */; };
+		56B662DC159A06A386023551 /* StartupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28A863D8FACC89865E5B02AE /* StartupCoordinator.swift */; };
+		589EE25508C29C0854EB4912 /* MissingIconHintView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85A2082093DBBCD396198A9C /* MissingIconHintView.swift */; };
+		5A25017DFEF93E116ECA08E2 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
 		5B92DEAF73D4A58CD8B62A69 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
+		5C76D7E4E513E62149275F6A /* ClassicBackgroundV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDC840D20233F0618288F1E6 /* ClassicBackgroundV2.swift */; };
+		5C993AF7FD43EAFB765E4AC7 /* FileTransferRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D9A4EDD78AB3ED51D441734 /* FileTransferRow.swift */; };
+		5EE1800E4C259668BD77A84C /* ClassicBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3388F3763B3264B31C56F6A4 /* ClassicBackground.swift */; };
+		5EEE661E2440BD1615A2FAC2 /* SVGEmbeddedImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F8976817A70651D31498598 /* SVGEmbeddedImageView.swift */; };
+		509C55AFB81E4008B1B5D0F4 /* LocalP2PFileTransferSmokeHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF5DB93E00D44E869300B260 /* LocalP2PFileTransferSmokeHarness.swift */; };
+		61117B98453EDD7EFFB38D6A /* EnhancedDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8793A89866E33950D6F13A33 /* EnhancedDeviceRow.swift */; };
+		617E33E5B02A7202C97933CD /* BrandIcon.png in Resources */ = {isa = PBXBuildFile; fileRef = 10384E630E9ABF87508AC6ED /* BrandIcon.png */; };
+		64A3EA9E284F96AF9C3084B2 /* SkyBridgeVisualParity in Frameworks */ = {isa = PBXBuildFile; productRef = 207088C036D7A7F97A6A0444 /* SkyBridgeVisualParity */; };
+		6696E14B73BEF52586DD13EA /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 4EBDD94C659F2EC1275A278C /* Assets.xcassets */; };
+		6820DA289F7FA98B38EBE133 /* SkyBridgeCore in Frameworks */ = {isa = PBXBuildFile; productRef = 921C38E07E934A5CDB49F41E /* SkyBridgeCore */; };
+		6B9C2343C5BE6AFBB0F37B2F /* MetricsTimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E0064CA0B644C4F8C054C1 /* MetricsTimelineView.swift */; };
+		70C604B3B95BA156481FB8C7 /* SSHTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 904A7A42479065B9367A8E4D /* SSHTerminalView.swift */; };
+		719D81F3008816D48A6AA1EB /* LocalPeerServiceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D981C5DE0E776952AD0B0761 /* LocalPeerServiceCoordinator.swift */; };
+		732868A8F7E1C04A5E32E73C /* OrderedCollectionsFallback.swift in Sources */ = {isa = PBXBuildFile; fileRef = E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */; };
+		7423F51C7AA49B9CFF3823AD /* DMGBackgroundRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ADADBFE1FDEAD8FBEFE21B7 /* DMGBackgroundRenderer.swift */; };
+		7905FFC1F533B585ED3BA250 /* NearFieldMirrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */; };
+		7A447F0A23637367C8D92BD7 /* AppleSiliconSystemCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09525D33288E26F88FF2AA60 /* AppleSiliconSystemCoordinator.swift */; };
+		7A82E21B4233C8E31F7F217F /* UserProfileOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7AA82D7D5FC282FEB03C6D1 /* UserProfileOverlay.swift */; };
+		7AC9D3D4188016B890EBE9A0 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E06A601920A0654D26DC0CF /* DashboardView.swift */; };
+		83E3064711CB4C8FDB487DAB /* AuthenticationViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A7DACBA6F3DD4E715607BD /* AuthenticationViewModel.swift */; };
+		8604A809C8518BE2CC1E8129 /* PerformanceMonitoringPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA0B3F8DBAA95AD39757262 /* PerformanceMonitoringPanelView.swift */; };
+		87D4E408B8934CF67E9FF500 /* DeviceDiscoveryPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFEB5C8A3A97F114A59348AC /* DeviceDiscoveryPanelView.swift */; };
+		8B7E29A1DF3C80E7F309FE53 /* PerformanceErrorHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83227A90FFD3F72879561C7C /* PerformanceErrorHandler.swift */; };
+		8C0E69CAD7A7861098A4EFD4 /* GlobalHazeBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90E4C0DD7117D686BDBD4290 /* GlobalHazeBackground.swift */; };
 		8D178C6A9D84763F3C1B383F /* CompassWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = D77D1FEE9D791CA02A737B6C /* CompassWidget.swift */; };
+		91C63733F74A311A141A022C /* AuroraBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 310BAB0F526B509D794C9F8F /* AuroraBackground.swift */; };
+		91E91AA50515927AEC2EF925 /* VNCViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD91A8E4CBF6638B206BB830 /* VNCViewerView.swift */; };
+		92AC76905AB39D110030E66C /* QuickActionsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40D097CFA59060A1F8A169EC /* QuickActionsPanelView.swift */; };
+		933F531B561BF179EB89FEB9 /* MetricView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395A4DD691CAA324EC11CBD1 /* MetricView.swift */; };
+		941EAC8F6EC80A3726E76FDD /* RemoteDesktopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE55FABF0A44C3E6FE9698E /* RemoteDesktopView.swift */; };
+		945DEDF7F8FDBE33F15F2C7A /* DashboardDataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D22DC77505406627AA516040 /* DashboardDataService.swift */; };
+		96FE8CB503DA57E359B75805 /* BundleModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBDABE257B6C6E3BD17FF38F /* BundleModule.swift */; };
+		970CC0C73DBC716E86E57AD6 /* GPUUsageMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3517C71164458BF6CE15043 /* GPUUsageMonitor.swift */; };
+		9B428D23CA3ECDB5E2A163E4 /* CopyToastView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE3E2F0E44685A79BA4C94DD /* CopyToastView.swift */; };
+		9B5E9C84738C88F50CDDFB5D /* DashboardBackgroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 453B52513C3C99FB3DD15270 /* DashboardBackgroundView.swift */; };
+		A17447C790F9151442DBEC93 /* AuroraBackgroundV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCD3371C10C30C141796DCAD /* AuroraBackgroundV2.swift */; };
+		A1E3DA4D6CDBD4961FFB442C /* AppIconDock.icns in Resources */ = {isa = PBXBuildFile; fileRef = C29A92C78926A2995AB5A04F /* AppIconDock.icns */; };
+		A351D181FFC11D0E226EED9E /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4F654D338CC30B122FE4B133 /* WebKit.framework */; };
 		A4FB6EB862F04D9BB309A69A /* WidgetIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CEA4D01349D879638CC4917 /* WidgetIntents.swift */; };
+		A5B2242292E41B5BE150BCCD /* custom-globe.svg in Resources */ = {isa = PBXBuildFile; fileRef = DE8FF424355FD3A38BD40DEC /* custom-globe.svg */; };
+		A75371379A7B47C826D07860 /* StatCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A11BCD0B79A6F1CDD86265 /* StatCard.swift */; };
+		A754A5A5420B98FC76F858A0 /* UnifiedDeviceDiscoveryIntegrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B71CE711B673A2D01534F10 /* UnifiedDeviceDiscoveryIntegrationView.swift */; };
+		A9EC192B3EAACD1D9DDD648C /* AppleSiliconFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA32C39188C5F008B50B36E5 /* AppleSiliconFeatures.swift */; };
+		AF3A7DB70017A5645EB81DB9 /* SkyBridgeCompassApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 840BCB4182BD17479821AF66 /* SkyBridgeCompassApp.swift */; };
+		AFB7B013F2F76496BAEA8D8D /* GlobalMouseTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */; };
+		AFCFB84CB3BED724BF7B7625 /* SkyBridgeCompassWidgetsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		B024F123E545DB94D950046D /* CrossNetworkConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614723D38FB3796157959949 /* CrossNetworkConnectionView.swift */; };
+		B443104E298B5FCAAAC7AB11 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */; };
+		B70CD70DCDCA73539F3EA1B1 /* AppleSiliconInfoCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE7D0EE9AAE38836D4F2611 /* AppleSiliconInfoCardView.swift */; };
+		B9967812E8862B2D5E969337 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59C11557E4D37206C350EB7 /* AuthenticationView.swift */; };
+		BA379AB843B4BAD867386914 /* SiriIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */; };
+		BC8915FB56BCA3D001CEC9AD /* LiquidGlassUserArea.swift in Sources */ = {isa = PBXBuildFile; fileRef = C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */; };
+		BCCE38FACB757941021C0F32 /* CloudDeviceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E05B03AA449A0E8D2C4820E /* CloudDeviceService.swift */; };
+		BD94EE9880420BECE2D44FBF /* CompactDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAFBEC275559A384FBE1B542 /* CompactDeviceRow.swift */; };
+		C00EEDBECAC4FEC52B10FA31 /* SkyBridgeUI in Frameworks */ = {isa = PBXBuildFile; productRef = 962ACD1027DC997E30E6FD7B /* SkyBridgeUI */; };
+		C3289C4C332751DA0734C68F /* app-icon.svg in Resources */ = {isa = PBXBuildFile; fileRef = 5E3E7BAB3B34858277B55286 /* app-icon.svg */; };
+		C4F836ECF847653206BAA2C7 /* NSTextFieldRepresentable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31C4F642A50FB646F1B464CD /* NSTextFieldRepresentable.swift */; };
+		C91899FAFC645E27B5CFCEC5 /* TrustedDeviceDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */; };
+		D150ECFD3F644A3C36BC983F /* DeepSpaceBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43B75F6178584EDAD57DED90 /* DeepSpaceBackground.swift */; };
 		D18FEAF482D5F10FC9FF76D1 /* SkyBridgeWidgetShared in Frameworks */ = {isa = PBXBuildFile; productRef = 0EEB3E27748D53378DDED79E /* SkyBridgeWidgetShared */; };
+		D1AA0048AE2EFE6CAA48604F /* WeatherDashboardCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A605DDC91BE62D3D7CDC61C7 /* WeatherDashboardCard.swift */; };
+		D453B26935EB98F5D6C3BC0E /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 457DD196A7C6A5E5E3C11952 /* AppIcon.icns */; };
+		D4D432BD658297ACD73A41A1 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */; };
+		D701D1AEA7BC985D7A1E0B81 /* GlassSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5181227F31B316BCC735B8FA /* GlassSidebar.swift */; };
+		DABEA837C02F24603DAE0260 /* SupabaseConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3445ED6C3F4CBF4F08CDBEB5 /* SupabaseConfiguration.swift */; };
+		DF057D8E9931418687E6EAAF /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F4D58C1923FEAD79BD120C04 /* Localizable.strings */; };
+		E02FFD8F6509AEAC92FAC3D7 /* ConcurrentSystemMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31A02FDE90C72D12CAF98806 /* ConcurrentSystemMonitor.swift */; };
+		E1E33C33EF35461B1031B9F9 /* NavigationNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */; };
+		E81FFD20E659CB05F6991F79 /* StarryBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B40C1F0879EFE650598B9D8 /* StarryBackground.swift */; };
+		E93F2D2FEF6DB167B7A65C17 /* NotificationBellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */; };
+		EF8F54C38D35C3042A9F8D2A /* AuthenticationServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7421CFFDEE7371624E428DBF /* AuthenticationServices.framework */; };
+		F2AD1913110B4DC7058F4997 /* RemoteSessionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = F619970AE867A40F81CB88B7 /* RemoteSessionRow.swift */; };
+		F9096AB77DFBB5B022AFA4EE /* SkyBridgeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EF31CD7A8365F25C7F6BDBE /* SkyBridgeCommands.swift */; };
+		FB5D3C7F0F4BCF51EFA9DBD4 /* RemoteSessionStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6DD40EDD84B524150667A28 /* RemoteSessionStatusView.swift */; };
+		FDD48779FE89C3C746869876 /* SupabaseTurnstileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D5F467BEAD915B84BACF7DF /* SupabaseTurnstileView.swift */; };
+		FE0E1D3FD29C2CDD20364243 /* AppIconDock.png in Resources */ = {isa = PBXBuildFile; fileRef = 033230544C8FB70DBDF38544 /* AppIconDock.png */; };
+		FEB4E5F083CBE09135FC0B5A /* BackgroundControlManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C029BBBAD7F82EA70394637A /* BackgroundControlManager.swift */; };
+		FF7C91DAC645B2312CA969B0 /* RemoteSessionsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9084B8D1A2C8E96846F2EABC /* RemoteSessionsPanelView.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		F7E4FA72F5FA0ECDAE6E2A50 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 620DCBF70F533292B94D88C3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 33EDECE841DEB307763D7C42;
+			remoteInfo = SkyBridgeCompassWidgetsExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D89476B82486194D80E7A3F7 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				AFCFB84CB3BED724BF7B7625 /* SkyBridgeCompassWidgetsExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
+		033230544C8FB70DBDF38544 /* AppIconDock.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = AppIconDock.png; sourceTree = "<group>"; };
+		06339FDDB8B71E52F8BD41F9 /* MetricChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricChartView.swift; sourceTree = "<group>"; };
+		09525D33288E26F88FF2AA60 /* AppleSiliconSystemCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSiliconSystemCoordinator.swift; sourceTree = "<group>"; };
+		0BE7D0EE9AAE38836D4F2611 /* AppleSiliconInfoCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSiliconInfoCardView.swift; sourceTree = "<group>"; };
+		10384E630E9ABF87508AC6ED /* BrandIcon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = BrandIcon.png; sourceTree = "<group>"; };
 		1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SkyBridgeCompassWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		271098ACD4DC0594546D9468 /* EventMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventMonitor.swift; sourceTree = "<group>"; };
+		27F1FDDA6E8134F99044B055 /* QuickActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionButton.swift; sourceTree = "<group>"; };
+		28A863D8FACC89865E5B02AE /* StartupCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupCoordinator.swift; sourceTree = "<group>"; };
 		2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppIntents.framework; sourceTree = "<group>"; };
+		2D9A4EDD78AB3ED51D441734 /* FileTransferRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferRow.swift; sourceTree = "<group>"; };
+		2E06A601920A0654D26DC0CF /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		2F34F8DCDE6691F163DC5C82 /* SkyBridgeCompassMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SkyBridgeCompassMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedDeviceDiscoveryView.swift; sourceTree = "<group>"; };
+		310BAB0F526B509D794C9F8F /* AuroraBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuroraBackground.swift; sourceTree = "<group>"; };
+		3193C5594A0A8D869E8AFC70 /* WeatherStatCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherStatCard.swift; sourceTree = "<group>"; };
+		31A02FDE90C72D12CAF98806 /* ConcurrentSystemMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConcurrentSystemMonitor.swift; sourceTree = "<group>"; };
+		31C4F642A50FB646F1B464CD /* NSTextFieldRepresentable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NSTextFieldRepresentable.swift; sourceTree = "<group>"; };
+		3388F3763B3264B31C56F6A4 /* ClassicBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicBackground.swift; sourceTree = "<group>"; };
+		3445ED6C3F4CBF4F08CDBEB5 /* SupabaseConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseConfiguration.swift; sourceTree = "<group>"; };
+		395A4DD691CAA324EC11CBD1 /* MetricView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricView.swift; sourceTree = "<group>"; };
+		39D2A37D92B82FBD25E719A3 /* UserProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserProfileView.swift; sourceTree = "<group>"; };
+		3AE55FABF0A44C3E6FE9698E /* RemoteDesktopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopView.swift; sourceTree = "<group>"; };
+		3B71CE711B673A2D01534F10 /* UnifiedDeviceDiscoveryIntegrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnifiedDeviceDiscoveryIntegrationView.swift; sourceTree = "<group>"; };
+		40D097CFA59060A1F8A169EC /* QuickActionsPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionsPanelView.swift; sourceTree = "<group>"; };
+		43B75F6178584EDAD57DED90 /* DeepSpaceBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepSpaceBackground.swift; sourceTree = "<group>"; };
+		451C648AD24D1A64C8C8D3CC /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
+		453B52513C3C99FB3DD15270 /* DashboardBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardBackgroundView.swift; sourceTree = "<group>"; };
+		457DD196A7C6A5E5E3C11952 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
+		4AA118FAF4446AA7A926A272 /* PerformanceMetricRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMetricRow.swift; sourceTree = "<group>"; };
+		4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustedDeviceDetailView.swift; sourceTree = "<group>"; };
+		4C0310489E5FE84E88C2AA09 /* DashboardViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardViewModel.swift; sourceTree = "<group>"; };
+		4EBDD94C659F2EC1275A278C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		4F654D338CC30B122FE4B133 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = WebKit.framework; sourceTree = "<group>"; };
+		5181227F31B316BCC735B8FA /* GlassSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassSidebar.swift; sourceTree = "<group>"; };
+		5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalMouseTracker.swift; sourceTree = "<group>"; };
+		5BA0B3F8DBAA95AD39757262 /* PerformanceMonitoringPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMonitoringPanelView.swift; sourceTree = "<group>"; };
 		5CEA4D01349D879638CC4917 /* WidgetIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetIntents.swift; sourceTree = "<group>"; };
+		5E3E7BAB3B34858277B55286 /* app-icon.svg */ = {isa = PBXFileReference; path = "app-icon.svg"; sourceTree = "<group>"; };
+		5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiriIntents.swift; sourceTree = "<group>"; };
+		614723D38FB3796157959949 /* CrossNetworkConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkConnectionView.swift; sourceTree = "<group>"; };
+		6D5F467BEAD915B84BACF7DF /* SupabaseTurnstileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseTurnstileView.swift; sourceTree = "<group>"; };
 		6F343001F48A7DD45E78B48B /* SkyBridge Compass Pro release */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "SkyBridge Compass Pro release"; path = .; sourceTree = SOURCE_ROOT; };
+		71D9EF4C7CF9BE849F017EDA /* DeviceChainViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceChainViewModel.swift; sourceTree = "<group>"; };
+		72CCFF8EFF1A7A7B473878F4 /* USBDeviceManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USBDeviceManagementView.swift; sourceTree = "<group>"; };
+		72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationBellView.swift; sourceTree = "<group>"; };
+		7421CFFDEE7371624E428DBF /* AuthenticationServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AuthenticationServices.framework; sourceTree = "<group>"; };
+		74DF29B58CA8ADE6A6AD3F74 /* DashboardContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardContentView.swift; sourceTree = "<group>"; };
+		80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldMirrorView.swift; sourceTree = "<group>"; };
+		825CF90D2A0365C9B9F0A7F5 /* CustomBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomBackgroundView.swift; sourceTree = "<group>"; };
+		83227A90FFD3F72879561C7C /* PerformanceErrorHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceErrorHandler.swift; sourceTree = "<group>"; };
+		840BCB4182BD17479821AF66 /* SkyBridgeCompassApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeCompassApp.swift; sourceTree = "<group>"; };
+		85A2082093DBBCD396198A9C /* MissingIconHintView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissingIconHintView.swift; sourceTree = "<group>"; };
+		8793A89866E33950D6F13A33 /* EnhancedDeviceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedDeviceRow.swift; sourceTree = "<group>"; };
+		88E0064CA0B644C4F8C054C1 /* MetricsTimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricsTimelineView.swift; sourceTree = "<group>"; };
+		8ADADBFE1FDEAD8FBEFE21B7 /* DMGBackgroundRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DMGBackgroundRenderer.swift; sourceTree = "<group>"; };
+		8B1FB7AA1712E13D6F941B63 /* RemoteDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDisplayView.swift; sourceTree = "<group>"; };
+		8B40C1F0879EFE650598B9D8 /* StarryBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StarryBackground.swift; sourceTree = "<group>"; };
+		8EF31CD7A8365F25C7F6BDBE /* SkyBridgeCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeCommands.swift; sourceTree = "<group>"; };
+		904A7A42479065B9367A8E4D /* SSHTerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTerminalView.swift; sourceTree = "<group>"; };
+		9084B8D1A2C8E96846F2EABC /* RemoteSessionsPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionsPanelView.swift; sourceTree = "<group>"; };
+		90E4C0DD7117D686BDBD4290 /* GlobalHazeBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHazeBackground.swift; sourceTree = "<group>"; };
+		96EC655F5DBE77E1A3D0BFBD /* AppleSiliconOptimizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSiliconOptimizer.swift; sourceTree = "<group>"; };
+		9842147459203026BBF10390 /* UserNotifications.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = UserNotifications.framework; sourceTree = "<group>"; };
+		9E05B03AA449A0E8D2C4820E /* CloudDeviceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudDeviceService.swift; sourceTree = "<group>"; };
+		9F8976817A70651D31498598 /* SVGEmbeddedImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVGEmbeddedImageView.swift; sourceTree = "<group>"; };
+		9FD3678EA90CE43D8B206FD5 /* RealTimeWeatherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealTimeWeatherService.swift; sourceTree = "<group>"; };
+		A4A43A751BE9D7EF1691A7E4 /* PerformanceMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMonitor.swift; sourceTree = "<group>"; };
+		A605DDC91BE62D3D7CDC61C7 /* WeatherDashboardCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherDashboardCard.swift; sourceTree = "<group>"; };
+		A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationNotifications.swift; sourceTree = "<group>"; };
+		A8D1E1B2B213D3C7CA21D24F /* ThemeConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeConfiguration.swift; sourceTree = "<group>"; };
 		AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = WidgetKit.framework; sourceTree = "<group>"; };
+		AAFBEC275559A384FBE1B542 /* CompactDeviceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactDeviceRow.swift; sourceTree = "<group>"; };
+		B59C11557E4D37206C350EB7 /* AuthenticationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationView.swift; sourceTree = "<group>"; };
+		B7A11BCD0B79A6F1CDD86265 /* StatCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatCard.swift; sourceTree = "<group>"; };
+		B94E56E85A4296340AE2361F /* PreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesView.swift; sourceTree = "<group>"; };
+		BA32C39188C5F008B50B36E5 /* AppleSiliconFeatures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSiliconFeatures.swift; sourceTree = "<group>"; };
+		BBDABE257B6C6E3BD17FF38F /* BundleModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleModule.swift; sourceTree = "<group>"; };
+		BC06DE625F848AA1986847EB /* NavigationItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationItem.swift; sourceTree = "<group>"; };
+		BCCDC5283DA30812C545D629 /* OnlineDeviceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineDeviceRow.swift; sourceTree = "<group>"; };
+		BCD3371C10C30C141796DCAD /* AuroraBackgroundV2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuroraBackgroundV2.swift; sourceTree = "<group>"; };
+		BFFF0177072A08B62103F153 /* app_icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = app_icon.png; sourceTree = "<group>"; };
+		C029BBBAD7F82EA70394637A /* BackgroundControlManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundControlManager.swift; sourceTree = "<group>"; };
+		C06FBCEF936A2D2849046F52 /* TopNavigationBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopNavigationBarView.swift; sourceTree = "<group>"; };
+		C29A92C78926A2995AB5A04F /* AppIconDock.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIconDock.icns; sourceTree = "<group>"; };
+		C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassUserArea.swift; sourceTree = "<group>"; };
+		C6DD40EDD84B524150667A28 /* RemoteSessionStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionStatusView.swift; sourceTree = "<group>"; };
+		C7AA82D7D5FC282FEB03C6D1 /* UserProfileOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserProfileOverlay.swift; sourceTree = "<group>"; };
+		CC73A329850D8E20553B4C60 /* MetalPerformanceOptimizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalPerformanceOptimizer.swift; sourceTree = "<group>"; };
+		CD76C79AD9E56BFA57C1F041 /* SystemMetricsPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemMetricsPanelView.swift; sourceTree = "<group>"; };
+		CF5DB93E00D44E869300B260 /* LocalP2PFileTransferSmokeHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalP2PFileTransferSmokeHarness.swift; sourceTree = "<group>"; };
+		CFCE049A1A7724672405473E /* GlobalHazeShaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GlobalHazeShaders.metal; sourceTree = "<group>"; };
+		CFEB5C8A3A97F114A59348AC /* DeviceDiscoveryPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDiscoveryPanelView.swift; sourceTree = "<group>"; };
+		D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentPathDeviceActivationCoordinator.swift; sourceTree = "<group>"; };
+		D138E4FDB3B74C8B610ED913 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudDeviceListViewModel.swift; sourceTree = "<group>"; };
+		D22DC77505406627AA516040 /* DashboardDataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardDataService.swift; sourceTree = "<group>"; };
+		D3517C71164458BF6CE15043 /* GPUUsageMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUUsageMonitor.swift; sourceTree = "<group>"; };
+		D759DFEDD41AB404216F0021 /* about-main-icon.svg */ = {isa = PBXFileReference; path = "about-main-icon.svg"; sourceTree = "<group>"; };
 		D77D1FEE9D791CA02A737B6C /* CompassWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompassWidget.swift; sourceTree = "<group>"; };
+		D7A7DACBA6F3DD4E715607BD /* AuthenticationViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationViewModel.swift; sourceTree = "<group>"; };
+		D981C5DE0E776952AD0B0761 /* LocalPeerServiceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPeerServiceCoordinator.swift; sourceTree = "<group>"; };
+		DD91A8E4CBF6638B206BB830 /* VNCViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VNCViewerView.swift; sourceTree = "<group>"; };
+		DE3E2F0E44685A79BA4C94DD /* CopyToastView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyToastView.swift; sourceTree = "<group>"; };
+		DE8FF424355FD3A38BD40DEC /* custom-globe.svg */ = {isa = PBXFileReference; path = "custom-globe.svg"; sourceTree = "<group>"; };
+		E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderedCollectionsFallback.swift; sourceTree = "<group>"; };
+		EB79A9CD6CDE01E4D03B7052 /* AppIcon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = AppIcon.png; sourceTree = "<group>"; };
+		F059831D58B7E74D438B7946 /* AppIconMaster.svg */ = {isa = PBXFileReference; path = AppIconMaster.svg; sourceTree = "<group>"; };
+		F08A9E6530CC6C2AB42A1164 /* WindowFocusManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFocusManager.swift; sourceTree = "<group>"; };
+		F619970AE867A40F81CB88B7 /* RemoteSessionRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionRow.swift; sourceTree = "<group>"; };
+		F63965829D3ABAF0609035D3 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		F82B594F9E6F32F8BBED768E /* EmptyStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyStateView.swift; sourceTree = "<group>"; };
+		FDC840D20233F0618288F1E6 /* ClassicBackgroundV2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicBackgroundV2.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		2E2945BB3663704CC7F25280 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6820DA289F7FA98B38EBE133 /* SkyBridgeCore in Frameworks */,
+				C00EEDBECAC4FEC52B10FA31 /* SkyBridgeUI in Frameworks */,
+				64A3EA9E284F96AF9C3084B2 /* SkyBridgeVisualParity in Frameworks */,
+				2A3B800F46EE5850165847B5 /* SkyBridgeProtocolCore in Frameworks */,
+				254927ADE12338ECAA061354 /* OrderedCollections in Frameworks */,
+				D4D432BD658297ACD73A41A1 /* AppIntents.framework in Frameworks */,
+				B443104E298B5FCAAAC7AB11 /* WidgetKit.framework in Frameworks */,
+				5A25017DFEF93E116ECA08E2 /* SwiftUI.framework in Frameworks */,
+				EF8F54C38D35C3042A9F8D2A /* AuthenticationServices.framework in Frameworks */,
+				A351D181FFC11D0E226EED9E /* WebKit.framework in Frameworks */,
+				1CD6D2548A45F0CE0B868CAE /* UserNotifications.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		4EA46C07DE6CCC6F4FE98192 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -44,28 +306,193 @@
 			isa = PBXGroup;
 			children = (
 				2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */,
+				7421CFFDEE7371624E428DBF /* AuthenticationServices.framework */,
 				011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */,
+				9842147459203026BBF10390 /* UserNotifications.framework */,
+				4F654D338CC30B122FE4B133 /* WebKit.framework */,
 				AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		17FCD93C560B29836849A9F2 /* Dashboard */ = {
+			isa = PBXGroup;
+			children = (
+				453B52513C3C99FB3DD15270 /* DashboardBackgroundView.swift */,
+				2E06A601920A0654D26DC0CF /* DashboardView.swift */,
+				82FF3543520062B6996BF2EC /* Components */,
+				AF250E9FB2DCB4A19E4E26A7 /* Navigation */,
+				B4FAF91F5B79E59E39668B94 /* Sections */,
+				BBB3D28210DDA1CFD319C2E9 /* TopBar */,
+			);
+			path = Dashboard;
+			sourceTree = "<group>";
+		};
 		418E4BEA2662B71E9BBADC6C /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				2F34F8DCDE6691F163DC5C82 /* SkyBridgeCompassMac.app */,
 				1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		4BDCDB24F480C3605ADA2515 /* Icons */ = {
+			isa = PBXGroup;
+			children = (
+				D759DFEDD41AB404216F0021 /* about-main-icon.svg */,
+				DE8FF424355FD3A38BD40DEC /* custom-globe.svg */,
+			);
+			path = Icons;
+			sourceTree = "<group>";
+		};
+		552266FC4F792A927F711658 /* SkyBridgeCompassApp */ = {
+			isa = PBXGroup;
+			children = (
+				310BAB0F526B509D794C9F8F /* AuroraBackground.swift */,
+				BCD3371C10C30C141796DCAD /* AuroraBackgroundV2.swift */,
+				B59C11557E4D37206C350EB7 /* AuthenticationView.swift */,
+				D7A7DACBA6F3DD4E715607BD /* AuthenticationViewModel.swift */,
+				C029BBBAD7F82EA70394637A /* BackgroundControlManager.swift */,
+				3388F3763B3264B31C56F6A4 /* ClassicBackground.swift */,
+				FDC840D20233F0618288F1E6 /* ClassicBackgroundV2.swift */,
+				825CF90D2A0365C9B9F0A7F5 /* CustomBackgroundView.swift */,
+				4C0310489E5FE84E88C2AA09 /* DashboardViewModel.swift */,
+				43B75F6178584EDAD57DED90 /* DeepSpaceBackground.swift */,
+				271098ACD4DC0594546D9468 /* EventMonitor.swift */,
+				5181227F31B316BCC735B8FA /* GlassSidebar.swift */,
+				90E4C0DD7117D686BDBD4290 /* GlobalHazeBackground.swift */,
+				CFCE049A1A7724672405473E /* GlobalHazeShaders.metal */,
+				5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */,
+				CF5DB93E00D44E869300B260 /* LocalP2PFileTransferSmokeHarness.swift */,
+				D981C5DE0E776952AD0B0761 /* LocalPeerServiceCoordinator.swift */,
+				85A2082093DBBCD396198A9C /* MissingIconHintView.swift */,
+				A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */,
+				31C4F642A50FB646F1B464CD /* NSTextFieldRepresentable.swift */,
+				E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */,
+				B94E56E85A4296340AE2361F /* PreferencesView.swift */,
+				3AE55FABF0A44C3E6FE9698E /* RemoteDesktopView.swift */,
+				8B1FB7AA1712E13D6F941B63 /* RemoteDisplayView.swift */,
+				5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */,
+				8EF31CD7A8365F25C7F6BDBE /* SkyBridgeCommands.swift */,
+				840BCB4182BD17479821AF66 /* SkyBridgeCompassApp.swift */,
+				8B40C1F0879EFE650598B9D8 /* StarryBackground.swift */,
+				3445ED6C3F4CBF4F08CDBEB5 /* SupabaseConfiguration.swift */,
+				6D5F467BEAD915B84BACF7DF /* SupabaseTurnstileView.swift */,
+				9F8976817A70651D31498598 /* SVGEmbeddedImageView.swift */,
+				A8D1E1B2B213D3C7CA21D24F /* ThemeConfiguration.swift */,
+				C7AA82D7D5FC282FEB03C6D1 /* UserProfileOverlay.swift */,
+				39D2A37D92B82FBD25E719A3 /* UserProfileView.swift */,
+				F08A9E6530CC6C2AB42A1164 /* WindowFocusManager.swift */,
+				D4E2E05D12D968E7C4EDB03F /* Core */,
+				17FCD93C560B29836849A9F2 /* Dashboard */,
+				CA217FF10CD52FF77653663E /* Monitoring */,
+				56FB408858272D2FFA8F6DB4 /* Resources */,
+				5794F40FE79DFC3FF1BD8A0E /* Services */,
+				68926376459D95DD2C58F268 /* Utilities */,
+				9DD7ADDD2B217C1710934D7C /* ViewModels */,
+				55FC17AEF69153420C3FC65C /* Views */,
+			);
+			name = SkyBridgeCompassApp;
+			path = Sources/SkyBridgeCompassApp;
+			sourceTree = "<group>";
+		};
+		55FC17AEF69153420C3FC65C /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				DE3E2F0E44685A79BA4C94DD /* CopyToastView.swift */,
+				614723D38FB3796157959949 /* CrossNetworkConnectionView.swift */,
+				2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */,
+				C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */,
+				80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */,
+				72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */,
+				904A7A42479065B9367A8E4D /* SSHTerminalView.swift */,
+				4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */,
+				3B71CE711B673A2D01534F10 /* UnifiedDeviceDiscoveryIntegrationView.swift */,
+				72CCFF8EFF1A7A7B473878F4 /* USBDeviceManagementView.swift */,
+				DD91A8E4CBF6638B206BB830 /* VNCViewerView.swift */,
+				A605DDC91BE62D3D7CDC61C7 /* WeatherDashboardCard.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		56FB408858272D2FFA8F6DB4 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				BFFF0177072A08B62103F153 /* app_icon.png */,
+				5E3E7BAB3B34858277B55286 /* app-icon.svg */,
+				457DD196A7C6A5E5E3C11952 /* AppIcon.icns */,
+				EB79A9CD6CDE01E4D03B7052 /* AppIcon.png */,
+				C29A92C78926A2995AB5A04F /* AppIconDock.icns */,
+				033230544C8FB70DBDF38544 /* AppIconDock.png */,
+				F059831D58B7E74D438B7946 /* AppIconMaster.svg */,
+				4EBDD94C659F2EC1275A278C /* Assets.xcassets */,
+				10384E630E9ABF87508AC6ED /* BrandIcon.png */,
+				F4D58C1923FEAD79BD120C04 /* Localizable.strings */,
+				4BDCDB24F480C3605ADA2515 /* Icons */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		5794F40FE79DFC3FF1BD8A0E /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				9E05B03AA449A0E8D2C4820E /* CloudDeviceService.swift */,
+				D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */,
+				D22DC77505406627AA516040 /* DashboardDataService.swift */,
+				F0BFA79F007535E0ADD84BC2 /* Weather */,
+			);
+			path = Services;
 			sourceTree = "<group>";
 		};
 		59D635831C028CE2A3D68EF0 = {
 			isa = PBXGroup;
 			children = (
 				A6A3A17372289871EB86E959 /* Packages */,
+				552266FC4F792A927F711658 /* SkyBridgeCompassApp */,
+				F19E6D85F753B77A03083B23 /* SkyBridgeCompassMac */,
 				BD1AD8B65B38F1A9EE92C573 /* SkyBridgeCompassWidgets */,
 				007FBC1553557CC3FB082A58 /* Frameworks */,
 				418E4BEA2662B71E9BBADC6C /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		68926376459D95DD2C58F268 /* Utilities */ = {
+			isa = PBXGroup;
+			children = (
+				8ADADBFE1FDEAD8FBEFE21B7 /* DMGBackgroundRenderer.swift */,
+			);
+			path = Utilities;
+			sourceTree = "<group>";
+		};
+		82FF3543520062B6996BF2EC /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				AAFBEC275559A384FBE1B542 /* CompactDeviceRow.swift */,
+				F82B594F9E6F32F8BBED768E /* EmptyStateView.swift */,
+				8793A89866E33950D6F13A33 /* EnhancedDeviceRow.swift */,
+				2D9A4EDD78AB3ED51D441734 /* FileTransferRow.swift */,
+				06339FDDB8B71E52F8BD41F9 /* MetricChartView.swift */,
+				88E0064CA0B644C4F8C054C1 /* MetricsTimelineView.swift */,
+				395A4DD691CAA324EC11CBD1 /* MetricView.swift */,
+				BCCDC5283DA30812C545D629 /* OnlineDeviceRow.swift */,
+				4AA118FAF4446AA7A926A272 /* PerformanceMetricRow.swift */,
+				27F1FDDA6E8134F99044B055 /* QuickActionButton.swift */,
+				F619970AE867A40F81CB88B7 /* RemoteSessionRow.swift */,
+				C6DD40EDD84B524150667A28 /* RemoteSessionStatusView.swift */,
+				B7A11BCD0B79A6F1CDD86265 /* StatCard.swift */,
+				3193C5594A0A8D869E8AFC70 /* WeatherStatCard.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		9DD7ADDD2B217C1710934D7C /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */,
+				71D9EF4C7CF9BE849F017EDA /* DeviceChainViewModel.swift */,
+			);
+			path = ViewModels;
 			sourceTree = "<group>";
 		};
 		A6A3A17372289871EB86E959 /* Packages */ = {
@@ -73,7 +500,37 @@
 			children = (
 				6F343001F48A7DD45E78B48B /* SkyBridge Compass Pro release */,
 			);
-			path = Packages;
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		AF250E9FB2DCB4A19E4E26A7 /* Navigation */ = {
+			isa = PBXGroup;
+			children = (
+				BC06DE625F848AA1986847EB /* NavigationItem.swift */,
+			);
+			path = Navigation;
+			sourceTree = "<group>";
+		};
+		B4FAF91F5B79E59E39668B94 /* Sections */ = {
+			isa = PBXGroup;
+			children = (
+				0BE7D0EE9AAE38836D4F2611 /* AppleSiliconInfoCardView.swift */,
+				74DF29B58CA8ADE6A6AD3F74 /* DashboardContentView.swift */,
+				CFEB5C8A3A97F114A59348AC /* DeviceDiscoveryPanelView.swift */,
+				5BA0B3F8DBAA95AD39757262 /* PerformanceMonitoringPanelView.swift */,
+				40D097CFA59060A1F8A169EC /* QuickActionsPanelView.swift */,
+				9084B8D1A2C8E96846F2EABC /* RemoteSessionsPanelView.swift */,
+				CD76C79AD9E56BFA57C1F041 /* SystemMetricsPanelView.swift */,
+			);
+			path = Sections;
+			sourceTree = "<group>";
+		};
+		BBB3D28210DDA1CFD319C2E9 /* TopBar */ = {
+			isa = PBXGroup;
+			children = (
+				C06FBCEF936A2D2849046F52 /* TopNavigationBarView.swift */,
+			);
+			path = TopBar;
 			sourceTree = "<group>";
 		};
 		BD1AD8B65B38F1A9EE92C573 /* SkyBridgeCompassWidgets */ = {
@@ -84,6 +541,54 @@
 			);
 			name = SkyBridgeCompassWidgets;
 			path = Sources/SkyBridgeCompassWidgets;
+			sourceTree = "<group>";
+		};
+		CA217FF10CD52FF77653663E /* Monitoring */ = {
+			isa = PBXGroup;
+			children = (
+				09525D33288E26F88FF2AA60 /* AppleSiliconSystemCoordinator.swift */,
+			);
+			path = Monitoring;
+			sourceTree = "<group>";
+		};
+		D4E2E05D12D968E7C4EDB03F /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				28A863D8FACC89865E5B02AE /* StartupCoordinator.swift */,
+				DEE7E62298D19D7544B08904 /* Performance */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		DEE7E62298D19D7544B08904 /* Performance */ = {
+			isa = PBXGroup;
+			children = (
+				BA32C39188C5F008B50B36E5 /* AppleSiliconFeatures.swift */,
+				96EC655F5DBE77E1A3D0BFBD /* AppleSiliconOptimizer.swift */,
+				31A02FDE90C72D12CAF98806 /* ConcurrentSystemMonitor.swift */,
+				D3517C71164458BF6CE15043 /* GPUUsageMonitor.swift */,
+				CC73A329850D8E20553B4C60 /* MetalPerformanceOptimizer.swift */,
+				83227A90FFD3F72879561C7C /* PerformanceErrorHandler.swift */,
+				A4A43A751BE9D7EF1691A7E4 /* PerformanceMonitor.swift */,
+			);
+			path = Performance;
+			sourceTree = "<group>";
+		};
+		F0BFA79F007535E0ADD84BC2 /* Weather */ = {
+			isa = PBXGroup;
+			children = (
+				9FD3678EA90CE43D8B206FD5 /* RealTimeWeatherService.swift */,
+			);
+			path = Weather;
+			sourceTree = "<group>";
+		};
+		F19E6D85F753B77A03083B23 /* SkyBridgeCompassMac */ = {
+			isa = PBXGroup;
+			children = (
+				BBDABE257B6C6E3BD17FF38F /* BundleModule.swift */,
+			);
+			name = SkyBridgeCompassMac;
+			path = XcodeSupport/SkyBridgeCompassMac;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -108,6 +613,32 @@
 			productReference = 1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		D9BE6C0C8A91425F9D51A6D7 /* SkyBridgeCompassMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BD5E5B7CEC1F835AC8AFA058 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassMac" */;
+			buildPhases = (
+				490846018FEF8931A893C8D1 /* Sources */,
+				BF892A9EF24111D8DF30BFEB /* Resources */,
+				2E2945BB3663704CC7F25280 /* Frameworks */,
+				D89476B82486194D80E7A3F7 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A22CFF3B88EEAD7AFABC4F1D /* PBXTargetDependency */,
+			);
+			name = SkyBridgeCompassMac;
+			packageProductDependencies = (
+				921C38E07E934A5CDB49F41E /* SkyBridgeCore */,
+				962ACD1027DC997E30E6FD7B /* SkyBridgeUI */,
+				207088C036D7A7F97A6A0444 /* SkyBridgeVisualParity */,
+				E0E308E97B432D86D27EEC34 /* SkyBridgeProtocolCore */,
+				40C692463D61FF3FD0CFD937 /* OrderedCollections */,
+			);
+			productName = SkyBridgeCompassMac;
+			productReference = 2F34F8DCDE6691F163DC5C82 /* SkyBridgeCompassMac.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -115,9 +646,12 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 1500;
+				LastUpgradeCheck = 2640;
 				TargetAttributes = {
 					33EDECE841DEB307763D7C42 = {
+						ProvisioningStyle = Manual;
+					};
+					D9BE6C0C8A91425F9D51A6D7 = {
 						ProvisioningStyle = Manual;
 					};
 				};
@@ -128,23 +662,145 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				Base,
+				en,
+				ja,
 				"zh-Hans",
 			);
 			mainGroup = 59D635831C028CE2A3D68EF0;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				4C8D120A079758A614584FDB /* XCRemoteSwiftPackageReference "swift-collections" */,
 				693E3FFB165133393C01CBB9 /* XCLocalSwiftPackageReference "." */,
 			);
 			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				D9BE6C0C8A91425F9D51A6D7 /* SkyBridgeCompassMac */,
 				33EDECE841DEB307763D7C42 /* SkyBridgeCompassWidgetsExtension */,
 			);
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		BF892A9EF24111D8DF30BFEB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D453B26935EB98F5D6C3BC0E /* AppIcon.icns in Resources */,
+				1B615D30B7949E25F0242CB4 /* AppIcon.png in Resources */,
+				A1E3DA4D6CDBD4961FFB442C /* AppIconDock.icns in Resources */,
+				FE0E1D3FD29C2CDD20364243 /* AppIconDock.png in Resources */,
+				222CA52844563ADD78381D08 /* AppIconMaster.svg in Resources */,
+				6696E14B73BEF52586DD13EA /* Assets.xcassets in Resources */,
+				617E33E5B02A7202C97933CD /* BrandIcon.png in Resources */,
+				DF057D8E9931418687E6EAAF /* Localizable.strings in Resources */,
+				46F3D5F3C45056CD18AE4355 /* about-main-icon.svg in Resources */,
+				C3289C4C332751DA0734C68F /* app-icon.svg in Resources */,
+				1648DA143122FEAE697FC7F8 /* app_icon.png in Resources */,
+				A5B2242292E41B5BE150BCCD /* custom-globe.svg in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
+		490846018FEF8931A893C8D1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A9EC192B3EAACD1D9DDD648C /* AppleSiliconFeatures.swift in Sources */,
+				B70CD70DCDCA73539F3EA1B1 /* AppleSiliconInfoCardView.swift in Sources */,
+				21C986C5254A1432048CEC23 /* AppleSiliconOptimizer.swift in Sources */,
+				7A447F0A23637367C8D92BD7 /* AppleSiliconSystemCoordinator.swift in Sources */,
+				91C63733F74A311A141A022C /* AuroraBackground.swift in Sources */,
+				A17447C790F9151442DBEC93 /* AuroraBackgroundV2.swift in Sources */,
+				B9967812E8862B2D5E969337 /* AuthenticationView.swift in Sources */,
+				83E3064711CB4C8FDB487DAB /* AuthenticationViewModel.swift in Sources */,
+				FEB4E5F083CBE09135FC0B5A /* BackgroundControlManager.swift in Sources */,
+				96FE8CB503DA57E359B75805 /* BundleModule.swift in Sources */,
+				5EE1800E4C259668BD77A84C /* ClassicBackground.swift in Sources */,
+				5C76D7E4E513E62149275F6A /* ClassicBackgroundV2.swift in Sources */,
+				513D63C5FD6A64DCFB0E0437 /* CloudDeviceListViewModel.swift in Sources */,
+				BCCE38FACB757941021C0F32 /* CloudDeviceService.swift in Sources */,
+				BD94EE9880420BECE2D44FBF /* CompactDeviceRow.swift in Sources */,
+				E02FFD8F6509AEAC92FAC3D7 /* ConcurrentSystemMonitor.swift in Sources */,
+				9B428D23CA3ECDB5E2A163E4 /* CopyToastView.swift in Sources */,
+				B024F123E545DB94D950046D /* CrossNetworkConnectionView.swift in Sources */,
+				2E251BC35BA073961CBEF59F /* CurrentPathDeviceActivationCoordinator.swift in Sources */,
+				0B678571CB3B88CBD991C927 /* CustomBackgroundView.swift in Sources */,
+				7423F51C7AA49B9CFF3823AD /* DMGBackgroundRenderer.swift in Sources */,
+				9B5E9C84738C88F50CDDFB5D /* DashboardBackgroundView.swift in Sources */,
+				4950910AF6588D333D47018B /* DashboardContentView.swift in Sources */,
+				945DEDF7F8FDBE33F15F2C7A /* DashboardDataService.swift in Sources */,
+				7AC9D3D4188016B890EBE9A0 /* DashboardView.swift in Sources */,
+				3685AE9894ADAC0AC97FAE1C /* DashboardViewModel.swift in Sources */,
+				D150ECFD3F644A3C36BC983F /* DeepSpaceBackground.swift in Sources */,
+				508D04834661A08F8BCF47C4 /* DeviceChainViewModel.swift in Sources */,
+				87D4E408B8934CF67E9FF500 /* DeviceDiscoveryPanelView.swift in Sources */,
+				09AC369A1BA081BB3C128EE7 /* EmptyStateView.swift in Sources */,
+				4202FE43689DB0FAFA65F335 /* EnhancedDeviceDiscoveryView.swift in Sources */,
+				61117B98453EDD7EFFB38D6A /* EnhancedDeviceRow.swift in Sources */,
+				2924D972BBAC27169E7EE8F6 /* EventMonitor.swift in Sources */,
+				5C993AF7FD43EAFB765E4AC7 /* FileTransferRow.swift in Sources */,
+				970CC0C73DBC716E86E57AD6 /* GPUUsageMonitor.swift in Sources */,
+				D701D1AEA7BC985D7A1E0B81 /* GlassSidebar.swift in Sources */,
+				8C0E69CAD7A7861098A4EFD4 /* GlobalHazeBackground.swift in Sources */,
+				14F0E1D218B84170A8F10BCE /* GlobalHazeShaders.metal in Sources */,
+				AFB7B013F2F76496BAEA8D8D /* GlobalMouseTracker.swift in Sources */,
+				BC8915FB56BCA3D001CEC9AD /* LiquidGlassUserArea.swift in Sources */,
+				509C55AFB81E4008B1B5D0F4 /* LocalP2PFileTransferSmokeHarness.swift in Sources */,
+				719D81F3008816D48A6AA1EB /* LocalPeerServiceCoordinator.swift in Sources */,
+				4195DB68957C37F2112E4114 /* MetalPerformanceOptimizer.swift in Sources */,
+				33AB642A10F5D94F285B83FC /* MetricChartView.swift in Sources */,
+				933F531B561BF179EB89FEB9 /* MetricView.swift in Sources */,
+				6B9C2343C5BE6AFBB0F37B2F /* MetricsTimelineView.swift in Sources */,
+				589EE25508C29C0854EB4912 /* MissingIconHintView.swift in Sources */,
+				C4F836ECF847653206BAA2C7 /* NSTextFieldRepresentable.swift in Sources */,
+				460A1A9C2CD7B05278490283 /* NavigationItem.swift in Sources */,
+				E1E33C33EF35461B1031B9F9 /* NavigationNotifications.swift in Sources */,
+				7905FFC1F533B585ED3BA250 /* NearFieldMirrorView.swift in Sources */,
+				E93F2D2FEF6DB167B7A65C17 /* NotificationBellView.swift in Sources */,
+				56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */,
+				732868A8F7E1C04A5E32E73C /* OrderedCollectionsFallback.swift in Sources */,
+				8B7E29A1DF3C80E7F309FE53 /* PerformanceErrorHandler.swift in Sources */,
+				04C415DA7E1F652E680E5D0C /* PerformanceMetricRow.swift in Sources */,
+				3E1E8CDD5E02C9D0EBFE7DC2 /* PerformanceMonitor.swift in Sources */,
+				8604A809C8518BE2CC1E8129 /* PerformanceMonitoringPanelView.swift in Sources */,
+				2F9EFBC936751A50E4539FC5 /* PreferencesView.swift in Sources */,
+				195373F5C2826F2164ADA210 /* QuickActionButton.swift in Sources */,
+				92AC76905AB39D110030E66C /* QuickActionsPanelView.swift in Sources */,
+				4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */,
+				941EAC8F6EC80A3726E76FDD /* RemoteDesktopView.swift in Sources */,
+				1107809D175EC5DE28930559 /* RemoteDisplayView.swift in Sources */,
+				F2AD1913110B4DC7058F4997 /* RemoteSessionRow.swift in Sources */,
+				FB5D3C7F0F4BCF51EFA9DBD4 /* RemoteSessionStatusView.swift in Sources */,
+				FF7C91DAC645B2312CA969B0 /* RemoteSessionsPanelView.swift in Sources */,
+				70C604B3B95BA156481FB8C7 /* SSHTerminalView.swift in Sources */,
+				5EEE661E2440BD1615A2FAC2 /* SVGEmbeddedImageView.swift in Sources */,
+				BA379AB843B4BAD867386914 /* SiriIntents.swift in Sources */,
+				F9096AB77DFBB5B022AFA4EE /* SkyBridgeCommands.swift in Sources */,
+				AF3A7DB70017A5645EB81DB9 /* SkyBridgeCompassApp.swift in Sources */,
+				E81FFD20E659CB05F6991F79 /* StarryBackground.swift in Sources */,
+				56B662DC159A06A386023551 /* StartupCoordinator.swift in Sources */,
+				A75371379A7B47C826D07860 /* StatCard.swift in Sources */,
+				DABEA837C02F24603DAE0260 /* SupabaseConfiguration.swift in Sources */,
+				FDD48779FE89C3C746869876 /* SupabaseTurnstileView.swift in Sources */,
+				4DF7982B3966C816E9E52BC0 /* SystemMetricsPanelView.swift in Sources */,
+				37D0AB8ABBF69CB961977B17 /* ThemeConfiguration.swift in Sources */,
+				2CA33118A7F89D5B3CBDEFBD /* TopNavigationBarView.swift in Sources */,
+				C91899FAFC645E27B5CFCEC5 /* TrustedDeviceDetailView.swift in Sources */,
+				3718C6A09071B63D5A584DC2 /* USBDeviceManagementView.swift in Sources */,
+				A754A5A5420B98FC76F858A0 /* UnifiedDeviceDiscoveryIntegrationView.swift in Sources */,
+				7A82E21B4233C8E31F7F217F /* UserProfileOverlay.swift in Sources */,
+				46E9BD8263B340621DE3E145 /* UserProfileView.swift in Sources */,
+				91E91AA50515927AEC2EF925 /* VNCViewerView.swift in Sources */,
+				D1AA0048AE2EFE6CAA48604F /* WeatherDashboardCard.swift in Sources */,
+				2CA6F6A18970D83F186488CE /* WeatherStatCard.swift in Sources */,
+				19B6F9FEF50AFBB2F2389FC5 /* WindowFocusManager.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		715CD2463F3D7D991DEF66FE /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -156,11 +812,33 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		A22CFF3B88EEAD7AFABC4F1D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 33EDECE841DEB307763D7C42 /* SkyBridgeCompassWidgetsExtension */;
+			targetProxy = F7E4FA72F5FA0ECDAE6E2A50 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		F4D58C1923FEAD79BD120C04 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				D138E4FDB3B74C8B610ED913 /* en */,
+				451C648AD24D1A64C8C8D3CC /* ja */,
+				F63965829D3ABAF0609035D3 /* zh-Hans */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
 /* Begin XCBuildConfiguration section */
 		10E6B88141B51784070BACAC /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
@@ -195,6 +873,7 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1.0.0;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -213,6 +892,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -239,17 +919,45 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.widgets;
+				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.pro.widgets;
 				PRODUCT_NAME = SkyBridgeCompassWidgetsExtension;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 			};
 			name = Release;
 		};
+		3C0E24AA46EC37E09B54FB49 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				EXECUTABLE_NAME = SkyBridgeCompassApp;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = XcodeSupport/SkyBridgeCompassMac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_CFLAGS = "$(inherited)";
+				OTHER_CPLUSPLUSFLAGS = "$(inherited)";
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -I -Xcc $(PROJECT_DIR)/Sources/Vendor/WebRTCHeaders";
+				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.pro;
+				PRODUCT_NAME = "SkyBridge Compass Pro";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) APPLE_SILICON_OPTIMIZED ARM64_NATIVE";
+				SWIFT_STRICT_CONCURRENCY = complete;
+			};
+			name = Debug;
+		};
 		5C890C9AFD814A0BB87B5E78 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
@@ -284,6 +992,7 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1.0.0;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -296,6 +1005,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -305,6 +1015,33 @@
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		81AF0B346700168E11A1B560 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				EXECUTABLE_NAME = SkyBridgeCompassApp;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = XcodeSupport/SkyBridgeCompassMac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_CFLAGS = "$(inherited)";
+				OTHER_CPLUSPLUSFLAGS = "$(inherited)";
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -I -Xcc $(PROJECT_DIR)/Sources/Vendor/WebRTCHeaders";
+				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.pro;
+				PRODUCT_NAME = "SkyBridge Compass Pro";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) APPLE_SILICON_OPTIMIZED ARM64_NATIVE";
+				SWIFT_STRICT_CONCURRENCY = complete;
 			};
 			name = Release;
 		};
@@ -322,7 +1059,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.widgets;
+				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.pro.widgets;
 				PRODUCT_NAME = SkyBridgeCompassWidgetsExtension;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -337,6 +1074,15 @@
 			buildConfigurations = (
 				94B98FA533874626A135F031 /* Debug */,
 				32E32D1AB187AD7EA9084F0C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BD5E5B7CEC1F835AC8AFA058 /* Build configuration list for PBXNativeTarget "SkyBridgeCompassMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3C0E24AA46EC37E09B54FB49 /* Debug */,
+				81AF0B346700168E11A1B560 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
@@ -359,10 +1105,42 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		4C8D120A079758A614584FDB /* XCRemoteSwiftPackageReference "swift-collections" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-collections";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.4.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		0EEB3E27748D53378DDED79E /* SkyBridgeWidgetShared */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SkyBridgeWidgetShared;
+		};
+		207088C036D7A7F97A6A0444 /* SkyBridgeVisualParity */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SkyBridgeVisualParity;
+		};
+		40C692463D61FF3FD0CFD937 /* OrderedCollections */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4C8D120A079758A614584FDB /* XCRemoteSwiftPackageReference "swift-collections" */;
+			productName = OrderedCollections;
+		};
+		921C38E07E934A5CDB49F41E /* SkyBridgeCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SkyBridgeCore;
+		};
+		962ACD1027DC997E30E6FD7B /* SkyBridgeUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SkyBridgeUI;
+		};
+		E0E308E97B432D86D27EEC34 /* SkyBridgeProtocolCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SkyBridgeProtocolCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

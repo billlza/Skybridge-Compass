@@ -123,34 +123,66 @@ public enum BonjourTXTParser: Sendable {
     public static func parse(_ txtRecord: NWTXTRecord) -> [String: String] {
         var result: [String: String] = [:]
 
+        func mergeMissing(_ parsed: [String: String]) {
+            for (key, value) in parsed where result[key] == nil {
+                result[key] = value
+            }
+        }
+
  // 方法 1: 尝试使用原生 API（macOS 14.0+）
         if #available(macOS 14.0, *) {
  // NWTXTRecord 在 macOS 14+ 提供更好的迭代支持
  // 通过 rawValue 获取底层数据
             if let rawData = txtRecord.rawValue {
                 let parsed = parseRawTXTData(rawData)
-                if !parsed.isEmpty {
-                    return parsed
-                }
+                mergeMissing(parsed)
             }
         }
 
  // 方法 2: 使用 NetService 兼容层
         if let rawData = txtRecord.rawValue {
             let dict = NetService.dictionary(fromTXTRecord: rawData)
+            var parsed: [String: String] = [:]
             for (key, value) in dict {
                 if let stringValue = String(data: value, encoding: .utf8) {
-                    result[key] = stringValue
+                    parsed[key] = stringValue
                 }
             }
-            if !result.isEmpty {
-                return result
-            }
+            mergeMissing(parsed)
         }
 
+        let direct = parseKnownKeys(txtRecord)
+        mergeMissing(direct)
+
  // 方法 3: 降级到字符串正则解析
-        let description = "\(txtRecord)"
-        return parseWithRegex(description)
+        if result.isEmpty {
+            let description = "\(txtRecord)"
+            mergeMissing(parseWithRegex(description))
+        }
+        return result
+    }
+
+    private static func parseKnownKeys(_ txtRecord: NWTXTRecord) -> [String: String] {
+        let keys = [
+            "deviceId", "deviceID", "device_id", "uuid", "id", "uniqueId", "unique_id",
+            "pubKeyFP", "pubKeyFp", "pub_key_fp",
+            "platform", "osVersion", "os_version", "platformVersion", "platform_version", "os", "systemVersion",
+            "model", "modelName", "hardwareModel", "hwModel", "name",
+            "capabilities", "pqc", "version", "kemRefreshVersion", "kemKeyDigest", "hs_soa",
+            "rssi", "signalStrength", "signal_strength", "signal",
+            "port", "skybridgePort", "p2pPort", "controlPort", "controlPortSource",
+            "transferPort", "fileTransferPort", "file_transfer_port",
+            "remotePort", "remoteControlPort", "remote_port",
+            "lanHost", "lanIPv4", "lanIPv6", "host", "ip", "ipv4", "ipv6", "address", "hostAddress"
+        ]
+        var result: [String: String] = [:]
+        for key in keys {
+            if let value = txtRecord[key] ?? txtRecord[key.lowercased()] {
+                result[key] = value
+                result[key.lowercased()] = value
+            }
+        }
+        return result
     }
 
  /// 从原始 TXT 记录数据解析

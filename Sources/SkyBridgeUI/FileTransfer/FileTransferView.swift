@@ -17,6 +17,7 @@ public struct FileTransferView: View {
     @State private var dragOver = false
     @State private var qrCodeString = ""
     @State private var previewingFile: PreviewedFile?
+    @State private var transferErrorMessage: String?
  // 调试面板：记录最近一次整文件HMAC与签名校验结果
     @State private var lastHmacTagHex: String = ""
     @State private var lastSignatureOk: Bool = false
@@ -53,6 +54,19 @@ public struct FileTransferView: View {
  // 顶部不再显示“二维码/齿轮”按钮，设置入口保留在“设置”标签
         .sheet(item: $previewingFile) { previewFile in
             MediaPreviewView(fileURL: previewFile.url)
+        }
+        .alert(
+            "文件未发送",
+            isPresented: Binding(
+                get: { transferErrorMessage != nil },
+                set: { if !$0 { transferErrorMessage = nil } }
+            )
+        ) {
+            Button("好的", role: .cancel) {
+                transferErrorMessage = nil
+            }
+        } message: {
+            Text(transferErrorMessage ?? "")
         }
  // 威胁警报对话框 - Requirements: 4.3
         .sheet(isPresented: $showingThreatAlert) {
@@ -596,25 +610,41 @@ public struct FileTransferView: View {
 
     private func sendSelectedFiles() {
         Task { @MainActor in
-            for fileURL in selectedFiles {
+            let filesToSend = selectedFiles
+            var failedFiles: [URL] = []
+            var failureMessages: [String] = []
+
+            for fileURL in filesToSend {
                 do {
                     // 1. Prefer Cross-Network (WebRTC DataChannel) when available.
                     if case .connected = crossNetworkManager.connectionStatus,
                        let conn = crossNetworkManager.currentConnection,
                        case .webrtc = conn.transport {
                         try await crossNetworkManager.sendFileToConnectedPeer(fileURL)
+                        selectedFiles.removeAll { $0 == fileURL }
                         continue
                     }
                     
                     // 2. Try Local P2P (Bonjour/IP) via FileTransferManager internal resolution
                     // This handles active peer lookup and throws if no connection exists.
                     try await fileTransferManager.sendFileToFirstActivePeer(at: fileURL)
+                    selectedFiles.removeAll { $0 == fileURL }
                     continue
                 } catch {
+                    failedFiles.append(fileURL)
+                    failureMessages.append("\(fileURL.lastPathComponent): \(error.localizedDescription)")
                     SkyBridgeLogger.ui.error("传输失败: \(error.localizedDescription, privacy: .private)")
                 }
             }
-            selectedFiles.removeAll()
+
+            let attemptedFiles = Set(filesToSend)
+            let newlyQueuedFiles = selectedFiles.filter { !attemptedFiles.contains($0) }
+            selectedFiles = failedFiles + newlyQueuedFiles
+            if !failureMessages.isEmpty {
+                let details = failureMessages.prefix(3).joined(separator: "\n")
+                let suffix = failureMessages.count > 3 ? "\n..." : ""
+                transferErrorMessage = "设备离线或没有可用的已认证传输会话。待发送文件已保留，请重新连接后重试。\n\n\(details)\(suffix)"
+            }
         }
     }
 

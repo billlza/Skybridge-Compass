@@ -74,9 +74,10 @@ impl SignalingLifecycleEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionReadiness {
+    #[default]
     Idle,
     TransportReady {
         session_id: String,
@@ -85,12 +86,6 @@ pub enum SessionReadiness {
         session_id: String,
         negotiated_suite: String,
     },
-}
-
-impl Default for SessionReadiness {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 impl SessionReadiness {

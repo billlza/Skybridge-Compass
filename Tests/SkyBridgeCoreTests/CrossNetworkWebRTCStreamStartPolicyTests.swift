@@ -256,14 +256,20 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
             encoding: .utf8
         )
+        let policySource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCScreenStreamingPolicy.swift"),
+            encoding: .utf8
+        )
+        let hostAndPolicySource = source + "\n" + policySource
 
         XCTAssertTrue(source.contains("nativeVideoFailureStrikeCount += 1"))
         XCTAssertTrue(source.contains("nativeVideoFailureStrikeCount >= 3 ? 10.0 : 1.25"))
         XCTAssertTrue(source.contains("nativeVideoFallbackDecision"))
+        XCTAssertTrue(policySource.contains("static func nativeVideoFallbackDecision"))
         let fallbackDecisionBody = try sourceSlice(
-            from: "private static func nativeVideoFallbackDecision",
-            to: "static func shouldUseWebRTCAudioFallback",
-            in: source
+            from: "static func nativeVideoFallbackDecision",
+            to: "static func shouldThrottleNativeWarmupJPEGFallback",
+            in: policySource
         )
         XCTAssertTrue(
             fallbackDecisionBody.contains("guard nativeVideoTrackReady else"),
@@ -283,11 +289,11 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             fallbackDecisionBody.contains("fallbackShouldDriveMain: !rtpIsHealthy"),
             "Host-side stats lag must not reopen fallback-main after the viewer has reported visible native rendering."
         )
-        XCTAssertTrue(source.contains("webRTCFallbackBoundedJPEGWarmupProducer"))
-        XCTAssertTrue(source.contains("boundedJPEGWarmupMain"))
+        XCTAssertTrue(hostAndPolicySource.contains("webRTCFallbackBoundedJPEGWarmupProducer"))
+        XCTAssertTrue(hostAndPolicySource.contains("boundedJPEGWarmupMain"))
         XCTAssertTrue(source.contains("native-warmup-bounded-jpeg"))
-        XCTAssertTrue(source.contains("boundedWebRTCWarmupJPEGProfile"))
-        XCTAssertTrue(source.contains("shouldThrottleNativeWarmupJPEGFallback"))
+        XCTAssertTrue(hostAndPolicySource.contains("boundedWebRTCWarmupJPEGProfile"))
+        XCTAssertTrue(hostAndPolicySource.contains("shouldThrottleNativeWarmupJPEGFallback"))
         XCTAssertTrue(source.contains("chunkDropReason=native-warmup-jpeg-backpressure"))
         XCTAssertTrue(source.contains("screenSendMaxBufferedAmountBytes"))
         XCTAssertTrue(source.contains("captureStreamer.onEncodedFrame = nil"))
@@ -332,12 +338,12 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             source.contains("format=webrtc-native-video-warmup"),
             "Strict WebRTC startup must wait for native video instead of advertising a warmup fallback format."
         )
-        XCTAssertTrue(source.contains("shouldDropNativeWarmupNonJPEGFallbackFrame"))
+        XCTAssertTrue(hostAndPolicySource.contains("shouldDropNativeWarmupNonJPEGFallbackFrame"))
         XCTAssertTrue(source.contains("dropReason=native-warmup-non-jpeg-fallback"))
         XCTAssertTrue(source.contains("effectiveWebRTCNativeCaptureVideoFormats"))
         XCTAssertTrue(source.contains("nativeCaptureCodec="))
         XCTAssertTrue(source.contains("audioEndpointPreservedForVideoRefresh"))
-        XCTAssertTrue(source.contains("shouldFailFastRemoteMediaFallbacks"))
+        XCTAssertTrue(hostAndPolicySource.contains("shouldFailFastRemoteMediaFallbacks"))
         XCTAssertTrue(source.contains("shouldUseFallbackAudioChunks && !failFastMediaFallbacks"))
         XCTAssertTrue(source.contains("screen-channel-control-fallback-forbidden"))
         XCTAssertTrue(source.contains("degraded-screen-fallback-forbidden"))
@@ -584,19 +590,40 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let source = try String(
+        let managerSource = try String(
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
             encoding: .utf8
         )
+        let audioSupportSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCAudioFallbackSupport.swift"),
+            encoding: .utf8
+        )
+        let mediaRelayPolicySource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCMediaRelayPolicy.swift"),
+            encoding: .utf8
+        )
+        let diagnosticsSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/CrossNetworkWebRTCDiagnostics.swift"),
+            encoding: .utf8
+        )
+        let realtimeAudioCoordinatorSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCRealtimeAudioSenderCoordinator.swift"),
+            encoding: .utf8
+        )
+        let source = managerSource
+            + "\n" + audioSupportSource
+            + "\n" + mediaRelayPolicySource
+            + "\n" + diagnosticsSource
+            + "\n" + realtimeAudioCoordinatorSource
 
-        guard let functionStart = source.range(of: "private func makeWebRTCRealtimeAudioSenderIfNeeded"),
-              let functionEnd = source.range(of: "private func refreshWebRTCMediaAdmissionLease", range: functionStart.upperBound..<source.endIndex) else {
+        guard let functionStart = realtimeAudioCoordinatorSource.range(of: "func makeSenderIfNeeded"),
+              let functionEnd = realtimeAudioCoordinatorSource.range(of: "func requestSenderEndpoint", range: functionStart.upperBound..<realtimeAudioCoordinatorSource.endIndex) else {
             XCTFail("WebRTC realtime audio sender helper should be present")
             return
         }
-        let helper = String(source[functionStart.lowerBound..<functionEnd.lowerBound])
+        let helper = String(realtimeAudioCoordinatorSource[functionStart.lowerBound..<functionEnd.lowerBound])
 
-        XCTAssertTrue(helper.contains("requestWebRTCRealtimeAudioSenderEndpoint(sessionID: sessionID)"))
+        XCTAssertTrue(helper.contains("requestSenderEndpoint(sessionID: sessionID)"))
         XCTAssertTrue(helper.contains("leaseSource=localRoleLease"))
         XCTAssertTrue(helper.contains("relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy"))
         XCTAssertTrue(source.contains("failFastMediaFallbacks ? .requireAcknowledgement : .optimisticAfterSend"))
@@ -608,7 +635,7 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("kind = \"audioTxRelayBindTimedOut\""))
         XCTAssertFalse(helper.contains("let endpoint = viewerAudioEndpoint"))
         XCTAssertTrue(source.contains("signalServer.requestMediaRelayLease(mediaAdmissionToken:"))
-        XCTAssertTrue(source.contains("refreshWebRTCMediaAdmissionLease(sessionID: sessionID)"))
+        XCTAssertTrue(source.contains("makeWebRTCRealtimeAudioSenderCoordinator().refreshAdmissionLease(sessionID: sessionID)"))
         XCTAssertTrue(source.contains("preserveRealtimeAudioSender"))
         XCTAssertTrue(source.contains("audioTxSenderPreserved"))
         XCTAssertTrue(source.contains("directRealtimeAudioAttachTask = Task(priority: .utility)"))
@@ -642,10 +669,17 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
             encoding: .utf8
         )
+        let localAppMessageFactory = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/RemoteConnection/WebRTC/CrossNetworkWebRTCLocalAppMessageFactory.swift"
+            ),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(source.contains("webrtcOutboundHeartbeatTasksBySessionId"))
         XCTAssertTrue(source.contains("startOutboundHeartbeatIfNeeded()"))
-        XCTAssertTrue(source.contains("AppMessage.heartbeat"))
+        XCTAssertTrue(source.contains("CrossNetworkWebRTCLocalAppMessageFactory.heartbeatMessage"))
+        XCTAssertTrue(localAppMessageFactory.contains("AppMessage.heartbeat"))
         XCTAssertTrue(source.contains("label: \"tx/webrtc-heartbeat\""))
         XCTAssertTrue(source.contains("maxBufferedAmountBytes: 256 * 1024"))
         XCTAssertTrue(source.contains("webrtcRekeyInProgressSessionIds.contains(sessionID)"))
@@ -723,6 +757,19 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
     func testStrictNativeVideoRejectsSoftwareCodecAndEncoderEvidence() {
         XCTAssertNil(CrossNetworkConnectionManager.strictNativeVideoCodecFailureReason("video/H264"))
         XCTAssertNil(CrossNetworkConnectionManager.strictNativeVideoCodecFailureReason("video/HEVC"))
+        XCTAssertNil(
+            CrossNetworkConnectionManager.strictNativeVideoCodecFailureReason(
+                "video/HEVC",
+                requestedCodec: .hevc
+            )
+        )
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.strictNativeVideoCodecFailureReason(
+                "video/H264",
+                requestedCodec: .hevc
+            ),
+            "native-video-codec-mismatch-requested-hevc-actual-videoh264"
+        )
         XCTAssertEqual(
             CrossNetworkConnectionManager.strictNativeVideoCodecFailureReason("video/VP8"),
             "native-video-unacceptable-codec-videovp8"
@@ -742,11 +789,21 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             "native-video-encoder-stats-unavailable"
         )
 
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.nativeVideoNoRTPFailureGraceSeconds(
+                failFastMediaFallbacks: true,
+                codec: "video/H264",
+                encoder: "VideoToolbox",
+                requestedCodec: .hevc
+            ),
+            2.0
+        )
         XCTAssertGreaterThan(
             CrossNetworkConnectionManager.nativeVideoNoRTPFailureGraceSeconds(
                 failFastMediaFallbacks: true,
                 codec: "video/H264",
-                encoder: "VideoToolbox"
+                encoder: "VideoToolbox",
+                requestedCodec: .h264
             ),
             2.0
         )
@@ -1000,6 +1057,10 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
             encoding: .utf8
         )
+        let realtimeAudioSenderSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCRealtimeAudioSenderCoordinator.swift"),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(source.contains("let strictHighFPS ="))
         XCTAssertTrue(source.contains("lowLatencyMode: settings.lowLatencyMode || strictHighFPS"))
@@ -1015,6 +1076,6 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("lastFailFastMediaFallbacks"))
         XCTAssertTrue(source.contains("realtimeAudioSenderLeaseReusable"))
         XCTAssertTrue(source.contains("audioTxSenderRenewing"))
-        XCTAssertTrue(source.contains("continuitySeq"))
+        XCTAssertTrue(realtimeAudioSenderSource.contains("continuitySeq"))
     }
 }

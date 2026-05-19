@@ -475,7 +475,7 @@ public actor BonjourDiscoveryTransport: DiscoveryTransport {
 
  // 解析长度
             let length = lengthData.withUnsafeBytes { ptr in
-                ptr.load(as: UInt32.self).bigEndian
+                ptr.loadUnaligned(as: UInt32.self).bigEndian
             }
 
  // 读取消息体

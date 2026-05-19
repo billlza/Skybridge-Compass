@@ -6,457 +6,6 @@ import os
 import Security
 #endif
 
-// MARK: - 设备类型枚举
-public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
-    case macOS = "macOS"
-    case iOS = "iOS"
-    case iPadOS = "iPadOS"
-    case android = "Android"
-    case windows = "Windows"
-    case linux = "Linux"
-    
- /// 设备类型显示名称
-    public var displayName: String {
-        switch self {
-        case .macOS: return "Mac"
-        case .iOS: return "iPhone"
-        case .iPadOS: return "iPad"
-        case .android: return "Android"
-        case .windows: return "Windows"
-        case .linux: return "Linux"
-        }
-    }
-    
- /// 设备图标名称
-    public var iconName: String {
-        switch self {
-        case .macOS: return "desktopcomputer"
-        case .iOS: return "iphone"
-        case .iPadOS: return "ipad"
-        case .android: return "smartphone"
-        case .windows: return "pc"
-        case .linux: return "server.rack"
-        }
-    }
-}
-
-// MARK: - STUN服务器配置
-public struct STUNServer: Codable, Sendable {
- /// 服务器主机名
-    public let host: String
- /// 服务器端口
-    public let port: UInt16
-    
-    public init(host: String, port: UInt16 = 3478) {
-        self.host = host
-        self.port = port
-    }
-    
- /// 默认STUN服务器列表
-    public static let defaultServers = [
-        // SkyBridge 自建服务器 (首选)
-        STUNServer(host: "54.92.79.99", port: 3478),
-        // 公共备用服务器
-        STUNServer(host: "stun.l.google.com", port: 19302),
-        STUNServer(host: "stun1.l.google.com", port: 19302),
-        STUNServer(host: "stun.cloudflare.com", port: 3478)
-    ]
-}
-
-// MARK: - 穿透难度
-public enum TraversalDifficulty: String, Codable, CaseIterable {
-    case easy = "easy"
-    case medium = "medium"
-    case hard = "hard"
-    case unknown = "unknown"
-    
-    public var displayName: String {
-        switch self {
-        case .easy: return "简单"
-        case .medium: return "中等"
-        case .hard: return "困难"
-        case .unknown: return "未知"
-        }
-    }
-}
-
-// MARK: - NAT类型
-public enum NATType: String, Codable, CaseIterable {
-    case fullCone = "full_cone"
-    case restrictedCone = "restricted_cone"
-    case portRestrictedCone = "port_restricted_cone"
-    case symmetric = "symmetric"
-    case noNAT = "no_nat"
-    case unknown = "unknown"
-    
-    public var displayName: String {
-        switch self {
-        case .fullCone: return "完全锥形NAT"
-        case .restrictedCone: return "限制锥形NAT"
-        case .portRestrictedCone: return "端口限制锥形NAT"
-        case .symmetric: return "对称NAT"
-        case .noNAT: return "无NAT"
-        case .unknown: return "未知"
-        }
-    }
-    
-    public var traversalDifficulty: TraversalDifficulty {
-        switch self {
-        case .noNAT, .fullCone:
-            return .easy
-        case .restrictedCone, .portRestrictedCone:
-            return .medium
-        case .symmetric:
-            return .hard
-        case .unknown:
-            return .unknown
-        }
-    }
-}
-
-// MARK: - P2P协议类型
-public enum P2PProtocol: String, Codable, CaseIterable {
-    case udp = "udp"
-    case tcp = "tcp"
-    case webrtc = "webrtc"
-    
-    public var displayName: String {
-        switch self {
-        case .udp: return "UDP"
-        case .tcp: return "TCP"
-        case .webrtc: return "WebRTC"
-        }
-    }
-    
-    public var defaultPort: UInt16 {
-        switch self {
-        case .udp: return 8080
-        case .tcp: return 8081
-        case .webrtc: return 8082
-        }
-    }
-}
-
-// MARK: - 设备信息
-public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
-    public let id: String
-    public let name: String
-    public let type: P2PDeviceType
-    public let address: String
-    public let port: UInt16
-    public let osVersion: String
-    public let capabilities: [String]
-    public let publicKeyFingerprint: String
-    
- /// 获取当前设备信息
-    public static func current() -> P2PDeviceInfo {
-        return P2PDeviceInfo(
-            id: getOrCreateDeviceId(),
-            name: getDeviceName(),
-            type: getCurrentDeviceType(),
-            address: "0.0.0.0", // 将在网络发现时更新
-            port: 8080,
-            osVersion: getOSVersion(),
-            capabilities: getSupportedCapabilities(),
-            publicKeyFingerprint: "" // 将在安全管理器初始化时设置
-        )
-    }
-    
- /// 获取或创建设备ID
-    private static func getOrCreateDeviceId() -> String {
-        let key = "SkyBridge.DeviceId"
-        if let existingId = UserDefaults.standard.string(forKey: key) {
-            return existingId
-        } else {
-            let newId = UUID().uuidString
-            UserDefaults.standard.set(newId, forKey: key)
-            return newId
-        }
-    }
-    
-    private static func getDeviceName() -> String {
-        #if os(macOS)
-        return Host.current().localizedName ?? "Mac"
-        #elseif os(iOS)
-        return UIDevice.current.name
-        #else
-        return "Unknown Device"
-        #endif
-    }
-    
-    private static func getCurrentDeviceType() -> P2PDeviceType {
-        #if os(macOS)
-        return .macOS
-        #elseif os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            return .iPadOS
-        } else {
-            return .iOS
-        }
-        #else
-        return .macOS
-        #endif
-    }
-    
-    private static func getOSVersion() -> String {
-        let version = ProcessInfo.processInfo.operatingSystemVersion
-        return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
-    }
-    
-    private static func getSupportedCapabilities() -> [String] {
-        var capabilities = [
-            "remote_desktop",
-            "file_transfer",
-            "screen_sharing"
-        ]
-        
-        #if os(macOS)
-        capabilities.append("system_control")
-        capabilities.append("hardware_acceleration")
-        capabilities.append("metal_rendering")
-        #endif
-        
-        #if os(iOS) || os(iPadOS)
-        capabilities.append("touch_input")
-        capabilities.append("camera_access")
-        #endif
-        
-        return capabilities
-    }
-}
-
-// MARK: - 组播设备发现消息契约
-
-/// 设备发现消息（UDP组播）统一契约
-/// 必需字段：id、name、type、address、port、osVersion、capabilities、publicKeyFingerprint、timestamp
-/// 可选字段：publicKeyBase64、signatureBase64（用于验签）
-/// 强身份字段：deviceId、pubKeyFP（用于本机判定）
-public struct P2PDiscoveryMessage: Codable, Sendable {
-    public let id: String
-    public let name: String
-    public let type: P2PDeviceType
-    public let address: String
-    public let port: UInt16
-    public let osVersion: String
-    public let capabilities: [String]
-    public let publicKeyFingerprint: String
-    public let timestamp: Double
-    public let publicKeyBase64: String?
-    public let signatureBase64: String?
-    
- // MARK: - 强身份字段（用于本机判定）
- /// 设备持久化 ID（UUID）
-    public let deviceId: String?
- /// P-256 公钥 SHA256 指纹（hex 小写）
-    public let pubKeyFP: String?
- /// MAC 地址集合（以逗号分隔的字符串）
-    public let macAddresses: String?
-}
-
-// MARK: - P2P设备
-public struct P2PDevice: Codable, Identifiable, Hashable, Sendable {
-    public let id: String
-    public let name: String
-    public let type: P2PDeviceType
-    public let address: String
-    public let port: UInt16
-    public let osVersion: String
-    public let capabilities: [String]
-    public let publicKey: Data
-    public let lastSeen: Date
- /// 发现消息原始时间戳（用于UI展示原始时效），可能为空
-    public let lastMessageTimestamp: Date?
- /// 验签是否通过（基于发现消息签名），默认false
-    public let isVerified: Bool
- /// 验签失败原因（中文），当验签未通过时可用于UI显示
-    public let verificationFailedReason: String?
- /// 网络端点列表，用于连接建立
-    public let endpoints: [String] // 存储为字符串数组，实际使用时转换为NWEndpoint
-    
- // MARK: - 强身份字段（用于本机判定）
- /// 设备持久化 ID（UUID）
-    public let persistentDeviceId: String?
- /// P-256 公钥指纹
-    public let pubKeyFingerprint: String?
- /// MAC 地址集合
-    public let macAddresses: Set<String>?
-    
- /// 设备ID的便捷访问器
-    public var deviceId: String { return id }
-    public var deviceType: P2PDeviceType { return type }
-
-    public init(from deviceInfo: P2PDeviceInfo) {
-        self.id = deviceInfo.id
-        self.name = deviceInfo.name
-        self.type = deviceInfo.type
-        self.address = deviceInfo.address
-        self.port = deviceInfo.port
-        self.osVersion = deviceInfo.osVersion
-        self.capabilities = deviceInfo.capabilities
- // Swift 6.2.1：公钥数据在发现阶段暂不可用，将在协议握手阶段获取
- // 实际的公钥/身份绑定发生在 HandshakeDriver / TwoAttemptHandshakeManager 主路径中
-        self.publicKey = Data()
-        self.lastSeen = Date()
-        self.lastMessageTimestamp = nil
- // 未获取公钥时标记为未验证，连接前需进行密钥交换
-        self.isVerified = false
-        self.verificationFailedReason = deviceInfo.publicKeyFingerprint.isEmpty ? "等待公钥交换" : nil
-        self.endpoints = ["\(deviceInfo.address):\(deviceInfo.port)"]
- // 强身份字段：从 deviceInfo 中提取公钥指纹
-        self.persistentDeviceId = nil
-        self.pubKeyFingerprint = deviceInfo.publicKeyFingerprint.isEmpty ? nil : deviceInfo.publicKeyFingerprint
-        self.macAddresses = nil
-    }
-
-    public init(id: String, name: String, type: P2PDeviceType, address: String, port: UInt16, osVersion: String, capabilities: [String], publicKey: Data, lastSeen: Date, endpoints: [String] = [], lastMessageTimestamp: Date? = nil, isVerified: Bool = false, verificationFailedReason: String? = nil, persistentDeviceId: String? = nil, pubKeyFingerprint: String? = nil, macAddresses: Set<String>? = nil) {
-        self.id = id
-        self.name = name
-        self.type = type
-        self.address = address
-        self.port = port
-        self.osVersion = osVersion
-        self.capabilities = capabilities
-        self.publicKey = publicKey
-        self.lastSeen = lastSeen
-        self.lastMessageTimestamp = lastMessageTimestamp
-        self.isVerified = isVerified
-        self.verificationFailedReason = verificationFailedReason
-        self.endpoints = endpoints.isEmpty ? ["\(address):\(port)"] : endpoints
-        self.persistentDeviceId = persistentDeviceId
-        self.pubKeyFingerprint = pubKeyFingerprint
-        self.macAddresses = macAddresses
-    }
-    
- /// 检查设备是否支持指定功能
-    public func supports(_ capability: String) -> Bool {
-        return capabilities.contains(capability)
-    }
-    
- /// 设备是否在线
-    public var isOnline: Bool {
-        return Date().timeIntervalSince(lastSeen) < 30 // 30秒内视为在线
-    }
-    
- /// 状态描述
-    public var statusDescription: String {
-        if isOnline {
-            return "在线"
-        } else {
-            let interval = Date().timeIntervalSince(lastSeen)
-            if interval < 300 { // 5分钟内
-                return "刚刚离线"
-            } else if interval < 3600 { // 1小时内
-                return "\(Int(interval / 60))分钟前在线"
-            } else {
-                return "\(Int(interval / 3600))小时前在线"
-            }
-        }
-    }
-}
-
-// MARK: - 连接请求类型
-public enum ConnectionRequestType: String, Codable, CaseIterable {
-    case remoteDesktop = "remote_desktop"
-    case fileTransfer = "file_transfer"
-    case screenSharing = "screen_sharing"
-    case systemControl = "system_control"
-    
-    public var displayName: String {
-        switch self {
-        case .remoteDesktop: return "远程桌面"
-        case .fileTransfer: return "文件传输"
-        case .screenSharing: return "屏幕共享"
-        case .systemControl: return "系统控制"
-        }
-    }
-    
-    public var iconName: String {
-        switch self {
-        case .remoteDesktop: return "display"
-        case .fileTransfer: return "folder"
-        case .screenSharing: return "rectangle.on.rectangle"
-        case .systemControl: return "gear"
-        }
-    }
-}
-
-// MARK: - P2P连接请求
-public struct P2PConnectionRequest: Codable, Identifiable {
-    public let id: String
-    public let sourceDevice: P2PDeviceInfo
-    public let targetDevice: P2PDevice
-    public let timestamp: Date
-    public let signature: Data
-    public let requestType: ConnectionRequestType
-    public let message: String?
-    
-    public init(sourceDevice: P2PDeviceInfo, targetDevice: P2PDevice, timestamp: Date, signature: Data, requestType: ConnectionRequestType = .remoteDesktop, message: String? = nil) {
-        self.id = UUID().uuidString
-        self.sourceDevice = sourceDevice
-        self.targetDevice = targetDevice
-        self.timestamp = timestamp
-        self.signature = signature
-        self.requestType = requestType
-        self.message = message
-    }
-    
- /// 请求是否已过期
-    public var isExpired: Bool {
-        return Date().timeIntervalSince(timestamp) > 300
-    }
-}
-
-// MARK: - P2P连接状态
-public enum P2PConnectionStatus: String, Codable {
-    case connecting = "connecting"
-    case connected = "connected"
-    case authenticating = "authenticating"
-    case authenticated = "authenticated"
-    case disconnected = "disconnected"
-    case failed = "failed"
-    case listening = "listening"
-    case networkUnavailable = "networkUnavailable"
-    
-    public var displayName: String {
-        switch self {
-        case .connecting: return "连接中"
-        case .connected: return "已连接"
-        case .authenticating: return "认证中"
-        case .authenticated: return "已认证"
-        case .disconnected: return "已断开"
-        case .failed: return "连接失败"
-        case .listening: return "监听中"
-        case .networkUnavailable: return "网络不可用"
-        }
-    }
-    
-    public var isActive: Bool {
-        return self == .connected || self == .authenticated
-    }
-}
-
-// MARK: - 会话安全保证级别
-@available(macOS 14.0, iOS 17.0, *)
-public enum P2PSessionAssuranceLevel: String, Codable, Sendable {
-    case pqcStrict = "pqc_strict"
-    case bootstrapAssisted = "bootstrap_assisted"
-    case legacyClassic = "legacy_classic"
-    case unknown = "unknown"
-
-    public var displayName: String {
-        switch self {
-        case .pqcStrict:
-            return "PQC严格模式"
-        case .bootstrapAssisted:
-            return "引导恢复模式"
-        case .legacyClassic:
-            return "经典兼容模式"
-        case .unknown:
-            return "未知"
-        }
-    }
-}
-
 // MARK: - P2P连接
 public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sendable {
     public let id = UUID()
@@ -503,6 +52,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     @available(macOS 14.0, iOS 17.0, *)
     private let lastPairingIdentityExchangeSentAtLock = OSAllocatedUnfairLock<Date?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
+    private let latestRemotePairingIdentityPayloadLock = OSAllocatedUnfairLock<AppMessage.PairingIdentityExchangePayload?>(initialState: nil)
+    @available(macOS 14.0, iOS 17.0, *)
     private let soaPairKeyLock = OSAllocatedUnfairLock<Data?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let previousSessionKeysBeforeRekeyLock = OSAllocatedUnfairLock<SessionKeys?>(initialState: nil)
@@ -543,6 +94,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             switch host {
             case .ipv4(let ipv4): return "\(ipv4)"
             case .ipv6(let ipv6): return "\(ipv6)"
+            case .name(let name, _): return name
             default: break
             }
         }
@@ -552,11 +104,157 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
              switch host {
              case .ipv4(let ipv4): return "\(ipv4)"
              case .ipv6(let ipv6): return "\(ipv6)"
+             case .name(let name, _): return name
              default: break
              }
         }
         return nil
     }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func classicTransferEndpointHostOrIP() -> String? {
+        resolveCurrentRemoteIP() ?? normalizedNonEmptyString(device.address)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func classicTransferMatchDeviceId(
+        remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
+    ) -> String {
+        let payload = remoteIdentityPayload ?? latestRemotePairingIdentityPayloadLock.withLock { $0 }
+        return normalizedNonEmptyString(payload?.deviceId)
+            ?? normalizedNonEmptyString(handshakePeer.deviceId)
+            ?? normalizedNonEmptyString(device.persistentDeviceId)
+            ?? normalizedNonEmptyString(device.deviceId)
+            ?? device.deviceId
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func classicTransferResolvedPeerDeviceId(
+        remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
+    ) -> String {
+        let payload = remoteIdentityPayload ?? latestRemotePairingIdentityPayloadLock.withLock { $0 }
+        let preferred = [
+            normalizedNonEmptyString(payload?.deviceId),
+            normalizedNonEmptyString(device.persistentDeviceId),
+            normalizedNonEmptyString(handshakePeer.deviceId),
+            normalizedNonEmptyString(device.deviceId)
+        ]
+
+        for candidate in preferred {
+            if let persistent = PeerTrustLookup.persistentDeviceId(from: candidate) {
+                return persistent
+            }
+        }
+
+        return preferred.compactMap { $0 }.first ?? device.deviceId
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func classicTransferPeerLookupAliases(
+        remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
+    ) -> [String] {
+        let payload = remoteIdentityPayload ?? latestRemotePairingIdentityPayloadLock.withLock { $0 }
+        let endpoint = classicTransferEndpointHostOrIP()
+        let rawAliases: [String?] = [
+            payload?.deviceId,
+            payload?.deviceName,
+            device.persistentDeviceId,
+            handshakePeer.deviceId,
+            device.deviceId,
+            device.name,
+            device.address,
+            endpoint
+        ] + device.endpoints.map(Optional.some)
+
+        var aliases: [String] = []
+        var seen = Set<String>()
+        for raw in rawAliases {
+            guard let raw = normalizedNonEmptyString(raw) else { continue }
+            for candidate in PeerTrustLookup.lookupCandidates(for: raw) {
+                let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                guard seen.insert(trimmed.lowercased()).inserted else { continue }
+                aliases.append(trimmed)
+            }
+        }
+        return aliases
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func classicTransferCapabilities(
+        remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
+    ) -> [String] {
+        let payload = remoteIdentityPayload ?? latestRemotePairingIdentityPayloadLock.withLock { $0 }
+        var values = device.capabilities
+        values.append(contentsOf: payload?.capabilities ?? [])
+        if let port = payload?.fileTransferPort, (1...65535).contains(Int(port)) {
+            values.append("fileTransferPort=\(port)")
+        }
+
+        var deduped: [String] = []
+        var seen = Set<String>()
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            guard seen.insert(trimmed.lowercased()).inserted else { continue }
+            deduped.append(trimmed)
+        }
+        return deduped
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func publishClassicTransferSessionSnapshot(
+        keys: SessionKeys,
+        remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
+    ) async {
+        let payload = remoteIdentityPayload ?? latestRemotePairingIdentityPayloadLock.withLock { $0 }
+        let aliases = classicTransferPeerLookupAliases(remoteIdentityPayload: payload)
+        let endpoint = classicTransferEndpointHostOrIP()
+        let snapshot = ClassicTransferSessionSnapshot(
+            sessionId: "p2p-\(id.uuidString)-\(keys.sessionId)",
+            matchDeviceId: classicTransferMatchDeviceId(remoteIdentityPayload: payload),
+            resolvedPeerDeviceId: classicTransferResolvedPeerDeviceId(remoteIdentityPayload: payload),
+            aliases: aliases,
+            endpointHostOrIP: endpoint,
+            capabilities: classicTransferCapabilities(remoteIdentityPayload: payload),
+            sessionKeys: keys
+        )
+
+        await ClassicTransferSessionRegistry.shared.upsert(session: snapshot)
+        await ClassicTransferSessionRegistry.shared.upsert(
+            connection: self,
+            peerKeys: [snapshot.matchDeviceId, snapshot.resolvedPeerDeviceId]
+                + aliases
+                + [endpoint].compactMap { $0 }
+        )
+    }
+
+    #if DEBUG
+    @available(macOS 14.0, iOS 17.0, *)
+    func testingSetClassicTransferRemoteIdentity(
+        deviceId: String,
+        fileTransferPort: UInt16? = nil,
+        capabilities: [String]? = nil
+    ) {
+        latestRemotePairingIdentityPayloadLock.withLock {
+            $0 = AppMessage.PairingIdentityExchangePayload(
+                deviceId: deviceId,
+                kemPublicKeys: [],
+                capabilities: capabilities,
+                fileTransferPort: fileTransferPort
+            )
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func testingSetHandshakePeerDeviceId(_ deviceId: String) {
+        handshakePeer = PeerIdentifier(
+            deviceId: deviceId,
+            displayName: device.name,
+            address: "\(device.address):\(device.port)"
+        )
+    }
+    #endif
 
     // MARK: - Lifecycle
 
@@ -583,23 +281,31 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         metricsTask?.cancel()
         metricsTask = nil
         if #available(macOS 14.0, iOS 17.0, *) {
-            let peerId = handshakePeer.deviceId
+            let peerIds = Array(
+                Set(([handshakePeer.deviceId] + classicTransferPeerLookupAliases())
+                    .compactMap { normalizedNonEmptyString($0) })
+            )
             let displayName = device.name
             Task { @MainActor in
-                ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
-                UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
-                    peerId: peerId,
-                    displayName: displayName
-                )
+                for peerId in peerIds {
+                    ConnectionPresenceService.shared.markDisconnected(peerId: peerId)
+                    UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
+                        peerId: peerId,
+                        displayName: displayName
+                    )
+                }
             }
         }
 
         if #available(macOS 14.0, iOS 17.0, *) {
+            let peerKeys = classicTransferPeerLookupAliases()
+                + [device.deviceId, handshakePeer.deviceId, device.persistentDeviceId].compactMap { $0 }
             handshakeDriverLock.withLock { $0 = nil }
             sessionKeysLock.withLock { $0 = nil }
             previousSessionKeysBeforeRekeyLock.withLock { $0 = nil }
             authenticatedRemoteAuthorityLock.withLock { $0 = nil }
             lastPairingIdentityExchangeSentAtLock.withLock { $0 = nil }
+            latestRemotePairingIdentityPayloadLock.withLock { $0 = nil }
             let stalePairKey = soaPairKeyLock.withLock { state -> Data? in
                 let current = state
                 state = nil
@@ -619,7 +325,6 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     await PeerSessionArbiter.shared.clearOutgoing(pairKey: stalePairKey, attemptId: nil)
                 }
             }
-            let peerKeys = [device.deviceId, handshakePeer.deviceId, device.persistentDeviceId].compactMap { $0 }
             Task {
                 await ClassicTransferSessionRegistry.shared.remove(peerKeys: peerKeys)
             }
@@ -644,6 +349,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
 
         authenticatedRemoteAuthorityLock.withLock { $0 = nil }
+        latestRemotePairingIdentityPayloadLock.withLock { $0 = nil }
 
         handshakePeer = await resolveHandshakePeerIdentifier()
         if handshakePeer.deviceId != device.deviceId {
@@ -666,6 +372,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             await MainActor.run { self.status = .authenticated }
             let peerKeys = [device.deviceId, handshakePeer.deviceId, device.persistentDeviceId].compactMap { $0 }
             await ClassicTransferSessionRegistry.shared.upsert(connection: self, peerKeys: peerKeys)
+            await publishAuthenticatedPresence(keys: keys)
             do {
                 try await sendPairingIdentityExchange(force: true)
             } catch {
@@ -677,6 +384,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         } catch {
             soaPairKeyLock.withLock { $0 = nil }
             authenticatedRemoteAuthorityLock.withLock { $0 = nil }
+            latestRemotePairingIdentityPayloadLock.withLock { $0 = nil }
             let peerKeys = [device.deviceId, handshakePeer.deviceId, device.persistentDeviceId].compactMap { $0 }
             await ClassicTransferSessionRegistry.shared.remove(peerKeys: peerKeys)
             await MainActor.run { self.status = .failed }
@@ -996,13 +704,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         error: Error,
         hasRequiredPeerKEM: Bool
     ) -> Bool {
-        guard policy.requirePQC else { return false }
-        guard !hasRequiredPeerKEM else { return false }
-        guard let handshakeError = error as? HandshakeError,
-              case .failed(.suiteNegotiationFailed) = handshakeError else {
-            return false
-        }
-        return true
+        false
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -1035,23 +737,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         error: Error,
         hasRequiredPeerKEM: Bool
     ) -> Bool {
-        guard policy.requirePQC else { return false }
-        guard hasRequiredPeerKEM else { return false }
-        guard let handshakeError = error as? HandshakeError,
-              case .failed(let reason) = handshakeError else {
-            return false
-        }
-
-        switch reason {
-        case .cryptoError(let detail):
-            return looksLikeStalePeerKEMCryptoFailure(detail)
-        case .timeout:
-            return true
-        case .transportError(let detail):
-            return looksLikeStalePeerKEMTransportFailure(detail)
-        default:
-            return false
-        }
+        false
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -1540,6 +1226,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             SkyBridgeLogger.p2p.warning("⚠️ 跳过 pairingIdentityExchange：本机 deviceId 为空")
             return
         }
+        let protocolIdentityPublicKeys = await localProtocolIdentityPublicKeysForPairing()
         let localDeviceName: String? = {
             #if os(macOS)
             return Host.current().localizedName
@@ -1569,6 +1256,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let message = AppMessage.pairingIdentityExchange(.init(
             deviceId: localDeviceId,
             kemPublicKeys: kemKeys,
+            protocolIdentityPublicKeys: protocolIdentityPublicKeys,
             deviceName: localDeviceName,
             modelName: localModel,
             platform: localPlatform,
@@ -1580,6 +1268,22 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         ))
         try await sendEncryptedAppMessage(message)
         lastPairingIdentityExchangeSentAtLock.withLock { $0 = now }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func localProtocolIdentityPublicKeysForPairing() async -> [AppMessage.ProtocolIdentityPublicKeyInfo] {
+        var keys: [AppMessage.ProtocolIdentityPublicKeyInfo] = []
+        for algorithm in [ProtocolSigningAlgorithm.ed25519, .mlDSA65] {
+            do {
+                let publicKey = try await DeviceIdentityKeyManager.shared.getProtocolSigningPublicKey(for: algorithm)
+                keys.append(.init(protocolSigningAlgorithm: algorithm.rawValue, publicKey: publicKey))
+            } catch {
+                SkyBridgeLogger.p2p.debug(
+                    "ℹ️ P2P pairingIdentityExchange skipped protocol identity key alg=\(algorithm.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+        return AppMessage.ProtocolIdentityPublicKeyInfo.normalizedValidKeys(keys) ?? []
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -1997,7 +1701,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             do {
                 while !Task.isCancelled {
                     let lenData = try await self.receiveExactly(4)
-                    let totalLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                    let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
                     guard totalLen > 0, totalLen <= self.maxFrameBytes else {
                         throw P2PConnectionError.invalidFrameLength(Int(totalLen))
                     }
@@ -2006,11 +1710,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 }
             } catch {
                 if !Task.isCancelled {
-                    DispatchQueue.main.async {
-                        if self.status != .disconnected {
-                            self.status = .failed
-                        }
-                    }
+                    SkyBridgeLogger.p2p.warning(
+                        "⚠️ P2P receive loop ended; tearing down authenticated session: peer=\(self.handshakePeer.deviceId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    )
+                    self.disconnect()
                 }
             }
         }
@@ -2317,6 +2020,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             rekeyInProgressLock.withLock { $0 = false }
             authenticatedRemoteAuthorityLock.withLock { $0 = nil }
+            latestRemotePairingIdentityPayloadLock.withLock { $0 = nil }
             await MainActor.run {
                 self.status = .failed
             }
@@ -2327,25 +2031,75 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private func publishAuthenticatedPresence(keys: SessionKeys) async {
+    private func publishAuthenticatedPresence(
+        keys: SessionKeys,
+        remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
+    ) async {
+        await publishClassicTransferSessionSnapshot(
+            keys: keys,
+            remoteIdentityPayload: remoteIdentityPayload
+        )
+
         let suite = keys.negotiatedSuite
         let cryptoKind = ConnectionCryptoPresentation.modeLabel(
             kind: nil,
             suite: suite.rawValue
         ) ?? suite.rawValue
+        let declaredPeerId = normalizedNonEmptyString(remoteIdentityPayload?.deviceId)
+        let remoteDisplayName = normalizedNonEmptyString(remoteIdentityPayload?.deviceName)
+        let advertisedTransferPort = remoteIdentityPayload?.fileTransferPort.flatMap { port -> Int? in
+            let value = Int(port)
+            return (1...65535).contains(value) ? value : nil
+        }
 
         await MainActor.run {
-            let displayName = self.device.name
+            let peerId = declaredPeerId ?? self.handshakePeer.deviceId
+            let displayName = remoteDisplayName ?? self.device.name
             let address = self.resolveCurrentRemoteIP() ?? self.device.address
-            ConnectionPresenceService.shared.markConnected(
-                peerId: self.handshakePeer.deviceId,
-                displayName: displayName,
-                address: address,
-                cryptoKind: cryptoKind,
-                suite: suite.rawValue
+            let endpointLabel = address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? self.handshakePeer.deviceId
+                : "host:\(address)"
+            let resolvedRoute = P2PDiscoveryService.resolveInboundPresenceRoute(
+                peerId: peerId,
+                endpointLabel: endpointLabel,
+                discoveredDevices: P2PDiscoveryService.shared.discoveredDevices,
+                unifiedDevices: UnifiedOnlineDeviceManager.shared.onlineDevices
             )
+            let displayAddress = resolvedRoute.displayAddress?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let transferAddress = displayAddress?.isEmpty == false ? displayAddress! : address
+            let transferPort = advertisedTransferPort ?? resolvedRoute.transferPort
+
+            if !transferAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               (1...65535).contains(transferPort) {
+                let routeDescriptor = ConnectionPresenceService.PresenceRouteDescriptor(
+                    peerId: peerId,
+                    deviceName: remoteDisplayName ?? resolvedRoute.name,
+                    displayAddress: transferAddress,
+                    transferAddress: transferAddress,
+                    transferPort: transferPort,
+                    routeSource: .outbound,
+                    connectedAt: Date()
+                )
+                _ = ConnectionPresenceService.shared.publishConnectedAtomically(
+                    peerId: peerId,
+                    displayName: remoteDisplayName ?? resolvedRoute.name,
+                    address: transferAddress,
+                    cryptoKind: cryptoKind,
+                    suite: suite.rawValue,
+                    routeDescriptor: routeDescriptor
+                )
+            } else {
+                ConnectionPresenceService.shared.markConnected(
+                    peerId: peerId,
+                    displayName: displayName,
+                    address: address,
+                    cryptoKind: cryptoKind,
+                    suite: suite.rawValue
+                )
+            }
             UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
-                peerId: self.handshakePeer.deviceId,
+                peerId: peerId,
                 displayName: displayName,
                 cryptoKind: cryptoKind,
                 suite: suite.rawValue,
@@ -2364,6 +2118,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
         switch message {
         case .clipboard:
+            break
+        case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
+             .protocolIdentityBindingRequest, .signedProtocolIdentityBinding:
             break
         case .pairingIdentityExchange(let payload):
             await handlePairingIdentityExchange(payload)
@@ -2392,6 +2149,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             )
             return
         }
+        let shouldForceIdentityReply = latestRemotePairingIdentityPayloadLock.withLock { current -> Bool in
+            let previousDeviceId = normalizedNonEmptyString(current?.deviceId)
+            current = payload
+            guard let previousDeviceId else { return true }
+            return previousDeviceId.caseInsensitiveCompare(payload.deviceId) != .orderedSame
+        }
 
         do {
             try await persistPeerKEMTrustRecords(from: payload)
@@ -2409,8 +2172,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             )
         }
 
+        if let keys = sessionKeysLock.withLock({ $0 }) {
+            await publishAuthenticatedPresence(keys: keys, remoteIdentityPayload: payload)
+        }
+
         do {
-            try await sendPairingIdentityExchange(force: false)
+            try await sendPairingIdentityExchange(force: shouldForceIdentityReply)
         } catch {
             SkyBridgeLogger.p2p.warning(
                 "⚠️ pairingIdentityExchange reply failed: \(error.localizedDescription, privacy: .public)"
@@ -2421,6 +2188,21 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     @available(macOS 14.0, iOS 17.0, *)
     internal static func isBootstrapControlMessage(_ message: AppMessage) -> Bool {
         if case .pairingIdentityExchange = message {
+            return true
+        }
+        if case .kemRefreshRequest = message {
+            return true
+        }
+        if case .signedKEMRefresh = message {
+            return true
+        }
+        if case .kemRefreshFailure = message {
+            return true
+        }
+        if case .protocolIdentityBindingRequest = message {
+            return true
+        }
+        if case .signedProtocolIdentityBinding = message {
             return true
         }
         return false
@@ -2502,6 +2284,29 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 "⚠️ current-path trust bridge skipped: peer=\(self.handshakePeer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
             )
             return
+        }
+
+        func normalizedFingerprint(_ raw: String?) -> String? {
+            guard let raw else { return nil }
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard value.count == 64, value.allSatisfy(\.isHexDigit) else { return nil }
+            return value
+        }
+
+        let advertisedFingerprints = Set(
+            (AppMessage.ProtocolIdentityPublicKeyInfo.normalizedValidKeys(payload.protocolIdentityPublicKeys) ?? [])
+                .compactMap { normalizedFingerprint($0.authoritativeFingerprint) }
+        )
+        let authenticatedFingerprint = normalizedFingerprint(authority.protocolPublicKeyFingerprint)
+        if let authenticatedFingerprint, advertisedFingerprints.contains(authenticatedFingerprint) {
+            await PeerProtocolIdentityBootstrapStore.shared.upsert(
+                deviceIds: knownDeviceIds,
+                fingerprints: advertisedFingerprints
+            )
+        } else if !advertisedFingerprints.isEmpty {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ pairingIdentityExchange protocol identity pins ignored because they are not bound to the authenticated session: peer=\(self.handshakePeer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public) count=\(advertisedFingerprints.count, privacy: .public)"
+            )
         }
 
         SkyBridgeLogger.p2p.info(
@@ -2755,112 +2560,6 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
         case .bootstrapControlOnly:
             return "引导恢复期间仅允许 pairingIdentityExchange 控制消息"
         }
-    }
-}
-
-// MARK: - P2P消息
-public enum P2PMessage: Codable {
-    case authChallenge(Data)
-    case authResponse(Data)
-    case remoteDesktopFrame(Data)
-    case fileTransferRequest(FileTransferRequest)
-    case fileTransferData(Data)
-    case systemCommand(SystemCommand)
-    case heartbeat
-    
-    private enum CodingKeys: String, CodingKey {
-        case type, payload
-    }
-    
-    private enum MessageType: String, Codable {
-        case authChallenge, authResponse, remoteDesktopFrame
-        case fileTransferRequest, fileTransferData, systemCommand, heartbeat
-    }
-    
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let type = try container.decode(MessageType.self, forKey: .type)
-        
-        switch type {
-        case .authChallenge:
-            let data = try container.decode(Data.self, forKey: .payload)
-            self = .authChallenge(data)
-        case .authResponse:
-            let data = try container.decode(Data.self, forKey: .payload)
-            self = .authResponse(data)
-        case .remoteDesktopFrame:
-            let data = try container.decode(Data.self, forKey: .payload)
-            self = .remoteDesktopFrame(data)
-        case .fileTransferRequest:
-            let request = try container.decode(FileTransferRequest.self, forKey: .payload)
-            self = .fileTransferRequest(request)
-        case .fileTransferData:
-            let data = try container.decode(Data.self, forKey: .payload)
-            self = .fileTransferData(data)
-        case .systemCommand:
-            let command = try container.decode(SystemCommand.self, forKey: .payload)
-            self = .systemCommand(command)
-        case .heartbeat:
-            self = .heartbeat
-        }
-    }
-    
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        
-        switch self {
-        case .authChallenge(let data):
-            try container.encode(MessageType.authChallenge, forKey: .type)
-            try container.encode(data, forKey: .payload)
-        case .authResponse(let data):
-            try container.encode(MessageType.authResponse, forKey: .type)
-            try container.encode(data, forKey: .payload)
-        case .remoteDesktopFrame(let data):
-            try container.encode(MessageType.remoteDesktopFrame, forKey: .type)
-            try container.encode(data, forKey: .payload)
-        case .fileTransferRequest(let request):
-            try container.encode(MessageType.fileTransferRequest, forKey: .type)
-            try container.encode(request, forKey: .payload)
-        case .fileTransferData(let data):
-            try container.encode(MessageType.fileTransferData, forKey: .type)
-            try container.encode(data, forKey: .payload)
-        case .systemCommand(let command):
-            try container.encode(MessageType.systemCommand, forKey: .type)
-            try container.encode(command, forKey: .payload)
-        case .heartbeat:
-            try container.encode(MessageType.heartbeat, forKey: .type)
-        }
-    }
-}
-
-// MARK: - 文件传输请求
-// FileTransferRequest 定义已移至 FileTransferModels.swift 中
-
-// MARK: - 系统命令
-public struct SystemCommand: Codable {
-    public let id: String
-    public let type: CommandType
-    public let parameters: [String: String]
-    public let timestamp: Date
-    
-    public enum CommandType: String, Codable, CaseIterable {
-        case shutdown = "shutdown"
-        case restart = "restart"
-        case sleep = "sleep"
-        case lock = "lock"
-        case screenshot = "screenshot"
-        case volumeUp = "volume_up"
-        case volumeDown = "volume_down"
-        case mute = "mute"
-        case brightness = "brightness"
-        case custom = "custom"
-    }
-    
-    public init(id: String = UUID().uuidString, type: CommandType, parameters: [String: String] = [:]) {
-        self.id = id
-        self.type = type
-        self.parameters = parameters
-        self.timestamp = Date()
     }
 }
 

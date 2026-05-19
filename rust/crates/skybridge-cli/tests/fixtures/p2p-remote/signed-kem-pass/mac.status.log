@@ -1,0 +1,4 @@
+[2026-05-16T01:00:00.005Z] boot role=mac-p2p-host
+[2026-05-16T01:00:00.050Z] PIB-1 protocol identity binding served: requester=ios target=mac fingerprint=abc code=123456 lifecycle=identity-oob>served
+[2026-05-16T01:00:00.150Z] SKR-1 signed LAN KEM refresh served requester=ios target=mac keyId=skr1 generation=100 suites=0x0001 wireId=0x0001 lifecycle=request>served
+[2026-05-16T01:00:00.240Z] mac remote established peer=iPhone suite=X-Wing route=lan-direct

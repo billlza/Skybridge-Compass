@@ -1,0 +1,55 @@
+import Foundation
+
+@available(iOS 17.0, *)
+actor InboundChunkQueue {
+    private var pending: [Data] = []
+    private var waiters: [CheckedContinuation<Data, Error>] = []
+    private var finished = false
+
+    enum QueueError: Error {
+        case finished
+        case invalidReadLimit
+    }
+
+    func push(_ data: Data) {
+        guard !finished else { return }
+        if let waiter = waiters.first {
+            waiters.removeFirst()
+            waiter.resume(returning: data)
+            return
+        }
+        pending.append(data)
+    }
+
+    func finish() {
+        finished = true
+        let activeWaiters = waiters
+        waiters.removeAll()
+        activeWaiters.forEach { $0.resume(throwing: QueueError.finished) }
+    }
+
+    func next() async throws -> Data {
+        if let first = pending.first {
+            pending.removeFirst()
+            return first
+        }
+        if finished { throw QueueError.finished }
+        return try await withCheckedThrowingContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func next(max: Int) async throws -> Data {
+        guard max > 0 else {
+            throw QueueError.invalidReadLimit
+        }
+        let chunk = try await next()
+        if chunk.count <= max {
+            return chunk
+        }
+        let head = Data(chunk.prefix(max))
+        let tail = Data(chunk.dropFirst(max))
+        pending.insert(tail, at: 0)
+        return head
+    }
+}

@@ -120,13 +120,8 @@ public struct DashboardView: View {
         }
         .sheet(isPresented: $showingQRScanner) {
             QRCodeHubSheet(
-                onScanPairingData: { qrData in
-                handleQRCodeScan(qrData)
-            },
                 onScanConnectLink: { link in
-                    Task {
-                        await crossNetworkManager.connect(fromScannedString: link)
-                    }
+                    handleScannedConnectLink(link)
                 },
                 onConnectWithCode: { code in
                     Task {
@@ -675,8 +670,8 @@ private struct QuantumStarLayer: View {
                     }
                     
                     QuickActionButtonView(
-                        title: RuntimeLocalization.string("扫码连接"),
-                        icon: "qrcode.viewfinder",
+                        title: RuntimeLocalization.string("跨网连接"),
+                        icon: "link.badge.plus",
                         color: .mint
                     ) {
                         showingQRScanner = true
@@ -930,47 +925,14 @@ private struct QuantumStarLayer: View {
     }
     
     // MARK: - Methods
-    
-    private func handleQRCodeScan(_ data: QRCodeData) {
-        showingQRScanner = false
 
-        guard data.type == .devicePairing else {
-            return
-        }
-
-        switch data.validateDevicePairingSecurity() {
-        case .verified:
-            guard let ip = data.ipAddress, let _ = data.port else {
-                crossNetworkAlertMessage = "局域网二维码缺少可连接的地址信息"
-                return
+    private func handleScannedConnectLink(_ link: String) {
+        Task { @MainActor in
+            showingQRScanner = false
+            await crossNetworkManager.connect(fromScannedString: link)
+            if case .failed(let message) = crossNetworkManager.state {
+                crossNetworkAlertMessage = message
             }
-
-            Task { @MainActor in
-                let skybridgeTCP = DiscoveryServiceType.skybridge.rawValue
-                let portMap: [String: UInt16] = data.port.map { [skybridgeTCP: $0] } ?? [:]
-                let device = DiscoveredDevice(
-                    id: data.deviceId,
-                    name: data.deviceName,
-                    modelName: "Unknown",
-                    platform: .unknown,
-                    osVersion: "Unknown",
-                    ipAddress: ip,
-                    services: [skybridgeTCP],
-                    portMap: portMap,
-                    signalStrength: -50,
-                    lastSeen: Date()
-                )
-
-                do {
-                    try await viewModel.quickConnect(to: device)
-                } catch {
-                    crossNetworkAlertMessage = error.localizedDescription
-                }
-            }
-        case .unsignedLegacy:
-            crossNetworkAlertMessage = "已拦截未认证的局域网二维码。请让对方升级到新版 App 后重新生成，或改用跨网二维码。"
-        case .invalid(let reason):
-            crossNetworkAlertMessage = reason
         }
     }
 }
@@ -1134,74 +1096,11 @@ enum QRCodeHubMode: String, CaseIterable, Identifiable {
     }
 
 @available(iOS 17.0, *)
-struct QRCodeHubInteractionState: Equatable, Sendable {
-    var isConnecting = false
-    var isSubmittingCode = false
-    var isSubmittingScannedConnectLink = false
-    var sheetErrorMessage: String?
-
-    mutating func startConnectionCodeSubmission() {
-        sheetErrorMessage = nil
-        isSubmittingCode = true
-    }
-
-    mutating func startScannedConnectLinkSubmission() {
-        sheetErrorMessage = nil
-        isSubmittingScannedConnectLink = true
-    }
-
-    mutating func startPairingConnection() {
-        isConnecting = true
-    }
-
-    mutating func cancelPairingConnection() {
-        isConnecting = false
-    }
-
-    mutating func resetForModeChange() {
-        isConnecting = false
-        isSubmittingCode = false
-        isSubmittingScannedConnectLink = false
-        sheetErrorMessage = nil
-    }
-
-    mutating func handleCrossNetworkState(_ state: CrossNetworkWebRTCManager.State) {
-        switch state {
-        case .failed(let message):
-            let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !normalized.isEmpty {
-                sheetErrorMessage = normalized
-            }
-            isSubmittingCode = false
-            isSubmittingScannedConnectLink = false
-            isConnecting = false
-        case .idle, .connecting, .connected:
-            break
-        }
-    }
-
-    mutating func handleReadiness(_ readiness: CrossNetworkWebRTCManager.Readiness) -> Bool {
-        switch readiness {
-        case .handshakeComplete:
-            isSubmittingScannedConnectLink = false
-            return true
-        case .idle:
-            isSubmittingCode = false
-            isSubmittingScannedConnectLink = false
-            return false
-        case .transportReady:
-            return false
-        }
-    }
-}
-
-@available(iOS 17.0, *)
 private struct QRCodeHubSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @State private var mode: QRCodeHubMode = .scan
-    @State private var pendingPairing: QRCodeData?
     @State private var scannerSessionID = UUID()
     @State private var interactionState = QRCodeHubInteractionState()
     @State private var codeInput: String = ""
@@ -1210,7 +1109,6 @@ private struct QRCodeHubSheet: View {
     @State private var isPresentedInHierarchy = false
     @FocusState private var isCodeInputFocused: Bool
 
-    let onScanPairingData: (QRCodeData) -> Void
     let onScanConnectLink: (String) -> Void
     let onConnectWithCode: (String) -> Void
 
@@ -1232,8 +1130,9 @@ private struct QRCodeHubSheet: View {
                         ZStack {
                             QRCodeScannerView(
                                 onScan: { data in
-                                    // 扫到配对码：先弹确认卡片，不直接连接
-                                    pendingPairing = data
+                                    SkyBridgeLogger.shared.warning("🔐 已拒绝本地 P2P 二维码路径: device=\(data.deviceId)")
+                                    interactionState.sheetErrorMessage = RuntimeLocalization.string("本地 P2P 二维码引导已移除。请从设备发现列表选择设备；若信任失效，请使用“修复 P2P 信任”。")
+                                    scannerSessionID = UUID()
                                 },
                                 onScanString: { string in
                                     if CrossNetworkWebRTCManager.isConnectLinkString(string) {
@@ -1274,28 +1173,6 @@ private struct QRCodeHubSheet: View {
                                 .transition(.opacity)
                             }
 
-                            if let pendingPairing {
-                                // 半透明遮罩
-                                Color.black.opacity(0.35)
-                                    .ignoresSafeArea()
-
-                                QRCodePairingConfirmCard(
-                                    data: pendingPairing,
-                                    isConnecting: interactionState.isConnecting,
-                                    onCancel: {
-                                        self.pendingPairing = nil
-                                        self.interactionState.cancelPairingConnection()
-                                        self.scannerSessionID = UUID() // 重新开始扫描
-                                    },
-                                    onConnect: {
-                                        interactionState.startPairingConnection()
-                                        onScanPairingData(pendingPairing)
-                                        dismiss()
-                                    }
-                                )
-                                .padding(.horizontal, 20)
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
-                            }
                         }
                         .accessibilityIdentifier("dashboard.qr.scan.root")
 
@@ -1501,81 +1378,6 @@ private struct QRCodeHubSheet: View {
 }
 
 @available(iOS 17.0, *)
-private struct QRCodePairingConfirmCard: View {
-    let data: QRCodeData
-    let isConnecting: Bool
-    let onCancel: () -> Void
-    let onConnect: () -> Void
-
-    private var addressText: String {
-        let ip = data.ipAddress ?? RuntimeLocalization.string("未知地址")
-        if let port = data.port {
-            return "\(ip):\(port)"
-        }
-        return ip
-    }
-
-    var body: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "qrcode.viewfinder")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.primary)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("确认连接")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                    Text("扫描到设备配对信息")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                InfoRow(label: "设备", value: data.deviceName)
-                InfoRow(label: "地址", value: addressText)
-                InfoRow(label: "端口", value: data.port.map(String.init) ?? "—")
-            }
-            .padding(.top, 4)
-
-            HStack(spacing: 12) {
-                Button("取消") { onCancel() }
-                    .buttonStyle(.bordered)
-
-                Button {
-                    onConnect()
-                } label: {
-                    HStack(spacing: 8) {
-                        if isConnecting {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                        Text(isConnecting ? RuntimeLocalization.string("连接中...") : RuntimeLocalization.string("连接"))
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isConnecting || data.ipAddress == nil)
-            }
-            .padding(.top, 6)
-
-            if data.ipAddress == nil {
-                Text("此二维码未包含可连接的 IP/端口信息。请使用新版配对码。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 2)
-            }
-        }
-        .padding(16)
-        // 液态玻璃卡片（iOS 26+ 使用 glassEffect；旧系统回退 ultraThinMaterial）
-        .liquidGlassCard(cornerRadius: 22, padding: 0)
-    }
-}
-
-@available(iOS 17.0, *)
 private struct MyConnectionQRCodeView: View {
     private enum QRCodeGenerationError: LocalizedError {
         case message(String)
@@ -1593,15 +1395,12 @@ private struct MyConnectionQRCodeView: View {
     }
 
     private enum TransportMode: String, CaseIterable, Identifiable {
-        case p2p
         case webRTC
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .p2p:
-                return "P2P"
             case .webRTC:
                 return "WebRTC"
             }
@@ -1609,8 +1408,6 @@ private struct MyConnectionQRCodeView: View {
 
         var subtitle: String {
             switch self {
-            case .p2p:
-                return "同一网络优先，直接局域网连接"
             case .webRTC:
                 return "跨网络连接，依赖信令与登录态"
             }
@@ -1618,8 +1415,7 @@ private struct MyConnectionQRCodeView: View {
     }
 
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
-    @StateObject private var connectionManager = P2PConnectionManager.instance
-    @AppStorage("dashboard.myqr.transport.mode") private var transportModeRaw = TransportMode.p2p.rawValue
+    @AppStorage("dashboard.myqr.transport.mode") private var transportModeRaw = TransportMode.webRTC.rawValue
     @State private var qrImage: UIImage?
     @State private var errorText: String?
     @State private var isGenerating = false
@@ -1724,8 +1520,6 @@ private struct MyConnectionQRCodeView: View {
 
         let result: Result<UIImage, QRCodeGenerationError>
         switch mode {
-        case .p2p:
-            result = await generateP2PQRCode()
         case .webRTC:
             result = await generateWebRTCQRCode()
         }
@@ -1742,7 +1536,7 @@ private struct MyConnectionQRCodeView: View {
     }
 
     private var selectedTransportMode: TransportMode {
-        TransportMode(rawValue: transportModeRaw) ?? .p2p
+        TransportMode(rawValue: transportModeRaw) ?? .webRTC
     }
 
     private var transportModeBinding: Binding<TransportMode> {
@@ -1754,8 +1548,6 @@ private struct MyConnectionQRCodeView: View {
 
     private var descriptionText: String {
         switch selectedTransportMode {
-        case .p2p:
-            return "让同一网络下的 iPhone / iPad / Mac 扫描此二维码后直接连接"
         case .webRTC:
             return "让 macOS / 其他设备扫描此二维码以跨网连接"
         }
@@ -1766,45 +1558,6 @@ private struct MyConnectionQRCodeView: View {
             return .failure(.message(crossNetworkManager.lastError ?? RuntimeLocalization.string("生成二维码失败")))
         }
         return renderConnectLinkQRCode(from: connectLink)
-    }
-
-    private func generateP2PQRCode() async -> Result<UIImage, QRCodeGenerationError> {
-        do {
-            if !connectionManager.isListening {
-                try await connectionManager.startListening()
-            }
-        } catch {
-            return .failure(.message("P2P 监听启动失败：\(error.localizedDescription)"))
-        }
-
-        guard let localIPAddress = preferredLocalPairingIPAddress() else {
-            return .failure(.message("无法获取当前局域网地址。若已开启 VPN / TUN，请改用 WebRTC 二维码。"))
-        }
-
-        let qrData: QRCodeData
-        do {
-            qrData = try QRCodeGenerator.shared.createAuthenticatedPairingData(
-                deviceId: KeychainManager.shared.getOrGenerateDeviceId(),
-                deviceName: UIDevice.current.name,
-                ipAddress: localIPAddress,
-                port: 9527
-            )
-        } catch {
-            return .failure(.message(error.localizedDescription))
-        }
-
-        let image = QRCodeGenerator.shared.generateQRCode(
-            from: qrData,
-            size: CGSize(width: 420, height: 420),
-            foregroundColor: .black,
-            backgroundColor: .white
-        )
-
-        guard let image else {
-            return .failure(.message(RuntimeLocalization.string("生成二维码失败")))
-        }
-
-        return .success(image)
     }
 
     private func renderConnectLinkQRCode(from connectLink: String?) -> Result<UIImage, QRCodeGenerationError> {
@@ -1826,60 +1579,6 @@ private struct MyConnectionQRCodeView: View {
         return .success(image)
     }
 
-    private func preferredLocalPairingIPAddress() -> String? {
-        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else {
-            return nil
-        }
-        defer { freeifaddrs(ifaddrPtr) }
-
-        var preferredIP: String?
-        var fallbackIP: String?
-        var cursor: UnsafeMutablePointer<ifaddrs>? = firstAddr
-
-        while let entry = cursor?.pointee {
-            defer { cursor = entry.ifa_next }
-            guard let addressPtr = entry.ifa_addr else { continue }
-            guard addressPtr.pointee.sa_family == sa_family_t(AF_INET) else { continue }
-
-            let flags = Int32(entry.ifa_flags)
-            if (flags & IFF_LOOPBACK) != 0 { continue }
-
-            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            let result = getnameinfo(
-                addressPtr,
-                socklen_t(addressPtr.pointee.sa_len),
-                &hostname,
-                socklen_t(hostname.count),
-                nil,
-                0,
-                NI_NUMERICHOST
-            )
-            guard result == 0 else { continue }
-
-            let ip = hostname.withUnsafeBufferPointer { buffer in
-                String(
-                    decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
-                    as: UTF8.self
-                )
-            }
-            guard !ip.isEmpty else { continue }
-
-            let interfaceName = entry.ifa_name.map { String(cString: $0) } ?? ""
-            if interfaceName == "en0" || interfaceName == "en1" {
-                if preferredIP == nil {
-                    preferredIP = ip
-                }
-            } else if fallbackIP == nil,
-                      !interfaceName.hasPrefix("utun"),
-                      !interfaceName.hasPrefix("ipsec"),
-                      !interfaceName.hasPrefix("tun") {
-                fallbackIP = ip
-            }
-        }
-
-        return preferredIP ?? fallbackIP
-    }
 }
 
 // MARK: - Weather Effects (iOS)

@@ -131,6 +131,7 @@ struct TrustedDeviceDetailView: View {
     let presentationMetadata: ApplePeerDeviceMetadataNormalizer.Presentation
     let status: OnlineDeviceStatus
     let onDisconnect: ((_ idsToDisconnect: [String], _ declaredDeviceId: String?) -> Void)?
+    let onRepairP2PTrust: (_ idsToRepair: [String]) -> Void
     let onRemoveTrust: (_ idsToRevoke: [String], _ declaredDeviceId: String?) -> Void
     
     var body: some View {
@@ -199,10 +200,15 @@ struct TrustedDeviceDetailView: View {
                         Label(LocalizationManager.shared.localizedString("action.disconnect"), systemImage: "xmark.circle")
                     }
                 }
+                Button {
+                    onRepairP2PTrust(idsToRevoke)
+                } label: {
+                    Label(ui(chinese: "修复 P2P 信任", english: "Repair P2P Trust", japanese: "P2P 信頼を修復"), systemImage: "wrench.and.screwdriver")
+                }
                 Button(role: .destructive) {
                     onRemoveTrust(idsToRevoke, declaredDeviceId)
                 } label: {
-                    Label(ui(chinese: "移除信任", english: "Remove Trust", japanese: "信頼を解除"), systemImage: "trash")
+                    Label(ui(chinese: "彻底忘记设备", english: "Forget Device", japanese: "デバイスを完全に忘れる"), systemImage: "trash")
                 }
                 .keyboardShortcut(.delete)
             }

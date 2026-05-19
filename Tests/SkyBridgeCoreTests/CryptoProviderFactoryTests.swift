@@ -205,6 +205,23 @@ final class CryptoProviderFactoryTests: XCTestCase {
                        "Apple PQC should be false without HAS_APPLE_PQC_SDK")
         #endif
     }
+
+    func testSystemApplePQCProbeIsCachedOffHotPath() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("ApplePQCAvailabilityCache"))
+        XCTAssertTrue(source.contains("static let applePQC"))
+        XCTAssertTrue(source.contains("static let xwing"))
+        XCTAssertTrue(source.contains("return ApplePQCAvailabilityCache.applePQC"))
+        XCTAssertTrue(source.contains("return ApplePQCAvailabilityCache.xwing"))
+    }
 }
 
 // MARK: - HPKESealedBox Tests

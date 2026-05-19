@@ -90,8 +90,8 @@ public struct PairingTrustApprovalSheet: View {
                 Divider()
                 
                 VStack(alignment: .leading, spacing: 10) {
-                    if shouldShowVerificationStage {
-                        Text("请将上方 6 位验证码输入到 iPhone/iPad 的“PQC 身份验证”界面，以完成论文叙事中的 OOB pairing ceremony。")
+                    if shouldShowCompletionOnly {
+                        Text(completionText)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
@@ -107,7 +107,7 @@ public struct PairingTrustApprovalSheet: View {
                             .buttonStyle(.borderedProminent)
                         }
                     } else {
-                        Text("该申请用于建立/更新 PQC 引导所需的 KEM 身份公钥信任信息。选择“始终允许”会记住该设备。")
+                        Text(promptText)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                         
@@ -164,8 +164,38 @@ public struct PairingTrustApprovalSheet: View {
     
     private var shouldShowVerificationStage: Bool {
         guard service.pendingRequest?.id == request.id else { return false }
+        if isProtocolIdentityBindingPrompt {
+            return service.pendingVerificationCode?.isEmpty == false
+        }
         guard let decision = service.pendingDecision else { return false }
         return decision != .reject
+    }
+
+    private var shouldShowCompletionOnly: Bool {
+        guard shouldShowVerificationStage else { return false }
+        guard service.pendingDecision != nil else { return false }
+        return true
+    }
+
+    private var isProtocolIdentityBindingPrompt: Bool {
+        if service.pendingVerificationSuite == "PIB-1" {
+            return true
+        }
+        return request.policyBindingKey?.hasPrefix("PIB-1") == true
+    }
+
+    private var promptText: String {
+        if isProtocolIdentityBindingPrompt {
+            return "请确认 Mac 与 iPhone/iPad 显示的 6 位验证码完全一致；一致后才允许建立协议身份 pin。"
+        }
+        return "该申请用于建立/更新 PQC 引导所需的 KEM 身份公钥信任信息。选择“始终允许”会记住该设备。"
+    }
+
+    private var completionText: String {
+        if isProtocolIdentityBindingPrompt {
+            return "协议身份确认已处理。另一端现在可以继续 SKR-1 signed KEM refresh。"
+        }
+        return "请将上方 6 位验证码输入到 iPhone/iPad 的“PQC 身份验证”界面，以完成论文叙事中的 OOB pairing ceremony。"
     }
 
     private func resolve(_ decision: PairingTrustApprovalService.Decision) {
@@ -175,5 +205,4 @@ public struct PairingTrustApprovalSheet: View {
         // to surface the transcript-bound SAS verification code.
     }
 }
-
 

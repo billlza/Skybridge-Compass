@@ -5,6 +5,8 @@ import PackageDescription
 let packageRootPath = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let webRTCHeadersIncludePath = "\(packageRootPath)/Sources/Vendor/WebRTCHeaders"
 let macOSAppInfoPlistPath = "\(packageRootPath)/Sources/SkyBridgeCompassApp/Info.plist"
+let latestCStandardFlags = ["-std=gnu23"]
+let latestCXXStandardFlags = ["-std=gnu++23"]
 
 // Build-time gate for Apple CryptoKit PQC types (iOS 26+/macOS 26+).
 //
@@ -102,7 +104,7 @@ let package = Package(
             publicHeadersPath: "include",
             cxxSettings: [
                 // 中文注释：启用 C++23 支持，统一 Apple 端原生桥接目标的语言标准。
-                .unsafeFlags(["-std=c++23"])
+                .unsafeFlags(latestCXXStandardFlags)
             ]
         ),
         .target(
@@ -111,6 +113,7 @@ let package = Package(
             path: "Sources/FreeRDPBridge",
             publicHeadersPath: "include",
             cSettings: [
+                .unsafeFlags(latestCStandardFlags),
                 // Apple Silicon 优化编译选项（不要手动定义 TARGET_CPU_*，由 SDK/编译器根据架构提供）
                 .define("APPLE_SILICON_OPTIMIZED", to: "1")
             ],
@@ -180,6 +183,7 @@ let package = Package(
             path: "Sources/WebRTCAudioDeviceBridge",
             publicHeadersPath: "include",
             cSettings: [
+                .unsafeFlags(latestCStandardFlags),
                 .unsafeFlags(["-I", webRTCHeadersIncludePath])
             ],
             linkerSettings: [
@@ -190,7 +194,10 @@ let package = Package(
             name: "CSkyBridgeOpusShim",
             dependencies: ["libopus"],
             path: "Sources/CSkyBridgeOpusShim",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(latestCStandardFlags)
+            ]
         ),
         .target(
             name: "SkyBridgeOpus",
@@ -260,9 +267,6 @@ let package = Package(
                 .define("ARM64_NATIVE"),
                 // Swift 6.3 严格并发控制
                 .enableUpcomingFeature("StrictConcurrency"),
-                // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
-                // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
-                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
                 // WebRTC binary header overlay (SwiftPM): provide missing public/internal include paths on macOS.
                 .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
                 .define("OQS_ENABLED"),
@@ -312,9 +316,6 @@ let package = Package(
                 .define("ARM64_NATIVE"),
                 // Swift 6.3 严格并发控制
                 .enableUpcomingFeature("StrictConcurrency"),
-                // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
-                // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
-                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
                 // SkyBridgeUI depends on SkyBridgeCore -> WebRTC; keep Clang scanner include paths aligned.
                 .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ],
@@ -329,14 +330,14 @@ let package = Package(
                 "SkyBridgeUI",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
-                "OQSRAII"
+                "OQSRAII",
+                "PrivateSensorBridge"
             ],
             path: "Tests/SkyBridgeCoreTests",
             exclude: [
             ],
             swiftSettings: ([
                 // 测试目标同样会导入 WebRTC，保持与主模块一致的头文件覆盖路径，避免 clang 依赖扫描误报。
-                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
                 .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ] + (enableApplePQCSDK ? [
                 // 与 SkyBridgeCore 保持一致：否则测试中的 `#if HAS_APPLE_PQC_SDK` 分支会与被测模块不一致
@@ -352,7 +353,6 @@ let package = Package(
             ],
             path: "Tests/SkyBridgeBenchTests",
             swiftSettings: ([
-                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
                 .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ] + (enableApplePQCSDK ? [
                 .define("HAS_APPLE_PQC_SDK")
@@ -381,6 +381,7 @@ let package = Package(
             // 排除配置文件和文档 - 符合 Swift 6.3 最佳实践
             exclude: [
                 "Info.plist",
+                "Resources/AppIcon.icon",
                 "SkyBridgeCompassApp.entitlements",
                 "SkyBridgeCompassApp.packaging.entitlements",
                 "SkyBridgeCompassApp.native.packaging.entitlements"
@@ -395,9 +396,6 @@ let package = Package(
                 // Apple Silicon特定优化
                 .enableUpcomingFeature("StrictConcurrency"),
                 .define("APPLE_SILICON_OPTIMIZED"),
-                // Suppress deprecated declarations coming from imported Objective‑C headers inside WebRTC.xcframework
-                // (e.g., RTCNSGLVideoView uses NSOpenGLView/NSOpenGLPixelFormat which are deprecated on macOS).
-                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
                 // App target depends transitively on SkyBridgeCore -> WebRTC.
                 .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ],
@@ -438,7 +436,6 @@ let package = Package(
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
                 .define("APPLE_SILICON_OPTIMIZED"),
-                .unsafeFlags(["-Xcc", "-Wno-deprecated-declarations"], .when(platforms: [.macOS])),
                 .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ],
             linkerSettings: [
@@ -502,6 +499,9 @@ let package = Package(
             dependencies: [],
             path: "Sources/PrivateSensorBridgeC",
             publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(latestCStandardFlags)
+            ],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreFoundation")

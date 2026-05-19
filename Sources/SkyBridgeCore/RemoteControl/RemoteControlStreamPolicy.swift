@@ -76,6 +76,20 @@ enum RemoteControlCaptureCompatibility {
         )
     }
 
+    static func encodedBackingCaptureSize(
+        _ visibleSize: CGSize,
+        for codec: RemoteFrameType,
+        preserveExactVisibleSize: Bool = false
+    ) -> CGSize {
+        guard preserveExactVisibleSize, codec != .bgra else {
+            return normalizedCaptureSize(visibleSize, for: codec, preserveExactVisibleSize: false)
+        }
+        return CGSize(
+            width: evenBackingDimension(visibleSize.width),
+            height: evenBackingDimension(visibleSize.height)
+        )
+    }
+
     static func fallbackCodec(afterEncodeFailure status: OSStatus, activeCodec: RemoteFrameType) -> RemoteFrameType? {
         switch (status, activeCodec) {
         case (kVTInvalidSessionErr, .hevc),
@@ -103,6 +117,15 @@ enum RemoteControlCaptureCompatibility {
         }
         return CGFloat(dimension)
     }
+
+    private static func evenBackingDimension(_ rawValue: CGFloat) -> CGFloat {
+        let sanitized = rawValue.isFinite ? rawValue : 2
+        var dimension = max(2, Int(sanitized.rounded(.down)))
+        if !dimension.isMultiple(of: 2) {
+            dimension += 1
+        }
+        return CGFloat(dimension)
+    }
 }
 
 enum RemoteControlStreamPolicySelector {
@@ -127,8 +150,20 @@ enum RemoteControlStreamPolicySelector {
             && (Int(request.preferredSize.width.rounded(.down)).isMultiple(of: 2) == false
                 || Int(request.preferredSize.height.rounded(.down)).isMultiple(of: 2) == false)
 
+        let highFPSHardwareHEVCPreferred = supportsHEVC
+            && requestedFPS >= 55
+            && longEdge >= 2_000
+            && isAppleSilicon
+            && request.enableHardwareAcceleration
+            && request.enableAppleSiliconOptimization
+
         if request.lowLatencyMode {
-            if supportsH264 && !exactOddVisibleDimension {
+            if highFPSHardwareHEVCPreferred {
+                codec = .hevc
+                reason = exactOddVisibleDimension
+                    ? "low-latency-high-fps-hevc-exact-visible"
+                    : "low-latency-high-fps-hevc"
+            } else if supportsH264 && !exactOddVisibleDimension {
                 codec = .h264
                 reason = "low-latency-h264"
             } else if supportsHEVC {
@@ -220,8 +255,11 @@ enum RemoteControlStreamPolicySelector {
         }
 
         let targetFrameRate = max(12, min(requestedFPS, fpsCap))
+        let lowLatencyKeyFrameCeiling = highFPSHardwareHEVCPreferred
+            ? max(30, targetFrameRate)
+            : max(15, targetFrameRate / 2)
         let keyFrameCeiling = request.lowLatencyMode
-            ? max(15, targetFrameRate / 2)
+            ? lowLatencyKeyFrameCeiling
             : max(30, targetFrameRate * 2)
         let keyFrameInterval = max(10, min(request.keyFrameInterval, keyFrameCeiling))
 

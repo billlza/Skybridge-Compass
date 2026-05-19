@@ -72,21 +72,21 @@ impl PresenceRegistry {
         };
         self.active_connections.insert(peer_id.clone(), connection);
 
-        if !self.route_descriptors_by_peer_id.contains_key(&peer_id) {
-            if let Some(address) = address.and_then(|address| sanitize_address(Some(address))) {
-                self.route_descriptors_by_peer_id.insert(
-                    peer_id.clone(),
-                    PresenceRouteDescriptor {
-                        peer_id,
-                        device_name: display_name,
-                        display_address: address.clone(),
-                        transfer_address: address,
-                        transfer_port: 8080,
-                        route_source: PresenceRouteSource::Compatibility,
-                        connected_at: OffsetDateTime::now_utc(),
-                    },
-                );
-            }
+        if !self.route_descriptors_by_peer_id.contains_key(&peer_id)
+            && let Some(address) = address.and_then(|address| sanitize_address(Some(address)))
+        {
+            self.route_descriptors_by_peer_id.insert(
+                peer_id.clone(),
+                PresenceRouteDescriptor {
+                    peer_id,
+                    device_name: display_name,
+                    display_address: address.clone(),
+                    transfer_address: address,
+                    transfer_port: 8080,
+                    route_source: PresenceRouteSource::Compatibility,
+                    connected_at: OffsetDateTime::now_utc(),
+                },
+            );
         }
     }
 
@@ -178,7 +178,7 @@ pub fn resolve_active_peer_routes(registry: &PresenceRegistry) -> RouteResolutio
         .values()
         .cloned()
         .collect::<Vec<_>>();
-    presence.sort_by(|lhs, rhs| rhs.connected_at.cmp(&lhs.connected_at));
+    presence.sort_by_key(|connection| std::cmp::Reverse(connection.connected_at));
 
     for connection in presence {
         fallback_invoked = true;
@@ -244,28 +244,28 @@ pub fn resolve_inbound_presence_route(
         .to_owned();
 
     for device in discovered_devices {
-        if device.peer_id == peer_id || device.device_id.as_deref() == Some(stable_device_id) {
-            if let Some(display_address) = sanitize_address(device.ipv4.clone()) {
-                return InboundPresenceRouteResolution {
-                    name: device.name.clone(),
-                    display_address: display_address.clone(),
-                    transfer_address: display_address,
-                    transfer_port: device.transfer_port.unwrap_or(8080),
-                };
-            }
+        if (device.peer_id == peer_id || device.device_id.as_deref() == Some(stable_device_id))
+            && let Some(display_address) = sanitize_address(device.ipv4.clone())
+        {
+            return InboundPresenceRouteResolution {
+                name: device.name.clone(),
+                display_address: display_address.clone(),
+                transfer_address: display_address,
+                transfer_port: device.transfer_port.unwrap_or(8080),
+            };
         }
     }
 
     for device in unified_devices {
-        if device.peer_id == peer_id || device.device_id.as_deref() == Some(stable_device_id) {
-            if let Some(display_address) = sanitize_address(device.address.clone()) {
-                return InboundPresenceRouteResolution {
-                    name: device.name.clone(),
-                    display_address: display_address.clone(),
-                    transfer_address: display_address,
-                    transfer_port: device.transfer_port.unwrap_or(8080),
-                };
-            }
+        if (device.peer_id == peer_id || device.device_id.as_deref() == Some(stable_device_id))
+            && let Some(display_address) = sanitize_address(device.address.clone())
+        {
+            return InboundPresenceRouteResolution {
+                name: device.name.clone(),
+                display_address: display_address.clone(),
+                transfer_address: display_address,
+                transfer_port: device.transfer_port.unwrap_or(8080),
+            };
         }
     }
 

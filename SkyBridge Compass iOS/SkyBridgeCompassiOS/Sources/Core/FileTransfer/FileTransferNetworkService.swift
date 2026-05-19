@@ -88,6 +88,7 @@ public actor FileTransferNetworkService {
         parameters.includePeerToPeer = true
         parameters.allowLocalEndpointReuse = true
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.noDelay = true
             tcp.enableKeepalive = true
             tcp.keepaliveIdle = 30
             tcp.keepaliveInterval = 15
@@ -267,6 +268,7 @@ public actor FileTransferNetworkService {
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.noDelay = true
             tcp.enableKeepalive = true
             tcp.keepaliveIdle = 30
             tcp.keepaliveInterval = 15

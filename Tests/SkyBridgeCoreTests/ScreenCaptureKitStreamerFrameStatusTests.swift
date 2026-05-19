@@ -56,7 +56,7 @@ final class ScreenCaptureKitStreamerFrameStatusTests: XCTestCase {
                 width: 2056,
                 height: 1329
             ),
-            6
+            8
         )
         XCTAssertEqual(
             ScreenCaptureKitStreamer.captureQueueDepth(
@@ -65,7 +65,7 @@ final class ScreenCaptureKitStreamerFrameStatusTests: XCTestCase {
                 width: 2560,
                 height: 1600
             ),
-            7
+            8
         )
         XCTAssertLessThanOrEqual(
             ScreenCaptureKitStreamer.captureQueueDepth(
@@ -127,6 +127,23 @@ final class ScreenCaptureKitStreamerFrameStatusTests: XCTestCase {
                 captureVideoOutput: false,
                 requestedSystemAudio: false
             )
+        )
+    }
+
+    func testAudioOnlyCaptureUsesDistinctSmokeStatusPrefix() {
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.startSmokeStatusPrefix(
+                captureVideoOutput: true,
+                requestedSystemAudio: true
+            ),
+            "mac-sck-start"
+        )
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.startSmokeStatusPrefix(
+                captureVideoOutput: false,
+                requestedSystemAudio: true
+            ),
+            "mac-sck-audio-start"
         )
     }
 
@@ -202,10 +219,61 @@ final class ScreenCaptureKitStreamerFrameStatusTests: XCTestCase {
         XCTAssertEqual(
             targets,
             [
+                lastSubmittedAt + 166_666_660,
+                lastSubmittedAt + 183_333_326,
                 lastSubmittedAt + 199_999_992
             ]
         )
         XCTAssertTrue(targets.allSatisfy { $0 <= lastSubmittedAt + 200_000_000 })
+    }
+
+    func testCadenceSubmissionSkipsExpiredHighFpsProducerCatchUp() {
+        let lastSubmittedAt: UInt64 = 1_000_000_000
+
+        let oneTimerSlip = ScreenCaptureKitStreamer.cadenceSubmissionTargetUptimes(
+            lastSubmittedAt: lastSubmittedAt,
+            nowNanos: lastSubmittedAt + 35_000_000,
+            configuredFPS: 60,
+            maxCatchUpFrames: ScreenCaptureKitStreamer.cadenceCatchUpFrameLimit(forConfiguredFPS: 60)
+        )
+
+        XCTAssertEqual(
+            oneTimerSlip,
+            [
+                lastSubmittedAt + 16_666_666,
+                lastSubmittedAt + 33_333_332
+            ]
+        )
+
+        let longStall = ScreenCaptureKitStreamer.cadenceSubmissionTargetUptimes(
+            lastSubmittedAt: lastSubmittedAt,
+            nowNanos: lastSubmittedAt + 200_000_000,
+            configuredFPS: 60,
+            maxCatchUpFrames: ScreenCaptureKitStreamer.cadenceCatchUpFrameLimit(forConfiguredFPS: 60)
+        )
+
+        XCTAssertEqual(
+            longStall,
+            [
+                lastSubmittedAt + 183_333_326,
+                lastSubmittedAt + 199_999_992
+            ]
+        )
+    }
+
+    func testHighFpsDisplayCadenceUsesBoundedTwoFrameProducerCatchUp() {
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.cadenceCatchUpFrameLimit(forConfiguredFPS: 60),
+            2
+        )
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.cadenceCatchUpFrameLimit(forConfiguredFPS: 120),
+            2
+        )
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.cadenceCatchUpFrameLimit(forConfiguredFPS: 30),
+            1
+        )
     }
 
     func testEncodeLatencyPercentilesAreDeterministic() {
@@ -241,7 +309,7 @@ final class ScreenCaptureKitStreamerFrameStatusTests: XCTestCase {
         )
     }
 
-    func testLowLatencyRateControlOnlyAppliesToCompatibleH264Profiles() throws {
+    func testLowLatencyRateControlStaysOnKnownProducingProfiles() throws {
         XCTAssertTrue(
             ScreenCaptureKitStreamer.shouldEnableLowLatencyRateControl(
                 codec: kCMVideoCodecType_H264,
@@ -276,6 +344,140 @@ final class ScreenCaptureKitStreamerFrameStatusTests: XCTestCase {
             specification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String] as? Bool,
             true
         )
+        let hevcSpecification = try XCTUnwrap(
+            ScreenCaptureKitStreamer.videoEncoderSpecification(
+                codec: kCMVideoCodecType_HEVC,
+                lowLatencyMode: true,
+                requiresHardwareEncoder: true,
+                preferredProfile: .hevcMain
+            ) as NSDictionary?
+        )
+        XCTAssertNil(hevcSpecification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String])
+        XCTAssertEqual(
+            hevcSpecification[kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String] as? Bool,
+            true
+        )
+    }
+
+    func testLowLatencyHEVCHighFpsKeepsOneSecondGOP() {
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.videoToolboxKeyFrameInterval(
+                configuredKeyInterval: 60,
+                configuredFPS: 60,
+                lowLatencyEnabled: true,
+                codec: kCMVideoCodecType_HEVC
+            ),
+            60
+        )
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.videoToolboxKeyFrameIntervalDuration(
+                configuredKeyInterval: 60,
+                configuredFPS: 60,
+                lowLatencyEnabled: true,
+                codec: kCMVideoCodecType_HEVC
+            ),
+            1.0,
+            accuracy: 0.0001
+        )
+    }
+
+    func testLowLatencyH264KeepsShortRecoveryGOP() {
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.videoToolboxKeyFrameInterval(
+                configuredKeyInterval: 60,
+                configuredFPS: 60,
+                lowLatencyEnabled: true,
+                codec: kCMVideoCodecType_H264
+            ),
+            30
+        )
+        XCTAssertEqual(
+            ScreenCaptureKitStreamer.videoToolboxKeyFrameIntervalDuration(
+                configuredKeyInterval: 60,
+                configuredFPS: 60,
+                lowLatencyEnabled: true,
+                codec: kCMVideoCodecType_H264
+            ),
+            0.5,
+            accuracy: 0.0001
+        )
+    }
+
+    func testLowLatencyHEVC2K60CapsBitrateForTransportCadence() throws {
+        let source = try screenCaptureKitStreamerSource()
+        let limits = ScreenCaptureKitStreamer.videoToolboxDataRateLimits(
+            codec: kCMVideoCodecType_HEVC,
+            averageBitRate: 12_000_000,
+            width: 2056,
+            height: 1330,
+            fps: 60,
+            lowLatencyEnabled: true
+        )
+
+        XCTAssertTrue(source.contains("quality = min(quality, 0.30)"))
+        XCTAssertTrue(source.contains("maximum = 12_000_000"))
+        XCTAssertTrue(source.contains("averageBitRate=\\(averageBitRate)"))
+        XCTAssertTrue(source.contains("dataRateLimitBytesPerSecond=\\(hardLimitBytesPerSecond)"))
+        XCTAssertTrue(source.contains("dataRateBurstLimitBytes=\\(burstLimitBytes)"))
+        XCTAssertTrue(source.contains("dataRateBurstWindowMs=\\(burstWindowMs)"))
+        XCTAssertTrue(source.contains("lowLatencyHEVC2K60BurstHeadroomMultiplier = 8.0"))
+        XCTAssertTrue(source.contains("lowLatencyHEVC2K60SingleChunkEncodedPayloadBudgetBytes"))
+        XCTAssertTrue(source.contains("dataRateLimitsStatus=\\(dataRateLimitsStatus)"))
+        XCTAssertTrue(source.contains("dataRateLimitsApplied=\\(dataRateLimitsApplied ? 1 : 0)"))
+        XCTAssertTrue(source.contains("strict-video-rate-limit-unapplied"))
+        XCTAssertTrue(source.contains("Double(averageBitRate) / 8.0"))
+        XCTAssertTrue(source.contains("queueDepth=\\(selectedQueueDepth)"))
+        XCTAssertEqual(limits.hardLimitBytesPerSecond, 1_500_000)
+        XCTAssertEqual(
+            limits.burstLimitBytes,
+            Optional(ScreenCaptureKitStreamer.lowLatencyHEVC2K60BurstLimitBytes(hardLimitBytesPerSecond: 1_500_000))
+        )
+        XCTAssertLessThan(
+            limits.burstLimitBytes ?? Int.max,
+            ScreenCaptureKitStreamer.lowLatencyHEVC2K60SingleChunkEncodedPayloadBudgetBytes
+        )
+        XCTAssertEqual(limits.burstWindowSeconds ?? 0, 1.0 / 60.0, accuracy: 0.0001)
+        XCTAssertEqual(limits.limits.count, 4)
+    }
+
+    func testFirstFrameWatchdogTimeoutIsBoundedFor2K60() {
+        let timeout = ScreenCaptureKitStreamer.firstEncodedFrameTimeoutSeconds(
+            targetFPS: 60,
+            width: 2056,
+            height: 1330
+        )
+
+        XCTAssertGreaterThanOrEqual(timeout, 3.0)
+        XCTAssertLessThanOrEqual(timeout, 6.0)
+    }
+
+    func testCadenceEncoderSerializesCompressionSessionInvalidation() throws {
+        let source = try screenCaptureKitStreamerSource()
+
+        XCTAssertTrue(source.contains("compressionSessionLock"))
+        XCTAssertTrue(source.contains("takeCompressionSessionForInvalidation()"))
+        XCTAssertTrue(source.contains("drainVideoCadenceQueueIfNeeded()"))
+        XCTAssertTrue(source.contains("videoCadenceQueue.setSpecific"))
+    }
+
+    private func screenCaptureKitStreamerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourcePaths = [
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift",
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer+CaptureTypes.swift",
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer+VideoPolicy.swift",
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer+JPEGEncoding.swift",
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureTelemetrySnapshot.swift"
+        ]
+        return try sourcePaths.map { path in
+            try String(
+                contentsOf: root.appendingPathComponent(path),
+                encoding: .utf8
+            )
+        }.joined(separator: "\n")
     }
 }
 #endif

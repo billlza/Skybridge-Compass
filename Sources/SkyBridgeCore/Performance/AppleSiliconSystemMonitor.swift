@@ -18,6 +18,9 @@ public final class AppleSiliconSystemMonitor: ObservableObject {
     @Published public var systemPower: Double = 0
     @Published public var cpuPower: Double = 0
     @Published public var gpuPower: Double = 0
+    @Published public var anePower: Double = 0
+    @Published public var ramPower: Double = 0
+    @Published public var packagePower: Double = 0
     @Published public var thermalState: ProcessInfo.ThermalState = .nominal
 
     public private(set) var isMonitoring = false
@@ -65,15 +68,18 @@ public final class AppleSiliconSystemMonitor: ObservableObject {
         memoryPressure = monitor.memoryUsage
         cpuTemperature = monitor.cpuTemperature
         gpuTemperature = monitor.gpuTemperature
+        cpuPower = monitor.cpuPower
         gpuPower = monitor.gpuPower
+        anePower = monitor.anePower
+        ramPower = monitor.ramPower
+        packagePower = monitor.packagePower
 
         memoryUsed = Int64((memoryPressure / 100.0) * Double(memoryTotal))
 
-        // 当前统一后端不提供 E/P core 拆分与 CPU 功耗，保持 0 明确表示不可用。
+        // 当前统一后端不提供 E/P core 拆分，保持 0 明确表示不可用。
         ecoreUsage = 0
         pcoreUsage = 0
-        cpuPower = 0
-        systemPower = gpuPower
+        systemPower = packagePower > 0 ? packagePower : cpuPower + gpuPower + anePower + ramPower
 
         thermalState = ProcessInfo.processInfo.thermalState
     }

@@ -6,6 +6,18 @@ import SkyBridgeOpus
 import SkyBridgeRealtimeMedia
 
 final class SkyBridgeRealtimeMediaTests: XCTestCase {
+    private func remoteControlSource(root: URL) throws -> String {
+        let pumpSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlOutboundFramePump.swift"),
+            encoding: .utf8
+        )
+        let managerSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"),
+            encoding: .utf8
+        )
+        return [pumpSource, managerSource].joined(separator: "\n")
+    }
+
     func testOpusRoundTripAndPLC() throws {
         let configuration = SkyBridgeOpusConfiguration.lowLatency
         let encoder = try SkyBridgeOpusEncoder(configuration: configuration)
@@ -961,17 +973,19 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let p2pSource = try String(
-            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"),
-            encoding: .utf8
-        )
+        let p2pSource = try remoteControlSource(root: root)
         XCTAssertTrue(p2pSource.contains("legacyAudioFallbackEnabled"))
         XCTAssertTrue(p2pSource.contains("if legacyAudioFallbackEnabled {\n            policy = policy.protectingRealtimeAudio()"))
         XCTAssertTrue(p2pSource.contains("private var realtimeAudioCaptureStreamer: ScreenCaptureKitStreamer?"))
         XCTAssertTrue(p2pSource.contains("realtimeAudioCapture=\\(realtimeAudioCaptureStreamerForAttempt == nil ? \"none\" : \"separate-sck\""))
         XCTAssertTrue(p2pSource.contains("Remote frame tx telemetry"))
+        XCTAssertTrue(p2pSource.contains("sampleMs=\\(sampleMs"))
         XCTAssertTrue(p2pSource.contains("submittedFPS="))
         XCTAssertTrue(p2pSource.contains("sentFPS="))
+        XCTAssertTrue(p2pSource.contains("submitted=\\(snapshot.submittedFrames"))
+        XCTAssertTrue(p2pSource.contains("rawBackpressure=\\(snapshot.rawBackpressureEvents"))
+        XCTAssertTrue(p2pSource.contains("orderedThrottle=\\(snapshot.orderedThrottleEvents"))
+        XCTAssertTrue(p2pSource.contains("queueBacklog=\\(snapshot.queueBacklogEvents"))
         XCTAssertTrue(p2pSource.contains("avgSendMs="))
         XCTAssertFalse(
             p2pSource.contains("if realtimeAudioSender != nil {\n            policy = policy.protectingRealtimeAudio()"),
@@ -988,10 +1002,20 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             "P2P system audio capture must not automatically enter the shared remote-control channel."
         )
 
-        let webrtcSource = try String(
-            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
-            encoding: .utf8
-        )
+        let webrtcSource = try [
+            String(
+                contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
+                encoding: .utf8
+            ),
+            String(
+                contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCScreenStreamingPolicy.swift"),
+                encoding: .utf8
+            ),
+            String(
+                contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCRealtimeAudioSenderCoordinator.swift"),
+                encoding: .utf8
+            )
+        ].joined(separator: "\n")
         XCTAssertTrue(webrtcSource.contains("legacyAudioFallbackEnabled: legacyAudioFallbackEnabled"))
         XCTAssertTrue(webrtcSource.contains("audioRedirectionEnabled && !nativeAudioTrackEnabled && legacyAudioFallbackEnabled"))
         XCTAssertTrue(webrtcSource.contains("let shouldUseFallbackAudioChunks = Self.shouldUseWebRTCAudioFallback("))
@@ -1006,21 +1030,47 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(webrtcSource.contains("captureSystemAudio: shouldUseNativeAudioTrack\n                                || shouldUseFallbackAudioChunks\n                                || shouldUseRealtimeAudio"))
         XCTAssertTrue(webrtcSource.contains("audioTxCapturePipeReady session="))
 
-        let streamerSource = try String(
-            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift"),
-            encoding: .utf8
-        )
+        let streamerSource = try [
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift",
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer+CaptureTypes.swift",
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer+VideoPolicy.swift",
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer+JPEGEncoding.swift",
+            "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureTelemetrySnapshot.swift"
+        ].map { path in
+            try String(
+                contentsOf: root.appendingPathComponent(path),
+                encoding: .utf8
+            )
+        }.joined(separator: "\n")
         XCTAssertTrue(streamerSource.contains("captureVideoOutput: Bool = true"))
         XCTAssertTrue(streamerSource.contains("Self.shouldRegisterScreenOutput("))
         XCTAssertTrue(streamerSource.contains("try stream?.addStreamOutput(streamOutput, type: .screen"))
         XCTAssertTrue(streamerSource.contains("ScreenCaptureKit 系统音频采集启动：audio-only"))
         XCTAssertTrue(streamerSource.contains("encodeCadenceFrameIfAvailable(from: sampleBuffer)"))
-        XCTAssertTrue(streamerSource.contains("latestVideoPixelBufferForCadence()"))
+        XCTAssertTrue(streamerSource.contains("latestVideoPixelBufferSnapshotForCadence()"))
         XCTAssertTrue(streamerSource.contains("audioSequenceNumber = nativePCMChunk.sequenceNumber"))
         XCTAssertTrue(streamerSource.contains("SCK tx telemetry"))
+        XCTAssertTrue(streamerSource.contains("sampleMs=\\(sampleMs"))
         XCTAssertTrue(streamerSource.contains("captureFPS="))
         XCTAssertTrue(streamerSource.contains("meaningfulFPS="))
         XCTAssertTrue(streamerSource.contains("encodedFPS="))
+        XCTAssertTrue(streamerSource.contains("encoded=\\(snapshot.encodedFrames"))
+        XCTAssertTrue(streamerSource.contains("mac-sck-tx targetFPS="))
+        XCTAssertTrue(streamerSource.contains("visible=\\(snapshot.visibleWidth)x\\(snapshot.visibleHeight)"))
+        XCTAssertTrue(streamerSource.contains("encodedBackingCaptureSize("))
+        XCTAssertTrue(streamerSource.contains("RemoteControlSmokeStatusWriter.append"))
+        let smokeWriterSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlSmokeStatusWriter.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(smokeWriterSource.contains("private static let writerQueue"))
+        XCTAssertTrue(smokeWriterSource.contains("writerQueue.async"))
+        XCTAssertTrue(smokeWriterSource.contains("private final class WriterState: @unchecked Sendable"))
+        XCTAssertTrue(smokeWriterSource.contains("private var cachedHandle"))
+        XCTAssertFalse(
+            smokeWriterSource.contains("NSLock"),
+            "Smoke status diagnostics must not serialize media hot paths behind a synchronous lock and file open/seek/write."
+        )
         XCTAssertTrue(streamerSource.contains("var onCaptureTelemetry"))
         XCTAssertTrue(streamerSource.contains("onCaptureTelemetry?(snapshot)"))
         XCTAssertTrue(streamerSource.contains("static func encodePresentationTimeStamp(from sampleBuffer: CMSampleBuffer) -> CMTime"))
@@ -1043,8 +1093,26 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(sckDiagnosticsSource.contains("sckEncodedFPS"))
         XCTAssertTrue(sckDiagnosticsSource.contains("sckEncodeLatencyP95Ms"))
         XCTAssertTrue(streamerSource.contains("sourceFrameRefcon: encodeTimingRefcon"))
+        let remoteControlSource = try remoteControlSource(root: root)
+        XCTAssertTrue(remoteControlSource.contains("mac-remote-frame-tx peer="))
+        XCTAssertTrue(remoteControlSource.contains("avgSendMs="))
+        XCTAssertTrue(remoteControlSource.contains("maxSendMs="))
+        XCTAssertTrue(remoteControlSource.contains("source=encoded-direct-pump"))
+        XCTAssertTrue(remoteControlSource.contains("scheduleGapMaxMs="))
+        XCTAssertTrue(remoteControlSource.contains("scheduleJitterMaxMs="))
+        XCTAssertTrue(remoteControlSource.contains("completionGapMaxMs="))
+        XCTAssertTrue(remoteControlSource.contains("RemoteControlFrameSequenceGenerator"))
+        XCTAssertTrue(remoteControlSource.contains("sequenceNumber: videoFrameSequence.next()"))
+        XCTAssertTrue(remoteControlSource.contains("sequenceNumber: frame.sequenceNumber"))
+        XCTAssertFalse(
+            remoteControlSource.contains("peer.queue.async {\n                let frame = ScreenData("),
+            "Encoded video frames must enter the sender pump directly so peer queue stalls cannot be hidden from telemetry."
+        )
         XCTAssertTrue(streamerSource.contains("consumeEncodeFrameTimingRefcon"))
         XCTAssertTrue(streamerSource.contains("encodeLatencyP95Ms"))
+        XCTAssertTrue(streamerSource.contains("actualEncodeLatencyP95Ms"))
+        XCTAssertTrue(streamerSource.contains("encodeSubmissionDelayMaxMs"))
+        XCTAssertTrue(streamerSource.contains("encodeSubmissionBacklogMax"))
         XCTAssertTrue(webrtcSource.contains("kind: \"sckTxTelemetry\""))
         XCTAssertTrue(webrtcSource.contains("sckEncodeLatencyP95Ms: snapshot.encodeLatencyP95Ms"))
         XCTAssertTrue(webrtcSource.contains("probable: snapshot.meaningfulSamples == 0"))
@@ -1120,15 +1188,154 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(diagnosticsSource.contains("audioTxSentTotal"))
     }
 
+    func testP2PRemoteDesktopVideoTransportUsesTCPNoDelayAndSendLatencyTelemetry() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let remoteControlSource = try remoteControlSource(root: root)
+        XCTAssertTrue(remoteControlSource.contains("try await sendRemoteFrame(payload)"))
+        XCTAssertTrue(remoteControlSource.contains("makeOutboundRemoteFrame("))
+        XCTAssertTrue(remoteControlSource.contains("sampleMs=\\(sampleMs"))
+        XCTAssertTrue(remoteControlSource.contains("sentFPS=\\(sentFPS)"))
+        XCTAssertTrue(remoteControlSource.contains("submitted=\\(snapshot.submittedFrames)"))
+        XCTAssertTrue(remoteControlSource.contains("dropped=\\(snapshot.droppedFrames)"))
+        XCTAssertTrue(remoteControlSource.contains("avgSendMs=\\(averageLatency)"))
+        XCTAssertTrue(remoteControlSource.contains("maxSendMs=\\(maxLatency)"))
+        XCTAssertTrue(remoteControlSource.contains("chunkCapBytes=\\(Self.maxChunkedScreenFrameMessageBytes)"))
+        XCTAssertTrue(remoteControlSource.contains("chunkSend=\\(chunkSendMode)"))
+        XCTAssertTrue(remoteControlSource.contains("chunkedFrames=\\(snapshot.chunkedFrames)"))
+        XCTAssertTrue(remoteControlSource.contains("sentChunks=\\(snapshot.sentChunks)"))
+        XCTAssertTrue(remoteControlSource.contains("maxChunksPerFrame=\\(snapshot.maxChunksPerFrame)"))
+        XCTAssertTrue(remoteControlSource.contains("private static let maxInFlightVideoSends = 3"))
+        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedContentProcessedBacklogFrames = 12"))
+        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedContentProcessedBacklogBytes = 12 * 256 * 1024"))
+        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedVideoFramesPerDrain = 1"))
+        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedHighFPSVideoFramesPerDrain = 3"))
+        XCTAssertTrue(remoteControlSource.contains("private static let boundedCadenceCatchUpFrameAgeLimitMs: Double = 50"))
+        XCTAssertFalse(remoteControlSource.contains("maxChunkedStaleQueueCatchUpFramesPerDrain"))
+        XCTAssertFalse(remoteControlSource.contains("staleQueuedFrameCatchUpEligible"))
+        XCTAssertTrue(remoteControlSource.contains("let staleQueueCatchUpBudgetActive = false"))
+        XCTAssertTrue(remoteControlSource.contains("private var effectiveMaxContentProcessedBacklogFrames: Int"))
+        XCTAssertTrue(remoteControlSource.contains("usesChunkedScreenFrameWire ? Self.maxChunkedContentProcessedBacklogFrames : Self.maxInFlightVideoSends"))
+        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedScreenFrameMessageBytes = 256 * 1024"))
+        XCTAssertTrue(remoteControlSource.contains("let contentBacklogFull = isContentProcessedBacklogFull"))
+        XCTAssertTrue(remoteControlSource.contains("let delay = isContentProcessedBacklogFull"))
+        XCTAssertTrue(remoteControlSource.contains("noteVideoScheduleBudget(0, elapsedCadenceSlots: elapsedCadenceSlots)"))
+        XCTAssertTrue(remoteControlSource.contains("usesChunkedScreenFrameWire = frameTransport == .binaryWire"))
+        XCTAssertTrue(remoteControlSource.contains("makeOutboundScreenWireMessages(from: outboundData)"))
+        XCTAssertTrue(remoteControlSource.contains("RemoteDesktopScreenFrameWire.encodeChunkEnvelope("))
+        XCTAssertTrue(remoteControlSource.contains("Self.sendFramedMessages(\n            wireMessages,\n            over: connection,\n            mode: sendMode"))
+        XCTAssertTrue(remoteControlSource.contains("sendFramedMessagesBatchedInOrder("))
+        XCTAssertTrue(remoteControlSource.contains("connection.batch {"))
+        XCTAssertTrue(remoteControlSource.contains("FramedMessageBatchCompletionState"))
+        XCTAssertTrue(remoteControlSource.contains("RemoteDesktopStreamConfiguration.screenChannelWireFormatSBC2ChunkedV1"))
+        XCTAssertTrue(remoteControlSource.contains("completeVideoFrameSend("))
+        XCTAssertTrue(remoteControlSource.contains("inFlight=\\(snapshot.inFlightVideoSends)"))
+        XCTAssertTrue(remoteControlSource.contains("inFlightMax=\\(snapshot.inFlightVideoSendsMax)"))
+        XCTAssertTrue(remoteControlSource.contains("contentBacklogMax=\\(snapshot.inFlightVideoSendsMax)"))
+        XCTAssertTrue(remoteControlSource.contains("contentBacklogBytesMax=\\(snapshot.contentBacklogBytesMax)"))
+        XCTAssertTrue(remoteControlSource.contains("contentBacklogByteLimit=\\(snapshot.contentBacklogByteLimit)"))
+        XCTAssertTrue(remoteControlSource.contains("maxFramesPerDrain=\\(snapshot.maxVideoFramesPerDrain)"))
+        XCTAssertTrue(remoteControlSource.contains("scheduleBudgetMax=\\(snapshot.scheduleBudgetMax)"))
+        XCTAssertTrue(remoteControlSource.contains("missedCadenceSlotsMax=\\(snapshot.missedCadenceSlotsMax)"))
+        XCTAssertTrue(remoteControlSource.contains("contentBacklogFull=\\(snapshot.contentBacklogFullEvents)"))
+        XCTAssertTrue(remoteControlSource.contains("oldestContentBacklogMs=\\(String(format: \"%.1f\", snapshot.oldestContentBacklogMs))"))
+        XCTAssertTrue(remoteControlSource.contains("queueAgeMaxMs=\\(String(format: \"%.1f\", snapshot.queuedFrameAgeMaxMs))"))
+        XCTAssertTrue(remoteControlSource.contains("dequeuedAgeMaxMs=\\(String(format: \"%.1f\", snapshot.dequeuedFrameAgeMaxMs))"))
+        XCTAssertTrue(remoteControlSource.contains("queuedMax=\\(snapshot.queuedFramesMax)"))
+        XCTAssertTrue(remoteControlSource.contains("paceWake=\\(snapshot.paceWakeDrains)"))
+        XCTAssertTrue(remoteControlSource.contains("boundedCadenceCatchUp=\\(snapshot.boundedCadenceCatchUpFrames)"))
+        XCTAssertTrue(remoteControlSource.contains("staleQueueCatchUp=\\(snapshot.staleQueueCatchUpFrames)"))
+        XCTAssertTrue(remoteControlSource.contains("writerClock=dispatch-source-userinteractive"))
+        XCTAssertTrue(remoteControlSource.contains("sendScheduler=dispatch-clock-only"))
+        XCTAssertTrue(remoteControlSource.contains("encodedToSubmitMaxMs=\\(encodedToSubmitMaxMs)"))
+        XCTAssertTrue(remoteControlSource.contains("submitGapMaxMs=\\(submitGapMaxMs)"))
+        XCTAssertTrue(remoteControlSource.contains("clockFireToDrainMaxMs=\\(clockFireToDrainMaxMs)"))
+        XCTAssertTrue(remoteControlSource.contains("final class RemoteControlVideoPaceClock"))
+        XCTAssertTrue(remoteControlSource.contains("DispatchSource.makeTimerSource(queue: queue)"))
+        XCTAssertTrue(remoteControlSource.contains("leeway: .nanoseconds(100_000)"))
+        XCTAssertTrue(remoteControlSource.contains("videoPaceClock.schedule(after: delay, generation: generation)"))
+        XCTAssertFalse(remoteControlSource.contains("try await Task.sleep(nanoseconds: UInt64((delay * 1_000_000_000).rounded(.up)))"))
+        XCTAssertTrue(remoteControlSource.contains("scheduleVideoPaceWakeIfNeeded()"))
+        XCTAssertTrue(remoteControlSource.contains("await drainIfNeeded(maxVideoFramesToSchedule: videoScheduleBudget(now: drainStartedAt))"))
+        XCTAssertTrue(remoteControlSource.contains("catchUp=bounded-cadence-catch-up-no-stale"))
+
+        let remoteServerSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlServer.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(remoteServerSource.contains("tcp.noDelay = true"))
+        XCTAssertTrue(remoteServerSource.contains("parameters.serviceClass = .interactiveVideo"))
+        XCTAssertTrue(remoteServerSource.contains("qos: .userInteractive"))
+        XCTAssertTrue(remoteServerSource.contains("listener.start(queue: queue)"))
+        XCTAssertTrue(remoteServerSource.contains("connection.start(queue: queue)"))
+        XCTAssertTrue(remoteServerSource.contains("parameters.includePeerToPeer = false"))
+        XCTAssertTrue(remoteServerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)"))
+        XCTAssertGreaterThanOrEqual(
+            remoteServerSource.components(separatedBy: "LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)").count - 1,
+            2
+        )
+
+        let fileTransferListenerSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/FileTransfer/FileTransferListenerService.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(fileTransferListenerSource.contains("parameters.includePeerToPeer = false"))
+        XCTAssertTrue(fileTransferListenerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)"))
+        XCTAssertTrue(fileTransferListenerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &d)"))
+
+        XCTAssertTrue(LocalNetworkAdvertisementAddressProvider.isAdvertisableRoutableLANAddress("192.168.31.20"))
+        XCTAssertFalse(LocalNetworkAdvertisementAddressProvider.isAdvertisableRoutableLANAddress("169.254.10.20"))
+        XCTAssertFalse(LocalNetworkAdvertisementAddressProvider.isAdvertisableRoutableLANAddress("fe80::468:f5a1:462b:29d3%en0"))
+
+        let iosRemoteDesktopSource = try [
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift",
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopViewerStreamConfigurationFactory.swift"
+        ].map { path in
+            try String(
+                contentsOf: root.appendingPathComponent(path),
+                encoding: .utf8
+            )
+        }.joined(separator: "\n")
+        let iosSecurePipelineSource = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopLANSecureReceivePipeline.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(iosRemoteDesktopSource.contains("tcp.noDelay = true"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("parameters.serviceClass = .interactiveVideo"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("activeTransportMode == .crossNetwork || activeTransportMode == .lan"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("RemoteDesktopScreenFrameWire.ChunkedPayloadReassembler"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("unwrapLANChunkedPayloadIfNeeded("))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("sbc2-chunk-reassembly-failed"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("screenWire=\\(lanInboundScreenWireFormat)"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("sbc2Frames=\\(lanInboundChunkedScreenFramesInWindow)"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("sbc2Chunks=\\(lanInboundScreenChunksInWindow)"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("parser=\\(lanInboundReceiveParserMode)"))
+        XCTAssertTrue(iosSecurePipelineSource.contains("actor LANRemoteSecureReceivePipeline"))
+        XCTAssertTrue(iosSecurePipelineSource.contains("AES.GCM.open(sealedBox, using: key)"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("pipeline.appendAndDrain("))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("private var needsLANReceiveBufferDrain = false"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("needsLANReceiveBufferDrain = true"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("let shouldDrainAgain = needsLANReceiveBufferDrain || hasCompleteLANFramedPayloadPending()"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("await self?.processLANReceiveBuffer(from: connection)"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("private func hasCompleteLANFramedPayloadPending() -> Bool"))
+    }
+
     func testRealtimeAudioEndpointChangesRestartSenderAndViewerKeepsEndpointStable() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let p2pSource = try String(
-            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"),
-            encoding: .utf8
-        )
+        let p2pSource = try [
+            "Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift",
+            "Sources/SkyBridgeCore/RemoteControl/RemoteControlStreamRequestPolicy.swift"
+        ].map { path in
+            try String(
+                contentsOf: root.appendingPathComponent(path),
+                encoding: .utf8
+            )
+        }.joined(separator: "\n")
         XCTAssertTrue(
             p2pSource.contains("previous.mediaAudioEndpoint != current.mediaAudioEndpoint"),
             "If the viewer advertises a new UDP audio endpoint, the host must restart capture so the realtime audio sender does not keep sending to a stale port."
@@ -1146,13 +1353,17 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"),
             encoding: .utf8
         )
+        let iosRemoteDesktopMediaPolicySource = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopCrossNetworkMediaPolicy.swift"),
+            encoding: .utf8
+        )
         XCTAssertTrue(iosViewerSource.contains("private var realtimeMediaAudioEndpoint: SkyBridgeMediaEndpoint?"))
         XCTAssertTrue(iosViewerSource.contains("let endpoint = realtimeMediaAudioEndpoint"))
         XCTAssertTrue(
             iosViewerSource.contains("snapshot = lanRealtimeMediaKeySnapshot()"),
             "LAN realtime audio must be bound to the remote-desktop secure channel keys, not the separate file-transfer/P2P session keys."
         )
-        XCTAssertTrue(iosViewerSource.contains("skybridge-lan-remote-media-session-v1"))
+        XCTAssertTrue(iosRemoteDesktopMediaPolicySource.contains("skybridge-lan-remote-media-session-v1"))
         XCTAssertFalse(
             iosViewerSource.contains("let endpoint = lastSentStreamConfiguration?.mediaAudioEndpoint"),
             "The iOS viewer must keep the live UDP receiver endpoint stable across first-frame refresh pushes before lastSentStreamConfiguration settles."
@@ -1178,6 +1389,8 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(audioSource.contains("private func playoutNextFrame(allowPLCGap: Bool) async -> Bool"))
         XCTAssertTrue(audioSource.contains("private var playoutBurstFrameLimit: Int"))
         XCTAssertTrue(audioSource.contains("private var gapPlayoutDeficitThresholdPacketCount: Int"))
+        XCTAssertTrue(audioSource.contains("private var gapPlayoutBufferedThresholdPacketCount: Int"))
+        XCTAssertTrue(audioSource.contains("bufferedFrameCount >= gapPlayoutBufferedThresholdPacketCount"))
         XCTAssertTrue(audioSource.contains("lowWaterMs = 700"))
         XCTAssertTrue(audioSource.contains("min(96, deficitMs / frameDurationMs)"))
         XCTAssertTrue(audioSource.contains("min(32, effectiveJitterMaxMs / profile.frameDurationMs)"))
@@ -1189,6 +1402,7 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(audioSource.contains("jitterBuffer.popReadyOrGap(now: now)"))
         XCTAssertTrue(audioSource.contains("jitterBuffer.popReadyFrame(now: now)"))
         XCTAssertTrue(audioSource.contains("case .gap(let sequence):"))
+        XCTAssertTrue(audioSource.contains("rx-ordering-gap-wait"))
         XCTAssertTrue(audioSource.contains("case .frame(let frame):"))
         XCTAssertTrue(audioSource.contains("consecutivePLCFrames < maxConsecutivePLCFrameCount"))
         XCTAssertTrue(audioSource.contains("consecutivePLCFrames = 0"))
@@ -1285,75 +1499,198 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"),
             encoding: .utf8
         )
-        guard let duplicateGuardRange = viewSource.range(of: "if !shouldClear, frame != nil"),
-              let submittedGuardRange = viewSource.range(of: "frameVersion != submittedVersion"),
-              let drawableRange = viewSource.range(of: "let drawable = view.currentDrawable") else {
-            XCTFail("Metal renderer must keep duplicate/submitted-frame guards and drawable acquisition visible in source")
+        guard let emptyQueueGuardRange = viewSource.range(of: "guard shouldClear || hasPendingFrame else"),
+              let renderTargetRange = viewSource.range(of: "guard let renderTarget = makeDrawableRenderTarget(for: view)"),
+              let completionRange = viewSource.range(of: "private func addDisplayedFrameCompletion("),
+              let submittedFrameResetRange = viewSource.range(of: "if self.submittedFrameVersion == frameVersion") else {
+            XCTFail("Metal renderer must keep empty-queue/submitted-frame guards and drawable acquisition visible in source")
             return
         }
         XCTAssertLessThan(
-            duplicateGuardRange.lowerBound,
-            drawableRange.lowerBound,
-            "The Metal renderer must skip duplicate frames before acquiring a CAMetalDrawable; otherwise iOS can reuse/present a stale drawable and trigger fallback."
+            emptyQueueGuardRange.lowerBound,
+            renderTargetRange.lowerBound,
+            "The Metal renderer must skip empty display-link ticks before acquiring a CAMetalDrawable; otherwise iOS can reuse/present a stale drawable and trigger fallback."
         )
         XCTAssertLessThan(
-            submittedGuardRange.lowerBound,
-            drawableRange.lowerBound,
-            "The Metal renderer must reject in-flight frame versions before acquiring a CAMetalDrawable."
+            completionRange.lowerBound,
+            submittedFrameResetRange.lowerBound,
+            "The Metal renderer must reset submitted frame ownership only after the owned command buffer completes."
         )
         XCTAssertTrue(viewSource.contains("private var submittedFrameVersion: UInt64 = 0"))
         XCTAssertTrue(viewSource.contains("submittedFrameVersion = frameVersion"))
-        XCTAssertTrue(viewSource.contains("DispatchSemaphore(value: 3)"))
-        XCTAssertFalse(
-            viewSource.contains("view.currentRenderPassDescriptor"),
-            "The Metal renderer must not mix MTKView.currentRenderPassDescriptor with explicit currentDrawable ownership."
-        )
+        XCTAssertTrue(viewSource.contains("emptyQueueTick="))
+        XCTAssertTrue(viewSource.contains("recordRenderSkip(.emptyQueue"))
+        XCTAssertTrue(viewSource.contains("DispatchSemaphore(value: MetalVideoRenderer.inFlightLimit)"))
+        XCTAssertFalse(viewSource.contains("view.currentRenderPassDescriptor"))
         XCTAssertEqual(viewSource.components(separatedBy: "view.currentDrawable").count - 1, 1)
-        XCTAssertEqual(viewSource.components(separatedBy: "drawable.texture").count - 1, 1)
         XCTAssertTrue(viewSource.contains("let renderPassDescriptor = MTLRenderPassDescriptor()"))
-        XCTAssertTrue(viewSource.contains("renderPassDescriptor.colorAttachments[0].texture"))
-        XCTAssertTrue(viewSource.contains("let drawableTexture = drawable.texture"))
-        guard let textureRange = viewSource.range(of: "let drawableTexture = drawable.texture"),
+        XCTAssertTrue(viewSource.contains("renderPassDescriptor.colorAttachments[0].texture = drawable.texture"))
+        guard let currentDrawableRange = viewSource.range(of: "let drawable = view.currentDrawable"),
+              let descriptorRange = viewSource.range(of: "let renderPassDescriptor = MTLRenderPassDescriptor()", range: currentDrawableRange.upperBound..<viewSource.endIndex),
+              let textureRange = viewSource.range(of: "renderPassDescriptor.colorAttachments[0].texture = drawable.texture", range: descriptorRange.upperBound..<viewSource.endIndex),
               let returnRange = viewSource.range(of: "return DrawableRenderTarget(", range: textureRange.upperBound..<viewSource.endIndex) else {
-            XCTFail("The Metal renderer must read drawable.texture only inside the drawable target helper")
+            XCTFail("The Metal renderer must acquire exactly one currentDrawable and build one render-pass descriptor around it")
             return
         }
+        XCTAssertLessThan(currentDrawableRange.lowerBound, descriptorRange.lowerBound)
+        XCTAssertLessThan(descriptorRange.lowerBound, textureRange.lowerBound)
         XCTAssertLessThan(textureRange.lowerBound, returnRange.lowerBound)
         guard let framePathRange = viewSource.range(of: "let drawableWidth ="),
               let drawableTargetRange = viewSource.range(
                 of: "guard let renderTarget = makeDrawableRenderTarget(for: view)",
                 range: framePathRange.upperBound..<viewSource.endIndex
               ),
-              let renderRange = viewSource.range(
-                of: "ciContext.render(",
+              let directRenderRange = viewSource.range(
+                of: "encodeDirectTextureFrame(",
                 range: drawableTargetRange.upperBound..<viewSource.endIndex
               ),
               let presentRange = viewSource.range(
                 of: "commandBuffer.present(renderTarget.drawable)",
-                range: renderRange.upperBound..<viewSource.endIndex
+                range: directRenderRange.upperBound..<viewSource.endIndex
               ) else {
             XCTFail("The Metal renderer must render directly into one owned CAMetalDrawable and present that drawable once")
             return
         }
-        XCTAssertLessThan(drawableTargetRange.lowerBound, renderRange.lowerBound)
+        XCTAssertLessThan(drawableTargetRange.lowerBound, directRenderRange.lowerBound)
         XCTAssertLessThan(drawableTargetRange.lowerBound, presentRange.lowerBound)
+        XCTAssertTrue(viewSource.contains("CVMetalTextureCacheCreateTextureFromImage"))
+        XCTAssertTrue(viewSource.contains("texture2d<float, access::sample> frameTexture"))
+        XCTAssertTrue(viewSource.contains("passthroughPipelineState"))
         XCTAssertFalse(viewSource.contains("makeRenderTexture("))
         XCTAssertFalse(viewSource.contains("commandBuffer.makeBlitCommandEncoder()"))
-        XCTAssertTrue(viewSource.contains("metalView.enableSetNeedsDisplay = true"))
-        XCTAssertTrue(viewSource.contains("metalView.isPaused = true"))
-        XCTAssertTrue(viewSource.contains("view.setNeedsDisplay()"))
-        XCTAssertTrue(viewSource.contains("view.draw()"))
-        XCTAssertTrue(viewSource.contains("pendingRedraw"))
-        XCTAssertTrue(viewSource.contains("requestFollowUpDrawIfPossible"))
+        XCTAssertTrue(viewSource.contains("metalView.enableSetNeedsDisplay = false"))
+        XCTAssertTrue(viewSource.contains("metalView.isPaused = false"))
+        XCTAssertFalse(viewSource.contains("startDisplayLinkIfNeeded()"))
+        XCTAssertTrue(viewSource.contains("displayLinkTargetFPS(for screen: UIScreen)"))
+        XCTAssertTrue(viewSource.contains("displayLinkPumpFPS(for screen: UIScreen)"))
+        XCTAssertTrue(viewSource.contains("metalView.preferredFramesPerSecond = pumpFPS"))
+        XCTAssertTrue(viewSource.contains("private static let strictRemoteDisplayFPS = 60"))
+        XCTAssertTrue(viewSource.contains("min(strictRemoteDisplayFPS, max(1, screen.maximumFramesPerSecond))"))
+        XCTAssertTrue(viewSource.contains("private static func displayLinkPumpFPS(for screen: UIScreen) -> Int {\n            max(displayLinkTargetFPS(for: screen), screen.maximumFramesPerSecond)\n        }"))
+        XCTAssertTrue(viewSource.contains("let hasNativePumpHeadroom = displayLinkPumpFPS > displayLinkTargetFPS"))
+        XCTAssertTrue(viewSource.contains("let shouldUseNativePumpCatchUp = hasNativePumpHeadroom"))
+        XCTAssertTrue(viewSource.contains("&& lateBy > Self.frameCadenceTolerance"))
+        XCTAssertTrue(viewSource.contains("&& lateBy <= Self.missedCadenceResetThreshold"))
+        XCTAssertTrue(viewSource.contains("|| shouldUseNativePumpCatchUp else {"))
+        XCTAssertTrue(viewSource.contains("guard shouldUseNativePumpBacklogCatchUpLocked("))
+        XCTAssertTrue(viewSource.contains("private static let nativePumpBacklogCatchUpMinimumDepth = 2"))
+        XCTAssertTrue(viewSource.contains("private static let nativePumpBacklogCatchUpFrameAgeMs = 80"))
+        XCTAssertTrue(viewSource.contains("private static let nativePumpBacklogCatchUpMinimumInterval: TimeInterval = 0.5"))
+        XCTAssertTrue(viewSource.contains("renderNativePumpBacklogCatchUpFrames += 1"))
+        XCTAssertTrue(viewSource.contains("now.timeIntervalSince(lastNativePumpBacklogCatchUpAt) >= Self.nativePumpBacklogCatchUpMinimumInterval"))
+        XCTAssertFalse(viewSource.contains("let hasBurstBacklog = pendingFrames.count > 1"))
+        XCTAssertTrue(viewSource.contains("private static let frameCadenceTolerance: TimeInterval = 0.004"))
+        XCTAssertTrue(viewSource.contains("screen.maximumFramesPerSecond"))
+        XCTAssertFalse(viewSource.contains("CADisplayLink("))
+        XCTAssertFalse(viewSource.contains("preferredFrameRateRange = CAFrameRateRange("))
+        XCTAssertFalse(viewSource.contains("renderCadenceTick(in: metalView, timestamp: displayLink.timestamp)"))
+        XCTAssertFalse(viewSource.contains("func renderCadenceTick(in view: MTKView, timestamp: CFTimeInterval)"))
+        XCTAssertFalse(viewSource.contains("private var lastCadenceDrawTimestamp: CFTimeInterval = 0"))
+        XCTAssertFalse(viewSource.contains("private var lastCadenceTickTimestamp: CFTimeInterval = 0"))
+        XCTAssertFalse(viewSource.contains("private var cadenceFrameCredit: Double = 0"))
+        XCTAssertFalse(viewSource.contains("private var lastSubmittedAt = Date.distantPast"))
+        XCTAssertTrue(viewSource.contains("private var nextFrameDueAt = Date.distantPast"))
+        XCTAssertTrue(viewSource.contains("private static let missedCadenceResetThreshold: TimeInterval = targetFrameInterval"))
+        XCTAssertTrue(viewSource.contains("advanceNextFrameDueAtLocked(submittedAt: Date())"))
+        XCTAssertTrue(viewSource.contains("lateBy > Self.missedCadenceResetThreshold"))
+        XCTAssertTrue(viewSource.contains("nextFrameDueAt = nextFrameDueAt.addingTimeInterval(Self.targetFrameInterval)"))
+        XCTAssertFalse(viewSource.contains("private static let videoPaceEarlyDrawTolerance"))
+        XCTAssertFalse(viewSource.contains("shouldRequestFrameArrivalDrawLocked(now: enqueuedAt)"))
+        XCTAssertFalse(viewSource.contains("private func shouldRequestFrameArrivalDrawLocked(now: Date) -> Bool"))
+        XCTAssertFalse(viewSource.contains("elapsed + Self.videoPaceEarlyDrawTolerance >= targetInterval"))
+        XCTAssertFalse(viewSource.contains("renderFrameArrivalDrawSkips += 1"))
+        XCTAssertFalse(viewSource.contains("private var lastFrameArrivalDrawAt = Date.distantPast"))
+        XCTAssertFalse(viewSource.contains("let shouldDrainDecodedBacklog = pendingFrames.count > 1"))
+        XCTAssertFalse(viewSource.contains("renderCadenceBacklogDraws += 1"))
+        XCTAssertFalse(viewSource.contains("isEarlyBacklogDrain"))
+        XCTAssertFalse(viewSource.contains("guard !view.isPaused else { return }"))
+        if let displayRange = viewSource.range(of: "func display(frame: DecodedPixelBufferFrame, version: UInt64, in view: MTKView)"),
+           let flushRange = viewSource.range(of: "func flush(", range: displayRange.upperBound..<viewSource.endIndex) {
+            XCTAssertFalse(
+                viewSource[displayRange.lowerBound..<flushRange.lowerBound].contains("view.draw()"),
+                "Frame arrival must not manually draw; MTKView native cadence owns every CAMetalDrawable."
+            )
+        } else {
+            XCTFail("Missing Metal display or flush method while checking draw ownership")
+        }
+        XCTAssertFalse(viewSource.contains("pendingRedraw"))
+        XCTAssertTrue(viewSource.contains("private var renderInFlight = false"))
+        XCTAssertFalse(viewSource.contains("guard !renderInFlight else"))
+        XCTAssertFalse(viewSource.contains("private var frameDeadlineDrawScheduled = false"))
+        XCTAssertFalse(viewSource.contains("requestScheduledFollowUpDrawIfPossible"))
+        XCTAssertFalse(viewSource.contains("nextFrameDeadlineDrawDelayLocked"))
+        XCTAssertFalse(viewSource.contains("private var frameDeadlineDrawGeneration: UInt64 = 0"))
+        XCTAssertFalse(viewSource.contains("generation == frameDeadlineDrawGeneration"))
+        XCTAssertFalse(viewSource.contains("private func requestDrawableRefresh(on view: MTKView)"))
+        XCTAssertFalse(viewSource.contains("view.draw()"))
+        XCTAssertFalse(viewSource.contains("private static let realtimeCoalescingQueueBudget"))
+        XCTAssertTrue(viewSource.contains("private static let maxQueuedFrames = 3"))
+        XCTAssertTrue(viewSource.contains("private var renderFrameAgeMaxMs: Int?"))
+        XCTAssertTrue(viewSource.contains("renderFrameAgeMaxMs = max(self.renderFrameAgeMaxMs ?? frameAgeMs, frameAgeMs)"))
+        XCTAssertFalse(viewSource.contains("if pendingFrames.count > 1 {\n                renderFrameArrivalDrawSkips += 1\n                return false"))
+        XCTAssertFalse(viewSource.contains("renderCoalescedFrames += coalescedCount"))
+        XCTAssertFalse(viewSource.contains("lowLatencyCoalescingThreshold"))
+        XCTAssertFalse(viewSource.contains("pendingFrames.removeFirst(framesToDiscard)"))
+        XCTAssertTrue(viewSource.contains("private var renderCoalescedFrames = 0"))
+        XCTAssertFalse(viewSource.contains("pendingDisplayedCallbackCount"))
+        XCTAssertFalse(viewSource.contains("lastDisplayedCallbackFlushAt"))
+        XCTAssertTrue(viewSource.contains("onFramesDisplayed: @escaping @Sendable (CMTime, Int, Date, Int?) -> Void"))
+        XCTAssertTrue(viewSource.contains("displayedCallbackCompletedAt"))
         XCTAssertTrue(viewSource.contains("let uprightTransform = CGAffineTransform("))
+        XCTAssertTrue(viewSource.contains("let visibleRect = CGRect("))
+        XCTAssertTrue(viewSource.contains("backingImage.cropped(to: visibleRect)"))
+        XCTAssertTrue(
+            viewSource.range(of: "encodeDirectTextureFrame(")!.lowerBound
+                < viewSource.range(of: "ciContext.render(")!.lowerBound,
+            "The primary Metal path should use CVMetalTextureCache before the CI fallback."
+        )
         XCTAssertTrue(viewSource.contains("d: scaleY"))
         XCTAssertFalse(viewSource.contains("d: -scaleY"))
         XCTAssertFalse(viewSource.contains("a: -scaleX"))
         XCTAssertTrue(viewSource.contains("Metal render telemetry"))
+        XCTAssertTrue(viewSource.contains("SkyBridgeSmokeTraceWriter.appendStatus(telemetryLine)"))
+        XCTAssertTrue(viewSource.contains("inputFPS="))
         XCTAssertTrue(viewSource.contains("frameAgeMs="))
+        XCTAssertTrue(viewSource.contains("source="))
         XCTAssertTrue(viewSource.contains("orientation=upright"))
-        XCTAssertTrue(viewSource.contains("drawableAccess=single-late"))
-        XCTAssertTrue(viewSource.contains("frameDriven=true"))
+        XCTAssertTrue(viewSource.contains("drawableAccess=single-current-drawable displayLink"))
+        XCTAssertTrue(viewSource.contains("displayLink=mtkview-native"))
+        XCTAssertTrue(viewSource.contains("displayLinkTargetFPS=\\(snapshot.displayLinkTargetFPS)"))
+        XCTAssertTrue(viewSource.contains("displayLinkPumpFPS=\\(snapshot.displayLinkPumpFPS)"))
+        XCTAssertTrue(viewSource.contains("screenMaxFPS=\\(snapshot.screenMaxFPS)"))
+        XCTAssertTrue(viewSource.contains("displayCadence=strict-60-native-pump-catch-up-vsync"))
+        XCTAssertTrue(viewSource.contains("manualDraw=0"))
+        XCTAssertTrue(viewSource.contains("nativePumpCatchUp=\\(snapshot.nativePumpBacklogCatchUpFrames)"))
+        XCTAssertFalse(viewSource.contains("cadenceNotDueTick="))
+        XCTAssertFalse(viewSource.contains("arrivalDraw="))
+        XCTAssertFalse(viewSource.contains("arrivalDrawSkip="))
+        XCTAssertFalse(viewSource.contains("cadenceBacklogDraw="))
+        XCTAssertFalse(viewSource.contains("cadenceLateMaxMs="))
+        XCTAssertTrue(viewSource.contains("frameDriven=mtkview-native-vsync"))
+        XCTAssertTrue(viewSource.contains("renderPath="))
+        XCTAssertTrue(viewSource.contains("directBGRA="))
+        XCTAssertTrue(viewSource.contains("ciFallback="))
+
+        let managerSourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift")
+        let managerSource = try String(contentsOf: managerSourceURL, encoding: .utf8)
+        XCTAssertTrue(managerSource.contains("completedAt: Date"))
+        XCTAssertTrue(managerSource.contains("noteDisplayedFrames(count: displayedFrameCount, at: completedAt)"))
+        guard let decodeLoopStart = managerSource.range(of: "private func startDecodeLoopIfNeeded()"),
+              let finishDecodeStart = managerSource.range(
+                  of: "@MainActor\n    private func finishDecodeTask(",
+                  range: decodeLoopStart.upperBound..<managerSource.endIndex
+              ) else {
+            XCTFail("Missing remote desktop decode loop while checking MainActor isolation")
+            return
+        }
+        let decodeLoopBody = managerSource[decodeLoopStart.lowerBound..<finishDecodeStart.lowerBound]
+        XCTAssertTrue(decodeLoopBody.contains("Task.detached(priority: .userInteractive)"))
+        XCTAssertTrue(decodeLoopBody.contains("try await decoder.decode(screenData: screenData)"))
+        XCTAssertFalse(decodeLoopBody.contains("Task { @MainActor"))
+        XCTAssertTrue(managerSource.contains("metal-feed-awaiting-renderer-consumer"))
+        XCTAssertTrue(managerSource.contains("metal-feed-renderer-rejected"))
+        XCTAssertTrue(managerSource.contains("failed stage=remote-desktop phase=metal_feed_not_accepted"))
     }
 
     func testIOSSampleBufferFallbackRequiresConsecutiveStalls() throws {
@@ -1376,14 +1713,25 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(managerSource.contains("private let metalFallbackPersistentFailureThreshold = 3"))
         XCTAssertTrue(managerSource.contains("private let metalFallbackExpectedRestoreWindow: TimeInterval = 2"))
         XCTAssertTrue(managerSource.contains("activateSampleBufferFallbackForDecodedVideo(reason: reason)"))
-        XCTAssertTrue(managerSource.contains("metalVideoFrameFeed.flush(removeDisplayedImage: false)"))
+        XCTAssertTrue(managerSource.contains("flushMetalVideoFrameFeed(removeDisplayedImage: false)"))
         XCTAssertTrue(managerSource.contains("restoreProbeMs=\\(Int(metalFallbackRestoreCooldown * 1000))"))
         XCTAssertTrue(managerSource.contains("expectedRestoreMs=\\(Int(metalFallbackExpectedRestoreWindow * 1000))"))
         XCTAssertTrue(managerSource.contains("Metal restore repeated failures suppressed"))
         XCTAssertTrue(managerSource.contains("cooldownMs=\\(cooldownMs)"))
         XCTAssertTrue(managerSource.contains("metalFallbackReason = nil"))
+        guard let continuityStallRange = managerSource.range(
+            of: "private func handleStreamContinuityStall(reason: String) async"
+        ),
+              let continuityStallEndRange = managerSource.range(
+                of: "func handleVideoRendererDidEnqueueFrame",
+                range: continuityStallRange.upperBound..<managerSource.endIndex
+              ) else {
+            XCTFail("Missing stream continuity recovery function while checking Metal recovery scope")
+            return
+        }
+        let continuityStallBody = String(managerSource[continuityStallRange.lowerBound..<continuityStallEndRange.lowerBound])
         XCTAssertFalse(
-            managerSource.contains("guard activeTransportMode == .lan else { return }"),
+            continuityStallBody.contains("guard activeTransportMode == .lan else { return }"),
             "Metal recovery must apply to WebRTC/cross-network renderer stalls, not only LAN."
         )
         XCTAssertTrue(managerSource.contains("minimumInterval: metalFallbackRestoreCooldown"))

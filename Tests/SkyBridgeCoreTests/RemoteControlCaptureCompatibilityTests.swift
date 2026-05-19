@@ -14,15 +14,26 @@ final class RemoteControlCaptureCompatibilityTests: XCTestCase {
         XCTAssertEqual(normalized.height, 1328)
     }
 
-    func testEncodedCaptureSizeCanPreserveExplicitVisibleDimensions() {
-        let normalized = RemoteControlCaptureCompatibility.normalizedCaptureSize(
+    func testVisibleCaptureSizeCanPreserveExplicitOddDimensions() {
+        let visible = RemoteControlCaptureCompatibility.normalizedCaptureSize(
             CGSize(width: 2056, height: 1329),
             for: .h264,
             preserveExactVisibleSize: true
         )
 
-        XCTAssertEqual(normalized.width, 2056)
-        XCTAssertEqual(normalized.height, 1329)
+        XCTAssertEqual(visible.width, 2056)
+        XCTAssertEqual(visible.height, 1329)
+    }
+
+    func testEncodedBackingSizeUsesEvenDimensionsWhenVisibleSizeIsOdd() {
+        let encoded = RemoteControlCaptureCompatibility.encodedBackingCaptureSize(
+            CGSize(width: 2056, height: 1329),
+            for: .hevc,
+            preserveExactVisibleSize: true
+        )
+
+        XCTAssertEqual(encoded.width, 2056)
+        XCTAssertEqual(encoded.height, 1330)
     }
 
     func testJPEGCaptureSizeKeepsRequestedDimensions() {

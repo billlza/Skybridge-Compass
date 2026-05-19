@@ -22,7 +22,11 @@ public struct PerformanceMonitoringPanelView: View {
                     PerformanceMetricRow(
                         title: LocalizationManager.shared.localizedString("monitor.cpu"),
                         value: String(format: "%.1f%%", monitor.cpuUsage),
-                        temperature: String(format: "%.1f°C", monitor.cpuTemperature),
+                        temperature: metricValueText(
+                            value: monitor.cpuTemperature,
+                            state: monitor.cpuTemperatureState,
+                            format: "%.1f°C"
+                        ),
                         color: .orange
                     )
                     
@@ -32,8 +36,16 @@ public struct PerformanceMonitoringPanelView: View {
  // GPU温度和使用率
                     PerformanceMetricRow(
                         title: LocalizationManager.shared.localizedString("monitor.gpu"),
-                        value: String(format: "%.1f%%", monitor.gpuUsage),
-                        temperature: String(format: "%.1f°C", monitor.gpuTemperature),
+                        value: metricValueText(
+                            value: monitor.gpuUsage,
+                            state: monitor.gpuUsageState,
+                            format: "%.1f%%"
+                        ),
+                        temperature: metricValueText(
+                            value: monitor.gpuTemperature,
+                            state: monitor.gpuTemperatureState,
+                            format: "%.1f°C"
+                        ),
                         color: .purple
                     )
                     
@@ -58,27 +70,25 @@ public struct PerformanceMonitoringPanelView: View {
                             .foregroundColor(.blue)
                     }
                     
-                    if !monitor.fanSpeed.isEmpty {
-                        Divider()
-                            .background(themeConfiguration.borderColor)
-                        
+                    Divider()
+                        .background(themeConfiguration.borderColor)
+
  // 风扇转速
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(LocalizationManager.shared.localizedString("monitor.fanSpeed"))
-                                    .font(.caption)
-                                    .foregroundColor(themeConfiguration.secondaryTextColor)
-                                Text(monitor.fanSpeed.map { "\($0) RPM" }.joined(separator: ", "))
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundColor(.cyan)
-                            }
-                            
-                            Spacer()
-                            
-                            Image(systemName: "fanblades.fill")
-                                .font(.title2)
-                                .foregroundColor(.cyan)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(LocalizationManager.shared.localizedString("monitor.fanSpeed"))
+                                .font(.caption)
+                                .foregroundColor(themeConfiguration.secondaryTextColor)
+                            Text(fanSpeedText(for: monitor))
+                                .font(.subheadline.weight(.medium))
+                                .foregroundColor(monitor.fanState.availability == .available ? .cyan : themeConfiguration.secondaryTextColor)
                         }
+
+                        Spacer()
+
+                        Image(systemName: "fanblades.fill")
+                            .font(.title2)
+                            .foregroundColor(monitor.fanState.availability == .available ? .cyan : themeConfiguration.secondaryTextColor)
                     }
                     
                     Divider()
@@ -105,22 +115,22 @@ public struct PerformanceMonitoringPanelView: View {
                             .foregroundColor(.green)
                     }
                 } else {
- // 回退到原有显示（当SystemPerformanceMonitor不可用时）
+ // 监控后端未运行时明确显示不可用，避免用默认 normal 状态伪装成健康数据。
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(LocalizationManager.shared.localizedString("monitor.thermalState"))
                                 .font(.caption)
                                 .foregroundColor(themeConfiguration.secondaryTextColor)
-                            Text(thermalStateDescription)
+                            Text(LocalizationManager.shared.localizedString("monitor.metric.availability.unavailable"))
                                 .font(.subheadline.weight(.medium))
-                                .foregroundColor(thermalStateColor)
+                                .foregroundColor(themeConfiguration.secondaryTextColor)
                         }
                         
                         Spacer()
                         
-                        Image(systemName: thermalStateIcon)
+                        Image(systemName: "thermometer")
                             .font(.title2)
-                            .foregroundColor(thermalStateColor)
+                            .foregroundColor(themeConfiguration.secondaryTextColor)
                     }
                     
                     Divider()
@@ -131,16 +141,16 @@ public struct PerformanceMonitoringPanelView: View {
                             Text(LocalizationManager.shared.localizedString("monitor.powerState"))
                                 .font(.caption)
                                 .foregroundColor(themeConfiguration.secondaryTextColor)
-                            Text(powerStateDescription)
+                            Text(LocalizationManager.shared.localizedString("monitor.metric.availability.unavailable"))
                                 .font(.subheadline.weight(.medium))
-                                .foregroundColor(powerStateColor)
+                                .foregroundColor(themeConfiguration.secondaryTextColor)
                         }
                         
                         Spacer()
                         
-                        Image(systemName: powerStateIcon)
+                        Image(systemName: "bolt.slash")
                             .font(.title2)
-                            .foregroundColor(powerStateColor)
+                            .foregroundColor(themeConfiguration.secondaryTextColor)
                     }
                 }
                 
@@ -173,74 +183,78 @@ public struct PerformanceMonitoringPanelView: View {
         .frame(minHeight: 200)
     }
     
- // MARK: - 热量和电源状态计算属性
-    
-    private var thermalStateDescription: String {
-        switch appModel.thermalState {
-        case .nominal: return LocalizationManager.shared.localizedString("state.normal")
-        case .fair: return LocalizationManager.shared.localizedString("state.fair")
-        case .serious: return LocalizationManager.shared.localizedString("state.serious")
-        case .critical: return LocalizationManager.shared.localizedString("state.critical")
-        @unknown default: return LocalizationManager.shared.localizedString("state.unknown")
+ // MARK: - 指标可用性显示
+
+    private func metricValueText(value: Double, state: MetricState, format: String) -> String {
+        switch state.availability {
+        case .available:
+            return String(format: format, value)
+        case .stale:
+            return String(
+                format: "%@ (%@)",
+                String(format: format, value),
+                LocalizationManager.shared.localizedString("monitor.metric.availability.stale")
+            )
+        case .unavailable:
+            return metricUnavailableText(state)
         }
     }
-    
-    private var thermalStateColor: Color {
-        switch appModel.thermalState {
-        case .nominal: return .green
-        case .fair: return .yellow
-        case .serious: return .orange
-        case .critical: return .red
-        @unknown default: return .gray
+
+    private func fanSpeedText(for monitor: SystemPerformanceMonitor) -> String {
+        switch monitor.fanState.availability {
+        case .available:
+            guard !monitor.fanSpeed.isEmpty else {
+                return metricUnavailableText(
+                    .unavailable(reason: .notProvidedByOS, source: monitor.fanState.source, sampledAt: monitor.fanState.sampledAt)
+                )
+            }
+            return monitor.fanSpeed.map { "\($0) RPM" }.joined(separator: ", ")
+        case .stale:
+            let value = monitor.fanSpeed.isEmpty
+                ? LocalizationManager.shared.localizedString("monitor.metric.availability.unavailable")
+                : monitor.fanSpeed.map { "\($0) RPM" }.joined(separator: ", ")
+            return String(
+                format: "%@ (%@)",
+                value,
+                LocalizationManager.shared.localizedString("monitor.metric.availability.stale")
+            )
+        case .unavailable:
+            return metricUnavailableText(monitor.fanState)
         }
     }
-    
-    private var thermalStateIcon: String {
-        switch appModel.thermalState {
-        case .nominal: return "thermometer.low"
-        case .fair: return "thermometer.medium"
-        case .serious: return "thermometer.high"
-        case .critical: return "thermometer.high.fill"
-        @unknown default: return "thermometer"
+
+    private func metricUnavailableText(_ state: MetricState) -> String {
+        let reason = metricReasonText(state.reason)
+        return String(
+            format: LocalizationManager.shared.localizedString("monitor.metric.unavailableWithReason"),
+            reason
+        )
+    }
+
+    private func metricReasonText(_ reason: MetricUnavailableReason?) -> String {
+        switch reason {
+        case .unsupported:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.unsupported")
+        case .permissionDenied:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.permissionDenied")
+        case .notProvidedByOS:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.notProvidedByOS")
+        case .helperUnavailable:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.helperUnavailable")
+        case .helperOutdated:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.helperOutdated")
+        case .parsingFailed:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.parsingFailed")
+        case .sampling:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.sampling")
+        case .requiresExpertMode:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.requiresExpertMode")
+        case .temporarilyInitializing:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.temporarilyInitializing")
+        case .none:
+            return LocalizationManager.shared.localizedString("monitor.metric.reason.notProvidedByOS")
         }
     }
-    
-    private var powerStateDescription: String {
-        switch appModel.powerState {
-        case .normal: return LocalizationManager.shared.localizedString("state.normal")
-        case .lowPower: return LocalizationManager.shared.localizedString("state.lowPower")
-        case .powerSaving: return LocalizationManager.shared.localizedString("state.powerSaving")
-        case .critical: return LocalizationManager.shared.localizedString("state.critical")
-        case .thermalThrottling: return LocalizationManager.shared.localizedString("state.thermalThrottling")
-        case .batteryOptimized: return LocalizationManager.shared.localizedString("state.batteryOptimized")
-        @unknown default: return LocalizationManager.shared.localizedString("state.unknown")
-        }
-    }
-    
-    private var powerStateColor: Color {
-        switch appModel.powerState {
-        case .normal: return .green
-        case .lowPower: return .blue
-        case .powerSaving: return .yellow
-        case .critical: return .red
-        case .thermalThrottling: return .orange
-        case .batteryOptimized: return .blue
-        @unknown default: return .gray
-        }
-    }
-    
-    private var powerStateIcon: String {
-        switch appModel.powerState {
-        case .normal: return "bolt.fill"
-        case .lowPower: return "battery.25"
-        case .powerSaving: return "battery.0"
-        case .critical: return "battery.0.fill"
-        case .thermalThrottling: return "slowmo"
-        case .batteryOptimized: return "leaf.fill"
-        @unknown default: return "questionmark"
-        }
-    }
-    
  // MARK: - Helper
     
     private func themedCard<Content: View>(title: String, iconName: String, @ViewBuilder content: () -> Content) -> some View {
@@ -261,4 +275,3 @@ public struct PerformanceMonitoringPanelView: View {
         )
     }
 }
-

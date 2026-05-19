@@ -52,8 +52,8 @@ private func verifyConnectionIdentifier(_ connection: NSXPCConnection, allowedId
 }
 
 final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked Sendable {
-    private static let helperVersion = "2.3.0"
-    private static let helperVersionMarker = "SKYBRIDGE_HELPER_VERSION=2.3.0"
+    private static let helperVersion = "2.4.0"
+    private static let helperVersionMarker = "SKYBRIDGE_HELPER_VERSION=2.4.0"
     private static let protocolVersion = 3
 
     private enum MonitoringMode: String, Codable {
@@ -120,13 +120,54 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
         let helperStartedAt: Date
     }
 
+    private enum TemperatureGroup: String, Codable {
+        case cpu
+        case gpu
+        case memory
+        case system
+        case unknown
+    }
+
+    private struct TemperatureReading: Codable {
+        let key: String
+        let group: TemperatureGroup
+        let source: MetricSource?
+        let valueCelsius: Double
+    }
+
+    private struct FanReading: Codable {
+        let index: Int
+        let key: String
+        let rpm: Int
+        let source: MetricSource?
+    }
+
+    private enum PowerComponent: String, Codable {
+        case cpu
+        case gpu
+        case ane
+        case ram
+        case package
+        case unknown
+    }
+
+    private struct PowerReading: Codable {
+        let component: PowerComponent
+        let source: MetricSource?
+        let watts: Double
+    }
+
     private struct Snapshot: Codable {
         let timestamp: Date
         let monitoringMode: MonitoringMode?
         let cpuUsagePercent: Double?
         let memoryUsagePercent: Double?
         let gpuUsagePercent: Double?
+        let cpuPowerWatts: Double?
         let gpuPowerWatts: Double?
+        let anePowerWatts: Double?
+        let ramPowerWatts: Double?
+        let packagePowerWatts: Double?
         let cpuTemperatureC: Double?
         let gpuTemperatureC: Double?
         let fanRPMs: [Int]?
@@ -150,6 +191,14 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
         let gpuTemperatureAgeMs: Int?
         let fanAgeMs: Int?
 
+        let temperatureReadings: [TemperatureReading]?
+        let fanReadings: [FanReading]?
+        let cpuTemperatureHottestC: Double?
+        let gpuTemperatureHottestC: Double?
+        let cpuTemperatureAverageC: Double?
+        let gpuTemperatureAverageC: Double?
+        let powerReadings: [PowerReading]?
+
         static func bootstrap(now: Date) -> Snapshot {
             Snapshot(
                 timestamp: now,
@@ -157,7 +206,11 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
                 cpuUsagePercent: nil,
                 memoryUsagePercent: nil,
                 gpuUsagePercent: nil,
+                cpuPowerWatts: nil,
                 gpuPowerWatts: nil,
+                anePowerWatts: nil,
+                ramPowerWatts: nil,
+                packagePowerWatts: nil,
                 cpuTemperatureC: nil,
                 gpuTemperatureC: nil,
                 fanRPMs: nil,
@@ -176,17 +229,35 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
                 gpuPowerAgeMs: 0,
                 cpuTemperatureAgeMs: 0,
                 gpuTemperatureAgeMs: 0,
-                fanAgeMs: 0
+                fanAgeMs: 0,
+                temperatureReadings: nil,
+                fanReadings: nil,
+                cpuTemperatureHottestC: nil,
+                gpuTemperatureHottestC: nil,
+                cpuTemperatureAverageC: nil,
+                gpuTemperatureAverageC: nil,
+                powerReadings: nil
             )
         }
     }
 
     private struct ParsedValueSet {
         var gpuUsagePercent: Double?
+        var cpuPowerWatts: Double?
         var gpuPowerWatts: Double?
+        var anePowerWatts: Double?
+        var ramPowerWatts: Double?
+        var packagePowerWatts: Double?
         var cpuTemperatureC: Double?
         var gpuTemperatureC: Double?
         var fanRPMs: [Int]?
+        var temperatureReadings: [TemperatureReading]?
+        var fanReadings: [FanReading]?
+        var cpuTemperatureHottestC: Double?
+        var gpuTemperatureHottestC: Double?
+        var cpuTemperatureAverageC: Double?
+        var gpuTemperatureAverageC: Double?
+        var powerReadings: [PowerReading]?
     }
 
     private struct ParsedPowerMetrics {
@@ -326,10 +397,21 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
             sampledAt: sampledAt,
             values: ParsedValueSet(
                 gpuUsagePercent: snapshot.gpuUsagePercent,
+                cpuPowerWatts: snapshot.cpuPowerWatts,
                 gpuPowerWatts: snapshot.gpuPowerWatts,
+                anePowerWatts: snapshot.anePowerWatts,
+                ramPowerWatts: snapshot.ramPowerWatts,
+                packagePowerWatts: snapshot.packagePowerWatts,
                 cpuTemperatureC: snapshot.cpuTemperatureC,
                 gpuTemperatureC: snapshot.gpuTemperatureC,
-                fanRPMs: snapshot.fanRPMs
+                fanRPMs: snapshot.fanRPMs,
+                temperatureReadings: snapshot.temperatureReadings,
+                fanReadings: snapshot.fanReadings,
+                cpuTemperatureHottestC: snapshot.cpuTemperatureHottestC,
+                gpuTemperatureHottestC: snapshot.gpuTemperatureHottestC,
+                cpuTemperatureAverageC: snapshot.cpuTemperatureAverageC,
+                gpuTemperatureAverageC: snapshot.gpuTemperatureAverageC,
+                powerReadings: snapshot.powerReadings
             ),
             gpuUsageState: snapshot.gpuUsageState ?? .unavailable(reason: .temporarilyInitializing, source: .powermetrics, sampledAt: sampledAt),
             gpuPowerState: snapshot.gpuPowerState ?? .unavailable(reason: .temporarilyInitializing, source: .powermetrics, sampledAt: sampledAt),
@@ -357,7 +439,11 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
             cpuUsagePercent: nil,
             memoryUsagePercent: memoryUsage,
             gpuUsagePercent: parsed.values.gpuUsagePercent,
+            cpuPowerWatts: parsed.values.cpuPowerWatts,
             gpuPowerWatts: parsed.values.gpuPowerWatts,
+            anePowerWatts: parsed.values.anePowerWatts,
+            ramPowerWatts: parsed.values.ramPowerWatts,
+            packagePowerWatts: parsed.values.packagePowerWatts,
             cpuTemperatureC: parsed.values.cpuTemperatureC,
             gpuTemperatureC: parsed.values.gpuTemperatureC,
             fanRPMs: parsed.values.fanRPMs,
@@ -376,7 +462,14 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
             gpuPowerAgeMs: gpuPowerAge,
             cpuTemperatureAgeMs: cpuTempAge,
             gpuTemperatureAgeMs: gpuTempAge,
-            fanAgeMs: fanAge
+            fanAgeMs: fanAge,
+            temperatureReadings: parsed.values.temperatureReadings,
+            fanReadings: parsed.values.fanReadings,
+            cpuTemperatureHottestC: parsed.values.cpuTemperatureHottestC,
+            gpuTemperatureHottestC: parsed.values.gpuTemperatureHottestC,
+            cpuTemperatureAverageC: parsed.values.cpuTemperatureAverageC,
+            gpuTemperatureAverageC: parsed.values.gpuTemperatureAverageC,
+            powerReadings: parsed.values.powerReadings
         )
     }
 
@@ -390,7 +483,11 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
             cpuUsagePercent: latestSnapshot.cpuUsagePercent,
             memoryUsagePercent: latestSnapshot.memoryUsagePercent,
             gpuUsagePercent: latestSnapshot.gpuUsagePercent,
+            cpuPowerWatts: latestSnapshot.cpuPowerWatts,
             gpuPowerWatts: latestSnapshot.gpuPowerWatts,
+            anePowerWatts: latestSnapshot.anePowerWatts,
+            ramPowerWatts: latestSnapshot.ramPowerWatts,
+            packagePowerWatts: latestSnapshot.packagePowerWatts,
             cpuTemperatureC: latestSnapshot.cpuTemperatureC,
             gpuTemperatureC: latestSnapshot.gpuTemperatureC,
             fanRPMs: latestSnapshot.fanRPMs,
@@ -409,7 +506,14 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
             gpuPowerAgeMs: latestSnapshot.gpuPowerState?.ageMs(at: now),
             cpuTemperatureAgeMs: latestSnapshot.cpuTemperatureState?.ageMs(at: now),
             gpuTemperatureAgeMs: latestSnapshot.gpuTemperatureState?.ageMs(at: now),
-            fanAgeMs: latestSnapshot.fanState?.ageMs(at: now)
+            fanAgeMs: latestSnapshot.fanState?.ageMs(at: now),
+            temperatureReadings: latestSnapshot.temperatureReadings,
+            fanReadings: latestSnapshot.fanReadings,
+            cpuTemperatureHottestC: latestSnapshot.cpuTemperatureHottestC,
+            gpuTemperatureHottestC: latestSnapshot.gpuTemperatureHottestC,
+            cpuTemperatureAverageC: latestSnapshot.cpuTemperatureAverageC,
+            gpuTemperatureAverageC: latestSnapshot.gpuTemperatureAverageC,
+            powerReadings: latestSnapshot.powerReadings
         )
     }
 
@@ -439,9 +543,25 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
         var fanState = powermetrics.fanState
         var gpuPowerState = powermetrics.gpuPowerState
 
+        let temperatureReadings = privateSensors.temperatureReadings.map(mapTemperatureReading)
+        if !temperatureReadings.isEmpty {
+            mergedValues.temperatureReadings = temperatureReadings
+        }
+
+        let fanReadings = privateSensors.fanReadings.map(mapFanReading)
+        if !fanReadings.isEmpty {
+            mergedValues.fanReadings = fanReadings
+        }
+
         if let cpuTemperature = privateSensors.cpuTemperatureC {
             mergedValues.cpuTemperatureC = cpuTemperature
             let source: MetricSource = privateSensors.cpuTemperatureFromHID ? .iohid : .smc
+            mergedValues.cpuTemperatureHottestC = cpuTemperature
+            mergedValues.cpuTemperatureAverageC = averageTemperature(
+                temperatureReadings,
+                group: .cpu,
+                source: source
+            ) ?? cpuTemperature
             cpuTempState = .available(source: source, sampledAt: sampledAt)
         } else if cpuTempState.availability != .available {
             cpuTempState = .unavailable(reason: sensorMissingReason, source: .smc, sampledAt: sampledAt)
@@ -450,6 +570,12 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
         if let gpuTemperature = privateSensors.gpuTemperatureC {
             mergedValues.gpuTemperatureC = gpuTemperature
             let source: MetricSource = privateSensors.gpuTemperatureFromHID ? .iohid : .smc
+            mergedValues.gpuTemperatureHottestC = gpuTemperature
+            mergedValues.gpuTemperatureAverageC = averageTemperature(
+                temperatureReadings,
+                group: .gpu,
+                source: source
+            ) ?? gpuTemperature
             gpuTempState = .available(source: source, sampledAt: sampledAt)
         } else if gpuTempState.availability != .available {
             gpuTempState = .unavailable(reason: sensorMissingReason, source: .smc, sampledAt: sampledAt)
@@ -462,10 +588,27 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
             fanState = .unavailable(reason: sensorMissingReason, source: .smc, sampledAt: sampledAt)
         }
 
+        let powerReadings = privateSensors.powerReadings.map(mapPowerReading)
+        if !powerReadings.isEmpty {
+            mergedValues.powerReadings = powerReadings
+        }
+        if let cpuPowerWatts = privateSensors.cpuPowerWatts {
+            mergedValues.cpuPowerWatts = cpuPowerWatts
+        }
         if let gpuPowerWatts = privateSensors.gpuPowerWatts {
             mergedValues.gpuPowerWatts = gpuPowerWatts
             gpuPowerState = .available(source: .ioreport, sampledAt: sampledAt)
-        } else if gpuPowerState.availability == .unavailable {
+        }
+        if let anePowerWatts = privateSensors.anePowerWatts {
+            mergedValues.anePowerWatts = anePowerWatts
+        }
+        if let ramPowerWatts = privateSensors.ramPowerWatts {
+            mergedValues.ramPowerWatts = ramPowerWatts
+        }
+        if let packagePowerWatts = privateSensors.packagePowerWatts {
+            mergedValues.packagePowerWatts = packagePowerWatts
+        }
+        if privateSensors.gpuPowerWatts == nil, gpuPowerState.availability == .unavailable {
             gpuPowerState = .unavailable(reason: sensorMissingReason, source: .ioreport, sampledAt: sampledAt)
         }
 
@@ -478,6 +621,88 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
             gpuTemperatureState: gpuTempState,
             fanState: fanState
         )
+    }
+
+    private func mapTemperatureReading(_ reading: PrivateTemperatureReading) -> TemperatureReading {
+        TemperatureReading(
+            key: reading.key,
+            group: mapTemperatureGroup(reading.group),
+            source: mapSensorSource(reading.source),
+            valueCelsius: reading.valueCelsius
+        )
+    }
+
+    private func mapFanReading(_ reading: PrivateFanReading) -> FanReading {
+        FanReading(
+            index: reading.index,
+            key: reading.key,
+            rpm: reading.rpm,
+            source: mapSensorSource(reading.source)
+        )
+    }
+
+    private func mapPowerReading(_ reading: PrivatePowerReading) -> PowerReading {
+        PowerReading(
+            component: mapPowerComponent(reading.component),
+            source: mapSensorSource(reading.source),
+            watts: reading.watts
+        )
+    }
+
+    private func mapTemperatureGroup(_ group: PrivateTemperatureSensorGroup) -> TemperatureGroup {
+        switch group {
+        case .cpu:
+            return .cpu
+        case .gpu:
+            return .gpu
+        case .memory:
+            return .memory
+        case .system:
+            return .system
+        case .unknown:
+            return .unknown
+        }
+    }
+
+    private func mapPowerComponent(_ component: PrivatePowerComponent) -> PowerComponent {
+        switch component {
+        case .cpu:
+            return .cpu
+        case .gpu:
+            return .gpu
+        case .ane:
+            return .ane
+        case .ram:
+            return .ram
+        case .package:
+            return .package
+        case .unknown:
+            return .unknown
+        }
+    }
+
+    private func mapSensorSource(_ source: PrivateSensorSource) -> MetricSource {
+        switch source {
+        case .smc:
+            return .smc
+        case .iohid:
+            return .iohid
+        case .ioreport:
+            return .ioreport
+        }
+    }
+
+    private func averageTemperature(
+        _ readings: [TemperatureReading],
+        group: TemperatureGroup,
+        source: MetricSource
+    ) -> Double? {
+        let values = readings
+            .filter { $0.group == group && $0.source == source }
+            .map(\.valueCelsius)
+            .filter { $0.isFinite && $0 >= -10 && $0 <= 130 }
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
     }
 
     private func buildParsedMetrics(

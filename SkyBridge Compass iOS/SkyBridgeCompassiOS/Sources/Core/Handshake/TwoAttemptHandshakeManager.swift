@@ -128,8 +128,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
         switch reason {
         // Paper whitelist (Fig. downgrade-matrix / Sec.G):
         // Only provider unavailability or suite negotiation errors may fallback.
-        case .pqcProviderUnavailable, .suiteNotSupported, .suiteNegotiationFailed:
+        case .pqcProviderUnavailable, .suiteNegotiationFailed:
             return true
+        case .suiteNotSupported:
+            // Unknown/unsupported wire suites are security-relevant and must not
+            // become a downgrade trigger.
+            return false
         case .missingPeerKEMPublicKey:
             // Not a downgrade edge in the paper whitelist. Treat as provisioning/bootstrap signal.
             return false
@@ -220,7 +224,11 @@ public struct TwoAttemptHandshakeManager: Sendable {
         using cryptoProvider: any CryptoProvider
     ) -> [CryptoSuite] {
         var suites = cryptoProvider.supportedSuites
+        let explicitXWingPreference = explicitlyPrefersXWingHybridSuite()
         guard cryptoProvider.tier == .nativePQC else {
+            if explicitXWingPreference {
+                return []
+            }
             return deduplicatedSuitesByWire(suites)
         }
 
@@ -232,7 +240,14 @@ public struct TwoAttemptHandshakeManager: Sendable {
             suite.wireId == CryptoSuite.mlkem768.wireId
         }
 
-        if preferXWing && xwingAvailable {
+        if preferXWing {
+            guard xwingAvailable else {
+                if explicitXWingPreference {
+                    return []
+                }
+                suites.insert(.mlkem768, at: 0)
+                return deduplicatedSuitesByWire(suites)
+            }
             suites.insert(.xwing, at: 0)
             suites.insert(.mlkem768, at: 1)
         } else {
@@ -256,6 +271,14 @@ public struct TwoAttemptHandshakeManager: Sendable {
     }
 
     private static func prefersXWingHybridSuite() -> Bool {
+        if explicitlyPrefersXWingHybridSuite() {
+            return true
+        }
+
+        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
+    }
+
+    private static func explicitlyPrefersXWingHybridSuite() -> Bool {
         if let raw = ProcessInfo.processInfo.environment["SB_PQC_PREFERRED_SUITE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased(),
@@ -263,7 +286,7 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return true
         }
 
-        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
+        return false
     }
 
     private static func isAppleXWingAvailable() -> Bool {
@@ -304,7 +327,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
             } catch let error as AttemptPreparationError {
                 // PQC 准备失败，尝试 fallback
                 if case .pqcProviderUnavailable = error {
-                    if let bridged = try await attemptPQCCompatibilityRetry(
+                    if !policy.requirePQC,
+                       let bridged = try await attemptPQCCompatibilityRetry(
                         deviceId: deviceId,
                         reason: .pqcProviderUnavailable,
                         policy: policy,
@@ -328,7 +352,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
             } catch let error as HandshakeError {
                 // 检查是否允许 fallback
                 if case .failed(let reason) = error {
-                    if let bridged = try await attemptPQCCompatibilityRetry(
+                    if !policy.requirePQC,
+                       let bridged = try await attemptPQCCompatibilityRetry(
                         deviceId: deviceId,
                         reason: reason,
                         policy: policy,
@@ -361,8 +386,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
 
     private static func shouldAttemptPQCCompatibilityRetry(_ reason: HandshakeFailureReason) -> Bool {
         switch reason {
-        case .pqcProviderUnavailable, .suiteNegotiationFailed, .missingPeerKEMPublicKey:
+        case .pqcProviderUnavailable, .suiteNegotiationFailed:
             return true
+        case .missingPeerKEMPublicKey:
+            // Missing peer KEM is a trust/provisioning failure, not a suite compatibility signal.
+            // Retrying with another PQC suite hides the real connect-stage defect.
+            return false
         case .suiteNotSupported,
              .unknownSuite,
              .timeout,
@@ -508,8 +537,12 @@ public struct TwoAttemptHandshakeManager: Sendable {
     public static func isPQCUnavailableError(_ reason: HandshakeFailureReason) -> Bool {
         switch reason {
         // Paper whitelist (Sec.G): treat only these as local PQC-unavailability / negotiation failures.
-        case .pqcProviderUnavailable, .suiteNotSupported, .suiteNegotiationFailed:
+        case .pqcProviderUnavailable, .suiteNegotiationFailed:
             return true
+        case .suiteNotSupported:
+            // Unknown/unsupported wire suites fail closed; falling back here can
+            // turn protocol confusion into a classic downgrade.
+            return false
         case .missingPeerKEMPublicKey:
             // Distinguish from "pqc unavailable": it's "missing peer provisioning".
             return false

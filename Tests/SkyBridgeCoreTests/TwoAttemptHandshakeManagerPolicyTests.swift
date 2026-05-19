@@ -110,6 +110,36 @@ final class TwoAttemptHandshakeManagerPolicyTests: XCTestCase {
         XCTAssertEqual(strategies, [.pqcOnly, .pqcOnly, .classicOnly])
     }
 
+    func testStrictPQCPreparationDisablesPQCBridgeRetry() async {
+        let tracker = AttemptTracker()
+        let strategyTracker = StrategyTracker()
+        let provider = MockCryptoProvider()
+
+        do {
+            _ = try await TwoAttemptHandshakeManager.performHandshakeWithPreparation(
+                deviceId: "strict-bridge-disabled-device",
+                preferPQC: true,
+                policy: .strictPQC,
+                cryptoProvider: provider
+            ) { preparation in
+                await strategyTracker.record(preparation.strategy)
+                let count = await tracker.increment()
+                XCTAssertEqual(count, 1)
+                throw HandshakeError.failed(.suiteNegotiationFailed)
+            }
+            XCTFail("Expected strictPQC to fail without PQC bridge retry")
+        } catch let HandshakeError.failed(reason) {
+            XCTAssertEqual(reason, .suiteNegotiationFailed)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let attempts = await tracker.count
+        XCTAssertEqual(attempts, 1)
+        let strategies = await strategyTracker.strategies()
+        XCTAssertEqual(strategies, [.pqcOnly])
+    }
+
     func testRequirePQCOverridesAllowClassicFallback() {
         let policy = HandshakePolicy(requirePQC: true, allowClassicFallback: true, minimumTier: .classic)
         XCTAssertTrue(policy.requirePQC)

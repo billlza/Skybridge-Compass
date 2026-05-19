@@ -12,6 +12,8 @@
 //
 
 import XCTest
+import Foundation
+import Network
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -102,7 +104,7 @@ final class P2PDeviceDiscoveryTests: XCTestCase {
     
  /// Test TXT record binary parsing
     func testTXTRecordBinaryParsing() {
- // Create binary TXT record data
+// Create binary TXT record data
         var data = Data()
         
  // Add "deviceId=test-123"
@@ -122,6 +124,42 @@ final class P2PDeviceDiscoveryTests: XCTestCase {
  // Property: All entries should be parsed
         XCTAssertEqual(parsed["deviceId"], "test-123")
         XCTAssertEqual(parsed["pubKeyFP"], pubKeyFP)
+    }
+
+    func testBonjourTXTInjectionDoesNotImportKEMTrustMaterial() async {
+        let validFP = String(repeating: "a", count: 64)
+        let forgedKEM = "forged-kem-public-key-sentinel"
+        let txtData = NetService.data(fromTXTRecord: [
+            "deviceId": Data("evil-device".utf8),
+            "pubKeyFP": Data(validFP.utf8),
+            "platform": Data("iOS".utf8),
+            "capabilities": Data("screen-mirror,file-transfer".utf8),
+            "name": Data("Injected Peer".utf8),
+            "kemRefreshVersion": Data("1".utf8),
+            "kemKeyDigest": Data(String(repeating: "b", count: 64).utf8),
+            "kemPublicKey": Data(forgedKEM.utf8),
+            "kemPublicKeys": Data("[{\"suiteWireId\":1,\"publicKey\":\"forged\"}]".utf8)
+        ])
+
+        await PeerKEMBootstrapStore.shared.clearForTesting()
+
+        let parsed = P2PTXTRecordParser.parse(txtData)
+        XCTAssertEqual(parsed["kemPublicKey"], forgedKEM)
+        XCTAssertNotNil(parsed["kemPublicKeys"])
+
+        let device = P2PTXTRecordParser.createDevice(
+            from: parsed,
+            endpoint: createMockEndpoint()
+        )
+        XCTAssertEqual(device?.deviceId, "evil-device")
+        XCTAssertEqual(device?.pubKeyFP, validFP)
+        XCTAssertEqual(device?.capabilities, ["screen-mirror", "file-transfer"])
+        XCTAssertFalse(device?.capabilities.contains { $0.localizedCaseInsensitiveContains("kem") } ?? true)
+
+        let cachedKEM = await PeerKEMBootstrapStore.shared.mergedKEMPublicKeys(forCandidates: ["evil-device"])
+        XCTAssertTrue(cachedKEM.isEmpty)
+
+        await PeerKEMBootstrapStore.shared.clearForTesting()
     }
     
  // MARK: - Property 3: Offline Device Removal
@@ -370,5 +408,3 @@ final class P2PDeviceDiscoveryTests: XCTestCase {
         return NWEndpoint.hostPort(host: "127.0.0.1", port: 12345)
     }
 }
-
-import Network

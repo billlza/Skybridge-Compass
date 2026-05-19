@@ -16,6 +16,8 @@ packages:
     path: LocalPackages/WebRTCLocal
   OQSRAIILocal:
     path: LocalPackages/OQSRAIILocal
+  SkyBridgeMediaLocal:
+    path: LocalPackages/SkyBridgeMediaLocal
 
 targets:
   SkyBridgeCompass-iOS:
@@ -78,6 +80,8 @@ targets:
         product: WebRTC
       - package: OQSRAIILocal
         product: OQSRAII
+      - package: SkyBridgeMediaLocal
+        product: SkyBridgeRealtimeMedia
       - target: SkyBridgeCompass-Widgets
         embed: true
     settings:
@@ -86,23 +90,12 @@ targets:
         DEVELOPMENT_TEAM: YKUPL7Z869
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
-        SWIFT_STRICT_CONCURRENCY: targeted
-        OTHER_SWIFT_FLAGS:
-          - "$(inherited)"
-          - "-Xcc"
-          - "-I"
-          - "-Xcc"
-          - "$(SRCROOT)/../Sources/Vendor/WebRTCHeaders"
-          - "-Xcc"
-          - "-Wno-incomplete-umbrella"
-        OTHER_CFLAGS: "$(inherited) -Wno-incomplete-umbrella"
-        OTHER_CPLUSPLUSFLAGS: "$(inherited) -Wno-incomplete-umbrella"
+        SWIFT_STRICT_CONCURRENCY: complete
+        OTHER_CFLAGS: "$(inherited)"
+        OTHER_CPLUSPLUSFLAGS: "$(inherited)"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]: "$(inherited) HAS_APPLE_PQC_SDK"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]: "$(inherited) HAS_APPLE_PQC_SDK"
-        # WebRTC (third-party binary package) exposes an incomplete umbrella header on iOS.
-        # Keep this warning enabled for our own frameworks; suppress only at app integration boundary.
-        CLANG_WARN_INCOMPLETE_UMBRELLA: NO
         # Auto-enable Apple PQC compile gate only when building against iOS 26 SDK.
         # This keeps older SDK builds portable while allowing 26.x builds to use native PQC.
       configs:
@@ -131,7 +124,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios.widgets
         DEVELOPMENT_TEAM: YKUPL7Z869
         INFOPLIST_FILE: "Widgets/Info.plist"
-        SWIFT_STRICT_CONCURRENCY: targeted
+        SWIFT_STRICT_CONCURRENCY: complete
         # Widgets do not need HAS_APPLE_PQC_SDK; keep build conditions minimal for portability.
 
   SkyBridgeCompassiOSTests:
@@ -148,19 +141,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios.tests
         DEVELOPMENT_TEAM: YKUPL7Z869
         GENERATE_INFOPLIST_FILE: YES
-        CODE_SIGNING_ALLOWED: NO
-        SWIFT_STRICT_CONCURRENCY: targeted
-        OTHER_SWIFT_FLAGS:
-          - "$(inherited)"
-          - "-Xcc"
-          - "-I"
-          - "-Xcc"
-          - "$(SRCROOT)/../Sources/Vendor/WebRTCHeaders"
-          - "-Xcc"
-          - "-Wno-incomplete-umbrella"
-        OTHER_CFLAGS: "$(inherited) -Wno-incomplete-umbrella"
-        OTHER_CPLUSPLUSFLAGS: "$(inherited) -Wno-incomplete-umbrella"
-        CLANG_WARN_INCOMPLETE_UMBRELLA: NO
+        CODE_SIGNING_ALLOWED: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+        OTHER_CFLAGS: "$(inherited)"
+        OTHER_CPLUSPLUSFLAGS: "$(inherited)"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]: "$(inherited) HAS_APPLE_PQC_SDK"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]: "$(inherited) HAS_APPLE_PQC_SDK"

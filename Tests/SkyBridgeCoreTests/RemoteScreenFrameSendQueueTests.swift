@@ -2,10 +2,10 @@ import XCTest
 @testable import SkyBridgeCore
 
 final class RemoteScreenFrameSendQueueTests: XCTestCase {
-    func testDefaultQueueDepthAbsorbsHighFpsHevcSendJitter() {
+    func testDefaultQueueDepthMatchesStrictSixFrameLatencyBudget() {
         let queue = RemoteScreenFrameSendQueue()
 
-        XCTAssertEqual(queue.maxQueuedFrames, 12)
+        XCTAssertEqual(queue.maxQueuedFrames, 6)
     }
 
     func testQueueRequestsSyncRefreshWhenPredictiveFrameOverflows() {
@@ -54,6 +54,28 @@ final class RemoteScreenFrameSendQueueTests: XCTestCase {
         XCTAssertEqual(result, .enqueued)
         XCTAssertFalse(queue.waitingForSyncFrame)
         XCTAssertEqual(queue.pendingFrames.count, 1)
+    }
+
+    func testQueueDoesNotRecoverFromWaitingSyncUsingAdvertisedFlagWithoutIRAPNAL() {
+        var queue = RemoteScreenFrameSendQueue(maxQueuedFrames: 1)
+        _ = queue.enqueue(makeFrame(sync: true))
+        _ = queue.enqueue(makeFrame(sync: false))
+
+        let advertisedSyncPredictiveHEVC = ScreenData(
+            width: 2056,
+            height: 1329,
+            imageData: Data([0x00, 0x00, 0x00, 0x01, 0x02, 0x01, 0x88]),
+            timestamp: 2,
+            format: "hevc",
+            isSyncFrame: true
+        )
+
+        XCTAssertEqual(
+            queue.enqueue(advertisedSyncPredictiveHEVC),
+            .droppedPredictiveFrameWaitingForSync
+        )
+        XCTAssertTrue(queue.waitingForSyncFrame)
+        XCTAssertTrue(queue.pendingFrames.isEmpty)
     }
 
     func testIndependentFramesStayDecodableWhenQueueRolls() {

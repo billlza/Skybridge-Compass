@@ -1,0 +1,93 @@
+use std::time::Duration;
+
+use anyhow::Result;
+use skybridge_agent::run_agent;
+
+mod smoke;
+
+use crate::auth_commands::{login, logout};
+use crate::device_commands::{device_approve, device_enroll, device_status};
+use crate::doctor_commands::{
+    diagnose_webrtc_media, doctor_media_lease, doctor_signaling, doctor_webrtc_media,
+};
+use crate::operator_status::{doctor, metrics, tail_logs};
+use crate::performance_commands::check_performance;
+use crate::session_commands::{disconnect, session_inspect, session_ls};
+use crate::{
+    AgentSubcommand, CheckSubcommand, Cli, CodeSubcommand, Commands, DeviceSubcommand,
+    DiagnoseSubcommand, DoctorSubcommand, FileSubcommand, InternalSubcommand, LogsSubcommand,
+    SessionSubcommand,
+};
+
+pub(super) async fn dispatch(cli: Cli) -> Result<()> {
+    match cli.command {
+        Commands::Agent(agent) => match agent.command {
+            AgentSubcommand::Run => {
+                run_agent(skybridge_agent::AgentRuntimeOptions {
+                    state_dir: cli.state_dir,
+                    heartbeat_interval: Duration::from_secs(2),
+                })
+                .await
+            }
+        },
+        Commands::Login(args) => login(cli.state_dir, args).await,
+        Commands::Logout => logout(cli.state_dir).await,
+        Commands::Device(device) => match device.command {
+            DeviceSubcommand::Status(output) => device_status(cli.state_dir, output.json).await,
+            DeviceSubcommand::Enroll(args) => device_enroll(cli.state_dir, args).await,
+            DeviceSubcommand::Approve(args) => device_approve(cli.state_dir, args).await,
+        },
+        Commands::Code(code) => match code.command {
+            CodeSubcommand::Create(args) => {
+                crate::connection_code::code_create(cli.state_dir, args).await
+            }
+            CodeSubcommand::Current(args) => {
+                crate::connection_code_snapshot::code_current(args).await
+            }
+        },
+        Commands::Connect(args) => crate::connection_code::connect_code(cli.state_dir, args).await,
+        Commands::Session(session) => match session.command {
+            SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,
+            SessionSubcommand::Inspect(args) => session_inspect(cli.state_dir, args).await,
+        },
+        Commands::Disconnect(args) => disconnect(cli.state_dir, &args.session_id).await,
+        Commands::File(file) => match file.command {
+            FileSubcommand::Send(args) => {
+                crate::file_commands::send_placeholder(&args.path, &args.to)
+            }
+            FileSubcommand::Receive => crate::file_commands::receive_placeholder(),
+            FileSubcommand::History(output) => {
+                crate::file_commands::history_placeholder(output.json)
+            }
+        },
+        Commands::Check(check) => match check.command {
+            CheckSubcommand::Memory(args) => crate::memory_check::check_memory(args).await,
+            CheckSubcommand::Performance(args) => check_performance(args).await,
+            CheckSubcommand::Coverage(args) => crate::check_coverage::check_coverage(args).await,
+        },
+        Commands::Diagnose(args) => match args.command {
+            DiagnoseSubcommand::WebRtcMedia(webrtc_media) => {
+                diagnose_webrtc_media(webrtc_media).await
+            }
+        },
+        Commands::Doctor(args) => match args.command {
+            Some(DoctorSubcommand::Signaling(signaling)) => doctor_signaling(signaling).await,
+            Some(DoctorSubcommand::MediaLease(media_lease)) => {
+                doctor_media_lease(media_lease).await
+            }
+            Some(DoctorSubcommand::WebRtcMedia(webrtc_media)) => {
+                doctor_webrtc_media(webrtc_media).await
+            }
+            None => doctor(cli.state_dir, args.output.json).await,
+        },
+        Commands::Smoke(smoke) => smoke::dispatch_smoke_command(smoke).await,
+        Commands::Logs(logs) => match logs.command {
+            LogsSubcommand::Tail(args) => tail_logs(cli.state_dir, args.lines).await,
+        },
+        Commands::Metrics(output) => metrics(cli.state_dir, output.json).await,
+        Commands::Internal(internal) => match internal.command {
+            InternalSubcommand::VerifyMldsa(args) => crate::internal_commands::verify_mldsa(args),
+        },
+        Commands::Version => crate::cli_metadata::version(),
+    }
+}

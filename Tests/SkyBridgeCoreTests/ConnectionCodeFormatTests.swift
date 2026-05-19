@@ -83,7 +83,11 @@ final class ConnectionCodeFormatTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        let policyURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCPQCHandshakePolicy.swift")
+        let trustPolicyURL = root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkQRCodeTrustPolicy.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let policySource = try String(contentsOf: policyURL, encoding: .utf8)
+        let trustPolicySource = try String(contentsOf: trustPolicyURL, encoding: .utf8)
 
         XCTAssertTrue(
             source.contains("authenticatedConnectionCodeRebindAllowed: true"),
@@ -102,7 +106,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "Connection-code WebRTC bootstrap must explicitly bind the initial handshake policy to the advertised authority identity."
         )
         XCTAssertTrue(
-            source.contains("activeConnectionCodeSessionID == sessionID"),
+            policySource.contains("activeConnectionCodeSessionID == sessionID"),
             "The local connection-code offerer must use classic authority bootstrap even when trusted KEM material is available."
         )
         XCTAssertTrue(
@@ -114,7 +118,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "Connection-code offerer sessions must also be marked as authority-bound for the same identity-pinning reason."
         )
         XCTAssertTrue(
-            source.contains("expectedRemoteAuthorityAlgorithm == .ed25519"),
+            policySource.contains("expectedRemoteAuthorityAlgorithm == .ed25519"),
             "The connection-code joiner must honor the Ed25519 authority fingerprint returned by lookup instead of switching to a PQC identity key."
         )
         XCTAssertTrue(
@@ -126,11 +130,11 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "Connection-code rebinds need a dedicated policy instead of borrowing QR behavior."
         )
         XCTAssertTrue(
-            source.contains("case .identityConflict:\n            return true"),
+            trustPolicySource.contains("case .identityConflict:\n            return true"),
             "A verified connection code should heal stale authoritative keys for the same deviceId."
         )
         XCTAssertTrue(
-            source.contains("case .deviceIdMigrationRequired, .quarantinedIdentity, .revokedIdentity:\n            return false"),
+            trustPolicySource.contains("case .deviceIdMigrationRequired, .quarantinedIdentity, .revokedIdentity:\n            return false"),
             "Connection codes must still block device-id migration, quarantined identities, and revoked identities."
         )
         XCTAssertFalse(

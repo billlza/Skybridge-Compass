@@ -1,6 +1,5 @@
-use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use bytes::BytesMut;
@@ -10,16 +9,23 @@ use tracing::{debug, info, warn};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelMessage};
 use webrtc::peer_connection::{
     MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
-    RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer,
-    RTCPeerConnectionState, RTCSessionDescription,
+    RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceGatheringState, RTCPeerConnectionState,
+    RTCSessionDescription,
 };
 
 use crate::{
-    ClassicHandleResult, ClassicInitiatorConfig, ClassicInitiatorHandshake, ClassicSessionKeys,
-    PqcInitiatorConfig, PqcInitiatorHandshake, PqcResponderConfig, PqcResponderHandshake,
-    RuntimeSessionKeepaliveKind, RuntimeSessionRole, TurnCredentials, WebRtcMessageType,
-    WebRtcSignalingEnvelope, WebRtcSignalingPayload,
+    ClassicHandleResult, ClassicInitiatorConfig, ClassicSessionKeys, PqcInitiatorConfig,
+    PqcResponderConfig, RuntimeSessionKeepaliveKind, RuntimeSessionRole, TurnCredentials,
+    WebRtcMessageType, WebRtcSignalingEnvelope, WebRtcSignalingPayload,
 };
+
+mod handshake;
+mod support;
+#[cfg(test)]
+mod tests;
+
+use handshake::NativeSessionHandshake;
+use support::{build_ice_servers, native_webrtc_udp_bind_addrs, now_unix_seconds};
 
 const CONTROL_CHANNEL_LABEL: &str = "skybridge";
 const MAX_FRAMED_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -65,123 +71,6 @@ struct NativeWebRtcState {
     heartbeat_task_started: bool,
     next_ping_id: u64,
     pending_remote_candidates: Vec<RTCIceCandidateInit>,
-}
-
-#[derive(Debug)]
-enum NativeInitiatorHandshake {
-    Classic(ClassicInitiatorHandshake),
-    Pqc(PqcInitiatorHandshake),
-}
-
-#[derive(Debug)]
-enum NativeResponderHandshake {
-    Pqc(PqcResponderHandshake),
-}
-
-#[derive(Debug)]
-enum NativeSessionHandshake {
-    Initiator(NativeInitiatorHandshake),
-    Responder(NativeResponderHandshake),
-}
-
-impl NativeInitiatorHandshake {
-    fn start(&mut self) -> Result<Vec<u8>> {
-        match self {
-            Self::Classic(handshake) => handshake.start(),
-            Self::Pqc(handshake) => handshake.start(),
-        }
-    }
-
-    fn handle_frame(&mut self, frame: &[u8]) -> Result<ClassicHandleResult> {
-        match self {
-            Self::Classic(handshake) => handshake.handle_frame(frame),
-            Self::Pqc(handshake) => handshake.handle_frame(frame),
-        }
-    }
-
-    fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        match self {
-            Self::Classic(handshake) => handshake.build_heartbeat_frame(),
-            Self::Pqc(handshake) => handshake.build_heartbeat_frame(),
-        }
-    }
-
-    fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Classic(handshake) => handshake.build_pong_frame(id),
-            Self::Pqc(handshake) => handshake.build_pong_frame(id),
-        }
-    }
-
-    fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Classic(handshake) => handshake.build_ping_frame(id),
-            Self::Pqc(handshake) => handshake.build_ping_frame(id),
-        }
-    }
-}
-
-impl NativeResponderHandshake {
-    fn handle_frame(&mut self, frame: &[u8]) -> Result<ClassicHandleResult> {
-        match self {
-            Self::Pqc(handshake) => handshake.handle_frame(frame),
-        }
-    }
-
-    fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        match self {
-            Self::Pqc(handshake) => handshake.build_heartbeat_frame(),
-        }
-    }
-
-    fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Pqc(handshake) => handshake.build_pong_frame(id),
-        }
-    }
-
-    fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Pqc(handshake) => handshake.build_ping_frame(id),
-        }
-    }
-}
-
-impl NativeSessionHandshake {
-    fn start(&mut self) -> Result<Vec<u8>> {
-        match self {
-            Self::Initiator(handshake) => handshake.start(),
-            Self::Responder(_) => Ok(Vec::new()),
-        }
-    }
-
-    fn handle_frame(&mut self, frame: &[u8]) -> Result<ClassicHandleResult> {
-        match self {
-            Self::Initiator(handshake) => handshake.handle_frame(frame),
-            Self::Responder(handshake) => handshake.handle_frame(frame),
-        }
-    }
-
-    fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        match self {
-            Self::Initiator(handshake) => handshake.build_heartbeat_frame(),
-            Self::Responder(handshake) => handshake.build_heartbeat_frame(),
-        }
-    }
-
-    fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Initiator(handshake) => handshake.build_pong_frame(id),
-            Self::Responder(handshake) => handshake.build_pong_frame(id),
-        }
-    }
-
-    fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Initiator(handshake) => handshake.build_ping_frame(id),
-            Self::Responder(handshake) => handshake.build_ping_frame(id),
-        }
-    }
 }
 
 struct NativeWebRtcInner {
@@ -302,15 +191,13 @@ impl NativeWebRtcSession {
                     config.pqc_initiator,
                     config.pqc_responder,
                 ) {
-                    (_, Some(config), _) => Some(NativeSessionHandshake::Initiator(
-                        NativeInitiatorHandshake::Pqc(PqcInitiatorHandshake::new(config)?),
-                    )),
-                    (Some(config), None, _) => Some(NativeSessionHandshake::Initiator(
-                        NativeInitiatorHandshake::Classic(ClassicInitiatorHandshake::new(config)?),
-                    )),
-                    (None, None, Some(config)) => Some(NativeSessionHandshake::Responder(
-                        NativeResponderHandshake::Pqc(PqcResponderHandshake::new(config)?),
-                    )),
+                    (_, Some(config), _) => Some(NativeSessionHandshake::pqc_initiator(config)?),
+                    (Some(config), None, _) => {
+                        Some(NativeSessionHandshake::classic_initiator(config)?)
+                    }
+                    (None, None, Some(config)) => {
+                        Some(NativeSessionHandshake::pqc_responder(config)?)
+                    }
                     (None, None, None) => None,
                 },
                 ..NativeWebRtcState::default()
@@ -640,7 +527,7 @@ impl NativeWebRtcInner {
 
     async fn wait_for_ice_gathering_complete(&self) -> Result<()> {
         let mut gather_complete_rx = self.gather_complete_rx.lock().await;
-        let _ = timeout(Duration::from_secs(10), gather_complete_rx.recv())
+        timeout(Duration::from_secs(10), gather_complete_rx.recv())
             .await
             .map_err(|_| anyhow!("ice_gathering_timeout"))?
             .ok_or_else(|| anyhow!("ice_gathering_channel_closed"))?;
@@ -963,17 +850,17 @@ impl NativeWebRtcInner {
             loop {
                 interval.tick().await;
                 tick_count = tick_count.saturating_add(1);
-                if tick_count % 3 == 0 {
-                    if let Err(error) = heartbeat_self.send_heartbeat_once().await {
-                        warn!(
-                            kind = "native_webrtc.heartbeat.stopped",
-                            session_id = %heartbeat_self.session_id,
-                            role = ?heartbeat_self.role,
-                            error = %error,
-                            "stopping handshake heartbeat loop"
-                        );
-                        break;
-                    }
+                if tick_count.is_multiple_of(3)
+                    && let Err(error) = heartbeat_self.send_heartbeat_once().await
+                {
+                    warn!(
+                        kind = "native_webrtc.heartbeat.stopped",
+                        session_id = %heartbeat_self.session_id,
+                        role = ?heartbeat_self.role,
+                        error = %error,
+                        "stopping handshake heartbeat loop"
+                    );
+                    break;
                 }
                 if let Err(error) = heartbeat_self.send_ping_once().await {
                     warn!(
@@ -1124,286 +1011,5 @@ impl NativeWebRtcInner {
             ))
             .await
             .map_err(|_| anyhow!("native_webrtc_event_receiver_dropped"))
-    }
-}
-
-fn build_ice_servers(turn_credentials: Option<&TurnCredentials>) -> Vec<RTCIceServer> {
-    match turn_credentials {
-        Some(credentials) if !credentials.uris.is_empty() => vec![RTCIceServer {
-            urls: credentials.uris.clone(),
-            username: credentials.username.clone(),
-            credential: credentials.password.clone(),
-            ..Default::default()
-        }],
-        _ => Vec::new(),
-    }
-}
-
-fn native_webrtc_udp_bind_addrs() -> Vec<String> {
-    if let Ok(raw_addrs) = std::env::var("SKYBRIDGE_NATIVE_WEBRTC_UDP_ADDRS") {
-        let configured = raw_addrs
-            .split(',')
-            .map(str::trim)
-            .filter(|addr| !addr.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        if !configured.is_empty() {
-            return configured;
-        }
-    }
-
-    let mut addrs = Vec::new();
-    push_unique_addr(&mut addrs, "127.0.0.1:0".to_owned());
-    if let Some(primary_addr) = primary_ipv4_udp_bind_addr() {
-        push_unique_addr(&mut addrs, primary_addr);
-    }
-    addrs
-}
-
-fn primary_ipv4_udp_bind_addr() -> Option<String> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    let local_addr = socket.local_addr().ok()?;
-    match local_addr.ip() {
-        IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(format!("{ip}:0")),
-        _ => None,
-    }
-}
-
-fn push_unique_addr(addrs: &mut Vec<String>, addr: String) {
-    if !addrs.iter().any(|existing| existing == &addr) {
-        addrs.push(addr);
-    }
-}
-
-fn now_unix_seconds() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs_f64())
-        .unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use anyhow::Result;
-
-    use super::*;
-    use crate::{
-        CryptoSuite, PqcInitiatorConfig, PqcResponderConfig, ProtocolIdentityBinding,
-        RustPqcIdentityMaterial,
-    };
-
-    async fn pump_events(
-        initiator: &mut NativeWebRtcSession,
-        responder: &mut NativeWebRtcSession,
-        min_ready: usize,
-        min_handshake: usize,
-    ) -> Result<Vec<NativeWebRtcEvent>> {
-        let mut observed = Vec::new();
-        let mut ready_count = 0usize;
-        let mut handshake_count = 0usize;
-
-        for _ in 0..256 {
-            tokio::select! {
-                event = initiator.next_event() => {
-                    if let Some(event) = event {
-                        match &event {
-                            NativeWebRtcEvent::SignalingEnvelope(envelope) => responder.handle_signaling_envelope(envelope).await?,
-                            NativeWebRtcEvent::TransportReady => {
-                                ready_count += 1;
-                                observed.push(event);
-                            }
-                            NativeWebRtcEvent::HandshakeComplete { .. } => {
-                                handshake_count += 1;
-                                observed.push(event);
-                            }
-                            NativeWebRtcEvent::Keepalive { .. } => {}
-                            NativeWebRtcEvent::TransportDisconnected { .. } => observed.push(event),
-                        }
-                    }
-                }
-                event = responder.next_event() => {
-                    if let Some(event) = event {
-                        match &event {
-                            NativeWebRtcEvent::SignalingEnvelope(envelope) => initiator.handle_signaling_envelope(envelope).await?,
-                            NativeWebRtcEvent::TransportReady => {
-                                ready_count += 1;
-                                observed.push(event);
-                            }
-                            NativeWebRtcEvent::HandshakeComplete { .. } => {
-                                handshake_count += 1;
-                                observed.push(event);
-                            }
-                            NativeWebRtcEvent::Keepalive { .. } => {}
-                            NativeWebRtcEvent::TransportDisconnected { .. } => observed.push(event),
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            }
-
-            if ready_count >= min_ready && handshake_count >= min_handshake {
-                break;
-            }
-        }
-
-        Ok(observed)
-    }
-
-    #[tokio::test]
-    async fn native_webrtc_marks_ready_from_real_data_channel_open_without_faking_handshake()
-    -> Result<()> {
-        let mut initiator = NativeWebRtcSession::new(NativeWebRtcConfig {
-            session_id: "native-test".to_owned(),
-            local_device_id: "device-a".to_owned(),
-            role: RuntimeSessionRole::Initiator,
-            turn_credentials: None,
-            classic_initiator: None,
-            pqc_initiator: None,
-            pqc_responder: None,
-        })
-        .await?;
-        let mut responder = NativeWebRtcSession::new(NativeWebRtcConfig {
-            session_id: "native-test".to_owned(),
-            local_device_id: "device-b".to_owned(),
-            role: RuntimeSessionRole::Responder,
-            turn_credentials: None,
-            classic_initiator: None,
-            pqc_initiator: None,
-            pqc_responder: None,
-        })
-        .await?;
-
-        initiator.start().await?;
-        responder.start().await?;
-        initiator.notify_remote_join("device-b").await?;
-
-        let observed = timeout(
-            Duration::from_secs(15),
-            pump_events(&mut initiator, &mut responder, 2, 0),
-        )
-        .await
-        .map_err(|_| anyhow!("native_webrtc_test_timeout"))??;
-
-        let ready_count = observed
-            .iter()
-            .filter(|event| matches!(event, NativeWebRtcEvent::TransportReady))
-            .count();
-        let handshake_count = observed
-            .iter()
-            .filter(|event| matches!(event, NativeWebRtcEvent::HandshakeComplete { .. }))
-            .count();
-
-        assert_eq!(ready_count, 2);
-        assert_eq!(handshake_count, 0);
-        assert!(
-            observed
-                .iter()
-                .all(|event| { !matches!(event, NativeWebRtcEvent::TransportDisconnected { .. }) })
-        );
-
-        initiator.close().await?;
-        responder.close().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn native_webrtc_completes_rust_to_rust_pqc_handshake() -> Result<()> {
-        let initiator_identity = RustPqcIdentityMaterial::generate()?;
-        let responder_identity = RustPqcIdentityMaterial::generate()?;
-        let mut initiator = NativeWebRtcSession::new(NativeWebRtcConfig {
-            session_id: "native-pqc-test".to_owned(),
-            local_device_id: "device-a".to_owned(),
-            role: RuntimeSessionRole::Initiator,
-            turn_credentials: None,
-            classic_initiator: None,
-            pqc_initiator: Some(PqcInitiatorConfig {
-                local_binding: ProtocolIdentityBinding::new(
-                    "device-1234567890abcd",
-                    initiator_identity.signing_algorithm,
-                    initiator_identity.signing_public_key.clone(),
-                    None,
-                )?,
-                signing_secret_key: initiator_identity.signing_secret_key.clone(),
-                local_device_name: Some("Rust PQC Initiator".to_owned()),
-                preferred_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
-                peer_kem_public_keys: BTreeMap::from([
-                    (
-                        CryptoSuite::XWING_MLDSA,
-                        responder_identity.xwing_public_key.clone(),
-                    ),
-                    (
-                        CryptoSuite::MLKEM768_MLDSA65,
-                        responder_identity.mlkem768_public_key.clone(),
-                    ),
-                ]),
-            }),
-            pqc_responder: None,
-        })
-        .await?;
-        let mut responder = NativeWebRtcSession::new(NativeWebRtcConfig {
-            session_id: "native-pqc-test".to_owned(),
-            local_device_id: "device-b".to_owned(),
-            role: RuntimeSessionRole::Responder,
-            turn_credentials: None,
-            classic_initiator: None,
-            pqc_initiator: None,
-            pqc_responder: Some(PqcResponderConfig {
-                local_binding: ProtocolIdentityBinding::new(
-                    "device-fedcba0987654321",
-                    responder_identity.signing_algorithm,
-                    responder_identity.signing_public_key.clone(),
-                    None,
-                )?,
-                local_device_name: Some("Rust PQC Responder".to_owned()),
-                identity: responder_identity,
-                supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
-            }),
-        })
-        .await?;
-
-        initiator.start().await?;
-        responder.start().await?;
-        initiator.notify_remote_join("device-b").await?;
-
-        let observed = timeout(
-            Duration::from_secs(20),
-            pump_events(&mut initiator, &mut responder, 2, 2),
-        )
-        .await
-        .map_err(|_| anyhow!("native_webrtc_pqc_test_timeout"))??;
-
-        let ready_count = observed
-            .iter()
-            .filter(|event| matches!(event, NativeWebRtcEvent::TransportReady))
-            .count();
-        let handshake_events = observed
-            .iter()
-            .filter_map(|event| match event {
-                NativeWebRtcEvent::HandshakeComplete { negotiated_suite } => {
-                    Some(negotiated_suite.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(ready_count, 2);
-        assert_eq!(handshake_events.len(), 2);
-        assert!(
-            handshake_events
-                .iter()
-                .all(|suite| { *suite == "X-Wing" || *suite == "ML-KEM-768" })
-        );
-        assert!(
-            observed
-                .iter()
-                .all(|event| !matches!(event, NativeWebRtcEvent::TransportDisconnected { .. }))
-        );
-
-        initiator.close().await?;
-        responder.close().await?;
-        Ok(())
     }
 }

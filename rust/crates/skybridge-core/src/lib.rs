@@ -1,3 +1,6 @@
+mod handshake_app_frame;
+mod handshake_wire;
+
 pub mod auth;
 pub mod classic_handshake;
 pub mod control_plane;
