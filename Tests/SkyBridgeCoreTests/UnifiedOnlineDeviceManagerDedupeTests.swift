@@ -312,6 +312,39 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     }
 
     @MainActor
+    func testResolvedICloudDeviceRequiresStableOrAddressAnchorForSameNamedLiveDevice() {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sameNamedLiveDevice = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "bonjour:Ziang的iPad@local.",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro"
+        )
+        let cloudDevice = iCloudDevice(
+            id: "icloud-ipad",
+            name: "Ziang的iPad",
+            model: "iPad Pro",
+            osVersion: "26.5",
+            appVersion: "1.0.0",
+            lastSeen: Date(timeIntervalSinceNow: -3_600),
+            capabilities: [.remoteDesktop],
+            isOnline: false,
+            networkType: .wifi,
+            ipAddress: nil
+        )
+
+        manager.replaceDevicesForTesting([sameNamedLiveDevice])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        XCTAssertNil(manager.resolvedOnlineDevice(for: cloudDevice))
+    }
+
+    @MainActor
     func testMarkDeviceAsConnectedUpdatesStableIdentityEvenWhenDisplayNameIsEphemeral() {
         let manager = UnifiedOnlineDeviceManager.shared
         let peerId = "id:550E8400-E29B-41D4-A716-446655440001"

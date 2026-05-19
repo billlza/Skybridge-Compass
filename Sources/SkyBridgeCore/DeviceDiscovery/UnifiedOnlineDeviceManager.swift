@@ -795,7 +795,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 source: DeviceSource.skybridgeCloud,
                 signalStrength: nil,
                 isConnectable: true,
-                isAuthorized: true
+                isAuthorized: true,
+                lastSeen: device.lastSeen,
+                initialConnectionStatus: device.isOnline ? .online : .offline
             )
         }
 
@@ -838,7 +840,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         source: DeviceSource,
         signalStrength: Double? = nil,
         isConnectable: Bool = true,
-        isAuthorized: Bool = false
+        isAuthorized: Bool = false,
+        lastSeen: Date = Date(),
+        initialConnectionStatus: OnlineDeviceStatus = .online
     ) {
  // 检查是否已存在
         if var existingDevice = deviceMap[identifier] {
@@ -861,8 +865,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 uniqueIdentifier: identifier,
                 sources: [source],
                 discoveredAt: existingDevice.discoveredAt,
-                lastSeen: Date(),
-                connectionStatus: existingDevice.connectionStatus,
+                lastSeen: lastSeen,
+                connectionStatus: initialConnectionStatus,
                 lastConnectedAt: existingDevice.lastConnectedAt,
                 isLocalDevice: false,
                 isAuthorized: isAuthorized || existingDevice.isAuthorized,
@@ -893,7 +897,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 ipv4: ipv4,
                 ipv6: ipv6,
                 macAddress: macAddress,
-                serialNumber: serialNumber
+                serialNumber: serialNumber,
+                source: source
             ) {
  // 找到相似设备,合并
                 if var existingDevice = deviceMap[similarIdentifier] {
@@ -915,8 +920,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                         uniqueIdentifier: identifier,
                         sources: [source],
                         discoveredAt: existingDevice.discoveredAt,
-                        lastSeen: Date(),
-                        connectionStatus: existingDevice.connectionStatus,
+                        lastSeen: lastSeen,
+                        connectionStatus: initialConnectionStatus,
                         lastConnectedAt: existingDevice.lastConnectedAt,
                         isLocalDevice: false,
                         isAuthorized: isAuthorized || existingDevice.isAuthorized,
@@ -963,8 +968,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     uniqueIdentifier: identifier,
                     sources: [source],
                     discoveredAt: Date(),
-                    lastSeen: Date(),
-                    connectionStatus: .online,
+                    lastSeen: lastSeen,
+                    connectionStatus: initialConnectionStatus,
                     lastConnectedAt: nil,
                     isLocalDevice: isLocalCandidate(
                         identifier: identifier,
@@ -991,8 +996,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         ipv4: String?,
         ipv6: String?,
         macAddress: String?,
-        serialNumber: String?
+        serialNumber: String?,
+        source: DeviceSource
     ) -> String? {
+        let allowsWeakNameMatch = source != .skybridgeCloud
+
         for (identifier, device) in deviceMap {
  // 禁止将“相似设备”合并到本机条目，避免第三方设备覆盖本机
             if identifier.hasPrefix("local:") || device.isLocalDevice {
@@ -1030,6 +1038,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             }
 
  // 4. 标准化名称匹配
+            guard allowsWeakNameMatch else {
+                continue
+            }
+
             let normalizedName = normalizeDeviceName(name)
             let normalizedExisting = normalizeDeviceName(device.name)
 
@@ -1112,7 +1124,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
  // 更新最后发现时间
-        merged.lastSeen = Date()
+        merged.lastSeen = max(existing.lastSeen, new.lastSeen)
 
         // 更新授权状态
         if new.isAuthorized {
@@ -2100,14 +2112,14 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         var score = 0
-        var hasIdentityMatch = false
+        var hasStrongIdentityMatch = false
 
         if let cloudStable = Self.normalizeStableIdentifier(cloudDevice.id) {
             let deviceStable = Self.normalizedStableIdentifierPayload(from: device.uniqueIdentifier)
                 ?? Self.normalizeStableIdentifier(device.uniqueIdentifier)
             if cloudStable == deviceStable {
                 score += 360
-                hasIdentityMatch = true
+                hasStrongIdentityMatch = true
             }
         }
 
@@ -2115,22 +2127,21 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             let deviceIPs = Set([device.ipv4, device.ipv6].compactMap { $0.map(Self.normalizeIPAddress) })
             if deviceIPs.contains(cloudIP) {
                 score += 280
-                hasIdentityMatch = true
+                hasStrongIdentityMatch = true
             } else if device.uniqueIdentifier.hasPrefix("ip:") {
                 let identifierIP = Self.normalizeIPAddress(String(device.uniqueIdentifier.dropFirst("ip:".count)))
                 if identifierIP == cloudIP {
                     score += 260
-                    hasIdentityMatch = true
+                    hasStrongIdentityMatch = true
                 }
             }
         }
 
+        guard hasStrongIdentityMatch else { return 0 }
+
         if Self.namesRepresentSameDevice(cloudDevice.name, device.name) {
             score += 120
-            hasIdentityMatch = true
         }
-
-        guard hasIdentityMatch else { return 0 }
 
         let cloudModel = Self.normalizedDedupeName(cloudDevice.model)
         let deviceModel = Self.normalizedDedupeName(device.modelName ?? "")
