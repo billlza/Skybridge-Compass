@@ -16,6 +16,7 @@ struct CrossNetworkConnectionView: View {
     @State private var lastQRCodeErrorFingerprint: String?
     @State private var lastQRCodeErrorAt: Date = .distantPast
     @State private var hoveredMethod: ConnectionMethod? = nil
+    @State private var connectingCloudDeviceId: String?
     @StateObject private var qrScannerManager = QRCodeScannerManager.shared
     @ObservedObject private var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "CrossNetworkConnection")
@@ -87,6 +88,21 @@ struct CrossNetworkConnectionView: View {
             }
         } message: {
             Text(qrCodeErrorMessage ?? "")
+        }
+        .alert(
+            "iCloud 设备连接失败",
+            isPresented: Binding(
+                get: { deviceChainViewModel.errorMessage != nil },
+                set: { newValue in
+                    if !newValue { deviceChainViewModel.errorMessage = nil }
+                }
+            )
+        ) {
+            Button(LocalizationManager.shared.localizedString("discovery.qrCode.error.ok")) {
+                deviceChainViewModel.errorMessage = nil
+            }
+        } message: {
+            Text(deviceChainViewModel.errorMessage ?? "")
         }
     }
 
@@ -356,8 +372,11 @@ struct CrossNetworkConnectionView: View {
                     }
 
                     ForEach(deviceChainViewModel.authorizedDevices) { device in
-                        CloudDeviceCard(device: mapToCloudDevice(device)) {
-                            deviceChainViewModel.connectToDevice(device)
+                        CloudDeviceCard(
+                            device: mapToCloudDevice(device),
+                            isConnecting: connectingCloudDeviceId == device.id
+                        ) {
+                            Task { await connectToCloudDevice(device) }
                         }
                     }
                 }
@@ -405,6 +424,14 @@ struct CrossNetworkConnectionView: View {
             lastSeen: effectiveLastSeen,
             capabilities: mappedCapabilities.isEmpty ? [.remoteDesktop] : mappedCapabilities
         )
+    }
+
+    private func connectToCloudDevice(_ device: iCloudDevice) async {
+        guard connectingCloudDeviceId == nil else { return }
+        connectingCloudDeviceId = device.id
+        defer { connectingCloudDeviceId = nil }
+
+        await deviceChainViewModel.connectToDeviceAsync(device)
     }
 
  // MARK: - 3️⃣ 智能连接码模式
@@ -832,6 +859,7 @@ struct FeatureTag: View {
 @MainActor
 struct CloudDeviceCard: View {
     let device: CloudDevice
+    let isConnecting: Bool
     let onConnect: () -> Void
 
     var body: some View {
@@ -870,11 +898,19 @@ struct CloudDeviceCard: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
 
-                Button(LocalizationManager.shared.localizedString("device.action.connect")) {
+                Button {
                     onConnect()
+                } label: {
+                    if isConnecting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text(LocalizationManager.shared.localizedString("device.action.connect"))
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+                .disabled(isConnecting)
             }
         }
         .padding(16)

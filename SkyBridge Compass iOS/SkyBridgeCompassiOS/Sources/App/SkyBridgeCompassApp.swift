@@ -308,7 +308,11 @@ struct SkyBridgeCompassApp: App {
         let discoveryElapsedMs = Int(Date().timeIntervalSince(discoveryStartedAt) * 1000)
         SkyBridgeLogger.shared.info("✅ Discovery 配置完成 (\(discoveryElapsedMs)ms)")
 
-        // 3. 初始化 CloudKit 同步（默认关闭；需要在设置中开启且配置 iCloud 能力）
+        // 3. 启动 iCloud KVS 在线心跳。它不是 CloudKit 数据同步，必须默认开启，
+        // 否则 Mac 端只能看到过期云设备记录，iPad 前台也会显示离线。
+        ICloudDevicePresenceService.shared.start()
+
+        // 4. 初始化 CloudKit 同步（默认关闭；需要在设置中开启且配置 iCloud 能力）
         if SettingsManager.instance.enableCloudKitSync {
             SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：CloudKit 初始化")
             let cloudKitStartedAt = Date()
@@ -319,7 +323,7 @@ struct SkyBridgeCompassApp: App {
             SkyBridgeLogger.shared.info("ℹ️ CloudKit 同步未开启（SettingsManager.enableCloudKitSync = false）")
         }
 
-        // 4. 启动 P2P 监听器（按后台策略）
+        // 5. 启动 P2P 监听器（按后台策略）
         if SettingsManager.instance.allowBackgroundConnection || scenePhase == .active {
             do {
                 SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：P2P 监听器")
@@ -334,24 +338,24 @@ struct SkyBridgeCompassApp: App {
             SkyBridgeLogger.shared.info("ℹ️ 后台连接未开启：P2P 监听器延迟到前台启动")
         }
 
-        // 5. Clipboard Sync wiring（最小闭环）：本地剪贴板变化 -> 广播给已握手连接
+        // 6. Clipboard Sync wiring（最小闭环）：本地剪贴板变化 -> 广播给已握手连接
         ClipboardManager.shared.onLocalClipboardChanged = { data, mimeType in
             Task { @MainActor in
                 await P2PConnectionManager.instance.broadcastClipboard(data: data, mimeType: mimeType)
             }
         }
 
-        // 6. 应用剪贴板设置（启用/图片/URL/大小/历史/轮询/限速）
+        // 7. 应用剪贴板设置（启用/图片/URL/大小/历史/轮询/限速）
         applyClipboardSettings()
 
-        // 7. 启动文件传输监听（iOS 作为接收端：macOS -> iOS）
+        // 8. 启动文件传输监听（iOS 作为接收端：macOS -> iOS）
         SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：文件传输监听")
         let fileTransferStartedAt = Date()
         await FileTransferRuntime.shared.startIfNeeded()
         let fileTransferElapsedMs = Int(Date().timeIntervalSince(fileTransferStartedAt) * 1000)
         SkyBridgeLogger.shared.info("✅ 文件传输监听步骤完成 (\(fileTransferElapsedMs)ms)")
 
-        // 8. 启动灵动岛 Live Activity（显示天气或连接状态）
+        // 9. 启动灵动岛 Live Activity（显示天气或连接状态）
         SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：Live Activity")
         let liveActivityStartedAt = Date()
         await initializeLiveActivity()
@@ -447,6 +451,7 @@ struct SkyBridgeCompassApp: App {
             if !connectionManager.isListening {
                 try? await connectionManager.startListening()
             }
+            ICloudDevicePresenceService.shared.refreshNow()
             applyClipboardSettings()
 
         case .background:

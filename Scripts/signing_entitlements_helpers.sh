@@ -409,6 +409,105 @@ skybridge_write_signed_entitlements() {
   [[ -s "${output_path}" ]]
 }
 
+skybridge_expand_build_setting_entitlements() {
+  local entitlements_path="$1"
+  local profile_path="${2:-}"
+
+  python3 - "${entitlements_path}" "${profile_path}" <<'PY'
+import os
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+
+def load_profile(path: Path):
+    payload = path.read_bytes()
+    try:
+        return plistlib.loads(payload)
+    except Exception:
+        pass
+    for command in (
+        ["security", "cms", "-D", "-i", str(path)],
+        ["openssl", "smime", "-inform", "DER", "-verify", "-noverify", "-in", str(path)],
+    ):
+        completed = subprocess.run(command, check=False, capture_output=True)
+        if completed.returncode == 0 and completed.stdout:
+            return plistlib.loads(completed.stdout)
+    raise SystemExit(1)
+
+
+def dotted(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    return value if value.endswith(".") else f"{value}."
+
+
+def replace_tokens(value, replacements):
+    if isinstance(value, str):
+        expanded = value
+        for token, replacement in replacements.items():
+            if replacement:
+                expanded = expanded.replace(token, replacement)
+        return expanded
+    if isinstance(value, list):
+        return [replace_tokens(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {key: replace_tokens(item, replacements) for key, item in value.items()}
+    return value
+
+
+entitlements_path = Path(sys.argv[1])
+profile_arg = sys.argv[2].strip()
+if not entitlements_path.exists():
+    raise SystemExit(1)
+
+with entitlements_path.open("rb") as fh:
+    entitlements = plistlib.load(fh)
+
+profile = {}
+if profile_arg:
+    profile_path = Path(profile_arg)
+    if profile_path.exists():
+        profile = load_profile(profile_path)
+
+team_identifier = ""
+profile_team = profile.get("TeamIdentifier") or []
+if profile_team:
+    team_identifier = str(profile_team[0]).strip()
+team_identifier = (
+    team_identifier
+    or os.environ.get("DEVELOPMENT_TEAM", "").strip()
+    or os.environ.get("SKYBRIDGE_TEAM_IDENTIFIER", "").strip()
+)
+
+application_prefix = ""
+profile_application_prefix = profile.get("ApplicationIdentifierPrefix") or []
+if profile_application_prefix:
+    application_prefix = str(profile_application_prefix[0]).strip()
+application_prefix = application_prefix or team_identifier
+
+replacements = {
+    "$(TeamIdentifierPrefix)": dotted(team_identifier),
+    "${TeamIdentifierPrefix}": dotted(team_identifier),
+    "$(AppIdentifierPrefix)": dotted(application_prefix),
+    "${AppIdentifierPrefix}": dotted(application_prefix),
+}
+
+expanded = replace_tokens(entitlements, replacements)
+serialized = plistlib.dumps(expanded, fmt=plistlib.FMT_XML, sort_keys=False)
+entitlements_path.write_bytes(serialized)
+
+if profile and b"$(TeamIdentifierPrefix)" in serialized:
+    print("未能展开 TeamIdentifierPrefix entitlement 占位符", file=sys.stderr)
+    raise SystemExit(1)
+if profile and b"$(AppIdentifierPrefix)" in serialized:
+    print("未能展开 AppIdentifierPrefix entitlement 占位符", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 skybridge_validate_provisionprofile_app_identity() {
   local profile_path="$1"
   local bundle_identifier="$2"
@@ -487,6 +586,7 @@ skybridge_prepare_signing_entitlements() {
   }
 
   cp "${source_entitlements}" "${output_entitlements}"
+  skybridge_expand_build_setting_entitlements "${output_entitlements}" "${profile_path}" || return 1
   SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=0
   SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=0
   SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN_MODE="disabled"

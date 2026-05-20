@@ -56,12 +56,52 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "The cross-network window should start local discovery so live iPad presence can refresh stale iCloud rows."
         )
         XCTAssertTrue(
+            crossNetworkSource.contains("connectingCloudDeviceId"),
+            "The cross-network iCloud button must show an in-flight state instead of looking like a no-op."
+        )
+        XCTAssertTrue(
+            crossNetworkSource.contains("deviceChainViewModel.errorMessage"),
+            "The cross-network iCloud button must surface connection failures in the current UI."
+        )
+        XCTAssertTrue(
             unifiedSource.contains("iCloudDiscovery.$discoveredDevices"),
             "UnifiedOnlineDeviceManager must subscribe to iCloud discovery updates instead of creating a half-wired manager."
         )
         XCTAssertTrue(
             unifiedSource.contains("self?.handleiCloudDevicesUpdate(devices)"),
             "iCloud heartbeat rows must flow into the unified online device list."
+        )
+    }
+
+    func testSharedICloudPresenceIsWiredForMacPackageAndIOSRuntime() throws {
+        let macPackaging = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements")
+        let macNativePackaging = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.native.packaging.entitlements")
+        let iosDebug = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements")
+        let iosRelease = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements")
+        let iosAppSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/SkyBridgeCompassApp.swift")
+        let iosPresenceSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CloudKitSyncManager.swift")
+        let macICloudSource = try repositorySource("Sources/SkyBridgeCore/iCloud/iCloudDeviceDiscoveryManager.swift")
+        let signingHelperSource = try repositorySource("Scripts/signing_entitlements_helpers.sh")
+
+        for entitlements in [macPackaging, macNativePackaging, iosDebug, iosRelease] {
+            XCTAssertTrue(entitlements.contains("iCloud.com.skybridge.compass"))
+            XCTAssertTrue(entitlements.contains("com.apple.developer.ubiquity-kvstore-identifier"))
+            XCTAssertTrue(entitlements.contains("$(TeamIdentifierPrefix)com.skybridge.compass"))
+        }
+
+        XCTAssertTrue(signingHelperSource.contains("skybridge_expand_build_setting_entitlements"))
+        XCTAssertTrue(signingHelperSource.contains("ApplicationIdentifierPrefix"))
+        XCTAssertTrue(signingHelperSource.contains("$(TeamIdentifierPrefix)"))
+
+        XCTAssertTrue(iosAppSource.contains("ICloudDevicePresenceService.shared.start()"))
+        XCTAssertTrue(iosAppSource.contains("ICloudDevicePresenceService.shared.refreshNow()"))
+        XCTAssertTrue(iosPresenceSource.contains("private let deviceKeyPrefix = \"skybridge.device.\""))
+        XCTAssertTrue(iosPresenceSource.contains("NSUbiquitousKeyValueStore.default"))
+        XCTAssertTrue(iosPresenceSource.contains("\"remote_desktop\", \"file_transfer\", \"clipboard\""))
+        XCTAssertTrue(macICloudSource.contains("继续使用 iCloud KV Store 做设备在线心跳"))
+        XCTAssertFalse(
+            macICloudSource.contains("iCloud 容器不可用：请检查 iCloud Drive"),
+            "iCloud KVS device presence must not be blocked by the optional iCloud Documents container."
         )
     }
 

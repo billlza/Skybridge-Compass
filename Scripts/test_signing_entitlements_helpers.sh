@@ -60,6 +60,10 @@ cat > "${PROFILE_PLIST}" <<'EOF'
   <array>
     <string>YKUPL7Z869</string>
   </array>
+  <key>ApplicationIdentifierPrefix</key>
+  <array>
+    <string>YKUPL7Z869</string>
+  </array>
   <key>Entitlements</key>
   <dict>
     <key>com.apple.application-identifier</key>
@@ -121,6 +125,32 @@ cp "${SOURCE_ENTITLEMENTS}" "${OUTPUT_ENTITLEMENTS}"
 if ! skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
   fail "App Groups should be accepted when the provisioning profile covers the requested group"
 fi
+
+cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.developer.ubiquity-kvstore-identifier</key>
+  <string>$(TeamIdentifierPrefix)com.skybridge.compass</string>
+  <key>com.apple.security.network.client</key>
+  <true/>
+</dict>
+</plist>
+EOF
+
+skybridge_prepare_signing_entitlements \
+  "${SOURCE_ENTITLEMENTS}" \
+  "${OUTPUT_ENTITLEMENTS}" \
+  "${INFO_PLIST}" \
+  "${PROFILE_PLIST}"
+
+if grep -q '$(TeamIdentifierPrefix)' "${OUTPUT_ENTITLEMENTS}"; then
+  fail "prepare_signing_entitlements should expand TeamIdentifierPrefix before codesign receives the entitlements"
+fi
+
+grep -q '<string>YKUPL7Z869.com.skybridge.compass</string>' "${OUTPUT_ENTITLEMENTS}" \
+  || fail "expanded KVS entitlement should use the provisioning profile TeamIdentifier prefix"
 
 cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>

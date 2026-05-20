@@ -85,6 +85,21 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         )
     }
 
+    func testBonjourBrowserDoesNotPinDiscoveryToOtherInterface() throws {
+        let source = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift")
+        let browser = try sourceSlice(
+            from: "private func startSingleBrowser(serviceType:",
+            to: "browser.stateUpdateHandler",
+            in: source
+        )
+
+        XCTAssertTrue(browser.contains("parameters.includePeerToPeer = true"))
+        XCTAssertFalse(
+            browser.contains("requiredInterfaceType"),
+            "Bonjour browsing must not be pinned to .other; that hides normal Wi-Fi/Ethernet/AWDL iPad advertisements."
+        )
+    }
+
     @available(macOS 14.0, iOS 17.0, *)
     func testP2PControlPortParsingIsServiceTypeAware() {
         let txt = [

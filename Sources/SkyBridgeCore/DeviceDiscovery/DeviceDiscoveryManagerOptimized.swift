@@ -711,20 +711,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
  /// 启动单个浏览器（在后台队列）
- /// 根据 enableIPv6Support 设置配置网络参数
+ /// Bonjour discovery must let Network.framework pick Wi-Fi/Ethernet/AWDL interfaces.
     private func startSingleBrowser(serviceType: String) async {
         let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: serviceDomain)
         let parameters = NWParameters()
         parameters.includePeerToPeer = true
 
- // 根据 IPv6 设置配置协议栈
         if enableIPv6Support {
- // 允许 IPv4 和 IPv6 双栈
-            parameters.requiredInterfaceType = .other
-            logger.debug("🌐 浏览器启用 IPv6 双栈模式: \(serviceType)")
-        } else {
- // 仅 IPv4
-            parameters.requiredInterfaceType = .other
+            logger.debug("🌐 浏览器使用系统接口选择（IPv4/IPv6/AWDL）: \(serviceType)")
         }
 
         let browser = NWBrowser(for: descriptor, using: parameters)

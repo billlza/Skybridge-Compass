@@ -1,5 +1,6 @@
 import Foundation
 import CloudKit
+import Darwin
 
 /// CloudKit 同步管理器 - 同步设备列表和信任关系
 @MainActor
@@ -207,5 +208,153 @@ public class CloudKitSyncManager: ObservableObject {
                 SkyBridgeLogger.shared.warning("⚠️ CloudKit 保存可信设备失败: \(recordID.recordName) error=\(error.localizedDescription)")
             }
         }
+    }
+}
+
+/// Lightweight iCloud KVS presence heartbeat shared with the macOS app.
+///
+/// This is intentionally separate from CloudKit trusted-device sync. Presence must stay on by
+/// default so Mac can refresh stale cloud rows as soon as the iPad app is foregrounded.
+@MainActor
+public final class ICloudDevicePresenceService: ObservableObject {
+    public static let shared = ICloudDevicePresenceService()
+
+    private let kvStore = NSUbiquitousKeyValueStore.default
+    private let deviceKeyPrefix = "skybridge.device."
+    private let refreshInterval: TimeInterval = 30
+    private var heartbeatTimer: Timer?
+    private var didLogUnavailable = false
+
+    private init() {}
+
+    public func start() {
+        guard heartbeatTimer == nil else {
+            refreshNow()
+            return
+        }
+
+        refreshNow()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshNow()
+            }
+        }
+        SkyBridgeLogger.shared.info("💓 iCloud KVS 在线心跳已启动")
+    }
+
+    public func stop() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+    }
+
+    public func refreshNow() {
+        guard FileManager.default.ubiquityIdentityToken != nil else {
+            if !didLogUnavailable {
+                didLogUnavailable = true
+                SkyBridgeLogger.shared.warning("⚠️ iCloud KVS 在线心跳未发布：当前设备未登录 iCloud")
+            }
+            return
+        }
+
+        let identity = AppleMobileDeviceIdentity.currentSnapshot()
+        let endpoint = Self.localNetworkEndpoint()
+        let device = PresenceDevice(
+            id: identity.stableDeviceId,
+            name: identity.deviceName,
+            model: identity.modelName,
+            osVersion: identity.osVersion,
+            appVersion: Self.appVersion(),
+            lastSeen: Date(),
+            capabilities: ["remote_desktop", "file_transfer", "clipboard"],
+            isOnline: true,
+            networkType: endpoint.networkType,
+            ipAddress: endpoint.ipAddress
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        do {
+            let data = try encoder.encode(device)
+            kvStore.set(data, forKey: deviceKeyPrefix + device.id)
+            kvStore.synchronize()
+            didLogUnavailable = false
+            SkyBridgeLogger.shared.debug("💓 iCloud KVS 在线心跳已发布: \(device.name)")
+        } catch {
+            SkyBridgeLogger.shared.warning("⚠️ iCloud KVS 在线心跳编码失败: \(error.localizedDescription)")
+        }
+    }
+
+    private struct PresenceDevice: Codable {
+        let id: String
+        let name: String
+        let model: String
+        let osVersion: String
+        let appVersion: String
+        let lastSeen: Date
+        let capabilities: [String]
+        let isOnline: Bool
+        let networkType: String
+        let ipAddress: String?
+    }
+
+    private static func appVersion() -> String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        guard let build, !build.isEmpty else { return version }
+        return "\(version) (\(build))"
+    }
+
+    private static func localNetworkEndpoint() -> (ipAddress: String?, networkType: String) {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let first = interfaces else {
+            return (nil, "unknown")
+        }
+        defer { freeifaddrs(interfaces) }
+
+        var ipv6Fallback: (ipAddress: String, networkType: String)?
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+
+            guard let address = current.pointee.ifa_addr else { continue }
+            let flags = Int32(current.pointee.ifa_flags)
+            guard (flags & IFF_UP) == IFF_UP, (flags & IFF_LOOPBACK) == 0 else { continue }
+
+            let family = Int32(address.pointee.sa_family)
+            guard family == AF_INET || family == AF_INET6 else { continue }
+
+            let interfaceName = String(cString: current.pointee.ifa_name)
+            guard let ip = numericHost(from: address) else { continue }
+            let endpoint = (ipAddress: ip, networkType: networkType(for: interfaceName))
+
+            if interfaceName == "en0", family == AF_INET { return endpoint }
+            if family == AF_INET, endpoint.networkType == "wifi" { return endpoint }
+            if family == AF_INET { return endpoint }
+            if ipv6Fallback == nil { ipv6Fallback = endpoint }
+        }
+
+        return ipv6Fallback.map { ($0.ipAddress, $0.networkType) } ?? (nil, "unknown")
+    }
+
+    private static func numericHost(from address: UnsafePointer<sockaddr>) -> String? {
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = getnameinfo(
+            address,
+            socklen_t(address.pointee.sa_len),
+            &host,
+            socklen_t(host.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+        )
+        guard result == 0 else { return nil }
+        return String(cString: host)
+    }
+
+    private static func networkType(for interfaceName: String) -> String {
+        if interfaceName.hasPrefix("pdp_ip") { return "cellular" }
+        if interfaceName == "en0" || interfaceName.hasPrefix("awdl") { return "wifi" }
+        return "unknown"
     }
 }

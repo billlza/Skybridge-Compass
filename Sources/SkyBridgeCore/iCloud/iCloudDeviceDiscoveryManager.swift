@@ -151,12 +151,10 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
             return
         }
 
-        // 1.2 可选：检查 iCloud Documents 容器是否可用（通常对应 iCloud Drive/容器初始化）。
-        // 这一步能更早发现“已登录但容器不可用”的状态，避免后续反复同步/刷屏。
+        // 1.2 KV Store 不依赖 iCloud Drive 文档容器。容器缺失只降级提示，
+        // 不能阻止在线心跳，否则已开启 KVS 的正式包会被误判为离线。
         if FileManager.default.url(forUbiquityContainerIdentifier: nil) == nil {
-            logger.warning("⚠️ iCloud 容器不可用（可能未启用 iCloud Drive / 未配置 iCloud Documents 容器）")
-            discoveryStatus = .error("iCloud 容器不可用：请检查 iCloud Drive 是否开启，以及 App 的 iCloud 容器是否配置正确")
-            return
+            logger.warning("⚠️ iCloud Documents 容器不可用，继续使用 iCloud KV Store 做设备在线心跳")
         }
 
         discoveryStatus = .discovering
