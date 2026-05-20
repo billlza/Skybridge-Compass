@@ -1685,7 +1685,7 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             return
         }
         let decodeLoopBody = managerSource[decodeLoopStart.lowerBound..<finishDecodeStart.lowerBound]
-        XCTAssertTrue(decodeLoopBody.contains("Task.detached(priority: .userInteractive)"))
+        XCTAssertTrue(decodeLoopBody.contains("Task.detached(priority: .high)"))
         XCTAssertTrue(decodeLoopBody.contains("try await decoder.decode(screenData: screenData)"))
         XCTAssertFalse(decodeLoopBody.contains("Task { @MainActor"))
         XCTAssertTrue(managerSource.contains("metal-feed-awaiting-renderer-consumer"))

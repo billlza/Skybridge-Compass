@@ -11,12 +11,13 @@ struct ClassicBackgroundV2: View {
     @EnvironmentObject var settingsManager: SettingsManager
     @ObservedObject var bgControl = BackgroundControlManager.shared
 
-    @State private var time: TimeInterval = 0
+    private static let animationEpoch = Date()
 
     var body: some View {
         Group {
             if !bgControl.isPaused {
                 TimelineView(.periodic(from: .now, by: 1.0 / bgControl.getEffectiveFPS(base: settingsManager.performanceMode.targetFPS))) { timeline in
+                    let time = timeline.date.timeIntervalSince(Self.animationEpoch)
                     ZStack {
  // 1. 深色底色
                         Color(red: 0.05, green: 0.08, blue: 0.15)
@@ -39,10 +40,6 @@ struct ClassicBackgroundV2: View {
                             .stroke(Color.white.opacity(0.03), lineWidth: 1)
                             .ignoresSafeArea()
                     }
-                    .onChange(of: timeline.date) { oldDate, newDate in
-                        let delta = newDate.timeIntervalSince(oldDate)
-                        time += delta
-                    }
                 }
             } else {
  // 暂停时显示静态背景
@@ -50,7 +47,7 @@ struct ClassicBackgroundV2: View {
                     Color(red: 0.05, green: 0.08, blue: 0.15)
                         .ignoresSafeArea()
 
-                    FluidGradientLayer(time: time)
+                    FluidGradientLayer(time: 0)
                         .blendMode(.screen)
                         .opacity(0.8)
 

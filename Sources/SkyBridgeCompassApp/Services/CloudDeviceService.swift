@@ -23,13 +23,20 @@ public final class DefaultCloudDeviceService: CloudDeviceService {
     public init() {}
 
     public func fetchDevices() async throws -> [iCloudDevice] {
- // 调用 Core 中的刷新逻辑，确保列表是最新的
-        await manager.refreshDevices()
+        if manager.isStarted {
+            await manager.refreshDevices()
+        } else {
+            await manager.startDiscovery()
+        }
         return manager.discoveredDevices
     }
 
     public func refreshHeartbeat() async throws {
-        await manager.updateHeartbeat()
+        if manager.isStarted {
+            await manager.updateHeartbeat()
+        } else {
+            await manager.startDiscovery()
+        }
     }
     
     public var currentDeviceId: String? {

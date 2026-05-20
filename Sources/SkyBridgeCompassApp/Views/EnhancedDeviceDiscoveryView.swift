@@ -2098,34 +2098,14 @@ public struct EnhancedDeviceDiscoveryView: View {
                     connectingOnlineDeviceIds.remove(device.id)
                 }
             }
-            var discoveredCandidates = unifiedDeviceManager.resolvedDiscoveredCandidates(for: device, limit: 6)
-            if let fallback = fallbackDiscoveredDevice(for: device),
-               !discoveredCandidates.contains(where: { isSameConnectTarget($0, fallback) }) {
-                discoveredCandidates.append(fallback)
-            }
-            let preferUSBRoute = shouldPreferUSBRoute(for: device, candidates: discoveredCandidates)
-            let routePreference: P2PDiscoveryService.ConnectionRoutePreference = {
-                if !SettingsManager.shared.enableP2PDirectConnection {
-                    return .managedRelayOnly
-                }
-                return preferUSBRoute ? .preferUSB : .automatic
-            }()
-
             do {
-                var lastError: Error?
-                for candidate in discoveredCandidates {
-                    do {
-                        try await p2pDiscoveryService.connectToDevice(candidate, routePreference: routePreference)
-                        unifiedDeviceManager.markDeviceAsConnected(device.id)
-                        connectionCodeErrorMessage = nil
-                        logger.info("✅ 在线设备连接成功: \(device.name)")
-                        return
-                    } catch {
-                        lastError = error
-                        logger.warning("⚠️ 在线设备候选连接失败，将尝试下一个候选: \(candidate.name, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
-                    }
-                }
-                throw lastError ?? P2PDiscoveryError.noConnectableEndpoint
+                try await OnlineDeviceConnectionCoordinator.connect(
+                    to: device,
+                    unifiedDeviceManager: unifiedDeviceManager,
+                    p2pDiscoveryService: p2pDiscoveryService
+                )
+                connectionCodeErrorMessage = nil
+                logger.info("✅ 在线设备连接成功: \(device.name)")
             } catch {
                 logger.error("❌ 在线设备连接失败: \(device.name, privacy: .public), \(error.localizedDescription, privacy: .public)")
                 connectionCodeErrorMessage = userFacingConnectionErrorMessage(error)
@@ -2135,112 +2115,12 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     private func connectToCloudDevice(_ device: iCloudDevice) {
         if let liveDevice = unifiedDeviceManager.resolvedOnlineDevice(for: device),
-           liveDevice.connectionStatus != .offline {
+           liveDevice.connectionStatus != .offline || liveDevice.isConnectable {
             connectToOnlineDevice(liveDevice)
             return
         }
 
-        Task {
-            let cloudDevice = mapToCloudDevice(device)
-            do {
-                _ = try await crossNetworkManager.connectToCloudDevice(cloudDevice)
-                connectionCodeErrorMessage = nil
-            } catch {
-                scannerErrorMessage = "iCloud 设备连接失败：\(userFacingConnectionErrorMessage(error))"
-                logger.error("❌ iCloud 设备连接失败: \(device.name, privacy: .public), \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
-    private func isSameConnectTarget(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
-        if let leftID = lhs.uniqueIdentifier, let rightID = rhs.uniqueIdentifier, !leftID.isEmpty, leftID == rightID {
-            return true
-        }
-        let leftIPv4 = lhs.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rightIPv4 = rhs.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let leftIPv4, let rightIPv4, !leftIPv4.isEmpty, leftIPv4 == rightIPv4 {
-            return true
-        }
-        let leftIPv6 = lhs.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rightIPv6 = rhs.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let leftIPv6, let rightIPv6, !leftIPv6.isEmpty, leftIPv6 == rightIPv6 {
-            return true
-        }
-        return lhs.name == rhs.name && Set(lhs.services) == Set(rhs.services)
-    }
-
-    private func shouldPreferUSBRoute(for device: OnlineDevice, candidates: [DiscoveredDevice]) -> Bool {
-        guard device.connectionTypes.contains(.usb) else { return false }
-        return candidates.contains { candidate in
-            candidate.connectionTypes.contains(.usb)
-                && ((candidate.portMap["_skybridge._tcp"] ?? 0) > 0
-                    || (candidate.portMap["_skybridge._udp"] ?? 0) > 0
-                    || candidate.uniqueIdentifier?.hasPrefix("bonjour:") == true
-                    || candidate.uniqueIdentifier?.hasPrefix("recent:bonjour:") == true)
-        }
-    }
-
-    private func fallbackDiscoveredDevice(for device: OnlineDevice) -> DiscoveredDevice? {
-        var normalizedServices = device.services
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { $0.hasPrefix("_") && ($0.hasSuffix("._tcp") || $0.hasSuffix("._udp")) }
-
-        let hasSkyBridgeSource = device.sources.contains(.skybridgeBonjour) || device.sources.contains(.skybridgeP2P)
-        let hasBonjourIdentifier = device.uniqueIdentifier.hasPrefix("bonjour:")
-            || device.uniqueIdentifier.hasPrefix("recent:bonjour:")
-        let hasSkyBridgeControlPort = (device.portMap["_skybridge._tcp"] ?? 0) > 0
-            || (device.portMap["_skybridge._udp"] ?? 0) > 0
-        let hasSkyBridgeControlService = normalizedServices.contains("_skybridge._tcp")
-            || normalizedServices.contains("_skybridge._udp")
-
-        if normalizedServices.isEmpty, hasSkyBridgeSource, hasBonjourIdentifier {
-            normalizedServices = ["_skybridge._tcp"]
-        }
-        guard hasSkyBridgeControlService
-            || hasSkyBridgeControlPort
-            || (hasSkyBridgeSource && hasBonjourIdentifier)
-        else {
-            logger.warning(
-                "⚠️ 跳过在线设备 fallback 候选：缺少真实 SkyBridge 控制端点 device=\(device.name, privacy: .public) id=\(device.uniqueIdentifier, privacy: .public)"
-            )
-            return nil
-        }
-
-        let mappedDeviceId: String? = {
-            guard device.uniqueIdentifier.hasPrefix("id:") else { return nil }
-            return String(device.uniqueIdentifier.dropFirst("id:".count))
-        }()
-        let inferredDeviceId: String? = {
-            let trimmed = device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            guard !trimmed.contains(":") else { return nil }
-            guard trimmed.count >= 8 else { return nil }
-            return trimmed
-        }()
-        let mappedPubKeyFP: String? = {
-            guard device.uniqueIdentifier.hasPrefix("fp:") else { return nil }
-            return String(device.uniqueIdentifier.dropFirst("fp:".count))
-        }()
-        let source: DeviceSource = {
-            if device.sources.contains(.skybridgeP2P) { return .skybridgeP2P }
-            if device.sources.contains(.skybridgeBonjour) { return .skybridgeBonjour }
-            return .unknown
-        }()
-        return DiscoveredDevice(
-            id: device.id,
-            name: device.name,
-            ipv4: device.ipv4,
-            ipv6: device.ipv6,
-            services: normalizedServices,
-            portMap: device.portMap,
-            connectionTypes: device.connectionTypes,
-            uniqueIdentifier: device.uniqueIdentifier,
-            signalStrength: device.signalStrength,
-            source: source,
-            isLocalDevice: device.isLocalDevice,
-            deviceId: mappedDeviceId ?? inferredDeviceId,
-            pubKeyFP: mappedPubKeyFP
-        )
+        scannerErrorMessage = "没有发现这台设备的本地 P2P/Bonjour 端点，iCloud 自动连接暂不可用。请确认 iPad 与 Mac 在同一局域网、SkyBridge 在前台，并刷新设备。"
     }
 
     private func isCrossNetworkConnectLink(_ raw: String) -> Bool {

@@ -13,7 +13,7 @@ struct DeepSpaceBackground: View {
     @EnvironmentObject var settingsManager: SettingsManager
     @ObservedObject var bgControl = BackgroundControlManager.shared
 
-    @State private var time: TimeInterval = 0
+    private static let animationEpoch = Date()
 
  /// 风速影响漂移速度
     private var windSpeedFactor: Double {
@@ -38,6 +38,7 @@ struct DeepSpaceBackground: View {
         Group {
             if !bgControl.isPaused {
                 TimelineView(.periodic(from: .now, by: 1.0 / bgControl.getEffectiveFPS(base: settingsManager.performanceMode.targetFPS))) { timeline in
+                    let time = timeline.date.timeIntervalSince(Self.animationEpoch)
                     ZStack {
  // 1. 基础深空背景 (增强渐变)
                         LinearGradient(
@@ -75,10 +76,6 @@ struct DeepSpaceBackground: View {
                                 .blendMode(.overlay)
                                 .ignoresSafeArea()
                         }
-                    }
-                    .onChange(of: timeline.date) { oldDate, newDate in
-                        let delta = newDate.timeIntervalSince(oldDate)
-                        time += delta
                     }
                 }
             } else {

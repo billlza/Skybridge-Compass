@@ -109,7 +109,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var needsLANReceiveBufferDrain = false
     private var activeTransportMode: ActiveTransportMode = .none
     private let decoder = VideoDecoder()
-    private let queue = DispatchQueue(label: "com.skybridge.remotedesktop", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "com.skybridge.remotedesktop", qos: .userInitiated)
     private let fallbackImageContext = CIContext(options: [.cacheIntermediates: false])
     private let remoteAudioPlayback = RemoteAudioPlaybackController()
     private var remoteAudioPlaybackGeneration: UInt64 = 0

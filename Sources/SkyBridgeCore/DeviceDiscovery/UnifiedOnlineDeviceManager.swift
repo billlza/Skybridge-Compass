@@ -65,6 +65,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
  /// 设备清理定时器(移除长时间离线的设备)
     private var cleanupTimer: Timer?
+    private var discoveryPresenceRefreshTimer: Timer?
 
  // MARK: - 初始化
 
@@ -99,12 +100,13 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
  // 启动iCloud发现
         if iCloudDiscovery == nil {
-            iCloudDiscovery = iCloudDeviceDiscoveryManager()
+            iCloudDiscovery = iCloudDeviceDiscoveryManager.shared
         }
         ensureICloudDiscoveryObserver()
         Task {
             await iCloudDiscovery?.startDiscovery()
         }
+        startDiscoveryPresenceRefreshTimer()
     }
 
  /// 异步版本的启动接口，供需要 `await` 的调用场景（例如前台分层恢复）
@@ -121,6 +123,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         networkDiscovery.stopScanning()
         usbDiscovery.stopMonitoring()
         iCloudDiscovery?.stopDiscovery()
+        stopDiscoveryPresenceRefreshTimer()
 
         isScanning = false
     }
@@ -142,9 +145,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         // Lightweight nudges (no stop):
         usbDiscovery.scanUSBDevices()
         if iCloudDiscovery == nil {
-            iCloudDiscovery = iCloudDeviceDiscoveryManager()
+            iCloudDiscovery = iCloudDeviceDiscoveryManager.shared
         }
         ensureICloudDiscoveryObserver()
+        refreshActiveDiscoveryPresence()
         Task { await iCloudDiscovery?.refreshDevices() }
     }
 
@@ -636,6 +640,37 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             .sink { [weak self] devices in
                 self?.handleiCloudDevicesUpdate(devices)
             }
+    }
+
+    private func startDiscoveryPresenceRefreshTimer() {
+        discoveryPresenceRefreshTimer?.invalidate()
+        discoveryPresenceRefreshTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshActiveDiscoveryPresence()
+            }
+        }
+        discoveryPresenceRefreshTimer?.tolerance = 5.0
+    }
+
+    private func stopDiscoveryPresenceRefreshTimer() {
+        discoveryPresenceRefreshTimer?.invalidate()
+        discoveryPresenceRefreshTimer = nil
+    }
+
+    private func refreshActiveDiscoveryPresence() {
+        guard isScanning else { return }
+
+        let liveBonjourDevices = networkDiscovery.discoveredDevices
+        if !liveBonjourDevices.isEmpty {
+            handleNetworkDevicesUpdate(liveBonjourDevices)
+        }
+
+        if iCloudDiscovery == nil {
+            iCloudDiscovery = iCloudDeviceDiscoveryManager.shared
+            ensureICloudDiscoveryObserver()
+        }
+
+        Task { await iCloudDiscovery?.refreshDevices() }
     }
 
  /// 将全局设置同步到网络设备发现器，以保证 UI 开关生效
@@ -1719,6 +1754,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 uniqueDevices[i].connectionStatus = .online
             } else if timeSinceLastSeen < 60 {
  // 60秒内有响应,认为在线
+                uniqueDevices[i].connectionStatus = .online
+            } else if device.sources.contains(.skybridgeCloud), timeSinceLastSeen < 120 {
+ // iCloud KVS heartbeat is eventually consistent; keep its online TTL aligned with the KVS discovery timeout.
                 uniqueDevices[i].connectionStatus = .online
             } else if device.lastConnectedAt != nil || device.isAuthorized {
  // 有连接历史或已授权,但当前不在线

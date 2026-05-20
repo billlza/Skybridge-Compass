@@ -2275,7 +2275,7 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
         private static let maxBufferedFrames = 3
         private let rendererQueue = DispatchQueue(
             label: "com.skybridge.remote.samplebuffer.renderer",
-            qos: .userInteractive
+            qos: .userInitiated
         )
         private let onDecodeFailure: @Sendable (String?) -> Void
         private let onRequiresFlush: @Sendable () -> Void

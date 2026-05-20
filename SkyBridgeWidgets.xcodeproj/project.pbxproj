@@ -99,6 +99,7 @@
 		B70CD70DCDCA73539F3EA1B1 /* AppleSiliconInfoCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE7D0EE9AAE38836D4F2611 /* AppleSiliconInfoCardView.swift */; };
 		B9967812E8862B2D5E969337 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59C11557E4D37206C350EB7 /* AuthenticationView.swift */; };
 		BA379AB843B4BAD867386914 /* SiriIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */; };
+		BC2A52E86F0D41DB8B4B9A16 /* OnlineDeviceConnectionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A5F1CF7485D4C08A1F9355D /* OnlineDeviceConnectionCoordinator.swift */; };
 		BC8915FB56BCA3D001CEC9AD /* LiquidGlassUserArea.swift in Sources */ = {isa = PBXBuildFile; fileRef = C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */; };
 		BCCE38FACB757941021C0F32 /* CloudDeviceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E05B03AA449A0E8D2C4820E /* CloudDeviceService.swift */; };
 		BD94EE9880420BECE2D44FBF /* CompactDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAFBEC275559A384FBE1B542 /* CompactDeviceRow.swift */; };
@@ -202,6 +203,7 @@
 		72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationBellView.swift; sourceTree = "<group>"; };
 		7421CFFDEE7371624E428DBF /* AuthenticationServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AuthenticationServices.framework; sourceTree = "<group>"; };
 		74DF29B58CA8ADE6A6AD3F74 /* DashboardContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardContentView.swift; sourceTree = "<group>"; };
+		6A5F1CF7485D4C08A1F9355D /* OnlineDeviceConnectionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineDeviceConnectionCoordinator.swift; sourceTree = "<group>"; };
 		80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldMirrorView.swift; sourceTree = "<group>"; };
 		825CF90D2A0365C9B9F0A7F5 /* CustomBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomBackgroundView.swift; sourceTree = "<group>"; };
 		83227A90FFD3F72879561C7C /* PerformanceErrorHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceErrorHandler.swift; sourceTree = "<group>"; };
@@ -440,6 +442,7 @@
 				9E05B03AA449A0E8D2C4820E /* CloudDeviceService.swift */,
 				D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */,
 				D22DC77505406627AA516040 /* DashboardDataService.swift */,
+				6A5F1CF7485D4C08A1F9355D /* OnlineDeviceConnectionCoordinator.swift */,
 				F0BFA79F007535E0ADD84BC2 /* Weather */,
 			);
 			path = Services;
@@ -761,6 +764,7 @@
 				E1E33C33EF35461B1031B9F9 /* NavigationNotifications.swift in Sources */,
 				7905FFC1F533B585ED3BA250 /* NearFieldMirrorView.swift in Sources */,
 				E93F2D2FEF6DB167B7A65C17 /* NotificationBellView.swift in Sources */,
+				BC2A52E86F0D41DB8B4B9A16 /* OnlineDeviceConnectionCoordinator.swift in Sources */,
 				56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */,
 				732868A8F7E1C04A5E32E73C /* OrderedCollectionsFallback.swift in Sources */,
 				8B7E29A1DF3C80E7F309FE53 /* PerformanceErrorHandler.swift in Sources */,

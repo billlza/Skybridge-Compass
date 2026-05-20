@@ -39,7 +39,7 @@ struct SkyBridgeCompassApp: App {
     private let localP2PFileTransferSmokeHarness = LocalP2PFileTransferSmokeHarness()
 
     var body: some Scene {
-        WindowGroup(localizationManager.localizedString("app.name")) {
+        WindowGroup(localizationManager.localizedString("app.name"), id: "main") {
             Group {
                 if let _ = renderConfig {
                     Color.clear
@@ -343,6 +343,7 @@ struct SkyBridgeCompassApp: App {
             DMGBackgroundRenderer.renderAndTerminate(config: renderConfig)
             return
         }
+        Self.pruneVolatileSwiftUIAutosaveDefaults()
 
         // Phase C3: Boot self-test for SBP2 TrafficPadding + CSV stats.
         // This guarantees we can see DIAG/CSV path even if no handshake happens yet.
@@ -428,6 +429,28 @@ struct SkyBridgeCompassApp: App {
                 await FileTransferSettingsBridge.shared.applyAsync()
             }
         }
+    }
+
+    /// SwiftUI/AppKit autosave keys can include anonymous view type names and load addresses.
+    /// Those keys are not stable across builds, so old releases accumulated hundreds of
+    /// window/split-view entries and eventually pushed the app defaults domain over 4 MB.
+    private static func pruneVolatileSwiftUIAutosaveDefaults() {
+        let defaults = UserDefaults.standard
+        let volatilePrefixes = [
+            "NSWindow Frame SwiftUI",
+            "NSSplitView Subview Frames SwiftUI"
+        ]
+        let staleKeys = defaults.dictionaryRepresentation().keys.filter { key in
+            volatilePrefixes.contains { key.hasPrefix($0) }
+                && key.contains("(unknown context at $")
+        }
+
+        guard !staleKeys.isEmpty else { return }
+
+        for key in staleKeys {
+            defaults.removeObject(forKey: key)
+        }
+        SkyBridgeLogger.ui.debugOnly("🧹 清理不稳定 SwiftUI 自动保存偏好项: \(staleKeys.count)")
     }
 
  /// 激活应用以接收键盘输入

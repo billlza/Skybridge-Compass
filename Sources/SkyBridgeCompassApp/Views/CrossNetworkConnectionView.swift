@@ -431,7 +431,21 @@ struct CrossNetworkConnectionView: View {
         connectingCloudDeviceId = device.id
         defer { connectingCloudDeviceId = nil }
 
-        await deviceChainViewModel.connectToDeviceAsync(device)
+        if let liveDevice = unifiedDeviceManager.resolvedOnlineDevice(for: device),
+           liveDevice.connectionStatus != .offline || liveDevice.isConnectable {
+            do {
+                try await OnlineDeviceConnectionCoordinator.connect(to: liveDevice)
+                deviceChainViewModel.errorMessage = nil
+            } catch {
+                let localized = HandshakeErrorLocalizer.localizedMessage(for: error)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                deviceChainViewModel.errorMessage = localized.isEmpty ? error.localizedDescription : localized
+                logger.error("❌ iCloud row local P2P connect failed: \(device.name, privacy: .public) \(error.localizedDescription, privacy: .public)")
+            }
+            return
+        }
+
+        deviceChainViewModel.errorMessage = "没有发现这台设备的本地 P2P/Bonjour 端点，iCloud 自动连接暂不可用。请确认 iPad 与 Mac 在同一局域网、SkyBridge 在前台，并刷新设备。"
     }
 
  // MARK: - 3️⃣ 智能连接码模式

@@ -42,7 +42,13 @@ public final class CloudDeviceListViewModel: ObservableObject {
 
     public func connectToDeviceAsync(_ device: iCloudDevice) async {
         do {
-            _ = try await CrossNetworkConnectionManager.shared.connectToCloudDevice(Self.mapToCloudDevice(device))
+            guard let liveDevice = UnifiedOnlineDeviceManager.shared.resolvedOnlineDevice(for: device),
+                  liveDevice.connectionStatus != .offline || liveDevice.isConnectable else {
+                errorMessage = "没有发现这台设备的本地 P2P/Bonjour 端点，iCloud 自动连接暂不可用。请确认 iPad 与 Mac 在同一局域网、SkyBridge 在前台，并刷新设备。"
+                return
+            }
+
+            try await OnlineDeviceConnectionCoordinator.connect(to: liveDevice)
             errorMessage = nil
         } catch {
             let localized = HandshakeErrorLocalizer.localizedMessage(for: error)
@@ -52,36 +58,6 @@ public final class CloudDeviceListViewModel: ObservableObject {
         }
     }
 
-    private static func mapToCloudDevice(_ device: iCloudDevice) -> CloudDevice {
-        let type: CloudDevice.DeviceType
-        if device.model.contains("iPhone") {
-            type = .iPhone
-        } else if device.model.contains("iPad") {
-            type = .iPad
-        } else {
-            type = .mac
-        }
-
-        let mappedCapabilities: [CloudDevice.DeviceCapability] = device.capabilities.compactMap { capability in
-            switch capability {
-            case .remoteDesktop:
-                return .remoteDesktop
-            case .fileTransfer:
-                return .fileTransfer
-            default:
-                return nil
-            }
-        }
-
-        return CloudDevice(
-            id: device.id,
-            name: device.name,
-            type: type,
-            lastSeen: device.lastSeen,
-            capabilities: mappedCapabilities.isEmpty ? [.remoteDesktop] : mappedCapabilities
-        )
-    }
-    
  // MARK: - Compatibility Properties
     
     public var authorizedDevices: [iCloudDevice] {

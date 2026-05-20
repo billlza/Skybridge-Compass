@@ -266,15 +266,11 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
     }
 
     func testOnlineDeviceConnectFallbackRequiresRealSkyBridgeEndpoint() throws {
-        let source = try readSource("Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift")
-        let connector = try sourceSlice(
-            from: "private func connectToOnlineDevice(",
-            to: "private func isCrossNetworkConnectLink",
-            in: source
-        )
+        let source = try readSource("Sources/SkyBridgeCompassApp/Services/OnlineDeviceConnectionCoordinator.swift")
+        let connector = source
 
         XCTAssertTrue(
-            connector.contains("if let fallback = fallbackDiscoveredDevice(for: device)"),
+            source.contains("if let fallback = fallbackDiscoveredDevice(for: device)"),
             "Connect must not append a synthetic fallback candidate for stale recent or USB-only rows."
         )
         XCTAssertTrue(

@@ -55,19 +55,14 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
  /// 设备超时时间（秒）
     private let deviceTimeout: TimeInterval = 120.0
 
- /// Combine订阅
+    /// Combine订阅
     private var iCloudCancellables = Set<AnyCancellable>()
+    private var kvStoreChangeObserver: NSObjectProtocol?
 
  // MARK: - 生命周期管理方法
 
- /// 启动iCloud设备发现管理器
+    /// 启动iCloud设备发现管理器
     public func start() async throws {
-        guard !isStarted else { return }
-
-        logger.info("🚀 启动iCloud设备发现管理器")
-        isStarted = true
-
- // 启动设备发现
         await startDiscovery()
     }
 
@@ -92,6 +87,7 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
 
  // 清理订阅
         iCloudCancellables.removeAll()
+        removeiCloudNotifications()
 
  // 清理设备列表
         discoveredDevices.removeAll()
@@ -118,9 +114,7 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         logger.info("🔷 iCloud设备发现管理器初始化（延迟加载CloudKit）")
 
  // 初始化当前设备信息（不依赖CloudKit）
-        Task {
-            setupCurrentDevice() // setupCurrentDevice 是同步方法，不需要 await
-        }
+        setupCurrentDevice()
     }
 
     deinit {
@@ -130,15 +124,23 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
 
  // MARK: - 公共方法
 
- /// 启动设备发现（使用iCloud KV Store）
+    /// 启动设备发现（使用iCloud KV Store）
     public func startDiscovery() async {
+        if isStarted {
+            sendHeartbeat()
+            fetchDevices()
+            return
+        }
+
         logger.info("🚀 启动iCloud设备发现（使用KV Store）")
+        isStarted = true
         discoveryStatus = .checking
 
  // 1. 检查iCloud KV Store是否可用
         guard FileManager.default.ubiquityIdentityToken != nil else {
             logger.error("❌ iCloud未登录")
             discoveryStatus = .error("请在系统偏好设置中登录iCloud")
+            isStarted = false
             return
         }
 
@@ -148,6 +150,7 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         guard Self.hasUbiquityKVStoreEntitlement() else {
             logger.error("❌ iCloud KV Store 不可用：缺少 iCloud entitlement（请在 Xcode -> Signing & Capabilities -> iCloud 勾选 CloudKit / iCloud Documents，并配置容器）")
             discoveryStatus = .error("iCloud 未启用：缺少 iCloud/CloudKit entitlement（请在 Xcode Signing & Capabilities 中开启 iCloud 能力）")
+            isStarted = false
             return
         }
 
@@ -189,7 +192,9 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         logger.info("⏹️ 停止iCloud设备发现")
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
+        removeiCloudNotifications()
         discoveryStatus = .idle
+        isStarted = false
     }
 
  /// 手动刷新设备列表
@@ -216,7 +221,8 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
 
  /// 设置iCloud通知监听
     private func setupiCloudNotifications() {
-        NotificationCenter.default.addObserver(
+        guard kvStoreChangeObserver == nil else { return }
+        kvStoreChangeObserver = NotificationCenter.default.addObserver(
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
             object: kvStore,
             queue: .main
@@ -225,6 +231,12 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
                 self?.fetchDevices() // fetchDevices 是 @MainActor 方法，需要确保在主线程调用
             }
         }
+    }
+
+    private func removeiCloudNotifications() {
+        guard let observer = kvStoreChangeObserver else { return }
+        NotificationCenter.default.removeObserver(observer)
+        kvStoreChangeObserver = nil
     }
 
  /// 设置当前设备信息

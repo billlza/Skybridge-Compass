@@ -7,7 +7,7 @@ import SkyBridgeCore
 struct AuroraBackgroundV2: View {
     let weather: WeatherInfo?
 
-    @State private var time: TimeInterval = 0
+    private static let animationEpoch = Date()
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
     @EnvironmentObject var settingsManager: SettingsManager
     @ObservedObject var bgControl = BackgroundControlManager.shared
@@ -22,6 +22,7 @@ struct AuroraBackgroundV2: View {
         Group {
             if !bgControl.isPaused {
                 TimelineView(.periodic(from: .now, by: 1.0 / bgControl.getEffectiveFPS(base: settingsManager.performanceMode.targetFPS))) { timeline in
+                    let time = timeline.date.timeIntervalSince(Self.animationEpoch)
                     ZStack {
  // 1. 深邃夜空背景
                         LinearGradient(
@@ -73,10 +74,6 @@ struct AuroraBackgroundV2: View {
  // 3. 星空点缀 (复用深空背景的星空逻辑，但更稀疏)
                         StarDots(time: time)
                             .opacity(0.7)
-                    }
-                    .onChange(of: timeline.date) { oldDate, newDate in
-                        let delta = newDate.timeIntervalSince(oldDate)
-                        time += delta
                     }
                 }
             } else {
