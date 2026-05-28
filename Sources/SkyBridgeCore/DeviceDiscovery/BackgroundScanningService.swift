@@ -51,6 +51,7 @@ public class BackgroundScanningService: ObservableObject {
     private var currentBackgroundScanCount: Int = 0
     
     private init() {
+        isBackgroundScanningEnabled = SettingsManager.shared.enableBackgroundScanning
         setupSettingsObserver()
     }
     
@@ -192,16 +193,27 @@ public class BackgroundScanningService: ObservableObject {
  // 使用轻量级扫描策略
         let discoveryManager = DeviceDiscoveryManagerOptimized()
         
- // 配置为低功耗模式
-        discoveryManager.enableCompatibilityMode = false
-        discoveryManager.enableCompanionLink = false
+ // 配置为低功耗模式，同时保留用户明确选择的地址族/算法设置。
+        discoveryManager.applyRuntimeSettings(
+            compatibilityMode: false,
+            companionLink: false,
+            ipv6Support: SettingsManager.shared.enableIPv6Support,
+            useNewDiscoveryAlgorithm: SettingsManager.shared.useNewDiscoveryAlgorithm,
+            enableBonjourDiscovery: SettingsManager.shared.enableBonjourDiscovery,
+            enableMDNSResolution: SettingsManager.shared.enableMDNSResolution,
+            scanCustomPorts: SettingsManager.shared.scanCustomPorts,
+            customServiceTypes: SettingsManager.shared.customServiceTypes,
+            discoveryTimeout: SettingsManager.shared.discoveryTimeout,
+            restartIfNeeded: false
+        )
         
  // 启动扫描
         discoveryManager.startScanning()
         
  // 等待扫描结果（限时 10 秒）
+        let scanWaitSeconds = min(max(TimeInterval(SettingsManager.shared.discoveryTimeout), 1), 60)
         do {
-            try await Task.sleep(nanoseconds: 10_000_000_000) // 10秒
+            try await Task.sleep(nanoseconds: UInt64(scanWaitSeconds * 1_000_000_000))
         } catch {
  // 任务被取消
         }
@@ -279,4 +291,3 @@ public extension Notification.Name {
     static let deviceDiscoveredInBackground = Notification.Name("com.skybridge.deviceDiscoveredInBackground")
     static let mergeBackgroundDiscoveredDevices = Notification.Name("com.skybridge.mergeBackgroundDiscoveredDevices")
 }
-

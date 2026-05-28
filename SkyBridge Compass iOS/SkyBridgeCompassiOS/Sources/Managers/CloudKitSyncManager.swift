@@ -1,6 +1,7 @@
 import Foundation
 import CloudKit
 import Darwin
+import Network
 
 /// CloudKit 同步管理器 - 同步设备列表和信任关系
 @MainActor
@@ -268,7 +269,9 @@ public final class ICloudDevicePresenceService: ObservableObject {
             capabilities: ["remote_desktop", "file_transfer", "clipboard"],
             isOnline: true,
             networkType: endpoint.networkType,
-            ipAddress: endpoint.ipAddress
+            ipAddress: endpoint.ipAddress,
+            stableIdentityDeviceId: identity.stableDeviceId,
+            vendorDeviceId: identity.vendorDeviceId
         )
 
         let encoder = JSONEncoder()
@@ -296,6 +299,8 @@ public final class ICloudDevicePresenceService: ObservableObject {
         let isOnline: Bool
         let networkType: String
         let ipAddress: String?
+        let stableIdentityDeviceId: String
+        let vendorDeviceId: String?
     }
 
     private static func appVersion() -> String {
@@ -312,6 +317,9 @@ public final class ICloudDevicePresenceService: ObservableObject {
         }
         defer { freeifaddrs(interfaces) }
 
+        var en0IPv4: (ipAddress: String, networkType: String)?
+        var wifiIPv4: (ipAddress: String, networkType: String)?
+        var otherIPv4: (ipAddress: String, networkType: String)?
         var ipv6Fallback: (ipAddress: String, networkType: String)?
         var cursor: UnsafeMutablePointer<ifaddrs>? = first
         while let current = cursor {
@@ -328,12 +336,23 @@ public final class ICloudDevicePresenceService: ObservableObject {
             guard let ip = numericHost(from: address) else { continue }
             let endpoint = (ipAddress: ip, networkType: networkType(for: interfaceName))
 
-            if interfaceName == "en0", family == AF_INET { return endpoint }
-            if family == AF_INET, endpoint.networkType == "wifi" { return endpoint }
-            if family == AF_INET { return endpoint }
-            if ipv6Fallback == nil { ipv6Fallback = endpoint }
+            if family == AF_INET {
+                guard isAdvertisableRoutableIPv4(ip) else { continue }
+                if interfaceName == "en0", en0IPv4 == nil {
+                    en0IPv4 = endpoint
+                } else if endpoint.networkType == "wifi", wifiIPv4 == nil {
+                    wifiIPv4 = endpoint
+                } else if otherIPv4 == nil {
+                    otherIPv4 = endpoint
+                }
+            } else if ipv6Fallback == nil, isAdvertisableIPv6(ip) {
+                ipv6Fallback = endpoint
+            }
         }
 
+        if let en0IPv4 { return (en0IPv4.ipAddress, en0IPv4.networkType) }
+        if let wifiIPv4 { return (wifiIPv4.ipAddress, wifiIPv4.networkType) }
+        if let otherIPv4 { return (otherIPv4.ipAddress, otherIPv4.networkType) }
         return ipv6Fallback.map { ($0.ipAddress, $0.networkType) } ?? (nil, "unknown")
     }
 
@@ -349,12 +368,35 @@ public final class ICloudDevicePresenceService: ObservableObject {
             NI_NUMERICHOST
         )
         guard result == 0 else { return nil }
-        return String(cString: host)
+        let byteCount = host.firstIndex(of: 0) ?? host.count
+        let bytes = host[..<byteCount].map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     private static func networkType(for interfaceName: String) -> String {
         if interfaceName.hasPrefix("pdp_ip") { return "cellular" }
         if interfaceName == "en0" || interfaceName.hasPrefix("awdl") { return "wifi" }
         return "unknown"
+    }
+
+    private static func isAdvertisableRoutableIPv4(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard IPv4Address(value) != nil else { return false }
+        return !value.hasPrefix("169.254.")
+            && !value.hasPrefix("127.")
+            && !value.hasPrefix("0.")
+            && value != "255.255.255.255"
+    }
+
+    private static func isAdvertisableIPv6(_ raw: String) -> Bool {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("[") && value.hasSuffix("]") {
+            value = String(value.dropFirst().dropLast())
+        }
+        if let scopeIndex = value.firstIndex(of: "%") {
+            value = String(value[..<scopeIndex])
+        }
+        guard IPv6Address(value) != nil else { return false }
+        return value != "::1" && !value.hasPrefix("fe80:")
     }
 }

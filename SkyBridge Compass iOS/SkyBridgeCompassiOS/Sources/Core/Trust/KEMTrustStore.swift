@@ -32,6 +32,7 @@ public actor KEMTrustStore {
         var signingFingerprint: String? = nil
         var payloadHashHex: String? = nil
         var signedSuiteWireIds: [UInt16]? = nil
+        var signedRefreshDeviceId: String? = nil
     }
 
     private struct SelectedKey: Sendable {
@@ -69,7 +70,7 @@ public actor KEMTrustStore {
     }
 
     public func upsert(deviceId: String, kemPublicKeys: [KEMPublicKeyInfo]) {
-        let candidates = PeerIdentityAliasResolver.lookupCandidates(for: deviceId)
+        let candidates = Self.trustMaterialCandidates(forAny: [deviceId])
         guard !candidates.isEmpty else { return }
         let validKeys = KEMPublicKeyInfo.normalizedValidKeys(kemPublicKeys)
         guard !validKeys.isEmpty else { return }
@@ -136,7 +137,7 @@ public actor KEMTrustStore {
         guard !validKeys.isEmpty else { return }
 
         let identifiers = [validPayload.deviceId] + validPayload.aliases + deviceIds
-        let candidates = Self.lookupCandidates(forAny: identifiers)
+        let candidates = Self.trustMaterialCandidates(forAny: identifiers)
         guard !candidates.isEmpty else { return }
 
         let keyDict = Dictionary(uniqueKeysWithValues: validKeys.map { ($0.suiteWireId, $0.publicKey) })
@@ -153,7 +154,8 @@ public actor KEMTrustStore {
                 protocolIdentityFingerprint: validPayload.protocolIdentityFingerprint,
                 signingFingerprint: validPayload.protocolIdentityFingerprint,
                 payloadHashHex: payloadHash,
-                signedSuiteWireIds: validKeys.map(\.suiteWireId).sorted()
+                signedSuiteWireIds: validKeys.map(\.suiteWireId).sorted(),
+                signedRefreshDeviceId: validPayload.deviceId
             )
         }
         save()
@@ -172,7 +174,7 @@ public actor KEMTrustStore {
     }
 
     private func selectKEMPublicKeys(for deviceIds: [String]) -> [CryptoSuite: SelectedKey] {
-        let candidates = Self.lookupCandidates(forAny: deviceIds)
+        let candidates = Self.trustMaterialCandidates(forAny: deviceIds)
         let canonicalCandidates = Self.canonicalLookupCandidates(for: deviceIds)
         var selected: [CryptoSuite: SelectedKey] = [:]
 
@@ -200,7 +202,7 @@ public actor KEMTrustStore {
 
     public func maximumKEMGeneration(forAny deviceIds: [String]) -> UInt64? {
         var maximum: UInt64?
-        for candidate in Self.lookupCandidates(forAny: deviceIds) {
+        for candidate in Self.trustMaterialCandidates(forAny: deviceIds) {
             guard let generation = cache[candidate]?.generation else { continue }
             maximum = max(maximum ?? generation, generation)
         }
@@ -209,14 +211,14 @@ public actor KEMTrustStore {
 
     public func signedRefreshEvidence(forAny deviceIds: [String]) -> SignedRefreshEvidence? {
         var selected: SignedRefreshEvidence?
-        for candidate in Self.lookupCandidates(forAny: deviceIds) {
+        for candidate in Self.trustMaterialCandidates(forAny: deviceIds) {
             guard let stored = cache[candidate],
                   stored.source == "signed_lan_kem_refresh" else {
                 continue
             }
             if let expiresAt = stored.expiresAt, expiresAt <= Date() { continue }
             let evidence = SignedRefreshEvidence(
-                deviceId: candidate,
+                deviceId: stored.signedRefreshDeviceId ?? candidate,
                 suiteWireIds: stored.signedSuiteWireIds ?? stored.keys.keys.sorted(),
                 source: stored.source,
                 keyId: stored.keyId,
@@ -235,7 +237,7 @@ public actor KEMTrustStore {
     }
 
     public func clear(deviceId: String) {
-        for candidate in PeerIdentityAliasResolver.lookupCandidates(for: deviceId) {
+        for candidate in Self.trustMaterialCandidates(forAny: [deviceId]) {
             cache.removeValue(forKey: candidate)
         }
         save()
@@ -301,7 +303,8 @@ public actor KEMTrustStore {
             protocolIdentityFingerprint: selectedSignedEvidence?.protocolIdentityFingerprint,
             signingFingerprint: selectedSignedEvidence?.signingFingerprint,
             payloadHashHex: selectedSignedEvidence?.payloadHashHex,
-            signedSuiteWireIds: reboundSignedSuiteWireIds
+            signedSuiteWireIds: reboundSignedSuiteWireIds,
+            signedRefreshDeviceId: selectedSignedEvidence?.signedRefreshDeviceId
         )
         for candidate in Set(migrationCandidates) where !canonicalCandidates.contains(candidate) {
             cache.removeValue(forKey: candidate)
@@ -358,13 +361,14 @@ public actor KEMTrustStore {
             ordered.append(value)
         }
 
-        for candidate in PeerIdentityAliasResolver.lookupCandidates(for: trimmed) {
+        for candidate in Self.trustMaterialCandidates(forAny: [trimmed]) {
             append(candidate)
         }
 
         let normalized = trimmed.lowercased()
-        append(normalized)
-        append("host:\(normalized)")
+        if !PeerIdentityAliasResolver.isEndpointAlias(normalized) {
+            append(normalized)
+        }
         return ordered
     }
 
@@ -384,6 +388,10 @@ public actor KEMTrustStore {
         }
 
         return ordered
+    }
+
+    private static func trustMaterialCandidates(forAny identifiers: [String]) -> [String] {
+        lookupCandidates(forAny: identifiers).filter { !PeerIdentityAliasResolver.isEndpointAlias($0) }
     }
 
     private static func canonicalLookupCandidates(for identifiers: [String]) -> Set<String> {
@@ -471,7 +479,7 @@ public actor ProtocolIdentityTrustStore {
     }
 
     public func upsert(deviceId: String, fingerprints: Set<String>) {
-        let candidates = Self.lookupCandidates(forAny: [deviceId])
+        let candidates = Self.trustMaterialCandidates(forAny: [deviceId])
         let normalizedFingerprints = Set(fingerprints.compactMap(Self.normalizedFingerprint))
         guard !candidates.isEmpty, !normalizedFingerprints.isEmpty else { return }
 
@@ -493,15 +501,23 @@ public actor ProtocolIdentityTrustStore {
 
     public func trustedFingerprints(forAny deviceIds: [String]) -> Set<String> {
         var fingerprints = Set<String>()
-        for candidate in Self.lookupCandidates(forAny: deviceIds) {
+        for candidate in Self.trustMaterialCandidates(forAny: deviceIds) {
             guard let stored = cache[candidate] else { continue }
             fingerprints.formUnion(stored.fingerprints.compactMap(Self.normalizedFingerprint))
         }
         return fingerprints
     }
 
+    public func deviceIds(containingFingerprint rawFingerprint: String) -> [String] {
+        guard let fingerprint = Self.normalizedFingerprint(rawFingerprint) else { return [] }
+        return cache.compactMap { deviceId, stored in
+            stored.fingerprints.contains(fingerprint) ? deviceId : nil
+        }
+        .sorted()
+    }
+
     public func clear(deviceId: String) {
-        for candidate in Self.lookupCandidates(forAny: [deviceId]) {
+        for candidate in Self.trustMaterialCandidates(forAny: [deviceId]) {
             cache.removeValue(forKey: candidate)
         }
         save()
@@ -532,12 +548,17 @@ public actor ProtocolIdentityTrustStore {
         }
 
         for identifier in identifiers {
-            for candidate in PeerIdentityAliasResolver.lookupCandidates(for: identifier) {
+            for candidate in PeerIdentityAliasResolver.lookupCandidates(for: identifier)
+            where !PeerIdentityAliasResolver.isEndpointAlias(candidate) {
                 append(candidate)
             }
         }
 
         return ordered
+    }
+
+    private static func trustMaterialCandidates(forAny identifiers: [String]) -> [String] {
+        lookupCandidates(forAny: identifiers)
     }
 
     private static func loadCache(storageKey: String, userDefaults: UserDefaults) -> [String: StoredPeer] {

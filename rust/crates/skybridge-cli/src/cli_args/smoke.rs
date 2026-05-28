@@ -17,12 +17,18 @@ pub(crate) enum SmokeSubcommand {
     WebRtc(WebRtcSmokeCommand),
     #[command(name = "local-webrtc")]
     LocalWebrtc(SmokeSuiteCommonArgs),
+    #[command(name = "local-webrtc-security-notice")]
+    LocalWebrtcSecurityNotice(SmokeSuiteCommonArgs),
+    #[command(name = "local-macos-security-notice-panel")]
+    LocalMacosSecurityNoticePanel(SmokeSuiteCommonArgs),
     #[command(name = "local-p2p")]
     LocalP2p(SmokeLocalP2pArgs),
     #[command(name = "real-device")]
     RealDevice(SmokeSuiteCommonArgs),
     #[command(name = "real-device-p2p")]
     RealDeviceP2p(SmokeSuiteCommonArgs),
+    #[command(name = "real-device-p2p-security-notice")]
+    RealDeviceP2pSecurityNotice(SmokeSuiteCommonArgs),
     #[command(name = "real-device-file-transfer")]
     RealDeviceFileTransfer(SmokeSuiteCommonArgs),
     Suite(SmokeSuiteArgs),
@@ -155,8 +161,11 @@ pub(crate) enum SmokeSuiteProfile {
     ScriptTests,
     IosConfig,
     LocalWebrtc,
+    LocalWebrtcSecurityNotice,
+    LocalMacosSecurityNoticePanel,
     LocalP2p,
     RealDeviceP2p,
+    RealDeviceP2pSecurityNotice,
     FaultInjection,
     Benchmarks,
     Release,

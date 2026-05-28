@@ -46,22 +46,22 @@ final class RemoteControlCaptureCompatibilityTests: XCTestCase {
         XCTAssertEqual(normalized.height, 1329)
     }
 
-    func testInvalidSessionDowngradesHEVCToH264() {
+    func testInvalidSessionDoesNotDowngradeHEVCToH264() {
         let fallback = RemoteControlCaptureCompatibility.fallbackCodec(
             afterEncodeFailure: kVTInvalidSessionErr,
             activeCodec: .hevc
         )
 
-        XCTAssertEqual(fallback, .h264)
+        XCTAssertNil(fallback)
     }
 
-    func testInvalidSessionDowngradesH264ToJPEG() {
+    func testInvalidSessionDoesNotChainFallbackFromH264ToJPEG() {
         let fallback = RemoteControlCaptureCompatibility.fallbackCodec(
             afterEncodeFailure: kVTInvalidSessionErr,
             activeCodec: .h264
         )
 
-        XCTAssertEqual(fallback, .bgra)
+        XCTAssertNil(fallback)
     }
 
     func testUnrelatedEncodeFailureDoesNotForceFallback() {

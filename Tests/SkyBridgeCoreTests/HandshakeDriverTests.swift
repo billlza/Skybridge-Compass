@@ -80,6 +80,30 @@ actor MockDiscoveryTransport: DiscoveryTransport {
     }
 }
 
+@available(macOS 14.0, iOS 17.0, *)
+actor InlineFirstSendTransport: DiscoveryTransport {
+    private(set) var sentMessages: [(PeerIdentifier, Data)] = []
+    private var onFirstSend: (@Sendable (PeerIdentifier, Data) async throws -> Void)?
+
+    func setOnFirstSend(_ handler: (@Sendable (PeerIdentifier, Data) async throws -> Void)?) {
+        onFirstSend = handler
+    }
+
+    func send(to peer: PeerIdentifier, data: Data) async throws {
+        sentMessages.append((peer, data))
+        guard sentMessages.count == 1, let onFirstSend else { return }
+        try await onFirstSend(peer, data)
+    }
+
+    func getSentMessageCount() -> Int {
+        sentMessages.count
+    }
+
+    func getSentMessages() -> [(PeerIdentifier, Data)] {
+        sentMessages
+    }
+}
+
 // MARK: - Mock Trust Provider
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -100,6 +124,59 @@ struct StaticTrustProvider: HandshakeTrustProvider, Sendable {
 
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
         guard deviceId == self.deviceId else { return nil }
+        return nil
+    }
+}
+
+private enum HandshakeDriverTestError: Error {
+    case timeoutWaitingForSentMessages
+    case timeoutWaitingForProcessingMessageB
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+struct DelayedTrustProvider: HandshakeTrustProvider, Sendable {
+    let deviceId: String
+    let fingerprint: String?
+    let delay: Duration
+
+    func trustedFingerprint(for deviceId: String) async -> String? {
+        if delay > .zero {
+            try? await Task.sleep(for: delay)
+        }
+        guard deviceId == self.deviceId else { return nil }
+        return fingerprint
+    }
+
+    func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
+        guard deviceId == self.deviceId else { return [:] }
+        return [:]
+    }
+
+    func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
+        guard deviceId == self.deviceId else { return nil }
+        return nil
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+struct HangingUnusedTrustLookupProvider: HandshakeTrustProvider, Sendable {
+    let deviceId: String
+    let fingerprint: String?
+
+    func trustedFingerprint(for deviceId: String) async -> String? {
+        guard deviceId == self.deviceId else { return nil }
+        return fingerprint
+    }
+
+    func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
+        _ = deviceId
+        try? await Task.sleep(for: .seconds(60))
+        return [:]
+    }
+
+    func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
+        _ = deviceId
+        try? await Task.sleep(for: .seconds(60))
         return nil
     }
 }
@@ -177,6 +254,53 @@ final class HandshakeDriverTests: XCTestCase {
             metricsCollector: metricsCollector,
             trustProvider: trustProvider
         )
+    }
+
+    private func waitForSentMessageCount(
+        _ expectedCount: Int,
+        on transport: MockDiscoveryTransport,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<2_000 {
+            if await transport.getSentMessageCount() >= expectedCount {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("Timed out waiting for \(expectedCount) sent messages", file: file, line: line)
+        throw HandshakeDriverTestError.timeoutWaitingForSentMessages
+    }
+
+    private func waitForSentMessageCount(
+        _ expectedCount: Int,
+        on transport: InlineFirstSendTransport,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<2_000 {
+            if await transport.getSentMessageCount() >= expectedCount {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("Timed out waiting for \(expectedCount) sent messages", file: file, line: line)
+        throw HandshakeDriverTestError.timeoutWaitingForSentMessages
+    }
+
+    private func waitForProcessingMessageB(
+        _ driver: HandshakeDriver,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<500 {
+            if case .processingMessageB = await driver.getCurrentState() {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("Timed out waiting for processingMessageB", file: file, line: line)
+        throw HandshakeDriverTestError.timeoutWaitingForProcessingMessageB
     }
 
  // MARK: - Property 4: Handshake State Machine Validity
@@ -418,6 +542,35 @@ final class HandshakeDriverTests: XCTestCase {
         await responder.cancel()
     }
 
+    func testResponderMessageADoesNotWaitForUnusedTrustLookups() async throws {
+        let responderTransport = MockDiscoveryTransport()
+        let initiatorKeyPair = try await provider.generateKeyPair(for: .signing)
+        let trustedFingerprint = authoritativeFingerprint(initiatorKeyPair.publicKey.bytes)
+        let trustProvider = HangingUnusedTrustLookupProvider(
+            deviceId: "test-peer",
+            fingerprint: trustedFingerprint
+        )
+        let responder = try makeDriver(
+            transport: responderTransport,
+            timeout: .seconds(1),
+            trustProvider: trustProvider
+        )
+        let initiatorContext = try await HandshakeContext.create(
+            role: .initiator,
+            cryptoProvider: provider
+        )
+        let messageA = try await initiatorContext.buildMessageA(
+            identityKeyHandle: .softwareKey(initiatorKeyPair.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(initiatorKeyPair.publicKey.bytes)
+        )
+
+        await responder.handleMessage(messageA.encoded, from: PeerIdentifier(deviceId: "test-peer"))
+
+        try await waitForSentMessageCount(1, on: responderTransport)
+        await responder.cancel()
+        await initiatorContext.zeroize()
+    }
+
     func testResponderCompletesHandshakeWithSessionKeys() async throws {
         let initiatorKeyPair = try await provider.generateKeyPair(for: .signing)
         let initiatorContext = try await HandshakeContext.create(
@@ -459,6 +612,163 @@ final class HandshakeDriverTests: XCTestCase {
             return
         }
         XCTAssertEqual(establishedKeys.negotiatedSuite, sessionKeys.negotiatedSuite)
+    }
+
+    func testInitiatorBuffersFinishedArrivingWhileProcessingMessageB() async throws {
+        let initiatorTransport = MockDiscoveryTransport()
+        let responderTransport = MockDiscoveryTransport()
+
+        let initiatorIdentity = try await provider.generateKeyPair(for: .signing)
+        let responderIdentity = try await provider.generateKeyPair(for: .signing)
+        let peer = PeerIdentifier(deviceId: "early-finished-peer")
+
+        let initiator = try HandshakeDriver(
+            transport: initiatorTransport,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(initiatorIdentity.privateKey.bytes),
+            sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(initiatorIdentity.publicKey.bytes),
+            offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(2),
+            trustProvider: DelayedTrustProvider(
+                deviceId: peer.deviceId,
+                fingerprint: authoritativeFingerprint(responderIdentity.publicKey.bytes),
+                delay: .milliseconds(150)
+            )
+        )
+
+        let responder = try HandshakeDriver(
+            transport: responderTransport,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(responderIdentity.privateKey.bytes),
+            sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(responderIdentity.publicKey.bytes),
+            offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(2)
+        )
+
+        let handshakeTask = Task {
+            try await initiator.initiateHandshake(with: peer)
+        }
+
+        try await waitForSentMessageCount(1, on: initiatorTransport)
+        let messageA = await initiatorTransport.getSentMessages()[0].1
+        await responder.handleMessage(messageA, from: peer)
+
+        try await waitForSentMessageCount(2, on: responderTransport)
+        let responderMessages = await responderTransport.getSentMessages()
+
+        let messageBTask = Task {
+            await initiator.handleMessage(responderMessages[0].1, from: peer)
+        }
+        try await waitForProcessingMessageB(initiator)
+        await initiator.handleMessage(responderMessages[1].1, from: peer)
+        await messageBTask.value
+
+        try await waitForSentMessageCount(2, on: initiatorTransport)
+        let initiatorFinished = await initiatorTransport.getSentMessages()[1].1
+        await responder.handleMessage(initiatorFinished, from: peer)
+
+        let initiatorKeys = try await handshakeTask.value
+        XCTAssertEqual(initiatorKeys.negotiatedSuite, .x25519Ed25519)
+
+        let initiatorState = await initiator.getCurrentState()
+        guard case .established = initiatorState else {
+            XCTFail("Expected initiator established after early Finished, got \(initiatorState)")
+            return
+        }
+
+        let responderState = await responder.getCurrentState()
+        guard case .established = responderState else {
+            XCTFail("Expected responder established after initiator Finished, got \(responderState)")
+            return
+        }
+    }
+
+    func testInitiatorDoesNotRollbackStateWhenMessageBArrivesDuringMessageASend() async throws {
+        let initiatorTransport = InlineFirstSendTransport()
+        let responderTransport = MockDiscoveryTransport()
+
+        let initiatorIdentity = try await provider.generateKeyPair(for: .signing)
+        let responderIdentity = try await provider.generateKeyPair(for: .signing)
+        let peer = PeerIdentifier(deviceId: "inline-messageb-peer")
+
+        let initiator = try HandshakeDriver(
+            transport: initiatorTransport,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(initiatorIdentity.privateKey.bytes),
+            sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(initiatorIdentity.publicKey.bytes),
+            offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(2)
+        )
+
+        let responder = try HandshakeDriver(
+            transport: responderTransport,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(responderIdentity.privateKey.bytes),
+            sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(responderIdentity.publicKey.bytes),
+            offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(2)
+        )
+
+        await initiatorTransport.setOnFirstSend { peer, messageA in
+            await responder.handleMessage(messageA, from: peer)
+            for _ in 0..<2_000 {
+                if await responderTransport.getSentMessageCount() >= 2 {
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            guard await responderTransport.getSentMessageCount() >= 2 else {
+                throw HandshakeDriverTestError.timeoutWaitingForSentMessages
+            }
+            let responderMessages = await responderTransport.getSentMessages()
+            await initiator.handleMessage(responderMessages[0].1, from: peer)
+        }
+
+        let handshakeTask = Task {
+            try await initiator.initiateHandshake(with: peer)
+        }
+
+        for _ in 0..<500 {
+            if case .waitingFinished = await initiator.getCurrentState() {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard case .waitingFinished = await initiator.getCurrentState() else {
+            XCTFail("Expected initiator to remain waitingFinished after inline MessageB")
+            await initiator.cancel()
+            await responder.cancel()
+            return
+        }
+
+        let responderMessages = await responderTransport.getSentMessages()
+        await initiator.handleMessage(responderMessages[1].1, from: peer)
+
+        try await waitForSentMessageCount(2, on: initiatorTransport)
+        let initiatorFinished = await initiatorTransport.getSentMessages()[1].1
+        await responder.handleMessage(initiatorFinished, from: peer)
+
+        _ = try await handshakeTask.value
+
+        let initiatorState = await initiator.getCurrentState()
+        guard case .established = initiatorState else {
+            XCTFail("Expected initiator established after Finished, got \(initiatorState)")
+            return
+        }
+
+        let responderState = await responder.getCurrentState()
+        guard case .established = responderState else {
+            XCTFail("Expected responder established after Finished, got \(responderState)")
+            return
+        }
     }
 
     func testResponderFinishOnceRecordsSuccessMetrics() async throws {

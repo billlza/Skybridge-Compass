@@ -64,6 +64,7 @@ enum PeerTrustLookup {
         if normalized.hasPrefix("id:") {
             let payload = String(normalized.dropFirst("id:".count))
             guard isPlausibleStableDeviceIdentifierPayload(payload) else { return nil }
+            guard !isLiteralIPAddress(payload) else { return nil }
             return "id:\(payload)"
         }
         if normalized.hasPrefix("host:")
@@ -74,7 +75,23 @@ enum PeerTrustLookup {
             return nil
         }
         guard isPlausibleStableDeviceIdentifierPayload(normalized) else { return nil }
+        guard !isLiteralIPAddress(normalized) else { return nil }
         return "id:\(normalized)"
+    }
+
+    static func isEndpointAlias(_ raw: String?) -> Bool {
+        guard let normalized = normalizedIdentifier(raw) else { return false }
+        if normalized.hasPrefix("recent:") {
+            return isEndpointAlias(String(normalized.dropFirst("recent:".count)))
+        }
+        if normalized.hasPrefix("host:") || normalized.hasPrefix("peer:") {
+            return true
+        }
+        if normalized.hasPrefix("id:") {
+            let payload = String(normalized.dropFirst("id:".count))
+            return isLiteralIPAddress(payload)
+        }
+        return isLiteralIPAddress(normalized)
     }
 
     static func lookupCandidates(for identifier: String?) -> [String] {

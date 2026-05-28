@@ -18,70 +18,61 @@ extension P2PConnectionManager {
     final class ConnectionReadyGate: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Void, Error>?
-        private var finished = false
-        private var lastState: NWConnection.State?
+        private var result: Result<Void, Error>?
 
         func onState(_ state: NWConnection.State) {
-            lock.lock()
-            defer { lock.unlock() }
-            lastState = state
-            guard !finished, let continuation else { return }
-
             switch state {
             case .ready:
-                finished = true
-                continuation.resume()
-                self.continuation = nil
+                finish(.success(()))
             case .failed(let error):
-                finished = true
-                continuation.resume(throwing: error)
-                self.continuation = nil
+                finish(.failure(error))
             default:
                 break
             }
         }
 
         func waitReady(timeoutSeconds: Double) async throws {
-            let gate = self
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    try await gate.awaitReadyOrFail()
-                }
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                guard !Task.isCancelled else { return }
+                self?.finish(.failure(P2PError.connectionFailed))
+            }
+            defer { timeoutTask.cancel() }
+            try await awaitReadyOrFail()
+        }
 
-                group.addTask {
-                    try? await Task.sleep(for: .seconds(timeoutSeconds))
-                    throw P2PError.connectionFailed
-                }
+        private func finish(_ result: Result<Void, Error>) {
+            lock.lock()
+            guard self.result == nil else {
+                lock.unlock()
+                return
+            }
+            self.result = result
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
 
-                do {
-                    _ = try await group.next()
-                    group.cancelAll()
-                } catch {
-                    group.cancelAll()
-                    throw error
-                }
+            guard let continuation else { return }
+            switch result {
+            case .success:
+                continuation.resume()
+            case .failure(let error):
+                continuation.resume(throwing: error)
             }
         }
 
         private func awaitReadyOrFail() async throws {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
                 lock.lock()
-                // 如果 ready/fail 已经先到，直接返回，避免错过 stateUpdate
-                if let last = lastState, !finished {
-                    switch last {
-                    case .ready:
-                        finished = true
-                        lock.unlock()
+                if let result {
+                    lock.unlock()
+                    switch result {
+                    case .success:
                         cont.resume()
-                        return
-                    case .failed(let error):
-                        finished = true
-                        lock.unlock()
+                    case .failure(let error):
                         cont.resume(throwing: error)
-                        return
-                    default:
-                        break
                     }
+                    return
                 }
                 continuation = cont
                 lock.unlock()
@@ -115,27 +106,13 @@ extension P2PConnectionManager {
         }
 
         func wait(timeoutSeconds: Double) async throws -> Data {
-            let gate = self
-            return try await withThrowingTaskGroup(of: Data.self) { group in
-                group.addTask {
-                    try await gate.awaitResult()
-                }
-                group.addTask {
-                    try? await Task.sleep(for: .seconds(timeoutSeconds))
-                    throw P2PConnectionManager.signedLANRefreshFailure("receive timeout")
-                }
-
-                do {
-                    guard let data = try await group.next() else {
-                        throw P2PConnectionManager.signedLANRefreshFailure("receive cancelled")
-                    }
-                    group.cancelAll()
-                    return data
-                } catch {
-                    group.cancelAll()
-                    throw error
-                }
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                guard !Task.isCancelled else { return }
+                self?.finish(.failure(P2PConnectionManager.signedLANRefreshFailure("receive timeout")))
             }
+            defer { timeoutTask.cancel() }
+            return try await awaitResult()
         }
 
         private func awaitResult() async throws -> Data {

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=Scripts/package_build_policy.sh
 source "${SCRIPT_DIR}/package_build_policy.sh"
 
 fail() {
@@ -23,9 +24,8 @@ mkdir -p "${xcode_dir}/PackageFrameworks" "${swiftpm_dir}/PackageFrameworks"
 skybridge_assert_package_build_policy "app" "swiftpm_release" \
   || fail "non-DMG packaging should allow swiftpm_release"
 
-if skybridge_assert_package_build_policy "release_dmg" "swiftpm_release" >/dev/null 2>&1; then
-  fail "release_dmg packaging must reject swiftpm_release"
-fi
+skybridge_assert_package_build_policy "release_dmg" "swiftpm_release" \
+  || fail "release_dmg packaging should allow swiftpm_release"
 
 skybridge_assert_package_build_policy "release_dmg" "xcode_release" \
   || fail "release_dmg packaging should allow xcode_release"
@@ -36,6 +36,13 @@ fi
 
 if skybridge_assert_package_build_policy "release_dmg" "unknown" >/dev/null 2>&1; then
   fail "release_dmg packaging must reject unknown build source"
+fi
+
+skybridge_assert_release_executable_not_instrumented "/bin/ls" "system executable" \
+  || fail "non-instrumented executable should pass release instrumentation guard"
+
+if skybridge_assert_release_executable_not_instrumented "/missing/SkyBridgeCompassApp" >/dev/null 2>&1; then
+  fail "instrumentation guard must reject missing executables"
 fi
 
 printf '#!/bin/sh\nexit 0\n' > "${xcode_dir}/SkyBridgeCompassApp"

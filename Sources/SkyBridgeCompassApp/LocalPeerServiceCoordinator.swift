@@ -39,20 +39,10 @@ final class LocalPeerServiceCoordinator: ObservableObject {
         try await fileTransferListener.ensureHealthy()
         fileTransferReady = fileTransferListener.activePort != nil
 
-        let endpointsBeforeRemote = ServiceEndpointRegistry.shared.snapshot()
-        let remoteNeedsRestart = remoteControlServer.activePort == nil
-            || endpointsBeforeRemote.remoteControlPort == nil
-            || endpointsBeforeRemote.remoteControlPort != remoteControlServer.activePort
-            || !remoteControlServer.isBonjourPublished
-        if remoteNeedsRestart {
-            if remoteControlServer.activePort != nil {
-                remoteControlServer.stop()
-            }
-            do {
-                try await remoteControlServer.start()
-            } catch {
-                SkyBridgeLogger.ui.error("❌ 启动常驻远程控制监听失败: \(error.localizedDescription, privacy: .public)")
-            }
+        do {
+            try await remoteControlServer.ensureHealthy()
+        } catch {
+            SkyBridgeLogger.ui.error("❌ 启动常驻远程控制监听失败: \(error.localizedDescription, privacy: .public)")
         }
         remoteControlReady = remoteControlServer.activePort != nil
 

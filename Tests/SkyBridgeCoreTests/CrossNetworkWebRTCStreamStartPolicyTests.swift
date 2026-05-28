@@ -213,7 +213,8 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             imageData: Data([0x01, 0x02]),
             timestamp: 1_000,
             format: "h264",
-            isSyncFrame: false
+            isSyncFrame: false,
+            sequenceNumber: 1
         )
 
         for offset in stride(from: 0.0, through: 0.25, by: 0.05) {
@@ -358,6 +359,32 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("audioTxAttachRetryScheduled session="))
         XCTAssertTrue(source.contains("strictRealtimeAudioAttachRetryWindowSeconds"))
         XCTAssertTrue(source.contains("reason: \"realtime-audio-main-path-unavailable\""))
+    }
+
+    func testFallbackScreenDataCarriesSequenceNumberThroughSBRFV2() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"),
+            encoding: .utf8
+        )
+        let wireSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/RemoteDesktopWebRTCWire.swift"),
+            encoding: .utf8
+        )
+        let frameStoreSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCEncodedFrameStore.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(wireSource.contains("let sequenceNumber: UInt64?"))
+        XCTAssertTrue(frameStoreSource.contains("let sequenceNumber: UInt64"))
+        XCTAssertTrue(source.contains("let fallbackFrameSequence = RemoteControlFrameSequenceGenerator()"))
+        XCTAssertTrue(source.contains("sequenceNumber: fallbackFrameSequence.next()"))
+        XCTAssertTrue(source.contains("sequenceNumber: encodedFrame.sequenceNumber"))
+        XCTAssertTrue(source.contains("sequenceNumber: sd.sequenceNumber"))
     }
 
     @MainActor

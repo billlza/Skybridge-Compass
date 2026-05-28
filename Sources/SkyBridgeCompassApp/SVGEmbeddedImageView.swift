@@ -97,25 +97,63 @@ struct BrandAppIconView: View {
 @MainActor
 private enum BrandIconAssetLoader {
     static func load() -> NSImage? {
-        for bundle in [Bundle.module, Bundle.main] {
-            if let image = bundle.image(forResource: NSImage.Name("BrandIcon")) {
-                return image
+        if let packagedIconURLs = packagedResourceIconURLs() {
+            for url in packagedIconURLs {
+                if let image = NSImage(contentsOf: url) {
+                    return image
+                }
             }
+            return nil
+        }
 
-            for candidate in [("AppIcon", "png"), ("AppIconDock", "png"), ("BrandIcon", "png")] {
-                if let url = bundle.url(forResource: candidate.0, withExtension: candidate.1),
+        for bundle in [Bundle.module] {
+            for candidate in iconCandidates {
+                if let url = bundle.url(forResource: candidate.name, withExtension: candidate.extensionName),
                    let image = NSImage(contentsOf: url) {
                     return image
                 }
             }
         }
 
-        if let appIcon = NSApp.applicationIconImage.copy() as? NSImage,
-           appIcon.size.width > 0,
-           appIcon.size.height > 0 {
-            return appIcon
-        }
+        return nil
+    }
 
+    private static let iconCandidates: [(name: String, extensionName: String)] = [
+        ("AppIcon", "png"),
+        ("BrandIcon", "png"),
+        ("AppIconDock", "png"),
+        ("app_icon", "png")
+    ]
+
+    private static func packagedResourceIconURLs() -> [URL]? {
+        guard let resourcesURL = packagedResourcesURL() else { return nil }
+        return iconCandidates.map { candidate in
+            resourcesURL
+                .appendingPathComponent(candidate.name, isDirectory: false)
+                .appendingPathExtension(candidate.extensionName)
+        }
+    }
+
+    private static func packagedResourcesURL() -> URL? {
+        let executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        guard let contentsURL = packagedContentsURL(containing: executableURL) else { return nil }
+        let resourcesURL = contentsURL.appendingPathComponent("Resources", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resourcesURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return nil
+        }
+        return resourcesURL
+    }
+
+    private static func packagedContentsURL(containing executableURL: URL) -> URL? {
+        var url = executableURL
+        while url.path != "/" {
+            if url.lastPathComponent == "Contents" {
+                return url
+            }
+            url.deleteLastPathComponent()
+        }
         return nil
     }
 }

@@ -1,6 +1,6 @@
 use super::FileTransferPerformanceEvidence;
 use crate::performance_evidence::{
-    is_p2p_remote_fallback_failure_line, is_unknown_suite_rejection_line,
+    extract_text_value, is_p2p_remote_fallback_failure_line, is_unknown_suite_rejection_line,
     update_signed_kem_refresh_evidence,
 };
 
@@ -77,6 +77,7 @@ pub(crate) fn update_file_transfer_evidence(
         is_mac && line.contains("mac-reconnect outbound-complete name=mac-reconnect-smoke-");
     evidence.ios_reconnect_inbound_complete |=
         is_ios && line.contains("mac-reconnect inbound-complete name=mac-reconnect-smoke-");
+    update_payload_digest_evidence(evidence, line, is_mac, is_ios);
     if line.contains("failed stage=") {
         evidence.failed_stage_count += 1;
         if line.contains("stage=file-transfer phase=unknown") {
@@ -89,4 +90,41 @@ pub(crate) fn update_file_transfer_evidence(
             evidence.first_failure = Some(line.trim().to_owned());
         }
     }
+}
+
+fn update_payload_digest_evidence(
+    evidence: &mut FileTransferPerformanceEvidence,
+    line: &str,
+    is_mac: bool,
+    is_ios: bool,
+) {
+    let Some(name) = extract_text_value(line, "name") else {
+        return;
+    };
+    let Some(sha256) = extract_text_value(line, "sha256") else {
+        return;
+    };
+    if !is_sha256_hex(&sha256) {
+        return;
+    }
+
+    let sender = (is_ios && line.contains("file-transfer outbound-complete name=ios-smoke-"))
+        || (is_mac && line.contains("file-transfer outbound-complete name=mac-smoke-"))
+        || (is_mac && line.contains("mac-reconnect outbound-complete name=mac-reconnect-smoke-"));
+    let receiver = (is_mac && line.contains("file-transfer inbound-complete name=ios-smoke-"))
+        || (is_ios && line.contains("file-transfer inbound-complete name=mac-smoke-"))
+        || (is_ios && line.contains("mac-reconnect inbound-complete name=mac-reconnect-smoke-"));
+
+    if sender {
+        evidence
+            .payload_digests
+            .record_sender(name.clone(), sha256.clone());
+    }
+    if receiver {
+        evidence.payload_digests.record_receiver(name, sha256);
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

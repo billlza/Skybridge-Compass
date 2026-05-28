@@ -1,5 +1,6 @@
 import CoreGraphics
 import CoreVideo
+import Foundation
 import VideoToolbox
 import XCTest
 @testable import SkyBridgeCore
@@ -25,6 +26,22 @@ final class WebRTCCGDisplayVideoEncoderTests: XCTestCase {
 
         XCTAssertEqual(topLeft, [255, 0, 0, 255], "Top row should remain red")
         XCTAssertEqual(bottomLeft, [0, 0, 255, 255], "Bottom row should remain blue")
+    }
+
+    func testHEVCSessionCreationFailureDoesNotFallbackToH264() throws {
+        let source = try webRTCCGDisplayVideoEncoderSource()
+        let failureBody = try sourceSlice(
+            from: "if status != noErr || session == nil {",
+            to: "compressionSession = session",
+            in: source
+        )
+
+        XCTAssertTrue(failureBody.contains("refusing automatic H.264 fallback"))
+        XCTAssertFalse(failureBody.contains("codecType = kCMVideoCodecType_H264"))
+        XCTAssertFalse(
+            failureBody.contains("setupCompressionSession(width: width, height: height, codec: kCMVideoCodecType_H264)"),
+            "HEVC encoder setup failures must fail fast instead of silently changing the negotiated codec."
+        )
     }
 
     private func makeTwoRowTestImage() throws -> CGImage {
@@ -76,5 +93,28 @@ final class WebRTCCGDisplayVideoEncoderTests: XCTestCase {
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         let offset = (y * bytesPerRow) + (x * 4)
         return Array(pixels[offset..<(offset + 4)])
+    }
+
+    private func webRTCCGDisplayVideoEncoderSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let path = root
+            .appendingPathComponent("Sources")
+            .appendingPathComponent("SkyBridgeCore")
+            .appendingPathComponent("RemoteConnection")
+            .appendingPathComponent("WebRTC")
+            .appendingPathComponent("WebRTCCGDisplayVideoEncoder.swift")
+        return try String(contentsOf: path)
+    }
+
+    private func sourceSlice(from startMarker: String, to endMarker: String, in source: String) throws -> String {
+        guard let start = source.range(of: startMarker)?.lowerBound,
+              let end = source.range(of: endMarker, range: start..<source.endIndex)?.lowerBound else {
+            XCTFail("source markers not found: \(startMarker) -> \(endMarker)")
+            return source
+        }
+        return String(source[start..<end])
     }
 }

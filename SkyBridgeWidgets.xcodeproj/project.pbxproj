@@ -43,9 +43,11 @@
 		4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FD3678EA90CE43D8B206FD5 /* RealTimeWeatherService.swift */; };
 		508D04834661A08F8BCF47C4 /* DeviceChainViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9EF4C7CF9BE849F017EDA /* DeviceChainViewModel.swift */; };
 		513D63C5FD6A64DCFB0E0437 /* CloudDeviceListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */; };
+		51A7B7E0A61F4F5A9C85A8B2 /* CloudDevicePresentationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E7F9D9C16B348B5B4C5A8A2 /* CloudDevicePresentationPolicy.swift */; };
 		56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCCDC5283DA30812C545D629 /* OnlineDeviceRow.swift */; };
 		56B662DC159A06A386023551 /* StartupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28A863D8FACC89865E5B02AE /* StartupCoordinator.swift */; };
 		589EE25508C29C0854EB4912 /* MissingIconHintView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85A2082093DBBCD396198A9C /* MissingIconHintView.swift */; };
+		5A9E3D9F4A4146F5AD219601 /* AppUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A9E3D9E4A4146F5AD219600 /* AppUpdateChecker.swift */; };
 		5A25017DFEF93E116ECA08E2 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
 		5B92DEAF73D4A58CD8B62A69 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
 		5C76D7E4E513E62149275F6A /* ClassicBackgroundV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDC840D20233F0618288F1E6 /* ClassicBackgroundV2.swift */; };
@@ -67,6 +69,7 @@
 		7A447F0A23637367C8D92BD7 /* AppleSiliconSystemCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09525D33288E26F88FF2AA60 /* AppleSiliconSystemCoordinator.swift */; };
 		7A82E21B4233C8E31F7F217F /* UserProfileOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7AA82D7D5FC282FEB03C6D1 /* UserProfileOverlay.swift */; };
 		7AC9D3D4188016B890EBE9A0 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E06A601920A0654D26DC0CF /* DashboardView.swift */; };
+		2D88B02F6C9D4D8E83F19F01 /* RemoteControlSecurityNoticePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D88B02E6C9D4D8E83F19F00 /* RemoteControlSecurityNoticePanelController.swift */; };
 		83E3064711CB4C8FDB487DAB /* AuthenticationViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A7DACBA6F3DD4E715607BD /* AuthenticationViewModel.swift */; };
 		8604A809C8518BE2CC1E8129 /* PerformanceMonitoringPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA0B3F8DBAA95AD39757262 /* PerformanceMonitoringPanelView.swift */; };
 		87D4E408B8934CF67E9FF500 /* DeviceDiscoveryPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFEB5C8A3A97F114A59348AC /* DeviceDiscoveryPanelView.swift */; };
@@ -167,6 +170,7 @@
 		2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppIntents.framework; sourceTree = "<group>"; };
 		2D9A4EDD78AB3ED51D441734 /* FileTransferRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferRow.swift; sourceTree = "<group>"; };
 		2E06A601920A0654D26DC0CF /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		2D88B02E6C9D4D8E83F19F00 /* RemoteControlSecurityNoticePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlSecurityNoticePanelController.swift; sourceTree = "<group>"; };
 		2F34F8DCDE6691F163DC5C82 /* SkyBridgeCompassMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SkyBridgeCompassMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedDeviceDiscoveryView.swift; sourceTree = "<group>"; };
 		310BAB0F526B509D794C9F8F /* AuroraBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuroraBackground.swift; sourceTree = "<group>"; };
@@ -191,6 +195,7 @@
 		4F654D338CC30B122FE4B133 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = WebKit.framework; sourceTree = "<group>"; };
 		5181227F31B316BCC735B8FA /* GlassSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassSidebar.swift; sourceTree = "<group>"; };
 		5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalMouseTracker.swift; sourceTree = "<group>"; };
+		5A9E3D9E4A4146F5AD219600 /* AppUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateChecker.swift; sourceTree = "<group>"; };
 		5BA0B3F8DBAA95AD39757262 /* PerformanceMonitoringPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMonitoringPanelView.swift; sourceTree = "<group>"; };
 		5CEA4D01349D879638CC4917 /* WidgetIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetIntents.swift; sourceTree = "<group>"; };
 		5E3E7BAB3B34858277B55286 /* app-icon.svg */ = {isa = PBXFileReference; path = "app-icon.svg"; sourceTree = "<group>"; };
@@ -204,6 +209,7 @@
 		7421CFFDEE7371624E428DBF /* AuthenticationServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AuthenticationServices.framework; sourceTree = "<group>"; };
 		74DF29B58CA8ADE6A6AD3F74 /* DashboardContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardContentView.swift; sourceTree = "<group>"; };
 		6A5F1CF7485D4C08A1F9355D /* OnlineDeviceConnectionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineDeviceConnectionCoordinator.swift; sourceTree = "<group>"; };
+		6E7F9D9C16B348B5B4C5A8A2 /* CloudDevicePresentationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudDevicePresentationPolicy.swift; sourceTree = "<group>"; };
 		80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldMirrorView.swift; sourceTree = "<group>"; };
 		825CF90D2A0365C9B9F0A7F5 /* CustomBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomBackgroundView.swift; sourceTree = "<group>"; };
 		83227A90FFD3F72879561C7C /* PerformanceErrorHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceErrorHandler.swift; sourceTree = "<group>"; };
@@ -371,9 +377,10 @@
 				85A2082093DBBCD396198A9C /* MissingIconHintView.swift */,
 				A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */,
 				31C4F642A50FB646F1B464CD /* NSTextFieldRepresentable.swift */,
-				E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */,
-				B94E56E85A4296340AE2361F /* PreferencesView.swift */,
-				3AE55FABF0A44C3E6FE9698E /* RemoteDesktopView.swift */,
+					E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */,
+					B94E56E85A4296340AE2361F /* PreferencesView.swift */,
+					2D88B02E6C9D4D8E83F19F00 /* RemoteControlSecurityNoticePanelController.swift */,
+					3AE55FABF0A44C3E6FE9698E /* RemoteDesktopView.swift */,
 				8B1FB7AA1712E13D6F941B63 /* RemoteDisplayView.swift */,
 				5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */,
 				8EF31CD7A8365F25C7F6BDBE /* SkyBridgeCommands.swift */,
@@ -440,6 +447,7 @@
 			isa = PBXGroup;
 			children = (
 				9E05B03AA449A0E8D2C4820E /* CloudDeviceService.swift */,
+				5A9E3D9E4A4146F5AD219600 /* AppUpdateChecker.swift */,
 				D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */,
 				D22DC77505406627AA516040 /* DashboardDataService.swift */,
 				6A5F1CF7485D4C08A1F9355D /* OnlineDeviceConnectionCoordinator.swift */,
@@ -493,6 +501,7 @@
 			isa = PBXGroup;
 			children = (
 				D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */,
+				6E7F9D9C16B348B5B4C5A8A2 /* CloudDevicePresentationPolicy.swift */,
 				71D9EF4C7CF9BE849F017EDA /* DeviceChainViewModel.swift */,
 			);
 			path = ViewModels;
@@ -716,6 +725,7 @@
 				B70CD70DCDCA73539F3EA1B1 /* AppleSiliconInfoCardView.swift in Sources */,
 				21C986C5254A1432048CEC23 /* AppleSiliconOptimizer.swift in Sources */,
 				7A447F0A23637367C8D92BD7 /* AppleSiliconSystemCoordinator.swift in Sources */,
+				5A9E3D9F4A4146F5AD219601 /* AppUpdateChecker.swift in Sources */,
 				91C63733F74A311A141A022C /* AuroraBackground.swift in Sources */,
 				A17447C790F9151442DBEC93 /* AuroraBackgroundV2.swift in Sources */,
 				B9967812E8862B2D5E969337 /* AuthenticationView.swift in Sources */,
@@ -725,6 +735,7 @@
 				5EE1800E4C259668BD77A84C /* ClassicBackground.swift in Sources */,
 				5C76D7E4E513E62149275F6A /* ClassicBackgroundV2.swift in Sources */,
 				513D63C5FD6A64DCFB0E0437 /* CloudDeviceListViewModel.swift in Sources */,
+				51A7B7E0A61F4F5A9C85A8B2 /* CloudDevicePresentationPolicy.swift in Sources */,
 				BCCE38FACB757941021C0F32 /* CloudDeviceService.swift in Sources */,
 				BD94EE9880420BECE2D44FBF /* CompactDeviceRow.swift in Sources */,
 				E02FFD8F6509AEAC92FAC3D7 /* ConcurrentSystemMonitor.swift in Sources */,
@@ -773,9 +784,10 @@
 				8604A809C8518BE2CC1E8129 /* PerformanceMonitoringPanelView.swift in Sources */,
 				2F9EFBC936751A50E4539FC5 /* PreferencesView.swift in Sources */,
 				195373F5C2826F2164ADA210 /* QuickActionButton.swift in Sources */,
-				92AC76905AB39D110030E66C /* QuickActionsPanelView.swift in Sources */,
-				4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */,
-				941EAC8F6EC80A3726E76FDD /* RemoteDesktopView.swift in Sources */,
+					92AC76905AB39D110030E66C /* QuickActionsPanelView.swift in Sources */,
+					4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */,
+					2D88B02F6C9D4D8E83F19F01 /* RemoteControlSecurityNoticePanelController.swift in Sources */,
+					941EAC8F6EC80A3726E76FDD /* RemoteDesktopView.swift in Sources */,
 				1107809D175EC5DE28930559 /* RemoteDisplayView.swift in Sources */,
 				F2AD1913110B4DC7058F4997 /* RemoteSessionRow.swift in Sources */,
 				FB5D3C7F0F4BCF51EFA9DBD4 /* RemoteSessionStatusView.swift in Sources */,

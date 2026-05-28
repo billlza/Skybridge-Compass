@@ -272,6 +272,9 @@ public class AirPlayManager: NSObject, ObservableObject, Sendable {
             if autoDiscoverAppleTV && !isScanning {
                 startScanning()
                 logger.info("自动发现Apple TV已启用")
+            } else {
+                refreshDevices()
+                logger.info("Apple TV发现设置已更新: \(autoDiscoverAppleTV)")
             }
         }
         
@@ -279,6 +282,7 @@ public class AirPlayManager: NSObject, ObservableObject, Sendable {
         if let showHomePodDevices = userInfo["showHomePodDevices"] as? Bool {
  // 重新过滤设备列表
             filterDevicesBySettings()
+            refreshDevices()
             logger.info("HomePod设备显示设置已更新: \(showHomePodDevices)")
         }
         
@@ -286,7 +290,13 @@ public class AirPlayManager: NSObject, ObservableObject, Sendable {
         if let showThirdPartyDevices = userInfo["showThirdPartyAirPlayDevices"] as? Bool {
  // 重新过滤设备列表
             filterDevicesBySettings()
+            refreshDevices()
             logger.info("第三方AirPlay设备显示设置已更新: \(showThirdPartyDevices)")
+        }
+
+        if let _ = userInfo["scanInterval"] as? TimeInterval, isScanning {
+            refreshDevices()
+            logger.info("AirPlay扫描间隔已更新")
         }
     }
     

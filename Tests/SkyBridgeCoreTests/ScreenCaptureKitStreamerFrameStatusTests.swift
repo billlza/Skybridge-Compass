@@ -48,6 +48,16 @@ final class ScreenCaptureKitStreamerFrameStatusTests: XCTestCase {
         XCTAssertTrue(CMTimeCompare(clamped, .zero) > 0)
     }
 
+    func testHighFpsScreenCaptureSamplesAheadOfEncodedCadence() {
+        let highFPS = ScreenCaptureKitStreamer.screenCaptureMinimumFrameInterval(forConfiguredFPS: 60)
+        XCTAssertEqual(highFPS.value, 1)
+        XCTAssertEqual(highFPS.timescale, 120)
+
+        let normalFPS = ScreenCaptureKitStreamer.screenCaptureMinimumFrameInterval(forConfiguredFPS: 30)
+        XCTAssertEqual(normalFPS.value, 1)
+        XCTAssertEqual(normalFPS.timescale, 30)
+    }
+
     func testHighFps2KUsesDeeperScreenCaptureQueueWithoutExceedingAppleCap() {
         XCTAssertEqual(
             ScreenCaptureKitStreamer.captureQueueDepth(
@@ -155,10 +165,10 @@ final class ScreenCaptureKitStreamerFrameStatusTests: XCTestCase {
         XCTAssertTrue(pts.isValid)
     }
 
-    func testHighFpsCadenceTimerPollsFasterThanTargetFrameInterval() {
+    func testHighFpsCadenceTimerUsesTargetFrameIntervalBecauseSamplesAlsoTriggerCadence() {
         XCTAssertEqual(
             ScreenCaptureKitStreamer.cadenceTimerIntervalNanoseconds(forConfiguredFPS: 60),
-            8_333_333
+            16_666_666
         )
         XCTAssertEqual(
             ScreenCaptureKitStreamer.cadenceTimerIntervalNanoseconds(forConfiguredFPS: 30),

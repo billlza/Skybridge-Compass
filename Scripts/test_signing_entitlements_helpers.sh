@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=Scripts/signing_entitlements_helpers.sh
 source "${SCRIPT_DIR}/signing_entitlements_helpers.sh"
 
 fail() {
@@ -113,6 +114,56 @@ cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>aps-environment</key>
+  <string>development</string>
+</dict>
+</plist>
+EOF
+
+cp "${SOURCE_ENTITLEMENTS}" "${OUTPUT_ENTITLEMENTS}"
+if skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
+  fail "Push notification aps-environment should require matching provisioning profile coverage"
+fi
+
+python3 - "${PROFILE_PLIST}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+profile_path = Path(sys.argv[1])
+with profile_path.open("rb") as fh:
+    profile = plistlib.load(fh)
+profile.setdefault("Entitlements", {})["aps-environment"] = "production"
+with profile_path.open("wb") as fh:
+    plistlib.dump(profile, fh)
+PY
+
+if skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
+  fail "Push notification aps-environment should reject provisioning profiles with the wrong environment"
+fi
+
+python3 - "${PROFILE_PLIST}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+profile_path = Path(sys.argv[1])
+with profile_path.open("rb") as fh:
+    profile = plistlib.load(fh)
+profile.setdefault("Entitlements", {})["aps-environment"] = "development"
+with profile_path.open("wb") as fh:
+    plistlib.dump(profile, fh)
+PY
+
+if ! skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
+  fail "Push notification aps-environment should pass when the provisioning profile matches the requested environment"
+fi
+
+cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
   <key>com.apple.security.application-groups</key>
   <array>
     <string>group.com.skybridge.compass</string>
@@ -131,6 +182,8 @@ cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>com.apple.application-identifier</key>
+  <string>$(AppIdentifierPrefix)com.skybridge.compass.pro</string>
   <key>com.apple.developer.ubiquity-kvstore-identifier</key>
   <string>$(TeamIdentifierPrefix)com.skybridge.compass</string>
   <key>com.apple.security.network.client</key>
@@ -145,12 +198,109 @@ skybridge_prepare_signing_entitlements \
   "${INFO_PLIST}" \
   "${PROFILE_PLIST}"
 
-if grep -q '$(TeamIdentifierPrefix)' "${OUTPUT_ENTITLEMENTS}"; then
+if grep -qF '$''(TeamIdentifierPrefix)' "${OUTPUT_ENTITLEMENTS}"; then
   fail "prepare_signing_entitlements should expand TeamIdentifierPrefix before codesign receives the entitlements"
 fi
 
 grep -q '<string>YKUPL7Z869.com.skybridge.compass</string>' "${OUTPUT_ENTITLEMENTS}" \
   || fail "expanded KVS entitlement should use the provisioning profile TeamIdentifier prefix"
+
+grep -q '<string>YKUPL7Z869.com.skybridge.compass.pro</string>' "${OUTPUT_ENTITLEMENTS}" \
+  || fail "expanded application identifier entitlement should use the provisioning profile AppIdentifier prefix"
+
+if skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
+  fail "iCloud KVS coverage check should fail when the provisioning profile is missing the requested KVS entitlement"
+fi
+
+cat > "${PROFILE_PLIST}" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Platform</key>
+  <array>
+    <string>OSX</string>
+  </array>
+  <key>TeamIdentifier</key>
+  <array>
+    <string>YKUPL7Z869</string>
+  </array>
+  <key>ApplicationIdentifierPrefix</key>
+  <array>
+    <string>YKUPL7Z869</string>
+  </array>
+  <key>Entitlements</key>
+  <dict>
+    <key>com.apple.application-identifier</key>
+    <string>YKUPL7Z869.com.skybridge.compass.pro</string>
+    <key>com.apple.developer.applesignin</key>
+    <array>
+      <string>Default</string>
+    </array>
+    <key>com.apple.developer.icloud-container-identifiers</key>
+    <array>
+      <string>iCloud.com.skybridge.compass</string>
+    </array>
+    <key>com.apple.developer.icloud-services</key>
+    <string>*</string>
+    <key>com.apple.developer.ubiquity-container-identifiers</key>
+    <array>
+      <string>iCloud.com.skybridge.compass</string>
+    </array>
+    <key>com.apple.developer.ubiquity-kvstore-identifier</key>
+    <string>YKUPL7Z869.*</string>
+    <key>com.apple.security.application-groups</key>
+    <array>
+      <string>group.com.skybridge.compass</string>
+    </array>
+  </dict>
+</dict>
+</plist>
+EOF
+
+cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.application-identifier</key>
+  <string>$(AppIdentifierPrefix)com.skybridge.compass.pro</string>
+  <key>com.apple.developer.icloud-container-identifiers</key>
+  <array>
+    <string>iCloud.com.skybridge.compass</string>
+  </array>
+  <key>com.apple.developer.icloud-services</key>
+  <array>
+    <string>CloudKit</string>
+    <string>CloudDocuments</string>
+  </array>
+  <key>com.apple.developer.ubiquity-container-identifiers</key>
+  <array>
+    <string>iCloud.com.skybridge.compass</string>
+  </array>
+  <key>com.apple.developer.ubiquity-kvstore-identifier</key>
+  <string>$(TeamIdentifierPrefix)com.skybridge.compass</string>
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.com.skybridge.compass</string>
+  </array>
+</dict>
+</plist>
+EOF
+
+skybridge_prepare_signing_entitlements \
+  "${SOURCE_ENTITLEMENTS}" \
+  "${OUTPUT_ENTITLEMENTS}" \
+  "${INFO_PLIST}" \
+  "${PROFILE_PLIST}"
+
+if ! skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
+  fail "Developer ID profile wildcards should cover concrete iCloud services and KVS entitlements"
+fi
+
+if ! skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${SOURCE_ENTITLEMENTS}"; then
+  fail "profile coverage checks should expand TeamIdentifierPrefix placeholders before comparing profile-backed entitlements"
+fi
 
 cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -169,6 +319,41 @@ EOF
 cp "${SOURCE_ENTITLEMENTS}" "${OUTPUT_ENTITLEMENTS}"
 if skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
   fail "App Groups coverage check should fail when the provisioning profile is missing one of the requested groups"
+fi
+
+cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.developer.device-information.user-assigned-device-name</key>
+  <true/>
+</dict>
+</plist>
+EOF
+
+cp "${SOURCE_ENTITLEMENTS}" "${OUTPUT_ENTITLEMENTS}"
+if skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
+  fail "user-assigned device name entitlement must require provisioning profile coverage"
+fi
+
+python3 - "${PROFILE_PLIST}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+profile_path = Path(sys.argv[1])
+with profile_path.open("rb") as fh:
+    profile = plistlib.load(fh)
+profile.setdefault("Entitlements", {})[
+    "com.apple.developer.device-information.user-assigned-device-name"
+] = True
+with profile_path.open("wb") as fh:
+    plistlib.dump(profile, fh)
+PY
+
+if ! skybridge_profile_supports_requested_profile_backed_entitlements "${PROFILE_PLIST}" "${OUTPUT_ENTITLEMENTS}"; then
+  fail "user-assigned device name entitlement should pass when the profile explicitly covers it"
 fi
 
 cat > "${SOURCE_ENTITLEMENTS}" <<'EOF'

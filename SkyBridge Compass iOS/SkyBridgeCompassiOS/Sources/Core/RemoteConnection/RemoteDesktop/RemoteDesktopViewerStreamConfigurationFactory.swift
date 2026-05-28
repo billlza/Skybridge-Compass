@@ -15,6 +15,7 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
         let mediaAudioEndpoint: SkyBridgeMediaEndpoint?
         let mediaSessionId: String?
         let streamRefreshToken: UInt64?
+        let securityIdentity: RemoteDesktopSecurityIdentityPayload?
         let smokeDimensions: (width: Int, height: Int)?
         let smokeTargetFrameRate: Int?
     }
@@ -114,7 +115,8 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
             audioChannelCount: 2,
             performanceValidationMode: strictMediaValidationEnabled ? "extreme" : nil,
             mediaFallbackPolicy: activeTransportMode == .crossNetwork ? "forbidden" : "fail-fast",
-            streamRefreshToken: input.streamRefreshToken
+            streamRefreshToken: input.streamRefreshToken,
+            remoteControlSecurityIdentity: input.securityIdentity?.isEmpty == true ? nil : input.securityIdentity
         )
     }
 

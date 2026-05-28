@@ -87,6 +87,166 @@ final class RegressionHardeningTests: XCTestCase {
     )
   }
 
+  func testBenignSmokeStartupStatesStayOutOfWarningLogs() throws {
+    let liveActivitySource = try liveActivityManagerSource()
+    let appSource = try skyBridgeCompassAppSource()
+    let fileTransferServiceSource = try iosFileTransferNetworkServiceSource()
+    let remoteDesktopSource = try remoteDesktopManagerSource()
+    let p2pConnectionSource = try p2pConnectionManagerSource()
+
+    XCTAssertFalse(
+      liveActivitySource.contains("SkyBridgeLogger.shared.warning(\"⚠️ Live Activities 未启用\")"),
+      "Disabled Live Activities are a normal device setting and must not make smoke logs noisy."
+    )
+    XCTAssertFalse(
+      appSource.contains("SkyBridgeLogger.shared.warning(\"ℹ️ 灵动岛 Live Activity 未启动"),
+      "A skipped Live Activity startup is expected when the device setting is off."
+    )
+    XCTAssertFalse(
+      fileTransferServiceSource.contains("SkyBridgeLogger.shared.warning(\n            \"⚠️ iOS 文件传输 listener 不健康"),
+      "A stopped listener that is immediately restarted by ensureHealthy should be logged as self-healing info."
+    )
+    XCTAssertTrue(
+      remoteDesktopSource.contains(
+        "if crossNetwork.activeRemoteDesktopSessionId == nil {\n            SkyBridgeLogger.shared.info(\"ℹ️ \\(message)\")\n        } else {\n            SkyBridgeLogger.shared.warning(\"⚠️ \\(message)\")\n        }"
+      ),
+      "Late render-continuity recovery after the remote desktop session has ended must not be emitted as a warning."
+    )
+    XCTAssertFalse(
+      remoteDesktopSource.contains("SkyBridgeLogger.shared.warning(\n                    \"⚠️ 视频解码队列正在等待关键帧，已暂时丢弃预测帧\""),
+      "Dropping predictive frames while already waiting for a keyframe is expected decode policy; queue overflow remains the warning."
+    )
+    XCTAssertFalse(
+      p2pConnectionSource.contains("SkyBridgeLogger.shared.warning(\"🔔 收到配对/受信任申请"),
+      "Receiving a pairing/trust request is a normal inbound event and should not dirty smoke logs with warnings."
+    )
+    XCTAssertFalse(
+      p2pConnectionSource.contains("SkyBridgeLogger.shared.warning(\"⏹️ 连接已取消/断开"),
+      "A cancelled connection state can be ordinary transport teardown; concrete failures should be logged at their failure site."
+    )
+  }
+
+  func testP2PConnectionReadyGateTimeoutResumesUnresolvedConnection() async {
+    let gate = P2PConnectionManager.ConnectionReadyGate()
+    let startedAt = Date()
+
+    do {
+      try await gate.waitReady(timeoutSeconds: 0.05)
+      XCTFail("Connection ready wait should fail when no ready or failed state arrives.")
+    } catch {
+      XCTAssertLessThan(
+        Date().timeIntervalSince(startedAt),
+        1.0,
+        "Connection candidate timeout must not hang behind an uncancellable continuation."
+      )
+    }
+  }
+
+  func testPlainFrameReceiveGateTimeoutResumesUnresolvedReceive() async {
+    let gate = P2PConnectionManager.PlainFrameReceiveGate()
+    let startedAt = Date()
+
+    do {
+      _ = try await gate.wait(timeoutSeconds: 0.05)
+      XCTFail("Plain frame receive should fail when no frame arrives.")
+    } catch {
+      XCTAssertLessThan(
+        Date().timeIntervalSince(startedAt),
+        1.0,
+        "Plain frame receive timeout must not hang behind an uncancellable continuation."
+      )
+    }
+  }
+
+  func testRealDeviceSmokeUsesDynamicMacControlPortForPIBRoute() throws {
+    let hostSource = try repositoryScriptSource("Sources/LocalLanInteropHost/main.swift")
+    let smokeScript = try repositoryScriptSource("Scripts/run_real_device_p2p_remote_smoke.sh")
+    let harnessSource = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalP2PSmokeHarness.swift"
+    )
+    let p2pSource = try p2pConnectionManagerSource()
+
+    XCTAssertTrue(hostSource.contains("waitForControlAdvertisementPort()"))
+    XCTAssertTrue(hostSource.contains("ready discovery=_skybridge._tcp port=\\(controlPort)"))
+    XCTAssertFalse(
+      hostSource.contains("ready discovery=_skybridge._tcp port=9527"),
+      "The macOS smoke host must report the actual dynamic listener port, not a stale fixed port."
+    )
+
+    XCTAssertTrue(smokeScript.contains("MAC_CONTROL_PORT="))
+    XCTAssertTrue(smokeScript.contains("SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-direct"))
+    XCTAssertTrue(smokeScript.contains("MAC_DIRECT_BIN=\"$ROOT_DIR/.build/debug/LocalLanInteropHost\""))
+    XCTAssertTrue(smokeScript.contains("if [[ \"$MAC_HOST_LAUNCH_MODE\" == \"direct\" ]]"))
+    XCTAssertTrue(smokeScript.contains("\"$MAC_DIRECT_BIN\" >\"$HOST_STDOUT\" 2>&1 &"))
+    XCTAssertTrue(smokeScript.contains("launch method=direct-app-binary pid=$HOST_PID mode=direct binary=swiftpm-build-product"))
+    XCTAssertFalse(smokeScript.contains("fallbackFrom=open-app-bundle"))
+    XCTAssertTrue(smokeScript.contains("failed stage=mac-host"))
+    XCTAssertTrue(smokeScript.contains("verify_mac_control_port_reachable \"$MAC_CONTROL_HOST\" \"$MAC_CONTROL_PORT\""))
+    XCTAssertTrue(smokeScript.contains("mac-control-port reachable=1 host=$host port=$port source=pre-ios-probe"))
+    XCTAssertTrue(smokeScript.contains("failed stage=mac-host phase=control-port-probe reason=tcp-unreachable"))
+    XCTAssertTrue(smokeScript.contains("SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT=\"$MAC_CONTROL_PORT\""))
+    XCTAssertTrue(smokeScript.contains("SKYBRIDGE_SMOKE_TARGET_HOST=\"$MAC_CONTROL_HOST\""))
+
+    XCTAssertTrue(harnessSource.contains("applySmokePinnedControlRoute"))
+    XCTAssertTrue(harnessSource.contains("SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT"))
+    XCTAssertTrue(harnessSource.contains("updated.portMap[controlService] = port"))
+
+    XCTAssertTrue(
+      p2pSource.contains("connectionEndpointCandidates(for: device, preferDirectHostPort: true)"),
+      "PIB-1 OOB binding should try the pinned direct LAN route before Bonjour service fallback."
+    )
+  }
+
+  func testP2PPathRecoverySocketFailureIsRecoverableOnlyWithRecoveryContext() throws {
+    let socketNotConnected = NWError.posix(.ENOTCONN)
+    let connectionRefused = NWError.posix(.ECONNREFUSED)
+    let source = try p2pConnectionManagerSource()
+    let failedStateBody = try sourceSlice(
+      from: "private func handleConnectionStateChange",
+      to: "private func startHeartbeatIfNeeded",
+      in: source
+    )
+
+    XCTAssertTrue(
+      P2PConnectionManager.isRecoverablePathRecoverySocketFailure(
+        socketNotConnected,
+        pathRecoveryScheduled: true,
+        recoveryMessageActive: false
+      )
+    )
+    XCTAssertTrue(
+      P2PConnectionManager.isRecoverablePathRecoverySocketFailure(
+        socketNotConnected,
+        pathRecoveryScheduled: false,
+        recoveryMessageActive: true
+      )
+    )
+    XCTAssertFalse(
+      P2PConnectionManager.isRecoverablePathRecoverySocketFailure(
+        socketNotConnected,
+        pathRecoveryScheduled: false,
+        recoveryMessageActive: false
+      ),
+      "Socket-not-connected without an active path-recovery transition is a real connection failure."
+    )
+    XCTAssertFalse(
+      P2PConnectionManager.isRecoverablePathRecoverySocketFailure(
+        connectionRefused,
+        pathRecoveryScheduled: true,
+        recoveryMessageActive: false
+      ),
+      "Only the Network.framework ENOTCONN transition emitted during path recovery should be demoted."
+    )
+    XCTAssertTrue(
+      failedStateBody.contains("upsertActiveConnection(device: effectiveDevice, status: .connecting)"),
+      "Recoverable path-loss failures must keep the presentation in a reconnecting state."
+    )
+    XCTAssertTrue(
+      failedStateBody.contains("if !isPathRecoverySocketFailure {\n                cancelPeerProtectionRoots"),
+      "Recoverable path-loss failures must not reset reconnect budget or protected discovery roots."
+    )
+  }
+
   func testRemoteAudioSoftOverflowUsesBackpressureInsteadOfPlayerReset() throws {
     let root = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
@@ -153,7 +313,8 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       source.contains("strictRelayBindRequired ? .requireAcknowledgement : .optimisticAfterSend"))
     XCTAssertTrue(source.contains("relayBindPolicy: relayBindPolicy"))
-    XCTAssertTrue(source.contains("payload.mediaAudioEndpoint == nil"))
+    XCTAssertTrue(
+      source.contains("payloadIncludesAudioEndpoint: payload.mediaAudioEndpoint != nil"))
   }
 
   func testRealtimeMediaAudioReceiverStartupIsSingleflightAndObservable() throws {
@@ -256,6 +417,32 @@ final class RegressionHardeningTests: XCTestCase {
       source.contains("pushViewerStreamConfiguration(force: false, refreshStream: false)"))
   }
 
+  func testLANRealtimeAudioNoTrafficRepublishesEndpointInsteadOfWaitingOnJitter() throws {
+    let source = try remoteDesktopManagerSource()
+    let noTrafficBody = try sourceSlice(
+      from: "private func scheduleRealtimeMediaAudioNoTrafficRecovery(",
+      to: "private func scheduleRealtimeMediaAudioEndpointRenewal(",
+      in: source
+    )
+
+    XCTAssertTrue(noTrafficBody.contains("expectedTransportMode == .crossNetwork || expectedTransportMode == .lan"))
+    XCTAssertTrue(noTrafficBody.contains("self.activeTransportMode == expectedTransportMode"))
+    XCTAssertTrue(noTrafficBody.contains("\"lanNoTrafficRecovery\""))
+    XCTAssertTrue(noTrafficBody.contains("\"lanNoTrafficRecoveryExhausted\""))
+    XCTAssertTrue(noTrafficBody.contains("\"lan-endpoint-published-but-no-datagrams\""))
+    XCTAssertTrue(noTrafficBody.contains("action=stream-config-republish"))
+    XCTAssertTrue(noTrafficBody.contains("action=receiver-rebind"))
+    XCTAssertTrue(noTrafficBody.contains("reason: \"lan-no-traffic-after-republish\""))
+    XCTAssertTrue(noTrafficBody.contains("self.ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mode)"))
+    XCTAssertTrue(noTrafficBody.contains("await self.pushViewerStreamConfiguration(force: true, refreshStream: false)"))
+    XCTAssertTrue(noTrafficBody.contains("self.scheduleRealtimeMediaAudioNoTrafficRecovery("))
+    XCTAssertTrue(noTrafficBody.contains("\"action\": \"doctor-fail\""))
+    XCTAssertFalse(
+      noTrafficBody.contains("guard activeTransportMode == .crossNetwork else { return }"),
+      "LAN realtime audio zero-rx must actively republish the UDP endpoint instead of only letting jitter diagnostics report starvation."
+    )
+  }
+
   func testRelayBindRejectedAndMalformedStillFailCurrentEndpoint() throws {
     let source = try remoteDesktopManagerSource()
     let failureCases = try sourceSlice(
@@ -336,6 +523,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(failureBody.contains("event=receiverStartFailed"))
     XCTAssertTrue(failureBody.contains("reason=\\(reason.rawValue)"))
     XCTAssertTrue(failureBody.contains("stage=\\(stage)"))
+    XCTAssertTrue(failureBody.contains("SkyBridgeSmokeTraceWriter.appendStatus("))
+    XCTAssertTrue(failureBody.contains("audioRxReceiverStartFailed"))
+    XCTAssertTrue(failureBody.contains("SkyBridgeSmokeTraceWriter.appendMediaDiagnostic("))
     XCTAssertFalse(
       failureBody.contains("pushViewerStreamConfiguration"),
       "Audio receiver startup failures must not send stream configuration updates."
@@ -366,8 +556,18 @@ final class RegressionHardeningTests: XCTestCase {
       in: source
     )
     XCTAssertTrue(
-      hevcFailureBody.contains("handleTransportFailure(\"hevc-main-path-failed: \\(reason)\")"),
-      "Repeated HEVC failures must fail the main path instead of pushing a refreshed H.264 fallback configuration."
+      hevcFailureBody.contains("await failFastRemoteDesktopRenderMainPath("),
+      "Repeated HEVC failures must fail the render main path instead of closing the LAN transport and realtime audio receiver."
+    )
+    XCTAssertTrue(
+      hevcFailureBody.contains("reason: \"hevc-main-path-failed: \\(reason)\"")
+    )
+    XCTAssertTrue(
+      hevcFailureBody.contains("forceSyncFrameWait: true")
+    )
+    XCTAssertFalse(
+      hevcFailureBody.contains("handleTransportFailure"),
+      "HEVC render-path failures must not be propagated as transport failures."
     )
     XCTAssertFalse(
       hevcFailureBody.contains("pushViewerStreamConfiguration"),
@@ -404,6 +604,8 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(typesSource.contains("case streamConfigurationAck = \"streamConfigurationAck\""))
     XCTAssertTrue(managerSource.contains("case .streamConfigurationAck:"))
     XCTAssertTrue(managerSource.contains("handleStreamConfigurationAck"))
+    XCTAssertTrue(managerSource.contains("lastAcknowledgedMediaAudioEndpointPresent = ack.audioEndpointPresent"))
+    XCTAssertTrue(managerSource.contains("audioEndpointAck=\\(lastAcknowledgedMediaAudioEndpointPresent)"))
   }
 
   func testSBC2ReassemblerSuppressesRepeatedOrphanChunksUntilNextFrameStarts() throws {
@@ -1006,6 +1208,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(scriptSource.contains("Metal aggregate displayFPS below"))
     XCTAssertTrue(scriptSource.contains("Metal aggregate submittedFPS exceeded strict target"))
     XCTAssertTrue(scriptSource.contains("Metal aggregate displayFPS exceeded strict target"))
+    XCTAssertTrue(scriptSource.contains("Metal aggregate inputFPS below"))
     XCTAssertTrue(scriptSource.contains("Metal CI fallback rendered frames were nonzero"))
     XCTAssertTrue(scriptSource.contains("Metal direct BGRA frames did not match submitted frames"))
     XCTAssertTrue(scriptSource.contains("iOS worst two-second display cadence below requirement"))
@@ -1016,22 +1219,57 @@ final class RegressionHardeningTests: XCTestCase {
       scriptSource.contains("iOS audio playback did not progress inside final pass window"))
     XCTAssertTrue(scriptSource.contains("ios-lan-remote-rx "))
     XCTAssertTrue(scriptSource.contains("iOS LAN receive did not use sbc2-chunked-v1"))
+    XCTAssertTrue(scriptSource.contains("stream-parser-low-latency-256k-4frame-6ms-drain-budget"))
     XCTAssertTrue(
       scriptSource.contains(
         "iOS LAN receive did not prove low-latency read-ahead and bounded drain"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "iOS LAN parser drain budget samples did not cover every telemetry line"))
+    XCTAssertTrue(scriptSource.contains("iOS LAN parser drain budget exceeded strict 6ms bound"))
+    XCTAssertTrue(scriptSource.contains("iOS LAN parser drain exceeded strict budget inside final pass window"))
+    XCTAssertTrue(scriptSource.contains("iOS LAN parser drain hit the strict 6ms budget inside final pass window"))
     XCTAssertTrue(
       scriptSource.contains("iOS LAN screen delivery samples did not cover every telemetry line"))
     XCTAssertTrue(
       scriptSource.contains(
         "iOS LAN screen delivery was not strict decoded-to-Metal 60Hz feed for every telemetry line"
       ))
-    XCTAssertTrue(scriptSource.contains("iOS LAN screen delivery FPS below"))
+    XCTAssertTrue(scriptSource.contains("iOS LAN sampled screen delivery FPS far below final pass marker"))
     XCTAssertTrue(
       scriptSource.contains(
         "iOS LAN direct screen delivery queued frames instead of immediate Metal feed"))
     XCTAssertTrue(
       scriptSource.contains("iOS LAN screen delivery delay exceeded 100ms inside final pass window")
     )
+    XCTAssertTrue(scriptSource.contains("strict_ios_decode_feed_mode = \"ordered-vt-decode-metal-direct\""))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "lan_rx_decode_feed_samples != lan_rx_count"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "iOS LAN decode feed was not ordered VideoToolbox-to-Metal direct for every telemetry line"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "lan_rx_decode_attempted += int_metric(line, \"decodeAttempted\")"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "lan_rx_decode_accepted += int_metric(line, \"decodeAccepted\")"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "lan_rx_decode_dropped += int_metric(line, \"decodeDropped\")"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "lan_rx_decode_pending_max = max(lan_rx_decode_pending_max, int_metric(line, \"decodePendingMax\"))"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "lan_rx_decode_in_flight_max = max(lan_rx_decode_in_flight_max, int_metric(line, \"decodeInFlightMax\"))"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "lan_rx_decode_waiting_sync += int_metric(line, \"decodeWaitingSyncSamples\")"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "lan_rx_decode_resets += int_metric(line, \"decodeResets\")"))
     XCTAssertTrue(
       scriptSource.contains(
         "iOS LAN receive did not report SBC2 screen frames inside final pass window"))
@@ -1081,8 +1319,10 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       scriptSource.contains(
         "\"mac remote\" in line or \"mac-remote\" in line or \"mac-stream-config\" in line"))
-    XCTAssertTrue(scriptSource.contains("iOS LAN receive aggregate screenFPS below"))
+    XCTAssertTrue(scriptSource.contains("iOS LAN sampled receive screenFPS far below final pass marker"))
     XCTAssertTrue(scriptSource.contains("maxGapMs"))
+    XCTAssertTrue(scriptSource.contains("lanSampledScreenFPS="))
+    XCTAssertTrue(scriptSource.contains("lanScreenDeliveryFPS="))
     XCTAssertTrue(
       scriptSource.contains("iOS core media gate fell out of pass state inside final window"))
     XCTAssertTrue(scriptSource.contains("metal_sample_ms += int_metric(line, \"sampleMs\")"))
@@ -1125,6 +1365,7 @@ final class RegressionHardeningTests: XCTestCase {
       scriptSource.contains(
         "Metal display cadence is not the strict 60Hz MTKView native-vsync path"))
     XCTAssertTrue(scriptSource.contains("metalDisplayLinkPumpFPS="))
+    XCTAssertTrue(scriptSource.contains("metalInputFPS="))
     XCTAssertTrue(scriptSource.contains("metalQueueBackpressure="))
     XCTAssertTrue(scriptSource.contains("lanScreenDeliveryAttempted="))
     XCTAssertTrue(scriptSource.contains("lanScreenDeliveryBackpressure="))
@@ -1146,7 +1387,7 @@ final class RegressionHardeningTests: XCTestCase {
       ))
     XCTAssertTrue(
       scriptSource.contains(
-        "Mac remote contentBacklogLimit drifted from the strict 12-frame chunked contentProcessed pipeline"
+        "Mac remote contentBacklogLimit drifted from the strict byte-bounded chunked contentProcessed pipeline"
       ))
     XCTAssertTrue(
       scriptSource.contains(
@@ -1158,8 +1399,29 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       scriptSource.contains(
         "Mac HEVC SCK display cadence exceeded bounded producer recovery inside final pass window"))
-    XCTAssertTrue(scriptSource.contains("SKYBRIDGE_SMOKE_REMOTE_ANIMATION=1"))
+    XCTAssertFalse(scriptSource.contains("SKYBRIDGE_SMOKE_REMOTE_ANIMATION=1"))
+    XCTAssertTrue(scriptSource.contains("MAC_APP_BUNDLE=\"$ARTIFACT_DIR/LocalLanInteropHost.app\""))
+    XCTAssertTrue(scriptSource.contains("prepare_macos_smoke_host_app_bundle()"))
+    XCTAssertTrue(scriptSource.contains("start_macos_smoke_host()"))
+    XCTAssertTrue(scriptSource.contains("/usr/bin/open"))
+    XCTAssertTrue(scriptSource.contains("register_macos_smoke_host_app_bundle()"))
+    XCTAssertTrue(scriptSource.contains("LocalLanInteropHostSmoke.${RUN_ID}"))
+    XCTAssertTrue(scriptSource.contains("fallback=direct-app-binary"))
+    XCTAssertTrue(scriptSource.contains("SKYBRIDGE_SMOKE_ROLE=mac-smoke-source"))
+    XCTAssertTrue(scriptSource.contains("windowOcclusionVisible=1"))
+    XCTAssertTrue(scriptSource.contains("local source_webrtc_framework=\"$ROOT_DIR/.build/debug/WebRTC.framework\""))
+    XCTAssertTrue(scriptSource.contains("cp -R \"$source_webrtc_framework\" \"$macos_dir/WebRTC.framework\""))
+    XCTAssertTrue(scriptSource.contains("/usr/bin/codesign --force --deep --sign - \"$MAC_APP_BUNDLE\""))
+    XCTAssertTrue(scriptSource.contains("-c 'Add :CFBundlePackageType string APPL'"))
+    XCTAssertTrue(scriptSource.contains("-c 'Add :NSPrincipalClass string NSApplication'"))
+    XCTAssertFalse(scriptSource.contains("-c 'Add :LSUIElement bool true'"))
+    XCTAssertFalse(scriptSource.contains("*.bundle"))
+    XCTAssertTrue(scriptSource.contains("MAC_APP_BIN=\"$macos_dir/LocalLanInteropHost\""))
     XCTAssertTrue(scriptSource.contains("smoke-capture-source active=1"))
+    XCTAssertTrue(scriptSource.contains("detect_macos_loginwindow_occlusion()"))
+    XCTAssertTrue(scriptSource.contains("CGWindowListCopyWindowInfo"))
+    XCTAssertTrue(scriptSource.contains("reason=screen-locked-loginwindow-occlusion"))
+    XCTAssertTrue(scriptSource.contains("detect_macos_loginwindow_occlusion\nwait_for_file_pattern \"$HOST_STATUS\" 'smoke-capture-source active=1 .*windowOcclusionVisible=1'"))
     XCTAssertTrue(scriptSource.contains("macSCKSourceCallbackBottleneck="))
     XCTAssertFalse(scriptSource.contains("Mac HEVC aggregate captureFPS below"))
     XCTAssertFalse(scriptSource.contains("Mac HEVC aggregate meaningfulFPS below"))
@@ -1176,17 +1438,17 @@ final class RegressionHardeningTests: XCTestCase {
     )
     XCTAssertTrue(
       scriptSource.contains(
-        "Mac remote missed cadence slots exceeded strict zero-miss cadence window"))
+        "Mac remote missed cadence slots exceeded strict zero-miss cadence budget"))
     XCTAssertTrue(
       scriptSource.contains(
         "Mac remote queuedMax exceeded ordered SBC2 cadence buffer inside final pass window"))
     XCTAssertTrue(
       scriptSource.contains(
-        "Mac remote contentProcessed backlog exceeded the strict 12-frame limit inside final pass window"
+        "Mac remote contentProcessed backlog exceeded the strict frame limit inside final pass window"
       ))
     XCTAssertTrue(
       scriptSource.contains(
-        "Mac remote contentProcessed backlog hit the strict 12-frame ceiling inside final pass window"
+        "Mac remote contentProcessed backlog hit the strict frame ceiling inside final pass window"
       ))
     XCTAssertTrue(
       scriptSource.contains(
@@ -1281,7 +1543,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(scriptSource.contains("renderOrientation=verticalFlip"))
   }
 
-  func testLANRemoteReceiveReadAheadKeepsSocketArmedBeforeDecode() throws {
+  func testLANRemoteReceiveRegistersRawChunkBeforeRearmingSocket() throws {
     let source = try remoteDesktopManagerSource()
     let runtimeModelsSource = try remoteDesktopRuntimeModelsSource()
     let runtimeSources = source + "\n" + runtimeModelsSource
@@ -1301,8 +1563,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(receiveChunk.contains("minimumIncompleteLength: 1"))
     XCTAssertTrue(runtimeModelsSource.contains("enum RemoteDesktopManagerRuntimeLimits"))
     XCTAssertTrue(
-      runtimeModelsSource.contains("static let lanReceiveChunkMaxBytes: Int = 8 * 1024"))
+      runtimeModelsSource.contains("static let lanReceiveChunkMaxBytes: Int = 256 * 1024"))
     XCTAssertTrue(runtimeModelsSource.contains("static let maxLANScreenFramesPerParserDrain = 4"))
+    XCTAssertTrue(runtimeModelsSource.contains("static let maxLANParserDrainBudgetMs: Double = 6.0"))
     XCTAssertTrue(source.contains("private let metalFeedDeliveryMaxDelayMs: Double = 100.0"))
     XCTAssertTrue(runtimeModelsSource.contains("enum LANInboundPayloadKind: Equatable"))
     XCTAssertTrue(source.contains("private var lanReceiveBufferNewestArrivalAt: Date?"))
@@ -1313,6 +1576,8 @@ final class RegressionHardeningTests: XCTestCase {
       source.contains("private lazy var lanSecureReceivePipeline = LANRemoteSecureReceivePipeline(")
     )
     XCTAssertTrue(source.contains("private var lanSecureReceiveChain: Task<Void, Never>?"))
+    XCTAssertTrue(source.contains("private var lanSecureReceiveApplyChain: Task<Void, Never>?"))
+    XCTAssertTrue(source.contains("private var lanSecureReceiveGeneration: UInt64 = 0"))
     XCTAssertTrue(source.contains("lanReceiveBufferNewestArrivalAt = nil"))
     XCTAssertTrue(
       source.contains("lanReceiveBufferArrivalMarkers.removeAll(keepingCapacity: keepingCapacity)"))
@@ -1323,18 +1588,25 @@ final class RegressionHardeningTests: XCTestCase {
       ))
     XCTAssertTrue(source.contains("lanSecureReceiveChain?.cancel()"))
     XCTAssertTrue(source.contains("lanSecureReceiveChain = nil"))
+    XCTAssertTrue(source.contains("lanSecureReceiveApplyChain?.cancel()"))
+    XCTAssertTrue(source.contains("lanSecureReceiveApplyChain = nil"))
     XCTAssertTrue(
       receiveChunk.contains(
         "maximumLength: RemoteDesktopManagerRuntimeLimits.lanReceiveChunkMaxBytes"))
     XCTAssertTrue(receiveChunk.contains("private nonisolated func receiveNextLANChunk"))
-    XCTAssertTrue(receiveChunk.contains("self?.receiveNextLANChunk(from: connection)"))
+    XCTAssertTrue(receiveChunk.contains("self.receiveNextLANChunk(from: connection)"))
+    XCTAssertTrue(receiveChunk.contains("!self.shouldContinueLANBootstrapFramingHandoff"))
     XCTAssertTrue(receiveChunk.contains("self.processSecureLANReceiveChunk("))
     XCTAssertTrue(receiveChunk.contains("self.lanReceiveBufferNewestArrivalAt = receivedAt"))
     XCTAssertTrue(
       receiveChunk.contains("(endOffset: self.lanReceiveBuffer.count, receivedAt: receivedAt)"))
     XCTAssertTrue(receiveChunk.contains("await self.processLANReceiveBuffer(from: connection)"))
-    XCTAssertTrue(processBody.contains("noteLANParserDrain("))
+    XCTAssertTrue(processBody.contains("noteLANBootstrapParserDrain("))
     XCTAssertTrue(source.contains("parserDrainMaxMs="))
+    XCTAssertTrue(source.contains("parserBudgetMs="))
+    XCTAssertTrue(source.contains("parserBudgetHits="))
+    XCTAssertTrue(source.contains("bootstrapParserDrainMaxMs="))
+    XCTAssertTrue(source.contains("bootstrapParserBudgetHits="))
     XCTAssertTrue(source.contains("payloadsPerDrainMax="))
     XCTAssertTrue(source.contains("completeFramesPerDrainMax="))
     XCTAssertTrue(source.contains("screenDelivery=immediate-decode-metal-feed-direct"))
@@ -1345,22 +1617,36 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(source.contains("private var isMetalFeedDeliverySteadyState: Bool"))
     XCTAssertFalse(source.contains("PendingMetalFeedFrame"))
     let rearmIndex = try XCTUnwrap(
-      receiveChunk.range(of: "self?.receiveNextLANChunk(from: connection)")?.lowerBound)
-    let processIndex = try XCTUnwrap(
-      receiveChunk.range(of: "await self.processLANReceiveBuffer(from: connection)")?.lowerBound)
+      receiveChunk.range(of: "self.receiveNextLANChunk(from: connection)")?.lowerBound)
+    let secureRegistrationIndex = try XCTUnwrap(
+      receiveChunk.range(of: "self.processSecureLANReceiveChunk(")?.lowerBound)
+    let bufferedAppendIndex = try XCTUnwrap(
+      receiveChunk.range(of: "self.lanReceiveBuffer.append(chunk)")?.lowerBound)
     XCTAssertLessThan(
+      secureRegistrationIndex,
       rearmIndex,
-      processIndex,
-      "LAN video receive must re-arm the socket before parsing/decode handling so MainActor stalls do not create TCP burst gaps."
+      "LAN secure receive must register raw bytes in the ordered parser chain before re-arming NWConnection; otherwise later callbacks can overtake earlier screen chunks and corrupt AES-GCM frame boundaries."
+    )
+    XCTAssertLessThan(
+      bufferedAppendIndex,
+      rearmIndex,
+      "LAN bootstrap receive must append raw bytes before re-arming NWConnection so handoff into the secure parser preserves TCP byte order."
     )
     XCTAssertTrue(processBody.contains("while isCurrentLANConnection(connection)"))
     XCTAssertTrue(processBody.contains("try nextLANFramedPayloadFromReceiveBuffer()"))
     XCTAssertTrue(
       processBody.contains("let bodyReceivedAt = nextPayload.receivedAt ?? drainStartedAt"))
+    XCTAssertTrue(processBody.contains("if let keys = lanSessionKeys"))
+    XCTAssertTrue(processBody.contains("let framedPayload = Self.lanLengthPrefixedFrame(for: data)"))
+    XCTAssertTrue(
+      processBody.contains(
+        "processSecureLANReceiveChunk(\n                        framedPayload"))
     XCTAssertTrue(source.contains("lanReceiveBufferArrivalTime(forPayloadEndingAt: totalLength)"))
     XCTAssertTrue(source.contains("consumeLANReceiveBufferBytes(totalLength)"))
+    XCTAssertTrue(source.contains("private static func lanLengthPrefixedFrame(for payload: Data) -> Data"))
     XCTAssertTrue(processBody.contains("try unwrapLANChunkedPayloadIfNeeded("))
-    XCTAssertTrue(processBody.contains("guard let completeWirePayload"))
+    XCTAssertTrue(processBody.contains("let completeWirePayload: Data"))
+    XCTAssertTrue(processBody.contains("case .complete(let payload):"))
     XCTAssertTrue(processBody.contains("let payloadKind = try await handleInboundLANPayload("))
     XCTAssertTrue(source.contains("await handleScreenData(screenData, receivedAt: bodyReceivedAt)"))
     XCTAssertTrue(source.contains("await enqueueMetalFrameForDisplay("))
@@ -1374,6 +1660,10 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       processBody.contains(
         "completeFramesInDrain >= RemoteDesktopManagerRuntimeLimits.maxLANScreenFramesPerParserDrain"
+      ))
+    XCTAssertTrue(
+      processBody.contains(
+        "Date().timeIntervalSince(drainStartedAt) * 1_000 >= RemoteDesktopManagerRuntimeLimits.maxLANParserDrainBudgetMs"
       ))
     XCTAssertTrue(
       processBody.contains("needsLANReceiveBufferDrain = hasCompleteLANFramedPayloadPending()"))
@@ -1415,33 +1705,964 @@ final class RegressionHardeningTests: XCTestCase {
       to: "private func scheduleSecureLANReceiveDrain(",
       in: source
     )
+    let secureDrainBody = try sourceSlice(
+      from: "private func scheduleSecureLANReceiveDrain(",
+      to: "private func scheduleSecureLANReceiveApply(",
+      in: source
+    )
+    let nextFramedPayloadBody = try sourceSlice(
+      from: "private func nextFramedPayload()",
+      to: "private func arrivalTime(forPayloadEndingAt endOffset: Int) -> Date?",
+      in: pipelineSource
+    )
 
     XCTAssertTrue(actorBody.contains("actor LANRemoteSecureReceivePipeline"))
-    XCTAssertTrue(actorBody.contains("AES.GCM.open(sealedBox, using: key)"))
+    XCTAssertTrue(actorBody.contains("RemoteControlSecureEnvelope.open("))
+    XCTAssertTrue(actorBody.contains("allowedPacketTypes: [.control, .screen, .audio]"))
+    XCTAssertTrue(actorBody.contains("RemoteControlSecureReplayWindow"))
+    XCTAssertTrue(actorBody.contains("replayWindow.validateAndRecord(openedPayload)"))
+    XCTAssertTrue(actorBody.contains("validatePacketType(openedPayload.packetType"))
     XCTAssertTrue(actorBody.contains("RemoteDesktopScreenFrameWire.decodeIfPresent(payload)"))
     XCTAssertTrue(actorBody.contains("RemoteDesktopAudioChunkWire.decodeIfPresent(payload)"))
     XCTAssertTrue(
       pipelineSource.contains("case screen(ScreenData, payloadBytes: Int, bodyReceivedAt: Date)"))
+    XCTAssertTrue(
+      pipelineSource.contains("let chunkBytes: Int"),
+      "Slow parser diagnostics must retain the raw NWConnection chunk size for 2K60 SBC2 bottleneck attribution."
+    )
     XCTAssertTrue(actorBody.contains("maxCompleteScreenFrames"))
+    XCTAssertTrue(actorBody.contains("maxDrainBudgetMs"))
+    XCTAssertTrue(actorBody.contains("parserTimeBudgetHit"))
     XCTAssertTrue(
       actorBody.contains("hasCompletePayloadPending: hasCompleteFramedPayloadPending()"))
+    XCTAssertTrue(pipelineSource.contains("struct ParserStageTelemetry"))
+    XCTAssertTrue(actorBody.contains("stageName: \"length-frame-pop\""))
+    XCTAssertTrue(actorBody.contains("\"sbc2-reassembly-complete\""))
+    XCTAssertTrue(actorBody.contains("stageName: \"decrypt\""))
+    XCTAssertTrue(actorBody.contains("stageName: \"decode\""))
+    XCTAssertTrue(pipelineSource.contains("private var receiveBufferReadOffset = 0"))
+    XCTAssertTrue(pipelineSource.contains("private var readableReceiveBufferBytes: Int"))
+    XCTAssertTrue(pipelineSource.contains("private func compactReceiveBufferIfNeeded()"))
+    XCTAssertTrue(nextFramedPayloadBody.contains("receiveBufferReadOffset += totalLength"))
+    XCTAssertTrue(nextFramedPayloadBody.contains("compactReceiveBufferIfNeeded()"))
+    XCTAssertFalse(
+      nextFramedPayloadBody.contains("receiveBuffer.removeSubrange"),
+      "Secure LAN parser must not remove every payload from the front of Data; 2K60 SBC2 backlog made that O(n) copy dominate parserDrain."
+    )
     XCTAssertTrue(receiveChunk.contains("if let keys = self.lanSessionKeys"))
     XCTAssertTrue(receiveChunk.contains("self.processSecureLANReceiveChunk("))
     XCTAssertFalse(
       secureEntry.contains("@MainActor"),
       "Secure LAN frame decryption and screen-wire decode must be delegated to the off-main actor, not a MainActor task."
     )
-    XCTAssertTrue(secureEntry.contains("let previousTask = lanSecureReceiveChain"))
-    XCTAssertTrue(secureEntry.contains("Task(priority: .high)"))
-    XCTAssertTrue(secureEntry.contains("await previousTask?.value"))
+    XCTAssertTrue(secureEntry.contains("Task.detached(priority: .high)"))
+    XCTAssertTrue(
+      secureEntry.contains("await previousParse?.value"),
+      "Secure LAN parser must preserve TCP chunk order before appending to the sbc2/length-frame reassembler."
+    )
+    XCTAssertFalse(
+      secureEntry.contains("await previousTask?.value"),
+      "Secure LAN parser must not wait for the previous MainActor apply before parsing the next 256KB sbc2 chunk."
+    )
     XCTAssertTrue(secureEntry.contains("lanSecureReceiveChain = task"))
+    XCTAssertTrue(source.contains("private func scheduleSecureLANReceiveApply("))
+    XCTAssertTrue(source.contains("await previousApply?.value"))
+    let pendingDrainIndex = try XCTUnwrap(
+      secureEntry.range(of: "if result.hasCompletePayloadPending")?.lowerBound
+    )
+    let applyScheduleIndex = try XCTUnwrap(
+      secureEntry.range(of: "await self?.scheduleSecureLANReceiveApply")?.lowerBound
+    )
+    XCTAssertLessThan(
+      applyScheduleIndex,
+      pendingDrainIndex,
+      "Secure LAN parser must register the current apply before scheduling the next pending drain so drained follow-up events cannot overtake earlier audio/screen events."
+    )
+    XCTAssertTrue(secureDrainBody.contains("Task.detached(priority: .high)"))
+    XCTAssertTrue(secureDrainBody.contains("pipeline.drain("))
+    XCTAssertTrue(secureEntry.contains("let generation = lanSecureReceiveGeneration"))
+    XCTAssertTrue(secureEntry.contains("connectionID: connectionID"))
+    XCTAssertTrue(secureEntry.contains("generation: generation"))
+    XCTAssertTrue(secureDrainBody.contains("generation: UInt64"))
+    XCTAssertTrue(secureDrainBody.contains("guard generation == lanSecureReceiveGeneration else { return }"))
+    XCTAssertTrue(secureDrainBody.contains("connectionID: connectionID"))
+    XCTAssertTrue(secureDrainBody.contains("generation: generation"))
+    XCTAssertTrue(
+      secureDrainBody.contains("let previousParse = lanSecureReceiveChain")
+        && secureDrainBody.contains("await previousParse?.value"),
+      "A pending secure drain must remain on the same parse chain so length-framed screen bytes cannot be drained ahead of earlier append tasks."
+    )
+    let secureApplyBody = try sourceSlice(
+      from: "private func applySecureLANReceiveResult(",
+      to: "private func handleSecureLANReceiveFailure(",
+      in: source
+    )
+    XCTAssertFalse(
+      secureApplyBody.contains("scheduleSecureLANReceiveDrain"),
+      "Pending secure drains must not wait for the MainActor apply chain to start."
+    )
     XCTAssertTrue(secureEntry.contains("pipeline.appendAndDrain("))
     XCTAssertTrue(actorBody.contains("LAN secure decrypt failed bytes="))
+    let secureFailureBody = try sourceSlice(
+      from: "private func handleSecureLANReceiveFailure(",
+      to: "private func handleInboundLANRemoteMessage(",
+      in: source
+    )
+    XCTAssertTrue(secureFailureBody.contains("generation: UInt64"))
+    XCTAssertTrue(secureFailureBody.contains("generation == lanSecureReceiveGeneration"))
+    XCTAssertTrue(secureFailureBody.contains("Ignored stale LAN secure receive failure"))
+    XCTAssertTrue(secureApplyBody.contains("handleSecureLANReceiveFailure("))
+    XCTAssertTrue(secureApplyBody.contains("connectionID: connectionID"))
+    XCTAssertTrue(secureApplyBody.contains("generation: generation"))
     XCTAssertTrue(source.contains("parser=\\(lanInboundReceiveParserMode)"))
     XCTAssertTrue(source.contains("secure-off-main-actor"))
+    XCTAssertTrue(source.contains("parseQueueDelayMaxMs="))
+    XCTAssertTrue(source.contains("parserActorHopMaxMs="))
+    XCTAssertTrue(source.contains("parserStageMax="))
+    XCTAssertTrue(source.contains("parserStagePayloadBytesMax="))
+    XCTAssertTrue(source.contains("parserStageBufferBytesMax="))
+    XCTAssertTrue(source.contains("applyQueueDelayMaxMs="))
+    XCTAssertTrue(source.contains("screenApplyMaxMs="))
+    XCTAssertTrue(source.contains("ios-lan-parser-slow session="))
+    XCTAssertTrue(source.contains("budgetHit=\\(result.parserTimeBudgetHit ? 1 : 0)"))
+    XCTAssertTrue(source.contains("rawChunkBytes=\\(rawChunk?.chunkBytes ?? 0)"))
+    XCTAssertTrue(source.contains("receiveBufferBytesAfterDrain=\\(result.receiveBufferBytesAfterDrain)"))
+    XCTAssertTrue(source.contains("parserStageMax=\\(stageTelemetry?.stageName ?? \"none\")"))
+    XCTAssertTrue(source.contains("parserStagePayloadBytes=\\(stageTelemetry?.payloadBytes ?? 0)"))
   }
 
-  func testLANRemoteScreenWireUsesChunkedReassemblyAndFailsFastOnCorruption() throws {
+  func testLANReceiveLoopStartsAfterHandshakeDriverInstall() throws {
+    let source = try remoteDesktopManagerSource()
+    let preHandshakeBody = try sourceSlice(
+      from: "currentConnection = Connection(device: refreshedLANDevice, status: .connected)",
+      to: "try await establishLANSecureChannel(for: refreshedLANDevice, over: connection)",
+      in: source
+    )
+    let driverCreatedBody = try sourceSlice(
+      from: "onDriverCreated: { driver in",
+      to: "try ensureLANBootstrapStillActive(for: connection)",
+      in: source
+    )
+
+    XCTAssertFalse(
+      preHandshakeBody.contains("startReceiving()"),
+      "LAN receive may be armed for handshake traffic, but only after the handshake driver exists."
+    )
+    XCTAssertTrue(driverCreatedBody.contains("installLANHandshakeDriver("))
+    XCTAssertTrue(driverCreatedBody.contains("startReceiving()"))
+    XCTAssertTrue(source.contains("private func installLANSecureSessionKeys("))
+
+    let installKeysBody = try sourceSlice(
+      from: "private func installLANSecureSessionKeys(",
+      to: "private func syncLANSecureChannelState(",
+      in: source
+    )
+    XCTAssertTrue(
+      installKeysBody.contains(
+        "let shouldDrainBootstrapAfterInstall = shouldContinueLANBootstrapFramingHandoff"))
+    XCTAssertTrue(installKeysBody.contains("if shouldDrainBootstrapAfterInstall {"))
+    XCTAssertTrue(installKeysBody.contains("resetLANSecureReceivePipelineState()"))
+    XCTAssertTrue(installKeysBody.contains("needsLANReceiveBufferDrain = true"))
+    XCTAssertTrue(installKeysBody.contains("resetLANReceiveParserState()"))
+    XCTAssertTrue(installKeysBody.contains("lanSessionKeys = keys"))
+    XCTAssertTrue(
+      installKeysBody.contains(
+        "await self?.processLANReceiveBuffer(from: connection)"))
+
+    let resetParserBody = try sourceSlice(
+      from: "private func resetLANReceiveParserState(",
+      to: "private func isCrossNetworkDevice(",
+      in: source
+    )
+    XCTAssertTrue(resetParserBody.contains("private func resetLANSecureReceivePipelineState("))
+    XCTAssertTrue(resetParserBody.contains("private var shouldContinueLANBootstrapFramingHandoff: Bool"))
+    XCTAssertFalse(
+      resetParserBody.contains("lanSecureSendCounter = 0"),
+      "Receive parser resets must not rewind the LAN secure envelope send counter for an established session."
+    )
+  }
+
+  func testStrictInboundP2PHandshakeRequiresStablePinnedIdentity() throws {
+    let source = try p2pConnectionManagerSource()
+    let inboundBody = try sourceSlice(
+      from: "private func ensureInboundHandshakeDriverIfNeeded(",
+      to: "private func processHandshakeFrame(",
+      in: source
+    )
+    let trustContextBody = try sourceSlice(
+      from: "private func strictInboundHandshakeTrustContext(",
+      to: "private func preferredStrictPQCHandshakeTargetSuite()",
+      in: source
+    )
+    let messageASOACandidateBody = try sourceSlice(
+      from: "private func stableProtocolIdentityCandidates(from messageA: HandshakeMessageA?)",
+      to: "private func strictInboundHandshakeTrustContext(",
+      in: source
+    )
+    let connectBody = try sourceSlice(
+      from: "public func connect(to device: DiscoveredDevice) async throws",
+      to: "let endpoints = connectionEndpointCandidates(for: targetDevice)",
+      in: source
+    )
+
+    XCTAssertTrue(inboundBody.contains("strictInboundHandshakeTrustContext("))
+    XCTAssertTrue(inboundBody.contains("messageA: messageA"))
+    XCTAssertTrue(inboundBody.contains("trustProvider: strictTrustContext?.provider"))
+    XCTAssertTrue(inboundBody.contains("expectedRemoteSOAPeerId: soaPeerIdBytes(for: strictTrustContext?.stablePeerId ?? peerId)"))
+    XCTAssertTrue(messageASOACandidateBody.contains("soa.initiatorPeerId"))
+    XCTAssertTrue(messageASOACandidateBody.contains("TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: fingerprint)"))
+    XCTAssertTrue(messageASOACandidateBody.contains("ProtocolIdentityTrustStore.shared.deviceIds(containingFingerprint: fingerprint)"))
+    XCTAssertTrue(messageASOACandidateBody.contains("TrustedDeviceStore.shared.trustedDevices"))
+    XCTAssertTrue(messageASOACandidateBody.contains("lastAcceptedPairingIdentityDeviceIdByPeerId"))
+    XCTAssertTrue(messageASOACandidateBody.contains("soaPeerIdBytes(for: normalizedStablePeerId)"))
+    XCTAssertTrue(trustContextBody.contains("messageAStableCandidates + [peerId"))
+    XCTAssertTrue(trustContextBody.contains("reason=ambiguous_message_a_soa_identity"))
+    XCTAssertTrue(trustContextBody.contains("resolved stable peer from MessageA SOA"))
+    XCTAssertTrue(trustContextBody.contains("reason=missing_stable_protocol_identity"))
+    XCTAssertTrue(trustContextBody.contains("reason=missing_pinned_protocol_identity"))
+    XCTAssertTrue(trustContextBody.contains("P2PStoredHandshakeTrustProvider("))
+    XCTAssertTrue(source.contains("!PeerIdentityAliasResolver.isEndpointAlias(trimmed)"))
+    XCTAssertTrue(connectBody.contains("hasActiveAuthenticatedSession(for: targetDevice.id)"))
+    XCTAssertTrue(connectBody.contains("matchingInFlightConnectKey(for: targetDevice, runtimePeerId: runtimePeerId)"))
+    XCTAssertTrue(connectBody.contains("await waitForInFlightConnect(inFlightKey)"))
+    XCTAssertTrue(connectBody.contains("reason=missing_authenticated_session"))
+    XCTAssertFalse(
+      connectBody.contains("sessionKeys[targetDevice.id] != nil || connections[targetDevice.id] != nil"),
+      "A raw transport connection must not satisfy the connected gate without authenticated session keys."
+    )
+  }
+
+  func testLANRemoteSecureReceivePipelineOpensTypedEnvelopePayloads() async throws {
+    func lengthPrefixedLANPayload(_ payload: Data) -> Data {
+      var output = Data()
+      var length = UInt32(payload.count).bigEndian
+      withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
+      output.append(payload)
+      return output
+    }
+
+    let transcriptHash = Data((0..<32).map(UInt8.init))
+    let outboundKey = Data(repeating: 0x31, count: 32)
+    let inboundKey = Data(repeating: 0x42, count: 32)
+    let senderKeys = SessionKeys(
+      sendKey: outboundKey,
+      receiveKey: inboundKey,
+      negotiatedSuite: .xwing,
+      role: .initiator,
+      transcriptHash: transcriptHash
+    )
+    let receiverKeys = SessionKeys(
+      sendKey: inboundKey,
+      receiveKey: outboundKey,
+      negotiatedSuite: .xwing,
+      role: .responder,
+      transcriptHash: transcriptHash
+    )
+    let screen = ScreenData(
+      width: 2,
+      height: 2,
+      imageData: Data([0x01, 0x02, 0x03]),
+      timestamp: 1_700_000_000,
+      format: "hevc",
+      isSyncFrame: true,
+      sequenceNumber: 9
+    )
+    let screenMessage = try JSONEncoder().encode(
+      RemoteMessage(type: .screenData, payload: JSONEncoder().encode(screen))
+    )
+    let controlMessage = try JSONEncoder().encode(
+      RemoteMessage(type: .clipboard, payload: Data("typed-control".utf8))
+    )
+    let pipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+
+    let screenPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        screenMessage,
+        keys: senderKeys,
+        packetType: .screen,
+        counter: 1
+      )
+    )
+    let screenResult = try await pipeline.appendAndDrain(
+      chunk: screenPacket,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_001),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    guard case .screen(let decodedScreen, _, _) = try XCTUnwrap(screenResult.events.first) else {
+      XCTFail("expected typed screen envelope to decode as screen")
+      return
+    }
+    XCTAssertEqual(decodedScreen.sequenceNumber, 9)
+    XCTAssertEqual(decodedScreen.format, "hevc")
+
+    let controlPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        controlMessage,
+        keys: senderKeys,
+        packetType: .control,
+        counter: 2
+      )
+    )
+    let controlResult = try await pipeline.appendAndDrain(
+      chunk: controlPacket,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_002),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    guard case .control(let decodedMessage, _, _) = try XCTUnwrap(controlResult.events.first) else {
+      XCTFail("expected typed control envelope to decode as control")
+      return
+    }
+    XCTAssertEqual(decodedMessage.type, .clipboard)
+
+    let replayResult = try await pipeline.appendAndDrain(
+      chunk: screenPacket,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_003),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    XCTAssertTrue(replayResult.events.isEmpty)
+    XCTAssertEqual(replayResult.secureReplayDrops.count, 1)
+    XCTAssertEqual(replayResult.secureReplayDrops.first?.packetType, .screen)
+    XCTAssertEqual(replayResult.secureReplayDrops.first?.counter, 1)
+    XCTAssertEqual(replayResult.secureReplayDrops.first?.highestCounter, 1)
+    XCTAssertEqual(replayResult.secureReplayDrops.first?.reason, .duplicateCounter)
+
+    let mismatchPipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+    let mismatchedPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        screenMessage,
+        keys: senderKeys,
+        packetType: .control,
+        counter: 3
+      )
+    )
+    do {
+      _ = try await mismatchPipeline.appendAndDrain(
+        chunk: mismatchedPacket,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_004),
+        keys: receiverKeys,
+        maxCompleteScreenFrames: 4,
+        maxDrainBudgetMs: 100
+      )
+      XCTFail("expected packet type mismatch to fail closed")
+    } catch RemoteDesktopError.streamingFailed(let message) {
+      XCTAssertTrue(message.contains("LAN secure control payload carried screenData"))
+    }
+  }
+
+  func testLANRemoteSecureReceivePipelineHandlesMixedAudioScreenControlBurstWithoutReplayPollution() async throws {
+    func lengthPrefixedLANPayload(_ payload: Data) -> Data {
+      var output = Data()
+      var length = UInt32(payload.count).bigEndian
+      withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
+      output.append(payload)
+      return output
+    }
+    func appendUInt32(_ value: UInt32, to data: inout Data) {
+      var bigEndian = value.bigEndian
+      withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+    func appendUInt64(_ value: UInt64, to data: inout Data) {
+      var bigEndian = value.bigEndian
+      withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+    func audioWirePayload(
+      samples: Data,
+      sequenceNumber: UInt64,
+      sampleRate: Int = 48_000,
+      channelCount: Int = 2,
+      frameCount: Int = 480,
+      timestampMicros: UInt64 = 1_700_000_123_000_000
+    ) -> Data {
+      var wire = Data()
+      appendUInt32(0x5342_5241, to: &wire)
+      wire.append(2)
+      wire.append(1)
+      wire.append(UInt8(channelCount))
+      wire.append(0)
+      appendUInt32(UInt32(sampleRate), to: &wire)
+      appendUInt32(UInt32(frameCount), to: &wire)
+      appendUInt32(0, to: &wire)
+      appendUInt64(sequenceNumber, to: &wire)
+      appendUInt64(timestampMicros, to: &wire)
+      appendUInt32(0, to: &wire)
+      appendUInt32(0, to: &wire)
+      appendUInt32(UInt32(samples.count), to: &wire)
+      wire.append(samples)
+      return wire
+    }
+
+    let transcriptHash = Data((0..<32).map(UInt8.init))
+    let outboundKey = Data(repeating: 0x71, count: 32)
+    let inboundKey = Data(repeating: 0x82, count: 32)
+    let senderKeys = SessionKeys(
+      sendKey: outboundKey,
+      receiveKey: inboundKey,
+      negotiatedSuite: .xwing,
+      role: .initiator,
+      transcriptHash: transcriptHash,
+      sessionId: "lan-mixed-burst"
+    )
+    let receiverKeys = SessionKeys(
+      sendKey: inboundKey,
+      receiveKey: outboundKey,
+      negotiatedSuite: .xwing,
+      role: .responder,
+      transcriptHash: transcriptHash,
+      sessionId: "lan-mixed-burst"
+    )
+    let audioPayload = audioWirePayload(
+      samples: Data([0x10, 0x11, 0x12, 0x13]),
+      sequenceNumber: 77
+    )
+    let screen = ScreenData(
+      width: 2,
+      height: 2,
+      imageData: Data([0x01, 0x02, 0x03]),
+      timestamp: 1_700_000_020,
+      format: "hevc",
+      isSyncFrame: true,
+      sequenceNumber: 22
+    )
+    let screenMessage = try JSONEncoder().encode(
+      RemoteMessage(type: .screenData, payload: JSONEncoder().encode(screen))
+    )
+    let controlMessage = try JSONEncoder().encode(
+      RemoteMessage(type: .clipboard, payload: Data("mixed-control".utf8))
+    )
+    let audioPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        audioPayload,
+        keys: senderKeys,
+        packetType: .audio,
+        counter: 1
+      )
+    )
+    let screenPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        screenMessage,
+        keys: senderKeys,
+        packetType: .screen,
+        counter: 1
+      )
+    )
+    let controlPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        controlMessage,
+        keys: senderKeys,
+        packetType: .control,
+        counter: 1
+      )
+    )
+    let pipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+    var mixedChunk = Data()
+    mixedChunk.append(audioPacket)
+    mixedChunk.append(screenPacket)
+    mixedChunk.append(controlPacket)
+
+    let mixedResult = try await pipeline.appendAndDrain(
+      chunk: mixedChunk,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_021),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+
+    XCTAssertEqual(mixedResult.payloads, 3)
+    XCTAssertEqual(mixedResult.secureReplayDrops.count, 0)
+    guard mixedResult.events.count == 3 else {
+      XCTFail("expected audio, screen, and control events in one LAN secure drain")
+      return
+    }
+    guard case .audio(let decodedAudio) = mixedResult.events[0] else {
+      XCTFail("expected audio event first")
+      return
+    }
+    XCTAssertEqual(decodedAudio.sequenceNumber, 77)
+    XCTAssertEqual(decodedAudio.sampleRate, 48_000)
+    XCTAssertEqual(decodedAudio.channelCount, 2)
+    XCTAssertEqual(decodedAudio.data, Data([0x10, 0x11, 0x12, 0x13]))
+    guard case .screen(let decodedScreen, _, _) = mixedResult.events[1] else {
+      XCTFail("expected screen event second")
+      return
+    }
+    XCTAssertEqual(decodedScreen.sequenceNumber, 22)
+    guard case .control(let decodedControl, _, _) = mixedResult.events[2] else {
+      XCTFail("expected control event third")
+      return
+    }
+    XCTAssertEqual(decodedControl.type, .clipboard)
+
+    let audioReplay = try await pipeline.appendAndDrain(
+      chunk: audioPacket,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_022),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    XCTAssertTrue(audioReplay.events.isEmpty)
+    XCTAssertEqual(audioReplay.secureReplayDrops.count, 1)
+    XCTAssertEqual(audioReplay.secureReplayDrops.first?.packetType, .audio)
+    XCTAssertEqual(audioReplay.secureReplayDrops.first?.counter, 1)
+    XCTAssertEqual(audioReplay.secureReplayDrops.first?.highestCounter, 1)
+    XCTAssertEqual(audioReplay.secureReplayDrops.first?.reason, .duplicateCounter)
+
+    let isolationPipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+    let highScreenPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        screenMessage,
+        keys: senderKeys,
+        packetType: .screen,
+        counter: 2_000
+      )
+    )
+    let lowAudioPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        audioPayload,
+        keys: senderKeys,
+        packetType: .audio,
+        counter: 1
+      )
+    )
+    _ = try await isolationPipeline.appendAndDrain(
+      chunk: highScreenPacket,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_023),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    let lowAudioResult = try await isolationPipeline.appendAndDrain(
+      chunk: lowAudioPacket,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_024),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    XCTAssertEqual(lowAudioResult.secureReplayDrops.count, 0)
+    XCTAssertEqual(lowAudioResult.events.count, 1)
+    guard case .audio(let isolatedAudio) = lowAudioResult.events.first else {
+      XCTFail("expected audio lane to stay independent from high screen counter")
+      return
+    }
+    XCTAssertEqual(isolatedAudio.sequenceNumber, 77)
+  }
+
+  func testLANRemoteSecureReceivePipelineSurvivesOrderedFragmentedScreenBurst() async throws {
+    func lengthPrefixedLANPayload(_ payload: Data) -> Data {
+      var output = Data()
+      var length = UInt32(payload.count).bigEndian
+      withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
+      output.append(payload)
+      return output
+    }
+    func collectScreenSequences(from result: LANRemoteSecureReceiveResult, into sequences: inout [UInt64]) {
+      for event in result.events {
+        guard case .screen(let screen, _, _) = event,
+              let sequenceNumber = screen.sequenceNumber else {
+          continue
+        }
+        sequences.append(sequenceNumber)
+      }
+    }
+
+    let transcriptHash = Data((0..<32).map(UInt8.init))
+    let outboundKey = Data(repeating: 0xA1, count: 32)
+    let inboundKey = Data(repeating: 0xB2, count: 32)
+    let senderKeys = SessionKeys(
+      sendKey: outboundKey,
+      receiveKey: inboundKey,
+      negotiatedSuite: .xwing,
+      role: .initiator,
+      transcriptHash: transcriptHash,
+      sessionId: "lan-fragmented-screen-burst"
+    )
+    let receiverKeys = SessionKeys(
+      sendKey: inboundKey,
+      receiveKey: outboundKey,
+      negotiatedSuite: .xwing,
+      role: .responder,
+      transcriptHash: transcriptHash,
+      sessionId: "lan-fragmented-screen-burst"
+    )
+    var wire = Data()
+    let frameCount = 300
+    for counter in 1...frameCount {
+      let screen = ScreenData(
+        width: 2,
+        height: 2,
+        imageData: Data(repeating: UInt8(counter % 251), count: 16),
+        timestamp: 1_700_000_100 + Double(counter) / 60.0,
+        format: "hevc",
+        isSyncFrame: counter == 1,
+        sequenceNumber: UInt64(counter)
+      )
+      let message = try JSONEncoder().encode(
+        RemoteMessage(type: .screenData, payload: JSONEncoder().encode(screen))
+      )
+      wire.append(
+        try lengthPrefixedLANPayload(
+          RemoteControlSecureEnvelope.seal(
+            message,
+            keys: senderKeys,
+            packetType: .screen,
+            counter: UInt64(counter)
+          )
+        )
+      )
+    }
+
+    let pipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+    let chunkSizes = [1, 7, 83, 409, 17, 2048, 3, 512]
+    var offset = 0
+    var chunkIndex = 0
+    var decodedSequences: [UInt64] = []
+    while offset < wire.count {
+      let nextSize = min(chunkSizes[chunkIndex % chunkSizes.count], wire.count - offset)
+      let chunk = Data(wire[offset ..< offset + nextSize])
+      offset += nextSize
+      chunkIndex += 1
+      var result = try await pipeline.appendAndDrain(
+        chunk: chunk,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_101 + Double(chunkIndex) / 1_000.0),
+        keys: receiverKeys,
+        maxCompleteScreenFrames: 4,
+        maxDrainBudgetMs: 100
+      )
+      collectScreenSequences(from: result, into: &decodedSequences)
+      XCTAssertTrue(result.secureReplayDrops.isEmpty)
+      while result.hasCompletePayloadPending {
+        result = try await pipeline.drain(
+          keys: receiverKeys,
+          maxCompleteScreenFrames: 4,
+          maxDrainBudgetMs: 100
+        )
+        collectScreenSequences(from: result, into: &decodedSequences)
+        XCTAssertTrue(result.secureReplayDrops.isEmpty)
+      }
+    }
+
+    XCTAssertEqual(decodedSequences, (1...frameCount).map(UInt64.init))
+  }
+
+  func testLANRemoteSecureReceivePipelineFailsClosedWhenScreenEnvelopeBodyIsSpliced() async throws {
+    func lengthPrefixedLANPayload(_ payload: Data) -> Data {
+      var output = Data()
+      var length = UInt32(payload.count).bigEndian
+      withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
+      output.append(payload)
+      return output
+    }
+    func screenMessage(sequenceNumber: UInt64, fill: UInt8) throws -> Data {
+      let screen = ScreenData(
+        width: 2,
+        height: 2,
+        imageData: Data(repeating: fill, count: 16),
+        timestamp: 1_700_000_200 + Double(sequenceNumber) / 60.0,
+        format: "hevc",
+        isSyncFrame: true,
+        sequenceNumber: sequenceNumber
+      )
+      return try JSONEncoder().encode(
+        RemoteMessage(type: .screenData, payload: JSONEncoder().encode(screen))
+      )
+    }
+
+    let transcriptHash = Data((0..<32).map(UInt8.init))
+    let outboundKey = Data(repeating: 0xC1, count: 32)
+    let inboundKey = Data(repeating: 0xD2, count: 32)
+    let senderKeys = SessionKeys(
+      sendKey: outboundKey,
+      receiveKey: inboundKey,
+      negotiatedSuite: .xwing,
+      role: .initiator,
+      transcriptHash: transcriptHash,
+      sessionId: "lan-spliced-screen-envelope"
+    )
+    let receiverKeys = SessionKeys(
+      sendKey: inboundKey,
+      receiveKey: outboundKey,
+      negotiatedSuite: .xwing,
+      role: .responder,
+      transcriptHash: transcriptHash,
+      sessionId: "lan-spliced-screen-envelope"
+    )
+    let firstEnvelope = try RemoteControlSecureEnvelope.seal(
+      screenMessage(sequenceNumber: 1, fill: 0x11),
+      keys: senderKeys,
+      packetType: .screen,
+      counter: 1
+    )
+    let secondEnvelope = try RemoteControlSecureEnvelope.seal(
+      screenMessage(sequenceNumber: 2, fill: 0x22),
+      keys: senderKeys,
+      packetType: .screen,
+      counter: 2
+    )
+    let headerLength = 52
+    XCTAssertEqual(firstEnvelope.count, secondEnvelope.count)
+    var splicedEnvelope = Data(firstEnvelope.prefix(headerLength))
+    splicedEnvelope.append(secondEnvelope.dropFirst(headerLength))
+
+    let pipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+    do {
+      _ = try await pipeline.appendAndDrain(
+        chunk: lengthPrefixedLANPayload(splicedEnvelope),
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_201),
+        keys: receiverKeys,
+        maxCompleteScreenFrames: 4,
+        maxDrainBudgetMs: 100
+      )
+      XCTFail("expected spliced screen envelope to fail authentication")
+    } catch RemoteDesktopError.streamingFailed(let message) {
+      XCTAssertTrue(message.contains("LAN secure decrypt failed bytes="))
+      XCTAssertTrue(message.contains("secure envelope authentication failed packetType=2 counter=1"))
+    }
+  }
+
+  func testLANRemoteSecureReceivePipelineRejectsOldSessionPacketAfterReconnectWithoutPoisoningNewSession() async throws {
+    func lengthPrefixedLANPayload(_ payload: Data) -> Data {
+      var output = Data()
+      var length = UInt32(payload.count).bigEndian
+      withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
+      output.append(payload)
+      return output
+    }
+    func pairedKeys(sessionId: String) -> (sender: SessionKeys, receiver: SessionKeys) {
+      let transcriptHash = Data((0..<32).map(UInt8.init))
+      let outboundKey = Data(repeating: 0x91, count: 32)
+      let inboundKey = Data(repeating: 0xA2, count: 32)
+      let sender = SessionKeys(
+        sendKey: outboundKey,
+        receiveKey: inboundKey,
+        negotiatedSuite: .xwing,
+        role: .initiator,
+        transcriptHash: transcriptHash,
+        sessionId: sessionId
+      )
+      let receiver = SessionKeys(
+        sendKey: inboundKey,
+        receiveKey: outboundKey,
+        negotiatedSuite: .xwing,
+        role: .responder,
+        transcriptHash: transcriptHash,
+        sessionId: sessionId
+      )
+      return (sender, receiver)
+    }
+
+    let oldKeys = pairedKeys(sessionId: "lan-reconnect-old")
+    let newKeys = pairedKeys(sessionId: "lan-reconnect-new")
+    let screen = ScreenData(
+      width: 2,
+      height: 2,
+      imageData: Data([0x01, 0x02, 0x03]),
+      timestamp: 1_700_000_030,
+      format: "hevc",
+      isSyncFrame: true,
+      sequenceNumber: 30
+    )
+    let screenMessage = try JSONEncoder().encode(
+      RemoteMessage(type: .screenData, payload: JSONEncoder().encode(screen))
+    )
+    let oldSessionPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        screenMessage,
+        keys: oldKeys.sender,
+        packetType: .screen,
+        counter: 1
+      )
+    )
+    let oldPipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+    let oldResult = try await oldPipeline.appendAndDrain(
+      chunk: oldSessionPacket,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_031),
+      keys: oldKeys.receiver,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    XCTAssertEqual(oldResult.events.count, 1)
+
+    let newPipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+    do {
+      _ = try await newPipeline.appendAndDrain(
+        chunk: oldSessionPacket,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_032),
+        keys: newKeys.receiver,
+        maxCompleteScreenFrames: 4,
+        maxDrainBudgetMs: 100
+      )
+      XCTFail("expected old session packet to fail closed after reconnect")
+    } catch RemoteDesktopError.streamingFailed(let message) {
+      XCTAssertTrue(message.contains("LAN secure decrypt failed"))
+      XCTAssertTrue(message.contains("session mismatch"))
+    }
+
+    let newSessionPacket = try lengthPrefixedLANPayload(
+      RemoteControlSecureEnvelope.seal(
+        screenMessage,
+        keys: newKeys.sender,
+        packetType: .screen,
+        counter: 1
+      )
+    )
+    let newResult = try await newPipeline.appendAndDrain(
+      chunk: newSessionPacket,
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_033),
+      keys: newKeys.receiver,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    XCTAssertEqual(newResult.secureReplayDrops.count, 0)
+    XCTAssertEqual(newResult.events.count, 1)
+  }
+
+  func testLANRemoteSecureReceivePipelineDropsSBC2ReassemblyErrorsAndRecovers() async throws {
+    func lengthPrefixedLANPayload(_ payload: Data) -> Data {
+      var output = Data()
+      var length = UInt32(payload.count).bigEndian
+      withUnsafeBytes(of: &length) { output.append(contentsOf: $0) }
+      output.append(payload)
+      return output
+    }
+    func appendUInt16(_ value: UInt16, to data: inout Data) {
+      var bigEndian = value.bigEndian
+      withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+    func appendUInt32(_ value: UInt32, to data: inout Data) {
+      var bigEndian = value.bigEndian
+      withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+    func appendUInt64(_ value: UInt64, to data: inout Data) {
+      var bigEndian = value.bigEndian
+      withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+    }
+    func makeSBC2Chunks(payload: Data, frameId: UInt64, maxPayloadBytes: Int) -> [Data] {
+      let chunkPayloadBytes = max(1, maxPayloadBytes)
+      let chunkCount = max(1, (payload.count + chunkPayloadBytes - 1) / chunkPayloadBytes)
+      var chunks: [Data] = []
+      var offset = 0
+      for chunkIndex in 0..<chunkCount {
+        let end = min(offset + chunkPayloadBytes, payload.count)
+        let fragment = Data(payload[offset..<end])
+        var chunk = Data()
+        appendUInt32(0x5342_4332, to: &chunk)
+        chunk.append(1)
+        let flags = UInt8(chunkIndex == 0 ? 0x01 : 0x00)
+          | UInt8(chunkIndex == chunkCount - 1 ? 0x02 : 0x00)
+        chunk.append(flags)
+        appendUInt16(36, to: &chunk)
+        appendUInt64(frameId, to: &chunk)
+        appendUInt32(UInt32(chunkIndex), to: &chunk)
+        appendUInt32(UInt32(chunkCount), to: &chunk)
+        appendUInt32(UInt32(payload.count), to: &chunk)
+        appendUInt32(UInt32(offset), to: &chunk)
+        appendUInt32(UInt32(fragment.count), to: &chunk)
+        chunk.append(fragment)
+        chunks.append(chunk)
+        offset = end
+      }
+      return chunks
+    }
+
+    let transcriptHash = Data((0..<32).map(UInt8.init))
+    let outboundKey = Data(repeating: 0x51, count: 32)
+    let inboundKey = Data(repeating: 0x62, count: 32)
+    let senderKeys = SessionKeys(
+      sendKey: outboundKey,
+      receiveKey: inboundKey,
+      negotiatedSuite: .xwing,
+      role: .initiator,
+      transcriptHash: transcriptHash
+    )
+    let receiverKeys = SessionKeys(
+      sendKey: inboundKey,
+      receiveKey: outboundKey,
+      negotiatedSuite: .xwing,
+      role: .responder,
+      transcriptHash: transcriptHash
+    )
+    let screen = ScreenData(
+      width: 2,
+      height: 2,
+      imageData: Data([0x01, 0x02, 0x03]),
+      timestamp: 1_700_000_010,
+      format: "hevc",
+      isSyncFrame: true,
+      sequenceNumber: 10
+    )
+    let screenMessage = try JSONEncoder().encode(
+      RemoteMessage(type: .screenData, payload: JSONEncoder().encode(screen))
+    )
+    let corruptedFrameCiphertext = try RemoteControlSecureEnvelope.seal(
+      screenMessage,
+      keys: senderKeys,
+      packetType: .screen,
+      counter: 1
+    )
+    let corruptedChunks = makeSBC2Chunks(
+      payload: corruptedFrameCiphertext,
+      frameId: 10,
+      maxPayloadBytes: 16
+    )
+    XCTAssertGreaterThan(corruptedChunks.count, 1)
+
+    let pipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: 4096)
+    let missingFirstResult = try await pipeline.appendAndDrain(
+      chunk: lengthPrefixedLANPayload(corruptedChunks[1]),
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_011),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    XCTAssertTrue(missingFirstResult.events.isEmpty)
+    XCTAssertEqual(missingFirstResult.sbc2Drops.count, 1)
+    XCTAssertEqual(missingFirstResult.sbc2Drops.first?.reason, "missing-first-sbc2-chunk")
+    XCTAssertEqual(missingFirstResult.sbc2Drops.first?.frameId, 10)
+    XCTAssertEqual(missingFirstResult.sbc2Drops.first?.suppressed, false)
+
+    let suppressedOrphanResult = try await pipeline.appendAndDrain(
+      chunk: lengthPrefixedLANPayload(corruptedChunks[1]),
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_012),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    XCTAssertTrue(suppressedOrphanResult.events.isEmpty)
+    XCTAssertEqual(suppressedOrphanResult.sbc2Drops.count, 1)
+    XCTAssertEqual(suppressedOrphanResult.sbc2Drops.first?.reason, "missing-first-sbc2-chunk")
+    XCTAssertEqual(suppressedOrphanResult.sbc2Drops.first?.frameId, 10)
+    XCTAssertEqual(suppressedOrphanResult.sbc2Drops.first?.suppressed, true)
+
+    let recoveryCiphertext = try RemoteControlSecureEnvelope.seal(
+      screenMessage,
+      keys: senderKeys,
+      packetType: .screen,
+      counter: 2
+    )
+    let recoveryChunk = try XCTUnwrap(
+      makeSBC2Chunks(payload: recoveryCiphertext, frameId: 11, maxPayloadBytes: recoveryCiphertext.count).first
+    )
+    let recoveryResult = try await pipeline.appendAndDrain(
+      chunk: lengthPrefixedLANPayload(recoveryChunk),
+      receivedAt: Date(timeIntervalSince1970: 1_700_000_013),
+      keys: receiverKeys,
+      maxCompleteScreenFrames: 4,
+      maxDrainBudgetMs: 100
+    )
+    XCTAssertTrue(recoveryResult.sbc2Drops.isEmpty)
+    guard case .screen(let decodedScreen, _, _) = try XCTUnwrap(recoveryResult.events.first) else {
+      XCTFail("expected recovery SBC2 frame to decode")
+      return
+    }
+    XCTAssertEqual(decodedScreen.sequenceNumber, 10)
+  }
+
+  func testLANRemoteScreenWireUsesChunkedReassemblyAndDropsCorruptMediaFrames() throws {
     let source = try remoteDesktopManagerSource()
     let factorySource = try remoteDesktopViewerStreamConfigurationFactorySource()
     let wireSource = try remoteDesktopScreenFrameWireSource()
@@ -1468,7 +2689,8 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(wireBody.contains("static let screenChunkHeaderByteCount = 36"))
     XCTAssertTrue(wireBody.contains("private static let screenChunkMagic: UInt32 = 0x5342_4332"))
     XCTAssertTrue(wireBody.contains("struct ChunkedPayloadReassembler"))
-    XCTAssertTrue(wireBody.contains("case failed(reason: String, frameId: UInt64?)"))
+    XCTAssertTrue(wireBody.contains("case dropped(reason: String, frameId: UInt64?)"))
+    XCTAssertTrue(wireBody.contains("case suppressed(frameId: UInt64, reason: String)"))
     XCTAssertTrue(wireBody.contains("missing-first-sbc2-chunk"))
     XCTAssertTrue(wireBody.contains("out-of-order-sbc2-chunk"))
     XCTAssertTrue(wireBody.contains("interleaved-or-restarted-sbc2-frame"))
@@ -1477,8 +2699,12 @@ final class RegressionHardeningTests: XCTestCase {
       unwrapBody.contains("RemoteDesktopScreenFrameWire.decodeChunkEnvelopeIfPresent(data)"))
     XCTAssertTrue(
       unwrapBody.contains("lanScreenChunkReassembler.append(envelope, now: receivedAt)"))
-    XCTAssertTrue(unwrapBody.contains("throw RemoteDesktopError.streamingFailed("))
-    XCTAssertTrue(unwrapBody.contains("sbc2-chunk-reassembly-failed"))
+    XCTAssertTrue(unwrapBody.contains("return .mediaDrop("))
+    XCTAssertFalse(unwrapBody.contains("throw RemoteDesktopError.streamingFailed("))
+    XCTAssertTrue(source.contains("handleLANSBC2FrameDrops"))
+    XCTAssertTrue(source.contains("lan-sbc2-frame-drop reason="))
+    XCTAssertTrue(source.contains("action=\\(drop.suppressed ? \"drop-orphan\" : \"request-sync\")"))
+    XCTAssertTrue(source.contains("requestStreamRefreshIfNeeded("))
   }
 
   func testLANRemoteReceiveTelemetryExposesCadenceAndMainActorHop() throws {
@@ -1494,6 +2720,15 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(source.contains("sourceToReadMaxMs="))
     XCTAssertTrue(source.contains("sourceToReadClock=remote-wall-clock-unsynced"))
     XCTAssertTrue(source.contains("rxFrameClock=socket-arrival"))
+    XCTAssertTrue(source.contains("socketMetricClock=local-socket-arrival"))
+    XCTAssertTrue(source.contains("socketToDecodeFeedSamples="))
+    XCTAssertTrue(source.contains("socketToDecodeFeedMaxMs="))
+    XCTAssertTrue(source.contains("socketToApplyEndSamples="))
+    XCTAssertTrue(source.contains("socketToApplyEndMaxMs="))
+    XCTAssertTrue(
+      source.contains("scheduleFirstFrameContinuityCheck(for: streamEpoch, firstFrameAt: receiveAccountingAt)"),
+      "LAN first-frame continuity checks must use the same socket-arrival clock as lastFrameArrivalAt, otherwise startup freeze detection is silently skipped."
+    )
     XCTAssertTrue(source.contains("receivedFrameClock: activeTransportMode == .lan"))
     XCTAssertTrue(source.contains("? \"source-cadence+metal-delivery\""))
     XCTAssertTrue(source.contains("lanInboundSourceFrameTimesInCurrentStream"))
@@ -1504,7 +2739,17 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(source.contains("rawChunkGapMaxMs="))
     XCTAssertTrue(source.contains("rawChunkMainHopMaxMs="))
     XCTAssertTrue(source.contains("parser=\\(lanInboundReceiveParserMode)"))
-    XCTAssertTrue(source.contains("readAhead=stream-parser-low-latency-8k-4frame-drain-budget"))
+    XCTAssertTrue(source.contains("parserBudgetMs="))
+    XCTAssertTrue(source.contains("parserBudgetHits="))
+    XCTAssertTrue(source.contains("readAhead=stream-parser-low-latency-256k-4frame-6ms-drain-budget"))
+    XCTAssertTrue(source.contains("decodeFeed=ordered-vt-decode-metal-direct"))
+    XCTAssertTrue(source.contains("decodeAttempted="))
+    XCTAssertTrue(source.contains("decodeAccepted="))
+    XCTAssertTrue(source.contains("decodeDropped="))
+    XCTAssertTrue(source.contains("decodePendingMax="))
+    XCTAssertTrue(source.contains("decodeInFlightMax="))
+    XCTAssertTrue(source.contains("decodeWaitingSyncSamples="))
+    XCTAssertTrue(source.contains("decodeResets="))
     XCTAssertTrue(source.contains("SkyBridgeSmokeTraceWriter.appendStatus(telemetryLine)"))
   }
 
@@ -1543,11 +2788,25 @@ final class RegressionHardeningTests: XCTestCase {
 
   func testMetalSmokeCadenceUsesCommandBufferCompletionTracker() throws {
     let source = try remoteDesktopManagerSource()
+    let runtimeModelsSource = try remoteDesktopRuntimeModelsSource()
     let trackerSource = try remoteDesktopSmokeCadenceTrackerSource()
+    let watchdogBody = try sourceSlice(
+      from: "private func startStreamContinuityWatchdog(for epoch: UInt64)",
+      to: "private func scheduleFirstFrameContinuityCheck(",
+      in: source
+    )
+    let failFastBody = try sourceSlice(
+      from: "private func shouldFailFastMetalContinuityStall(reason: String, at now: Date) -> Bool",
+      to: "private func handleStreamContinuityStall(reason: String) async",
+      in: source
+    )
 
     XCTAssertTrue(trackerSource.contains("final class MetalDisplaySmokeCadenceTracker"))
     XCTAssertTrue(
       source.contains("private let metalDisplaySmokeCadence = MetalDisplaySmokeCadenceTracker()"))
+    XCTAssertTrue(source.contains("private typealias MetalDisplayCadenceSnapshot"))
+    XCTAssertTrue(source.contains("private func metalDisplayContinuitySnapshot(at now: Date) -> MetalDisplayCadenceSnapshot"))
+    XCTAssertTrue(source.contains("private func newerDisplayTime(_ lhs: Date?, _ rhs: Date?) -> Date?"))
     XCTAssertTrue(source.contains("metalDisplaySmokeCadence.reset()"))
     XCTAssertTrue(source.contains("nonisolated func recordMetalRendererDisplayedFramesForSmoke("))
     XCTAssertTrue(source.contains("metalDisplaySmokeCadence.record("))
@@ -1561,10 +2820,111 @@ final class RegressionHardeningTests: XCTestCase {
       source.contains("displayedFramesInLastTwoSeconds: displayedFramesInLastWindowForSmoke"))
     XCTAssertTrue(
       source.contains("lastDisplayedFrameAgeSeconds: lastDisplayedFrameTimeForSmoke.map"))
+    XCTAssertTrue(watchdogBody.contains("let metalDisplaySnapshot = self.metalDisplayContinuitySnapshot(at: now)"))
+    XCTAssertTrue(watchdogBody.contains("let effectiveLastDisplayedFrameTime = self.newerDisplayTime("))
+    XCTAssertTrue(watchdogBody.contains("effectiveLastDisplayedFrameTime == nil"))
+    XCTAssertTrue(watchdogBody.contains("lastFrameArrivalAt > effectiveLastDisplayedFrameTime"))
+    XCTAssertTrue(watchdogBody.contains("lastDecodedFrameTime > effectiveLastDisplayedFrameTime"))
+    XCTAssertTrue(failFastBody.contains("let metalDisplaySnapshot = metalDisplayContinuitySnapshot(at: now)"))
+    XCTAssertTrue(source.contains("metalDisplaySnapshot: MetalDisplayCadenceSnapshot? = nil"))
+    XCTAssertTrue(source.contains("let displayedFrames = max("))
+    XCTAssertTrue(source.contains("metalDisplaySnapshot?.displayedFramesInWindow ?? 0"))
+    XCTAssertTrue(source.contains("continuityWindowRates(at: now, metalDisplaySnapshot: metalDisplaySnapshot)"))
+    XCTAssertTrue(runtimeModelsSource.contains("let effectiveDisplayedAge = ["))
+    XCTAssertTrue(runtimeModelsSource.contains("let displayStaleEnough = effectiveDisplayedAge.map { $0 >= 2.0 } ?? false"))
+    XCTAssertTrue(runtimeModelsSource.contains("input.metalDisplayedFramesInStream > 0"))
+    XCTAssertTrue(runtimeModelsSource.contains("input.metalDisplayedFramesInWindow > 0"))
+    XCTAssertTrue(runtimeModelsSource.contains("(!hasRendererInput || !displayStaleEnough)"))
+    XCTAssertTrue(source.contains("metalDisplayedWindow="))
+    XCTAssertTrue(source.contains("metalDisplayAgeMs="))
+  }
+
+  func testMetalContinuityFailFastPolicyDefersProgressAndLowInputCadence() {
+    func evaluate(
+      reason: String = "frames-decoding-without-display",
+      displayedFramesInStatsWindow: Int = 0,
+      displayedFramesInCurrentStream: Int = 10,
+      observedDisplayedFramesWatermark: Int = 10,
+      metalDisplayedFramesInWindow: Int = 0,
+      metalDisplayedFramesInStream: Int = 0,
+      observedMetalDisplayedFramesWatermark: Int = 0,
+      displayedAgeSeconds: TimeInterval? = 3.0,
+      metalDisplayedAgeSeconds: TimeInterval? = nil,
+      arrivalAgeSeconds: TimeInterval? = 3.0,
+      decodedAgeSeconds: TimeInterval? = 0.5,
+      enqueueAgeSeconds: TimeInterval? = 0.5,
+      decodedFramesInStatsWindow: Int = 4,
+      rendererEnqueuedFramesInStatsWindow: Int = 4,
+      inputFPS: Double = 59.0,
+      inputFailureThresholdFPS: Double = 57.0
+    ) -> RemoteDesktopMetalContinuityStallPolicyResult {
+      RemoteDesktopMetalContinuityStallPolicy.evaluate(
+        RemoteDesktopMetalContinuityStallPolicyInput(
+          reason: reason,
+          isMetalRenderer: true,
+          hasPresentationOwner: true,
+          activeMetalConsumerCount: 1,
+          displayedFramesInStatsWindow: displayedFramesInStatsWindow,
+          displayedFramesInCurrentStream: displayedFramesInCurrentStream,
+          observedDisplayedFramesWatermark: observedDisplayedFramesWatermark,
+          metalDisplayedFramesInWindow: metalDisplayedFramesInWindow,
+          metalDisplayedFramesInStream: metalDisplayedFramesInStream,
+          observedMetalDisplayedFramesWatermark: observedMetalDisplayedFramesWatermark,
+          displayedAgeSeconds: displayedAgeSeconds,
+          metalDisplayedAgeSeconds: metalDisplayedAgeSeconds,
+          arrivalAgeSeconds: arrivalAgeSeconds,
+          decodedAgeSeconds: decodedAgeSeconds,
+          enqueueAgeSeconds: enqueueAgeSeconds,
+          decodedFramesInStatsWindow: decodedFramesInStatsWindow,
+          rendererEnqueuedFramesInStatsWindow: rendererEnqueuedFramesInStatsWindow,
+          inputFPS: inputFPS,
+          inputFailureThresholdFPS: inputFailureThresholdFPS
+        )
+      )
+    }
+
+    XCTAssertEqual(
+      evaluate(displayedFramesInStatsWindow: 1).decision,
+      .deferStall(classification: "display-progress-present")
+    )
+
+    let totalProgress = evaluate(
+      displayedFramesInCurrentStream: 12,
+      observedDisplayedFramesWatermark: 10
+    )
+    XCTAssertEqual(totalProgress.decision, .deferStall(classification: "display-total-progress-present"))
+    XCTAssertEqual(totalProgress.observedDisplayedFramesWatermark, 12)
+
+    XCTAssertEqual(
+      evaluate(inputFPS: 10.5, inputFailureThresholdFPS: 57.0).decision,
+      .deferStall(classification: "input-cadence-below-display-failure-threshold")
+    )
+
+    XCTAssertEqual(
+      evaluate(
+        arrivalAgeSeconds: 0.5,
+        decodedAgeSeconds: 3.0,
+        enqueueAgeSeconds: 3.0,
+        inputFPS: 0
+      ).decision,
+      .deferStall(classification: "input-cadence-window-reset-below-display-failure-threshold")
+    )
+
+    XCTAssertEqual(
+      evaluate(
+        displayedAgeSeconds: 3.0,
+        decodedAgeSeconds: 0.5,
+        enqueueAgeSeconds: 0.5,
+        inputFPS: 59.0,
+        inputFailureThresholdFPS: 57.0
+      ).decision,
+      .failFast
+    )
   }
 
   func testStrictRemoteDesktopMediaPolicyRejectsStaticRenderFallbacks() throws {
     let source = try remoteDesktopManagerSource()
+    let runtimeModelsSource = try remoteDesktopRuntimeModelsSource()
     let cgImageFallbackBody = try sourceSlice(
       from: "private func activateCGImageFallbackForDecodedVideo()",
       to: "private func maybeRestoreMetalRendererAfterStableSampleBuffer",
@@ -1580,6 +2940,16 @@ final class RegressionHardeningTests: XCTestCase {
       to: "case .sampleBuffer(let frame):",
       in: decodedOutputBody
     )
+    let sampleBufferPixelBufferBranch = try sourceSlice(
+      from: "case .sampleBuffer:",
+      to: "case .cgImage:",
+      in: decodedOutputBody
+    )
+    let sampleBufferDecodedBranch = try sourceSlice(
+      from: "case .sampleBuffer(let frame):",
+      to: "consecutiveDecodeMisses = 0",
+      in: decodedOutputBody
+    )
     let continuityBody = try sourceSlice(
       from: "private func handleStreamContinuityStall(reason: String) async",
       to: "func handleVideoRendererDidEnqueueFrame(",
@@ -1589,6 +2959,16 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(source.contains("private var remoteDesktopRenderFallbackForbidden"))
     XCTAssertTrue(source.contains("private func failFastRemoteDesktopRenderMainPath("))
     XCTAssertTrue(source.contains("render-main-path-failed"))
+    let renderFailFastBody = try sourceSlice(
+      from: "private func failFastRemoteDesktopRenderMainPath(",
+      to: "private func startStreamContinuityWatchdog(",
+      in: source
+    )
+    let metalFeedRejectionBody = try sourceSlice(
+      from: "let reason = \"metal-feed-renderer-rejected consumers=\\(deliveryResult.consumerCount)",
+      to: "lanInboundScreenDeliveryDeliveredInWindow += 1",
+      in: source
+    )
     XCTAssertTrue(cgImageFallbackBody.contains("cgimage-fallback-forbidden"))
     XCTAssertTrue(cgImageFallbackBody.contains("failFastRemoteDesktopRenderMainPath("))
     XCTAssertFalse(cgImageFallbackBody.contains("updateRenderPipeline(.sampleBufferDisplayLayer)"))
@@ -1609,8 +2989,106 @@ final class RegressionHardeningTests: XCTestCase {
       cgImagePixelBufferBranch.contains("guard !remoteDesktopRenderFallbackForbidden else"))
     XCTAssertTrue(cgImagePixelBufferBranch.contains("cgimage-pixelbuffer-fallback-forbidden"))
     XCTAssertTrue(cgImagePixelBufferBranch.contains("await failFastRemoteDesktopRenderMainPath("))
+    XCTAssertTrue(
+      sampleBufferPixelBufferBranch.contains("guard !remoteDesktopRenderFallbackForbidden else"))
+    XCTAssertTrue(sampleBufferPixelBufferBranch.contains("samplebuffer-pixelbuffer-fallback-forbidden"))
+    XCTAssertTrue(sampleBufferPixelBufferBranch.contains("attemptedFallback: \"sampleBufferDisplayLayer\""))
+    XCTAssertTrue(
+      sampleBufferDecodedBranch.contains("guard !remoteDesktopRenderFallbackForbidden else"))
+    XCTAssertTrue(sampleBufferDecodedBranch.contains("samplebuffer-displaylayer-fallback-forbidden"))
+    XCTAssertTrue(sampleBufferDecodedBranch.contains("attemptedFallback: \"sampleBufferDisplayLayer\""))
     XCTAssertTrue(continuityBody.contains("attemptedFallback: \"sampleBufferDisplayLayer\""))
     XCTAssertTrue(continuityBody.contains("attemptedFallback: \"stillImageFallback\""))
+    XCTAssertTrue(source.contains("fallbackResult=forbidden"))
+    XCTAssertTrue(source.contains("fallbackResult=not-attempted"))
+    XCTAssertTrue(renderFailFastBody.contains("transportAction=preserve"))
+    XCTAssertTrue(renderFailFastBody.contains("audioAction=preserve"))
+    XCTAssertTrue(renderFailFastBody.contains("failed stage=remote-desktop phase=render_main_path"))
+    XCTAssertTrue(renderFailFastBody.contains("requestStreamRefreshIfNeeded("))
+    XCTAssertFalse(
+      renderFailFastBody.contains("handleTransportFailure"),
+      "Render fail-fast must fail the render main path without closing the LAN transport and realtime audio receiver."
+    )
+    XCTAssertFalse(renderFailFastBody.contains("stopRealtimeMediaAudioReceiver"))
+    XCTAssertFalse(renderFailFastBody.contains("crossNetwork.disconnect"))
+    for forbiddenTeardown in [
+      "teardownRemoteAudioPlayback",
+      "activeTransportMode = .none",
+      "isStreaming = false",
+      "networkConnection?.cancel",
+      "resetLANReceiveParserState",
+      "clearLANSecureChannelState"
+    ] {
+      XCTAssertFalse(
+        renderFailFastBody.contains(forbiddenTeardown),
+        "Render fail-fast must preserve live transport/audio state, not run teardown path \(forbiddenTeardown)."
+      )
+    }
+    XCTAssertFalse(
+      continuityBody.contains("handleTransportFailure"),
+      "Continuity stalls must stay on render recovery/fail-fast paths instead of closing transport."
+    )
+    XCTAssertFalse(
+      continuityBody.contains("stopRealtimeMediaAudioReceiver"),
+      "Continuity stalls must not stop realtime audio while video asks for a sync frame."
+    )
+    XCTAssertFalse(
+      continuityBody.contains("crossNetwork.disconnect"),
+      "Continuity stalls must not disconnect the cross-network session."
+    )
+    XCTAssertTrue(metalFeedRejectionBody.contains("transportAction=preserve"))
+    XCTAssertTrue(metalFeedRejectionBody.contains("audioAction=preserve"))
+    XCTAssertTrue(metalFeedRejectionBody.contains("failFastRemoteDesktopRenderMainPath("))
+    XCTAssertTrue(metalFeedRejectionBody.contains("attemptedFallback: \"metalVideoFrameFeed\""))
+    XCTAssertFalse(
+      metalFeedRejectionBody.contains("handleTransportFailure"),
+      "Renderer rejection is a render/feed failure and must not close transport or realtime audio."
+    )
+    XCTAssertTrue(source.contains("private func shouldFailFastMetalContinuityStall(reason: String, at now: Date) -> Bool"))
+    XCTAssertTrue(source.contains("RemoteDesktopMetalContinuityStallPolicy.evaluate("))
+    XCTAssertTrue(runtimeModelsSource.contains("display-progress-present"))
+    XCTAssertTrue(runtimeModelsSource.contains("display-total-progress-present"))
+    XCTAssertTrue(runtimeModelsSource.contains("post-first-display-not-renderer-failure"))
+    XCTAssertTrue(runtimeModelsSource.contains("remote-view-not-presented"))
+    XCTAssertTrue(runtimeModelsSource.contains("metal-consumer-not-active"))
+    XCTAssertTrue(runtimeModelsSource.contains("decoded-without-renderer-enqueue"))
+    XCTAssertTrue(runtimeModelsSource.contains("arrived-without-renderer-enqueue"))
+    XCTAssertTrue(source.contains("presentationOwners=\\(presentationOwners) metalConsumers=\\(metalConsumers)"))
+    XCTAssertTrue(source.contains("hasPresentationOwner: !activePresentationOwnerTokens.isEmpty"))
+    XCTAssertTrue(source.contains("activeMetalConsumerCount: metalVideoFrameFeed.activeConsumerCount"))
+    XCTAssertTrue(runtimeModelsSource.contains("let hasRendererEnqueue = input.rendererEnqueuedFramesInStatsWindow > 0 || hasRecentEnqueuedInput"))
+    XCTAssertTrue(runtimeModelsSource.contains("input.reason == \"frames-decoding-without-display\", !hasRendererEnqueue"))
+    XCTAssertTrue(runtimeModelsSource.contains("input.reason == \"frames-arriving-without-display\", !hasRendererEnqueue"))
+    XCTAssertTrue(runtimeModelsSource.contains("if !hasDisplayedFrame,"))
+    XCTAssertTrue(runtimeModelsSource.contains("startup-renderer-input-not-stale"))
+    XCTAssertTrue(runtimeModelsSource.contains("startup-input-cadence-below-display-failure-threshold"))
+    XCTAssertTrue(source.contains("private func metalContinuityInputFailureThresholdFPS() -> Double"))
+    XCTAssertTrue(
+      source.contains("lastSentStreamConfiguration?.targetFrameRate ?? viewerSettings.targetFrameRate"))
+    XCTAssertTrue(runtimeModelsSource.contains("input.inputFPS > 0, input.inputFPS < input.inputFailureThresholdFPS"))
+    XCTAssertTrue(source.contains("inputFailureThresholdFPS="))
+    XCTAssertTrue(runtimeModelsSource.contains("input.inputFPS == 0"))
+    XCTAssertTrue(runtimeModelsSource.contains("hasRecentArrivingInput || hasRecentDecodedInput || hasRecentEnqueuedInput"))
+    XCTAssertTrue(source.contains("input-cadence-window-reset-below-display-failure-threshold"))
+    XCTAssertTrue(source.contains("startup-input-cadence-window-reset-below-display-failure-threshold"))
+    XCTAssertTrue(source.contains("arrivalAgeMs="))
+    XCTAssertTrue(source.contains("private func shouldRequestStreamRefreshForDeferredMetalContinuityStall"))
+    XCTAssertTrue(source.contains("case \"display-progress-present\","))
+    XCTAssertTrue(source.contains("\"input-cadence-below-display-failure-threshold\","))
+    XCTAssertTrue(source.contains("\"startup-input-cadence-below-display-failure-threshold\","))
+    XCTAssertTrue(source.contains("\"input-cadence-window-reset-below-display-failure-threshold\","))
+    XCTAssertTrue(source.contains("\"startup-input-cadence-window-reset-below-display-failure-threshold\","))
+    XCTAssertTrue(source.contains("\"display-total-progress-present\","))
+    XCTAssertTrue(source.contains("streamRefresh=suppressed"))
+    XCTAssertTrue(source.contains("streamRefresh=requested"))
+    XCTAssertTrue(source.contains("attemptedFallback=none fallbackResult=not-attempted streamRefresh="))
+    XCTAssertTrue(
+      runtimeModelsSource.contains(
+        "hasDisplayedFrame,\n           (input.reason == \"frames-arriving-without-display\""
+      ),
+      "Post-first-display Metal continuity stalls may be deferred, but first-display failures must not be masked by an ungrouped reason predicate."
+    )
+    XCTAssertTrue(source.contains("reason: \"metal-continuity-deferred-\\(reason)\""))
 
     let guardIndex = try XCTUnwrap(
       cgImagePixelBufferBranch.range(of: "guard !remoteDesktopRenderFallbackForbidden else")?
@@ -1648,6 +3126,65 @@ final class RegressionHardeningTests: XCTestCase {
       source.contains(
         "requestStreamRefreshIfNeeded(reason: \"decode-queue-overflow\", minimumInterval: 0.25)"),
       "The decode overflow recovery path should still request a refresh, but the LAN throttle must bound it."
+    )
+  }
+
+  func testRealtimeAudioStopReasonIsLoggedInsteadOfMaskedAsJitter() throws {
+    let managerSource = try remoteDesktopManagerSource()
+    let audioSource = try realtimeMediaAudioSource()
+
+    XCTAssertTrue(
+      managerSource.contains("stopRealtimeMediaAudioReceiver(reason: \"transport-failure:\\(errorMessage)\")"),
+      "Video transport failures must close realtime audio with an explicit reason instead of leaving zero-rx to look like jitter."
+    )
+    XCTAssertTrue(
+      managerSource.contains("audioRxStop session=\\(receiverSessionId) reason=\\(reason)"),
+      "Realtime audio receiver lifecycle logs must carry close reason and session."
+    )
+    XCTAssertTrue(
+      audioSource.contains("func close(reason: String = \"unspecified\") async"),
+      "The iOS realtime audio renderer must accept a close reason for zero-rx cascade diagnostics."
+    )
+    XCTAssertTrue(
+      audioSource.contains("audioRxRendererClose session=\\(sessionId) reason=\\(reason)"),
+      "Renderer close telemetry must include the session and reason."
+    )
+    XCTAssertTrue(
+      audioSource.contains("datagramsSeen=\\(datagramsSeen)"),
+      "Renderer close telemetry must show whether UDP datagrams ever reached the receiver."
+    )
+    XCTAssertTrue(
+      audioSource.contains("source=\\(sourceEndpoint)"),
+      "Renderer close telemetry must include the authenticated source endpoint when one was observed."
+    )
+    for field in [
+      "authRejected=\\(authRejected)",
+      "sessionHashRejected=\\(sessionHashRejected)",
+      "replayRejected=\\(replayRejected)",
+      "sourceRejected=\\(sourceRejected)",
+      "sourceMigrated=\\(sourceMigrated)",
+      "jitterLate=\\(jitterLate)",
+      "jitterDuplicate=\\(jitterDuplicate)",
+      "jitterEvicted=\\(jitterEvicted)",
+      "playbackDropped=\\(playbackDropped)",
+      "lateOrDuplicate=\\(lateOrDuplicate)"
+    ] {
+      XCTAssertTrue(
+        audioSource.contains(field),
+        "Renderer close telemetry must include \(field) so packet loss, auth failure, source mismatch, and playout drops are distinguishable."
+      )
+    }
+    XCTAssertTrue(
+      audioSource.contains("probable=zero-rx-after-playback"),
+      "Zero-rx after playback must stay visible as a transport starvation diagnosis."
+    )
+    XCTAssertTrue(
+      audioSource.contains("action=no-jitter-adaptation reason=transport-starved"),
+      "Receiver starvation must not be hidden behind jitter growth."
+    )
+    XCTAssertTrue(
+      audioSource.contains("window.datagramsSeen == 0,\n           window.received == 0"),
+      "Jitter adaptation must explicitly gate zero-datagram receive windows."
     )
   }
 
@@ -2303,6 +3840,243 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
+  func testDeviceDiscoveryCoalescesStableBonjourAndHostRowsForSameIPad() {
+    let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+    let stable = DiscoveredDevice(
+      id: "id:07cb9a6e-1111-4222-8333-123456789abc",
+      name: "Ziang的iPad",
+      bonjourServiceName: nil,
+      modelName: "iPad",
+      platform: .iOS,
+      osVersion: "26.5",
+      ipAddress: nil,
+      services: [],
+      portMap: [:],
+      lastSeen: Date().addingTimeInterval(-3),
+      isConnected: false,
+      isTrusted: true,
+      advertisedCapabilities: ["remote_desktop"],
+      capabilities: ["remote_desktop"]
+    )
+    let bonjour = DiscoveredDevice(
+      id: "bonjour:Ziang的iPad@local.",
+      name: "Ziang的iPad",
+      bonjourServiceName: "Ziang的iPad",
+      modelName: "iPad Pro",
+      platform: .iPadOS,
+      osVersion: "26.5",
+      ipAddress: nil,
+      bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
+      bonjourServiceDomain: "local.",
+      services: [DiscoveryServiceType.skybridge.rawValue],
+      portMap: [DiscoveryServiceType.skybridge.rawValue: 11550],
+      lastSeen: Date().addingTimeInterval(-2),
+      advertisedCapabilities: ["remote_desktop"],
+      capabilities: ["remote_desktop"]
+    )
+    let host = DiscoveredDevice(
+      id: "host:192.168.0.103",
+      name: "Ziang的iPad",
+      bonjourServiceName: nil,
+      modelName: "iPad Pro",
+      platform: .iPadOS,
+      osVersion: "26.5",
+      ipAddress: "192.168.0.103",
+      services: [DiscoveryServiceType.skybridgeRemote.rawValue],
+      portMap: [DiscoveryServiceType.skybridgeRemote.rawValue: 5901],
+      lastSeen: Date().addingTimeInterval(-1),
+      advertisedCapabilities: ["remote_control"],
+      capabilities: ["remote_control"]
+    )
+
+    manager.debugSeedDiscoveryState(
+      devices: [stable, bonjour, host],
+      lastActivity: Date(),
+      endpointToDeviceId: [
+        "stable-endpoint": stable.id,
+        "bonjour-endpoint": bonjour.id,
+        "host-endpoint": host.id
+      ],
+      liveBrowseEndpointKeysByServiceType: [
+        .skybridge: ["bonjour-endpoint"],
+        .skybridgeRemote: ["host-endpoint"]
+      ]
+    )
+
+    XCTAssertEqual(manager.discoveredDevices.count, 1)
+    let merged = manager.discoveredDevices[0]
+    XCTAssertEqual(merged.id, stable.id)
+    XCTAssertEqual(merged.name, "Ziang的iPad")
+    XCTAssertEqual(merged.modelName, "iPad Pro")
+    XCTAssertEqual(merged.platform, .iPadOS)
+    XCTAssertEqual(merged.bonjourServiceName, "Ziang的iPad")
+    XCTAssertEqual(merged.ipAddress, "192.168.0.103")
+    XCTAssertTrue(merged.services.contains(DiscoveryServiceType.skybridge.rawValue))
+    XCTAssertTrue(merged.services.contains(DiscoveryServiceType.skybridgeRemote.rawValue))
+    XCTAssertEqual(merged.portMap[DiscoveryServiceType.skybridge.rawValue], 11550)
+    XCTAssertEqual(merged.portMap[DiscoveryServiceType.skybridgeRemote.rawValue], 5901)
+    XCTAssertTrue(merged.isTrusted)
+    XCTAssertEqual(manager.debugCachedDeviceIds, Set([stable.id]))
+  }
+
+  @MainActor
+  func testDeviceDiscoveryCoalescesMacHardwareModelBonjourAliasWithStableMacRow() {
+    let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+    let stable = DiscoveredDevice(
+      id: "id:e0715a9a-d0d3-47e6-b353-de0a30293e1f",
+      name: "Lza的MacBook Pro",
+      bonjourServiceName: nil,
+      modelName: "MacBookPro18,2",
+      platform: .macOS,
+      osVersion: "26.5",
+      ipAddress: nil,
+      services: [DiscoveryServiceType.skybridge.rawValue],
+      portMap: [DiscoveryServiceType.skybridge.rawValue: 51776],
+      lastSeen: Date().addingTimeInterval(-2),
+      isConnected: true,
+      isTrusted: true,
+      advertisedCapabilities: ["remote_desktop"],
+      capabilities: ["remote_desktop"]
+    )
+    let hardwareModelAlias = DiscoveredDevice(
+      id: "bonjour:MacBookPro18,2@local.",
+      name: "MacBookPro18,2",
+      bonjourServiceName: "MacBookPro18,2",
+      modelName: "MacBookPro18,2",
+      platform: .macOS,
+      osVersion: "26.5",
+      ipAddress: nil,
+      bonjourServiceType: DiscoveryServiceType.skybridgeRemote.rawValue,
+      bonjourServiceDomain: "local.",
+      services: [DiscoveryServiceType.skybridgeRemote.rawValue],
+      portMap: [DiscoveryServiceType.skybridgeRemote.rawValue: 5901],
+      lastSeen: Date().addingTimeInterval(-1),
+      advertisedCapabilities: ["remote_control"],
+      capabilities: ["remote_control"]
+    )
+
+    manager.debugSeedDiscoveryState(
+      devices: [stable, hardwareModelAlias],
+      lastActivity: Date(),
+      endpointToDeviceId: [
+        "stable-endpoint": stable.id,
+        "mac-model-endpoint": hardwareModelAlias.id
+      ],
+      liveBrowseEndpointKeysByServiceType: [
+        .skybridge: ["stable-endpoint"],
+        .skybridgeRemote: ["mac-model-endpoint"]
+      ]
+    )
+
+    XCTAssertEqual(manager.discoveredDevices.count, 1)
+    let merged = manager.discoveredDevices[0]
+    XCTAssertEqual(merged.id, stable.id)
+    XCTAssertEqual(merged.name, "Lza的MacBook Pro")
+    XCTAssertEqual(merged.modelName, "MacBookPro18,2")
+    XCTAssertEqual(merged.platform, .macOS)
+    XCTAssertTrue(merged.services.contains(DiscoveryServiceType.skybridge.rawValue))
+    XCTAssertTrue(merged.services.contains(DiscoveryServiceType.skybridgeRemote.rawValue))
+    XCTAssertEqual(merged.portMap[DiscoveryServiceType.skybridge.rawValue], 51776)
+    XCTAssertEqual(merged.portMap[DiscoveryServiceType.skybridgeRemote.rawValue], 5901)
+    XCTAssertEqual(manager.debugCachedDeviceIds, Set([stable.id]))
+  }
+
+  @MainActor
+  func testDeviceDiscoveryDoesNotCoalesceGenericIPadBonjourNameOnlyRows() {
+    let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+    let generic = DiscoveredDevice(
+      id: "bonjour:iPad@local.",
+      name: "iPad",
+      bonjourServiceName: "iPad",
+      modelName: "iPad Pro",
+      platform: .iPadOS,
+      osVersion: "26.5",
+      ipAddress: nil,
+      bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
+      bonjourServiceDomain: "local.",
+      services: [DiscoveryServiceType.skybridge.rawValue],
+      portMap: [DiscoveryServiceType.skybridge.rawValue: 11550],
+      lastSeen: Date().addingTimeInterval(-2)
+    )
+    let personalized = DiscoveredDevice(
+      id: "bonjour:Ziang的iPad@local.",
+      name: "Ziang的iPad",
+      bonjourServiceName: "Ziang的iPad",
+      modelName: "iPad Pro",
+      platform: .iPadOS,
+      osVersion: "26.5",
+      ipAddress: nil,
+      bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
+      bonjourServiceDomain: "local.",
+      services: [DiscoveryServiceType.skybridge.rawValue],
+      portMap: [DiscoveryServiceType.skybridge.rawValue: 11550],
+      lastSeen: Date().addingTimeInterval(-1)
+    )
+
+    manager.debugSeedDiscoveryState(
+      devices: [generic, personalized],
+      lastActivity: Date(),
+      endpointToDeviceId: [
+        "generic-endpoint": generic.id,
+        "personalized-endpoint": personalized.id
+      ],
+      liveBrowseEndpointKeysByServiceType: [
+        .skybridge: ["generic-endpoint", "personalized-endpoint"]
+      ]
+    )
+
+    XCTAssertEqual(manager.discoveredDevices.count, 2)
+    XCTAssertEqual(manager.debugCachedDeviceIds, Set([generic.id, personalized.id]))
+  }
+
+  @MainActor
+  func testDeviceDiscoveryDoesNotCoalesceSameNameEndpointRowsWithoutAuthorityAnchor() {
+    let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+    let bonjour = DiscoveredDevice(
+      id: "bonjour:Lab-iPad@local.",
+      name: "Lab iPad",
+      bonjourServiceName: "Lab-iPad",
+      modelName: "iPad Pro",
+      platform: .iPadOS,
+      osVersion: "26.5",
+      ipAddress: nil,
+      bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
+      bonjourServiceDomain: "local.",
+      services: [DiscoveryServiceType.skybridge.rawValue],
+      portMap: [DiscoveryServiceType.skybridge.rawValue: 11550],
+      lastSeen: Date().addingTimeInterval(-2)
+    )
+    let host = DiscoveredDevice(
+      id: "host:192.168.0.155",
+      name: "Lab iPad",
+      bonjourServiceName: nil,
+      modelName: "iPad Pro",
+      platform: .iPadOS,
+      osVersion: "26.5",
+      ipAddress: "192.168.0.155",
+      services: [DiscoveryServiceType.skybridgeRemote.rawValue],
+      portMap: [DiscoveryServiceType.skybridgeRemote.rawValue: 5901],
+      lastSeen: Date().addingTimeInterval(-1)
+    )
+
+    manager.debugSeedDiscoveryState(
+      devices: [bonjour, host],
+      lastActivity: Date(),
+      endpointToDeviceId: [
+        "bonjour-endpoint": bonjour.id,
+        "host-endpoint": host.id
+      ],
+      liveBrowseEndpointKeysByServiceType: [
+        .skybridge: ["bonjour-endpoint"],
+        .skybridgeRemote: ["host-endpoint"]
+      ]
+    )
+
+    XCTAssertEqual(manager.discoveredDevices.count, 2)
+    XCTAssertEqual(manager.debugCachedDeviceIds, Set([bonjour.id, host.id]))
+  }
+
+  @MainActor
   func testRetryAuthorizationBlockedBrowsersClearsBlockedStateAndAttempts() {
     let manager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
     manager.debugSeedAuthorizationRecoveryState(
@@ -2605,6 +4379,7 @@ final class RegressionHardeningTests: XCTestCase {
 
   func testHEVCMainPathUsesAsynchronousHardwareDecode() throws {
     let managerSource = try remoteDesktopManagerSource()
+    let runtimeModelsSource = try remoteDesktopRuntimeModelsSource()
     let source = try remoteDesktopVideoDecoderSource()
     let decodeBody = try sourceSlice(
       from: "private func decodeToPixelBufferFrame(",
@@ -2613,7 +4388,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertTrue(
-      decodeBody.contains("flags: [._EnableAsynchronousDecompression]"),
+      source.contains("flags: [._EnableAsynchronousDecompression]"),
       "2056x1329@60 HEVC must not run VideoToolbox decode synchronously on the MainActor."
     )
     XCTAssertTrue(
@@ -2625,12 +4400,40 @@ final class RegressionHardeningTests: XCTestCase {
       "Realtime decoder configuration failure must surface as a real media failure, not a hidden latency regression."
     )
     XCTAssertTrue(
-      decodeBody.contains("RemoteDesktopError.decodingFailed(\"callback-no-image\")"),
+      source.contains("RemoteDesktopError.decodingFailed(\"callback-no-image\")"),
       "A VideoToolbox callback without an image must be surfaced as a real decode failure for fail-fast handling."
     )
     XCTAssertTrue(
-      managerSource.contains("private let maxConcurrentVideoDecodes: Int = 1"),
-      "Dependent HEVC/H.264 access units must be submitted to one VTDecompressionSession in wire order."
+      managerSource.contains(
+        "private let maxConcurrentVideoDecodes: Int = RemoteDesktopManagerRuntimeLimits.maxPredictiveVideoDecodeInFlight"
+      ))
+    XCTAssertTrue(
+      managerSource.contains("pendingDecodeCompletions[decodeOrder]"),
+      "Dependent HEVC/H.264 access units must be submitted with bounded in-flight callbacks and drained in submission order."
+    )
+    XCTAssertTrue(
+      source.contains("func submit(screenData: ScreenData) async throws -> VideoDecodeSubmission"),
+      "VideoToolbox submissions must be split from callback waits so access units enter the VT session in actor order."
+    )
+    XCTAssertTrue(
+      managerSource.contains("await previousSubmission?.value"),
+      "RemoteDesktopManager must preserve wire-order decode submission while allowing callbacks to complete asynchronously."
+    )
+    XCTAssertTrue(
+      managerSource.contains("decode-completion-gap-reset"),
+      "Ordered callback drain must fail visibly and request sync if an earlier VT callback gap blocks display."
+    )
+    XCTAssertTrue(
+      managerSource.contains("decodeCompletionGapWatchdogTask"),
+      "A missing earlier VideoToolbox callback must be reset by time, not only by a later completion event."
+    )
+    XCTAssertTrue(
+      runtimeModelsSource.contains("static let decodeCompletionGapWatchdogDelay: Duration = .milliseconds(500)"),
+      "The ordered callback watchdog must have an explicit realtime bound."
+    )
+    XCTAssertTrue(
+      runtimeModelsSource.contains("static let maxPredictiveVideoDecodeInFlight = 4"),
+      "2056x1329@60 HEVC must keep one realtime VTDecompressionSession fed instead of waiting for each callback before the next submit."
     )
     XCTAssertTrue(
       source.contains("VideoToolbox callback status=\\(status) \\(accessUnitSummary)"),
@@ -2647,6 +4450,11 @@ final class RegressionHardeningTests: XCTestCase {
     let decodeBody = try sourceSlice(
       from: "private func decodeVideoFrame(",
       to: "private func resetDecoderState(",
+      in: source
+    )
+    let resetBody = try sourceSlice(
+      from: "func resetPreservingLastFrame()",
+      to: "func consumeLastFailureReason()",
       in: source
     )
 
@@ -2674,6 +4482,10 @@ final class RegressionHardeningTests: XCTestCase {
     )
     XCTAssertTrue(sampleBody.contains("kCMSampleAttachmentKey_NotSync"))
     XCTAssertTrue(sampleBody.contains("kCMSampleAttachmentKey_DependsOnOthers"))
+    XCTAssertTrue(
+      resetBody.contains("clearVideoParameterSets()"),
+      "After a decoder reset, HEVC/H.264 must require fresh VPS/SPS/PPS before accepting the next sync frame."
+    )
   }
 
   func testP2PRemoteSmokeFailsImmediatelyOnMediaMainPathError() throws {
@@ -2753,6 +4565,8 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(source.contains("scheduleLeadMs < -60"))
     XCTAssertTrue(source.contains("scheduleLeadMs < -100"))
     XCTAssertTrue(source.contains("evictRatio="))
+    XCTAssertTrue(source.contains("transport-starved:zero-rx-after-playback"))
+    XCTAssertTrue(source.contains("action=no-jitter-adaptation reason=transport-starved"))
     XCTAssertTrue(source.contains("audioArrivalP50Ms"))
     XCTAssertTrue(source.contains("audioArrivalP95Ms"))
     XCTAssertTrue(source.contains("audioArrivalMaxMs"))
@@ -2891,6 +4705,7 @@ final class RegressionHardeningTests: XCTestCase {
       in: remoteDesktopSource
     )
     guard
+      let preStreamingGuardRange = handleScreenDataBody.range(of: "dropReason=pre-streaming-frame"),
       let warmupDropGuardRange = handleScreenDataBody.range(
         of: "shouldDropNativeWarmupNonJPEGFallbackFrame"),
       let renderedGuardRange = handleScreenDataBody.range(
@@ -2902,6 +4717,11 @@ final class RegressionHardeningTests: XCTestCase {
       return XCTFail(
         "Expected native warmup/rendered fallback guards and topology handler in handleScreenData.")
     }
+    XCTAssertLessThan(
+      preStreamingGuardRange.lowerBound,
+      warmupDropGuardRange.lowerBound,
+      "Frames that arrive before the viewer enters streaming must be dropped before any codec/topology handling can consume an early predictive frame."
+    )
     XCTAssertLessThan(
       warmupDropGuardRange.lowerBound,
       noteReceivedRange.lowerBound,
@@ -2918,6 +4738,50 @@ final class RegressionHardeningTests: XCTestCase {
       "Native-rendered fallback frames must be ignored before topology/decode state can be reset."
     )
     XCTAssertTrue(handleScreenDataBody.contains("dropReason=native-warmup-non-jpeg-fallback"))
+  }
+
+  func testTopologyChangeWaitsForDecoderBootstrapBeforeRecoveringPredictiveStream() throws {
+    let remoteDesktopSource = try remoteDesktopManagerSource()
+    let topologyBody = try sourceSlice(
+      from:
+        "private func handleIncomingStreamTopologyChangeIfNeeded(for screenData: ScreenData) async",
+      to: "private func acceptFrameSequenceForDecode(_ screenData: ScreenData, now: Date) -> Bool",
+      in: remoteDesktopSource
+    )
+
+    XCTAssertTrue(
+      topologyBody.contains("let incomingFrameHasDecoderBootstrap = screenData.isDecoderBootstrapFrame"))
+    XCTAssertTrue(
+      topologyBody.contains(
+        "let lightweightFlapTransition = isFallbackProducerFlap && incomingFrameHasDecoderBootstrap"))
+    XCTAssertTrue(
+      topologyBody.contains(
+        "decodeQueueWaitingForSyncFrame = RemoteDesktopDecodeQueuePolicy.isPredictiveVideoFormat(normalizedFormat)"))
+    XCTAssertTrue(topologyBody.contains("&& !incomingFrameHasDecoderBootstrap"))
+    XCTAssertFalse(
+      topologyBody.contains("RemoteDesktopScreenFrameWire.containsSyncFrame"),
+      "Topology changes must not clear waiting-for-sync on HEVC IRAP-only or H264 IDR-only frames that lack decoder parameter sets."
+    )
+  }
+
+  func testPredictiveSequenceGapRequestsStreamRefreshWithoutTransportTeardown() throws {
+    let remoteDesktopSource = try remoteDesktopManagerSource()
+    let gapBody = try sourceSlice(
+      from: "case .gapRequiresSync(let previous, let current, let missing):",
+      to: "private func enqueueFrameForDecode(_ screenData: ScreenData, receivedAt: Date? = nil)",
+      in: remoteDesktopSource
+    )
+
+    XCTAssertTrue(gapBody.contains("lastInboundVideoFrameSequence = current"))
+    XCTAssertTrue(gapBody.contains("pendingFrames.removeAll(keepingCapacity: true)"))
+    XCTAssertTrue(gapBody.contains("decodeQueueWaitingForSyncFrame = true"))
+    XCTAssertTrue(
+      gapBody.contains("requestStreamRefreshIfNeeded(reason: \"decode-sequence-gap\", minimumInterval: 0.25)")
+    )
+    XCTAssertTrue(gapBody.contains("return false"))
+    XCTAssertFalse(gapBody.contains("handleTransportFailure"))
+    XCTAssertFalse(gapBody.contains("crossNetwork.disconnect"))
+    XCTAssertFalse(gapBody.contains("clearLANSecureChannelState"))
   }
 
   func testNativeWarmupFallbackGuardDropsAllFallbackBeforeVisibleNativeRender() {
@@ -3309,7 +5173,11 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertTrue(
       pushPolicySource.contains(
-        "&& (activeTransportMode == .lan || !refreshStream || !lastSentMediaAudioEndpointPresent)"
+        "|| !lastAcknowledgedMediaAudioEndpointPresent"
+      ))
+    XCTAssertTrue(
+      pushBody.contains(
+        "lastAcknowledgedMediaAudioEndpointPresent: lastAcknowledgedMediaAudioEndpointPresent"
       ))
     XCTAssertTrue(
       pushBody.contains(
@@ -3943,8 +5811,15 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       iosSmoke.contains(
         "private nonisolated static func fileTransferFailureLine(for error: Error) -> String"))
-    XCTAssertTrue(iosSmoke.contains("phase=\\(Self.sanitize(stage))"))
-    XCTAssertTrue(iosSmoke.contains("phase=receipt_\\(Self.sanitize(stage.rawValue))"))
+    XCTAssertTrue(
+      iosSmoke.contains("phase=\\(Self.sanitize(phase)) category=\\(Self.sanitize(category))"))
+    XCTAssertTrue(iosSmoke.contains("fileTransferFailureCategory(forNetworkStage: stage)"))
+    XCTAssertTrue(iosSmoke.contains("phase: \"receipt_\\(stage.rawValue)\""))
+    XCTAssertTrue(iosSmoke.contains("category: \"discovery\""))
+    XCTAssertTrue(iosSmoke.contains("category: \"handshake\""))
+    XCTAssertTrue(iosSmoke.contains("category: \"secure_channel\""))
+    XCTAssertTrue(iosSmoke.contains("category: \"payload_framing\""))
+    XCTAssertTrue(iosSmoke.contains("category: \"auth_policy\""))
     XCTAssertFalse(
       iosSmoke.contains(
         "failed stage=file-transfer error=\\(Self.sanitize(error.localizedDescription))"),
@@ -4162,13 +6037,13 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(resolved, "vendor-id")
   }
 
-  func testSinglePeerTransferSecurityFallbackUsesOnlyAuthenticatedPeerWhenNoHintsExist() {
+  func testSinglePeerTransferSecurityFallbackFailsClosedWhenNoHintsExist() {
     let fallback = FileTransferClassicPeerResolutionPolicy.singlePeerFallbackDeviceId(
       requestedCandidates: [],
       activeConnectionDeviceIDs: ["id:trusted-peer"]
     )
 
-    XCTAssertEqual(fallback, "id:trusted-peer")
+    XCTAssertNil(fallback)
   }
 
   func testSinglePeerTransferSecurityFallbackDoesNotGuessWhenHintsMismatch() {
@@ -4260,6 +6135,31 @@ final class RegressionHardeningTests: XCTestCase {
         resolvedPeerDeviceId: "id:stale-mac",
         aliases: ["id:stale-mac", "host:10.0.0.44", "10.0.0.44"],
         endpointHostOrIP: "10.0.0.44",
+        capabilities: []
+      )
+    ]
+
+    let resolved = FileTransferClassicPeerResolutionPolicy.resolvePeer(
+      peerContext: peerContext,
+      authenticatedPeers: peers
+    )
+
+    XCTAssertNil(resolved)
+  }
+
+  func testClassicTransferPeerResolutionRequiresExplicitEvidenceWithSingleAuthenticatedPeer() {
+    let peerContext = FileTransferPeerContext(
+      declaredSenderDeviceId: nil,
+      endpointHostOrIP: nil,
+      peerLabel: "iPad",
+      transferId: "transfer-no-hints"
+    )
+    let peers = [
+      ClassicTransferAuthenticatedPeerCandidate(
+        matchDeviceId: "id:trusted-peer",
+        resolvedPeerDeviceId: "id:trusted-peer",
+        aliases: ["id:trusted-peer", "trusted-peer", "host:192.168.31.20"],
+        endpointHostOrIP: "192.168.31.20",
         capabilities: []
       )
     ]
@@ -4470,7 +6370,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertNotEqual(base, refreshed)
   }
 
-  func testRemoteDesktopAutomaticViewerPolicyPrefersStableH264At60FPS() {
+  func testRemoteDesktopAutomaticViewerPolicyPrefersHEVCAt60FPS() {
     XCTAssertEqual(RemoteDesktopViewerFrameRate.adaptive.targetFPS, 60)
     XCTAssertEqual(RemoteDesktopViewerResolution.uhd5k.dimensions?.width, 5120)
     XCTAssertEqual(RemoteDesktopViewerResolution.uhd5k.dimensions?.height, 2880)
@@ -4479,13 +6379,13 @@ final class RegressionHardeningTests: XCTestCase {
       RemoteDesktopViewerCodec.automatic.resolvedWireValue(
         supportedFormats: ["hevc", "jpeg", "h264"]
       ),
-      "h264"
+      "hevc"
     )
     XCTAssertEqual(
       RemoteDesktopViewerCodec.automatic.resolvedWireValue(
         supportedFormats: ["jpeg", "h264"]
       ),
-      "h264"
+      "jpeg"
     )
   }
 
@@ -4695,6 +6595,30 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertEqual(resolved, "id:peer-1")
+  }
+
+  func testPeerIdentityAliasResolverNormalizesScopedIPv6HostAliases() {
+    XCTAssertEqual(
+      PeerIdentityAliasResolver.hostAlias(fromIPAddress: "fe80::812:27b6:c448:dad0%en0"),
+      "host:fe80::812:27b6:c448:dad0"
+    )
+    XCTAssertEqual(
+      PeerIdentityAliasResolver.hostAlias(fromIPAddress: "host:[fe80::812:27b6:c448:dad0%en0].56600"),
+      "host:fe80::812:27b6:c448:dad0"
+    )
+
+    let endpoint = NWEndpoint.hostPort(
+      host: NWEndpoint.Host("fe80::812:27b6:c448:dad0%en0"),
+      port: NWEndpoint.Port(integerLiteral: 56600)
+    )
+    let resolved = PeerIdentityAliasResolver.resolveDeviceId(
+      for: endpoint,
+      endpointKey: endpoint.debugDescription,
+      exactEndpointMap: [:],
+      aliasMap: ["host:fe80::812:27b6:c448:dad0": "id:peer-ipv6"]
+    )
+
+    XCTAssertEqual(resolved, "id:peer-ipv6")
   }
 
   func testPeerIdentityAliasResolverMapsBonjourEndpointBackToStableDeviceID() {
@@ -5549,7 +7473,11 @@ final class RegressionHardeningTests: XCTestCase {
     let syncFrame = ScreenData(
       width: 1280,
       height: 720,
-      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x65, 0x88]),
+      imageData: Data([
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x42,
+        0x00, 0x00, 0x00, 0x01, 0x68, 0xCE,
+        0x00, 0x00, 0x00, 0x01, 0x65, 0x88
+      ]),
       timestamp: 3,
       format: "h264",
       isSyncFrame: false
@@ -5566,6 +7494,30 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(pending.count, 1)
     XCTAssertEqual(pending.first?.imageData, syncFrame.imageData)
     XCTAssertFalse(waitingForSyncFrame)
+  }
+
+  func testRemoteDesktopDecodeQueueDoesNotRecoverFromH264IDRWithoutParameterSets() {
+    var pending: [ScreenData] = []
+    var waitingForSyncFrame = true
+    let idrOnlyFrame = ScreenData(
+      width: 1280,
+      height: 720,
+      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x65, 0x88]),
+      timestamp: 3,
+      format: "h264",
+      isSyncFrame: true
+    )
+
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        idrOnlyFrame,
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame
+      ),
+      .droppedIncomingPredictiveFrame
+    )
+    XCTAssertTrue(pending.isEmpty)
+    XCTAssertTrue(waitingForSyncFrame)
   }
 
   func testRemoteDesktopScreenFrameWireDoesNotTrustAdvertisedHEVCSyncWithoutIRAPNAL() {
@@ -5590,6 +7542,80 @@ final class RegressionHardeningTests: XCTestCase {
         advertisedSyncFrame: false
       )
     )
+  }
+
+  func testRemoteDesktopScreenFrameWireRejectsMalformedOneByteHEVCNALHeaders() {
+    let malformedIRAP = Data([0x00, 0x00, 0x00, 0x01, 0x26])
+    let malformedBootstrap = Data([
+      0x00, 0x00, 0x00, 0x01, 0x40,
+      0x00, 0x00, 0x00, 0x01, 0x42,
+      0x00, 0x00, 0x00, 0x01, 0x44,
+      0x00, 0x00, 0x00, 0x01, 0x26
+    ])
+
+    XCTAssertFalse(
+      RemoteDesktopScreenFrameWire.containsSyncFrame(
+        format: "hevc",
+        imageData: malformedIRAP,
+        advertisedSyncFrame: true
+      )
+    )
+    XCTAssertFalse(
+      RemoteDesktopScreenFrameWire.containsDecoderBootstrapFrame(
+        format: "hevc",
+        imageData: malformedBootstrap,
+        advertisedSyncFrame: true
+      )
+    )
+  }
+
+  func testRemoteDesktopDecodeQueueRequiresHEVCParameterSetsForSyncRecovery() {
+    var pending: [ScreenData] = []
+    var waitingForSyncFrame = true
+    let hevcIRAPWithoutParameterSets = ScreenData(
+      width: 2056,
+      height: 1329,
+      imageData: Data([0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0x88]),
+      timestamp: 1,
+      format: "hevc",
+      isSyncFrame: true
+    )
+
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        hevcIRAPWithoutParameterSets,
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame
+      ),
+      .droppedIncomingPredictiveFrame
+    )
+    XCTAssertTrue(waitingForSyncFrame)
+    XCTAssertTrue(pending.isEmpty)
+
+    let hevcBootstrap = ScreenData(
+      width: 2056,
+      height: 1329,
+      imageData: Data([
+        0x00, 0x00, 0x00, 0x01, 0x40, 0x01,
+        0x00, 0x00, 0x00, 0x01, 0x42, 0x01,
+        0x00, 0x00, 0x00, 0x01, 0x44, 0x01,
+        0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0x88
+      ]),
+      timestamp: 2,
+      format: "hevc",
+      isSyncFrame: true
+    )
+
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.enqueue(
+        hevcBootstrap,
+        into: &pending,
+        waitingForSyncFrame: &waitingForSyncFrame
+      ),
+      .recoveredWithIndependentFrame
+    )
+    XCTAssertFalse(waitingForSyncFrame)
+    XCTAssertEqual(pending.first?.imageData, hevcBootstrap.imageData)
   }
 
   func testRemoteDesktopScreenFrameWireDecodesV2FrameSequenceNumber() {
@@ -5629,6 +7655,15 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   func testRemoteDesktopDecodeQueuePolicyRequiresSyncAfterPredictiveSequenceGap() {
+    XCTAssertEqual(
+      RemoteDesktopDecodeQueuePolicy.validatePredictiveSequence(
+        previous: 100,
+        current: 102,
+        isPredictiveVideo: true,
+        isIndependentFrame: false
+      ),
+      .gapRequiresSync(previous: 100, current: 102, missing: 1)
+    )
     XCTAssertEqual(
       RemoteDesktopDecodeQueuePolicy.validatePredictiveSequence(
         previous: 10,
@@ -6367,23 +8402,27 @@ final class RegressionHardeningTests: XCTestCase {
       in: source
     )
     let receiveLoopProbe = try sourceSlice(
-      from: "if let decoded = Self.decodeRemoteDesktopHighThroughputPayload(plaintext)",
-      to: "if await handleDecodedControlPlaintext",
+      from: "let openedPayload = try await decrypt(ciphertext: trafficUnwrapped, with: keys)",
+      to: "self.appendSmokeTrace(\"rx frame len=\\(length) keys=\\(hasSessionKeys)\")",
       in: source
     )
     let screenPublisher = try sourceSlice(
       from: "private func publishDecodedScreenDataIfCurrent",
-      to: "func sendFramed",
+      to: "nonisolated func appendSmokeTrace",
       in: source
     )
 
     XCTAssertTrue(highThroughputPublisher.contains("isStrictPQCClassicBootstrapOnlyCurrentSession"))
     XCTAssertTrue(highThroughputPublisher.contains("source=control-channel"))
     XCTAssertTrue(highThroughputPublisher.contains("return false"))
+    XCTAssertTrue(receiveLoopProbe.contains("if openedPayload.packetType == .remoteDesktop"))
     XCTAssertTrue(
-      receiveLoopProbe.contains(
-        "let published = await publishHighThroughputRemoteDesktopPayloadIfCurrent"))
-    XCTAssertTrue(receiveLoopProbe.contains("if published && !usesDirectControlPayloads"))
+      receiveLoopProbe.contains("let decoded = Self.decodeRemoteDesktopHighThroughputPayload(plaintext)")
+    )
+    XCTAssertTrue(
+      receiveLoopProbe.contains("_ = await publishHighThroughputRemoteDesktopPayloadIfCurrent")
+    )
+    XCTAssertTrue(receiveLoopProbe.contains("packetType: openedPayload.packetType"))
     XCTAssertTrue(
       screenPublisher.contains("strictPQCClassicBootstrapOnlySessionIds.contains(sessionId)"))
     XCTAssertTrue(screenPublisher.contains("source=screen-channel"))
@@ -6416,6 +8455,61 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(bootstrapTimeout.contains("strictPQCClassicBootstrapMaxGraceSeconds"))
     XCTAssertTrue(bootstrapTimeout.contains("timeout extended while rekey/liveness is active"))
     XCTAssertTrue(bootstrapTimeout.contains("failStrictPQCBootstrapSession"))
+  }
+
+  func testRemoteDesktopLANSOAPairKeyIsReleasedDuringSecureChannelCleanup() throws {
+    let source = try remoteDesktopManagerSource()
+    let clearBody = try sourceSlice(
+      from: "private func clearLANSecureChannelState() async",
+      to: "private func ensureLANRemoteControlTrustBootstrap",
+      in: source
+    )
+    let connectBody = try sourceSlice(
+      from: "public func connect(to device: DiscoveredDevice) async throws",
+      to: "public func startStreaming() async throws",
+      in: source
+    )
+    let handshakeBody = try sourceSlice(
+      from: "private func establishLANSecureChannel",
+      to: "private func installLANHandshakeDriver",
+      in: source
+    )
+
+    XCTAssertTrue(source.contains("private var lanSOAPairKey: Data?"))
+    XCTAssertTrue(source.contains("private var pendingConnectionTarget: DiscoveredDevice?"))
+    XCTAssertTrue(clearBody.contains("PeerSessionArbiter.shared.clearEstablished"))
+    XCTAssertTrue(clearBody.contains("PeerSessionArbiter.shared.clearOutgoing"))
+    XCTAssertTrue(clearBody.contains("lanSOAPairKey = nil"))
+    XCTAssertTrue(handshakeBody.contains("PeerSessionArbiter.pairKey"))
+    XCTAssertTrue(handshakeBody.contains("lanSOAPairKey = pairKey"))
+    XCTAssertTrue(connectBody.contains("pendingConnectionTarget"))
+    XCTAssertTrue(connectBody.contains("areEquivalentRemoteDesktopDevices"))
+    XCTAssertTrue(connectBody.contains("pushViewerStreamConfiguration(force: true)"))
+  }
+
+  func testRemoteDesktopLANHandshakeUsesRemoteControlSOAScope() throws {
+    let source = try remoteDesktopManagerSource()
+    let handshakeBody = try sourceSlice(
+      from: "private func establishLANSecureChannel",
+      to: "private func installLANHandshakeDriver",
+      in: source
+    )
+
+    XCTAssertTrue(handshakeBody.contains("scope: .remoteControl"))
+    XCTAssertTrue(handshakeBody.contains("soaSessionScope: .remoteControl"))
+  }
+
+  func testRemoteControlSOAStateIsOwnedByPeerLifecycle() throws {
+    let source = try repositoryScriptSource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
+
+    XCTAssertTrue(source.contains("var soaPairKey: Data?"))
+    XCTAssertTrue(source.contains("recordSOAState(soaPairKey, for: peer)"))
+    XCTAssertTrue(source.contains("releaseStaleSOAStateBeforeHandshake(pairKey: soaPairKey, for: peer)"))
+    XCTAssertTrue(source.contains("releaseSOAStateIfUnretained(for: previousPeer)"))
+    XCTAssertTrue(source.contains("releaseSOAStateIfUnretained(for: peer)"))
+    XCTAssertTrue(source.contains("PeerSessionArbiter.shared.clearEstablished"))
+    XCTAssertTrue(source.contains("PeerSessionArbiter.shared.clearOutgoing"))
+    XCTAssertTrue(source.contains("isSOAPairKeyRetainedByCurrentPeer"))
   }
 }
 

@@ -45,7 +45,6 @@ enum ClassicTransferPeerResolutionBranch: String, Sendable, Equatable {
     case declaredSenderDeviceId = "declared_sender_device_id"
     case aliasOrCanonicalDeviceId = "alias_or_canonical_device_id"
     case endpointHostOrIP = "endpoint_host_or_ip"
-    case singleAuthenticatedFallback = "single_authenticated_fallback"
 }
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -126,18 +125,6 @@ enum ClassicTransferPeerResolutionPolicy {
             )
         }
 
-        let hasPeerHints = exactDeclared != nil || !declaredCandidates.isEmpty || !endpointCandidates.isEmpty
-        if !hasPeerHints, authenticatedPeers.count == 1, let only = authenticatedPeers.first {
-            return ClassicTransferPeerResolutionOutcome(
-                matchDeviceId: only.matchDeviceId,
-                resolvedPeerDeviceId: only.resolvedPeerDeviceId,
-                matchedBy: .singleAuthenticatedFallback,
-                declaredCandidates: declaredCandidates,
-                endpointCandidates: endpointCandidates,
-                supportsClassicResume: ClassicTransferCapability.supportsClassicResume(in: only.capabilities)
-            )
-        }
-
         return nil
     }
 
@@ -197,8 +184,6 @@ enum ClassicTransferPeerResolutionPolicy {
             case .endpointHostOrIP:
                 return !endpointCandidates.isEmpty
                     && !endpointCandidates.isDisjoint(with: candidate.aliases.map { $0.lowercased() })
-            case .singleAuthenticatedFallback:
-                return true
             }
         }
 

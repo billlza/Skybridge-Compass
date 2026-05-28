@@ -2,12 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- iCloud权限 -->
+		<key>com.apple.application-identifier</key>
+		<string>$(AppIdentifierPrefix)com.skybridge.compass.pro</string>
+		<!-- iCloud权限 -->
 	<key>com.apple.developer.icloud-container-identifiers</key>
 	<array>
 		<string>iCloud.com.skybridge.compass</string>
 	</array>
-	
+
 	<key>com.apple.developer.icloud-services</key>
 	<array>
 		<string>CloudKit</string>
@@ -26,14 +28,20 @@
 	<key>com.apple.security.personal-information.location</key>
 	<true/>
 
-	<!-- 网络权限 -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<key>com.apple.security.network.server</key>
-	<true/>
-	
-	<!-- 文件访问权限 -->
-	<key>com.apple.security.files.user-selected.read-write</key>
+		<!-- 网络权限 -->
+		<key>com.apple.security.network.client</key>
+		<true/>
+		<key>com.apple.security.network.server</key>
+		<true/>
+
+		<key>keychain-access-groups</key>
+		<array>
+			<string>$(AppIdentifierPrefix)com.skybridge.compass.pro</string>
+			<string>$(AppIdentifierPrefix)group.com.skybridge.compass</string>
+		</array>
+
+		<!-- 文件访问权限 -->
+		<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 	
 	<!-- USB访问权限 -->

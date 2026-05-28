@@ -220,6 +220,44 @@ public struct TransferConfiguration: Codable, Sendable {
     )
 }
 
+/// File-transfer payload encryption is currently a fixed AES-256-GCM protocol.
+/// Unsupported persisted values are rejected instead of being presented as selectable algorithms.
+public enum FileTransferEncryptionAlgorithm: String, CaseIterable, Codable, Sendable {
+    case aes256GCM = "AES-256-GCM"
+
+    public var displayName: String {
+        switch self {
+        case .aes256GCM:
+            return "AES-256-GCM"
+        }
+    }
+
+    public init(persistedValue: String) throws {
+        let normalized = persistedValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .replacingOccurrences(of: "_", with: "-")
+
+        switch normalized {
+        case "AES-256-GCM", "AES256-GCM", "AES-256":
+            self = .aes256GCM
+        default:
+            throw FileTransferEncryptionAlgorithmError.unsupportedAlgorithm(persistedValue)
+        }
+    }
+}
+
+public enum FileTransferEncryptionAlgorithmError: LocalizedError, Sendable {
+    case unsupportedAlgorithm(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedAlgorithm(let value):
+            return "Unsupported file-transfer encryption algorithm: \(value)"
+        }
+    }
+}
+
 // MARK: - 文件传输会话
 
 /// 文件传输会话 - 管理单个文件的传输状态和进度

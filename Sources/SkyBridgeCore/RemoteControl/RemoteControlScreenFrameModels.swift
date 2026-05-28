@@ -1,7 +1,7 @@
 import Foundation
 
 enum RemoteControlWireLimits {
-    static let aesGCMCombinedOverheadBytes = 28
+    static let aesGCMCombinedOverheadBytes = RemoteControlSecureEnvelope.overheadBytes
 
     static func maxWireMessageBytes(for plaintextLimit: Int) -> Int {
         plaintextLimit + aesGCMCombinedOverheadBytes

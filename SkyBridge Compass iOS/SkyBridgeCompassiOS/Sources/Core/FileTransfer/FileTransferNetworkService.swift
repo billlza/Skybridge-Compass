@@ -108,7 +108,7 @@ public actor FileTransferNetworkService {
         let model = "iOS Device"
         #endif
 
-        let deviceId = KeychainManager.shared.getOrGenerateDeviceId()
+        let deviceId = ProtocolDeviceIdentity.stableDeviceId()
 
         let txtRecord = Self.makeBonjourTXTRecord(
             deviceName: deviceName,
@@ -174,8 +174,8 @@ public actor FileTransferNetworkService {
         if await isHealthy() {
             return
         }
-        SkyBridgeLogger.shared.warning(
-            "⚠️ iOS 文件传输 listener 不健康，准备重启: state=\(String(describing: listenerHealthState)) isListening=\(isListening)"
+        SkyBridgeLogger.shared.info(
+            "ℹ️ iOS 文件传输 listener 未运行，准备重启: state=\(String(describing: listenerHealthState)) isListening=\(isListening)"
         )
         stopListening()
         try await startListening()
@@ -188,7 +188,7 @@ public actor FileTransferNetworkService {
     #if canImport(UIKit)
     @MainActor
     private static func currentDeviceName() -> String {
-        UIDevice.current.name
+        AppleMobileDeviceIdentity.currentSnapshot().deviceName
     }
 
     @MainActor

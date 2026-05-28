@@ -17,10 +17,12 @@ public struct OnlineDeviceRow: View {
         VStack(alignment: .leading, spacing: settingsManager.compactMode ? 8 : 12) {
             HStack {
  // 设备图标
-                Image(systemName: deviceIcon)
-                    .font(settingsManager.compactMode ? .body : .title2)
-                    .foregroundColor(deviceColor)
-                    .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
+                if settingsManager.showDeviceIcons {
+                    Image(systemName: deviceIcon)
+                        .font(settingsManager.compactMode ? .body : .title2)
+                        .foregroundColor(deviceColor)
+                        .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
+                }
                 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {

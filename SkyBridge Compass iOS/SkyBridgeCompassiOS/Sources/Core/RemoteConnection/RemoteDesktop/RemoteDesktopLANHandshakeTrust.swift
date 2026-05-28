@@ -9,13 +9,10 @@ struct LANRemoteControlCurrentPathAuthority: Sendable {
 
 struct LANRemoteControlHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Sendable {
     let expectedRemoteAuthority: LANRemoteControlCurrentPathAuthority
-    let fallbackPeerIDs: [String]
 
     func trustedFingerprint(for deviceId: String) async -> String? {
-        if deviceId == expectedRemoteAuthority.deviceId || fallbackPeerIDs.contains(deviceId) {
-            return expectedRemoteAuthority.protocolPublicKeyFingerprint
-        }
-        return nil
+        guard deviceId == expectedRemoteAuthority.deviceId else { return nil }
+        return expectedRemoteAuthority.protocolPublicKeyFingerprint
     }
 
     func trustedFingerprints(for deviceId: String) async -> Set<String> {
@@ -30,6 +27,11 @@ struct LANRemoteControlHandshakeTrustProvider: MultiFingerprintHandshakeTrustPro
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
         _ = deviceId
         return nil
+    }
+
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool {
+        _ = deviceId
+        return true
     }
 }
 

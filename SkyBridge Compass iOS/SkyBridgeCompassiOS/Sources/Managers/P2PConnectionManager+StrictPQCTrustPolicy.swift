@@ -64,6 +64,14 @@ extension P2PConnectionManager {
         signedRefreshFailureReason: String? = nil,
         requiresSignedRefreshEvidence: Bool = true
     ) -> StrictPQCPreflightAction {
+        let normalizedPinnedProtocolFingerprints = Set(
+            pinnedProtocolFingerprints.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }.filter { !$0.isEmpty }
+        )
+        guard !normalizedPinnedProtocolFingerprints.isEmpty else {
+            return .attemptOOBProtocolIdentityBindingThenRefresh
+        }
         let trustedSuites = requiresSignedRefreshEvidence
             ? signedRefreshEvidenceSuites(signedRefreshEvidence)
             : trustedPeerKEMSuites
@@ -76,8 +84,7 @@ extension P2PConnectionManager {
         if requiresSignedRefreshEvidence, signedRefreshEvidence == nil {
             return .attemptOOBProtocolIdentityBindingThenRefresh
         }
-        if pinnedProtocolFingerprints.isEmpty
-            || shouldAttemptOOBProtocolIdentityBinding(afterSKRFailure: signedRefreshFailureReason) {
+        if shouldAttemptOOBProtocolIdentityBinding(afterSKRFailure: signedRefreshFailureReason) {
             return .attemptOOBProtocolIdentityBindingThenRefresh
         }
         return .attemptSignedLANRefresh

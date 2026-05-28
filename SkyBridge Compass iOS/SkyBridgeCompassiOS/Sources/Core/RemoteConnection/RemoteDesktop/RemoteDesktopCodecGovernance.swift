@@ -80,9 +80,6 @@ struct RemoteDesktopCodecGovernance: Sendable, Equatable {
         if hevcDisabled {
             switch userPreference {
             case .automatic, .hevc:
-                if effectiveFormats.contains("h264") {
-                    return "h264"
-                }
                 if effectiveFormats.contains("jpeg") {
                     return "jpeg"
                 }
@@ -98,7 +95,7 @@ struct RemoteDesktopCodecGovernance: Sendable, Equatable {
 @available(iOS 17.0, *)
 extension RemoteDesktopManager {
     public static func supportedRemoteVideoFormats() -> [String] {
-        var formats = ["h264"]
+        var formats = ["jpeg"]
         if VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) {
             formats.insert("hevc", at: 0)
         }

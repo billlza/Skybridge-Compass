@@ -192,6 +192,42 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
         XCTAssertNil(singleFingerprint)
     }
 
+    func testDefaultHandshakeTrustProviderReturnsAllPinsFromSingleMultiPinRecord() async {
+        let deviceId = "id:11111111-2222-4333-8444-555555555555"
+        let edFingerprint = String(repeating: "9", count: 64)
+        let mlFingerprint = String(repeating: "c", count: 64)
+        let record = TrustRecord(
+            deviceId: deviceId,
+            pubKeyFP: String(repeating: "a", count: 64),
+            publicKey: Data([0x01]),
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: mlFingerprint,
+            protocolIdentityPins: [
+                ProtocolIdentityPin(
+                    algorithm: .ed25519,
+                    fingerprint: edFingerprint,
+                    source: .legacyMigration
+                ),
+                ProtocolIdentityPin(
+                    algorithm: .mlDSA65,
+                    fingerprint: mlFingerprint,
+                    source: .pib1OperatorApproval
+                )
+            ],
+            signature: Data([0x02]),
+            currentDeviceId: deviceId,
+            knownDeviceIds: [deviceId]
+        )
+
+        let provider = DefaultHandshakeTrustProvider(trustRecordsSnapshot: [record])
+        let multiProvider: any MultiFingerprintHandshakeTrustProvider = provider
+        let trustedFingerprints = await multiProvider.trustedFingerprints(for: deviceId)
+
+        XCTAssertEqual(trustedFingerprints, [edFingerprint, mlFingerprint])
+        let singleFingerprint = await provider.trustedFingerprint(for: deviceId)
+        XCTAssertNil(singleFingerprint)
+    }
+
     func testDefaultHandshakeTrustProviderUsesSnapshotForKEMAndSecureEnclavePins() async {
         let deviceId = "id:11111111-2222-4333-8444-555555555555"
         let kemPublicKey = Data(repeating: 0x44, count: 1_184)

@@ -12,6 +12,36 @@ extension RegressionHardeningTests {
     return try readRepositorySource(at: sourceURL)
   }
 
+  func p2pConnectionManagerSource() throws -> String {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let sourceURL = root.appendingPathComponent(
+      "SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+    )
+    return try readRepositorySource(at: sourceURL)
+  }
+
+  func liveActivityManagerSource() throws -> String {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let sourceURL = root.appendingPathComponent(
+      "SkyBridgeCompassiOS/Sources/Managers/LiveActivityManager.swift"
+    )
+    return try readRepositorySource(at: sourceURL)
+  }
+
+  func iosFileTransferNetworkServiceSource() throws -> String {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let sourceURL = root.appendingPathComponent(
+      "SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"
+    )
+    return try readRepositorySource(at: sourceURL)
+  }
+
   func remoteDesktopRuntimeModelsSource() throws -> String {
     let root = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
@@ -128,6 +158,16 @@ extension RegressionHardeningTests {
       .deletingLastPathComponent()
     let sourceURL = root.appendingPathComponent(
       "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopVideoDecoder.swift"
+    )
+    return try readRepositorySource(at: sourceURL)
+  }
+
+  func realtimeMediaAudioSource() throws -> String {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let sourceURL = root.appendingPathComponent(
+      "SkyBridgeCompassiOS/Sources/Managers/RealtimeMediaAudio.swift"
     )
     return try readRepositorySource(at: sourceURL)
   }

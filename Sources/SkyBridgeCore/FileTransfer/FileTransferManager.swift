@@ -16,6 +16,8 @@ public class FileTransferManager: BaseManager {
             legacyUserDefaultsKey: "FileTransferManager.History"
         )
     )
+    private static let defaultClassicTransferPort = 8080
+    private static let recentInboundTransferRouteTTL: TimeInterval = 300
 
     /// Shared instance used across the app (so WebRTC / listeners can update the same model the UI observes).
     public static let shared = FileTransferManager()
@@ -37,6 +39,9 @@ public class FileTransferManager: BaseManager {
     private var maxTransferSpeedBytesPerSecond: Double?
     private var virusScanEnabled: Bool = false
     private var currentScanLevel: FileScanService.ScanLevel = .standard
+    private var keepTransferHistory: Bool = true
+    private var keepSystemAwakeDuringTransfer: Bool = false
+    private var encryptionAlgorithm: FileTransferEncryptionAlgorithm = .aes256GCM
     private var receiveBaseDirectory: URL?
     private var transferQueue = DispatchQueue(label: "file.transfer.queue", qos: .userInitiated)
     private var transferRateLimitStates: [String: TransferRateLimitState] = [:]
@@ -51,6 +56,7 @@ public class FileTransferManager: BaseManager {
     private let resumeAckTimeoutSeconds: TimeInterval = 15
     private let activeRouteReadinessTimeoutSeconds: TimeInterval = 8
     private let activeRouteReadinessPollIntervalSeconds: TimeInterval = 0.25
+    private let powerAssertion: FileTransferPowerAssertionControlling
     public var localServiceHealthCheck: (@MainActor () async throws -> Void)?
 
     #if canImport(UserNotifications)
@@ -66,9 +72,10 @@ public class FileTransferManager: BaseManager {
     }
     #endif
 
- /// 初始化文件传输管理器
+    /// 初始化文件传输管理器
     public init() {
         self.historyStore = Self.transferHistoryStore
+        self.powerAssertion = FileTransferPowerAssertionController()
         super.init(category: "FileTransferManager")
         loadPersistedHistory()
         updateSecuritySettings(
@@ -78,8 +85,12 @@ public class FileTransferManager: BaseManager {
         logger.info("📁 初始化文件传输管理器")
     }
 
-    init(historyStore: CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>) {
+    init(
+        historyStore: CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>,
+        powerAssertion: FileTransferPowerAssertionControlling = FileTransferPowerAssertionController()
+    ) {
         self.historyStore = historyStore
+        self.powerAssertion = powerAssertion
         super.init(category: "FileTransferManager")
         loadPersistedHistory()
         updateSecuritySettings(
@@ -109,6 +120,7 @@ public class FileTransferManager: BaseManager {
     public override func cleanup() {
  // 清理所有传输记录
         activeTransfers.removeAll()
+        updateTransferPowerAssertion()
         logger.info("📁 文件传输管理器资源已清理（保留历史记录）")
     }
 
@@ -119,7 +131,10 @@ public class FileTransferManager: BaseManager {
         chunkSize: Int? = nil,
         enableCompression: Bool? = nil,
         enableEncryption: Bool? = nil,
-        maxTransferSpeedBytesPerSecond: Double? = nil
+        maxTransferSpeedBytesPerSecond: Double? = nil,
+        keepTransferHistory: Bool? = nil,
+        keepSystemAwakeDuringTransfer: Bool? = nil,
+        encryptionAlgorithm: FileTransferEncryptionAlgorithm? = nil
     ) {
         if let maxConcurrentTransfers { self.maxConcurrentTransfers = max(1, maxConcurrentTransfers) }
         if let chunkSize { self.chunkSize = min(maxChunkSizeBytes, max(64 * 1024, chunkSize)) }
@@ -128,7 +143,20 @@ public class FileTransferManager: BaseManager {
         if let maxTransferSpeedBytesPerSecond {
             self.maxTransferSpeedBytesPerSecond = maxTransferSpeedBytesPerSecond > 0 ? maxTransferSpeedBytesPerSecond : nil
         }
-        logger.info("⚙️ 传输设置已更新：并发=\(self.maxConcurrentTransfers), 块=\(self.chunkSize), 压缩=\(self.compressionEnabled), 加密=\(self.encryptionEnabled), 限速=\(self.currentSpeedLimitDescription(), privacy: .public)")
+        if let keepTransferHistory {
+            self.keepTransferHistory = keepTransferHistory
+            if !keepTransferHistory {
+                clearHistory()
+            }
+        }
+        if let keepSystemAwakeDuringTransfer {
+            self.keepSystemAwakeDuringTransfer = keepSystemAwakeDuringTransfer
+            updateTransferPowerAssertion()
+        }
+        if let encryptionAlgorithm {
+            self.encryptionAlgorithm = encryptionAlgorithm
+        }
+        logger.info("⚙️ 传输设置已更新：并发=\(self.maxConcurrentTransfers), 块=\(self.chunkSize), 压缩=\(self.compressionEnabled), 加密=\(self.enableEncryptionDescription(), privacy: .public), 限速=\(self.currentSpeedLimitDescription(), privacy: .public), 历史=\(self.keepTransferHistory, privacy: .public), 保持唤醒=\(self.keepSystemAwakeDuringTransfer, privacy: .public)")
     }
 
     public func updateSecuritySettings(
@@ -195,6 +223,10 @@ public class FileTransferManager: BaseManager {
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
         return "\(formatter.string(fromByteCount: Int64(limit)))/s"
+    }
+
+    private func enableEncryptionDescription() -> String {
+        encryptionEnabled ? encryptionAlgorithm.displayName : "disabled"
     }
 
     private func applySpeedLimitIfNeeded(for transferId: String, transferredBytes: Int) async {
@@ -349,19 +381,6 @@ public class FileTransferManager: BaseManager {
         let sessionSource = resolvedSession.source
         let resolution = resolvedSession.resolution
 
-        if resolution.matchedBy == .singleAuthenticatedFallback {
-            logger.warning(
-                """
-                ⚠️ 文件传输安全会话回退到唯一已认证连接: transferId=\(peerContext.transferId, privacy: .public) \
-                declaredSenderId=\(peerContext.declaredSenderDeviceId ?? "-", privacy: .public) \
-                endpointHostOrIP=\(peerContext.endpointHostOrIP ?? "-", privacy: .public) \
-                aliasCandidates=\(resolution.declaredCandidates.joined(separator: ","), privacy: .public) \
-                authenticatedConnections=\(authenticatedSessions.count, privacy: .public) \
-                matchedFallbackBranch=\(resolution.matchedBy.rawValue, privacy: .public) \
-                resolvedPeerId=\(resolution.resolvedPeerDeviceId, privacy: .public)
-                """
-            )
-        }
         logger.info(
             """
             🔐 文件传输安全会话已解析: transferId=\(peerContext.transferId, privacy: .public) \
@@ -495,16 +514,18 @@ public class FileTransferManager: BaseManager {
         switch routeSource {
         case "authenticated-session":
             return 0
-        case "classic-session-registry":
+        case "recent-authenticated-inbound-transfer":
             return 1
-        case "presence:outbound":
+        case "classic-session-registry":
             return 2
-        case "presence:inbound":
+        case "presence:outbound":
             return 3
-        case "unified":
+        case "presence:inbound":
             return 4
-        default:
+        case "unified":
             return 5
+        default:
+            return 6
         }
     }
 
@@ -641,6 +662,23 @@ public class FileTransferManager: BaseManager {
             appendAuthenticatedRoute(
                 from: Self.classicTransferAuthenticatedPeerCandidate(for: snapshot),
                 routeSource: "classic-session-registry"
+            )
+        }
+
+        let recentInboundCutoff = Date().addingTimeInterval(-Self.recentInboundTransferRouteTTL)
+        let recentIncomingTransfers = (Array(activeTransfers.values) + transferHistory)
+            .filter { transfer in
+                transfer.direction == .incoming
+                    && transfer.status == .completed
+                    && (transfer.completedAt ?? transfer.createdAt) >= recentInboundCutoff
+            }
+        for transfer in recentIncomingTransfers {
+            appendRoute(
+                deviceId: transfer.deviceId,
+                deviceName: transfer.deviceName ?? "P2P Device",
+                address: transfer.deviceIPAddress,
+                port: transfer.devicePort,
+                routeSource: "recent-authenticated-inbound-transfer"
             )
         }
 
@@ -849,7 +887,7 @@ public class FileTransferManager: BaseManager {
         transfer.deviceIPAddress = ipAddress
         transfer.devicePort = port
         transfer.deviceName = deviceName
-        activeTransfers[transfer.id] = transfer
+        registerActiveTransfer(transfer)
         isTransferring = true
 
         let securityContext: ClassicTransferSecurityContext
@@ -1014,6 +1052,11 @@ public class FileTransferManager: BaseManager {
             lastTransferActivityAt = Date()
             updateTransferringStatus()
             throw FileTransferError.inboundConnectionClosedBeforeMetadata
+        } catch FileTransferError.inboundInvalidInitialHeader {
+            logger.info("📥 inbound file-transfer connection rejected before metadata: invalid initial header")
+            lastTransferActivityAt = Date()
+            updateTransferringStatus()
+            throw FileTransferError.inboundInvalidInitialHeader
         } catch {
             logger.error("❌ 文件接收失败: \(error)")
             lastTransferActivityAt = Date()
@@ -1130,7 +1173,11 @@ public class FileTransferManager: BaseManager {
         transfer.fileHash = metadata.fileHash
         transfer.compression = metadata.compression
         transfer.deviceName = effectiveDeviceName
-        activeTransfers[transfer.id] = transfer
+        if let inboundEndpointAddress = sanitizeAddress(peerContext.endpointHostOrIP) {
+            transfer.deviceIPAddress = inboundEndpointAddress
+            transfer.devicePort = Self.defaultClassicTransferPort
+        }
+        registerActiveTransfer(transfer)
 
         let receivePath = uniqueReceiveFileURL(for: metadata.fileName)
         transfer.localPath = receivePath
@@ -1350,7 +1397,7 @@ public class FileTransferManager: BaseManager {
             let compression = (resumeData["compression"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             restored.compression = compression?.isEmpty == true ? nil : compression
             restored.updateProgress(transferredBytes: acceptedOffset)
-            activeTransfers[restored.id] = restored
+            registerActiveTransfer(restored)
             return restored
         }()
 
@@ -1899,17 +1946,24 @@ public class FileTransferManager: BaseManager {
         )
         let header = parseHeader(headerData)
         guard header.length >= 0, header.length <= maxMessageBytes else {
-            throw FileTransferError.invalidHeader
+            throw FileTransferError.inboundInvalidInitialHeader
         }
 
         let payload = try await receiveData(length: header.length, from: connection)
-        switch header.type {
-        case .metadata:
-            return .metadata(try JSONDecoder().decode(FileMetadata.self, from: payload))
-        case .resumeRequest:
-            return .resume(try JSONDecoder().decode(ResumeRequestPayload.self, from: payload))
-        default:
-            throw FileTransferError.invalidHeader
+        do {
+            switch header.type {
+            case .metadata:
+                return .metadata(try JSONDecoder().decode(FileMetadata.self, from: payload))
+            case .resumeRequest:
+                return .resume(try JSONDecoder().decode(ResumeRequestPayload.self, from: payload))
+            default:
+                throw FileTransferError.inboundInvalidInitialHeader
+            }
+        } catch FileTransferError.inboundInvalidInitialHeader {
+            throw FileTransferError.inboundInvalidInitialHeader
+        } catch let error as DecodingError {
+            logger.info("📥 inbound file-transfer initial metadata rejected: \(String(describing: error), privacy: .public)")
+            throw FileTransferError.inboundInvalidInitialHeader
         }
     }
 
@@ -2696,7 +2750,7 @@ public class FileTransferManager: BaseManager {
             status: .preparing
         )
         transfer.deviceName = fromDeviceName
-        activeTransfers[transferId] = transfer
+        registerActiveTransfer(transfer)
         updateTransferringStatus()
     }
 
@@ -2754,7 +2808,7 @@ public class FileTransferManager: BaseManager {
         )
         transfer.localPath = fileURL
         transfer.deviceName = toDeviceName
-        activeTransfers[transferId] = transfer
+        registerActiveTransfer(transfer)
         updateTransferringStatus()
     }
 
@@ -2785,6 +2839,8 @@ public class FileTransferManager: BaseManager {
  /// 移动到历史记录
     private func moveToHistory(_ transfer: FileTransfer) {
         activeTransfers.removeValue(forKey: transfer.id)
+        updateTransferPowerAssertion()
+        guard keepTransferHistory else { return }
         transferHistory.append(transfer)
 
  // 限制历史记录数量
@@ -2792,6 +2848,18 @@ public class FileTransferManager: BaseManager {
             transferHistory.removeFirst()
         }
         persistTransferHistory()
+    }
+
+    private func registerActiveTransfer(_ transfer: FileTransfer) {
+        activeTransfers[transfer.id] = transfer
+        updateTransferPowerAssertion()
+    }
+
+    private func updateTransferPowerAssertion() {
+        powerAssertion.update(
+            shouldKeepAwake: keepSystemAwakeDuringTransfer,
+            hasActiveTransfers: !activeTransfers.isEmpty
+        )
     }
 
     private func loadPersistedHistory() {

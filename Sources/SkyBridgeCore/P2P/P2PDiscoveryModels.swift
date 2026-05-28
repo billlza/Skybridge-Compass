@@ -40,6 +40,7 @@ public enum P2PDiscoveryError: Error, LocalizedError {
     case timeout
     case scanningFailed
     case noConnectableEndpoint
+    case strictPQCTrustPreflightFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -53,6 +54,8 @@ public enum P2PDiscoveryError: Error, LocalizedError {
             return "扫描失败"
         case .noConnectableEndpoint:
             return "设备未暴露可连接的 SkyBridge 控制端点"
+        case .strictPQCTrustPreflightFailed(let reason):
+            return "strict PQC 信任预检失败：\(reason)"
         }
     }
 }

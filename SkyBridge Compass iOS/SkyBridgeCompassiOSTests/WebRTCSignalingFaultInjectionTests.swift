@@ -30,6 +30,26 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         XCTAssertEqual(parser.nextPayload(sessionId: "S2", logLabel: "test"), payload)
     }
 
+    func testInboundFrameParserAcceptsExactMaxFrameAndStickyNextFrame() {
+        var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 8192)
+        let exactMaxPayload = Data((0..<8192).map { UInt8($0 % 251) })
+        let nextPayload = Data("next".utf8)
+        var combined = framedPayload(exactMaxPayload)
+        combined.append(framedPayload(nextPayload))
+
+        parser.append(Data(combined.prefix(2)))
+        XCTAssertNil(parser.nextPayload(sessionId: "S2-exact", logLabel: "test"))
+
+        parser.append(Data(combined.dropFirst(2)))
+        XCTAssertEqual(parser.nextPayload(sessionId: "S2-exact", logLabel: "test"), exactMaxPayload)
+        XCTAssertEqual(parser.nextPayload(sessionId: "S2-exact", logLabel: "test"), nextPayload)
+
+        var oversizedParser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 8192)
+        oversizedParser.append(framedPayload(Data(repeating: 0xA5, count: 8193)))
+        XCTAssertNil(oversizedParser.nextPayload(sessionId: "S2-oversized", logLabel: "test"))
+        XCTAssertTrue(oversizedParser.canProbeDirectCompatibility)
+    }
+
     func testInboundFrameParserOnlyAllowsDirectProbeWhenNoPartialFrameIsBuffered() {
         var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 1024)
         let payload = Data("frame".utf8)

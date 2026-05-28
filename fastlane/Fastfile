@@ -1,6 +1,8 @@
 # Fastlane 自动化脚本
 # SkyBridge Compass
 
+require "shellwords"
+
 default_platform(:mac)
 
 platform :mac do
@@ -66,8 +68,18 @@ platform :mac do
 
     sh("cd .. && ./Scripts/ensure_notarytool_credentials.sh")
 
+    connectivity_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"]
+    p2p_remote_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR"]
+    file_transfer_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR"]
+    p2p_notice_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR"]
+    webrtc_notice_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR"]
+    notice_panel_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR"]
+    if connectivity_artifact_dir.to_s.empty? || p2p_remote_artifact_dir.to_s.empty? || file_transfer_artifact_dir.to_s.empty? || p2p_notice_artifact_dir.to_s.empty? || webrtc_notice_artifact_dir.to_s.empty? || notice_panel_artifact_dir.to_s.empty?
+      UI.user_error!("最终发布必须显式传入 SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR")
+    end
+
     release_args = [
-      "--identity '#{signing_identity}'",
+      "--identity #{Shellwords.escape(signing_identity)}",
       "--notarize-app",
       "--notarize-dmg",
       "--require-notarization"
@@ -78,7 +90,24 @@ platform :mac do
     end
 
     sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 ./Scripts/build_dmg.sh #{release_args.join(' ')}")
-    sh("cd .. && SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 ./Scripts/check_macos_release_readiness.sh --require-notarization")
+    readiness_args = [
+      "--require-notarization",
+      "--connectivity-artifact-dir #{Shellwords.escape(connectivity_artifact_dir)}",
+      "--p2p-remote-artifact-dir #{Shellwords.escape(p2p_remote_artifact_dir)}",
+      "--file-transfer-artifact-dir #{Shellwords.escape(file_transfer_artifact_dir)}",
+      "--p2p-notice-artifact-dir #{Shellwords.escape(p2p_notice_artifact_dir)}",
+      "--webrtc-notice-artifact-dir #{Shellwords.escape(webrtc_notice_artifact_dir)}",
+      "--notice-panel-artifact-dir #{Shellwords.escape(notice_panel_artifact_dir)}"
+    ]
+    sh("cd .. && SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 ./Scripts/check_macos_release_readiness.sh #{readiness_args.join(' ')}")
+
+    if ENV["SKYBRIDGE_PUBLISH_UPDATE_RELEASE"] == "1"
+      update_key_id = ENV["SKYBRIDGE_UPDATE_MANIFEST_KEY_ID"]
+      if update_key_id.to_s.empty?
+        UI.user_error!("发布 GitHub stable 更新必须设置 SKYBRIDGE_UPDATE_MANIFEST_KEY_ID")
+      end
+      sh("cd .. && ./Scripts/publish_macos_update_release.sh --key-id #{Shellwords.escape(update_key_id)}")
+    end
 
     UI.success("✅ 最终发布版本已准备好，DMG 已完成严格校验并复制到桌面！")
   end

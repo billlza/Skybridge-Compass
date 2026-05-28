@@ -101,6 +101,10 @@ targets:
       configs:
         Debug:
           CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSDebug.entitlements
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": YES
+          "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": YES
+          "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
         Release:
           CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSRelease.entitlements
 
@@ -126,6 +130,12 @@ targets:
         INFOPLIST_FILE: "Widgets/Info.plist"
         SWIFT_STRICT_CONCURRENCY: complete
         # Widgets do not need HAS_APPLE_PQC_SDK; keep build conditions minimal for portability.
+      configs:
+        Debug:
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": YES
+          "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": YES
+          "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
 
   SkyBridgeCompassiOSTests:
     type: bundle.unit-test
@@ -148,6 +158,12 @@ targets:
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]: "$(inherited) HAS_APPLE_PQC_SDK"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]: "$(inherited) HAS_APPLE_PQC_SDK"
+      configs:
+        Debug:
+          "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+          "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": YES
+          "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": YES
+          "ENABLE_DEBUG_DYLIB[sdk=iphonesimulator*]": NO
 
 schemes:
   SkyBridgeCompass-iOS:

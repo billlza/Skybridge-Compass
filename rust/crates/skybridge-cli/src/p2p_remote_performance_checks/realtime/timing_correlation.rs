@@ -1,4 +1,5 @@
 use crate::p2p_remote_performance_evidence::P2pRemotePerformanceEvidence;
+use crate::performance_budgets::P2P_REMOTE_STRICT_IOS_QUEUE_HOP_LIMIT_MS;
 use crate::{DoctorCheck, simple_doctor_check};
 
 pub(crate) fn check_p2p_remote_timing_correlation(
@@ -88,6 +89,61 @@ pub(crate) fn check_p2p_remote_timing_correlation(
     } else {
         evidence.ios_source_to_read_unsynced_clock_samples
     };
+    let source_to_read_trusted_clock_samples = if uses_final_window {
+        evidence.final_ios_source_to_read_trusted_clock_samples
+    } else {
+        evidence.ios_source_to_read_trusted_clock_samples
+    };
+    let rx_samples = if uses_final_window {
+        evidence.final_lan_rx_samples
+    } else {
+        evidence.ios_lan_rx_samples
+    };
+    let rx_frame_clock_samples = if uses_final_window {
+        evidence.final_lan_rx_frame_clock_samples
+    } else {
+        evidence.ios_lan_rx_frame_clock_samples
+    };
+    let socket_arrival_frame_clock_samples = if uses_final_window {
+        evidence.final_lan_rx_socket_arrival_frame_clock_samples
+    } else {
+        evidence.ios_lan_rx_socket_arrival_frame_clock_samples
+    };
+    let socket_metric_clock_samples = if uses_final_window {
+        evidence.final_lan_rx_socket_metric_clock_samples
+    } else {
+        evidence.ios_lan_rx_socket_metric_clock_samples
+    };
+    let local_socket_metric_clock_samples = if uses_final_window {
+        evidence.final_lan_rx_local_socket_metric_clock_samples
+    } else {
+        evidence.ios_lan_rx_local_socket_metric_clock_samples
+    };
+    let socket_to_decode_feed_samples = if uses_final_window {
+        evidence.final_lan_rx_socket_to_decode_feed_samples
+    } else {
+        evidence.ios_lan_rx_socket_to_decode_feed_samples
+    };
+    let socket_to_decode_feed_max_ms = if uses_final_window {
+        evidence.final_lan_rx_socket_to_decode_feed_max_ms
+    } else {
+        evidence.ios_lan_rx_socket_to_decode_feed_max_ms
+    };
+    let socket_to_apply_end_samples = if uses_final_window {
+        evidence.final_lan_rx_socket_to_apply_end_samples
+    } else {
+        evidence.ios_lan_rx_socket_to_apply_end_samples
+    };
+    let socket_to_apply_end_max_ms = if uses_final_window {
+        evidence.final_lan_rx_socket_to_apply_end_max_ms
+    } else {
+        evidence.ios_lan_rx_socket_to_apply_end_max_ms
+    };
+    let decode_attempted_total = if uses_final_window {
+        evidence.final_lan_rx_decode_attempted_total
+    } else {
+        evidence.ios_lan_rx_decode_attempted_total
+    };
     let max_allowed_source_gap_ms = 100.0;
     let tx_samples = if uses_final_window {
         evidence.mac_final_window_tx_samples
@@ -112,6 +168,17 @@ pub(crate) fn check_p2p_remote_timing_correlation(
     let direct_pump_all = tx_samples > 0 && direct_pump_samples == tx_samples;
     let writer_clock_all = tx_samples > 0 && writer_clock_samples == tx_samples;
     let send_scheduler_all = tx_samples > 0 && send_scheduler_samples == tx_samples;
+    let trusted_source_to_read_clock_all = rx_samples > 0
+        && source_to_read_trusted_clock_samples == rx_samples
+        && source_to_read_unsynced_clock_samples == 0;
+    let unsynced_source_to_read_clock_all = rx_samples > 0
+        && source_to_read_unsynced_clock_samples == rx_samples
+        && source_to_read_trusted_clock_samples == 0;
+    let source_to_read_clock_ok = if trusted_source_to_read_clock_all {
+        source_to_read <= 100.0
+    } else {
+        unsynced_source_to_read_clock_all
+    };
     let ok = source_samples > 0
         && direct_pump_all
         && writer_clock_all
@@ -125,13 +192,28 @@ pub(crate) fn check_p2p_remote_timing_correlation(
         && encoded_to_submit <= 100.0
         && submit_gap <= frame_budget_ms * 4.0
         && source_gap <= max_allowed_source_gap_ms
-        && (source_to_read <= 100.0 || source_to_read_unsynced_clock_samples > 0);
+        && source_to_read_clock_ok
+        && rx_samples > 0
+        && rx_frame_clock_samples == rx_samples
+        && socket_arrival_frame_clock_samples == rx_samples
+        && socket_metric_clock_samples == rx_samples
+        && local_socket_metric_clock_samples == rx_samples
+        && decode_attempted_total > 0
+        && source_samples >= decode_attempted_total
+        && socket_to_decode_feed_samples > 0
+        && socket_to_decode_feed_samples == decode_attempted_total
+        && socket_to_decode_feed_max_ms
+            .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_IOS_QUEUE_HOP_LIMIT_MS)
+        && socket_to_apply_end_samples > 0
+        && socket_to_apply_end_samples == decode_attempted_total
+        && socket_to_apply_end_max_ms
+            .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_IOS_QUEUE_HOP_LIMIT_MS);
     simple_doctor_check(
         "p2p_remote_timing_correlation",
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "finalWindow={} macDirectPumpSamples={}/{} macWriterClockSamples={}/{} macSendSchedulerSamples={}/{} macScheduleGapMaxMs={:.1} macScheduleJitterMaxMs={:.1} macCompletionGapMaxMs={:.1} macContentCallbackGapMaxMs={:.1} macContentActorHopMaxMs={:.1} macClockFireToDrainMaxMs={:.1} macEncodedToSubmitMaxMs={:.1} macSubmitGapMaxMs={:.1} iosSourceSamples={} iosSourceGapMaxMs={:.1} maxAllowedSourceGapMs={:.1} iosSourceToReadMaxMs={:.1} iosSourceToReadUnsyncedClockSamples={} frameBudgetMs={:.1}",
+            "finalWindow={} macDirectPumpSamples={}/{} macWriterClockSamples={}/{} macSendSchedulerSamples={}/{} macScheduleGapMaxMs={:.1} macScheduleJitterMaxMs={:.1} macCompletionGapMaxMs={:.1} macContentCallbackGapMaxMs={:.1} macContentActorHopMaxMs={:.1} macClockFireToDrainMaxMs={:.1} macEncodedToSubmitMaxMs={:.1} macSubmitGapMaxMs={:.1} iosSourceSamples={} iosDecodeAttempted={} iosSourceGapMaxMs={:.1} maxAllowedSourceGapMs={:.1} iosSourceToReadMaxMs={:.1} iosSourceToReadTrustedClockSamples={} iosSourceToReadUnsyncedClockSamples={} iosRxFrameClockSamples={}/{} iosSocketArrivalFrameClockSamples={}/{} iosSocketMetricClockSamples={}/{} iosLocalSocketMetricClockSamples={}/{} iosSocketToDecodeFeedSamples={}/{} iosSocketToDecodeFeedMaxMs={} iosSocketToApplyEndSamples={}/{} iosSocketToApplyEndMaxMs={} socketMetricBudgetMs={:.1} frameBudgetMs={:.1}",
             uses_final_window,
             direct_pump_samples,
             tx_samples,
@@ -148,10 +230,31 @@ pub(crate) fn check_p2p_remote_timing_correlation(
             encoded_to_submit,
             submit_gap,
             source_samples,
+            decode_attempted_total,
             source_gap,
             max_allowed_source_gap_ms,
             source_to_read,
+            source_to_read_trusted_clock_samples,
             source_to_read_unsynced_clock_samples,
+            rx_frame_clock_samples,
+            rx_samples,
+            socket_arrival_frame_clock_samples,
+            rx_samples,
+            socket_metric_clock_samples,
+            rx_samples,
+            local_socket_metric_clock_samples,
+            rx_samples,
+            socket_to_decode_feed_samples,
+            decode_attempted_total,
+            socket_to_decode_feed_max_ms
+                .map(|ms| format!("{ms:.1}"))
+                .unwrap_or_else(|| "missing".to_owned()),
+            socket_to_apply_end_samples,
+            decode_attempted_total,
+            socket_to_apply_end_max_ms
+                .map(|ms| format!("{ms:.1}"))
+                .unwrap_or_else(|| "missing".to_owned()),
+            P2P_REMOTE_STRICT_IOS_QUEUE_HOP_LIMIT_MS,
             frame_budget_ms
         ),
     )

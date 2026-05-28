@@ -99,7 +99,7 @@ enum AppleMobileDeviceIdentity {
         let modelIdentifier = currentModelIdentifier()
         let presentation = presentation(forModelIdentifier: modelIdentifier, platform: platform)
         return Snapshot(
-            stableDeviceId: KeychainManager.shared.getOrGenerateDeviceId(),
+            stableDeviceId: ProtocolDeviceIdentity.stableDeviceId(),
             vendorDeviceId: values.vendorDeviceId,
             deviceName: values.deviceName,
             platform: platform,

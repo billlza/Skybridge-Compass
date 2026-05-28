@@ -13,7 +13,8 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             strictValidationRequiresAudioEndpoint: false,
             hasUsableMediaAudioBinding: false,
             refreshStream: false,
-            lastSentMediaAudioEndpointPresent: false
+            lastSentMediaAudioEndpointPresent: false,
+            lastAcknowledgedMediaAudioEndpointPresent: false
         )
 
         XCTAssertFalse(plan.canSend)
@@ -32,7 +33,8 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: false,
             refreshStream: false,
-            lastSentMediaAudioEndpointPresent: false
+            lastSentMediaAudioEndpointPresent: false,
+            lastAcknowledgedMediaAudioEndpointPresent: false
         )
 
         XCTAssertTrue(plan.canSend)
@@ -49,11 +51,29 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: true,
             refreshStream: true,
-            lastSentMediaAudioEndpointPresent: true
+            lastSentMediaAudioEndpointPresent: true,
+            lastAcknowledgedMediaAudioEndpointPresent: true
         )
 
         XCTAssertFalse(plan.shouldDeferUntilAudioEndpointReady)
         XCTAssertFalse(plan.includeAudioEndpointInStreamConfig)
+    }
+
+    func testCrossNetworkRefreshRepeatsAudioEndpointUntilHostAcknowledgesIt() {
+        let plan = RemoteDesktopViewerStreamConfigurationPushPolicy.prepare(
+            activeTransportMode: .crossNetwork,
+            hasCurrentConnection: true,
+            hasLANConnection: false,
+            audioRedirectionEnabled: true,
+            strictValidationRequiresAudioEndpoint: true,
+            hasUsableMediaAudioBinding: true,
+            refreshStream: true,
+            lastSentMediaAudioEndpointPresent: true,
+            lastAcknowledgedMediaAudioEndpointPresent: false
+        )
+
+        XCTAssertFalse(plan.shouldDeferUntilAudioEndpointReady)
+        XCTAssertTrue(plan.includeAudioEndpointInStreamConfig)
     }
 
     func testCrossNetworkFirstAudioConfigIncludesEndpoint() {
@@ -65,7 +85,8 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: true,
             refreshStream: false,
-            lastSentMediaAudioEndpointPresent: false
+            lastSentMediaAudioEndpointPresent: false,
+            lastAcknowledgedMediaAudioEndpointPresent: false
         )
 
         XCTAssertTrue(plan.includeAudioEndpointInStreamConfig)
@@ -80,7 +101,8 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: true,
             refreshStream: true,
-            lastSentMediaAudioEndpointPresent: true
+            lastSentMediaAudioEndpointPresent: true,
+            lastAcknowledgedMediaAudioEndpointPresent: true
         )
 
         XCTAssertTrue(plan.canSendOverLAN)

@@ -135,6 +135,105 @@ pub(super) fn push_local_webrtc_smoke_steps(
     });
 }
 
+pub(super) fn push_local_webrtc_security_notice_smoke_steps(
+    root: &Path,
+    steps: &mut Vec<SmokeSuiteStepSpec>,
+    min_fps: f64,
+) {
+    let artifact_dir = root.join("Artifacts").join("local_webrtc_security_notice");
+    steps.push(SmokeSuiteStepSpec {
+        name: "local_webrtc_security_notice_smoke",
+        description: "Local WebRTC smoke with remote-control security notice evidence",
+        program: "bash".to_owned(),
+        args: vec!["Scripts/run_local_webrtc_smoke.sh".to_owned()],
+        env: vec![
+            (
+                "SKYBRIDGE_SMOKE_ARTIFACT_DIR".to_owned(),
+                artifact_dir.display().to_string(),
+            ),
+            (
+                "SKYBRIDGE_SMOKE_MIN_FPS".to_owned(),
+                format!("{min_fps:.2}"),
+            ),
+            (
+                "SKYBRIDGE_SMOKE_SIGNALING_FLAVOR".to_owned(),
+                "compat".to_owned(),
+            ),
+            (
+                "SKYBRIDGE_SMOKE_SCENARIO".to_owned(),
+                "xwing-only".to_owned(),
+            ),
+            (
+                "SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE".to_owned(),
+                "1".to_owned(),
+            ),
+            (
+                "SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE".to_owned(),
+                "1".to_owned(),
+            ),
+        ],
+        cwd: root.to_path_buf(),
+    });
+    push_remote_control_notice_check_step(root, steps, &artifact_dir, "webrtc", false);
+    push_local_macos_security_notice_panel_probe_steps(root, steps);
+}
+
+pub(super) fn push_local_macos_security_notice_panel_probe_steps(
+    root: &Path,
+    steps: &mut Vec<SmokeSuiteStepSpec>,
+) {
+    let artifact_dir = root
+        .join("Artifacts")
+        .join("local_macos_security_notice_panel");
+    steps.push(SmokeSuiteStepSpec {
+        name: "local_macos_security_notice_panel_probe",
+        description: "Launch SkyBridgeCompassApp and validate the production AppKit security notice panel",
+        program: "bash".to_owned(),
+        args: vec!["Scripts/run_remote_control_notice_panel_probe.sh".to_owned()],
+        env: vec![(
+            "SKYBRIDGE_SMOKE_ARTIFACT_DIR".to_owned(),
+            artifact_dir.display().to_string(),
+        )],
+        cwd: root.to_path_buf(),
+    });
+    push_remote_control_notice_check_step(root, steps, &artifact_dir, "webrtc", true);
+}
+
+pub(in crate::smoke_suite::plan) fn push_remote_control_notice_check_step(
+    root: &Path,
+    steps: &mut Vec<SmokeSuiteStepSpec>,
+    artifact_dir: &Path,
+    transport: &str,
+    require_panel: bool,
+) {
+    let mut args = vec![
+        "run".to_owned(),
+        "--quiet".to_owned(),
+        "--manifest-path".to_owned(),
+        "rust/Cargo.toml".to_owned(),
+        "-p".to_owned(),
+        "skybridge".to_owned(),
+        "--".to_owned(),
+        "check".to_owned(),
+        "remote-control-notice".to_owned(),
+        "--artifact-dir".to_owned(),
+        artifact_dir.display().to_string(),
+        "--transport".to_owned(),
+        transport.to_owned(),
+    ];
+    if require_panel {
+        args.push("--require-panel".to_owned());
+    }
+    steps.push(SmokeSuiteStepSpec {
+        name: "remote_control_security_notice_check",
+        description: "Validate remote-control security notice lifecycle evidence",
+        program: "cargo".to_owned(),
+        args,
+        env: vec![],
+        cwd: root.to_path_buf(),
+    });
+}
+
 pub(in crate::smoke_suite) fn push_local_p2p_smoke_steps(
     root: &Path,
     steps: &mut Vec<SmokeSuiteStepSpec>,

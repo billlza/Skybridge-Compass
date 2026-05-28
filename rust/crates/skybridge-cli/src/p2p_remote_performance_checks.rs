@@ -38,8 +38,12 @@ pub(crate) fn check_p2p_remote_complete_artifact_for_mode(
     evidence: &P2pRemotePerformanceEvidence,
     manual_artifact: bool,
 ) -> DoctorCheck {
-    let formal_complete = evidence.smoke_final_success && evidence.smoke_final_validated;
-    let manual_complete = manual_artifact && evidence.remote_desktop_pass;
+    let formal_complete = evidence.smoke_final_success
+        && evidence.smoke_final_validated
+        && evidence.remote_desktop_pass
+        && evidence.smoke_capture_source_verified;
+    let manual_complete =
+        manual_artifact && evidence.remote_desktop_pass && evidence.smoke_capture_source_verified;
     let ok = evidence.has_mac_log
         && evidence.has_ios_log
         && (formal_complete || manual_complete)
@@ -49,11 +53,12 @@ pub(crate) fn check_p2p_remote_complete_artifact_for_mode(
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "macLog={} iosLog={} smokeFinalSuccess={} smokeFinalValidated={} manualArtifact={} remoteDesktopPass={} hostProcessExited={}",
+            "macLog={} iosLog={} smokeFinalSuccess={} smokeFinalValidated={} captureVerified={} manualArtifact={} remoteDesktopPass={} hostProcessExited={}",
             evidence.has_mac_log,
             evidence.has_ios_log,
             evidence.smoke_final_success,
             evidence.smoke_final_validated,
+            evidence.smoke_capture_source_verified,
             manual_artifact,
             evidence.remote_desktop_pass,
             evidence.host_process_exited
@@ -66,16 +71,18 @@ pub(crate) fn check_p2p_remote_no_hidden_failure(
 ) -> DoctorCheck {
     let ok = evidence.failed_stage_count == 0
         && evidence.unknown_phase_count == 0
-        && evidence.missing_failure_phase_count == 0;
+        && evidence.missing_failure_phase_count == 0
+        && evidence.already_connected_rejection_count == 0;
     simple_doctor_check(
         "p2p_remote_no_hidden_failure",
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "failedStageCount={} unknownPhaseCount={} missingPhaseCount={} firstFailure={}",
+            "failedStageCount={} unknownPhaseCount={} missingPhaseCount={} alreadyConnectedRejections={} firstFailure={}",
             evidence.failed_stage_count,
             evidence.unknown_phase_count,
             evidence.missing_failure_phase_count,
+            evidence.already_connected_rejection_count,
             evidence.first_failure.as_deref().unwrap_or("-")
         ),
     )
@@ -157,6 +164,121 @@ pub(crate) fn check_p2p_remote_protocol_identity_binding(
         if ok { "info" } else { "error" },
         protocol_identity_binding_check_detail(binding),
     )
+}
+
+pub(crate) fn check_p2p_remote_mac_ipad_online_connect_button(
+    evidence: &P2pRemotePerformanceEvidence,
+) -> DoctorCheck {
+    let ordered_success_identity = p2p_remote_mac_ipad_ordered_connect_success_identity(evidence);
+    let duplicate_physical_rows = p2p_remote_mac_ipad_duplicate_physical_row_summary(evidence);
+    let ok = evidence.ios_ipad_presence_heartbeat_samples > 0
+        && evidence.mac_ipad_dashboard_role_boot_samples > 0
+        && evidence.mac_ipad_online_ui_rows > 0
+        && evidence.mac_ipad_real_online_row_source_samples > 0
+        && evidence.mac_ipad_online_button_enabled_rows > 0
+        && evidence.mac_ipad_online_connectable_enabled_rows > 0
+        && evidence.mac_ipad_online_strong_match_rows > 0
+        && evidence.mac_ipad_connect_click_samples > 0
+        && evidence.mac_ipad_real_button_source_click_samples > 0
+        && evidence.mac_ipad_connect_no_endpoint_failures == 0
+        && evidence.mac_ipad_p2p_connect_start_samples > 0
+        && evidence.mac_ipad_connect_success_samples > 0
+        && evidence.mac_ipad_connect_failure_samples == 0
+        && ordered_success_identity.is_some()
+        && duplicate_physical_rows.is_none();
+    simple_doctor_check(
+        "p2p_remote_mac_ipad_online_connect_button",
+        ok,
+        if ok { "info" } else { "error" },
+        format!(
+            "iosIpadHeartbeat={} dashboardRoleBoot={} macOnlineRows={} realRowSourceRows={} buttonEnabledRows={} connectableEnabledRows={} strongMatchRows={} weakMatchRows={} connectClicks={} buttonSourceClicks={} realEndpointSamples={} noEndpointFailures={} connectStarts={} connectSuccess={} connectFailure={} orderedIdentity={} rowIdentities={} clickIdentities={} startIdentities={} successIdentities={} duplicatePhysicalRows={}",
+            evidence.ios_ipad_presence_heartbeat_samples,
+            evidence.mac_ipad_dashboard_role_boot_samples,
+            evidence.mac_ipad_online_ui_rows,
+            evidence.mac_ipad_real_online_row_source_samples,
+            evidence.mac_ipad_online_button_enabled_rows,
+            evidence.mac_ipad_online_connectable_enabled_rows,
+            evidence.mac_ipad_online_strong_match_rows,
+            evidence.mac_ipad_online_weak_match_rows,
+            evidence.mac_ipad_connect_click_samples,
+            evidence.mac_ipad_real_button_source_click_samples,
+            evidence.mac_ipad_connect_real_endpoint_samples,
+            evidence.mac_ipad_connect_no_endpoint_failures,
+            evidence.mac_ipad_p2p_connect_start_samples,
+            evidence.mac_ipad_connect_success_samples,
+            evidence.mac_ipad_connect_failure_samples,
+            ordered_success_identity.as_deref().unwrap_or("-"),
+            evidence
+                .mac_ipad_online_connectable_identity_sequences
+                .len(),
+            evidence.mac_ipad_connect_click_identity_sequences.len(),
+            evidence.mac_ipad_connect_start_identity_sequences.len(),
+            evidence.mac_ipad_connect_success_identity_sequences.len(),
+            duplicate_physical_rows.as_deref().unwrap_or("0")
+        ),
+    )
+}
+
+fn p2p_remote_mac_ipad_duplicate_physical_row_summary(
+    evidence: &P2pRemotePerformanceEvidence,
+) -> Option<String> {
+    evidence
+        .mac_ipad_online_physical_identity_rows
+        .iter()
+        .find_map(|(physical_key, identities)| {
+            let row_count = evidence
+                .mac_ipad_online_physical_row_counts
+                .get(physical_key)
+                .copied()
+                .unwrap_or(identities.len() as u64);
+            if row_count <= 1 && identities.len() <= 1 {
+                return None;
+            }
+            Some(format!(
+                "{}:rows={}:identities={}",
+                physical_key,
+                row_count,
+                identities.iter().cloned().collect::<Vec<_>>().join(",")
+            ))
+        })
+        .or_else(|| {
+            evidence
+                .mac_ipad_online_physical_row_counts
+                .iter()
+                .find_map(|(physical_key, row_count)| {
+                    if *row_count <= 1 {
+                        return None;
+                    }
+                    Some(format!("{physical_key}:rows={row_count}:identities=-"))
+                })
+        })
+}
+
+fn p2p_remote_mac_ipad_ordered_connect_success_identity(
+    evidence: &P2pRemotePerformanceEvidence,
+) -> Option<String> {
+    evidence
+        .mac_ipad_online_connectable_identity_sequences
+        .iter()
+        .find_map(|(identity_source, row_sequence)| {
+            let click_sequence = evidence
+                .mac_ipad_connect_click_identity_sequences
+                .get(identity_source)?;
+            let identity = identity_source
+                .split_once('\u{1f}')
+                .map(|(identity, _)| identity)
+                .unwrap_or(identity_source.as_str());
+            let start_sequence = evidence
+                .mac_ipad_connect_start_identity_sequences
+                .get(identity)?;
+            let success_sequence = evidence
+                .mac_ipad_connect_success_identity_sequences
+                .get(identity)?;
+            (*row_sequence <= *click_sequence
+                && *click_sequence <= *start_sequence
+                && *start_sequence <= *success_sequence)
+                .then(|| identity.to_owned())
+        })
 }
 
 pub(crate) fn check_p2p_remote_no_fallback(evidence: &P2pRemotePerformanceEvidence) -> DoctorCheck {

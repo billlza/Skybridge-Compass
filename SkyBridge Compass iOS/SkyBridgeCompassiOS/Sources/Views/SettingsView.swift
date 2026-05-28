@@ -8,6 +8,7 @@ struct SettingsView: View {
     @EnvironmentObject private var localizationManager: LocalizationManager
     
     @StateObject private var settingsManager = SettingsManager.instance
+    @StateObject private var pqcManager = PQCCryptoManager.instance
     @State private var showLogoutConfirmation = false
 
     private func t(_ key: String) -> String {
@@ -152,8 +153,9 @@ struct SettingsView: View {
                 HStack {
                     Label(t("settings.pqc"), systemImage: "lock.shield.fill")
                     Spacer()
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
+                    Text(pqcManager.enforcePQCHandshake ? "Strict PQC" : "Classic")
+                        .font(.caption)
+                        .foregroundColor(pqcManager.enforcePQCHandshake ? .green : .orange)
                 }
             }
             
@@ -161,11 +163,17 @@ struct SettingsView: View {
                 Label(t("settings.trusted_devices"), systemImage: "checkmark.shield")
             }
             
-            Toggle(isOn: $settingsManager.requireBiometricAuth) {
+            LabeledContent {
+                Text("未启用")
+                    .foregroundColor(.secondary)
+            } label: {
                 Label(t("settings.biometric"), systemImage: "faceid")
             }
             
-            Toggle(isOn: $settingsManager.endToEndEncryption) {
+            LabeledContent {
+                Text(pqcManager.enforcePQCHandshake ? "强制启用" : "未强制")
+                    .foregroundColor(.secondary)
+            } label: {
                 Label(t("settings.e2ee"), systemImage: "lock.fill")
             }
         }
@@ -280,34 +288,14 @@ struct SettingsView: View {
 @available(iOS 17.0, *)
 struct PQCSecuritySettingsView: View {
     @StateObject private var pqcManager = PQCCryptoManager.instance
-    @AppStorage("Settings.PreferXWingHybrid") private var preferXWingHybrid: Bool = false
+    @State private var errorMessage: String?
     
     var body: some View {
         List {
             Section("加密算法") {
-                HStack {
-                    Text("密钥交换")
-                    Spacer()
-                    Text("ML-KEM-768")
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-                
-                HStack {
-                    Text("数字签名")
-                    Spacer()
-                    Text("ML-DSA-65")
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-                
-                HStack {
-                    Text("混合加密")
-                    Spacer()
-                    Text("X-Wing")
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
+                LabeledContent("当前套件", value: pqcManager.currentSuite.rawValue)
+                LabeledContent("Provider", value: pqcManager.providerInfo)
+                LabeledContent("安全层级", value: pqcManager.currentTier.rawValue)
             }
             
             Section("密钥状态") {
@@ -336,12 +324,11 @@ struct PQCSecuritySettingsView: View {
             
             Section("安全选项") {
                 Toggle("强制 PQC 握手", isOn: $pqcManager.enforcePQCHandshake)
-                
-                Toggle("允许经典降级（兼容旧设备）", isOn: .constant(false))
-                    .disabled(true)
-                    .opacity(0.5)
+                    .onChange(of: pqcManager.enforcePQCHandshake) { _, _ in
+                        reinitializePQCProvider()
+                    }
 
-                Toggle("优先 X-Wing 混合套件（iOS 26+）", isOn: $preferXWingHybrid)
+                LabeledContent("允许经典降级（兼容旧设备）", value: "禁用")
                 
                 Toggle("密钥自动轮换", isOn: $pqcManager.autoKeyRotation)
                 
@@ -380,17 +367,55 @@ struct PQCSecuritySettingsView: View {
         .background(DashboardView.QuantumGlassBackground())
         .navigationTitle("后量子加密")
         .navigationBarTitleDisplayMode(.inline)
+        .alert(
+            "PQC 操作失败",
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { presenting in
+                    if !presenting {
+                        errorMessage = nil
+                    }
+                }
+            )
+        ) {
+            Button("确定", role: .cancel) {
+                errorMessage = nil
+            }
+        } message: {
+            Text(errorMessage ?? "")
+        }
     }
     
     private func generateKeyPair() {
         Task {
-            try? await pqcManager.generateKeyPair()
+            do {
+                try await pqcManager.generateKeyPair()
+            } catch {
+                errorMessage = error.localizedDescription
+                SkyBridgeLogger.shared.error("❌ PQC 密钥生成失败: \(error.localizedDescription)")
+            }
         }
     }
     
     private func regenerateKeys() {
         Task {
-            try? await pqcManager.regenerateKeyPair()
+            do {
+                try await pqcManager.regenerateKeyPair()
+            } catch {
+                errorMessage = error.localizedDescription
+                SkyBridgeLogger.shared.error("❌ PQC 密钥重新生成失败: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func reinitializePQCProvider() {
+        Task {
+            do {
+                try await pqcManager.initialize()
+            } catch {
+                errorMessage = error.localizedDescription
+                SkyBridgeLogger.shared.error("❌ PQC Provider 重新初始化失败: \(error.localizedDescription)")
+            }
         }
     }
 }
@@ -400,6 +425,7 @@ struct PQCSecuritySettingsView: View {
 struct DiscoverySettingsView: View {
     @EnvironmentObject private var discoveryManager: DeviceDiscoveryManager
     @StateObject private var settings = SettingsManager.instance
+    @State private var discoveryError: String?
 
     var body: some View {
         Form {
@@ -475,6 +501,23 @@ struct DiscoverySettingsView: View {
             .scrollContentBackground(.hidden)
             .background(DashboardView.QuantumGlassBackground())
             .navigationTitle("设备发现")
+            .alert(
+                "发现服务启动失败",
+                isPresented: Binding(
+                    get: { discoveryError != nil },
+                    set: { presenting in
+                        if !presenting {
+                            discoveryError = nil
+                        }
+                    }
+                )
+            ) {
+                Button("确定", role: .cancel) {
+                    discoveryError = nil
+                }
+            } message: {
+                Text(discoveryError ?? "")
+            }
     }
 
     private func applyDiscovery() {
@@ -492,7 +535,12 @@ struct DiscoverySettingsView: View {
                     mode = .custom(types.isEmpty ? [.skybridge, .skybridgeQUIC] : types)
                 default: mode = .skybridgeOnly
                 }
-                try? await discoveryManager.startDiscovery(mode: mode)
+                do {
+                    try await discoveryManager.startDiscovery(mode: mode)
+                } catch {
+                    discoveryError = error.localizedDescription
+                    SkyBridgeLogger.shared.error("❌ 设备发现启动失败: \(error.localizedDescription)")
+                }
             } else {
                 discoveryManager.stopDiscovery()
             }

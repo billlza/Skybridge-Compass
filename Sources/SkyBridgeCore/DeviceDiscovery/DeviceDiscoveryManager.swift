@@ -411,16 +411,20 @@ public class DeviceDiscoveryManager: BaseManager {
                 return
             }
             do {
-                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)
                 var txt = NWTXTRecord()
                 txt["platform"] = "macos"
                 txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
                 txt["name"] = self.getDeviceName()
-                if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
+                if !snap.deviceId.isEmpty {
+                    txt["deviceId"] = snap.deviceId
+                    txt["uniqueId"] = snap.deviceId
+                }
                 if !snap.pubKeyFP.isEmpty {
                     txt["pubKeyFP"] = snap.pubKeyFP
                     txt["identityFingerprint"] = snap.pubKeyFP
                 }
+                txt["hs_soa"] = "1"
                 txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
                 if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
@@ -439,8 +443,8 @@ public class DeviceDiscoveryManager: BaseManager {
                     serviceType: "_skybridge._tcp",
                     txtRecord: txt,
                     owner: advertisementOwner,
-                    connectionHandler: { [weak self] connection in
-                        Task { @MainActor in self?.handleNewConnection(connection) }
+                    connectionHandler: { connection in
+                        Self.handleNewConnection(connection)
                     },
                     stateHandler: { [weak self] state in
                         Task { @MainActor in self?.handleListenerStateUpdate(state) }
@@ -513,6 +517,15 @@ public class DeviceDiscoveryManager: BaseManager {
             let deviceName = Self.DDM_ExtractDeviceName(result)
             let (ipv4, ipv6, port) = Self.DDM_ExtractNetworkInfo(result)
             let bonjourInfo = Self.DDM_ExtractBonjourDeviceInfo(result)
+            let bonjourIdentifier = Self.DDM_BonjourIdentifier(from: result.endpoint)
+            let pubKeyFingerprint = Self.DDM_ExtractPubKeyFingerprint(result)
+            let uniqueIdentifier = P2PDiscoveryBonjourPolicy.preferredUniqueIdentifier(
+                deviceId: bonjourInfo?.deviceId,
+                pubKeyFP: pubKeyFingerprint,
+                bonjourIdentifier: bonjourIdentifier,
+                ipv4: ipv4,
+                ipv6: ipv6
+            )
             var detectedDeviceType = ""
             if serviceType.contains("airplay") {
                 if !deviceName.lowercased().contains("iphone") &&
@@ -536,10 +549,13 @@ public class DeviceDiscoveryManager: BaseManager {
                 services: [serviceType],
                 portMap: [serviceType: port],
                 connectionTypes: [.wifi],
-                uniqueIdentifier: ipv4 ?? ipv6,
+                uniqueIdentifier: uniqueIdentifier,
+                routeIdentifiers: [bonjourIdentifier].compactMap { $0 },
                 signalStrength: nil,
                 source: source,
-                isLocalDevice: false  // 初始化为 false，由 applyLocalFlag 统一判定
+                isLocalDevice: false,  // 初始化为 false，由 applyLocalFlag 统一判定
+                deviceId: bonjourInfo?.deviceId,
+                pubKeyFP: pubKeyFingerprint
             )
  // 获取本机身份快照
             let selfId = await SelfIdentityProvider.shared.snapshot()
@@ -632,17 +648,19 @@ public class DeviceDiscoveryManager: BaseManager {
     }
 
  /// 处理新连接
-    private func handleNewConnection(_ connection: NWConnection) {
+    nonisolated private static func handleNewConnection(_ connection: NWConnection) {
+        let logger = Logger(subsystem: "com.skybridge.Compass", category: "DeviceDiscoveryManager")
         logger.info("🔗 收到新连接")
+        RemoteControlSmokeStatusWriter.append(
+            "mac-control-inbound accepted endpoint=\(Self.stableEndpointLabel(for: connection.endpoint))"
+        )
 
-        connection.stateUpdateHandler = { [weak self, weak connection] state in
-            Task { @MainActor [weak self, weak connection] in
-                guard let connection else { return }
-                self?.handleIncomingConnectionStateUpdate(state, connection: connection)
-            }
+        connection.stateUpdateHandler = { [weak connection] state in
+            guard let connection else { return }
+            Self.handleIncomingConnectionStateUpdate(state, connection: connection)
         }
 
-        connection.start(queue: .global())
+        connection.start(queue: .global(qos: .userInitiated))
     }
 
  /// 处理连接状态更新（主动连接）
@@ -673,10 +691,13 @@ public class DeviceDiscoveryManager: BaseManager {
     }
 
  /// 处理传入连接状态更新
-    private func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection) {
+    nonisolated private static func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection) {
+        let logger = Logger(subsystem: "com.skybridge.Compass", category: "DeviceDiscoveryManager")
+        let endpointLabel = Self.stableEndpointLabel(for: connection.endpoint)
         switch state {
         case .ready:
             logger.info("✅ 传入连接就绪")
+            RemoteControlSmokeStatusWriter.append("mac-control-inbound state=ready endpoint=\(endpointLabel)")
             connection.stateUpdateHandler = nil
             // iOS 端会在此连接上发起 HandshakeDriver 握手；这里必须读取并回包，否则对端必然 timeout
             // 重要：DeviceDiscoveryManager 是 @MainActor；入站读取/握手必须放到后台，
@@ -690,11 +711,15 @@ public class DeviceDiscoveryManager: BaseManager {
             } else {
                 logger.error("❌ 传入连接失败: \(error.localizedDescription, privacy: .public)")
             }
+            RemoteControlSmokeStatusWriter.append(
+                "mac-control-inbound state=failed endpoint=\(endpointLabel) error=\(error.localizedDescription)"
+            )
             connection.stateUpdateHandler = nil
             connection.cancel()
         case .cancelled:
             connection.stateUpdateHandler = nil
             logger.info("⏹️ 传入连接已取消")
+            RemoteControlSmokeStatusWriter.append("mac-control-inbound state=cancelled endpoint=\(endpointLabel)")
         default:
             break
         }
@@ -778,6 +803,7 @@ public class DeviceDiscoveryManager: BaseManager {
         }
 
         let endpointDescription = stableEndpointLabel(for: connection.endpoint)
+        RemoteControlSmokeStatusWriter.append("mac-control-inbound consume-start endpoint=\(endpointDescription)")
 
         struct DirectHandshakeTransport: DiscoveryTransport {
             let sendRaw: @Sendable (Data) async throws -> Void
@@ -796,6 +822,7 @@ public class DeviceDiscoveryManager: BaseManager {
                     if let err { c.resume(throwing: err) } else { c.resume() }
                 })
             }
+            RemoteControlSmokeStatusWriter.append("mac-control-inbound send-frame bytes=\(data.count) endpoint=\(endpointDescription)")
         }
 
         let framedReader = FramedReader.nwConnection(connection)
@@ -886,6 +913,31 @@ public class DeviceDiscoveryManager: BaseManager {
             }
 
             return normalized
+        }
+
+        func recordRemoteControlSecurityIdentity(
+            from payload: AppMessage.PairingIdentityExchangePayload
+        ) {
+            let identity = RemoteControlSecurityIdentity(
+                accountDisplayName: payload.accountDisplayName,
+                nebulaId: payload.nebulaId,
+                deviceId: payload.deviceId,
+                deviceName: payload.deviceName
+            )
+            guard !identity.isEmpty else { return }
+
+            RemoteControlSecurityPeerIdentityStore.record(
+                identity: identity,
+                aliases: [
+                    payload.deviceId,
+                    payload.deviceName,
+                    peerDeviceId,
+                    peer.deviceId,
+                    presencePeerId,
+                    endpointHostOrIP,
+                    endpointDescription
+                ].compactMap { $0 }
+            )
         }
 
         func publishClassicTransferSessionSnapshot(keys: SessionKeys) async {
@@ -995,7 +1047,7 @@ public class DeviceDiscoveryManager: BaseManager {
 
             do {
                 let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
-                    deviceId: peerDeviceId,
+                    deviceId: payload.deviceId,
                     displayName: displayName,
                     preferredCurrentDeviceId: payload.deviceId,
                     knownDeviceIds: knownDeviceIds,
@@ -1067,14 +1119,29 @@ public class DeviceDiscoveryManager: BaseManager {
                 if case .failed = connection.state { break }
                 if case .cancelled = connection.state { break }
                 logger.info("📥 等待入站帧（读取 4B length header）… state=\(String(describing: connection.state), privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound receive-wait endpoint=\(endpointDescription)")
                 let lenData = try await framedReader.receiveExactly(4)
                 let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
                 guard totalLen > 0 && totalLen < 1_048_576 else { break }
                 let payload = try await framedReader.receiveExactly(Int(totalLen))
                 logger.info("📥 入站帧: \(payload.count, privacy: .public) bytes")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound frame bytes=\(payload.count) endpoint=\(endpointDescription)")
                 // Phase C2: optional traffic padding (SBP2) — unwrap before handing to handshake driver.
                 // Phase C1: optional handshake padding (SBP1) — unwrap before decoding handshake frames.
                 let frame = P2PDiscoveryService.normalizeInboundControlFrame(payload)
+                let frameKind: String
+                if (try? HandshakeMessageA.decode(from: frame)) != nil {
+                    frameKind = "messageA"
+                } else if (try? HandshakeMessageB.decode(from: frame)) != nil {
+                    frameKind = "messageB"
+                } else if (try? HandshakeFinished.decode(from: frame)) != nil {
+                    frameKind = "finished"
+                } else {
+                    frameKind = "app-or-unknown"
+                }
+                RemoteControlSmokeStatusWriter.append(
+                    "mac-control-inbound normalized-frame bytes=\(frame.count) kind=\(frameKind) endpoint=\(endpointDescription)"
+                )
 
                 if await handlePreHandshakePlaintextControl(frame) {
                     return
@@ -1169,6 +1236,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                     break
                                 }
 
+                                recordRemoteControlSecurityIdentity(from: payload)
                                 await PeerKEMBootstrapStore.shared.upsert(
                                     deviceIds: [payload.deviceId, peerDeviceId],
                                     kemPublicKeys: payload.kemPublicKeys
@@ -1225,6 +1293,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                 let localOS = ProcessInfo.processInfo.operatingSystemVersionString
                                 let localName = Host.current().localizedName
                                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
+                                let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
                                 let localModel: String? = {
 #if os(macOS)
                                     return "Mac"
@@ -1242,6 +1311,8 @@ public class DeviceDiscoveryManager: BaseManager {
                                     platform: localPlatform,
                                     osVersion: localOS,
                                     chip: nil,
+                                    accountDisplayName: localIdentity?.accountDisplayName,
+                                    nebulaId: localIdentity?.nebulaId,
                                     capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
                                     fileTransferPort: endpoints.fileTransferPort,
                                     remoteControlPort: endpoints.remoteControlPort
@@ -1274,6 +1345,9 @@ public class DeviceDiscoveryManager: BaseManager {
                 // 延迟初始化：必须先看到 MessageA 才知道 offeredSuites 的分组，从而选择 sigAAlgorithm / provider
                 if driver == nil {
                     if let messageA = try? HandshakeMessageA.decode(from: frame) {
+                        RemoteControlSmokeStatusWriter.append(
+                            "mac-control-inbound handshake-messageA suites=\(messageA.supportedSuites.map { $0.rawValue }.joined(separator: ",")) endpoint=\(endpointDescription)"
+                        )
                         let soaBinding = InboundHandshakeAdapter.bindSOAState(
                             from: messageA,
                             localPeerId: localSOAPeerId
@@ -1373,6 +1447,26 @@ public class DeviceDiscoveryManager: BaseManager {
                         )
 
                         do {
+                            let trustProvider: (any HandshakeTrustProvider)?
+                            let messageAFingerprint = try? messageA
+                                .decodedIdentityPublicKeys()
+                                .authoritativeProtocolFingerprint()
+                                .lowercased()
+                            if let messageAFingerprint,
+                               await PeerProtocolIdentityBootstrapStore.shared.containsTrustedFingerprint(messageAFingerprint),
+                               let bootstrapProvider = BootstrapProtocolIdentityTrustProvider(
+                                    protocolIdentityFingerprint: messageAFingerprint
+                               ) {
+                                trustProvider = bootstrapProvider
+                                RemoteControlSmokeStatusWriter.append(
+                                    "mac-control-inbound handshake-bootstrap-pin matched fingerprint=\(messageAFingerprint) endpoint=\(endpointDescription)"
+                                )
+                            } else {
+                                trustProvider = nil
+                                RemoteControlSmokeStatusWriter.append(
+                                    "mac-control-inbound handshake-bootstrap-pin missing endpoint=\(endpointDescription)"
+                                )
+                            }
                             let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
                             driver = try HandshakeDriver(
                                 transport: transport,
@@ -1383,26 +1477,38 @@ public class DeviceDiscoveryManager: BaseManager {
                                 offeredSuites: offeredSuites,
                                 policy: effectivePolicy,
                                 cryptoPolicy: cryptoPolicy,
+                                trustProvider: trustProvider,
                                 localSOAPeerId: localSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
                             )
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
+                            RemoteControlSmokeStatusWriter.append(
+                                "mac-control-inbound handshake-driver initialized sigA=\(sigAAlgorithm.rawValue) suites=\(offeredSuites.map { $0.rawValue }.joined(separator: ",")) endpoint=\(endpointDescription)"
+                            )
                         } catch {
                             logger.error("❌ 入站 HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
+                            RemoteControlSmokeStatusWriter.append(
+                                "mac-control-inbound handshake-driver failed endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                            )
                             return
                         }
                     } else {
                         // 如果不是 MessageA（例如 probe/噪声），直接丢给一个最小 classic driver 会引入误判。
                         // 这里选择忽略，等待下一帧 MessageA。
                         logger.debug("ℹ️ 入站首帧不是 MessageA（忽略，等待下一帧） size=\(frame.count, privacy: .public)")
+                        RemoteControlSmokeStatusWriter.append(
+                            "mac-control-inbound handshake-skip non-messageA bytes=\(frame.count) endpoint=\(endpointDescription)"
+                        )
                         continue
                     }
                 }
 
                 guard let driver else { continue }
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound handshake-handle begin endpoint=\(endpointDescription)")
                 await driver.handleMessage(frame, from: peer)
                 let st = await driver.getCurrentState()
                 logger.info("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound handshake-state \(String(describing: st)) endpoint=\(endpointDescription)")
 
                 switch st {
                 case .waitingFinished(_, let keys, _):
@@ -1447,10 +1553,13 @@ public class DeviceDiscoveryManager: BaseManager {
             // 这里降级为 debug，避免污染正常日志与论文采集数据。
             if let framedError = error as? FramedReaderError, framedError == .peerClosed {
                 logger.debug("ℹ️ 入站控制通道结束（peer closed）")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound consume-ended endpoint=\(endpointDescription) reason=peer-closed")
             } else if let ns = error as NSError?, ns.domain == "SkyBridgeInbound", ns.code == -1 {
                 logger.debug("ℹ️ 入站控制通道结束（EOF/short read）: \(ns.localizedDescription, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound consume-ended endpoint=\(endpointDescription) reason=short-read")
             } else {
                 logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-control-inbound consume-ended endpoint=\(endpointDescription) reason=\(error.localizedDescription)")
             }
         }
     }
@@ -1813,6 +1922,30 @@ nonisolated private static func DDM_ExtractBonjourDeviceInfo(_ result: NWBrowser
     let metadata = result.metadata
     guard case .bonjour(let txtRecord) = metadata else { return nil }
     return BonjourTXTParser.extractDeviceInfo(txtRecord)
+}
+
+nonisolated private static func DDM_ExtractPubKeyFingerprint(_ result: NWBrowser.Result) -> String? {
+    guard case .bonjour(let txtRecord) = result.metadata else { return nil }
+    let dict = BonjourTXTParser.parse(txtRecord)
+    let raw = dict["pubKeyFP"]
+        ?? dict["pubKeyFp"]
+        ?? dict["pubkeyfp"]
+        ?? dict["pub_key_fp"]
+        ?? dict["identityFingerprint"]
+    guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+          value.range(of: "^[0-9a-f]{16,128}$", options: .regularExpression) != nil else {
+        return nil
+    }
+    return value
+}
+
+nonisolated private static func DDM_BonjourIdentifier(from endpoint: NWEndpoint) -> String? {
+    guard case .service(let name, _, let domain, _) = endpoint else { return nil }
+    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedName.isEmpty else { return nil }
+    let trimmedDomain = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedDomain = trimmedDomain.isEmpty ? "local." : trimmedDomain.lowercased()
+    return "bonjour:\(trimmedName)@\(normalizedDomain)"
 }
 
 nonisolated private static func DDM_ExtractAdvertisedServicePort(_ result: NWBrowser.Result) -> Int? {

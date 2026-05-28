@@ -8,29 +8,39 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
         self.trustRecordsSnapshot = trustRecordsSnapshot
     }
 
-    private func trimmedNonEmpty(_ raw: String?) -> String? {
-        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
-            return nil
-        }
-        return raw
-    }
-
-    func authoritativeProtocolFingerprint(for record: TrustRecord) -> String? {
-        if let fingerprint = trimmedNonEmpty(record.currentPathAuthorityFingerprint) {
-            return fingerprint.lowercased()
+    func authoritativeProtocolPins(for record: TrustRecord) -> [ProtocolIdentityPin] {
+        let storedPins = record.currentPathAuthorityPins
+        if !storedPins.isEmpty {
+            return storedPins
         }
 
         guard let protocolPublicKey = record.protocolPublicKey,
               !protocolPublicKey.isEmpty,
               let algorithm = record.protocolSigningAlgorithm else {
-            return nil
+            return []
         }
 
         let identityKeys = IdentityPublicKeys(
             protocolPublicKey: protocolPublicKey,
             protocolAlgorithm: algorithm.wire
         )
-        return try? identityKeys.authoritativeProtocolFingerprint().lowercased()
+        guard let fingerprint = try? identityKeys.authoritativeProtocolFingerprint().lowercased() else {
+            return []
+        }
+        return [
+            ProtocolIdentityPin(
+                algorithm: algorithm,
+                fingerprint: fingerprint,
+                approvedAt: record.updatedAt,
+                source: .legacyMigration
+            )
+        ]
+    }
+
+    func authoritativeProtocolFingerprint(for record: TrustRecord) -> String? {
+        let pins = authoritativeProtocolPins(for: record)
+        guard pins.count == 1 else { return nil }
+        return pins[0].fingerprint
     }
 
     func resolvedTrustedFingerprint(
@@ -69,9 +79,8 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
 
         var fingerprintsByAlgorithm: [String: Set<String>] = [:]
         for record in records {
-            if let fingerprint = authoritativeProtocolFingerprint(for: record) {
-                let algorithm = record.protocolSigningAlgorithm?.rawValue ?? "unknown"
-                fingerprintsByAlgorithm[algorithm, default: []].insert(fingerprint)
+            for pin in authoritativeProtocolPins(for: record) {
+                fingerprintsByAlgorithm[pin.algorithm.rawValue, default: []].insert(pin.fingerprint)
             }
         }
 

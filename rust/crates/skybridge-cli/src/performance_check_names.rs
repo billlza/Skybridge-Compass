@@ -7,6 +7,7 @@ pub(crate) fn required_p2p_remote_performance_check_names() -> &'static [&'stati
         "p2p_remote_xwing",
         "p2p_remote_protocol_identity_binding",
         "p2p_remote_signed_kem_refresh",
+        "p2p_remote_mac_ipad_online_connect_button",
         "p2p_remote_hevc_main_path",
         "p2p_remote_resolution",
         "p2p_remote_ios_window_fps",
@@ -31,6 +32,7 @@ pub(crate) fn required_file_transfer_performance_check_names() -> &'static [&'st
         "file_transfer_skr_direct_route",
         "file_transfer_bidirectional",
         "file_transfer_success",
+        "file_transfer_payload_integrity",
         "file_transfer_route_evidence",
     ]
 }

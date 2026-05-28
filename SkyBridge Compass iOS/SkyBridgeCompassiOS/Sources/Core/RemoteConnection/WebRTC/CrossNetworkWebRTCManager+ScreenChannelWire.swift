@@ -43,7 +43,7 @@ extension CrossNetworkWebRTCManager {
                     return (Int(b0) << 24) | (Int(b1) << 16) | (Int(b2) << 8) | Int(b3)
                 }
 
-                guard length > 0 && length < maxInboundFrameBytes else {
+                guard length > 0 && length <= maxInboundFrameBytes else {
                     let bufferedBytes = buffer.count - readOffset
                     let prefixEnd = min(buffer.count, readOffset + 8)
                     let prefix = buffer[readOffset..<prefixEnd]
@@ -226,6 +226,38 @@ extension CrossNetworkWebRTCManager {
         mutating func nextLengthPayload(sessionId: String, logLabel: String) -> Data? {
             parser.nextPayload(sessionId: sessionId, logLabel: logLabel)
         }
+    }
+
+    enum ScreenChannelLengthFramedDecodeFailureAction: Equatable {
+        case dropAuthenticatedReplay(
+            packetType: WebRTCAppSecurePacketType,
+            counter: UInt64,
+            highestCounter: UInt64,
+            reason: WebRTCAppSecureReplayRejectionReason
+        )
+        case resetParser
+    }
+
+    nonisolated static func screenLengthFramedDecodeFailureAction(
+        for error: Error
+    ) -> ScreenChannelLengthFramedDecodeFailureAction {
+        guard let envelopeError = error as? WebRTCAppSecureEnvelopeError else {
+            return .resetParser
+        }
+        guard case let .replayDetected(
+            packetType,
+            counter,
+            highestCounter,
+            reason
+        ) = envelopeError else {
+            return .resetParser
+        }
+        return .dropAuthenticatedReplay(
+            packetType: packetType,
+            counter: counter,
+            highestCounter: highestCounter,
+            reason: reason
+        )
     }
 
     struct ScreenChunkedPayloadEnvelope {

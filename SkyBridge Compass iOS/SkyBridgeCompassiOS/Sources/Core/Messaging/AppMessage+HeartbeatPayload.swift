@@ -11,6 +11,8 @@ public extension AppMessage {
         public let platform: String?
         public let osVersion: String?
         public let chip: String?
+        public let accountDisplayName: String?
+        public let nebulaId: String?
         public let remoteVideoFormats: [String]?
         public let capabilities: [String]?
         public let fileTransferPort: UInt16?
@@ -25,6 +27,8 @@ public extension AppMessage {
             platform: String? = nil,
             osVersion: String? = nil,
             chip: String? = nil,
+            accountDisplayName: String? = nil,
+            nebulaId: String? = nil,
             remoteVideoFormats: [String]? = nil,
             capabilities: [String]? = nil,
             fileTransferPort: UInt16? = nil,
@@ -38,6 +42,8 @@ public extension AppMessage {
             self.platform = platform
             self.osVersion = osVersion
             self.chip = chip
+            self.accountDisplayName = accountDisplayName
+            self.nebulaId = nebulaId
             self.remoteVideoFormats = remoteVideoFormats
             self.capabilities = capabilities
             self.fileTransferPort = fileTransferPort

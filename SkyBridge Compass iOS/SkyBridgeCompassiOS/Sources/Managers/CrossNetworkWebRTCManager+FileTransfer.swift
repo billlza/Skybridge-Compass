@@ -36,10 +36,17 @@ extension CrossNetworkWebRTCManager {
         try await session.sendFramedPayloadAsync(data)
     }
 
-    nonisolated func encrypt(plaintext: Data, with keys: SessionKeys) throws -> Data {
-        let key = SymmetricKey(data: keys.sendKey)
-        let sealed = try AES.GCM.seal(plaintext, using: key)
-        return sealed.combined ?? Data()
+    func encrypt(
+        plaintext: Data,
+        with keys: SessionKeys,
+        packetType: WebRTCAppSecurePacketType = .appControl
+    ) throws -> Data {
+        try sealWebRTCSecurePayload(
+            plaintext,
+            with: keys,
+            sessionId: keys.sessionId,
+            packetType: packetType
+        )
     }
 }
 
@@ -50,7 +57,7 @@ public extension CrossNetworkWebRTCManager {
     func sendFileTransferMessage(_ message: CrossNetworkFileTransferMessage) async throws {
         guard let session, let keys = sessionKeys else { throw RemoteDesktopError.disconnected }
         let data = try JSONEncoder().encode(message)
-        let encrypted = try encrypt(plaintext: data, with: keys)
+        let encrypted = try encrypt(plaintext: data, with: keys, packetType: .fileTransfer)
         let padded = TrafficPadding.wrapIfEnabled(encrypted, label: "tx/webrtc-file")
         try await sendFramed(padded, over: session)
     }
@@ -526,4 +533,3 @@ extension CrossNetworkWebRTCManager {
         }
     }
 }
-

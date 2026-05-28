@@ -4,11 +4,43 @@ import UserNotifications
 import os.log
 import AppKit
 import SkyBridgeCore
+import SkyBridgeSmokeSupport
 import SkyBridgeUI
+
+private enum MacOnlineIPadSmokeBootMarker {
+    static func appendIfNeeded(uiRole: String) {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SKYBRIDGE_SMOKE_ROLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "mac-online-ipad-client",
+              let rawStatusPath = environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawStatusPath.isEmpty else {
+            return
+        }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let line = [
+            "boot",
+            "role=mac-online-ipad-client",
+            "process=SkyBridgeCompassApp",
+            "uiRole=\(uiRole)",
+            "source=app",
+            "pid=\(ProcessInfo.processInfo.processIdentifier)"
+        ].joined(separator: " ")
+        let data = "[\(formatter.string(from: Date()))] \(line)\n".data(using: .utf8)
+
+        if let data {
+            try? SmokeStatusFileAppender.append(data, to: URL(fileURLWithPath: rawStatusPath))
+        }
+    }
+}
 
 @available(macOS 14.0, *)
 @main
 struct SkyBridgeCompassApp: App {
+    private let macOnlineSmokeBootMarker: Void = MacOnlineIPadSmokeBootMarker.appendIfNeeded(uiRole: "app-init-pre-state")
+
     @StateObject private var appModel = DashboardViewModel()
     @StateObject private var authModel = AuthenticationViewModel()
     @StateObject private var localPeerServices = LocalPeerServiceCoordinator.shared
@@ -17,6 +49,7 @@ struct SkyBridgeCompassApp: App {
     @StateObject private var vncLaunchContext = VNCLaunchContext.shared
     @StateObject private var sshLaunchContext = SSHLaunchContext.shared
     @StateObject private var pairingTrustApproval = PairingTrustApprovalService.shared
+    @StateObject private var remoteControlSecurityPanel = RemoteControlSecurityNoticePanelController.shared
 
  /// 天气服务 - 提供天气数据和位置服务
     @StateObject private var weatherDataService = WeatherDataService()
@@ -35,8 +68,10 @@ struct SkyBridgeCompassApp: App {
 
     private let renderConfig: DMGBackgroundRenderConfig?
     private let iconApplied: Bool
+    private let remoteControlNoticePanelProbeHarness = RemoteControlNoticePanelProbeHarness()
     private let localWebRTCSmokeHarness = LocalWebRTCSmokeHarness()
     private let localP2PFileTransferSmokeHarness = LocalP2PFileTransferSmokeHarness()
+    private let macOnlineIPadSmokeHarness = MacOnlineIPadSmokeHarness()
 
     var body: some Scene {
         WindowGroup(localizationManager.localizedString("app.name"), id: "main") {
@@ -44,7 +79,7 @@ struct SkyBridgeCompassApp: App {
                 if let _ = renderConfig {
                     Color.clear
                         .frame(width: 1, height: 1)
-                } else if startupCoordinator.isStartupComplete {
+                } else if MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment || startupCoordinator.isStartupComplete {
  // 启动完成后显示主界面
                     RootContainerView()
                         .environmentObject(appModel)
@@ -100,6 +135,14 @@ struct SkyBridgeCompassApp: App {
             }
             .task {
                 if renderConfig == nil {
+                    configureRemoteControlSecurityNoticeServices()
+                    macOnlineIPadSmokeHarness.appendAppBootIfNeeded()
+
+                    if remoteControlNoticePanelProbeHarness.isEnabledForCurrentEnvironment {
+                        await remoteControlNoticePanelProbeHarness.startIfNeeded()
+                        return
+                    }
+
                     if localP2PFileTransferSmokeHarness.isEnabledForCurrentEnvironment {
                         await localP2PFileTransferSmokeHarness.startIfNeeded()
                         return
@@ -215,6 +258,24 @@ struct SkyBridgeCompassApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
+    }
+
+ /// 安装远控安全提示面板与本机账号身份提供者
+    @MainActor
+    private func configureRemoteControlSecurityNoticeServices() {
+        remoteControlSecurityPanel.start()
+        RemoteControlSecurityNoticeCenter.shared.setLocalIdentityProvider { [weak authModel] in
+            guard let session = authModel?.currentSession else { return nil }
+            let displayName = session.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let account = displayName.isEmpty ? session.userIdentifier : displayName
+            return RemoteControlSecurityIdentity(
+                accountDisplayName: account,
+                nebulaId: session.nebulaId,
+                deviceId: nil,
+                deviceName: Host.current().localizedName
+            )
+        }
+        _ = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
     }
 
  /// 打开跨网络连接窗口（已在 @available(macOS 14.0, *) 作用域内）
@@ -343,6 +404,7 @@ struct SkyBridgeCompassApp: App {
             DMGBackgroundRenderer.renderAndTerminate(config: renderConfig)
             return
         }
+        macOnlineIPadSmokeHarness.appendAppBootIfNeeded(uiRole: "app-init")
         Self.pruneVolatileSwiftUIAutosaveDefaults()
 
         // Phase C3: Boot self-test for SBP2 TrafficPadding + CSV stats.
@@ -483,7 +545,7 @@ struct SkyBridgeCompassApp: App {
     @MainActor
     private static func configureNotifications() {
  // 在macOS命令行应用中，通知中心可能不可用，需要安全处理
-        guard Bundle.main.bundleURL.pathExtension != "" else {
+        guard isRunningFromPackagedApp else {
             SkyBridgeLogger.ui.debugOnly("跳过通知配置：命令行环境")
             return
         }
@@ -507,9 +569,8 @@ struct SkyBridgeCompassApp: App {
     @MainActor
     private static func configureNotificationsUnified() {
  // 检查是否为有效的 .app Bundle
-        let bundleURL = Bundle.main.bundleURL
-        guard bundleURL.path.lowercased().hasSuffix(".app"),
-              let bundleIdentifier = Bundle.main.bundleIdentifier else {
+        guard isRunningFromPackagedApp,
+              let bundleIdentifier = packagedBundleIdentifier() else {
             SkyBridgeLogger.ui.debugOnly("跳过通知配置：当前环境无有效 App Bundle")
             return
         }
@@ -619,20 +680,11 @@ struct SkyBridgeCompassApp: App {
  /// 应用应用图标（如果可用）
     @MainActor
     private static func applyAppIconIfAvailable() -> Bool {
- // On macOS, the Finder/static app icon and the running Dock icon should come
- // from the same bundle contract. Loading the raw .icns here causes the Dock
- // to bypass LaunchServices' packaged icon rendering, which is exactly how
- // static and runtime icons drift apart.
-        if Bundle.main.bundleURL.pathExtension == "app" {
-            let hasBundledIcon =
-                Bundle.main.url(forResource: "AppIconDock", withExtension: "icns") != nil ||
-                Bundle.main.url(forResource: "AppIconDock", withExtension: "png") != nil ||
-                Bundle.main.url(forResource: "AppIcon", withExtension: "icns") != nil ||
-                Bundle.main.url(forResource: "AppIcon", withExtension: "png") != nil
-            if hasBundledIcon {
-                SkyBridgeLogger.ui.debugOnly("✅ 使用 bundle 静态应用图标，避免运行态与未启动态图标分叉")
-                return true
-            }
+        if let url = resolvePackagedIconURL(),
+            let icon = NSImage(contentsOf: url) {
+            NSApplication.shared.applicationIconImage = icon
+            SkyBridgeLogger.ui.debugOnly("✅ 使用 packaged resource 应用图标，避免 Bundle.main 启动期资源解析: \(url.lastPathComponent)")
+            return true
         }
 
  // Fallback for non-bundled/debug launches where the process has no packaged
@@ -645,9 +697,9 @@ struct SkyBridgeCompassApp: App {
             return moduleICNS ?? mainICNS ?? modulePNG ?? mainPNG
         }
 
-        let chosenURL = resolveIconURL(named: "AppIconDock") ?? resolveIconURL(named: "AppIcon")
+        let chosenURL = resolveIconURL(named: "AppIcon") ?? resolveIconURL(named: "AppIconDock")
         guard let url = chosenURL else {
-            SkyBridgeLogger.ui.debugOnly("⚠️ 未找到 AppIconDock/AppIcon 图标资源（module/main 均为空）")
+            SkyBridgeLogger.ui.debugOnly("⚠️ 未找到 AppIcon/AppIconDock 图标资源（module/main 均为空）")
             return false
         }
         guard let icon = NSImage(contentsOf: url) else {
@@ -660,6 +712,63 @@ struct SkyBridgeCompassApp: App {
         }
         return true
     }
+
+    private static var isRunningFromPackagedApp: Bool {
+        packagedContentsURL() != nil
+    }
+
+    private static func packagedContentsURL() -> URL? {
+        guard let executablePath = CommandLine.arguments.first, !executablePath.isEmpty else {
+            return nil
+        }
+        let executableURL = URL(fileURLWithPath: executablePath).standardizedFileURL
+        let executableDirectory = executableURL.deletingLastPathComponent()
+        guard executableDirectory.lastPathComponent == "MacOS" else {
+            return nil
+        }
+        let contentsURL = executableDirectory.deletingLastPathComponent()
+        guard contentsURL.lastPathComponent == "Contents" else {
+            return nil
+        }
+        return contentsURL
+    }
+
+    private static func packagedResourcesURL() -> URL? {
+        packagedContentsURL()?.appendingPathComponent("Resources", isDirectory: true)
+    }
+
+    private static func packagedBundleIdentifier() -> String? {
+        guard let infoURL = packagedContentsURL()?.appendingPathComponent("Info.plist"),
+              let data = try? Data(contentsOf: infoURL),
+              let info = try? PropertyListSerialization.propertyList(
+                from: data,
+                options: [],
+                format: nil
+              ) as? [String: Any],
+              let identifier = info["CFBundleIdentifier"] as? String,
+              !identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return identifier
+    }
+
+    private static func resolvePackagedIconURL() -> URL? {
+        guard let resourcesURL = packagedResourcesURL() else { return nil }
+        let candidates = [
+            ("AppIcon", "icns"),
+            ("AppIcon", "png"),
+            ("AppIconDock", "icns"),
+            ("AppIconDock", "png")
+        ]
+        let fileManager = FileManager.default
+        for (name, ext) in candidates {
+            let url = resourcesURL.appendingPathComponent("\(name).\(ext)", isDirectory: false)
+            if fileManager.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        return nil
+    }
 }
 
 // MARK: - 根容器视图
@@ -671,11 +780,17 @@ private struct RootContainerView: View {
     @EnvironmentObject private var authModel: AuthenticationViewModel
     @EnvironmentObject private var localPeerServices: LocalPeerServiceCoordinator
     @Environment(\.iconMissingHint) private var iconMissingHint
+    @StateObject private var performanceHUD = MetalPerformanceHUD.shared
 
     var body: some View {
  // 移除调试日志以减少重复渲染的日志噪音
         Group {
-            if authModel.currentSession != nil {
+            if MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment {
+                DashboardView(initialNavigation: .deviceManagement)
+                    .onAppear {
+                        SkyBridgeLogger.ui.debugOnly("📱 [RootContainerView] mac-online-ipad smoke DashboardView 出现")
+                    }
+            } else if authModel.currentSession != nil {
                 DashboardView()
                     .onAppear {
                         SkyBridgeLogger.ui.debugOnly("📱 [RootContainerView] DashboardView 出现")
@@ -700,6 +815,10 @@ private struct RootContainerView: View {
  // 认证状态清除由onChange统一处理，避免重复调用
                     }
             }
+        }
+        .overlay {
+            MetalPerformanceHUDView(hud: performanceHUD)
+                .allowsHitTesting(false)
         }
         .task(id: authModel.currentSession) {
             await localPeerServices.startIfNeeded()
@@ -773,6 +892,100 @@ private extension EnvironmentValues {
     var iconMissingHint: Bool {
         get { self[IconMissingHintKey.self] }
         set { self[IconMissingHintKey.self] = newValue }
+    }
+}
+
+@available(macOS 14.0, *)
+private final class MacOnlineIPadSmokeHarness {
+    private var appendedBootRoles = Set<String>()
+
+    var isEnabledForCurrentEnvironment: Bool {
+        Self.isEnabledForCurrentEnvironment
+    }
+
+    static var isEnabledForCurrentEnvironment: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "mac-online-ipad-client"
+    }
+
+    func appendAppBootIfNeeded(uiRole: String = "app-root") {
+        guard isEnabledForCurrentEnvironment, !appendedBootRoles.contains(uiRole) else { return }
+        appendedBootRoles.insert(uiRole)
+
+        reporter.append(
+            [
+                "boot",
+                "role=mac-online-ipad-client",
+                "process=SkyBridgeCompassApp",
+                "uiRole=\(uiRole)",
+                "source=app",
+                "pid=\(ProcessInfo.processInfo.processIdentifier)"
+            ].joined(separator: " ")
+        )
+    }
+
+    private var reporter: SmokeStatusReporter {
+        SmokeStatusReporter(statusURL: statusURL)
+    }
+
+    private var statusURL: URL? {
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: raw)
+    }
+}
+
+@available(macOS 14.0, *)
+@MainActor
+private final class RemoteControlNoticePanelProbeHarness {
+    private var didStart = false
+
+    var isEnabledForCurrentEnvironment: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["SKYBRIDGE_SMOKE_ROLE"] == "mac-panel-probe"
+            && environment["SKYBRIDGE_SMOKE_PANEL_PROBE"] == "1"
+    }
+
+    func startIfNeeded() async {
+        guard isEnabledForCurrentEnvironment, !didStart else { return }
+        didStart = true
+
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: "panel-probe-\(UUID().uuidString)",
+            transportKind: .webrtc,
+            remoteIPAddress: "203.0.113.44",
+            remoteDeviceId: "panel-probe-ipad",
+            remoteDeviceName: "Panel Probe iPad",
+            remoteAccountDisplayName: "panel-probe@example.com",
+            remoteNebulaId: "panel-probe-nebula",
+            localAccountDisplayName: "panel-probe-mac@example.com",
+            localNebulaId: "panel-probe-mac-nebula",
+            cryptoSuite: "X-Wing PQC",
+            approvalTimeoutSeconds: 10
+        )
+        let approvalTask = Task { @MainActor in
+            await RemoteControlSecurityNoticeCenter.shared.requestApproval(descriptor)
+        }
+
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        print("remote control notice panel probe approving")
+        RemoteControlSecurityNoticeCenter.shared.approveCurrentNotice()
+        let decision = await approvalTask.value
+        guard decision == .approved else {
+            print("remote control notice panel probe rejected: \(decision.rawValue)")
+            NSApplication.shared.terminate(nil)
+            return
+        }
+
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        print("remote control notice panel probe disconnecting")
+        RemoteControlSecurityNoticeCenter.shared.disconnectCurrentNotice()
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        print("remote control notice panel probe complete")
+        exit(EXIT_SUCCESS)
     }
 }
 
@@ -947,17 +1160,11 @@ private struct SmokeStatusReporter {
 
     func append(_ line: String) {
         guard let statusURL else { return }
-        let sanitizedLine = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let sanitizedLine = "[\(formatter.string(from: Date()))] \(line)\n"
         if let data = sanitizedLine.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: statusURL.path),
-               let handle = try? FileHandle(forWritingTo: statusURL) {
-                defer { try? handle.close() }
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-            } else {
-                try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try? data.write(to: statusURL, options: .atomic)
-            }
+            try? SmokeStatusFileAppender.append(data, to: statusURL)
         }
     }
 }

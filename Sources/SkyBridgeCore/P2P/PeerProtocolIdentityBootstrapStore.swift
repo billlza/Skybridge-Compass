@@ -23,7 +23,7 @@ public actor PeerProtocolIdentityBootstrapStore {
     }
 
     public func upsert(deviceIds: [String], fingerprints: Set<String>) {
-        let normalizedIds = normalizedUniqueIds(deviceIds)
+        let normalizedIds = trustMaterialIds(deviceIds)
         let incoming = Set(fingerprints.compactMap(Self.normalizedFingerprint))
         guard !normalizedIds.isEmpty, !incoming.isEmpty else { return }
 
@@ -49,7 +49,7 @@ public actor PeerProtocolIdentityBootstrapStore {
     }
 
     public func trustedFingerprints(forCandidates candidates: [String]) -> Set<String> {
-        let normalizedCandidates = normalizedUniqueIds(candidates)
+        let normalizedCandidates = trustMaterialIds(candidates)
         guard !normalizedCandidates.isEmpty else { return [] }
 
         var fingerprints = Set<String>()
@@ -60,8 +60,17 @@ public actor PeerProtocolIdentityBootstrapStore {
         return fingerprints
     }
 
+    public func containsTrustedFingerprint(_ fingerprint: String) -> Bool {
+        guard let normalized = Self.normalizedFingerprint(fingerprint) else {
+            return false
+        }
+        return entries.values.contains { entry in
+            entry.fingerprints.contains(normalized)
+        }
+    }
+
     public func clear(deviceIds: [String]) {
-        let normalizedIds = normalizedUniqueIds(deviceIds)
+        let normalizedIds = trustMaterialIds(deviceIds)
         guard !normalizedIds.isEmpty else { return }
 
         var changed = false
@@ -84,18 +93,15 @@ public actor PeerProtocolIdentityBootstrapStore {
         defaults.removeObject(forKey: Self.defaultsKey)
     }
 
-    private func normalizedUniqueIds(_ rawIds: [String]) -> [String] {
+    private func trustMaterialIds(_ rawIds: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
-
         for raw in rawIds {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            if seen.insert(trimmed).inserted {
-                result.append(trimmed)
+            for candidate in PeerTrustLookup.lookupCandidates(for: raw)
+            where !PeerTrustLookup.isEndpointAlias(candidate) && seen.insert(candidate).inserted {
+                result.append(candidate)
             }
         }
-
         return result
     }
 

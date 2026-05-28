@@ -4,6 +4,8 @@ import CryptoKit
 
 @available(iOS 17.0, *)
 final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
+    private var inboundProbeCounter: UInt64 = 0
+
     func testControlChannelCodecLabelsBootstrapAppMessageKinds() {
         XCTAssertEqual(
             CrossNetworkWebRTCControlChannelCodec.bootstrapAppMessageKind(.heartbeat(.init())),
@@ -33,6 +35,134 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         XCTAssertTrue(CrossNetworkWebRTCControlChannelCodec.isActiveHandshakeDriverFrame(finished.encoded))
         XCTAssertFalse(CrossNetworkWebRTCControlChannelCodec.isLikelyCompleteHandshakeControlPacket(Data()))
         XCTAssertFalse(CrossNetworkWebRTCControlChannelCodec.isLikelyCompleteHandshakeControlPacket(Data([0xff, 0, 0, 0, 0])))
+    }
+
+    func testWebRTCSecureEnvelopeRejectsReplayAndWrongPacketType() throws {
+        let receiverKeys = makeSessionKeys()
+        let senderRole: HandshakeRole = receiverKeys.role == .initiator ? .responder : .initiator
+        let senderKeys = SessionKeys(
+            sendKey: receiverKeys.receiveKey,
+            receiveKey: receiverKeys.sendKey,
+            negotiatedSuite: receiverKeys.negotiatedSuite,
+            role: senderRole,
+            transcriptHash: receiverKeys.transcriptHash,
+            sessionId: receiverKeys.sessionId
+        )
+        let packet = try CrossNetworkWebRTCControlChannelCodec.encryptAppPayload(
+            Data("metadata".utf8),
+            with: senderKeys,
+            packetType: .fileTransfer,
+            counter: 1
+        )
+
+        let opened = try CrossNetworkWebRTCControlChannelCodec.decryptAppPayload(
+            packet,
+            with: receiverKeys,
+            allowedPacketTypes: [.fileTransfer]
+        )
+        XCTAssertEqual(opened.packetType, .fileTransfer)
+        XCTAssertEqual(opened.payload, Data("metadata".utf8))
+
+        var replayWindow = WebRTCAppSecureReplayWindow()
+        try replayWindow.validateAndRecord(opened)
+        XCTAssertThrowsError(try replayWindow.validateAndRecord(opened)) { error in
+            XCTAssertEqual(
+                error as? WebRTCAppSecureEnvelopeError,
+                .replayDetected(
+                    packetType: .fileTransfer,
+                    counter: 1,
+                    highestCounter: 1,
+                    reason: .duplicateCounter
+                )
+            )
+        }
+
+        XCTAssertThrowsError(
+            try CrossNetworkWebRTCControlChannelCodec.decryptAppPayload(
+                packet,
+                with: receiverKeys,
+                allowedPacketTypes: [.appControl]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? WebRTCAppSecureEnvelopeError,
+                .packetTypeMismatch(expected: [.appControl], actual: .fileTransfer)
+            )
+        }
+    }
+
+    func testWebRTCSecureEnvelopeSeparatesRemoteDesktopAudioReplayLane() throws {
+        let receiverKeys = makeSessionKeys()
+        let screenPacket = try encryptForInboundProbe(
+            Data("screen-frame".utf8),
+            keys: receiverKeys,
+            packetType: .remoteDesktop
+        )
+        let audioPacket = try encryptForInboundProbe(
+            Data("fallback-audio".utf8),
+            keys: receiverKeys,
+            packetType: .remoteDesktopAudio
+        )
+
+        let audioOpened = try XCTUnwrap(
+            CrossNetworkWebRTCManager.openDirectControlProbePayload(audioPacket, keys: receiverKeys)
+        )
+        XCTAssertEqual(audioOpened.packetType, .remoteDesktopAudio)
+        XCTAssertEqual(audioOpened.counter, 2)
+
+        let screenOpened = try WebRTCAppSecureEnvelope.open(
+            screenPacket,
+            keys: receiverKeys,
+            allowedPacketTypes: [.remoteDesktop]
+        )
+        XCTAssertEqual(screenOpened.counter, 1)
+
+        var replayWindow = WebRTCAppSecureReplayWindow()
+        try replayWindow.validateAndRecord(audioOpened)
+        XCTAssertNoThrow(
+            try replayWindow.validateAndRecord(screenOpened),
+            "Control-channel fallback audio must not advance the independently ordered screen channel replay lane."
+        )
+    }
+
+    func testWebRTCSecureEnvelopeReportsOutsideWindowReplayReason() throws {
+        let receiverKeys = makeSessionKeys()
+        let highPacket = try encryptForInboundProbe(
+            Data("screen-high".utf8),
+            keys: receiverKeys,
+            packetType: .remoteDesktop,
+            counter: 2_000
+        )
+        let stalePacket = try encryptForInboundProbe(
+            Data("screen-stale".utf8),
+            keys: receiverKeys,
+            packetType: .remoteDesktop,
+            counter: 976
+        )
+        let highOpened = try WebRTCAppSecureEnvelope.open(
+            highPacket,
+            keys: receiverKeys,
+            allowedPacketTypes: [.remoteDesktop]
+        )
+        let staleOpened = try WebRTCAppSecureEnvelope.open(
+            stalePacket,
+            keys: receiverKeys,
+            allowedPacketTypes: [.remoteDesktop]
+        )
+        var replayWindow = WebRTCAppSecureReplayWindow()
+
+        try replayWindow.validateAndRecord(highOpened)
+        XCTAssertThrowsError(try replayWindow.validateAndRecord(staleOpened)) { error in
+            XCTAssertEqual(
+                error as? WebRTCAppSecureEnvelopeError,
+                .replayDetected(
+                    packetType: .remoteDesktop,
+                    counter: 976,
+                    highestCounter: 2_000,
+                    reason: .counterOutsideWindow
+                )
+            )
+        }
     }
 
     func testFileTransferIntegrityMerkleRootUsesOrderedSha256Tree() throws {
@@ -199,22 +329,28 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
     }
 
     @MainActor
-    func testDirectProbeDecryptsRawCiphertextPayload() throws {
-        let keys = makeSessionKeys()
+    func testDirectProbeOpensSecureEnvelopeAndRejectsRawCiphertextPayload() throws {
+        let keys = makeSessionKeys(sessionId: "direct-probe-\(UUID().uuidString)")
         let plaintext = Data("hello-direct-probe".utf8)
         let ciphertext = try encryptForInboundProbe(plaintext, keys: keys)
 
-        let decrypted = CrossNetworkWebRTCManager.testOnlyDecryptDirectControlProbePayload(
+        let opened = CrossNetworkWebRTCManager.testOnlyOpenDirectControlProbePayload(
             ciphertext,
             keys: keys
         )
 
-        XCTAssertEqual(decrypted, plaintext)
+        XCTAssertEqual(opened?.packetType, .remoteDesktop)
+        XCTAssertEqual(opened?.payload, plaintext)
+
+        let rawCiphertext = try rawLegacyEncryptForInboundProbe(plaintext, keys: keys)
+        XCTAssertNil(
+            CrossNetworkWebRTCManager.testOnlyOpenDirectControlProbePayload(rawCiphertext, keys: keys)
+        )
     }
 
     @MainActor
     func testDirectProbeReturnsNilForLengthPrefixedFrame() throws {
-        let keys = makeSessionKeys()
+        let keys = makeSessionKeys(sessionId: "direct-framed-\(UUID().uuidString)")
         let plaintext = Data("hello-framed-payload".utf8)
         let ciphertext = try encryptForInboundProbe(plaintext, keys: keys)
         var framed = Data()
@@ -222,12 +358,100 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
         framed.append(ciphertext)
 
-        let decrypted = CrossNetworkWebRTCManager.testOnlyDecryptDirectControlProbePayload(
+        let opened = CrossNetworkWebRTCManager.testOnlyOpenDirectControlProbePayload(
             framed,
             keys: keys
         )
 
-        XCTAssertNil(decrypted)
+        XCTAssertNil(opened)
+    }
+
+    @MainActor
+    func testDirectProbeRejectsUndeclaredPacketTypes() throws {
+        let keys = makeSessionKeys(sessionId: "direct-type-\(UUID().uuidString)")
+        let fileTransferPacket = try encryptForInboundProbe(
+            Data("file-transfer-direct".utf8),
+            keys: keys,
+            packetType: .fileTransfer
+        )
+
+        XCTAssertNil(
+            CrossNetworkWebRTCManager.testOnlyOpenDirectControlProbePayload(fileTransferPacket, keys: keys)
+        )
+    }
+
+    @MainActor
+    func testScreenChannelSecureEnvelopeUsesManagerReplayWindow() throws {
+        let manager = CrossNetworkWebRTCManager.instance
+        let keys = makeSessionKeys(byte: 0x45, sessionId: "screen-replay-\(UUID().uuidString)")
+        manager.clearWebRTCSecureEnvelopeState(for: keys.sessionId)
+        defer { manager.clearWebRTCSecureEnvelopeState(for: keys.sessionId) }
+
+        let packet = try encryptForInboundProbe(makeScreenFrameWirePlaintext(), keys: keys)
+        let opened = try CrossNetworkWebRTCManager.openScreenChannelPayload(packet, keys: keys)
+        let validated = try manager.testOnlyValidateWebRTCSecureOpenedPayload(
+            opened,
+            with: keys,
+            sessionId: keys.sessionId
+        )
+        XCTAssertEqual(CrossNetworkWebRTCManager.decodeScreenChannelPayload(validated) != nil, true)
+
+        let replay = try CrossNetworkWebRTCManager.openScreenChannelPayload(packet, keys: keys)
+        XCTAssertThrowsError(
+            try manager.testOnlyValidateWebRTCSecureOpenedPayload(replay, with: keys, sessionId: keys.sessionId)
+        ) { error in
+            XCTAssertEqual(
+                error as? WebRTCAppSecureEnvelopeError,
+                .replayDetected(
+                    packetType: .remoteDesktop,
+                    counter: opened.counter,
+                    highestCounter: opened.counter,
+                    reason: .duplicateCounter
+                )
+            )
+        }
+    }
+
+    @MainActor
+    func testScreenChannelLengthFramedReplayDropsWithoutResettingParser() throws {
+        let replayError = WebRTCAppSecureEnvelopeError.replayDetected(
+            packetType: .remoteDesktop,
+            counter: 44,
+            highestCounter: 44,
+            reason: .duplicateCounter
+        )
+        let wrongKeyError = WebRTCAppSecureEnvelopeError.authenticationFailed(
+            packetType: .remoteDesktop,
+            counter: 44
+        )
+
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.screenLengthFramedDecodeFailureAction(for: replayError),
+            .dropAuthenticatedReplay(
+                packetType: .remoteDesktop,
+                counter: 44,
+                highestCounter: 44,
+                reason: .duplicateCounter
+            )
+        )
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.screenLengthFramedDecodeFailureAction(for: wrongKeyError),
+            .resetParser
+        )
+
+        var decoder = CrossNetworkWebRTCManager.ScreenChannelWireDecoder(maxInboundFrameBytes: 8_000_000)
+        decoder.markLengthFramedMode()
+        if case .dropAuthenticatedReplay = CrossNetworkWebRTCManager.screenLengthFramedDecodeFailureAction(for: replayError) {
+            XCTAssertEqual(decoder.mode, .lengthFramed)
+        } else {
+            XCTFail("expected authenticated replay to be dropped without parser reset")
+        }
+        if case .resetParser = CrossNetworkWebRTCManager.screenLengthFramedDecodeFailureAction(for: wrongKeyError) {
+            decoder.resetLengthFramedAfterDecodeFailure()
+        } else {
+            XCTFail("expected unauthenticated decode failure to reset parser")
+        }
+        XCTAssertEqual(decoder.mode, .unknown)
     }
 
     func testHighThroughputRemoteDesktopScreenPayloadDecodesOffMainActor() async throws {
@@ -303,7 +527,7 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
     }
 
     @MainActor
-    func testScreenChannelDirectRawCiphertextPayloadDecodes() throws {
+    func testScreenChannelDirectSecureCiphertextPayloadDecodes() throws {
         let keys = makeSessionKeys()
         let ciphertext = try encryptForInboundProbe(makeScreenFrameWirePlaintext(), keys: keys)
 
@@ -548,22 +772,56 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         )
     }
 
-    private func makeSessionKeys(byte: UInt8 = 0x42) -> SessionKeys {
+    private func makeSessionKeys(byte: UInt8 = 0x42, sessionId: String? = nil) -> SessionKeys {
         let keyBytes = Data(repeating: byte, count: 32)
         return SessionKeys(
             sendKey: keyBytes,
             receiveKey: keyBytes,
             negotiatedSuite: .mlkem768,
-            transcriptHash: Data(repeating: 0x24, count: 32)
+            transcriptHash: Data(repeating: 0x24, count: 32),
+            sessionId: sessionId
         )
     }
 
-    private func encryptForInboundProbe(_ plaintext: Data, keys: SessionKeys) throws -> Data {
-        let key = SymmetricKey(data: keys.receiveKey)
-        let sealed = try AES.GCM.seal(plaintext, using: key)
+    private func encryptForInboundProbe(
+        _ plaintext: Data,
+        keys: SessionKeys,
+        packetType: WebRTCAppSecurePacketType = .remoteDesktop,
+        counter: UInt64? = nil
+    ) throws -> Data {
+        let packetCounter: UInt64
+        if let counter {
+            packetCounter = counter
+            inboundProbeCounter = max(inboundProbeCounter, counter)
+        } else {
+            inboundProbeCounter += 1
+            packetCounter = inboundProbeCounter
+        }
+        let senderRole: HandshakeRole = keys.role == .initiator ? .responder : .initiator
+        let senderKeys = SessionKeys(
+            sendKey: keys.receiveKey,
+            receiveKey: keys.sendKey,
+            negotiatedSuite: keys.negotiatedSuite,
+            role: senderRole,
+            transcriptHash: keys.transcriptHash,
+            sessionId: keys.sessionId
+        )
+        return try CrossNetworkWebRTCControlChannelCodec.encryptAppPayload(
+            plaintext,
+            with: senderKeys,
+            packetType: packetType,
+            counter: packetCounter
+        )
+    }
+
+    private func rawLegacyEncryptForInboundProbe(_ plaintext: Data, keys: SessionKeys) throws -> Data {
+        let sealed = try AES.GCM.seal(plaintext, using: SymmetricKey(data: keys.receiveKey))
         guard let combined = sealed.combined else {
-            XCTFail("Missing combined ciphertext")
-            return Data()
+            throw NSError(
+                domain: "CrossNetworkWebRTCManagerDirectProbeTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "AES.GCM.seal produced no combined box"]
+            )
         }
         return combined
     }

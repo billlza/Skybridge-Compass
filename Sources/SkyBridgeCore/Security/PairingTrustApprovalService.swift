@@ -84,6 +84,7 @@ public final class PairingTrustApprovalService: ObservableObject {
     private var continuationByRequestId: [UUID: [CheckedContinuation<Decision, Never>]] = [:]
     private struct ProtocolIdentityPinContext: Sendable {
         let deviceIds: [String]
+        let algorithm: ProtocolSigningAlgorithm
         let fingerprint: String
         let verificationCode: String
     }
@@ -255,6 +256,7 @@ public final class PairingTrustApprovalService: ObservableObject {
         platform: String? = nil,
         osVersion: String? = nil,
         verificationCode: String,
+        requesterProtocolSigningAlgorithm: ProtocolSigningAlgorithm,
         requesterProtocolIdentityFingerprint: String
     ) async -> Decision {
         let normalizedIds = normalizedUniqueDeviceIds(requesterDeviceIds)
@@ -268,17 +270,18 @@ public final class PairingTrustApprovalService: ObservableObject {
         }
 
         let declaredDeviceId = normalizedIds.first ?? "unknown"
-        let policyBindingKey = "PIB-1-requester|\(declaredDeviceId)|\(normalizedFingerprint)"
+        let policyBindingKey = "PIB-1-requester|\(declaredDeviceId)|\(requesterProtocolSigningAlgorithm.rawValue)|\(normalizedFingerprint)"
         if let raw = policyByDeviceId[policyBindingKey],
            let policy = Decision(rawValue: raw) {
             switch policy {
             case .alwaysAllow:
-                await pinProtocolIdentityRequester(
+                guard await pinProtocolIdentityRequester(
                     deviceIds: normalizedIds,
+                    algorithm: requesterProtocolSigningAlgorithm,
                     fingerprint: normalizedFingerprint,
                     verificationCode: verificationCode,
                     operatorLabel: "stored-policy"
-                )
+                ) else { return .reject }
                 return policy
             case .reject:
                 return policy
@@ -290,12 +293,13 @@ public final class PairingTrustApprovalService: ObservableObject {
            let policy = Decision(rawValue: raw) {
             switch policy {
             case .alwaysAllow:
-                await pinProtocolIdentityRequester(
+                guard await pinProtocolIdentityRequester(
                     deviceIds: normalizedIds,
+                    algorithm: requesterProtocolSigningAlgorithm,
                     fingerprint: normalizedFingerprint,
                     verificationCode: verificationCode,
                     operatorLabel: "stored-policy"
-                )
+                ) else { return .reject }
                 return policy
             case .reject:
                 return policy
@@ -305,12 +309,13 @@ public final class PairingTrustApprovalService: ObservableObject {
         }
 
         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING"] == "1" {
-            await pinProtocolIdentityRequester(
+            guard await pinProtocolIdentityRequester(
                 deviceIds: normalizedIds,
+                algorithm: requesterProtocolSigningAlgorithm,
                 fingerprint: normalizedFingerprint,
                 verificationCode: verificationCode,
                 operatorLabel: "smoke-auto-approve"
-            )
+            ) else { return .reject }
             return .alwaysAllow
         }
 
@@ -339,6 +344,7 @@ public final class PairingTrustApprovalService: ObservableObject {
         }
         protocolIdentityPinContextByRequestId[request.id] = ProtocolIdentityPinContext(
             deviceIds: normalizedIds,
+            algorithm: requesterProtocolSigningAlgorithm,
             fingerprint: normalizedFingerprint,
             verificationCode: verificationCode
         )
@@ -360,10 +366,38 @@ public final class PairingTrustApprovalService: ObservableObject {
 
     private func pinProtocolIdentityRequester(
         deviceIds: [String],
+        algorithm: ProtocolSigningAlgorithm,
         fingerprint: String,
         verificationCode: String,
         operatorLabel: String
-    ) async {
+    ) async -> Bool {
+        guard let stableDeviceId = stableProtocolIdentityDeviceId(from: deviceIds) else {
+            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(deviceIds.first ?? "-") fingerprint=\(fingerprint) code=\(verificationCode) reason=missing_stable_device_id lifecycle=identity-oob>requester-pin-failed"
+            logger.warning("\(line, privacy: .public)")
+            RemoteControlSmokeStatusWriter.append(line)
+            return false
+        }
+        do {
+            let promoted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
+                deviceId: stableDeviceId,
+                preferredCurrentDeviceId: stableDeviceId,
+                knownDeviceIds: deviceIds,
+                protocolSigningAlgorithm: algorithm,
+                protocolPublicKeyFingerprint: fingerprint,
+                pinSource: .pib1OperatorApproval
+            )
+            guard promoted else {
+                let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(stableDeviceId) fingerprint=\(fingerprint) code=\(verificationCode) reason=authority_record_not_promoted lifecycle=identity-oob>requester-pin-failed"
+                logger.warning("\(line, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append(line)
+                return false
+            }
+        } catch {
+            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(stableDeviceId) fingerprint=\(fingerprint) code=\(verificationCode) reason=\(error.localizedDescription) lifecycle=identity-oob>requester-pin-failed"
+            logger.error("\(line, privacy: .public)")
+            RemoteControlSmokeStatusWriter.append(line)
+            return false
+        }
         await PeerProtocolIdentityBootstrapStore.shared.upsert(
             deviceIds: deviceIds,
             fingerprints: [fingerprint]
@@ -371,6 +405,16 @@ public final class PairingTrustApprovalService: ObservableObject {
         let line = "🔐 PIB-1 requester protocol identity pinned: requester=\(deviceIds.first ?? "-") fingerprint=\(fingerprint) code=\(verificationCode) operator=\(operatorLabel) lifecycle=identity-oob>requester-pinned"
         logger.info("\(line, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(line)
+        return true
+    }
+
+    private func stableProtocolIdentityDeviceId(from deviceIds: [String]) -> String? {
+        for deviceId in deviceIds {
+            if let persistent = PeerTrustLookup.persistentDeviceId(from: deviceId) {
+                return persistent
+            }
+        }
+        return nil
     }
 
     private func normalizedUniqueDeviceIds(_ rawIds: [String]) -> [String] {
@@ -448,15 +492,16 @@ public final class PairingTrustApprovalService: ObservableObject {
         let continuations = continuationByRequestId.removeValue(forKey: request.id) ?? []
         if let protocolIdentityContext, decision != .reject {
             Task { @MainActor in
-                await self.pinProtocolIdentityRequester(
+                let pinned = await self.pinProtocolIdentityRequester(
                     deviceIds: protocolIdentityContext.deviceIds,
+                    algorithm: protocolIdentityContext.algorithm,
                     fingerprint: protocolIdentityContext.fingerprint,
                     verificationCode: protocolIdentityContext.verificationCode,
                     operatorLabel: "local-user"
                 )
                 self.finishResolution(
                     request: request,
-                    decision: decision,
+                    decision: pinned ? decision : .reject,
                     continuations: continuations
                 )
             }

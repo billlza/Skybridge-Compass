@@ -1,6 +1,12 @@
 use crate::performance_budgets::{
     P2P_REMOTE_STRICT_CONTENT_BACKLOG_BYTE_LIMIT, P2P_REMOTE_STRICT_CONTENT_BACKLOG_FRAME_LIMIT,
-    P2P_REMOTE_STRICT_MAC_QUEUED_FRAME_LIMIT, P2P_REMOTE_STRICT_MAX_FRAMES_PER_DRAIN,
+    P2P_REMOTE_STRICT_MAC_CLOCK_FIRE_TO_DRAIN_LIMIT_MS,
+    P2P_REMOTE_STRICT_MAC_COMPLETION_GAP_LIMIT_MS,
+    P2P_REMOTE_STRICT_MAC_CONTENT_ACTOR_HOP_LIMIT_MS,
+    P2P_REMOTE_STRICT_MAC_CONTENT_CALLBACK_GAP_LIMIT_MS,
+    P2P_REMOTE_STRICT_MAC_ENCODED_TO_SUBMIT_LIMIT_MS, P2P_REMOTE_STRICT_MAC_QUEUED_FRAME_LIMIT,
+    P2P_REMOTE_STRICT_MAC_SCHEDULE_GAP_LIMIT_MS, P2P_REMOTE_STRICT_MAC_SCHEDULE_JITTER_LIMIT_MS,
+    P2P_REMOTE_STRICT_MAC_SUBMIT_GAP_FRAME_BUDGET, P2P_REMOTE_STRICT_MAX_FRAMES_PER_DRAIN,
     P2P_REMOTE_STRICT_MAX_MISSED_CADENCE_SLOTS,
 };
 
@@ -27,6 +33,32 @@ pub(super) fn evaluate(selected: &MacTxSelectedEvidence, min_fps: f64) -> MacTxV
     let writer_clock_all = selected.writer_clock_all();
     let send_scheduler_all = selected.send_scheduler_all();
     let wire_send_all = selected.wire_send_all();
+    let frame_budget_ms = 1_000.0 / min_fps.max(1.0);
+    let timing_ok = !selected.uses_final_window
+        || (selected
+            .schedule_gap_max_ms
+            .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_MAC_SCHEDULE_GAP_LIMIT_MS)
+            && selected
+                .schedule_jitter_max_ms
+                .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_MAC_SCHEDULE_JITTER_LIMIT_MS)
+            && selected
+                .completion_gap_max_ms
+                .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_MAC_COMPLETION_GAP_LIMIT_MS)
+            && selected
+                .content_callback_gap_max_ms
+                .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_MAC_CONTENT_CALLBACK_GAP_LIMIT_MS)
+            && selected
+                .content_actor_hop_max_ms
+                .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_MAC_CONTENT_ACTOR_HOP_LIMIT_MS)
+            && selected
+                .encoded_to_submit_max_ms
+                .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_MAC_ENCODED_TO_SUBMIT_LIMIT_MS)
+            && selected.submit_gap_max_ms.is_some_and(|ms| {
+                ms <= frame_budget_ms * P2P_REMOTE_STRICT_MAC_SUBMIT_GAP_FRAME_BUDGET
+            })
+            && selected
+                .clock_fire_to_drain_max_ms
+                .is_some_and(|ms| ms <= P2P_REMOTE_STRICT_MAC_CLOCK_FIRE_TO_DRAIN_LIMIT_MS));
     let ok = selected.latest_sent_fps.is_some_and(|fps| fps >= min_fps)
         && selected
             .latest_encoded_fps
@@ -65,7 +97,8 @@ pub(super) fn evaluate(selected: &MacTxSelectedEvidence, min_fps: f64) -> MacTxV
         && writer_clock_all
         && send_scheduler_all
         && selected.queue_backlog_max.unwrap_or(0) == 0
-        && selected.queue_age_max_ms.unwrap_or(0.0) <= 100.0;
+        && selected.queue_age_max_ms.unwrap_or(0.0) <= 100.0
+        && timing_ok;
     MacTxVerdict {
         ok,
         max_allowed_send_ms,

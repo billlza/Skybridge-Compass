@@ -2,12 +2,13 @@
 set -euo pipefail
 
 # 中文注释：
-# 该脚本用于将 Xcode workspace Release app executable 产物封装为标准的 macOS 应用（.app）。
+# 该脚本用于将 Release app executable 产物封装为标准的 macOS 应用（.app）。
 # 满足最低系统版本 macOS 14.0，针对 Apple Silicon（ARM64）进行优化，并使用最新 API。
 #
 # 使用方法：
-# 1) 先确保在项目根目录运行过 Release 构建：
-#    xcodebuild -workspace .swiftpm/xcode/package.xcworkspace -scheme SkyBridgeCompassApp -configuration Release -destination 'platform=macOS,arch=arm64' build
+# 1) 先确保在项目根目录运行过 Release 构建，或直接运行本脚本让它构建：
+#    SKYBRIDGE_MACOS_BUILD_ARCH=arm64 Scripts/package_app.sh
+#    （本地 .app 打包默认使用 SwiftPM CLI 构建主可执行文件，避免 Xcode Package scheme 的 macOS/Catalyst destination 歧义。）
 # 2) 运行本脚本：
 #    Scripts/package_app.sh
 # 3) 生成的 .app 会位于 dist/SkyBridge\ Compass\ Pro.app
@@ -56,6 +57,17 @@ function codesign_target_or_fail() {
   return 0
 }
 
+function bundle_contains_executable_code() {
+  local bundle="$1"
+
+  if [[ -d "${bundle}/Contents/MacOS" ]] && \
+     find "${bundle}/Contents/MacOS" -type f -perm -111 -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+
+  return 1
+}
+
 function resign_embedded_code() {
   log "统一重签名嵌入式代码（避免 Team ID 不一致导致 dyld 拒载）"
 
@@ -71,7 +83,9 @@ function resign_embedded_code() {
 
   if [[ -d "${RES_DIR}" ]]; then
     while IFS= read -r -d '' bundle; do
-      codesign_target_or_fail "${bundle}"
+      if bundle_contains_executable_code "${bundle}"; then
+        codesign_target_or_fail "${bundle}"
+      fi
     done < <(find "${RES_DIR}" -type d -name "*.bundle" -print0)
   fi
 
@@ -307,6 +321,8 @@ function compile_icon_composer_assets() {
   local partial_info_plist=""
   local icon_file=""
   local icon_name=""
+  local canonical_png_hash=""
+  local iconcomposer_png_hash=""
   local actool_inputs=()
 
   if [[ "${SKYBRIDGE_ENABLE_ICON_COMPOSER:-1}" == "0" ]]; then
@@ -321,6 +337,18 @@ function compile_icon_composer_assets() {
     fi
     log "未检测到完整 AppIcon.icon 图标源，沿用静态 AppIcon.icns"
     return 0
+  fi
+
+  if [[ ! -f "${source_resources_dir}/AppIcon.png" ]]; then
+    echo "错误：缺少 canonical AppIcon.png，无法证明 Icon Composer 图标源没有漂移。" >&2
+    exit 1
+  fi
+  canonical_png_hash="$(shasum -a 256 "${source_resources_dir}/AppIcon.png" | awk '{print $1}')"
+  iconcomposer_png_hash="$(shasum -a 256 "${icon_doc_dir}/Assets/Image.png" | awk '{print $1}')"
+  if [[ "${canonical_png_hash}" != "${iconcomposer_png_hash}" ]]; then
+    echo "错误：AppIcon.icon/Assets/Image.png 必须与 canonical AppIcon.png 完全一致，避免 Assets.car 与运行态图标漂移。" >&2
+    echo "AppIcon.png=${canonical_png_hash} IconComposerImage=${iconcomposer_png_hash}" >&2
+    exit 1
   fi
 
   if ! xcrun -f actool >/dev/null 2>&1; then
@@ -380,11 +408,15 @@ function compile_icon_composer_assets() {
   fi
 
   mkdir -p "${app_resources_dir}"
-  cp "${tmp_dir}/AppIcon.icns" "${app_resources_dir}/AppIcon.icns"
   cp "${tmp_dir}/Assets.car" "${app_resources_dir}/Assets.car"
-  if [[ -f "${source_resources_dir}/AppIconDock.icns" ]]; then
-    cp "${source_resources_dir}/AppIconDock.icns" "${app_resources_dir}/AppIconDock.icns"
+
+  if [[ ! -f "${source_resources_dir}/AppIcon.icns" || ! -f "${source_resources_dir}/AppIconDock.icns" ]]; then
+    rm -rf "${tmp_dir}"
+    echo "错误：缺少 full-size AppIcon.icns/AppIconDock.icns；请先运行 Scripts/regenerate_app_icons.sh。" >&2
+    exit 1
   fi
+  cp "${source_resources_dir}/AppIcon.icns" "${app_resources_dir}/AppIcon.icns"
+  cp "${source_resources_dir}/AppIconDock.icns" "${app_resources_dir}/AppIconDock.icns"
 
   icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "${partial_info_plist}" 2>/dev/null || true)
   icon_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "${partial_info_plist}" 2>/dev/null || true)
@@ -392,6 +424,140 @@ function compile_icon_composer_assets() {
   plutil -replace CFBundleIconName -string "${icon_name:-AppIcon}" "${info_plist_path}"
   rm -f "${app_resources_dir}/icon.json" "${app_resources_dir}/Image.png"
   rm -rf "${tmp_dir}"
+}
+
+function normalize_resource_bundle_to_macos_layout() {
+  local bundle="$1"
+  local contents_dir="${bundle}/Contents"
+  local resources_dir="${contents_dir}/Resources"
+  local tmp_dir=""
+  local entry=""
+  local base_name=""
+
+  [[ -d "${bundle}" ]] || return 1
+  [[ -d "${resources_dir}" ]] && return 0
+
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-resourcebundle.XXXXXX")"
+  mkdir -p "${tmp_dir}/Contents/Resources"
+
+  if [[ -f "${bundle}/Info.plist" ]]; then
+    mv "${bundle}/Info.plist" "${tmp_dir}/Contents/Info.plist"
+  elif [[ -f "${contents_dir}/Info.plist" ]]; then
+    mv "${contents_dir}/Info.plist" "${tmp_dir}/Contents/Info.plist"
+  else
+    rm -rf "${tmp_dir}"
+    echo "错误：资源 bundle 缺少 Info.plist，无法规范化为 macOS bundle：${bundle}" >&2
+    exit 1
+  fi
+
+  while IFS= read -r -d '' entry; do
+    base_name="$(basename "${entry}")"
+    [[ "${base_name}" == "Contents" ]] && continue
+    mv "${entry}" "${tmp_dir}/Contents/Resources/"
+  done < <(find "${bundle}" -mindepth 1 -maxdepth 1 -print0)
+
+  rm -rf "${bundle}"
+  mkdir -p "$(dirname "${bundle}")"
+  mv "${tmp_dir}" "${bundle}"
+}
+
+function copy_compiled_native_app_resource() {
+  local native_resources_dir="$1"
+  local module_resources_dir="$2"
+  local resource_name="$3"
+  local source_path="${native_resources_dir}/${resource_name}"
+
+  if [[ ! -e "${source_path}" ]]; then
+    return 1
+  fi
+
+  rm -rf "${module_resources_dir}/${resource_name}"
+  ditto "${source_path}" "${module_resources_dir}/${resource_name}"
+}
+
+function graft_xcode_app_compiled_resources_into_module_bundle() {
+  local module_bundle="$1"
+  local native_resources_dir="${XCODE_APP_BUNDLE}/Contents/Resources"
+  local module_resources_dir="${module_bundle}/Contents/Resources"
+  local lproj=""
+
+  normalize_resource_bundle_to_macos_layout "${module_bundle}"
+  mkdir -p "${module_resources_dir}"
+
+  if [[ ! -d "${native_resources_dir}" ]]; then
+    echo "错误：缺少 Xcode 原生 App 编译资源目录：${native_resources_dir}" >&2
+    exit 1
+  fi
+
+  copy_compiled_native_app_resource "${native_resources_dir}" "${module_resources_dir}" "Assets.car" || {
+    echo "错误：Xcode 原生 App 未产出编译后的 Assets.car：${native_resources_dir}/Assets.car" >&2
+    exit 1
+  }
+
+  copy_compiled_native_app_resource "${native_resources_dir}" "${module_resources_dir}" "default.metallib" || {
+    echo "错误：Xcode 原生 App 未产出编译后的 default.metallib：${native_resources_dir}/default.metallib" >&2
+    exit 1
+  }
+
+  for lproj in "${native_resources_dir}"/*.lproj(N); do
+    rm -rf "${module_resources_dir}/$(basename "${lproj}")"
+    ditto "${lproj}" "${module_resources_dir}/$(basename "${lproj}")"
+  done
+}
+
+function copy_xcode_app_compiled_resources_to_main_bundle() {
+  local native_resources_dir="${XCODE_APP_BUNDLE}/Contents/Resources"
+  local resource_name=""
+
+  [[ -d "${native_resources_dir}" ]] || return 0
+
+  for resource_name in default.metallib Metadata.appintents; do
+    if [[ -e "${native_resources_dir}/${resource_name}" ]]; then
+      rm -rf "${RES_DIR}/${resource_name}"
+      ditto "${native_resources_dir}/${resource_name}" "${RES_DIR}/${resource_name}"
+    fi
+  done
+}
+
+function copy_source_app_resources_to_main_bundle() {
+  local source_resources_dir="$1"
+  local app_resources_dir="$2"
+  local entry=""
+  local resource_name=""
+  local copied_count=0
+  local required_icon_resource=""
+
+  if [[ ! -d "${source_resources_dir}" ]]; then
+    echo "错误：缺少 app 源资源目录，无法打包图标资源：${source_resources_dir}" >&2
+    exit 1
+  fi
+
+  mkdir -p "${app_resources_dir}"
+  log "拷贝源资源目录 Resources 到 .app/Contents/Resources/"
+  for entry in "${source_resources_dir}"/*(N); do
+    resource_name="$(basename "${entry}")"
+    rm -rf "${app_resources_dir}/${resource_name}"
+    ditto "${entry}" "${app_resources_dir}/${resource_name}"
+    copied_count=$((copied_count + 1))
+  done
+
+  if [[ "${copied_count}" -eq 0 ]]; then
+    echo "错误：app 源资源目录为空，无法打包图标资源：${source_resources_dir}" >&2
+    exit 1
+  fi
+
+  for required_icon_resource in \
+    AppIcon.icns \
+    AppIconDock.icns \
+    AppIcon.png \
+    AppIconDock.png \
+    AppIcon.icon/icon.json \
+    AppIcon.icon/Assets/Image.png; do
+    if [[ ! -f "${app_resources_dir}/${required_icon_resource}" ]]; then
+      echo "错误：app 包缺少必需图标资源：${required_icon_resource}" >&2
+      exit 1
+    fi
+  done
 }
 
 function resolve_widget_provisionprofile() {
@@ -465,6 +631,10 @@ function build_and_embed_widget_extension() {
         -disableAutomaticPackageResolution \
         CODE_SIGNING_ALLOWED=NO \
         COMPILER_INDEX_STORE_ENABLE=NO \
+        ENABLE_CODE_COVERAGE=NO \
+        CLANG_ENABLE_CODE_COVERAGE=NO \
+        GCC_GENERATE_TEST_COVERAGE_FILES=NO \
+        GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
         ARCHS="${BUILD_ARCH}" \
         ONLY_ACTIVE_ARCH=YES \
         build
@@ -550,6 +720,11 @@ function select_release_build_dir() {
   local xcode_product="${XCODE_BUILD_DIR}/${EXECUTABLE}"
   local swiftpm_product="${SWIFTPM_RELEASE_BUILD_DIR}/${EXECUTABLE}"
 
+  if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" && -x "${swiftpm_product}" ]]; then
+    echo "${SWIFTPM_RELEASE_BUILD_DIR}"
+    return
+  fi
+
   if [[ -x "${xcode_product}" ]]; then
     echo "${XCODE_BUILD_DIR}"
     return
@@ -624,6 +799,7 @@ function assert_xcode_app_bundle_is_release_product() {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
+source "${ROOT_DIR}/Scripts/framework_artifact_helpers.sh"
 source "${ROOT_DIR}/Scripts/package_build_policy.sh"
 source "${ROOT_DIR}/Scripts/signing_entitlements_helpers.sh"
 source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
@@ -632,6 +808,7 @@ XCODE_BUILD_DIR="${XCODE_DERIVED_DATA_PATH}/Build/Products/Release"
 BUILD_ARCH="${BUILD_ARCH:-$(skybridge_default_macos_build_arch)}"
 SWIFTPM_RELEASE_BUILD_DIR="${ROOT_DIR}/.build/${BUILD_ARCH}-apple-macosx/release"
 BUILD_DIR="${XCODE_BUILD_DIR}"
+MAIN_BUILD_SYSTEM="${SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM:-swiftpm}"
 APP_NAME="SkyBridge Compass Pro.app"
 APP_DIR="${ROOT_DIR}/dist/${APP_NAME}"
 XCODE_PROJECT="${ROOT_DIR}/SkyBridgeWidgets.xcodeproj"
@@ -661,6 +838,23 @@ if [[ -d "${XCODE_WORKSPACE}" ]]; then
   USE_XCODE_WORKSPACE=1
 fi
 
+case "${MAIN_BUILD_SYSTEM}" in
+  swiftpm|xcode)
+    ;;
+  *)
+    echo "错误：不支持的 SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM=${MAIN_BUILD_SYSTEM}；允许值为 swiftpm 或 xcode。" >&2
+    exit 1
+    ;;
+esac
+
+VENDOR_XCFRAMEWORKS=(
+  "${ROOT_DIR}/Sources/Vendor/FreeRDP.xcframework"
+  "${ROOT_DIR}/Sources/Vendor/FreeRDPClient.xcframework"
+  "${ROOT_DIR}/Sources/Vendor/WinPR.xcframework"
+  "${ROOT_DIR}/Sources/Vendor/liboqs.xcframework"
+  "${ROOT_DIR}/Sources/Vendor/libopus.xcframework"
+)
+
 cleanup_packaging_tmp() {
   rm -rf "${PACKAGING_TMP_DIR}"
 }
@@ -680,6 +874,8 @@ else
   log "签名模式: certificate (${SIGN_IDENTITY})"
 fi
 
+skybridge_assert_xcframeworks_support_macos_arch "${BUILD_ARCH}" "${VENDOR_XCFRAMEWORKS[@]}"
+
 # 中文注释：可执行文件与资源 bundle 名称（来自 Xcode 构建输出）
 EXECUTABLE="SkyBridgeCompassApp"
 BUILD_DIR="$(select_release_build_dir)"
@@ -687,7 +883,7 @@ BUILD_SOURCE="$(skybridge_package_build_source "${BUILD_DIR}" "${XCODE_BUILD_DIR
 skybridge_assert_package_build_policy "${PACKAGE_CONTEXT}" "${BUILD_SOURCE}"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
-  log "执行 Release 构建，确保打包包含最新代码"
+  log "执行 Release 构建，确保打包包含最新代码（arch=${BUILD_ARCH}）"
   log "Xcode DerivedData 路径: ${XCODE_DERIVED_DATA_PATH}"
   cd "${ROOT_DIR}"
   skybridge_detect_apple_pqc_sdk
@@ -705,21 +901,15 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
     fi
   fi
 
-  if [[ "${USE_XCODE_WORKSPACE}" -eq 0 ]]; then
+  if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" ]]; then
+    log "使用 SwiftPM Release 构建主可执行文件（product=SkyBridgeCompassApp, arch=${BUILD_ARCH}）"
+    swift build \
+      -c release \
+      --arch "${BUILD_ARCH}" \
+      --product SkyBridgeCompassApp \
+      --disable-automatic-resolution
+  elif [[ "${USE_XCODE_WORKSPACE}" -eq 0 ]]; then
     log "未找到 package.xcworkspace，直接从 Swift package 根目录构建"
-  fi
-  if [[ "${USE_XCODE_WORKSPACE}" -eq 1 ]]; then
-    skybridge_run_xcodebuild -workspace "${XCODE_WORKSPACE}" \
-      -scheme SkyBridgeCompassApp \
-      -configuration Release \
-      -destination "${BUILD_DESTINATION}" \
-      -derivedDataPath "${XCODE_DERIVED_DATA_PATH}" \
-      -skipPackageUpdates \
-      -disableAutomaticPackageResolution \
-      CODE_SIGNING_ALLOWED=NO \
-      COMPILER_INDEX_STORE_ENABLE=NO \
-      build
-  else
     skybridge_run_xcodebuild \
       -scheme SkyBridgeCompassApp \
       -configuration Release \
@@ -729,6 +919,29 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
       -disableAutomaticPackageResolution \
       CODE_SIGNING_ALLOWED=NO \
       COMPILER_INDEX_STORE_ENABLE=NO \
+      ENABLE_CODE_COVERAGE=NO \
+      CLANG_ENABLE_CODE_COVERAGE=NO \
+      GCC_GENERATE_TEST_COVERAGE_FILES=NO \
+      GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
+      ARCHS="${BUILD_ARCH}" \
+      ONLY_ACTIVE_ARCH=YES \
+      build
+  else
+    skybridge_run_xcodebuild -workspace "${XCODE_WORKSPACE}" \
+      -scheme SkyBridgeCompassApp \
+      -configuration Release \
+      -destination "${BUILD_DESTINATION}" \
+      -derivedDataPath "${XCODE_DERIVED_DATA_PATH}" \
+      -skipPackageUpdates \
+      -disableAutomaticPackageResolution \
+      CODE_SIGNING_ALLOWED=NO \
+      COMPILER_INDEX_STORE_ENABLE=NO \
+      ENABLE_CODE_COVERAGE=NO \
+      CLANG_ENABLE_CODE_COVERAGE=NO \
+      GCC_GENERATE_TEST_COVERAGE_FILES=NO \
+      GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
+      ARCHS="${BUILD_ARCH}" \
+      ONLY_ACTIVE_ARCH=YES \
       build
   fi
   BUILD_DIR="$(select_release_build_dir)"
@@ -764,6 +977,7 @@ cp "${BUILD_DIR}/${EXECUTABLE}" "${MACOS_DIR}/${EXECUTABLE}"
 chmod +x "${MACOS_DIR}/${EXECUTABLE}"
 APP_BIN="${MACOS_DIR}/${EXECUTABLE}"
 assert_executable_embeds_privacy_usage_descriptions "${APP_BIN}"
+skybridge_assert_release_executable_not_instrumented "${APP_BIN}" "打包后的主可执行文件"
 
 log "拷贝运行时 Frameworks 到 .app/Contents/Frameworks/"
 found_framework=0
@@ -774,12 +988,41 @@ for framework_parent in "${BUILD_DIR}" "${BUILD_DIR}/PackageFrameworks"; do
     found_framework=1
     name="$(basename "${framework}")"
     rm -rf "${FW_DIR}/${name}"
-    cp -R "${framework}" "${FW_DIR}/"
+    ditto "${framework}" "${FW_DIR}/${name}"
   done
 done
 if [[ "${found_framework}" -eq 0 ]]; then
   log "未找到 .framework 产物（若运行时报 dyld 缺失，请检查构建产物）"
 fi
+
+linked_frameworks="$(
+  otool -L "${APP_BIN}" 2>/dev/null \
+    | sed -n 's|^[[:space:]]*@rpath/\([^/]*\)\.framework/.*|\1|p' \
+    | sort -u
+)"
+while IFS= read -r linked_framework; do
+  [[ -n "${linked_framework}" ]] || continue
+  if skybridge_framework_binary_exists "${FW_DIR}/${linked_framework}.framework" "${linked_framework}"; then
+    continue
+  fi
+
+  framework_source="$(
+    skybridge_resolve_framework_source_dir \
+      "${linked_framework}" \
+      "${BUILD_ARCH}" \
+      "${BUILD_DIR}" \
+      "${XCODE_DERIVED_DATA_PATH}" \
+      "${ROOT_DIR}"
+  )" || {
+    echo "错误：主二进制依赖 ${linked_framework}.framework，但无法从构建产物或 SwiftPM artifacts 找到 macOS ${BUILD_ARCH} slice。" >&2
+    exit 1
+  }
+
+  log "补齐 @rpath 依赖 ${linked_framework}.framework: ${framework_source}"
+  rm -rf "${FW_DIR}/${linked_framework}.framework"
+  ditto "${framework_source}" "${FW_DIR}/${linked_framework}.framework"
+  found_framework=1
+done <<< "${linked_frameworks}"
 
 # 兼容历史 rpath（@executable_path/../lib），同时保留标准 Frameworks 布局。
 if [[ -L "${LEGACY_FW_LINK}" || -e "${LEGACY_FW_LINK}" ]]; then
@@ -835,28 +1078,52 @@ fi
 
 log "拷贝构建产物中的资源 bundle 到 .app/Contents/Resources/"
 found_bundle=0
-for bundle in "${BUILD_DIR}"/*.bundle(N); do
-  [[ -d "${bundle}" ]] || continue
-  found_bundle=1
-  rm -rf "${RES_DIR}/$(basename "${bundle}")"
-  cp -R "${bundle}" "${RES_DIR}/"
+resource_bundle_dirs=("${BUILD_DIR}")
+if [[ "${XCODE_BUILD_DIR}" != "${BUILD_DIR}" && -d "${XCODE_BUILD_DIR}" ]]; then
+  # Xcode 编译后的 Bundle.module 资源包含 Assets.car 和 default.metallib；
+  # SwiftPM CLI 目录保留源码资源形态，不能作为发布包中 asset catalog 的最终来源。
+  resource_bundle_dirs+=("${XCODE_BUILD_DIR}")
+fi
+for bundle_dir in "${resource_bundle_dirs[@]}"; do
+  [[ -d "${bundle_dir}" ]] || continue
+  for bundle in "${bundle_dir}"/*.bundle(N); do
+    [[ -d "${bundle}" ]] || continue
+    found_bundle=1
+    rm -rf "${RES_DIR}/$(basename "${bundle}")"
+    ditto "${bundle}" "${RES_DIR}/$(basename "${bundle}")"
+  done
 done
 if [[ "${found_bundle}" -eq 0 ]]; then
   echo "错误：未发现构建产物资源 bundle；缺少 Bundle.module 资源会导致发布包功能缺失。" >&2
   exit 1
 fi
 
-if [[ ! -d "${RES_DIR}/SkyBridgeCompassApp_SkyBridgeCompassApp.bundle" ]]; then
+APP_RESOURCE_BUNDLE="${RES_DIR}/SkyBridgeCompassApp_SkyBridgeCompassApp.bundle"
+CORE_RESOURCE_BUNDLE="${RES_DIR}/SkyBridgeCompassApp_SkyBridgeCore.bundle"
+
+if [[ ! -d "${APP_RESOURCE_BUNDLE}" ]]; then
   echo "错误：缺少 SkyBridgeCompassApp_SkyBridgeCompassApp.bundle；禁止发布缺失 app target 资源的包。" >&2
+  exit 1
+fi
+log "规范化 App Bundle.module 资源，并注入 Xcode 编译产物"
+graft_xcode_app_compiled_resources_into_module_bundle "${APP_RESOURCE_BUNDLE}"
+copy_xcode_app_compiled_resources_to_main_bundle
+if [[ ! -f "${APP_RESOURCE_BUNDLE}/Contents/Resources/Assets.car" ]]; then
+  echo "错误：缺少编译后的 App Assets.car；禁止发布未经过 Xcode asset catalog 编译的资源 bundle。" >&2
+  exit 1
+fi
+if [[ ! -f "${APP_RESOURCE_BUNDLE}/Contents/Resources/default.metallib" ]]; then
+  echo "错误：缺少编译后的 App default.metallib；禁止发布未经过 Xcode Metal 编译的资源 bundle。" >&2
+  exit 1
+fi
+if [[ ! -f "${CORE_RESOURCE_BUNDLE}/Contents/Resources/default.metallib" ]]; then
+  echo "错误：缺少编译后的 SkyBridgeCore default.metallib；禁止发布未经过 Xcode Metal 编译的资源 bundle。" >&2
   exit 1
 fi
 
 # 额外拷贝源资源目录，供 LaunchServices app icon 与运行态 Dock 图标按主 bundle 解析。
 SRC_RES_DIR="${ROOT_DIR}/Sources/SkyBridgeCompassApp/Resources"
-if [[ -d "${SRC_RES_DIR}" ]]; then
-  log "拷贝源资源目录 Resources 到 .app/Contents/Resources/"
-  cp -R "${SRC_RES_DIR}/"* "${RES_DIR}/" 2>/dev/null || true
-fi
+copy_source_app_resources_to_main_bundle "${SRC_RES_DIR}" "${RES_DIR}"
 
 # 使用 plutil 注入/修正必要的关键键值
 log "校验并修正 Info.plist 关键键值"
@@ -893,6 +1160,14 @@ skybridge_prepare_signing_entitlements \
   "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}" \
   "${INFO_PLIST_DST}" \
   "${SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE:-}"
+
+if [[ -f "${SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE:-}" ]] && \
+   ! skybridge_profile_supports_requested_profile_backed_entitlements \
+     "${SKYBRIDGE_RESOLVED_MACOS_PROVISIONPROFILE}" \
+     "${ACTIVE_APP_PACKAGING_ENTITLEMENTS}"; then
+  echo "错误：macOS provisioning profile 不覆盖最终签名 entitlements，禁止生成会被 AMFI 拒绝启动的 App。" >&2
+  exit 1
+fi
 
 APPLE_SIGN_IN_FEATURE_FLAG="$(skybridge_read_plist_bool "${INFO_PLIST_DST}" "SKYBRIDGE_ENABLE_APPLE_SIGN_IN" 2>/dev/null || echo "unknown")"
 if [[ "${APPLE_SIGN_IN_FEATURE_FLAG}" == "1" ]]; then

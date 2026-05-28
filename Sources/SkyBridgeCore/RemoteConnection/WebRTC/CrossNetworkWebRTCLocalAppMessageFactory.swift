@@ -55,6 +55,8 @@ enum CrossNetworkWebRTCLocalAppMessageFactory {
     static func heartbeatMessage(
         deviceId: String,
         remoteVideoFormats: [String],
+        accountDisplayName: String? = nil,
+        nebulaId: String? = nil,
         sentAt: Date = Date(),
         descriptor: CrossNetworkWebRTCLocalDeviceDescriptor = .current()
     ) -> AppMessage {
@@ -66,6 +68,8 @@ enum CrossNetworkWebRTCLocalAppMessageFactory {
             platform: descriptor.platform,
             osVersion: descriptor.osVersion,
             chip: nil,
+            accountDisplayName: accountDisplayName,
+            nebulaId: nebulaId,
             remoteVideoFormats: remoteVideoFormats
         ))
     }
@@ -75,6 +79,8 @@ enum CrossNetworkWebRTCLocalAppMessageFactory {
         kemPublicKeys: [KEMPublicKeyInfo],
         protocolIdentityPublicKeys: [AppMessage.ProtocolIdentityPublicKeyInfo]?,
         remoteVideoFormats: [String],
+        accountDisplayName: String? = nil,
+        nebulaId: String? = nil,
         sentAt: Date = Date(),
         descriptor: CrossNetworkWebRTCLocalDeviceDescriptor = .current()
     ) -> AppMessage.PairingIdentityExchangePayload {
@@ -87,6 +93,8 @@ enum CrossNetworkWebRTCLocalAppMessageFactory {
             platform: descriptor.platform,
             osVersion: descriptor.osVersion,
             chip: nil,
+            accountDisplayName: accountDisplayName,
+            nebulaId: nebulaId,
             remoteVideoFormats: remoteVideoFormats,
             sentAt: sentAt
         )

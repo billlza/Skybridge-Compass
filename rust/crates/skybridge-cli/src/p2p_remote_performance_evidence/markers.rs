@@ -54,6 +54,19 @@ pub(super) fn update_p2p_remote_marker_evidence(
             evidence.first_failure = Some(line.trim().to_owned());
         }
     }
+    let remote_desktop_failure = lower.contains("远程桌面连接失败")
+        || lower.contains("remote desktop connection failed")
+        || lower.contains("remote-desktop connection failed")
+        || (lower.contains("remote-desktop") && lower.contains("result=failure"));
+    if remote_desktop_failure && !line.contains("failed stage=") {
+        evidence.failed_stage_count += 1;
+        if extract_text_value(line, "phase").is_none() {
+            evidence.missing_failure_phase_count += 1;
+        }
+        if evidence.first_failure.is_none() {
+            evidence.first_failure = Some(line.trim().to_owned());
+        }
+    }
     if line.contains("failed stage=") {
         evidence.failed_stage_count += 1;
         if extract_text_value(line, "phase").as_deref() == Some("unknown") {
@@ -66,11 +79,21 @@ pub(super) fn update_p2p_remote_marker_evidence(
             evidence.first_failure = Some(line.trim().to_owned());
         }
     }
+    if lower.contains("already_connected") || lower.contains("rejectalreadyconnected") {
+        evidence.already_connected_rejection_count += 1;
+        if evidence.first_failure.is_none() {
+            evidence.first_failure = Some(line.trim().to_owned());
+        }
+    }
     if line.contains("smoke-final") {
         evidence.smoke_final_success |=
             extract_text_value(line, "result").as_deref() == Some("success");
         evidence.smoke_final_validated |=
             extract_text_value(line, "validated").as_deref() == Some("1");
+    }
+    if line.contains("smoke-capture-source") {
+        evidence.smoke_capture_source_verified |=
+            extract_text_value(line, "captureVerified").as_deref() == Some("1");
     }
     evidence.host_process_exited |=
         line.contains("failed stage=mac-host") || line.contains("phase=process-exited");

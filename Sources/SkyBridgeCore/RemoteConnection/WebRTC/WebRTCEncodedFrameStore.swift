@@ -8,6 +8,7 @@ struct WebRTCEncodedScreenFrame: Sendable, Equatable {
     let timestamp: TimeInterval
     let format: String
     let isSyncFrame: Bool
+    let sequenceNumber: UInt64
 
     var recoveryIdentity: WebRTCEncodedScreenFrameIdentity {
         WebRTCEncodedScreenFrameIdentity(
@@ -16,7 +17,8 @@ struct WebRTCEncodedScreenFrame: Sendable, Equatable {
             timestamp: timestamp,
             format: format,
             isSyncFrame: isSyncFrame,
-            payloadBytes: imageData.count
+            payloadBytes: imageData.count,
+            sequenceNumber: sequenceNumber
         )
     }
 }
@@ -29,6 +31,7 @@ struct WebRTCEncodedScreenFrameIdentity: Sendable, Equatable {
     let format: String
     let isSyncFrame: Bool
     let payloadBytes: Int
+    let sequenceNumber: UInt64
 }
 
 @available(macOS 14.0, iOS 17.0, *)

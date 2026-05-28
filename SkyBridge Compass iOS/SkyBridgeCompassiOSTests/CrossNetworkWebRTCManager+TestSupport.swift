@@ -3,11 +3,11 @@ import Foundation
 
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
-    nonisolated internal static func testOnlyDecryptDirectControlProbePayload(
+    nonisolated internal static func testOnlyOpenDirectControlProbePayload(
         _ payload: Data,
         keys: SessionKeys
-    ) -> Data? {
-        decryptDirectControlProbePayload(payload, keys: keys)
+    ) -> WebRTCAppSecureOpenedPayload? {
+        openDirectControlProbePayload(payload, keys: keys)
     }
 
     nonisolated internal static func testOnlyDecodeHighThroughputRemoteDesktopPayloadKind(
@@ -35,6 +35,14 @@ extension CrossNetworkWebRTCManager {
         keys: SessionKeys
     ) throws -> String? {
         try decodeEncryptedScreenChannelPayload(payload, keys: keys).map { _ in "screen" }
+    }
+
+    internal func testOnlyValidateWebRTCSecureOpenedPayload(
+        _ opened: WebRTCAppSecureOpenedPayload,
+        with keys: SessionKeys,
+        sessionId: String
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        try validateWebRTCSecureOpenedPayload(opened, with: keys, sessionId: sessionId)
     }
 
     nonisolated internal static func testOnlyMediaRelayLeaseFailureReason(status: Int, body: String) -> String {

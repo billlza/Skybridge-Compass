@@ -43,6 +43,7 @@ public struct WebRTCMediaDiagnosticEvent: Codable, Equatable, Sendable {
     public let audioRxRecv: UInt64?
     public let audioRxDecoded: UInt64?
     public let audioRxPlayed: UInt64?
+    public let audioRxRejected: UInt64?
     public let engineRunning: Bool?
     public let renderedFrames: UInt64?
     public let underflow: UInt64?
@@ -107,6 +108,7 @@ public struct WebRTCMediaDiagnosticEvent: Codable, Equatable, Sendable {
         audioRxRecv: UInt64? = nil,
         audioRxDecoded: UInt64? = nil,
         audioRxPlayed: UInt64? = nil,
+        audioRxRejected: UInt64? = nil,
         engineRunning: Bool? = nil,
         renderedFrames: UInt64? = nil,
         underflow: UInt64? = nil,
@@ -171,6 +173,7 @@ public struct WebRTCMediaDiagnosticEvent: Codable, Equatable, Sendable {
         self.audioRxRecv = audioRxRecv
         self.audioRxDecoded = audioRxDecoded
         self.audioRxPlayed = audioRxPlayed
+        self.audioRxRejected = audioRxRejected
         self.engineRunning = engineRunning
         self.renderedFrames = renderedFrames
         self.underflow = underflow
@@ -237,6 +240,7 @@ public struct WebRTCMediaDiagnosticEvent: Codable, Equatable, Sendable {
         case audioRxRecv
         case audioRxDecoded
         case audioRxPlayed
+        case audioRxRejected
         case engineRunning
         case renderedFrames
         case underflow

@@ -15,12 +15,21 @@ pub(super) async fn dispatch_smoke_command(command: SmokeCommand) -> Result<()> 
         SmokeSubcommand::LocalWebrtc(common) => {
             run_suite_profile(SmokeSuiteProfile::LocalWebrtc, common).await
         }
+        SmokeSubcommand::LocalWebrtcSecurityNotice(common) => {
+            run_suite_profile(SmokeSuiteProfile::LocalWebrtcSecurityNotice, common).await
+        }
+        SmokeSubcommand::LocalMacosSecurityNoticePanel(common) => {
+            run_suite_profile(SmokeSuiteProfile::LocalMacosSecurityNoticePanel, common).await
+        }
         SmokeSubcommand::LocalP2p(args) => smoke_local_p2p(args).await,
         SmokeSubcommand::RealDevice(common) => {
             run_suite_profile(SmokeSuiteProfile::RealDevice, common).await
         }
         SmokeSubcommand::RealDeviceP2p(common) => {
             run_suite_profile(SmokeSuiteProfile::RealDeviceP2p, common).await
+        }
+        SmokeSubcommand::RealDeviceP2pSecurityNotice(common) => {
+            run_suite_profile(SmokeSuiteProfile::RealDeviceP2pSecurityNotice, common).await
         }
         SmokeSubcommand::RealDeviceFileTransfer(common) => {
             run_suite_profile(SmokeSuiteProfile::RealDeviceFileTransfer, common).await

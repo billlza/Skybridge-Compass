@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// 主内容视图 - 应用入口
 @available(iOS 17.0, *)
@@ -26,21 +29,17 @@ struct ContentView: View {
             }
         }
         .animation(contentTransitionAnimation, value: authManager.isAuthenticated)
-        .sheet(
-            item: Binding(
-                get: { connectionManager.pendingPairingTrustRequest },
-                set: { _ in }
-            )
-        ) { req in
-            PairingTrustRequestSheet(
-                request: req,
-                onDecision: { decision in
+        .background(
+            PairingTrustPromptWindowPresenter(
+                request: connectionManager.pendingPairingTrustRequest,
+                onDecision: { req, decision in
                     Task { @MainActor in
                         await connectionManager.resolvePairingTrustRequest(req, decision: decision)
                     }
                 }
             )
-        }
+            .frame(width: 0, height: 0)
+        )
         .alert(
             RuntimeLocalization.string("idleConnection.prompt.title"),
             isPresented: Binding(
@@ -75,13 +74,122 @@ struct ContentView: View {
     }
 }
 
+#if canImport(UIKit)
+@available(iOS 17.0, *)
+private struct PairingTrustPromptWindowPresenter: UIViewControllerRepresentable {
+    let request: P2PConnectionManager.PairingTrustRequest?
+    let onDecision: @MainActor (P2PConnectionManager.PairingTrustRequest, P2PConnectionManager.PairingTrustDecision) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        UIViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        context.coordinator.update(
+            request: request,
+            hostViewController: uiViewController,
+            onDecision: onDecision
+        )
+    }
+
+    @MainActor
+    static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Coordinator) {
+        _ = uiViewController
+        coordinator.dismissWindow()
+    }
+
+    @MainActor
+    final class Coordinator {
+        private var window: UIWindow?
+        private var currentRequestId: UUID?
+
+        func update(
+            request: P2PConnectionManager.PairingTrustRequest?,
+            hostViewController: UIViewController,
+            onDecision: @escaping @MainActor (P2PConnectionManager.PairingTrustRequest, P2PConnectionManager.PairingTrustDecision) -> Void
+        ) {
+            guard let request else {
+                dismissWindow()
+                return
+            }
+
+            guard let scene = hostViewController.view.window?.windowScene ?? Self.activeForegroundScene() else {
+                return
+            }
+
+            if window?.windowScene !== scene || currentRequestId != request.id {
+                dismissWindow()
+                let promptWindow = UIWindow(windowScene: scene)
+                promptWindow.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
+                promptWindow.backgroundColor = .clear
+                window = promptWindow
+                currentRequestId = request.id
+            }
+
+            let rootView = PairingTrustPromptWindowContent(
+                request: request,
+                onDecision: { [weak self] decision in
+                    self?.dismissWindow()
+                    onDecision(request, decision)
+                }
+            )
+            let hostingController = UIHostingController(rootView: rootView)
+            hostingController.view.backgroundColor = .clear
+            window?.rootViewController = hostingController
+            window?.isHidden = false
+        }
+
+        func dismissWindow() {
+            window?.isHidden = true
+            window?.rootViewController = nil
+            window = nil
+            currentRequestId = nil
+        }
+
+        private static func activeForegroundScene() -> UIWindowScene? {
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first { $0.activationState == .foregroundActive }
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+private struct PairingTrustPromptWindowContent: View {
+    let request: P2PConnectionManager.PairingTrustRequest
+    let onDecision: @MainActor (P2PConnectionManager.PairingTrustDecision) -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.42)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    onDecision(.reject)
+                }
+
+            PairingTrustRequestSheet(
+                request: request,
+                onDecision: onDecision
+            )
+            .frame(maxWidth: 540, maxHeight: 660)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(radius: 24)
+            .padding(20)
+            .accessibilityIdentifier("pairing.overlay")
+        }
+    }
+}
+#endif
+
 @available(iOS 17.0, *)
 private struct PairingTrustRequestSheet: View {
     let request: P2PConnectionManager.PairingTrustRequest
-    let onDecision: (P2PConnectionManager.PairingTrustDecision) -> Void
-    
-    @Environment(\.dismiss) private var dismiss
-    
+    let onDecision: @MainActor (P2PConnectionManager.PairingTrustDecision) -> Void
+
     var body: some View {
         NavigationStack {
             List {
@@ -126,7 +234,6 @@ private struct PairingTrustRequestSheet: View {
                 Section {
                     Button {
                         onDecision(.alwaysAllow)
-                        dismiss()
                     } label: {
                         Text(RuntimeLocalization.string("始终允许"))
                     }
@@ -134,7 +241,6 @@ private struct PairingTrustRequestSheet: View {
                     
                     Button {
                         onDecision(.allowOnce)
-                        dismiss()
                     } label: {
                         Text(RuntimeLocalization.string("允许本次"))
                     }
@@ -142,7 +248,6 @@ private struct PairingTrustRequestSheet: View {
                     
                     Button(role: .destructive) {
                         onDecision(.reject)
-                        dismiss()
                     } label: {
                         Text(RuntimeLocalization.string("拒绝"))
                     }
@@ -160,7 +265,7 @@ private struct PairingTrustRequestSheet: View {
 #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(RuntimeLocalization.string("关闭")) { dismiss() }
+                    Button(RuntimeLocalization.string("关闭")) { onDecision(.reject) }
                 }
             }
         }

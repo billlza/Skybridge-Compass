@@ -11,7 +11,17 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         let requesterId = "id:\(UUID().uuidString.lowercased())"
         let fingerprint = String(repeating: "a", count: 64)
         let verificationCode = "123456"
+        let trust = TrustSyncService.shared
+        trust.setInMemoryPersistenceForTesting(true)
+        await trust.removeRecordsForTesting(deviceIds: [requesterId])
         await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
+        defer {
+            Task { @MainActor in
+                await trust.removeRecordsForTesting(deviceIds: [requesterId])
+                trust.setInMemoryPersistenceForTesting(false)
+                await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
+            }
+        }
         let completion = DecisionRecorder()
 
         let approvalTask = Task { @MainActor in
@@ -21,6 +31,7 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
                 displayName: requesterId,
                 platform: "iOS",
                 verificationCode: verificationCode,
+                requesterProtocolSigningAlgorithm: .mlDSA65,
                 requesterProtocolIdentityFingerprint: fingerprint
             )
             await completion.set(decision)
@@ -43,6 +54,10 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         XCTAssertTrue(
             trusted.contains(fingerprint),
             "PIB-1 approval must pin requester protocol identity before the networking continuation resumes."
+        )
+        XCTAssertTrue(
+            trust.getTrustRecord(deviceId: requesterId)?.currentPathAuthorityFingerprints.contains(fingerprint) ?? false,
+            "PIB-1 approval must promote requester protocol identity into the authoritative TrustSync record."
         )
     }
 

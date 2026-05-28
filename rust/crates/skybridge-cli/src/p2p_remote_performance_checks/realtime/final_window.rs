@@ -113,7 +113,7 @@ pub(crate) fn check_p2p_remote_mac_final_window_fps(
         evidence.mac_final_window_tx_sent_frames,
         evidence.mac_final_window_tx_sample_ms,
     );
-    let line_sample_fps_floor = (min_fps - 1.0).max(0.0);
+    let line_sample_fps_floor = min_fps;
     let has_window =
         evidence.pass_window_start_at.is_some() && evidence.pass_window_end_at.is_some();
     let min_window_seconds = min_pass_window_seconds as f64;

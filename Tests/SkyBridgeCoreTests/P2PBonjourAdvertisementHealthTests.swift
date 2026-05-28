@@ -68,6 +68,30 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(localServices.contains("await p2pDiscoveryService.ensureAdvertisingHealthy()"))
     }
 
+    func testP2PAuthenticationDoesNotBlockOnOptionalPostAuthPairingExchange() throws {
+        let source = try readSource("Sources/SkyBridgeCore/P2P/P2PModels.swift")
+        let authenticateBody = try sourceSlice(
+            from: "public func authenticate() async throws",
+            to: "private func performHandshake() async throws",
+            in: source
+        )
+        let postAuthHelperBody = try sourceSlice(
+            from: "private func schedulePostAuthPairingIdentityExchange()",
+            to: "private func sendPairingIdentityExchange(force:",
+            in: source
+        )
+
+        XCTAssertTrue(authenticateBody.contains("schedulePostAuthPairingIdentityExchange()"))
+        XCTAssertFalse(
+            authenticateBody.contains("try await sendPairingIdentityExchange(force: true)"),
+            "A completed authenticated session must return before optional post-auth trust metadata sync."
+        )
+        XCTAssertTrue(postAuthHelperBody.contains("Task { [weak self] in"))
+        XCTAssertTrue(postAuthHelperBody.contains("sendPostAuthPairingIdentityExchangeWithTimeout"))
+        XCTAssertTrue(postAuthHelperBody.contains("postAuthPairingIdentityExchangeTimeout"))
+        XCTAssertTrue(postAuthHelperBody.contains("SkyBridgeLogger.p2p.info("))
+    }
+
     func testP2PControlAdvertiserUsesLANDirectListenerParameters() throws {
         let center = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift")
         let p2p = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
@@ -82,6 +106,44 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(
             p2p.contains("includePeerToPeer: false"),
             "P2P control advertising must use LAN-routable listener parameters so direct host:port control probes do not silently fall back to Bonjour/AWDL."
+        )
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func testP2PConnectionAdvertisesSOAWhenStableIdentityIsKnownWithoutBonjourFlag() {
+        let stableId = UUID().uuidString
+
+        XCTAssertTrue(
+            P2PConnection.shouldAdvertiseSOAForCurrentPath(
+                capabilities: ["_skybridge._tcp"],
+                handshakePeerDeviceId: "id:\(stableId.lowercased())",
+                connectionDeviceId: "bonjour:office-ipad@local.",
+                persistentDeviceId: nil
+            )
+        )
+        XCTAssertTrue(
+            P2PConnection.shouldAdvertiseSOAForCurrentPath(
+                capabilities: ["_skybridge._tcp"],
+                handshakePeerDeviceId: "bonjour:office-ipad@local.",
+                connectionDeviceId: "bonjour:office-ipad@local.",
+                persistentDeviceId: stableId
+            )
+        )
+        XCTAssertTrue(
+            P2PConnection.shouldAdvertiseSOAForCurrentPath(
+                capabilities: ["HS_SOA"],
+                handshakePeerDeviceId: "host:fe80::812:27b6:c448:dad0%en0",
+                connectionDeviceId: "host:fe80::812:27b6:c448:dad0%en0",
+                persistentDeviceId: nil
+            )
+        )
+        XCTAssertFalse(
+            P2PConnection.shouldAdvertiseSOAForCurrentPath(
+                capabilities: ["_skybridge._tcp"],
+                handshakePeerDeviceId: "host:fe80::812:27b6:c448:dad0%en0",
+                connectionDeviceId: "host:fe80::812:27b6:c448:dad0%en0",
+                persistentDeviceId: nil
+            )
         )
     }
 
@@ -164,6 +226,177 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             P2PDiscoveryBonjourPolicy.resolvedBonjourServiceNameCandidates(for: strongDevice),
             []
         )
+
+        let routedStrongDevice = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: nil,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "bonjour:Bill's iPad@local.",
+            deviceId: "stable-ipad"
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.resolvedBonjourServiceNameCandidates(for: routedStrongDevice),
+            ["Bill's iPad"]
+        )
+
+        let stableRoutedDevice = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: nil,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:stable-ipad",
+            routeIdentifiers: ["bonjour:Bill's iPad@local."],
+            deviceId: "stable-ipad"
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.resolvedBonjourServiceNameCandidates(for: stableRoutedDevice),
+            ["Bill's iPad"]
+        )
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func testOnlineRouteValidationRejectsStrongIdentityWithoutDialableRoute() {
+        let identityOnly = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: nil,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:stable-ipad",
+            deviceId: "stable-ipad"
+        )
+        XCTAssertFalse(
+            UnifiedOnlineDeviceManager.hasResolvedSkyBridgeControlRoute(identityOnly),
+            "A stable id plus control-port metadata is not a dialable Bonjour route."
+        )
+
+        let bonjourRouted = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: nil,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "bonjour:Bill's iPad@local.",
+            deviceId: "stable-ipad"
+        )
+        XCTAssertTrue(UnifiedOnlineDeviceManager.hasResolvedSkyBridgeControlRoute(bonjourRouted))
+
+        let stableWithPreservedRoute = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: nil,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:stable-ipad",
+            routeIdentifiers: ["bonjour:Bill's iPad@local."],
+            deviceId: "stable-ipad"
+        )
+        XCTAssertTrue(
+            UnifiedOnlineDeviceManager.hasResolvedSkyBridgeControlRoute(stableWithPreservedRoute),
+            "Stable identity is connectable only when the real Bonjour instance route is preserved separately."
+        )
+
+        let malformedBonjourRoute = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: nil,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:stable-ipad",
+            routeIdentifiers: ["bonjour:id:stable-ipad@local."],
+            deviceId: "stable-ipad"
+        )
+        XCTAssertFalse(
+            UnifiedOnlineDeviceManager.hasResolvedSkyBridgeControlRoute(malformedBonjourRoute),
+            "A stable id must never be treated as a Bonjour service instance."
+        )
+
+        let hostRouted = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: "192.0.2.44",
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:stable-ipad",
+            deviceId: "stable-ipad"
+        )
+        XCTAssertTrue(UnifiedOnlineDeviceManager.hasResolvedSkyBridgeControlRoute(hostRouted))
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func testBonjourServiceConnectionUsesRouteIdentityAsRuntimePeerId() throws {
+        let stableRoutedDevice = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: nil,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            routeIdentifiers: ["bonjour:iPad@local."],
+            deviceId: "07CB9A6E-7492-4680-9DD7-F37DC8568891"
+        )
+
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.connectionPeerIdentifier(
+                for: stableRoutedDevice,
+                usesBonjourServiceEndpoint: true
+            ),
+            "bonjour:iPad@local."
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.connectionPeerIdentifier(
+                for: stableRoutedDevice,
+                usesBonjourServiceEndpoint: false
+            ),
+            "07CB9A6E-7492-4680-9DD7-F37DC8568891"
+        )
+
+        let malformedRouteDevice = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill's iPad",
+            ipv4: nil,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            routeIdentifiers: ["bonjour:id:07CB9A6E-7492-4680-9DD7-F37DC8568891@local."],
+            deviceId: "07CB9A6E-7492-4680-9DD7-F37DC8568891"
+        )
+
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.connectionPeerIdentifier(
+                for: malformedRouteDevice,
+                usesBonjourServiceEndpoint: true
+            ),
+            "07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            "Stable ids must not be smuggled into Bonjour service names for route dialing."
+        )
+
+        let p2p = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        XCTAssertTrue(
+            p2p.contains("P2PDiscoveryBonjourPolicy.connectionPeerIdentifier("),
+            "P2P service connects must use the route-aware peer-id policy, not the UI stable identity directly."
+        )
     }
 
     func testP2PReconnectDiscoveryDoesNotInferWeakNameTargetsForStrongIdentity() throws {
@@ -208,22 +441,34 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         ]
 
         for source in sources {
+            let handleNewConnectionStart = source.contains("private func handleNewConnection(_ connection: NWConnection)")
+                ? "private func handleNewConnection(_ connection: NWConnection)"
+                : "nonisolated private static func handleNewConnection(_ connection: NWConnection)"
             let handleNewConnection = try sourceSlice(
-                from: "private func handleNewConnection(_ connection: NWConnection)",
+                from: handleNewConnectionStart,
                 to: "private func handleConnectionStateUpdate",
                 in: source
             )
             XCTAssertTrue(
-                handleNewConnection.contains("connection.stateUpdateHandler = { [weak self, weak connection] state in"),
+                handleNewConnection.contains("weak connection] state in"),
                 "Inbound NWConnection state handlers must not strongly capture the connection they are installed on."
             )
-            XCTAssertTrue(
-                handleNewConnection.contains("Task { @MainActor [weak self, weak connection] in"),
-                "The MainActor hop must preserve weak connection ownership to avoid an indirect closure cycle."
+            XCTAssertFalse(
+                handleNewConnection.contains("[connection] state in"),
+                "Inbound NWConnection state handlers must not strongly capture the connection they are installed on."
             )
+            if handleNewConnection.contains("Task { @MainActor") {
+                XCTAssertTrue(
+                    handleNewConnection.contains("Task { @MainActor [weak self, weak connection] in"),
+                    "The MainActor hop must preserve weak connection ownership to avoid an indirect closure cycle."
+                )
+            }
 
+            let handleIncomingStart = source.contains("private func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection)")
+                ? "private func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection)"
+                : "nonisolated private static func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection)"
             let handleIncoming = try sourceSlice(
-                from: "private func handleIncomingConnectionStateUpdate(_ state: NWConnection.State, connection: NWConnection)",
+                from: handleIncomingStart,
                 to: source.contains("private func resolveInboundPeerIdentifier") ? "private func resolveInboundPeerIdentifier" : "// MARK: - Inbound control channel",
                 in: source
             )
@@ -270,12 +515,20 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         let connector = source
 
         XCTAssertTrue(
-            source.contains("if let fallback = fallbackDiscoveredDevice(for: device)"),
+            source.contains("resolvedConnectableDiscoveredCandidates(for: device, limit: 6)"),
+            "Connect must prefer matched discovery candidates that already contain a real route."
+        )
+        XCTAssertTrue(
+            source.contains("if let fallback = fallbackDiscoveredDevice(for: device, unifiedDeviceManager: unifiedDeviceManager)"),
             "Connect must not append a synthetic fallback candidate for stale recent or USB-only rows."
         )
         XCTAssertTrue(
-            connector.contains("guard hasSkyBridgeControlService"),
-            "Fallback candidates must be gated on an actual SkyBridge control service, port, or Bonjour identity."
+            connector.contains("UnifiedOnlineDeviceManager.hasResolvedSkyBridgeControlRoute(fallback)"),
+            "Fallback candidates must be gated on a dialable host route or Bonjour instance, not only endpoint metadata."
+        )
+        XCTAssertFalse(
+            connector.contains("guard hasSkyBridgeControlService\n            || hasSkyBridgeControlPort"),
+            "A control service/port alone must not turn a stable id into a Bonjour service name."
         )
         XCTAssertTrue(
             connector.contains("return nil"),
@@ -285,6 +538,30 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             connector.contains("source: .skybridgeBonjour"),
             "The UI must not mark every fallback as SkyBridge Bonjour; that makes stale rows look connectable."
         )
+    }
+
+    func testRemoteControlRoutePreflightDoesNotEnterSessionLifecycle() throws {
+        let server = try readSource("Sources/SkyBridgeCore/RemoteControl/RemoteControlServer.swift")
+        let manager = try readSource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
+        let harness = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalP2PSmokeHarness.swift")
+
+        XCTAssertTrue(server.contains("SKYBRIDGE_REMOTE_ROUTE_PROBE_V1"))
+        XCTAssertTrue(server.contains("probe=remote-route-preflight"))
+        XCTAssertTrue(server.contains("receiveInitialConnectionBytes("))
+        XCTAssertTrue(
+            server.contains("let handoffConnection = connection")
+                && server.contains("let handoffData = initialData")
+                && server.contains("connection: handoffConnection,\n                        initialData: handoffData"),
+            "Server-side first-byte sniffing must transfer real handshake bytes into RemoteControlManager instead of consuming MessageA."
+        )
+
+        XCTAssertTrue(manager.contains("initialData: Data? = nil"))
+        XCTAssertTrue(manager.contains("var pendingInitialData = initialData"))
+        XCTAssertTrue(manager.contains("processInboundRemoteEventChunk("))
+
+        XCTAssertTrue(harness.contains("remoteControlRoutePreflightProbePayload"))
+        XCTAssertTrue(harness.contains("probePayload: Self.remoteControlRoutePreflightProbePayload"))
+        XCTAssertTrue(harness.contains("probe-send=ok"))
     }
 
     private func readSource(_ relativePath: String) throws -> String {

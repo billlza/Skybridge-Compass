@@ -24,6 +24,12 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../performance_tests/file_transfer/artifact_failures/ios_launch.rs"),
     ),
     (
+        "performance_tests/file_transfer/artifact_failures/payload_integrity.rs",
+        include_str!(
+            "../../performance_tests/file_transfer/artifact_failures/payload_integrity.rs"
+        ),
+    ),
+    (
         "performance_tests/file_transfer/artifact_failures/xwing_unknown_suite.rs",
         include_str!(
             "../../performance_tests/file_transfer/artifact_failures/xwing_unknown_suite.rs"
@@ -62,6 +68,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../performance_tests/p2p_remote/artifact_sources.rs"),
     ),
     (
+        "performance_tests/p2p_remote/audio.rs",
+        include_str!("../../performance_tests/p2p_remote/audio.rs"),
+    ),
+    (
         "performance_tests/p2p_remote/baseline.rs",
         include_str!("../../performance_tests/p2p_remote/baseline.rs"),
     ),
@@ -88,6 +98,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "performance_tests/p2p_remote/lan_route.rs",
         include_str!("../../performance_tests/p2p_remote/lan_route.rs"),
+    ),
+    (
+        "performance_tests/p2p_remote/mac_ipad_online.rs",
+        include_str!("../../performance_tests/p2p_remote/mac_ipad_online.rs"),
     ),
     (
         "performance_tests/p2p_remote/mac_tx.rs",

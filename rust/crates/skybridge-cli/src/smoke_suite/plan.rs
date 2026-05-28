@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+pub(super) use crate::repo_paths::swift_test_cache_env;
 use crate::webrtc_media_dimensions::VideoDimensions;
 use crate::{LocalP2pSmokeScenario, SmokeSuiteProfile};
 
@@ -12,11 +13,13 @@ mod standard;
 use benchmarks::push_benchmark_steps;
 use real_device::{
     push_real_device_file_transfer_smoke_step, push_real_device_p2p_remote_smoke_steps,
-    push_real_device_smoke_steps,
+    push_real_device_p2p_security_notice_smoke_steps, push_real_device_smoke_steps,
 };
 pub(super) use standard::{push_fault_injection_steps, push_local_p2p_smoke_steps};
 use standard::{
-    push_full_smoke_steps, push_ios_config_steps, push_local_webrtc_smoke_steps,
+    push_full_smoke_steps, push_ios_config_steps,
+    push_local_macos_security_notice_panel_probe_steps,
+    push_local_webrtc_security_notice_smoke_steps, push_local_webrtc_smoke_steps,
     push_quick_smoke_steps, push_release_smoke_steps, push_script_test_steps,
 };
 
@@ -75,6 +78,12 @@ pub(super) fn build_smoke_suite_steps(
         SmokeSuiteProfile::ScriptTests => push_script_test_steps(root, &mut steps),
         SmokeSuiteProfile::IosConfig => push_ios_config_steps(root, &mut steps),
         SmokeSuiteProfile::LocalWebrtc => push_local_webrtc_smoke_steps(root, &mut steps, min_fps),
+        SmokeSuiteProfile::LocalWebrtcSecurityNotice => {
+            push_local_webrtc_security_notice_smoke_steps(root, &mut steps, min_fps)
+        }
+        SmokeSuiteProfile::LocalMacosSecurityNoticePanel => {
+            push_local_macos_security_notice_panel_probe_steps(root, &mut steps)
+        }
         SmokeSuiteProfile::LocalP2p => {
             push_local_p2p_smoke_steps(root, &mut steps, SmokeLocalP2pOptions::default())
         }
@@ -87,6 +96,17 @@ pub(super) fn build_smoke_suite_steps(
             soak_seconds,
             video_sizes,
         ),
+        SmokeSuiteProfile::RealDeviceP2pSecurityNotice => {
+            push_real_device_p2p_security_notice_smoke_steps(
+                root,
+                &mut steps,
+                real_device_id,
+                min_fps,
+                timeout_seconds,
+                soak_seconds,
+                video_sizes,
+            )
+        }
         SmokeSuiteProfile::RealDeviceFileTransfer => {
             push_real_device_file_transfer_smoke_step(
                 root,
@@ -134,17 +154,4 @@ pub(super) fn build_smoke_suite_steps(
         }
     }
     Ok(steps)
-}
-
-fn swift_test_cache_env(root: &Path) -> Vec<(String, String)> {
-    let cache_dir = root.join(".swiftpm-cache").display().to_string();
-    let module_cache_dir = root.join(".swiftpm-module-cache").display().to_string();
-    vec![
-        ("SWIFTPM_CACHE_PATH".to_owned(), cache_dir),
-        (
-            "CLANG_MODULE_CACHE_PATH".to_owned(),
-            module_cache_dir.clone(),
-        ),
-        ("SWIFT_MODULE_CACHE_PATH".to_owned(), module_cache_dir),
-    ]
 }

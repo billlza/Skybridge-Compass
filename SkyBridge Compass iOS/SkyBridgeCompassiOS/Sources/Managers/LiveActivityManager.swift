@@ -47,7 +47,7 @@ public final class LiveActivityManager: ObservableObject {
     @discardableResult
     public func startActivity() async -> Bool {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            SkyBridgeLogger.shared.warning("⚠️ Live Activities 未启用")
+            SkyBridgeLogger.shared.info("ℹ️ Live Activities 未启用")
             return false
         }
 

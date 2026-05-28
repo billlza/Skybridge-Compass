@@ -15,8 +15,8 @@
 // - P256SignatureProvider: 经典 ECDSA
 // - CryptoKitPQCKEMProvider: iOS 26+ PQC KEM (委托给 CryptoProviderFactory)
 // - CryptoKitPQCSignatureProvider: iOS 26+ PQC 签名 (委托给 CryptoProviderFactory)
-// - LiboqsKEMProvider: liboqs fallback KEM (委托给 OQSPQCProvider)
-// - LiboqsSignatureProvider: liboqs fallback 签名 (委托给 OQSPQCProvider)
+// - LiboqsKEMProvider: liboqs KEM (委托给 OQSPQCProvider)
+// - LiboqsSignatureProvider: liboqs 签名 (委托给 OQSPQCProvider)
 //
 
 import Foundation
@@ -140,19 +140,14 @@ public struct P256SignatureProvider: SignatureProvider, Sendable {
 @available(macOS 14.0, iOS 17.0, *)
 public struct CryptoKitPQCKEMProvider: KEMProvider, Sendable {
 
-    public var algorithmName: String { P2PCryptoAlgorithm.xWing.rawValue }
-    public var isPQC: Bool { true }
+    public var algorithmName: String { delegateProvider.activeSuite.rawValue }
+    public var isPQC: Bool { delegateProvider.activeSuite.isPQCGroup }
 
  /// 内部委托的 Provider（由 CryptoProviderFactory 选择）
     private let delegateProvider: any CryptoProvider
 
     public init() {
- // 委托给 CryptoProviderFactory 选择最佳 Provider
- // 使用 preferPQC 策略，Factory 会根据运行时能力选择：
- // - macOS 26+: ApplePQCProvider
- // - 低版本 + liboqs: OQSPQCProvider
- // - 其他: ClassicProvider
-        self.delegateProvider = CryptoProviderFactory.make(policy: .preferPQC)
+        self.delegateProvider = CryptoProviderFactory.make(policy: .requirePQC)
     }
 
     public func generateKeyPair() async throws -> (publicKey: Data, privateKey: Data) {
@@ -190,15 +185,14 @@ public struct CryptoKitPQCKEMProvider: KEMProvider, Sendable {
 @available(macOS 14.0, iOS 17.0, *)
 public struct CryptoKitPQCSignatureProvider: SignatureProvider, Sendable {
 
-    public var algorithmName: String { P2PCryptoAlgorithm.mlDSA65.rawValue }
-    public var isPQC: Bool { true }
+    public var algorithmName: String { delegateProvider.activeSuite.rawValue }
+    public var isPQC: Bool { delegateProvider.activeSuite.isPQCGroup }
 
  /// 内部委托的 Provider（由 CryptoProviderFactory 选择）
     private let delegateProvider: any CryptoProvider
 
     public init() {
- // 委托给 CryptoProviderFactory 选择最佳 Provider
-        self.delegateProvider = CryptoProviderFactory.make(policy: .preferPQC)
+        self.delegateProvider = CryptoProviderFactory.make(policy: .requirePQC)
     }
 
     public func generateKeyPair() async throws -> (publicKey: Data, privateKey: Data) {
@@ -215,9 +209,9 @@ public struct CryptoKitPQCSignatureProvider: SignatureProvider, Sendable {
     }
 }
 
-// MARK: - Liboqs KEM Provider (Fallback)
+// MARK: - Liboqs KEM Provider
 
-/// Liboqs KEM Provider - 低版本 PQC fallback
+/// Liboqs KEM Provider - 低版本 PQC provider
 /// 使用 ML-KEM-768
 ///
 /// **Tech Debt Cleanup - 6.1**:
@@ -230,13 +224,9 @@ public struct LiboqsKEMProvider: KEMProvider, Sendable {
     public var isPQC: Bool { true }
 
  /// 内部委托的 Provider
-    private let delegateProvider: any CryptoProvider
+    private let delegateProvider = OQSPQCCryptoProvider()
 
-    public init() {
- // 使用 preferPQC 策略，如果 liboqs 可用会选择 OQSPQCProvider
- // 否则回退到 ClassicProvider
-        self.delegateProvider = CryptoProviderFactory.make(policy: .preferPQC)
-    }
+    public init() {}
 
     public func generateKeyPair() async throws -> (publicKey: Data, privateKey: Data) {
         let keyPair = try await delegateProvider.generateKeyPair(for: .keyExchange)
@@ -244,22 +234,22 @@ public struct LiboqsKEMProvider: KEMProvider, Sendable {
     }
 
     public func encapsulate(publicKey: Data) async throws -> (sharedSecret: Data, encapsulated: Data) {
- // 委托给 X25519KEMProvider 实现（兼容模式）
- // OQSPQCProvider 的 hpkeSeal 会处理实际的 ML-KEM 封装
-        let fallback = X25519KEMProvider()
-        return try await fallback.encapsulate(publicKey: publicKey)
+        let result = try await delegateProvider.kemEncapsulate(recipientPublicKey: publicKey)
+        return (result.sharedSecret.data, result.encapsulatedKey)
     }
 
     public func decapsulate(encapsulated: Data, privateKey: Data) async throws -> Data {
- // 委托给 X25519KEMProvider 实现（兼容模式）
-        let fallback = X25519KEMProvider()
-        return try await fallback.decapsulate(encapsulated: encapsulated, privateKey: privateKey)
+        let shared = try await delegateProvider.kemDecapsulate(
+            encapsulatedKey: encapsulated,
+            privateKey: SecureBytes(data: privateKey)
+        )
+        return shared.data
     }
 }
 
-// MARK: - Liboqs Signature Provider (Fallback)
+// MARK: - Liboqs Signature Provider
 
-/// Liboqs Signature Provider - 低版本 PQC fallback
+/// Liboqs Signature Provider - 低版本 PQC provider
 /// 使用 ML-DSA-65
 ///
 /// **Tech Debt Cleanup - 6.1**:
@@ -272,12 +262,9 @@ public struct LiboqsSignatureProvider: SignatureProvider, Sendable {
     public var isPQC: Bool { true }
 
  /// 内部委托的 Provider
-    private let delegateProvider: any CryptoProvider
+    private let delegateProvider = OQSPQCCryptoProvider()
 
-    public init() {
- // 使用 preferPQC 策略
-        self.delegateProvider = CryptoProviderFactory.make(policy: .preferPQC)
-    }
+    public init() {}
 
     public func generateKeyPair() async throws -> (publicKey: Data, privateKey: Data) {
         let keyPair = try await delegateProvider.generateKeyPair(for: .signing)

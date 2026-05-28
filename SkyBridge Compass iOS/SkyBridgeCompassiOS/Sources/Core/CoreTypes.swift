@@ -583,13 +583,35 @@ public struct SessionKeys: Sendable {
     public let sendKey: Data
     public let receiveKey: Data
     public let negotiatedSuite: CryptoSuite
+    public let role: HandshakeRole
     public let transcriptHash: Data
-    
-    public init(sendKey: Data, receiveKey: Data, negotiatedSuite: CryptoSuite, transcriptHash: Data) {
+    public let sessionId: String
+    public let createdAt: Date
+
+    public init(
+        sendKey: Data,
+        receiveKey: Data,
+        negotiatedSuite: CryptoSuite,
+        role: HandshakeRole = .initiator,
+        transcriptHash: Data,
+        sessionId: String? = nil,
+        createdAt: Date = Date()
+    ) {
         self.sendKey = sendKey
         self.receiveKey = receiveKey
         self.negotiatedSuite = negotiatedSuite
+        self.role = role
         self.transcriptHash = transcriptHash
+        self.sessionId = sessionId ?? Self.deterministicSessionId(transcriptHash: transcriptHash)
+        self.createdAt = createdAt
+    }
+
+    public static func deterministicSessionId(transcriptHash: Data) -> String {
+        var input = Data("SkyBridge-SessionId-v1|".utf8)
+        input.append(transcriptHash)
+        let digest = SHA256.hash(data: input)
+        let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+        return "hs-\(hex)"
     }
 }
 

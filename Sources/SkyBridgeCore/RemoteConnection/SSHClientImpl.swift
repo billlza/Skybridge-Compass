@@ -155,7 +155,8 @@ public final class SSHClientImpl: @unchecked Sendable {
                 host: host,
                 port: port,
                 group: group,
-                authDelegate: authDelegate
+                authDelegate: authDelegate,
+                connectionTimeout: configuration.connectionTimeout
             )
 
             self.channel = channel
@@ -297,7 +298,8 @@ public final class SSHClientImpl: @unchecked Sendable {
         host: String,
         port: UInt16,
         group: MultiThreadedEventLoopGroup,
-        authDelegate: SendableAuthDelegate
+        authDelegate: SendableAuthDelegate,
+        connectionTimeout: TimeInterval
     ) async throws -> Channel {
  // 捕获所需值以避免闭包捕获问题
         let trustOnFirstUse = UserDefaults.standard.bool(forKey: "ssh.trustOnFirstUse")
@@ -319,7 +321,17 @@ public final class SSHClientImpl: @unchecked Sendable {
                 sshConfig.addHandlerToPipeline(channel)
             }
 
-        return try await bootstrap.connect(host: host, port: Int(port)).get()
+        let connectionFuture = bootstrap.connect(host: host, port: Int(port))
+        let timeoutPromise = connectionFuture.eventLoop.makePromise(of: Channel.self)
+        connectionFuture.cascade(to: timeoutPromise)
+        let timeoutSeconds = max(1, Int64(connectionTimeout.rounded(.up)))
+        let timeoutTask = connectionFuture.eventLoop.scheduleTask(in: .seconds(timeoutSeconds)) {
+            timeoutPromise.fail(SSHClientImplError.timeout)
+        }
+        connectionFuture.whenComplete { _ in
+            timeoutTask.cancel()
+        }
+        return try await timeoutPromise.futureResult.get()
     }
 
     private func createAuthDelegate(method: SSHAuthMethod) throws -> SendableAuthDelegate {
@@ -648,10 +660,13 @@ public extension SSHClientImpl {
         password: String,
         command: String
     ) async throws -> SSHCommandResult {
+        let networkSettings = RemoteDesktopSettingsManager.shared.settings.networkSettings
         let config = SSHClientImplConfiguration(
             host: host,
             port: port,
-            username: username
+            username: username,
+            connectionTimeout: TimeInterval(networkSettings.boundedConnectionTimeoutSeconds),
+            keepAliveInterval: TimeInterval(networkSettings.keepAliveInterval)
         )
         let client = SSHClientImpl(configuration: config)
 

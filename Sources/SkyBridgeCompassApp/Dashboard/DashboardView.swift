@@ -50,7 +50,7 @@ public struct DashboardView: View {
 
  // 本地UI状态 - 使用@State管理组件内部状态
     @State private var selectedSession: RemoteSessionSummary?
-    @State private var selectedNavigation: NavigationItem = .dashboard
+    @State private var selectedNavigation: NavigationItem
     @State private var showingUserProfile = false
     @State private var showingUserProfileOverlay = false
     @State private var signalSortTimerEnabled = false
@@ -84,7 +84,9 @@ public struct DashboardView: View {
 
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "Dashboard")
 
-    public init() {}
+    public init(initialNavigation: NavigationItem = .dashboard) {
+        _selectedNavigation = State(initialValue: initialNavigation)
+    }
 
     public var body: some View {
         ZStack {

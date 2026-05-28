@@ -338,10 +338,12 @@ struct DeviceCardView: View {
  // 设备信息头部
             HStack {
  // 设备图标 - 使用检测到的设备类型图标
-                Image(systemName: deviceIcon)
-                    .font(settingsManager.compactMode ? .body : .title2)
-                    .foregroundColor(deviceIconColor)
-                    .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
+                if settingsManager.showDeviceIcons {
+                    Image(systemName: deviceIcon)
+                        .font(settingsManager.compactMode ? .body : .title2)
+                        .foregroundColor(deviceIconColor)
+                        .frame(width: settingsManager.compactMode ? 24 : 32, height: settingsManager.compactMode ? 24 : 32)
+                }
                 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {

@@ -202,20 +202,15 @@ public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
     
     /// 获取或创建设备ID
     private static func getOrCreateDeviceId() -> String {
-        let key = "SkyBridge.DeviceId"
-        if let existingId = UserDefaults.standard.string(forKey: key) {
-            return existingId
-        } else {
-            let newId = UUID().uuidString
-            UserDefaults.standard.set(newId, forKey: key)
-            return newId
-	        }
+        let deviceId = ProtocolDeviceIdentity.stableDeviceId()
+        ProtocolDeviceIdentity.mirrorDeviceIdToLegacyDefaultsIfNeeded(deviceId)
+        return deviceId
 	    }
 	    
 	    @MainActor
 	    private static func getDeviceName() -> String {
 	        #if canImport(UIKit)
-	        return UIDevice.current.name
+	        return AppleMobileDeviceIdentity.currentSnapshot().deviceName
 	        #else
 	        return "Unknown Device"
 	        #endif

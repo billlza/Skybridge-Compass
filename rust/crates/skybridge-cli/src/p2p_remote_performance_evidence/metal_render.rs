@@ -45,6 +45,15 @@ pub(super) fn update_p2p_remote_metal_render_evidence(
         if extract_text_f64(line, "frameAgeMs").is_some() {
             evidence.metal_frame_age_samples += 1;
         }
+        if let (Some(input), Some(sample_ms)) = (
+            extract_text_u64(line, "input"),
+            extract_text_f64(line, "sampleMs"),
+        ) && sample_ms > 0.0
+        {
+            let input_fps = input as f64 * 1000.0 / sample_ms;
+            update_min_f64(&mut evidence.metal_input_fps_min, Some(input_fps));
+            update_max_f64(&mut evidence.metal_input_fps_max, Some(input_fps));
+        }
         update_min_f64(
             &mut evidence.metal_display_fps_min,
             extract_text_f64(line, "displayFPS"),

@@ -68,7 +68,7 @@ public enum BonjourTXTParser: Sendable {
 
  /// TXT 记录键名映射（支持多种命名约定）
     private static let keyPatterns: [(key: String, patterns: [String])] = [
-        ("deviceId", ["deviceId", "id", "deviceID", "device_id"]),
+        ("deviceId", ["deviceId", "id", "deviceID", "device_id", "uuid", "uniqueId", "unique_id"]),
         ("serial", ["serial", "serialNumber", "sn"]),
         ("mac", ["mac", "macAddress", "hwaddr"]),
         ("bssid", ["bssid"]),
@@ -89,6 +89,9 @@ public enum BonjourTXTParser: Sendable {
         ("deviceId", "deviceId=([^,\\]]+)"),
         ("id", "id=([^,\\]]+)"),
         ("deviceID", "deviceID=([^,\\]]+)"),
+        ("uuid", "uuid=([^,\\]]+)"),
+        ("uniqueId", "uniqueId=([^,\\]]+)"),
+        ("unique_id", "unique_id=([^,\\]]+)"),
         ("serial", "serial=([^,\\]]+)"),
         ("mac", "mac=([0-9A-Fa-f:]{12,17})"),
         ("bssid", "bssid=([0-9A-Fa-f:]{12,17})"),
@@ -165,7 +168,7 @@ public enum BonjourTXTParser: Sendable {
     private static func parseKnownKeys(_ txtRecord: NWTXTRecord) -> [String: String] {
         let keys = [
             "deviceId", "deviceID", "device_id", "uuid", "id", "uniqueId", "unique_id",
-            "pubKeyFP", "pubKeyFp", "pub_key_fp",
+            "pubKeyFP", "pubKeyFp", "pub_key_fp", "identityFingerprint",
             "platform", "osVersion", "os_version", "platformVersion", "platform_version", "os", "systemVersion",
             "model", "modelName", "hardwareModel", "hwModel", "name",
             "capabilities", "pqc", "version", "kemRefreshVersion", "kemKeyDigest", "hs_soa",
@@ -248,7 +251,16 @@ public enum BonjourTXTParser: Sendable {
  /// - Returns: 结构化的设备信息
     public static func extractDeviceInfo(from dict: [String: String]) -> BonjourDeviceInfo {
  // 查找设备 ID（按优先级）
-        let deviceId = dict["deviceId"] ?? dict["id"] ?? dict["deviceID"] ?? dict["serial"] ?? dict["mac"] ?? dict["bssid"]
+        let deviceId = dict["deviceId"]
+            ?? dict["id"]
+            ?? dict["deviceID"]
+            ?? dict["device_id"]
+            ?? dict["uuid"]
+            ?? dict["uniqueId"]
+            ?? dict["unique_id"]
+            ?? dict["serial"]
+            ?? dict["mac"]
+            ?? dict["bssid"]
         let remoteVideoFormats = parseRemoteVideoFormats(
             dict["remoteVideoFormats"] ?? dict["remote_video_formats"] ?? dict["remoteformats"]
         )
@@ -296,7 +308,16 @@ public enum BonjourTXTParser: Sendable {
  /// - Returns: 设备唯一标识符（如有）
     public static func getDeviceIdentifier(_ txtRecord: NWTXTRecord) -> String? {
         let dict = parse(txtRecord)
-        return dict["deviceId"] ?? dict["id"] ?? dict["deviceID"] ?? dict["serial"] ?? dict["mac"] ?? dict["bssid"]
+        return dict["deviceId"]
+            ?? dict["id"]
+            ?? dict["deviceID"]
+            ?? dict["device_id"]
+            ?? dict["uuid"]
+            ?? dict["uniqueId"]
+            ?? dict["unique_id"]
+            ?? dict["serial"]
+            ?? dict["mac"]
+            ?? dict["bssid"]
     }
 
  /// 获取设备显示名称

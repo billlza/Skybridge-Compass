@@ -145,6 +145,8 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
     public var connectionTypes: Set<DeviceConnectionType>
  /// 设备唯一标识符（用于去重，如序列号、MAC地址等）
     public var uniqueIdentifier: String?
+ /// 真实可拨路由标识符（例如 Bonjour service instance），与稳定身份分开保存。
+    public var routeIdentifiers: [String]
  /// 链路强度（0-100），来源于真实测量（RSSI或RTT映射）
     public var signalStrength: Double?
  /// 设备来源（默认 unknown，不断断逻辑化）
@@ -174,6 +176,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         remoteVideoFormats: Set<String> = [],
         connectionTypes: Set<DeviceConnectionType> = [DeviceConnectionType.unknown],
         uniqueIdentifier: String? = nil,
+        routeIdentifiers: [String] = [],
         signalStrength: Double? = nil,
         source: DeviceSource = DeviceSource.unknown,
         isLocalDevice: Bool = false,
@@ -194,6 +197,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         self.remoteVideoFormats = remoteVideoFormats
         self.connectionTypes = connectionTypes
         self.uniqueIdentifier = uniqueIdentifier
+        self.routeIdentifiers = Self.normalizedRouteIdentifiers(routeIdentifiers)
         self.signalStrength = signalStrength
         self.source = source
         self.isLocalDevice = isLocalDevice
@@ -205,6 +209,27 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
  /// 内部唯一写口（DiscoveryManager 调用）
     public mutating func _setIsLocalInternal(_ v: Bool) {
         self.isLocalDevice = v
+    }
+
+    public mutating func mergeRouteIdentifiers(_ identifiers: [String]) {
+        routeIdentifiers = Self.mergedRouteIdentifiers(routeIdentifiers, identifiers)
+    }
+
+    public static func mergedRouteIdentifiers(_ lhs: [String], _ rhs: [String]) -> [String] {
+        var merged: [String] = []
+        var seen = Set<String>()
+        for routeIdentifier in lhs + rhs {
+            let trimmed = routeIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            merged.append(trimmed)
+        }
+        return merged
+    }
+
+    private static func normalizedRouteIdentifiers(_ identifiers: [String]) -> [String] {
+        mergedRouteIdentifiers([], identifiers)
     }
     
  /// 公开唯一写口（供 DiscoveryManager 调用）

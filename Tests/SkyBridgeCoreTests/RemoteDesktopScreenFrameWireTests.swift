@@ -172,4 +172,54 @@ final class RemoteDesktopScreenFrameWireTests: XCTestCase {
 
         XCTAssertEqual(decoded?.isSyncFrame, true)
     }
+
+    func testHEVCDecoderBootstrapRequiresParameterSetsAndIRAP() {
+        let hevcIRAPOnly = Data([0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0x88])
+        XCTAssertFalse(
+            RemoteDesktopScreenFrameWire.containsDecoderBootstrapFrame(
+                format: "hevc",
+                imageData: hevcIRAPOnly,
+                advertisedSyncFrame: true
+            )
+        )
+
+        let hevcBootstrap = Data([
+            0x00, 0x00, 0x00, 0x01, 0x40, 0x01,
+            0x00, 0x00, 0x00, 0x01, 0x42, 0x01,
+            0x00, 0x00, 0x00, 0x01, 0x44, 0x01,
+            0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0x88
+        ])
+        XCTAssertTrue(
+            RemoteDesktopScreenFrameWire.containsDecoderBootstrapFrame(
+                format: "hevc",
+                imageData: hevcBootstrap,
+                advertisedSyncFrame: false
+            )
+        )
+    }
+
+    func testHEVCSyncAndBootstrapRejectMalformedOneByteNALHeaders() {
+        let malformedIRAP = Data([0x00, 0x00, 0x00, 0x01, 0x26])
+        XCTAssertFalse(
+            RemoteDesktopScreenFrameWire.containsSyncFrame(
+                format: "hevc",
+                imageData: malformedIRAP,
+                advertisedSyncFrame: true
+            )
+        )
+
+        let malformedBootstrap = Data([
+            0x00, 0x00, 0x00, 0x01, 0x40,
+            0x00, 0x00, 0x00, 0x01, 0x42,
+            0x00, 0x00, 0x00, 0x01, 0x44,
+            0x00, 0x00, 0x00, 0x01, 0x26
+        ])
+        XCTAssertFalse(
+            RemoteDesktopScreenFrameWire.containsDecoderBootstrapFrame(
+                format: "hevc",
+                imageData: malformedBootstrap,
+                advertisedSyncFrame: true
+            )
+        )
+    }
 }

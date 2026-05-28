@@ -135,11 +135,90 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
     
  // MARK: - KeyPurpose Enum Tests
     
- /// Test KeyPurpose raw values
+    /// Test KeyPurpose raw values
     func testKeyPurposeRawValues() {
         XCTAssertEqual(KeyPurpose.legacy.rawValue, "legacy")
         XCTAssertEqual(KeyPurpose.protocol.rawValue, "protocol")
         XCTAssertEqual(KeyPurpose.pop.rawValue, "pop")
         XCTAssertEqual(KeyPurpose.unknown.rawValue, "unknown")
+    }
+
+    func testDeviceIdentityKeychainAccessGroupContract() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+
+        XCTAssertTrue(
+            source.contains("SecTaskCopyValueForEntitlement(task, \"keychain-access-groups\" as CFString, nil)"),
+            "Runtime identity storage must read the signed keychain access groups instead of assuming the process default namespace."
+        )
+        XCTAssertTrue(
+            source.contains("hasSuffix(\".group.com.skybridge.compass\")") &&
+            source.contains("hasSuffix(\".com.skybridge.compass.pro\")"),
+            "Runtime identity storage must prefer the shared SkyBridge keychain group, then fall back to the app keychain group."
+        )
+        XCTAssertTrue(
+            source.contains("kSecAttrAccessGroup as String") &&
+            source.contains("applyPreferredKeychainAccessGroup(&matchQuery)") &&
+            source.contains("applyPreferredKeychainAccessGroup(toKeyAttributes: &attributes)"),
+            "All persistent identity material must be written into the resolved keychain access group."
+        )
+        XCTAssertTrue(
+            source.contains("keychainAccessGroupSearchScopes()") &&
+            source.contains("return [preferred, nil]") &&
+            source.contains("if accessGroup == nil, Self.preferredKeychainAccessGroup() != nil") &&
+            source.contains("try upsertGenericPassword("),
+            "Existing unscoped identity material must be migrated into the signed access group without creating a new protocol identity."
+        )
+    }
+
+    func testMacPackageEntitlementsCarryKeychainAccessGroups() throws {
+        let developmentEntitlements = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.entitlements")
+        let webPackagingEntitlements = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements")
+        let nativePackagingEntitlements = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.native.packaging.entitlements")
+        let resourceEntitlements = try repositorySource("Sources/SkyBridgeCompassApp/Resources/SkyBridgeCompassApp.entitlements")
+        let signingHelper = try repositorySource("Scripts/signing_entitlements_helpers.sh")
+
+        for entitlements in [
+            developmentEntitlements,
+            webPackagingEntitlements,
+            nativePackagingEntitlements,
+            resourceEntitlements
+        ] {
+            XCTAssertTrue(entitlements.contains("<key>com.apple.application-identifier</key>"))
+            XCTAssertTrue(entitlements.contains("<key>keychain-access-groups</key>"))
+            XCTAssertTrue(entitlements.contains("$(AppIdentifierPrefix)com.skybridge.compass.pro"))
+            XCTAssertTrue(entitlements.contains("$(AppIdentifierPrefix)group.com.skybridge.compass"))
+        }
+
+        XCTAssertTrue(
+            signingHelper.contains("\"com.apple.application-identifier\"") &&
+            signingHelper.contains("\"keychain-access-groups\""),
+            "Signing/profile validation must treat app identity and keychain-access-groups as profile-backed entitlements."
+        )
+    }
+
+    func testIOSEntitlementsCarryIOSKeychainAccessGroups() throws {
+        let debugEntitlements = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements")
+        let releaseEntitlements = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements")
+
+        for entitlements in [debugEntitlements, releaseEntitlements] {
+            XCTAssertTrue(entitlements.contains("<key>keychain-access-groups</key>"))
+            XCTAssertTrue(entitlements.contains("$(AppIdentifierPrefix)com.skybridge.compass.ios"))
+            XCTAssertTrue(entitlements.contains("$(AppIdentifierPrefix)group.com.skybridge.compass"))
+            XCTAssertFalse(
+                entitlements.contains("$(AppIdentifierPrefix)com.skybridge.compass.pro"),
+                "iOS must not request the macOS app keychain access group."
+            )
+        }
+    }
+
+    private func repositorySource(_ relativePath: String) throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(
+            contentsOf: repoRoot.appendingPathComponent(relativePath),
+            encoding: .utf8
+        )
     }
 }

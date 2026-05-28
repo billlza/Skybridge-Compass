@@ -241,6 +241,40 @@ struct RemoteDesktopOverlayPayload: Codable, Sendable, Equatable {
     let sentAt: TimeInterval
 }
 
+struct RemoteDesktopSecurityIdentityPayload: Codable, Sendable, Equatable {
+    let accountDisplayName: String?
+    let nebulaId: String?
+    let deviceId: String?
+    let deviceName: String?
+
+    init(
+        accountDisplayName: String? = nil,
+        nebulaId: String? = nil,
+        deviceId: String? = nil,
+        deviceName: String? = nil
+    ) {
+        self.accountDisplayName = Self.normalized(accountDisplayName)
+        self.nebulaId = Self.normalized(nebulaId)
+        self.deviceId = Self.normalized(deviceId)
+        self.deviceName = Self.normalized(deviceName)
+    }
+
+    var isEmpty: Bool {
+        accountDisplayName == nil
+            && nebulaId == nil
+            && deviceId == nil
+            && deviceName == nil
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+}
+
 struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
     let width: Int?
     let height: Int?
@@ -277,6 +311,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
     let performanceValidationMode: String?
     let mediaFallbackPolicy: String?
     let streamRefreshToken: UInt64?
+    let remoteControlSecurityIdentity: RemoteDesktopSecurityIdentityPayload?
     let sentAt: TimeInterval
 
     init(
@@ -315,6 +350,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         performanceValidationMode: String? = nil,
         mediaFallbackPolicy: String? = nil,
         streamRefreshToken: UInt64? = nil,
+        remoteControlSecurityIdentity: RemoteDesktopSecurityIdentityPayload? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
         self.width = width
@@ -352,6 +388,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         self.performanceValidationMode = performanceValidationMode
         self.mediaFallbackPolicy = mediaFallbackPolicy
         self.streamRefreshToken = streamRefreshToken
+        self.remoteControlSecurityIdentity = remoteControlSecurityIdentity
         self.sentAt = sentAt
     }
 
@@ -391,5 +428,6 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
             && lhs.performanceValidationMode == rhs.performanceValidationMode
             && lhs.mediaFallbackPolicy == rhs.mediaFallbackPolicy
             && lhs.streamRefreshToken == rhs.streamRefreshToken
+            && lhs.remoteControlSecurityIdentity == rhs.remoteControlSecurityIdentity
     }
 }

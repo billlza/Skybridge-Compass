@@ -21,6 +21,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         "main_tests/parse/smoke.rs",
         include_str!("../../main_tests/parse/smoke.rs"),
     ),
+    (
+        "main_tests/parse/test.rs",
+        include_str!("../../main_tests/parse/test.rs"),
+    ),
     ("auth_commands.rs", include_str!("../../auth_commands.rs")),
     ("auth_support.rs", include_str!("../../auth_support.rs")),
     ("cli_args.rs", include_str!("../../cli_args.rs")),
@@ -38,6 +42,7 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../cli_args/operator.rs"),
     ),
     ("cli_args/smoke.rs", include_str!("../../cli_args/smoke.rs")),
+    ("cli_args/test.rs", include_str!("../../cli_args/test.rs")),
     ("cli_dispatch.rs", include_str!("../../cli_dispatch.rs")),
     (
         "cli_dispatch/smoke.rs",
@@ -49,6 +54,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../cli_test_support.rs"),
     ),
     ("cli_text.rs", include_str!("../../cli_text.rs")),
+    (
+        "connectivity_check.rs",
+        include_str!("../../connectivity_check.rs"),
+    ),
     (
         "connection_code.rs",
         include_str!("../../connection_code.rs"),
@@ -205,6 +214,11 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../operator_status/health.rs"),
     ),
     (
+        "remote_control_notice_check.rs",
+        include_str!("../../remote_control_notice_check.rs"),
+    ),
+    ("repo_paths.rs", include_str!("../../repo_paths.rs")),
+    (
         "session_commands.rs",
         include_str!("../../session_commands.rs"),
     ),
@@ -216,4 +230,5 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         "session_commands/tests.rs",
         include_str!("../../session_commands/tests.rs"),
     ),
+    ("test_commands.rs", include_str!("../../test_commands.rs")),
 ];

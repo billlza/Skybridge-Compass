@@ -147,6 +147,7 @@ enum RemoteControlStreamRequestPolicy {
             || previous.height != current.height
             || previous.preferredCodec != current.preferredCodec
             || previous.supportedVideoFormats != current.supportedVideoFormats
+            || previous.videoCompressionLevel != current.videoCompressionLevel
             || previous.adaptiveResolutionEnabled != current.adaptiveResolutionEnabled
             || previous.targetFrameRate != current.targetFrameRate
             || previous.keyFrameInterval != current.keyFrameInterval
@@ -159,6 +160,76 @@ enum RemoteControlStreamRequestPolicy {
             || previous.audioMode != current.audioMode
             || previous.mediaSessionId != current.mediaSessionId
             || previous.mediaAudioEndpoint != current.mediaAudioEndpoint
+    }
+
+    static func streamConfigurationByPreservingAudioEndpointForVideoRefresh(
+        _ current: RemoteDesktopStreamConfiguration,
+        previous: RemoteDesktopStreamConfiguration?
+    ) -> RemoteDesktopStreamConfiguration {
+        guard current.streamRefreshToken != nil,
+              current.mediaAudioEndpoint == nil,
+              current.mediaSessionId == nil,
+              current.requestsRealtimeMediaAudio,
+              let previous,
+              previous.requestsRealtimeMediaAudio,
+              hasUnchangedRealtimeAudioSemantics(current, previous: previous),
+              let previousEndpoint = previous.mediaAudioEndpoint else {
+            return current
+        }
+
+        return RemoteDesktopStreamConfiguration(
+            width: current.width,
+            height: current.height,
+            preferredCodec: current.preferredCodec,
+            supportedVideoFormats: current.supportedVideoFormats,
+            qualityPreset: current.qualityPreset,
+            videoCompressionLevel: current.videoCompressionLevel,
+            adaptiveResolutionEnabled: current.adaptiveResolutionEnabled,
+            targetFrameRate: current.targetFrameRate,
+            keyFrameInterval: current.keyFrameInterval,
+            lowLatencyMode: current.lowLatencyMode,
+            enableHardwareAcceleration: current.enableHardwareAcceleration,
+            enableAppleSiliconOptimization: current.enableAppleSiliconOptimization,
+            clipboardSyncEnabled: current.clipboardSyncEnabled,
+            damageTrackingEnabled: current.damageTrackingEnabled,
+            separateCursorChannelEnabled: current.separateCursorChannelEnabled,
+            interactionOverlayChannelEnabled: current.interactionOverlayChannelEnabled,
+            refreshStrategy: current.refreshStrategy,
+            jitterBufferFrames: current.jitterBufferFrames,
+            lossRecoveryMode: current.lossRecoveryMode,
+            screenFrameTransport: current.screenFrameTransport,
+            screenDataChannelEnabled: current.screenDataChannelEnabled,
+            screenChannelWireFormat: current.screenChannelWireFormat,
+            nativeVideoTrackReady: current.nativeVideoTrackReady,
+            nativeAudioTrackEnabled: current.nativeAudioTrackEnabled,
+            audioRedirectionEnabled: current.audioRedirectionEnabled,
+            audioTransport: current.audioTransport,
+            audioMode: current.audioMode ?? previous.audioMode,
+            mediaSessionId: current.mediaSessionId ?? previous.mediaSessionId,
+            mediaAudioEndpoint: previousEndpoint,
+            compatibilityAudioFallbackEnabled: current.compatibilityAudioFallbackEnabled,
+            preferredAudioEncoding: current.preferredAudioEncoding ?? previous.preferredAudioEncoding,
+            audioSampleRate: current.audioSampleRate ?? previous.audioSampleRate,
+            audioChannelCount: current.audioChannelCount ?? previous.audioChannelCount,
+            performanceValidationMode: current.performanceValidationMode ?? previous.performanceValidationMode,
+            mediaFallbackPolicy: current.mediaFallbackPolicy ?? previous.mediaFallbackPolicy,
+            streamRefreshToken: current.streamRefreshToken,
+            remoteControlSecurityIdentity: current.remoteControlSecurityIdentity ?? previous.remoteControlSecurityIdentity,
+            sentAt: current.sentAt
+        )
+    }
+
+    private static func hasUnchangedRealtimeAudioSemantics(
+        _ current: RemoteDesktopStreamConfiguration,
+        previous: RemoteDesktopStreamConfiguration
+    ) -> Bool {
+        current.audioRedirectionEnabled == previous.audioRedirectionEnabled
+            && current.audioTransport == previous.audioTransport
+            && (current.audioMode ?? previous.audioMode) == previous.audioMode
+            && current.compatibilityAudioFallbackEnabled == previous.compatibilityAudioFallbackEnabled
+            && (current.preferredAudioEncoding ?? previous.preferredAudioEncoding) == previous.preferredAudioEncoding
+            && (current.audioSampleRate ?? previous.audioSampleRate) == previous.audioSampleRate
+            && (current.audioChannelCount ?? previous.audioChannelCount) == previous.audioChannelCount
     }
 
     private static func preferredCodec(

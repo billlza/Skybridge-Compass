@@ -6,7 +6,7 @@ pub(super) fn format_mac_tx_detail(
     verdict: &MacTxVerdict,
 ) -> String {
     format!(
-        "finalWindow={} latestSentFPS={:?} latestEncodedFPS={:?} minSentFPS={:?} minEncodedFPS={:?} maxSendMs={:.1} maxAllowedSendMs={:.1} writerClockSamples={}/{} sendSchedulerSamples={}/{} maxFramesPerDrain={:?} maxFramesPerDrainSamples={}/{} scheduleBudgetMax={:?} missedCadenceSlotsMax={:?} contentBacklogFull={} contentBacklogMax={:?} contentBacklogLimit={:?} contentBacklogBytesMax={:?} contentBacklogByteLimit={:?} dropped={} backpressure={} rawBackpressure={} waitingForSyncSamples={} sbc2TransportSamples={}/{} chunkCapBytesMax={:?} maxChunksPerFrame={:?} wireBatchSingleFrames={} wireBatchMultiFrames={} wireSingleUnbatchedFrames={} wireSendFrames={} txSentFrames={} wireSendAll={} queuedMax={:?} queuedLimit={} staleQueueCatchUp={} queueBacklogMax={:?} queueAgeMaxMs={:?}",
+        "finalWindow={} latestSentFPS={:?} latestEncodedFPS={:?} minSentFPS={:?} minEncodedFPS={:?} maxSendMs={:.1} maxAllowedSendMs={:.1} writerClockSamples={}/{} sendSchedulerSamples={}/{} maxFramesPerDrain={:?} maxFramesPerDrainSamples={}/{} scheduleBudgetMax={:?} missedCadenceSlotsMax={:?} contentBacklogFull={} contentBacklogMax={:?} contentBacklogLimit={:?} contentBacklogBytesMax={:?} contentBacklogByteLimit={:?} dropped={} backpressure={} rawBackpressure={} waitingForSyncSamples={} sbc2TransportSamples={}/{} chunkCapBytesMax={:?} maxChunksPerFrame={:?} wireBatchSingleFrames={} wireBatchMultiFrames={} wireSingleUnbatchedFrames={} wireSendFrames={} txSentFrames={} wireSendAll={} queuedMax={:?} queuedLimit={} staleQueueCatchUp={} queueBacklogMax={:?} queueAgeMaxMs={:?} scheduleGapMaxMs={:?} scheduleJitterMaxMs={:?} completionGapMaxMs={:?} contentCallbackGapMaxMs={:?} contentActorHopMaxMs={:?} encodedToSubmitMaxMs={:?} submitGapMaxMs={:?} clockFireToDrainMaxMs={:?}",
         selected.uses_final_window,
         selected.latest_sent_fps,
         selected.latest_encoded_fps,
@@ -46,6 +46,14 @@ pub(super) fn format_mac_tx_detail(
         verdict.strict_queued_frame_limit,
         selected.stale_queue_catch_up_total,
         selected.queue_backlog_max,
-        selected.queue_age_max_ms
+        selected.queue_age_max_ms,
+        selected.schedule_gap_max_ms,
+        selected.schedule_jitter_max_ms,
+        selected.completion_gap_max_ms,
+        selected.content_callback_gap_max_ms,
+        selected.content_actor_hop_max_ms,
+        selected.encoded_to_submit_max_ms,
+        selected.submit_gap_max_ms,
+        selected.clock_fire_to_drain_max_ms
     )
 }

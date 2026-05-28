@@ -50,12 +50,18 @@ extension CrossNetworkConnectionManager {
     static let webRTCNativeWarmupJPEGBackpressureLowWatermarkBytes =
         UInt64(WebRTCDegradedFallbackJPEGProfile.maxTransportFrameBytes)
 
-    static func degradedWebRTCFallbackJPEGProfile() -> WebRTCDegradedFallbackJPEGProfile {
-        .emergency
+    static func degradedWebRTCFallbackJPEGProfile(
+        compressionLevel: Int = 6
+    ) -> WebRTCDegradedFallbackJPEGProfile {
+        jpegProfile(
+            base: .emergency,
+            compressionLevel: compressionLevel
+        )
     }
 
     static func boundedWebRTCWarmupJPEGProfile(
-        for sourceSize: CGSize
+        for sourceSize: CGSize,
+        compressionLevel: Int = 6
     ) -> WebRTCDegradedFallbackJPEGProfile {
         let requestedLongEdge = max(
             Int(sourceSize.width.rounded()),
@@ -66,7 +72,7 @@ extension CrossNetworkConnectionManager {
             webRTCNativeWarmupJPEGMaxLongEdge
         )
         let highResolutionBudget = longEdge > WebRTCDegradedFallbackJPEGProfile.maxLongEdge
-        return WebRTCDegradedFallbackJPEGProfile(
+        let base = WebRTCDegradedFallbackJPEGProfile(
             maxLongEdge: longEdge,
             targetFrameRate: highResolutionBudget
                 ? 6
@@ -80,6 +86,28 @@ extension CrossNetworkConnectionManager {
             qualityLadder: highResolutionBudget
                 ? [0.60, 0.48, 0.36, 0.28, 0.22]
                 : WebRTCDegradedFallbackJPEGProfile.qualityLadder
+        )
+        return jpegProfile(base: base, compressionLevel: compressionLevel)
+    }
+
+    private static func jpegProfile(
+        base: WebRTCDegradedFallbackJPEGProfile,
+        compressionLevel: Int
+    ) -> WebRTCDegradedFallbackJPEGProfile {
+        let level = max(0, min(compressionLevel, 9))
+        guard level != 6 else { return base }
+
+        let qualityScale = max(0.65, min(1.25, 1.0 - (CGFloat(level - 6) * 0.075)))
+        let byteScale = max(0.65, min(1.30, 1.0 - (Double(level - 6) * 0.08)))
+        let scaledQuality = base.qualityLadder.map { quality in
+            max(0.18, min(0.92, quality * qualityScale))
+        }
+        return WebRTCDegradedFallbackJPEGProfile(
+            maxLongEdge: base.maxLongEdge,
+            targetFrameRate: base.targetFrameRate,
+            maxEncodedFrameBytes: max(64 * 1024, Int(Double(base.maxEncodedFrameBytes) * byteScale)),
+            maxTransportFrameBytes: max(96 * 1024, Int(Double(base.maxTransportFrameBytes) * byteScale)),
+            qualityLadder: scaledQuality
         )
     }
 
@@ -280,6 +308,7 @@ extension CrossNetworkConnectionManager {
             preferredCodec: config.preferredCodec,
             supportedVideoFormats: config.supportedVideoFormats,
             qualityPreset: config.qualityPreset,
+            videoCompressionLevel: config.videoCompressionLevel,
             adaptiveResolutionEnabled: config.adaptiveResolutionEnabled,
             targetFrameRate: config.targetFrameRate,
             keyFrameInterval: config.keyFrameInterval,

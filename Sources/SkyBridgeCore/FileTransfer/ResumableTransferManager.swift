@@ -32,6 +32,9 @@ public final class ResumableTransferManager: ObservableObject {
     
     /// 自动重试次数
     public var maxRetryAttempts: Int = 3
+
+    /// 是否允许失败传输自动重新入队
+    public var autoRetryFailedTransfers: Bool = true
     
     /// 重试延迟（秒）
     public var retryDelay: TimeInterval = 5
@@ -156,6 +159,25 @@ public final class ResumableTransferManager: ObservableObject {
     /// 重试失败的传输
     public func retry(_ transferId: UUID) {
         resume(transferId)
+    }
+
+    public func applyRuntimeSettings(
+        autoRetryFailedTransfers: Bool,
+        maxRetryAttempts: Int,
+        maxConcurrentTransfers: Int,
+        keepTransferHistory: Bool,
+        keepSystemAwakeDuringTransfer: Bool,
+        encryptionAlgorithm: FileTransferEncryptionAlgorithm
+    ) {
+        self.autoRetryFailedTransfers = autoRetryFailedTransfers
+        self.maxRetryAttempts = max(1, min(10, maxRetryAttempts))
+        self.maxConcurrentTransfers = max(1, maxConcurrentTransfers)
+        fileTransferEngine.applyRuntimeSettings(
+            autoRetryFailedTransfers: autoRetryFailedTransfers,
+            keepTransferHistory: keepTransferHistory,
+            keepSystemAwakeDuringTransfer: keepSystemAwakeDuringTransfer,
+            encryptionAlgorithm: encryptionAlgorithm
+        )
     }
     
     /// 调整优先级
@@ -326,7 +348,11 @@ public final class ResumableTransferManager: ObservableObject {
             self.transfers[idx].lastError = error.localizedDescription
             self.transfers[idx].retryCount += 1
             
-            if self.transfers[idx].retryCount < self.maxRetryAttempts {
+            if ResumableTransferRetryDecision.shouldScheduleAutomaticRetry(
+                autoRetryFailedTransfers: self.autoRetryFailedTransfers,
+                retryCount: self.transfers[idx].retryCount,
+                maxRetryAttempts: self.maxRetryAttempts
+            ) {
                 // 安排重试
                 self.transfers[idx].state = .queued
                 self.logger.warning("⚠️ 传输失败，将重试: \(self.transfers[idx].fileName) 尝试 \(self.transfers[idx].retryCount)/\(self.maxRetryAttempts)")
@@ -443,6 +469,17 @@ public final class ResumableTransferManager: ObservableObject {
         } catch {
             logger.warning("⚠️ 加载传输状态失败: \(error.localizedDescription)")
         }
+    }
+}
+
+struct ResumableTransferRetryDecision: Sendable {
+    static func shouldScheduleAutomaticRetry(
+        autoRetryFailedTransfers: Bool,
+        retryCount: Int,
+        maxRetryAttempts: Int
+    ) -> Bool {
+        guard autoRetryFailedTransfers else { return false }
+        return retryCount < max(1, maxRetryAttempts)
     }
 }
 
@@ -593,5 +630,4 @@ public enum ResumableTransferError: Error, LocalizedError {
         }
     }
 }
-
 

@@ -63,6 +63,9 @@ struct RemoteDesktopView: View {
             self.allSessions = sessions
             syncSelectedSession(with: sessions)
         }
+        .onReceive(RemoteDesktopSettingsManager.shared.settings.$displaySettings) { displaySettings in
+            applyRemoteDesktopFullScreen(displaySettings.fullScreenMode, persist: false)
+        }
         .onDisappear {
 // 确保在视图消失时正确清理资源
             remoteDesktopManager.shutdown()
@@ -348,7 +351,7 @@ struct RemoteDesktopView: View {
                 .help(LocalizationManager.shared.localizedString("remote.settings.help"))
 
 // 全屏切换
-                Button(action: { isFullScreen.toggle() }) {
+                Button(action: toggleRemoteDesktopFullScreen) {
                     Image(systemName: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                         .foregroundColor(.primary)
                 }
@@ -756,6 +759,22 @@ struct RemoteDesktopView: View {
             deltaX: Float(deltaX),
             deltaY: Float(deltaY)
         )
+    }
+
+    private func toggleRemoteDesktopFullScreen() {
+        applyRemoteDesktopFullScreen(!isFullScreen, persist: true)
+    }
+
+    private func applyRemoteDesktopFullScreen(_ enabled: Bool, persist: Bool) {
+        let targetWindow = NSApp.mainWindow ?? NSApp.keyWindow
+        let windowIsFullScreen = targetWindow?.styleMask.contains(.fullScreen) ?? false
+        isFullScreen = enabled
+        if persist {
+            RemoteDesktopSettingsManager.shared.settings.displaySettings.fullScreenMode = enabled
+        }
+        if windowIsFullScreen != enabled {
+            targetWindow?.toggleFullScreen(nil)
+        }
     }
 
  // MARK: - 会话管理
@@ -1354,6 +1373,9 @@ struct RemoteDesktopSettingsView: View {
                         Text(type.displayName).tag(type)
                     }
                 }
+                Text(settingsManager.settings.networkSettings.connectionType.remoteDesktopScopeDescription)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("带宽限制: \(settingsManager.settings.networkSettings.bandwidthLimit == 0 ? "无限制" : "\(Int(settingsManager.settings.networkSettings.bandwidthLimit)) Mbps")")
@@ -1440,8 +1462,14 @@ struct RemoteDesktopSettingsView: View {
             }
 
             Section("高级选项") {
-                Toggle("启用网络加密", isOn: $settingsManager.settings.networkSettings.enableEncryption)
-                    .help("使用 TLS 加密网络传输")
+                HStack {
+                    Text("启用网络加密")
+                    Spacer()
+                    Text("Strict-PQC / TLS 1.3")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.green)
+                }
+                .help("远程桌面传输强制使用加密，不能在生产环境关闭")
 
                 Toggle("启用 UDP 传输", isOn: $settingsManager.settings.networkSettings.enableUDPTransport)
                     .help("使用 UDP 协议提高传输性能")

@@ -9,6 +9,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../check_coverage/entries/control_plane.rs"),
     ),
     (
+        "check_coverage/entries/connectivity.rs",
+        include_str!("../../check_coverage/entries/connectivity.rs"),
+    ),
+    (
         "check_coverage/entries/coverage.rs",
         include_str!("../../check_coverage/entries/coverage.rs"),
     ),
@@ -39,6 +43,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "check_coverage/entries/performance/webrtc.rs",
         include_str!("../../check_coverage/entries/performance/webrtc.rs"),
+    ),
+    (
+        "check_coverage/entries/release.rs",
+        include_str!("../../check_coverage/entries/release.rs"),
     ),
     (
         "check_coverage/entries/smoke.rs",

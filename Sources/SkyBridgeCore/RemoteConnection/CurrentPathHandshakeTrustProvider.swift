@@ -68,4 +68,9 @@ struct CurrentPathHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
         nil
     }
+
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool {
+        _ = deviceId
+        return expectedRemoteAuthority != nil
+    }
 }

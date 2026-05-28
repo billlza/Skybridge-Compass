@@ -1,6 +1,7 @@
 use crate::performance_budgets::{
+    P2P_REMOTE_STRICT_IOS_DECODE_FEED_MODE, P2P_REMOTE_STRICT_IOS_PARSER_MODE,
     P2P_REMOTE_STRICT_IOS_READ_AHEAD_MODE, P2P_REMOTE_STRICT_IOS_SCREEN_DELIVERY_MODE,
-    P2P_REMOTE_STRICT_METAL_REPLACEMENT_REASON,
+    P2P_REMOTE_STRICT_IOS_SCREEN_WIRE_FORMAT, P2P_REMOTE_STRICT_METAL_REPLACEMENT_REASON,
 };
 use crate::performance_evidence::{
     extract_text_f64, extract_text_u64, extract_text_value, update_max_f64, update_max_u64,
@@ -31,6 +32,14 @@ pub(crate) fn update_p2p_remote_final_window_ios_evidence(
                 update_max_u64(&mut evidence.final_audio_rx_decoded_max, audio_rx_decoded);
                 update_min_u64(&mut evidence.final_audio_rx_played_min, audio_rx_played);
                 update_max_u64(&mut evidence.final_audio_rx_played_max, audio_rx_played);
+                evidence.final_audio_jitter_evicted +=
+                    extract_text_u64(line, "audioRxJitterEvicted").unwrap_or(0);
+                evidence.final_audio_playback_drop +=
+                    extract_text_u64(line, "audioRxPlaybackDrop").unwrap_or(0);
+                evidence.final_audio_underflow +=
+                    extract_text_u64(line, "audioRxUnderflow").unwrap_or(0);
+                evidence.final_audio_rebuffer +=
+                    extract_text_u64(line, "audioRxRebuffer").unwrap_or(0);
             }
             if let Some(fps) = extract_text_f64(line, "fps") {
                 evidence.final_ios_fps = Some(fps);
@@ -88,8 +97,30 @@ pub(crate) fn update_p2p_remote_final_window_ios_evidence(
         evidence.final_lan_rx_samples += 1;
         evidence.final_lan_rx_sample_ms += extract_text_u64(line, "sampleMs").unwrap_or(0);
         evidence.final_lan_rx_screen_frames += extract_text_u64(line, "screenFrames").unwrap_or(0);
-        evidence.final_lan_rx_sbc2_frames += extract_text_u64(line, "sbc2Frames").unwrap_or(0);
-        evidence.final_lan_rx_sbc2_chunks += extract_text_u64(line, "sbc2Chunks").unwrap_or(0);
+        let sbc2_frames = extract_text_u64(line, "sbc2Frames");
+        let sbc2_chunks = extract_text_u64(line, "sbc2Chunks");
+        if sbc2_frames.is_some() {
+            evidence.final_lan_rx_sbc2_frame_samples += 1;
+        }
+        if sbc2_chunks.is_some() {
+            evidence.final_lan_rx_sbc2_chunk_samples += 1;
+        }
+        if sbc2_frames
+            .zip(sbc2_chunks)
+            .is_some_and(|(frames, chunks)| frames > 0 && chunks >= frames)
+        {
+            evidence.final_lan_rx_strict_sbc2_samples += 1;
+        }
+        evidence.final_lan_rx_sbc2_frames += sbc2_frames.unwrap_or(0);
+        evidence.final_lan_rx_sbc2_chunks += sbc2_chunks.unwrap_or(0);
+        if extract_text_value(line, "screenWire").is_some() {
+            evidence.final_lan_rx_screen_wire_samples += 1;
+        }
+        if extract_text_value(line, "screenWire").as_deref()
+            == Some(P2P_REMOTE_STRICT_IOS_SCREEN_WIRE_FORMAT)
+        {
+            evidence.final_lan_rx_strict_screen_wire_samples += 1;
+        }
         if extract_text_value(line, "readAhead").is_some() {
             evidence.final_lan_rx_read_ahead_samples += 1;
         }
@@ -97,6 +128,26 @@ pub(crate) fn update_p2p_remote_final_window_ios_evidence(
             == Some(P2P_REMOTE_STRICT_IOS_READ_AHEAD_MODE)
         {
             evidence.final_lan_rx_strict_read_ahead_samples += 1;
+        }
+        if extract_text_value(line, "rxFrameClock").is_some() {
+            evidence.final_lan_rx_frame_clock_samples += 1;
+        }
+        if extract_text_value(line, "rxFrameClock").as_deref() == Some("socket-arrival") {
+            evidence.final_lan_rx_socket_arrival_frame_clock_samples += 1;
+        }
+        if extract_text_value(line, "socketMetricClock").is_some() {
+            evidence.final_lan_rx_socket_metric_clock_samples += 1;
+        }
+        if extract_text_value(line, "socketMetricClock").as_deref() == Some("local-socket-arrival")
+        {
+            evidence.final_lan_rx_local_socket_metric_clock_samples += 1;
+        }
+        if extract_text_value(line, "parser").is_some() {
+            evidence.final_lan_rx_parser_samples += 1;
+        }
+        if extract_text_value(line, "parser").as_deref() == Some(P2P_REMOTE_STRICT_IOS_PARSER_MODE)
+        {
+            evidence.final_lan_rx_strict_parser_samples += 1;
         }
         if extract_text_value(line, "screenDelivery").is_some() {
             evidence.final_lan_rx_screen_delivery_samples += 1;
@@ -106,8 +157,12 @@ pub(crate) fn update_p2p_remote_final_window_ios_evidence(
         {
             evidence.final_lan_rx_strict_screen_delivery_samples += 1;
         }
+        evidence.final_lan_rx_screen_delivery_attempted_total +=
+            extract_text_u64(line, "screenDeliveryAttempted").unwrap_or(0);
         evidence.final_lan_rx_screen_delivery_delivered_total +=
             extract_text_u64(line, "screenDeliveryDelivered").unwrap_or(0);
+        evidence.final_lan_rx_screen_delivery_backpressure_total +=
+            extract_text_u64(line, "screenDeliveryBackpressure").unwrap_or(0);
         update_max_u64(
             &mut evidence.final_lan_rx_screen_delivery_queue_depth_max,
             extract_text_u64(line, "screenDeliveryQueueDepthMax"),
@@ -115,6 +170,48 @@ pub(crate) fn update_p2p_remote_final_window_ios_evidence(
         update_max_f64(
             &mut evidence.final_lan_rx_screen_delivery_delay_max_ms,
             extract_text_f64(line, "screenDeliveryDelayMaxMs"),
+        );
+        if extract_text_value(line, "decodeFeed").is_some() {
+            evidence.final_lan_rx_decode_feed_samples += 1;
+        }
+        if extract_text_value(line, "decodeFeed").as_deref()
+            == Some(P2P_REMOTE_STRICT_IOS_DECODE_FEED_MODE)
+        {
+            evidence.final_lan_rx_strict_decode_feed_samples += 1;
+        }
+        evidence.final_lan_rx_socket_to_decode_feed_samples +=
+            extract_text_u64(line, "socketToDecodeFeedSamples").unwrap_or(0);
+        update_max_f64(
+            &mut evidence.final_lan_rx_socket_to_decode_feed_max_ms,
+            extract_text_f64(line, "socketToDecodeFeedMaxMs"),
+        );
+        evidence.final_lan_rx_socket_to_apply_end_samples +=
+            extract_text_u64(line, "socketToApplyEndSamples").unwrap_or(0);
+        update_max_f64(
+            &mut evidence.final_lan_rx_socket_to_apply_end_max_ms,
+            extract_text_f64(line, "socketToApplyEndMaxMs"),
+        );
+        evidence.final_lan_rx_decode_attempted_total +=
+            extract_text_u64(line, "decodeAttempted").unwrap_or(0);
+        evidence.final_lan_rx_decode_accepted_total +=
+            extract_text_u64(line, "decodeAccepted").unwrap_or(0);
+        evidence.final_lan_rx_decode_dropped_total +=
+            extract_text_u64(line, "decodeDropped").unwrap_or(0);
+        update_max_u64(
+            &mut evidence.final_lan_rx_decode_pending_max,
+            extract_text_u64(line, "decodePendingMax"),
+        );
+        update_max_u64(
+            &mut evidence.final_lan_rx_decode_in_flight_max,
+            extract_text_u64(line, "decodeInFlightMax"),
+        );
+        evidence.final_lan_rx_decode_waiting_sync_total +=
+            extract_text_u64(line, "decodeWaitingSyncSamples").unwrap_or(0);
+        evidence.final_lan_rx_decode_resets_total +=
+            extract_text_u64(line, "decodeResets").unwrap_or(0);
+        update_min_f64(
+            &mut evidence.final_lan_rx_min_screen_fps,
+            extract_text_f64(line, "screenFPS"),
         );
         update_max_f64(
             &mut evidence.final_lan_rx_max_screen_fps,
@@ -130,12 +227,52 @@ pub(crate) fn update_p2p_remote_final_window_ios_evidence(
             extract_text_f64(line, "rawChunkGapMaxMs"),
         );
         update_max_f64(
+            &mut evidence.final_lan_rx_main_hop_max_ms,
+            extract_text_f64(line, "maxMainHopMs"),
+        );
+        update_max_f64(
             &mut evidence.final_raw_chunk_main_hop_ms,
             extract_text_f64(line, "rawChunkMainHopMaxMs"),
         );
         update_max_u64(
             &mut evidence.final_ios_complete_frames_per_drain_max,
             extract_text_u64(line, "completeFramesPerDrainMax"),
+        );
+        if extract_text_f64(line, "parserDrainMaxMs").is_some() {
+            evidence.final_ios_parser_drain_samples += 1;
+            update_max_f64(
+                &mut evidence.final_ios_parser_drain_max_ms,
+                extract_text_f64(line, "parserDrainMaxMs"),
+            );
+        }
+        if extract_text_f64(line, "parserBudgetMs").is_some() {
+            evidence.final_ios_parser_budget_samples += 1;
+            update_max_f64(
+                &mut evidence.final_ios_parser_budget_max_ms,
+                extract_text_f64(line, "parserBudgetMs"),
+            );
+        }
+        evidence.final_ios_parser_budget_hits_total +=
+            extract_text_u64(line, "parserBudgetHits").unwrap_or(0);
+        update_max_f64(
+            &mut evidence.final_ios_parse_queue_delay_max_ms,
+            extract_text_f64(line, "parseQueueDelayMaxMs"),
+        );
+        update_max_f64(
+            &mut evidence.final_ios_parser_actor_hop_max_ms,
+            extract_text_f64(line, "parserActorHopMaxMs"),
+        );
+        update_max_f64(
+            &mut evidence.final_ios_parser_stage_max_ms,
+            extract_text_f64(line, "parserStageMaxMs"),
+        );
+        update_max_f64(
+            &mut evidence.final_ios_apply_queue_delay_max_ms,
+            extract_text_f64(line, "applyQueueDelayMaxMs"),
+        );
+        update_max_f64(
+            &mut evidence.final_ios_screen_apply_max_ms,
+            extract_text_f64(line, "screenApplyMaxMs"),
         );
         evidence.final_ios_source_samples += extract_text_u64(line, "sourceSamples").unwrap_or(0);
         update_max_f64(
@@ -146,16 +283,21 @@ pub(crate) fn update_p2p_remote_final_window_ios_evidence(
             &mut evidence.final_ios_source_to_read_max_ms,
             extract_text_f64(line, "sourceToReadMaxMs"),
         );
-        if extract_text_value(line, "sourceToReadClock").as_deref()
-            == Some("remote-wall-clock-unsynced")
-        {
-            evidence.final_ios_source_to_read_unsynced_clock_samples += 1;
+        match extract_text_value(line, "sourceToReadClock").as_deref() {
+            Some("remote-wall-clock-unsynced") => {
+                evidence.final_ios_source_to_read_unsynced_clock_samples += 1;
+            }
+            Some("local-socket-arrival") | Some("clock-synchronized-wall-clock") => {
+                evidence.final_ios_source_to_read_trusted_clock_samples += 1;
+            }
+            _ => {}
         }
     }
 
     if line.contains("Metal render telemetry") {
         evidence.final_metal_telemetry_samples += 1;
         evidence.final_metal_sample_ms += extract_text_u64(line, "sampleMs").unwrap_or(0);
+        evidence.final_metal_input += extract_text_u64(line, "input").unwrap_or(0);
         evidence.final_metal_draw_callbacks += extract_text_u64(line, "drawCallbacks").unwrap_or(0);
         evidence.final_metal_submitted += extract_text_u64(line, "submitted").unwrap_or(0);
         evidence.final_metal_displayed += extract_text_u64(line, "displayed").unwrap_or(0);
@@ -211,14 +353,23 @@ pub(crate) fn update_p2p_remote_final_window_ios_evidence(
                 Some(draw_callback_fps),
             );
         }
-        update_min_f64(
-            &mut evidence.final_metal_display_fps_min,
-            extract_text_f64(line, "displayFPS"),
-        );
-        update_max_f64(
-            &mut evidence.final_metal_display_fps_max,
-            extract_text_f64(line, "displayFPS"),
-        );
+        let input_fps = extract_text_f64(line, "inputFPS").or_else(|| {
+            extract_text_u64(line, "input")
+                .zip(extract_text_f64(line, "sampleMs"))
+                .and_then(|(input, sample_ms)| {
+                    (sample_ms > 0.0).then_some(input as f64 * 1_000.0 / sample_ms)
+                })
+        });
+        update_min_f64(&mut evidence.final_metal_input_fps_min, input_fps);
+        let display_fps = extract_text_f64(line, "displayFPS").or_else(|| {
+            extract_text_u64(line, "displayed")
+                .zip(extract_text_f64(line, "sampleMs"))
+                .and_then(|(displayed, sample_ms)| {
+                    (sample_ms > 0.0).then_some(displayed as f64 * 1_000.0 / sample_ms)
+                })
+        });
+        update_min_f64(&mut evidence.final_metal_display_fps_min, display_fps);
+        update_max_f64(&mut evidence.final_metal_display_fps_max, display_fps);
         update_max_f64(
             &mut evidence.final_metal_submitted_fps_max,
             extract_text_f64(line, "submittedFPS"),

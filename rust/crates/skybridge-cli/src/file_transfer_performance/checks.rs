@@ -1,4 +1,6 @@
 use super::evidence::FileTransferPerformanceEvidence;
+use std::collections::BTreeSet;
+
 use crate::{
     DoctorCheck, protocol_identity_binding_check_detail, protocol_identity_binding_required_ok,
     signed_kem_refresh_check_detail, signed_kem_refresh_ok, simple_doctor_check,
@@ -208,6 +210,50 @@ pub(super) fn check_file_transfer_success(
     )
 }
 
+pub(super) fn check_file_transfer_payload_integrity(
+    evidence: &FileTransferPerformanceEvidence,
+) -> DoctorCheck {
+    let matched_names = evidence.payload_digests.matched_names();
+    let mismatched_names = evidence.payload_digests.mismatched_names();
+    let missing_receiver_names = evidence.payload_digests.missing_receiver_names();
+    let missing_sender_names = evidence.payload_digests.missing_sender_names();
+    let conflicting_names = evidence.payload_digests.conflicting_names();
+    let bidirectional_run_ids = bidirectional_payload_run_ids(&matched_names);
+    let reconnect_run_ids = matched_run_ids_for_prefix(&matched_names, "mac-reconnect-smoke-");
+    let reconnect_digest_ok = !evidence.mac_reconnect_required
+        || reconnect_run_ids
+            .iter()
+            .any(|run_id| bidirectional_run_ids.contains(run_id));
+    let ok = evidence.payload_digests.sender_count() >= 2
+        && evidence.payload_digests.receiver_count() >= 2
+        && matched_names.len() >= 2
+        && !bidirectional_run_ids.is_empty()
+        && reconnect_digest_ok
+        && mismatched_names.is_empty()
+        && missing_receiver_names.is_empty()
+        && missing_sender_names.is_empty()
+        && conflicting_names.is_empty();
+
+    simple_doctor_check(
+        "file_transfer_payload_integrity",
+        ok,
+        if ok { "info" } else { "error" },
+        format!(
+            "senderCount={} receiverCount={} matchedNames={} bidirectionalRunIds={} reconnectRunIds={} reconnectDigestOk={} mismatchedNames={} missingReceiverNames={} missingSenderNames={} conflictingNames={}",
+            evidence.payload_digests.sender_count(),
+            evidence.payload_digests.receiver_count(),
+            format_name_list(&matched_names),
+            format_set(&bidirectional_run_ids),
+            format_set(&reconnect_run_ids),
+            reconnect_digest_ok,
+            format_name_list(&mismatched_names),
+            format_name_list(&missing_receiver_names),
+            format_name_list(&missing_sender_names),
+            format_name_list(&conflicting_names)
+        ),
+    )
+}
+
 pub(super) fn check_file_transfer_route_evidence(
     evidence: &FileTransferPerformanceEvidence,
 ) -> DoctorCheck {
@@ -221,4 +267,39 @@ pub(super) fn check_file_transfer_route_evidence(
             evidence.route_evidence_samples, evidence.signed_kem_refresh.request_seen
         ),
     )
+}
+
+fn format_name_list(names: &[String]) -> String {
+    if names.is_empty() {
+        "-".to_owned()
+    } else {
+        names.join("|")
+    }
+}
+
+fn bidirectional_payload_run_ids(matched_names: &[String]) -> BTreeSet<String> {
+    let ios_run_ids = matched_run_ids_for_prefix(matched_names, "ios-smoke-");
+    let mac_run_ids = matched_run_ids_for_prefix(matched_names, "mac-smoke-");
+    ios_run_ids.intersection(&mac_run_ids).cloned().collect()
+}
+
+fn matched_run_ids_for_prefix(matched_names: &[String], prefix: &str) -> BTreeSet<String> {
+    matched_names
+        .iter()
+        .filter_map(|name| smoke_run_id(name, prefix))
+        .collect()
+}
+
+fn smoke_run_id(name: &str, prefix: &str) -> Option<String> {
+    let rest = name.strip_prefix(prefix)?;
+    let run_id = rest.strip_suffix(".txt").unwrap_or(rest).trim();
+    (!run_id.is_empty()).then(|| run_id.to_owned())
+}
+
+fn format_set(values: &BTreeSet<String>) -> String {
+    if values.is_empty() {
+        "-".to_owned()
+    } else {
+        values.iter().cloned().collect::<Vec<_>>().join("|")
+    }
 }

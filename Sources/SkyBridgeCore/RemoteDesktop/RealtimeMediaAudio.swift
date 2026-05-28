@@ -285,6 +285,7 @@ actor RemoteRealtimeMediaAudioSender {
     private var lastTelemetryDroppedPackets: UInt64 = 0
     private var lastTelemetryEmptyPacingTicks: UInt64 = 0
     private var lastTelemetryLogAt = Date.distantPast
+    private var lastSubmitDroppedLogAt = Date.distantPast
     private var didPrimeTelemetryWindow = false
     private var lastSendStartedAtNanos: UInt64?
     private var interSendSamplesMs: [Double] = []
@@ -410,7 +411,14 @@ actor RemoteRealtimeMediaAudioSender {
     }
 
     func submitPCM16Chunk(_ chunk: RemoteDesktopAudioChunkPayload) async {
-        guard !closed, started else { return }
+        guard !closed else {
+            logSubmitDroppedIfNeeded(reason: "closed")
+            return
+        }
+        guard started else {
+            logSubmitDroppedIfNeeded(reason: "not-started")
+            return
+        }
         guard chunk.encoding == .pcmS16LE,
               chunk.sampleRate == profile.sampleRate,
               chunk.channelCount == profile.channels,
@@ -427,21 +435,66 @@ actor RemoteRealtimeMediaAudioSender {
         logTelemetryIfNeeded()
     }
 
-    func close() async {
+    private func logSubmitDroppedIfNeeded(reason: String) {
+        let now = Date()
+        guard now.timeIntervalSince(lastSubmitDroppedLogAt) >= 1.0 else { return }
+        lastSubmitDroppedLogAt = now
+        RemoteControlSmokeStatusWriter.append(
+            "audioTxSubmitDropped session=\(Self.sanitizeSmokeField(diagnosticSessionId)) " +
+            "reason=\(Self.sanitizeSmokeField(reason)) started=\(started ? 1 : 0) closed=\(closed ? 1 : 0) " +
+            "capturedTotal=\(capturedPackets) encodedTotal=\(encodedPackets) sentTotal=\(sentPackets) " +
+            "droppedTotal=\(droppedPackets) endpoint=\(Self.sanitizeSmokeField(endpoint.host)):\(endpoint.port) " +
+            "mode=\(Self.sanitizeSmokeField(mode.rawValue))"
+        )
+    }
+
+    func close(reason: String = "unspecified") async {
         guard !closed else { return }
         closed = true
         drainTask?.cancel()
         drainTask = nil
         relayBindingRefreshTask?.cancel()
         relayBindingRefreshTask = nil
+        let queuedFramesAtClose = pendingPCM.count / max(frameBytes, 1)
+        let queuedMsAtClose = queuedFramesAtClose * profile.frameDurationMs
         pendingPCM.removeAll(keepingCapacity: false)
         await transport.stop()
         logger.info(
             """
             🛑 PQC media audio sender closed: sent=\(self.sentPackets, privacy: .public) \
-            dropped=\(self.droppedPackets, privacy: .public)
+            dropped=\(self.droppedPackets, privacy: .public) reason=\(reason, privacy: .public)
             """
         )
+        RemoteControlSmokeStatusWriter.append(
+            "audioTxSenderClose session=\(Self.sanitizeSmokeField(diagnosticSessionId)) " +
+            "reason=\(Self.sanitizeSmokeField(reason)) capturedTotal=\(capturedPackets) " +
+            "encodedTotal=\(encodedPackets) sentTotal=\(sentPackets) droppedTotal=\(droppedPackets) " +
+            "invalidDrop=\(invalidDroppedPackets) overflowDrop=\(overflowDroppedPackets) " +
+            "staleDrop=\(staleDroppedPackets) sendFail=\(sendFailedPackets) " +
+            "queuedFrames=\(queuedFramesAtClose) queuedMs=\(queuedMsAtClose) " +
+            "endpoint=\(Self.sanitizeSmokeField(endpoint.host)):\(endpoint.port) " +
+            "mode=\(Self.sanitizeSmokeField(mode.rawValue))"
+        )
+        let diagnosticEvent = WebRTCMediaDiagnosticEvent(
+            sessionId: diagnosticSessionId,
+            kind: "audioTxSenderClosed",
+            probable: reason,
+            audioTxCapturedTotal: capturedPackets,
+            audioTxEncodedTotal: encodedPackets,
+            audioTxSentTotal: sentPackets,
+            audioDropsTotal: droppedPackets,
+            validationMode: mode.rawValue,
+            failureReason: reason
+        )
+        WebRTCMediaDiagnosticWriter.append(diagnosticEvent)
+    }
+
+    private static func sanitizeSmokeField(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: "_")
+            .replacingOccurrences(of: "\r", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
     }
 
     private func startDrainLoopIfNeeded() {
@@ -556,6 +609,8 @@ actor RemoteRealtimeMediaAudioSender {
                 sequence: reservedSequence,
                 timestampSamples: reservedTimestampSamples,
                 flags: mediaFlags(for: mode),
+                wireDirection: keys.wireDirection,
+                transcriptPrefix: keys.transcriptPrefix,
                 keyEpoch: keys.epoch,
                 nonceCounter: reservedNonceCounter
             )
@@ -774,7 +829,13 @@ actor RemoteRealtimeMediaAudioSender {
 
 @available(macOS 14.0, *)
 actor RemoteRealtimeMediaAudioReceiver {
+    private enum AuthenticatedSourceDecision: Equatable {
+        case accepted
+        case migrated
+    }
+
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "RealtimeMediaAudio")
+    private let diagnosticSessionId: String
     private let sessionIdHash: UInt64
     private let keys: SkyBridgeMediaDirectionKeys
     private let profile: SkyBridgeMediaAudioProfile
@@ -786,8 +847,13 @@ actor RemoteRealtimeMediaAudioReceiver {
     private var decodedPackets: UInt64 = 0
     private var playedPackets: UInt64 = 0
     private var rejectedPackets: UInt64 = 0
+    private var sourceRejectedPackets: UInt64 = 0
+    private var sourceMigratedPackets: UInt64 = 0
     private var plcFrames: UInt64 = 0
     private var lastTelemetryLogAt = Date.distantPast
+    private var lockedRemoteEndpoint: SkyBridgeMediaEndpoint?
+    private var lastSourceMismatchLogAt = Date.distantPast
+    private var lastSourceMigrationLogAt = Date.distantPast
 
     init(
         sessionId: String,
@@ -795,6 +861,7 @@ actor RemoteRealtimeMediaAudioReceiver {
         mode: SkyBridgeMediaAudioMode,
         audioSessionId: UUID
     ) throws {
+        self.diagnosticSessionId = sessionId
         self.sessionIdHash = SkyBridgeMediaPacketCodec.sessionIdHash(sessionId)
         self.keys = keys
         self.mode = mode
@@ -808,10 +875,34 @@ actor RemoteRealtimeMediaAudioReceiver {
     }
 
     func handle(packet: Data, latestVideoTimestamp: TimeInterval?) async {
+        await handle(
+            datagram: SkyBridgeMediaReceivedDatagram(packet: packet, remoteEndpoint: nil),
+            latestVideoTimestamp: latestVideoTimestamp
+        )
+    }
+
+    func handle(datagram: SkyBridgeMediaReceivedDatagram, latestVideoTimestamp: TimeInterval?) async {
         do {
-            let opened = try SkyBridgeMediaPacketCodec.open(packet: packet, keys: keys)
-            guard opened.header.sessionIdHash == sessionIdHash,
-                  replayWindow.accept(sequence: opened.header.sequence) else {
+            let opened = try SkyBridgeMediaPacketCodec.open(
+                packet: datagram.packet,
+                keys: keys,
+                expectedSessionIdHash: sessionIdHash,
+                expectedStreamId: SkyBridgeRealtimeMediaConstants.defaultStreamId
+            )
+            guard let sourceDecision = acceptAuthenticatedSource(
+                datagram.remoteEndpoint,
+                sequence: opened.header.sequence
+            ) else {
+                sourceRejectedPackets &+= 1
+                rejectedPackets &+= 1
+                logTelemetryIfNeeded()
+                return
+            }
+            if sourceDecision == .migrated {
+                replayWindow = SkyBridgeMediaReplayWindow()
+                sourceMigratedPackets &+= 1
+            }
+            guard replayWindow.accept(sequence: opened.header.sequence) else {
                 rejectedPackets &+= 1
                 logTelemetryIfNeeded()
                 return
@@ -854,7 +945,7 @@ actor RemoteRealtimeMediaAudioReceiver {
         logTelemetryIfNeeded()
     }
 
-    func close() async {
+    func close(reason: String = "unspecified") async {
         await MainActor.run {
             AudioRedirectionManager.shared.disable()
         }
@@ -862,9 +953,21 @@ actor RemoteRealtimeMediaAudioReceiver {
             """
             🛑 PQC media audio receiver closed: recv=\(self.receivedPackets, privacy: .public) \
             decode=\(self.decodedPackets, privacy: .public) play=\(self.playedPackets, privacy: .public) \
-            rejected=\(self.rejectedPackets, privacy: .public)
+            rejected=\(self.rejectedPackets, privacy: .public) reason=\(reason, privacy: .public)
             """
         )
+        let diagnosticEvent = WebRTCMediaDiagnosticEvent(
+            sessionId: diagnosticSessionId,
+            kind: "audioRxReceiverClosed",
+            probable: receivedPackets == 0 ? "audio-rx-no-positive-evidence" : nil,
+            audioRxRecv: receivedPackets,
+            audioRxDecoded: decodedPackets,
+            audioRxPlayed: playedPackets,
+            audioRxRejected: rejectedPackets,
+            validationMode: mode.rawValue,
+            failureReason: reason
+        )
+        WebRTCMediaDiagnosticWriter.append(diagnosticEvent)
     }
 
     func diagnosticSnapshot() -> RealtimeMediaAudioReceiverDiagnosticSnapshot {
@@ -887,9 +990,75 @@ actor RemoteRealtimeMediaAudioReceiver {
             📈 PQC media audio rx: recv=\(self.receivedPackets, privacy: .public) \
             decode=\(self.decodedPackets, privacy: .public) play=\(self.playedPackets, privacy: .public) \
             rejected=\(self.rejectedPackets, privacy: .public) plc=\(self.plcFrames, privacy: .public) \
+            sourceReject=\(self.sourceRejectedPackets, privacy: .public) sourceMigrate=\(self.sourceMigratedPackets, privacy: .public) \
             codec=opus activeCodec=opus audioPath=pqc-opus-via-audio-redirection mode=\(self.mode.rawValue, privacy: .public)
             """
         )
+    }
+
+    private func acceptAuthenticatedSource(
+        _ remoteEndpoint: SkyBridgeMediaEndpoint?,
+        sequence: UInt64
+    ) -> AuthenticatedSourceDecision? {
+        guard let remoteEndpoint else {
+            return .accepted
+        }
+        if let lockedRemoteEndpoint {
+            if Self.normalized(lockedRemoteEndpoint) == Self.normalized(remoteEndpoint) {
+                return .accepted
+            }
+            guard Self.normalizedHost(lockedRemoteEndpoint) == Self.normalizedHost(remoteEndpoint) else {
+                logSourceMismatch(locked: lockedRemoteEndpoint, incoming: remoteEndpoint)
+                return nil
+            }
+            self.lockedRemoteEndpoint = remoteEndpoint
+            logSourceMigration(from: lockedRemoteEndpoint, to: remoteEndpoint, sequence: sequence)
+            return .migrated
+        }
+        lockedRemoteEndpoint = remoteEndpoint
+        let normalized = Self.normalized(remoteEndpoint)
+        logger.info(
+            "🎧 PQC media audio source locked: host=\(normalized.host, privacy: .public) port=\(normalized.port, privacy: .public)"
+        )
+        return .accepted
+    }
+
+    private func logSourceMismatch(locked: SkyBridgeMediaEndpoint, incoming: SkyBridgeMediaEndpoint) {
+        let now = Date()
+        guard now.timeIntervalSince(lastSourceMismatchLogAt) >= 2 else { return }
+        lastSourceMismatchLogAt = now
+        let lockedNormalized = Self.normalized(locked)
+        let incomingNormalized = Self.normalized(incoming)
+        logger.debug(
+            "PQC media audio rejected unexpected source: locked=\(lockedNormalized.host, privacy: .public):\(lockedNormalized.port, privacy: .public) incoming=\(incomingNormalized.host, privacy: .public):\(incomingNormalized.port, privacy: .public)"
+        )
+    }
+
+    private func logSourceMigration(from locked: SkyBridgeMediaEndpoint, to incoming: SkyBridgeMediaEndpoint, sequence: UInt64) {
+        let now = Date()
+        guard now.timeIntervalSince(lastSourceMigrationLogAt) >= 2 else { return }
+        lastSourceMigrationLogAt = now
+        let lockedNormalized = Self.normalized(locked)
+        let incomingNormalized = Self.normalized(incoming)
+        logger.info(
+            "🎧 PQC media audio source migrated: old=\(lockedNormalized.host, privacy: .public):\(lockedNormalized.port, privacy: .public) incoming=\(incomingNormalized.host, privacy: .public):\(incomingNormalized.port, privacy: .public) seq=\(sequence, privacy: .public)"
+        )
+    }
+
+    private static func normalized(_ endpoint: SkyBridgeMediaEndpoint) -> SkyBridgeMediaEndpoint {
+        SkyBridgeMediaEndpoint(
+            host: normalizedHost(endpoint),
+            port: endpoint.port,
+            relayToken: nil,
+            expiresAt: nil
+        )
+    }
+
+    private static func normalizedHost(_ endpoint: SkyBridgeMediaEndpoint) -> String {
+        endpoint.host
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
     }
 
     private static func data(from samples: [Int16]) -> Data {

@@ -127,7 +127,7 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
     /// 启动设备发现（使用iCloud KV Store）
     public func startDiscovery() async {
         if isStarted {
-            sendHeartbeat()
+            await sendHeartbeat()
             fetchDevices()
             return
         }
@@ -163,6 +163,7 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         discoveryStatus = .discovering
 
  // 2. 注册当前设备
+        await refreshCurrentDeviceIdentityHints()
         registerCurrentDevice()
 
  // 3. 同步并获取设备列表
@@ -206,7 +207,7 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
  /// 更新本机心跳
     public func updateHeartbeat() async {
         logger.info("💓 手动更新心跳")
-        sendHeartbeat()
+        await sendHeartbeat()
     }
 
  /// 移除已离线的设备
@@ -322,8 +323,8 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
 
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: self.refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.sendHeartbeat() // sendHeartbeat 是同步方法，不需要 await
-                self?.fetchDevices() // fetchDevices 是同步方法，不需要 await
+                await self?.sendHeartbeat()
+                self?.fetchDevices()
             }
         }
 
@@ -331,16 +332,37 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
     }
 
  /// 发送设备心跳
-    private func sendHeartbeat() {
+    private func sendHeartbeat() async {
         guard var device = currentDevice else { return }
 
  // 更新最后活跃时间
         device.lastSeen = Date()
         device.ipAddress = getLocalIPAddress()
         currentDevice = device
+        await refreshCurrentDeviceIdentityHints()
 
- // 更新到CloudKit（registerCurrentDevice 是同步方法，不需要 await）
         registerCurrentDevice()
+    }
+
+    private func refreshCurrentDeviceIdentityHints() async {
+        guard var device = currentDevice else { return }
+        let snapshot = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+        let stableIdentity = normalizeIdentityHint(snapshot.deviceId)
+        let generatedFingerprint = await SelfIdentityProvider.shared.generateRegistrationFingerprint()
+        let registrationFingerprint = normalizeIdentityHint(generatedFingerprint)
+
+        var changed = false
+        if device.stableIdentityDeviceId != stableIdentity {
+            device.stableIdentityDeviceId = stableIdentity
+            changed = true
+        }
+        if device.registrationFingerprint != registrationFingerprint {
+            device.registrationFingerprint = registrationFingerprint
+            changed = true
+        }
+        if changed {
+            currentDevice = device
+        }
     }
 
  // MARK: - 工具方法
@@ -361,6 +383,13 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         let newUUID = UUID().uuidString
         UserDefaults.standard.set(newUUID, forKey: key)
         return newUUID
+    }
+
+    private func normalizeIdentityHint(_ value: String?) -> String? {
+        let normalized = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalized?.isEmpty == false ? normalized : nil
     }
 
  /// 获取Mac序列号
@@ -412,12 +441,14 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
 
  /// 获取本地IP地址
     private func getLocalIPAddress() -> String? {
-        var address: String?
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
 
         guard getifaddrs(&ifaddr) == 0 else { return nil }
         defer { freeifaddrs(ifaddr) }
 
+        var en0IPv4: String?
+        var wifiIPv4: String?
+        var otherIPv4: String?
         var ptr = ifaddr
         while ptr != nil {
             defer { ptr = ptr?.pointee.ifa_next }
@@ -428,28 +459,46 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
             let addrFamily = addressPtr.pointee.sa_family
 
             if addrFamily == UInt8(AF_INET) {
- // 统一采用 UTF8 安全解码替代已弃用的 String(cString:)
                 let name = decodeCString(namePtr)
-                if name == "en0" {  // Wi-Fi interface
-                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    getnameinfo(
-                        addressPtr,
-                        socklen_t(addressPtr.pointee.sa_len),
-                        &hostname,
-                        socklen_t(hostname.count),
-                        nil,
-                        0,
-                        NI_NUMERICHOST
-                    )
-                    let data = Data(bytes: hostname, count: hostname.count)
-                    let trimmed = data.prefix { $0 != 0 }
-                    address = String(decoding: trimmed, as: UTF8.self)
-                    break
+                guard let ipAddress = numericHost(from: addressPtr),
+                      isAdvertisableRoutableIPv4(ipAddress) else { continue }
+                if name == "en0", en0IPv4 == nil {
+                    en0IPv4 = ipAddress
+                } else if name.hasPrefix("en"), wifiIPv4 == nil {
+                    wifiIPv4 = ipAddress
+                } else if otherIPv4 == nil {
+                    otherIPv4 = ipAddress
                 }
             }
         }
 
-        return address
+        return en0IPv4 ?? wifiIPv4 ?? otherIPv4
+    }
+
+    private func numericHost(from address: UnsafePointer<sockaddr>) -> String? {
+        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = getnameinfo(
+            address,
+            socklen_t(address.pointee.sa_len),
+            &hostname,
+            socklen_t(hostname.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+        )
+        guard result == 0 else { return nil }
+        let data = Data(bytes: hostname, count: hostname.count)
+        let trimmed = data.prefix { $0 != 0 }
+        return String(decoding: trimmed, as: UTF8.self)
+    }
+
+    private func isAdvertisableRoutableIPv4(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard IPv4Address(value) != nil else { return false }
+        return !value.hasPrefix("169.254.")
+            && !value.hasPrefix("127.")
+            && !value.hasPrefix("0.")
+            && value != "255.255.255.255"
     }
 }
 
@@ -467,8 +516,25 @@ public struct iCloudDevice: Identifiable, Codable, Hashable, Sendable {
     public var isOnline: Bool
     public var networkType: NetworkType
     public var ipAddress: String?
+    public var stableIdentityDeviceId: String?
+    public var registrationFingerprint: String?
+    public var vendorDeviceId: String?
 
-    public init(id: String, name: String, model: String, osVersion: String, appVersion: String, lastSeen: Date, capabilities: [DeviceCapability], isOnline: Bool, networkType: NetworkType, ipAddress: String? = nil) {
+    public init(
+        id: String,
+        name: String,
+        model: String,
+        osVersion: String,
+        appVersion: String,
+        lastSeen: Date,
+        capabilities: [DeviceCapability],
+        isOnline: Bool,
+        networkType: NetworkType,
+        ipAddress: String? = nil,
+        stableIdentityDeviceId: String? = nil,
+        registrationFingerprint: String? = nil,
+        vendorDeviceId: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.model = model
@@ -479,6 +545,9 @@ public struct iCloudDevice: Identifiable, Codable, Hashable, Sendable {
         self.isOnline = isOnline
         self.networkType = networkType
         self.ipAddress = ipAddress
+        self.stableIdentityDeviceId = stableIdentityDeviceId
+        self.registrationFingerprint = registrationFingerprint
+        self.vendorDeviceId = vendorDeviceId
     }
 
  /// 设备类型图标

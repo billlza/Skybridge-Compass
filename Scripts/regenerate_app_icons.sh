@@ -122,28 +122,38 @@ if grep -qi 'warning:' "$ICON_COMPOSER_LOG"; then
   exit 1
 fi
 
-if [[ ! -f "$ICON_COMPOSER_OUT/AppIcon.icns" ]]; then
-  echo "actool did not produce AppIcon.icns" >&2
+if [[ ! -f "$ICON_COMPOSER_OUT/AppIcon.icns" || ! -f "$ICON_COMPOSER_OUT/Assets.car" ]]; then
+  echo "actool did not produce AppIcon.icns/Assets.car" >&2
   exit 1
 fi
 
-cp "$ICON_COMPOSER_OUT/AppIcon.icns" "$RES_DIR/AppIcon.icns"
+generate_full_size_icns() {
+  local base="$1"
+  local iconset="$TMP_DIR/${base}.iconset"
+  local src="$RES_DIR/${base}.png"
 
-for base in AppIconDock; do
-  ICONSET="$TMP_DIR/${base}.iconset"
-  mkdir -p "$ICONSET"
-  SRC="$RES_DIR/${base}.png"
-  sips -z 16 16 "$SRC" --out "$ICONSET/icon_16x16.png" >/dev/null
-  sips -z 32 32 "$SRC" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
-  sips -z 32 32 "$SRC" --out "$ICONSET/icon_32x32.png" >/dev/null
-  sips -z 64 64 "$SRC" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
-  sips -z 128 128 "$SRC" --out "$ICONSET/icon_128x128.png" >/dev/null
-  sips -z 256 256 "$SRC" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
-  sips -z 256 256 "$SRC" --out "$ICONSET/icon_256x256.png" >/dev/null
-  sips -z 512 512 "$SRC" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
-  sips -z 512 512 "$SRC" --out "$ICONSET/icon_512x512.png" >/dev/null
-  cp "$SRC" "$ICONSET/icon_512x512@2x.png"
-  iconutil -c icns "$ICONSET" -o "$RES_DIR/${base}.icns"
+  if [[ ! -f "$src" ]]; then
+    echo "missing source png for $base: $src" >&2
+    exit 1
+  fi
+
+  rm -rf "$iconset"
+  mkdir -p "$iconset"
+  sips -z 16 16 "$src" --out "$iconset/icon_16x16.png" >/dev/null
+  sips -z 32 32 "$src" --out "$iconset/icon_16x16@2x.png" >/dev/null
+  sips -z 32 32 "$src" --out "$iconset/icon_32x32.png" >/dev/null
+  sips -z 64 64 "$src" --out "$iconset/icon_32x32@2x.png" >/dev/null
+  sips -z 128 128 "$src" --out "$iconset/icon_128x128.png" >/dev/null
+  sips -z 256 256 "$src" --out "$iconset/icon_128x128@2x.png" >/dev/null
+  sips -z 256 256 "$src" --out "$iconset/icon_256x256.png" >/dev/null
+  sips -z 512 512 "$src" --out "$iconset/icon_256x256@2x.png" >/dev/null
+  sips -z 512 512 "$src" --out "$iconset/icon_512x512.png" >/dev/null
+  cp "$src" "$iconset/icon_512x512@2x.png"
+  iconutil -c icns "$iconset" -o "$RES_DIR/${base}.icns"
+}
+
+for base in AppIcon AppIconDock; do
+  generate_full_size_icns "$base"
 done
 
-echo "regenerated app icons from $MASTER_SVG with Icon Composer AppIcon.icns"
+echo "regenerated app icons from $MASTER_SVG with Icon Composer validation and full-size icns files"

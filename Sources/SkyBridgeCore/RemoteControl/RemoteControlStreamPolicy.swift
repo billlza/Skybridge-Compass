@@ -95,11 +95,11 @@ enum RemoteControlCaptureCompatibility {
         case (kVTInvalidSessionErr, .hevc),
              (kVTVideoEncoderMalfunctionErr, .hevc),
              (kVTVideoEncoderNotAvailableNowErr, .hevc):
-            return .h264
+            return nil
         case (kVTInvalidSessionErr, .h264),
              (kVTVideoEncoderMalfunctionErr, .h264),
              (kVTVideoEncoderNotAvailableNowErr, .h264):
-            return .bgra
+            return nil
         default:
             return nil
         }
@@ -163,14 +163,14 @@ enum RemoteControlStreamPolicySelector {
                 reason = exactOddVisibleDimension
                     ? "low-latency-high-fps-hevc-exact-visible"
                     : "low-latency-high-fps-hevc"
-            } else if supportsH264 && !exactOddVisibleDimension {
-                codec = .h264
-                reason = "low-latency-h264"
             } else if supportsHEVC {
                 codec = .hevc
                 reason = exactOddVisibleDimension
                     ? "low-latency-hevc-exact-visible"
-                    : "low-latency-hevc-fallback"
+                    : "low-latency-hevc"
+            } else if supportsH264 && !exactOddVisibleDimension {
+                codec = .h264
+                reason = "low-latency-h264-explicit"
             } else if supportsJPEG {
                 codec = .bgra
                 reason = "low-latency-jpeg-compat"
@@ -183,7 +183,6 @@ enum RemoteControlStreamPolicySelector {
             reason = "peer-hevc-supported"
         } else if request.preferredCodec == .h264,
                   supportsHEVC,
-                  supportsH264,
                   requestedFPS >= 55,
                   longEdge >= 2_000,
                   isAppleSilicon,
@@ -191,18 +190,22 @@ enum RemoteControlStreamPolicySelector {
                   request.enableAppleSiliconOptimization {
             codec = .hevc
             reason = "high-fps-lan-hevc-probe"
+        } else if request.preferredCodec == .h264,
+                  supportsHEVC {
+            codec = .hevc
+            reason = "hevc-preferred-over-h264-request"
         } else if request.preferredCodec == .h264 && supportsH264 {
             codec = .h264
-            reason = "peer-h264-supported"
+            reason = "explicit-h264-request"
         } else if longEdge >= 3840 && supportsHEVC {
             codec = .hevc
             reason = "high-resolution-hevc"
-        } else if supportsH264 {
-            codec = .h264
-            reason = "fallback-h264"
         } else if supportsHEVC {
             codec = .hevc
-            reason = "fallback-hevc"
+            reason = "peer-hevc-supported"
+        } else if supportsH264 {
+            codec = .h264
+            reason = "h264-only-peer"
         } else if supportsJPEG {
             codec = .bgra
             reason = "legacy-jpeg-compat"

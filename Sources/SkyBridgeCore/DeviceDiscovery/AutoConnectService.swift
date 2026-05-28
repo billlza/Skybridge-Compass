@@ -84,6 +84,7 @@ public class AutoConnectService: ObservableObject {
     
     private init() {
         loadPairedDevices()
+        applyRuntimeSettingsSnapshot()
         setupSettingsObserver()
         setupDeviceDiscoveryObserver()
     }
@@ -98,6 +99,27 @@ public class AutoConnectService: ObservableObject {
                 self?.autoConnectEnabled = enabled
             }
             .store(in: &cancellables)
+
+        SettingsManager.shared.$connectionTimeout
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.connectionTimeout = TimeInterval(max(5, min(120, value)))
+            }
+            .store(in: &cancellables)
+
+        SettingsManager.shared.$retryCount
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] value in
+                self?.maxAutoConnectAttempts = max(1, min(10, value))
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyRuntimeSettingsSnapshot() {
+        let settings = SettingsManager.shared
+        autoConnectEnabled = settings.autoConnectPairedDevices
+        connectionTimeout = TimeInterval(max(5, min(120, settings.connectionTimeout)))
+        maxAutoConnectAttempts = max(1, min(10, settings.retryCount))
     }
     
     private func setupDeviceDiscoveryObserver() {
@@ -203,9 +225,9 @@ public class AutoConnectService: ObservableObject {
         guard autoConnectEnabled else { return }
         
         let deviceId = device.id.uuidString
-        
- // 检查是否为已配对设备
-        guard let pairedDevice = pairedDevices.first(where: { $0.id == deviceId }) else {
+
+ // 检查是否为已配对设备。动态发现的 UUID 可能变化，因此优先用协议指纹/名称兜底匹配。
+        guard let pairedDevice = pairedDeviceRecord(for: device) else {
             return
         }
         
@@ -231,6 +253,21 @@ public class AutoConnectService: ObservableObject {
  // 发起自动连接
         logger.info("🔗 发起自动连接到配对设备: \(pairedDevice.name)")
         initiateAutoConnect(to: device)
+    }
+
+    private func pairedDeviceRecord(for device: DiscoveredDevice) -> PairedDevice? {
+        let deviceId = device.id.uuidString
+        if let record = pairedDevices.first(where: { $0.id == deviceId }) {
+            return record
+        }
+        if let fingerprint = device.pubKeyFP?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !fingerprint.isEmpty,
+           let record = pairedDevices.first(where: { $0.publicKeyFingerprint == fingerprint }) {
+            return record
+        }
+        return pairedDevices.first { record in
+            record.name == device.name && record.deviceType == device.deviceType.rawValue
+        }
     }
     
  /// 发起自动连接
@@ -361,9 +398,11 @@ public class AutoConnectService: ObservableObject {
     
  /// 检查可连接的配对设备
     private func checkForPairedDevices() async {
- // 获取当前发现的设备列表
- // 这里应该从设备发现服务获取
- // 简化实现：发送检查请求
+ // 获取当前发现的设备列表并立即执行自动连接判断，通知仍保留给其它监听者。
+        let candidates = DeviceDiscoveryService.shared.discoveredDevices + P2PDiscoveryService.shared.discoveredDevices
+        for device in candidates {
+            handleDiscoveredDevice(device)
+        }
         NotificationCenter.default.post(name: .checkPairedDevicesAvailability, object: nil)
     }
     

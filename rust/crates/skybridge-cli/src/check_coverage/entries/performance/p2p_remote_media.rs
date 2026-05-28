@@ -16,11 +16,14 @@ pub(super) fn append_entries(
                 "audio_explicit_rx_samples",
                 "final_audio_status_samples",
                 "final_audio_rx_played_max",
+                "audio_zero_rx_after_playback_samples",
+                "audio_zero_datagram_after_playback_samples",
+                "zeroRxAfterPlayback",
                 "audio_jitter_evicted",
                 "audio_playback_continuity",
             ],
         ),
-        evidence: "blocks audio jitter eviction, stalls, drops, underflow, missing playback counters, and missing final-window audio progress through doctor checks".to_owned(),
+        evidence: "blocks audio jitter eviction, zero-rx-after-playback, zero-datagram-after-playback, stalls, drops, underflow, missing playback counters, and missing final-window audio progress through doctor checks".to_owned(),
     });
     entries.push(CheckCoverageEntry {
         id: "fallback_detection_gate",
@@ -31,6 +34,8 @@ pub(super) fn append_entries(
             &[
                 "check_p2p_remote_no_fallback",
                 "p2p_remote_fallback_parser_flags_real_fallback_lines",
+                "attemptedFallback=sampleBufferDisplayLayer",
+                "fallbackResult=activated",
                 "strict_media_failure",
             ],
         ),
@@ -66,6 +71,7 @@ pub(super) fn append_entries(
                 "replacementStructured",
                 "maxAllowedQueueDepth",
                 "final_metal_coalesced_total",
+                "inputFPSGate",
                 "final_metal_display_fps_min",
                 "p2p_remote_metal_render_queue_rejects_drop_depth_and_fallback_rendering",
             ],

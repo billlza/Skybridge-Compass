@@ -5,6 +5,6 @@
 [2026-05-16T01:00:00.010Z] SKR-1 signed LAN KEM refresh request peer=mac endpoint=192.168.0.2:51234 selectedEndpointClass=direct-host selectedEndpointDirect=1 directHostCandidate=1 suites=X-Wing suiteWireIds=0x0001 pinnedProtocolIdentity=1 lifecycle=missing-kem>request
 [2026-05-16T01:00:00.020Z] boot role=ios-p2p-client target=mac
 [2026-05-16T01:00:00.200Z] SKR-1 signed LAN KEM refresh verified and imported peer=mac suites=X-Wing wireId=0x0001 pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=72.0 jitterMs=51.0 successRatePct=100.0 applicationLossPct=0 retryCount=0 lifecycle=served>verified
-[2026-05-16T01:00:00.300Z] file-transfer outbound-complete name=ios-smoke-GOLDEN.txt
-[2026-05-16T01:00:00.310Z] file-transfer inbound-complete name=mac-smoke-GOLDEN.txt
+[2026-05-16T01:00:00.300Z] file-transfer outbound-complete name=ios-smoke-GOLDEN.txt sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+[2026-05-16T01:00:00.310Z] file-transfer inbound-complete name=mac-smoke-GOLDEN.txt sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 [2026-05-16T01:00:00.320Z] success suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0

@@ -378,6 +378,7 @@
 "status.idle" = "空闲";
 "status.enabled" = "已启用";
 "status.disabled" = "已禁用";
+"status.unavailable" = "不可用";
 "status.optimized" = "已优化";
 "status.needsAdjust" = "需调整";
 "status.load.high" = "高负载";
@@ -601,6 +602,7 @@
 "settings.remote.network.title" = "网络优化";
 "settings.remote.network.enableBandwidthAdaptive" = "启用带宽自适应";
 "settings.remote.network.enableUDP" = "启用UDP传输";
+"settings.remote.network.enableEncryption" = "启用网络加密";
 "settings.remote.network.enableCompression" = "启用数据压缩";
 "settings.remote.network.bandwidthLimit" = "带宽限制 (Mbps):";
 "settings.remote.network.bufferSize" = "缓冲区大小:";
@@ -611,6 +613,7 @@
 "settings.systemMonitor.config.enableHistory" = "启用历史记录";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "启用性能警报";
 "settings.systemMonitor.config.retentionDays" = "数据保留天数:";
+"settings.systemMonitor.config.maxHistoryPoints" = "最大历史数据点:";
 "settings.systemMonitor.display.title" = "显示选项";
 "settings.systemMonitor.display.cpu" = "显示CPU使用率";
 "settings.systemMonitor.display.memory" = "显示内存使用率";
@@ -625,7 +628,9 @@
 "settings.systemMonitor.alerts.cpuThreshold" = "CPU警报阈值:";
 "settings.systemMonitor.alerts.memoryThreshold" = "内存警报阈值:";
 "settings.systemMonitor.alerts.diskThreshold" = "磁盘警报阈值:";
+"settings.systemMonitor.alerts.enableTemperatureMonitoring" = "启用温度监控";
 "settings.systemMonitor.alerts.temperatureThreshold" = "温度警报阈值:";
+"settings.systemMonitor.alerts.enableFanSpeedMonitoring" = "启用风扇转速监控";
 "settings.systemMonitor.alerts.fanSpeedThreshold" = "风扇转速警报阈值:";
 "settings.systemMonitor.alerts.thermalThrottling" = "启用热节流警报";
 "settings.systemMonitor.alerts.enableSound" = "启用声音警报";
@@ -730,6 +735,16 @@
 "about.title" = "关于 SkyBridge Compass Pro";
 "about.checkingUpdates" = "正在检查更新...";
 "about.checkUpdates" = "检查更新";
+"update.available.title" = "发现新版本";
+"update.available.message" = "SkyBridge Compass Pro %@ (Build %@) 可用，最低需要 macOS %@。更新包为 Developer ID 签名并公证的 DMG，下载后将由 macOS Gatekeeper 验证。";
+"update.latest.title" = "已是最新版本";
+"update.latest.message" = "SkyBridge Compass Pro %@ 已是当前稳定版。";
+"update.unsupported.title" = "发现新版本，但系统不满足要求";
+"update.unsupported.message" = "版本 %@ 最低需要 macOS %@，当前系统为 macOS %@。";
+"update.failed.title" = "检查更新失败";
+"update.failed.message" = "无法完成更新检查：%@";
+"update.download" = "下载更新";
+"update.later" = "稍后";
 "about.systemInfo" = "系统信息";
 "about.diagnostics" = "诊断工具";
 "about.feedback" = "反馈问题";
@@ -1148,3 +1163,23 @@
 "common.yes" = "是";
 "common.no" = "否";
 "common.done" = "完成";
+
+/* 远控安全提示 */
+"remoteControl.securityNotice.windowTitle" = "远程控制安全提示";
+"remoteControl.securityNotice.appName" = "云桥司南";
+"remoteControl.securityNotice.pendingTitle" = "%@ 正在请求远程控制批准";
+"remoteControl.securityNotice.activeTitle" = "%@ 正在被远程控制";
+"remoteControl.securityNotice.subtitle" = "入站 %@ 远控受量子安全/PQC 加密保护。";
+"remoteControl.securityNotice.transport.p2p" = "P2P";
+"remoteControl.securityNotice.transport.webrtc" = "WebRTC";
+"remoteControl.securityNotice.remoteIP" = "IP";
+"remoteControl.securityNotice.transport" = "传输";
+"remoteControl.securityNotice.account" = "账号";
+"remoteControl.securityNotice.nebulaID" = "NebulaID";
+"remoteControl.securityNotice.device" = "设备身份";
+"remoteControl.securityNotice.pqc" = "PQC 套件";
+"remoteControl.securityNotice.approve" = "批准";
+"remoteControl.securityNotice.reject" = "拒绝";
+"remoteControl.securityNotice.disconnect" = "断开";
+"remoteControl.securityNotice.close" = "关闭";
+"remoteControl.securityNotice.valueUnavailable" = "未提供";

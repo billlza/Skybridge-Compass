@@ -3,6 +3,37 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
+    func testCrossNetworkPresenceUsesStableDeviceIdWhenAvailable() {
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.crossNetworkPresencePeerID(
+                sessionID: "session-route-1",
+                deviceId: "remote-device-alpha"
+            ),
+            "id:remote-device-alpha"
+        )
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.crossNetworkPresencePeerID(
+                sessionID: "session-route-1",
+                deviceId: "id:REMOTE-DEVICE-ALPHA"
+            ),
+            "id:remote-device-alpha"
+        )
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.crossNetworkPresencePeerID(
+                sessionID: "session-route-1",
+                deviceId: "cross-network:session-route-2"
+            ),
+            "cross-network:session-route-1"
+        )
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.crossNetworkPresencePeerID(
+                sessionID: "session-route-1",
+                deviceId: nil
+            ),
+            "cross-network:session-route-1"
+        )
+    }
+
     func testInitialWebRTCHandshakeStartsFromOffererOnly() {
         XCTAssertTrue(
             WebRTCPQCHandshakePolicy.shouldInitiateInitialWebRTCHandshake(role: .offerer)
@@ -479,34 +510,174 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(legacyDiscoverySource.contains("RemoteControlSmokeStatusWriter.append(controlResponse.statusLine)"))
 
         let localHostSource = try readSource("Sources/LocalLanInteropHost/main.swift")
-        XCTAssertTrue(localHostSource.contains("timer.schedule(deadline: .now(), repeating: .milliseconds(8)"))
-        XCTAssertTrue(localHostSource.contains("import QuartzCore"))
-        XCTAssertTrue(localHostSource.contains("private let accentLayer = CALayer()"))
-        XCTAssertTrue(localHostSource.contains("CATransaction.setDisableActions(true)"))
-        XCTAssertTrue(localHostSource.contains("CATransaction.flush()"))
-        XCTAssertTrue(localHostSource.contains("let window = NSPanel("))
-        XCTAssertTrue(localHostSource.contains("window.hidesOnDeactivate = false"))
-        XCTAssertTrue(localHostSource.contains("window.level = .floating"))
-        XCTAssertTrue(localHostSource.contains("window.displayIfNeeded()"))
-        XCTAssertTrue(localHostSource.contains("application.updateWindows()"))
-        XCTAssertTrue(localHostSource.contains("let mainDisplayID = CGMainDisplayID()"))
-        XCTAssertTrue(localHostSource.contains("Self.screen(for: mainDisplayID)"))
-        XCTAssertTrue(localHostSource.contains("displayID=\\(displayID)"))
-        XCTAssertTrue(localHostSource.contains("windowVisible=\\(visible)"))
-        XCTAssertTrue(localHostSource.contains("windowOcclusionVisible=\\(occlusionVisible)"))
-        XCTAssertTrue(localHostSource.contains("windowLevel=\\(level)"))
-        XCTAssertTrue(localHostSource.contains("windowFrame=\\(Int(windowFrame.origin.x))"))
+        XCTAssertTrue(localHostSource.contains("ready remote=_skybridge-remote._tcp"))
+        XCTAssertTrue(localHostSource.contains("NSApplication.shared.run()"))
+        XCTAssertTrue(localHostSource.contains("LocalLanInteropHostLifetime.coordinator = coordinator"))
+        XCTAssertFalse(localHostSource.contains("SmokeCaptureAnimationSource"))
+        XCTAssertFalse(localHostSource.contains("SmokeCaptureAnimationView"))
+        XCTAssertFalse(localHostSource.contains("SmokeCaptureMetalRenderer"))
+        XCTAssertFalse(localHostSource.contains("SKYBRIDGE_SMOKE_REMOTE_ANIMATION"))
+        XCTAssertFalse(localHostSource.contains("import MetalKit"))
+        XCTAssertFalse(localHostSource.contains("private let accentLayer = CALayer()"))
+        XCTAssertFalse(localHostSource.contains("CATransaction.setDisableActions(true)"))
+
+        let smokeSourceHost = try readSource("Sources/LocalLanSmokeSourceHost/main.swift")
+        XCTAssertTrue(smokeSourceHost.contains("beginActivity("))
+        XCTAssertTrue(smokeSourceHost.contains(".userInitiatedAllowingIdleSystemSleep"))
+        XCTAssertTrue(smokeSourceHost.contains(".latencyCritical"))
+        XCTAssertTrue(smokeSourceHost.contains(".suddenTerminationDisabled"))
+        XCTAssertTrue(smokeSourceHost.contains(".automaticTerminationDisabled"))
+        XCTAssertTrue(smokeSourceHost.contains("appNapDisabled=1"))
+        XCTAssertTrue(smokeSourceHost.contains("applyUserInteractiveMainThreadQoS()"))
+        XCTAssertTrue(smokeSourceHost.contains("pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE"))
+        XCTAssertTrue(smokeSourceHost.contains("mainThreadQOS=userInteractive"))
+        XCTAssertTrue(smokeSourceHost.contains("fileprivate static let targetCaptureFramesPerSecond = 60"))
+        XCTAssertTrue(smokeSourceHost.contains("private static func renderFramesPerSecond(for _: NSScreen?) -> Int"))
+        XCTAssertTrue(smokeSourceHost.contains("targetCaptureFramesPerSecond"))
+        XCTAssertTrue(smokeSourceHost.contains("private static let statusReportIntervalSeconds: TimeInterval = 1"))
+        XCTAssertTrue(smokeSourceHost.contains("private static let staleRenderRepairThresholdMilliseconds = 100.0"))
+        XCTAssertTrue(smokeSourceHost.contains("process=helper"))
+        XCTAssertTrue(smokeSourceHost.contains("DispatchSource.makeTimerSource(queue: .main)"))
+        XCTAssertTrue(smokeSourceHost.contains("import MetalKit"))
+        XCTAssertTrue(smokeSourceHost.contains("MTLCreateSystemDefaultDevice()"))
+        XCTAssertTrue(smokeSourceHost.contains("SmokeCaptureAnimationView: MTKView"))
+        XCTAssertTrue(smokeSourceHost.contains("SmokeCaptureMetalRenderer: NSObject, MTKViewDelegate"))
+        XCTAssertTrue(smokeSourceHost.contains("setRenderingFrameRate(targetRenderFramesPerSecond)"))
+        XCTAssertTrue(smokeSourceHost.contains("preferredFramesPerSecond = framesPerSecond"))
+        XCTAssertTrue(smokeSourceHost.contains("targetRenderFPS="))
+        XCTAssertTrue(smokeSourceHost.contains("screenMaxFPS="))
+        XCTAssertTrue(smokeSourceHost.contains("SmokeCaptureVertex"))
+        XCTAssertTrue(smokeSourceHost.contains("makeLibrary(source: Self.shaderSource"))
+        XCTAssertTrue(smokeSourceHost.contains("smoke_vertex"))
+        XCTAssertTrue(smokeSourceHost.contains("smoke_fragment"))
+        XCTAssertTrue(smokeSourceHost.contains("makeDynamicFrameVertices(for: frame)"))
+        XCTAssertTrue(smokeSourceHost.contains("encoder.drawPrimitives(type: .triangle"))
+        XCTAssertTrue(smokeSourceHost.contains("lastSnapshotFrameCount"))
+        XCTAssertTrue(smokeSourceHost.contains("maxFrameGapMilliseconds = 0"))
+        XCTAssertTrue(smokeSourceHost.contains("mode=metal-vsync"))
+        XCTAssertTrue(smokeSourceHost.contains("sourceCadenceDriver=mtkview-display-link"))
+        XCTAssertTrue(smokeSourceHost.contains("statusWriter=background-serial"))
+        XCTAssertTrue(smokeSourceHost.contains(".withFractionalSeconds"))
+        XCTAssertTrue(smokeSourceHost.contains("visibilityRepair=conditional"))
+        XCTAssertTrue(smokeSourceHost.contains("renderGapMaxMs="))
+        XCTAssertTrue(smokeSourceHost.contains("reason=metal_unavailable"))
+        XCTAssertTrue(smokeSourceHost.contains("reason=metal_renderer_unavailable"))
+        XCTAssertTrue(smokeSourceHost.contains("MainActor.assumeIsolated"))
+        XCTAssertTrue(smokeSourceHost.contains("private func repairCaptureWindowIfNeeded()"))
+        XCTAssertTrue(smokeSourceHost.contains("renderIsStale"))
+        XCTAssertTrue(smokeSourceHost.contains("visibilityRepair=1"))
+        XCTAssertTrue(smokeSourceHost.contains("window?.orderFrontRegardless()"))
+        XCTAssertTrue(smokeSourceHost.contains("application.setActivationPolicy(.regular)"))
+        XCTAssertTrue(smokeSourceHost.contains("NSRunningApplication.current.activate(options: [.activateAllWindows])"))
+        XCTAssertFalse(smokeSourceHost.contains(".activateIgnoringOtherApps"))
+        XCTAssertFalse(smokeSourceHost.contains("private let accentLayer = CALayer()"))
+        XCTAssertFalse(smokeSourceHost.contains("CATransaction.setDisableActions(true)"))
+        XCTAssertTrue(smokeSourceHost.contains("let window = NSWindow("))
+        XCTAssertTrue(smokeSourceHost.contains("styleMask: [.titled, .closable, .miniaturizable]"))
+        XCTAssertTrue(smokeSourceHost.contains("window.hidesOnDeactivate = false"))
+        XCTAssertTrue(smokeSourceHost.contains("window.level = .floating"))
+        XCTAssertTrue(smokeSourceHost.contains("window.collectionBehavior = [.moveToActiveSpace]"))
+        XCTAssertTrue(smokeSourceHost.contains("window.displayIfNeeded()"))
+        XCTAssertTrue(smokeSourceHost.contains("application.updateWindows()"))
+        XCTAssertTrue(smokeSourceHost.contains("NSApplication.shared.run()"))
+        XCTAssertTrue(smokeSourceHost.contains("let mainDisplayID = CGMainDisplayID()"))
+        XCTAssertTrue(smokeSourceHost.contains("Self.screen(for: mainDisplayID)"))
+        XCTAssertTrue(smokeSourceHost.contains("displayID=\\(displayID)"))
+        XCTAssertTrue(smokeSourceHost.contains("windowVisible=\\(visible)"))
+        XCTAssertTrue(smokeSourceHost.contains("windowOcclusionVisible=\\(occlusionVisible)"))
+        XCTAssertTrue(smokeSourceHost.contains("windowLevel=\\(level)"))
+        XCTAssertTrue(smokeSourceHost.contains("windowFrame=\\(Int(windowFrame.origin.x))"))
+        let heartbeatBody = try sourceSlice(
+            from: "private func heartbeat()",
+            to: "private func repairCaptureWindowIfNeeded()",
+            in: smokeSourceHost
+        )
+        XCTAssertFalse(heartbeatBody.contains("orderFrontRegardless()"))
+        XCTAssertFalse(heartbeatBody.contains("displayIfNeeded()"))
+        XCTAssertFalse(heartbeatBody.contains("SmokeStatusFileAppender.append"))
+        let statusReporterBody = try sourceSlice(
+            from: "private final class SmokeStatusReporter",
+            to: "private func writeProtectedData",
+            in: smokeSourceHost
+        )
+        XCTAssertTrue(statusReporterBody.contains("DispatchQueue("))
+        XCTAssertTrue(statusReporterBody.contains("label: \"com.skybridge.smoke.status-writer\""))
+        XCTAssertTrue(statusReporterBody.contains("qos: .utility"))
+        XCTAssertTrue(statusReporterBody.contains("queue.async"))
+        XCTAssertTrue(statusReporterBody.contains("appendAndWait"))
+        XCTAssertTrue(statusReporterBody.contains("SmokeStatusFileAppender.append"))
         XCTAssertFalse(
-            localHostSource.contains("window.level = .screenSaver"),
+            smokeSourceHost.contains("window.level = .screenSaver"),
             "The smoke source must stay in a capture-compatible app window level; screen-saver level can be invisible to display capture."
         )
+        XCTAssertTrue(
+            smokeSourceHost.contains("MTKView"),
+            "The smoke capture source must be backed by a real Metal drawable, not a main-queue layer timer."
+        )
+
+        let remoteControlSource = try readSource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
+        let remoteControlInitBody = try sourceSlice(
+            from: "public init() {",
+            to: "private func configureViewingRenderersIfNeeded()",
+            in: remoteControlSource
+        )
+        XCTAssertTrue(remoteControlSource.contains("private func configureViewingRenderersIfNeeded()"))
+        XCTAssertTrue(remoteControlSource.contains("configureViewingRenderersIfNeeded()\n\n        if let fmt"))
         XCTAssertFalse(
-            localHostSource.contains("MTKView"),
-            "The smoke capture source must use deterministic Core Animation updates, not a throttled MTKView display link."
+            remoteControlInitBody.contains("fluidRenderer.frameHandler") ||
+            remoteControlInitBody.contains("referenceRenderer.frameHandler"),
+            "The smoke host is a remote-control server and must not force viewer Metal/resource renderers during startup."
         )
 
         let remoteSmokeSource = try readSource("Scripts/run_real_device_p2p_remote_smoke.sh")
+        XCTAssertTrue(remoteSmokeSource.contains("MAC_APP_BUNDLE=\"$ARTIFACT_DIR/LocalLanInteropHost.app\""))
+        XCTAssertTrue(remoteSmokeSource.contains("prepare_macos_smoke_host_app_bundle()"))
+        XCTAssertTrue(remoteSmokeSource.contains("start_macos_smoke_host()"))
+        XCTAssertTrue(remoteSmokeSource.contains("MAC_HOST_LAUNCH_MODE=\"${SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-direct}\""))
+        XCTAssertTrue(remoteSmokeSource.contains("MAC_DIRECT_BIN=\"$ROOT_DIR/.build/debug/LocalLanInteropHost\""))
+        XCTAssertTrue(remoteSmokeSource.contains("MAC_SOURCE_DIRECT_BIN=\"$ROOT_DIR/.build/debug/LocalLanSmokeSourceHost\""))
+        XCTAssertTrue(remoteSmokeSource.contains("swift build --product LocalLanSmokeSourceHost"))
+        XCTAssertTrue(remoteSmokeSource.contains("start_macos_smoke_source_host()"))
+        XCTAssertTrue(remoteSmokeSource.contains("SKYBRIDGE_SMOKE_ROLE=mac-smoke-source"))
+        XCTAssertTrue(remoteSmokeSource.contains("role=mac-smoke-source"))
+        XCTAssertTrue(remoteSmokeSource.contains("fail_if_smoke_source_exited"))
+        XCTAssertTrue(remoteSmokeSource.contains("fail_if_smoke_source_stale"))
+        XCTAssertTrue(remoteSmokeSource.contains("phase=heartbeat-stale"))
+        XCTAssertTrue(remoteSmokeSource.contains("if [[ \"$MAC_HOST_LAUNCH_MODE\" == \"direct\" ]]"))
+        XCTAssertTrue(remoteSmokeSource.contains("\"$MAC_DIRECT_BIN\" >\"$HOST_STDOUT\" 2>&1 &"))
+        XCTAssertTrue(remoteSmokeSource.contains("launch method=direct-app-binary pid=$HOST_PID mode=direct binary=swiftpm-build-product"))
+        XCTAssertFalse(remoteSmokeSource.contains("fallbackFrom=open-app-bundle"))
+        XCTAssertTrue(remoteSmokeSource.contains("verify_mac_control_port_reachable \"$MAC_CONTROL_HOST\" \"$MAC_CONTROL_PORT\""))
+        XCTAssertTrue(remoteSmokeSource.contains("mac-control-port reachable=1 host=$host port=$port source=pre-ios-probe"))
+        XCTAssertTrue(remoteSmokeSource.contains("failed stage=mac-host phase=control-port-probe reason=tcp-unreachable"))
+        XCTAssertTrue(remoteSmokeSource.contains("/usr/bin/open"))
+        XCTAssertTrue(remoteSmokeSource.contains("register_macos_smoke_host_app_bundle()"))
+        XCTAssertTrue(remoteSmokeSource.contains("LocalLanInteropHostSmoke.${RUN_ID}"))
+        XCTAssertTrue(remoteSmokeSource.contains("fallback=direct-app-binary"))
+        XCTAssertFalse(remoteSmokeSource.contains("SKYBRIDGE_SMOKE_REMOTE_ANIMATION=1"))
+        XCTAssertTrue(remoteSmokeSource.contains("launch method=open-app-bundle"))
+        XCTAssertTrue(remoteSmokeSource.contains("windowOcclusionVisible=1"))
+        XCTAssertTrue(remoteSmokeSource.contains("local source_webrtc_framework=\"$ROOT_DIR/.build/debug/WebRTC.framework\""))
+        XCTAssertTrue(remoteSmokeSource.contains("cp -R \"$source_webrtc_framework\" \"$macos_dir/WebRTC.framework\""))
+        XCTAssertTrue(remoteSmokeSource.contains("/usr/bin/codesign --force --deep --sign - \"$MAC_APP_BUNDLE\""))
+        XCTAssertTrue(remoteSmokeSource.contains("-c 'Add :CFBundlePackageType string APPL'"))
+        XCTAssertTrue(remoteSmokeSource.contains("-c 'Add :NSPrincipalClass string NSApplication'"))
+        XCTAssertTrue(remoteSmokeSource.contains("-c 'Add :NSLocalNetworkUsageDescription string SkyBridge Compass uses the local network"))
+        XCTAssertTrue(remoteSmokeSource.contains("-c 'Add :NSBonjourServices:0 string _skybridge._tcp'"))
+        XCTAssertFalse(remoteSmokeSource.contains("-c 'Add :LSUIElement bool true'"))
+        XCTAssertFalse(remoteSmokeSource.contains("*.bundle"))
+        XCTAssertTrue(remoteSmokeSource.contains("MAC_APP_BIN=\"$macos_dir/LocalLanInteropHost\""))
+        XCTAssertTrue(remoteSmokeSource.contains("detect_macos_loginwindow_occlusion()"))
+        XCTAssertTrue(remoteSmokeSource.contains("CGWindowListCopyWindowInfo"))
+        XCTAssertTrue(remoteSmokeSource.contains("reason=screen-locked-loginwindow-occlusion"))
+        XCTAssertTrue(remoteSmokeSource.contains("detect_macos_loginwindow_occlusion\nwait_for_file_pattern \"$HOST_STATUS\" 'smoke-capture-source active=1 .*windowOcclusionVisible=1'"))
         XCTAssertTrue(remoteSmokeSource.contains("verify_mac_smoke_capture_source_visible()"))
+        XCTAssertTrue(remoteSmokeSource.contains("detect_macos_loginwindow_occlusion\n\n  if ! command -v screencapture"))
+        XCTAssertTrue(remoteSmokeSource.contains("minimum_source_samples"))
+        XCTAssertFalse(remoteSmokeSource.contains("Mac smoke source aggregate renderFPS below live-source budget"))
+        XCTAssertTrue(remoteSmokeSource.contains("source_frame_delta = source_frame_end - source_frame_start"))
+        XCTAssertTrue(remoteSmokeSource.contains("macSourceRenderProgressFPS="))
+        XCTAssertTrue(remoteSmokeSource.contains("Mac smoke source render gap exceeded live-source budget"))
         XCTAssertTrue(remoteSmokeSource.contains("screencapture -x \"$first\""))
         XCTAssertTrue(remoteSmokeSource.contains("changedRatio"))
         XCTAssertTrue(remoteSmokeSource.contains("smoke-capture-source captureVerified=1"))
@@ -539,6 +710,18 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(advertiserSource.contains("record[\"identityFingerprint\"] = snap.pubKeyFP"))
         XCTAssertFalse(advertiserSource.contains("record[\"kemPublicKey\"]"))
         XCTAssertFalse(advertiserSource.contains("record[\"kemPublicKeys\"]"))
+    }
+
+    func testP2PDiscoverySettingsRebuildRuntimeBrowserSet() throws {
+        let discoverySource = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let settingsSource = try readSource("Sources/SkyBridgeCore/Settings/SettingsManager.swift")
+
+        XCTAssertTrue(discoverySource.contains("activeBrowserServiceTypes"))
+        XCTAssertTrue(discoverySource.contains("public func applyDiscoverySettings("))
+        XCTAssertTrue(discoverySource.contains("browsers.forEach { $0.cancel() }"))
+        XCTAssertTrue(discoverySource.contains("startBrowsers(for: desired.sorted())"))
+        XCTAssertTrue(settingsSource.contains(".combineLatest($enableCompanionLink)"))
+        XCTAssertTrue(settingsSource.contains("P2PDiscoveryService.shared.applyDiscoverySettings"))
     }
 
     func testStrictBootstrapOnlyAcceptsOnlyBootstrapSecurityAndLivenessBeforeRekey() {
@@ -724,18 +907,33 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(source.contains("PairingTrustApprovalService.shared.updateVerificationCode"))
     }
 
+    func testStrictWebRTCInitialHandshakeRequiresPinnedCurrentPathAuthorityBeforeTrustedKEM() throws {
+        let source = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift")
+        let guardBody = try sourceSlice(
+            from: "if peerIdCandidates.isEmpty {",
+            to: "var trustedPeerKEMKeys: [CryptoSuite: Data] = [:]",
+            in: source
+        )
+
+        XCTAssertTrue(guardBody.contains("if strictPQCRequested,"))
+        XCTAssertTrue(guardBody.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionId] == nil"))
+        XCTAssertTrue(guardBody.contains("requires pinned current-path protocol identity"))
+        XCTAssertTrue(guardBody.contains("throw NSError("))
+    }
+
     func testSignedAppSmokeHasAppLevelPairingApprovalSurface() throws {
         let appSource = try readSource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let scriptSource = try readSource("Scripts/run_real_device_file_transfer_smoke.sh")
+        let releaseReadiness = try readSource("Scripts/check_macos_release_readiness.sh")
 
         let windowGroupPrefix = try sourceSlice(
-            from: "WindowGroup(localizationManager.localizedString(\"app.name\"))",
+            from: "WindowGroup(localizationManager.localizedString(\"app.name\"), id: \"main\")",
             to: ".task {",
             in: appSource
         )
         let rootContainerSource = try sourceSlice(
             from: "private struct RootContainerView: View",
-            to: "@available(macOS 14.0, *)\nprivate struct SupabasePasswordResetSheet",
+            to: "private struct SupabasePasswordResetSheet: View",
             in: appSource
         )
 
@@ -754,6 +952,163 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(
             scriptSource.contains("OPEN_ARGS=(-n --stdout \"$HOST_STDOUT\" --stderr \"$HOST_STDERR\")")
         )
+        XCTAssertTrue(
+            releaseReadiness.contains("--package-integrity-only"),
+            "Release readiness should expose a narrow package-integrity verifier for smoke preflight without weakening the full release gate."
+        )
+        XCTAssertTrue(
+            releaseReadiness.contains("Package integrity-only validation complete"),
+            "The package-integrity mode must exit only after package signing, stapling, and Gatekeeper checks."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("--package-integrity-only"),
+            "User-realistic file-transfer smoke should preflight the signed release package without requiring unrelated artifacts before the smoke produces them."
+        )
+    }
+
+    func testMacOnlineSmokeBootMarkerRunsBeforeHeavyAppStateObjects() throws {
+        let appSource = try readSource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
+
+        guard let bootMarker = appSource.range(of: "private let macOnlineSmokeBootMarker"),
+              let firstStateObject = appSource.range(of: "@StateObject private var appModel") else {
+            XCTFail("Expected mac-online boot marker and first StateObject in SkyBridgeCompassApp.")
+            return
+        }
+
+        XCTAssertLessThan(
+            bootMarker.lowerBound,
+            firstStateObject.lowerBound,
+            "The packaged LaunchServices smoke marker must run before heavy SwiftUI/App model initialization can block evidence emission."
+        )
+        XCTAssertTrue(appSource.contains("MacOnlineIPadSmokeBootMarker.appendIfNeeded(uiRole: \"app-init-pre-state\")"))
+        XCTAssertTrue(
+            appSource.contains("MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment || startupCoordinator.isStartupComplete"),
+            "The mac-online packaged-app smoke must render the device-management root before the normal startup gate can block OnlineDeviceCard evidence."
+        )
+        XCTAssertTrue(appSource.contains("SKYBRIDGE_SMOKE_ROLE"))
+        XCTAssertTrue(appSource.contains("SKYBRIDGE_SMOKE_STATUS_FILE"))
+        XCTAssertTrue(appSource.contains("SmokeStatusFileAppender.append(data, to: URL(fileURLWithPath: rawStatusPath))"))
+    }
+
+    func testMacOnlineStartupAvoidsBundleMainResourceResolutionBeforeRootViewCanRender() throws {
+        let dashboardSource = try readSource("Sources/SkyBridgeCompassApp/DashboardViewModel.swift")
+        let localizationSource = try readSource("Sources/SkyBridgeCore/Localization/LocalizationManager.swift")
+        let appSource = try readSource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
+        let appInfoPlist = try readSource("Sources/SkyBridgeCompassApp/Info.plist")
+        let xcodeInfoPlist = try readSource("XcodeSupport/SkyBridgeCompassMac/Info.plist")
+        let brandIconSource = try readSource("Sources/SkyBridgeCompassApp/SVGEmbeddedImageView.swift")
+        let dashboardStoredProperties = try sourceSlice(
+            from: "final class DashboardViewModel: ObservableObject",
+            to: "// MARK: - 初始化",
+            in: dashboardSource
+        )
+        let brandIconLoaderSource = try sourceSlice(
+            from: "private enum BrandIconAssetLoader",
+            to: "private extension View",
+            in: brandIconSource
+        )
+        let iconSource = try sourceSlice(
+            from: "private static func applyAppIconIfAvailable() -> Bool",
+            to: "// Fallback for non-bundled/debug launches",
+            in: appSource
+        )
+        let appIconFallbackSource = try sourceSlice(
+            from: "let chosenURL = resolveIconURL",
+            to: "guard let icon = NSImage(contentsOf: url) else",
+            in: appSource
+        )
+        let packagedIconSource = try sourceSlice(
+            from: "private static func resolvePackagedIconURL() -> URL?",
+            to: "// MARK: - 根容器视图",
+            in: appSource
+        )
+        let notificationSource = try sourceSlice(
+            from: "private static func configureNotificationsUnified()",
+            to: "/// 设置菜单栏通知处理器",
+            in: appSource
+        )
+
+        XCTAssertFalse(
+            dashboardStoredProperties.contains("LocalizationManager.shared.localizedString"),
+            "DashboardViewModel stored property initialization must not synchronously resolve localization bundles before the smoke root view can render."
+        )
+        XCTAssertTrue(
+            dashboardStoredProperties.contains("statusText: ConnectionStatus.disconnected.displayName"),
+            "The pre-render disconnected label should come from the non-resource connection status until live presentation bindings install localized labels."
+        )
+        XCTAssertTrue(localizationSource.contains("LocalizationBundleLookupCache"))
+        XCTAssertFalse(
+            localizationSource.contains("bundle.path(forResource:"),
+            "Localization lookup must use cached direct resource-directory resolution instead of synchronous CFBundle pathForResource scans on the startup path."
+        )
+        XCTAssertFalse(
+            localizationSource.contains("bundle.urls(forResourcesWithExtension:"),
+            "Localization lookup must avoid repeated all-resource Bundle URL enumeration on the startup path."
+        )
+        XCTAssertTrue(localizationSource.contains("defaultResourceSearchBaseURLs()"))
+        XCTAssertTrue(appSource.contains("private static func packagedContentsURL() -> URL?"))
+        XCTAssertFalse(iconSource.contains("Bundle.main.bundleURL"))
+        XCTAssertFalse(iconSource.contains("Bundle.main.url(forResource"))
+        XCTAssertLessThan(
+            try XCTUnwrap(packagedIconSource.range(of: "(\"AppIcon\", \"icns\")")?.lowerBound),
+            try XCTUnwrap(packagedIconSource.range(of: "(\"AppIconDock\", \"icns\")")?.lowerBound),
+            "Runtime app icon resolution must prefer the canonical LaunchServices AppIcon over AppIconDock so startup and post-launch icons cannot diverge."
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(appIconFallbackSource.range(of: "resolveIconURL(named: \"AppIcon\")")?.lowerBound),
+            try XCTUnwrap(appIconFallbackSource.range(of: "resolveIconURL(named: \"AppIconDock\")")?.lowerBound),
+            "Debug fallback icon resolution must also prefer AppIcon before AppIconDock."
+        )
+        XCTAssertTrue(appInfoPlist.contains("<key>CFBundleIconName</key>"))
+        XCTAssertTrue(appInfoPlist.contains("<string>AppIcon</string>"))
+        XCTAssertTrue(xcodeInfoPlist.contains("<key>CFBundleIconName</key>"))
+        XCTAssertTrue(xcodeInfoPlist.contains("<string>AppIcon</string>"))
+        XCTAssertTrue(brandIconLoaderSource.contains("packagedResourceIconURLs()"))
+        XCTAssertTrue(brandIconLoaderSource.contains("return nil"))
+        XCTAssertFalse(
+            brandIconLoaderSource.contains("image(forResource"),
+            "Brand icon startup must not use AppKit Bundle image lookup because it can synchronously initialize the main CoreUI catalog before the root device view renders."
+        )
+        XCTAssertFalse(
+            brandIconLoaderSource.contains("Bundle.main"),
+            "Packaged brand icon loading must not fall through to Bundle.main on the LaunchServices smoke path."
+        )
+        XCTAssertFalse(
+            notificationSource.contains("Bundle.main"),
+            "Startup notification setup must not touch Bundle.main before the root view can render."
+        )
+    }
+
+    func testWebRTCInboundControlLoopIgnoresDuplicateMessageAWithoutResettingSessionState() throws {
+        let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        let loopBody = try sourceSlice(
+            from: "let maxInboundFrameBytes = 8_000_000",
+            to: "private func establishP2PConnectionWithCode",
+            in: source
+        )
+        let duplicateMessageABody = try sourceSlice(
+            from: "if let activeDriver = handshakeState.driver {",
+            to: "if let keys = handshakeState.sessionKeys",
+            in: loopBody
+        )
+
+        XCTAssertTrue(loopBody.contains("guard totalLen > 0 && totalLen <= maxInboundFrameBytes"))
+        XCTAssertTrue(loopBody.contains("var lastInboundFrameLength = 0"))
+        XCTAssertTrue(loopBody.contains("var lastDecodedFrameLength = 0"))
+        XCTAssertTrue(loopBody.contains("var lastHandshakeDriverState = \"none\""))
+        XCTAssertTrue(loopBody.contains("var lastControlLoopEvent = \"start\""))
+        XCTAssertTrue(duplicateMessageABody.contains("duplicate_message_a_while_waiting_finished"))
+        XCTAssertTrue(duplicateMessageABody.contains("ignored duplicate fresh MessageA while waiting for Finished"))
+        XCTAssertTrue(duplicateMessageABody.contains("frameBytes=\\(frame.count"))
+        XCTAssertTrue(duplicateMessageABody.contains("continue"))
+        XCTAssertFalse(duplicateMessageABody.contains("responder restarting unfinished handshake from fresh MessageA"))
+        XCTAssertFalse(duplicateMessageABody.contains("handshakeState.driver = nil"))
+        XCTAssertFalse(duplicateMessageABody.contains("self.webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)"))
+        XCTAssertTrue(loopBody.contains("lastFrameLen=\\(lastInboundFrameLength"))
+        XCTAssertTrue(loopBody.contains("decodedFrameLen=\\(lastDecodedFrameLength"))
+        XCTAssertTrue(loopBody.contains("driverState=\\(lastHandshakeDriverState"))
+        XCTAssertTrue(loopBody.contains("lastEvent=\\(lastControlLoopEvent"))
+        XCTAssertTrue(loopBody.contains("lastRekey=\\(self.lastRekeyEvent ?? \"-\""))
     }
 
     private func readSource(_ relativePath: String) throws -> String {
@@ -768,8 +1123,17 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     ) throws -> String {
         guard let start = source.range(of: startMarker)?.lowerBound,
               let end = source.range(of: endMarker, range: start..<source.endIndex)?.lowerBound else {
-            throw XCTSkip("Source marker not found")
+            throw SourceMarkerError(startMarker: startMarker, endMarker: endMarker)
         }
         return String(source[start..<end])
+    }
+
+    private struct SourceMarkerError: Error, CustomStringConvertible {
+        let startMarker: String
+        let endMarker: String
+
+        var description: String {
+            "Source marker not found from '\(startMarker)' to '\(endMarker)'"
+        }
     }
 }

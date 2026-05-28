@@ -30,6 +30,7 @@ public actor PeerKEMBootstrapStore {
         var signingFingerprint: String? = nil
         var payloadHashHex: String? = nil
         var signedSuiteWireIds: [UInt16]? = nil
+        var signedRefreshDeviceId: String? = nil
     }
 
     private struct Snapshot: Codable, Sendable {
@@ -66,7 +67,7 @@ public actor PeerKEMBootstrapStore {
     }
 
     public func upsert(deviceIds: [String], kemPublicKeys: [KEMPublicKeyInfo]) {
-        let normalizedIds = normalizedUniqueIds(deviceIds)
+        let normalizedIds = trustMaterialIds(deviceIds)
         guard !normalizedIds.isEmpty else { return }
 
         let incoming = incomingKEMMap(kemPublicKeys)
@@ -147,7 +148,7 @@ public actor PeerKEMBootstrapStore {
         guard !validKeys.isEmpty else { return }
 
         let identifiers = [validPayload.deviceId] + validPayload.aliases + deviceIds
-        let candidates = lookupCandidates(forAny: identifiers)
+        let candidates = trustMaterialIds(identifiers)
         guard !candidates.isEmpty else { return }
 
         let keyDict = Dictionary(uniqueKeysWithValues: validKeys.map { ($0.suiteWireId, $0.publicKey) })
@@ -164,7 +165,8 @@ public actor PeerKEMBootstrapStore {
                 protocolIdentityFingerprint: validPayload.protocolIdentityFingerprint,
                 signingFingerprint: validPayload.protocolIdentityFingerprint,
                 payloadHashHex: payloadHash,
-                signedSuiteWireIds: validKeys.map(\.suiteWireId).sorted()
+                signedSuiteWireIds: validKeys.map(\.suiteWireId).sorted(),
+                signedRefreshDeviceId: validPayload.deviceId
             )
         }
         trimIfNeeded(maxEntries: 1024)
@@ -180,7 +182,7 @@ public actor PeerKEMBootstrapStore {
     }
 
     private func selectKEMPublicKeys(forCandidates candidates: [String]) -> [UInt16: SelectedKey] {
-        let normalizedCandidates = normalizedUniqueIds(candidates)
+        let normalizedCandidates = trustMaterialIds(candidates)
         guard !normalizedCandidates.isEmpty else { return [:] }
 
         var selected: [UInt16: SelectedKey] = [:]
@@ -212,7 +214,7 @@ public actor PeerKEMBootstrapStore {
 
     public func maximumKEMGeneration(forCandidates candidates: [String]) -> UInt64? {
         var maximum: UInt64?
-        for candidate in normalizedUniqueIds(candidates) {
+        for candidate in trustMaterialIds(candidates) {
             guard let generation = entries[candidate]?.generation else { continue }
             maximum = max(maximum ?? generation, generation)
         }
@@ -221,14 +223,14 @@ public actor PeerKEMBootstrapStore {
 
     public func signedRefreshEvidence(forCandidates candidates: [String]) -> SignedRefreshEvidence? {
         var selected: SignedRefreshEvidence?
-        for candidate in normalizedUniqueIds(candidates) {
+        for candidate in trustMaterialIds(candidates) {
             guard let entry = entries[candidate],
                   entry.source == "signed_lan_kem_refresh" else {
                 continue
             }
             if let expiresAt = entry.expiresAt, expiresAt <= Date() { continue }
             let evidence = SignedRefreshEvidence(
-                deviceId: candidate,
+                deviceId: entry.signedRefreshDeviceId ?? candidate,
                 suiteWireIds: entry.signedSuiteWireIds ?? entry.kemPublicKeys.keys.sorted(),
                 source: entry.source,
                 keyId: entry.keyId,
@@ -247,7 +249,7 @@ public actor PeerKEMBootstrapStore {
     }
 
     public func clear(deviceIds: [String]) {
-        let normalizedIds = normalizedUniqueIds(deviceIds)
+        let normalizedIds = trustMaterialIds(deviceIds)
         guard !normalizedIds.isEmpty else { return }
 
         var changed = false
@@ -270,30 +272,20 @@ public actor PeerKEMBootstrapStore {
         defaults.removeObject(forKey: Self.defaultsKey)
     }
 
-    private func normalizedUniqueIds(_ rawIds: [String]) -> [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-
-        for raw in rawIds {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            if seen.insert(trimmed).inserted {
-                result.append(trimmed)
-            }
-        }
-
-        return result
-    }
-
     private func lookupCandidates(forAny identifiers: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
         for identifier in identifiers {
-            for candidate in PeerTrustLookup.lookupCandidates(for: identifier) where seen.insert(candidate).inserted {
+            for candidate in PeerTrustLookup.lookupCandidates(for: identifier)
+            where !PeerTrustLookup.isEndpointAlias(candidate) && seen.insert(candidate).inserted {
                 result.append(candidate)
             }
         }
         return result
+    }
+
+    private func trustMaterialIds(_ rawIds: [String]) -> [String] {
+        lookupCandidates(forAny: rawIds)
     }
 
     private func incomingKEMMap(_ kemPublicKeys: [KEMPublicKeyInfo]) -> [UInt16: Data] {

@@ -44,7 +44,7 @@ public struct FramedReader: Sendable {
     public func receiveFrame(maxFrameLength: UInt32 = 1_048_576) async throws -> Data {
         let lenData = try await receiveExactly(4)
         let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
-        guard totalLen > 0, totalLen < maxFrameLength else {
+        guard totalLen > 0, totalLen <= maxFrameLength else {
             throw FramedReaderError.invalidLength(totalLen)
         }
         return try await receiveExactly(Int(totalLen))

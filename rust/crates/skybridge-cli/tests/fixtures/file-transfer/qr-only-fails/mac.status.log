@@ -1,7 +1,7 @@
 [2026-05-16T01:00:00.005Z] boot role=mac-p2p-host
 [2026-05-16T01:00:00.010Z] qr-connect-link mode=offline-p2p-kem suites=0x0001
 [2026-05-16T01:00:00.250Z] suite peer=id:peer suite=X-Wing
-[2026-05-16T01:00:00.260Z] file-transfer inbound-complete name=ios-smoke-GOLDEN.txt
+[2026-05-16T01:00:00.260Z] file-transfer inbound-complete name=ios-smoke-GOLDEN.txt sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 [2026-05-16T01:00:00.270Z] file-transfer outbound-route-probe source=bonjour-transfer host=mac.local. port=8080
-[2026-05-16T01:00:00.280Z] file-transfer outbound-complete name=mac-smoke-GOLDEN.txt
+[2026-05-16T01:00:00.280Z] file-transfer outbound-complete name=mac-smoke-GOLDEN.txt sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 [2026-05-16T01:00:00.330Z] success peer=id:peer suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0

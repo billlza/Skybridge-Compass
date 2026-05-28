@@ -21,11 +21,14 @@ pub(super) struct MetalRenderQueueSelectedEvidence {
     pub(super) realtime_replacement_reason_samples: u64,
     pub(super) realtime_replacement_bad_reason_total: u64,
     pub(super) manual_draw_total: u64,
+    pub(super) input_fps_min: Option<f64>,
+    pub(super) input_fps_max: Option<f64>,
     pub(super) display_fps_min: Option<f64>,
     pub(super) draw_callback_fps_min: Option<f64>,
     pub(super) draw_callback_fps_max: Option<f64>,
     pub(super) display_fps_max: Option<f64>,
     pub(super) submitted_fps_max: Option<f64>,
+    pub(super) input_fps_gate: Option<f64>,
     pub(super) display_fps_gate: Option<f64>,
     pub(super) draw_callback_fps_gate: Option<f64>,
     pub(super) strict_high_rate_cadence_seen: bool,
@@ -67,10 +70,23 @@ impl MetalRenderQueueSelectedEvidence {
         } else {
             evidence.metal_display_fps_min
         };
+        let input_fps_min = if uses_final_window {
+            evidence.final_metal_input_fps_min
+        } else {
+            evidence.metal_input_fps_min
+        };
         let draw_callback_fps_min = if uses_final_window {
             evidence.final_metal_draw_callback_fps_min
         } else {
             evidence.metal_draw_callback_fps_min
+        };
+        let input_fps_gate = if uses_final_window && evidence.final_metal_sample_ms > 0 {
+            Some(aggregate_fps(
+                evidence.final_metal_input,
+                evidence.final_metal_sample_ms,
+            ))
+        } else {
+            input_fps_min
         };
         let display_fps_gate = if uses_final_window && evidence.final_metal_sample_ms > 0 {
             Some(aggregate_fps(
@@ -144,6 +160,12 @@ impl MetalRenderQueueSelectedEvidence {
             } else {
                 evidence.metal_manual_draw_total
             },
+            input_fps_min,
+            input_fps_max: if uses_final_window {
+                input_fps_gate
+            } else {
+                evidence.metal_input_fps_max
+            },
             display_fps_min,
             draw_callback_fps_min,
             draw_callback_fps_max: if uses_final_window {
@@ -161,6 +183,7 @@ impl MetalRenderQueueSelectedEvidence {
             } else {
                 evidence.metal_submitted_fps_max
             },
+            input_fps_gate,
             display_fps_gate,
             draw_callback_fps_gate,
             strict_high_rate_cadence_seen: if uses_final_window {

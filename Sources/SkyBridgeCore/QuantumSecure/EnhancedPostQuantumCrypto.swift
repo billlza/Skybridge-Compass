@@ -210,6 +210,74 @@ public class EnhancedPostQuantumCrypto: @unchecked Sendable {
             }
         }
     }
+
+    /// Strict-PQC signing path for production data-transfer metadata.
+    /// This deliberately fails closed instead of returning a P-256 signature.
+    public func signPQCRequired(_ data: Data, for peerId: String) async throws -> Data {
+        let enablePQC = await SettingsManager.shared.enablePQC
+        let algorithm = await MainActor.run {
+            SettingsManager.normalizedPQCSignatureAlgorithm(SettingsManager.shared.pqcSignatureAlgorithm)
+        }
+
+        guard enablePQC else {
+            logger.error("❌ Strict-PQC 签名失败：PQC 已被本地设置关闭")
+            throw QuantumNetworkError.signatureFailed
+        }
+
+        guard #available(macOS 14.0, *), let provider = PQCProviderFactory.makeProvider() else {
+            logger.error("❌ Strict-PQC 签名失败：本机没有可用 PQC Provider")
+            throw QuantumNetworkError.signatureFailed
+        }
+
+        let pqcSignature = try await provider.sign(data: data, peerId: peerId, algorithm: algorithm)
+        logger.info("✅ Strict-PQC 签名成功: \(algorithm), 签名长度: \(pqcSignature.count)字节")
+        return pqcSignature
+    }
+
+    /// Strict-PQC verification path for production data-transfer metadata.
+    /// This requires an explicit ML-DSA metadata algorithm and never falls back to P-256.
+    public func verifyPQCRequired(
+        _ data: Data,
+        signature: Data,
+        for peerId: String,
+        algorithm rawAlgorithm: String?
+    ) async throws -> Bool {
+        let enablePQC = await SettingsManager.shared.enablePQC
+        guard enablePQC else {
+            logger.error("❌ Strict-PQC 验签失败：PQC 已被本地设置关闭")
+            throw QuantumNetworkError.signatureFailed
+        }
+
+        guard let algorithm = Self.normalizedStrictPQCSignatureAlgorithm(rawAlgorithm) else {
+            logger.error("❌ Strict-PQC 验签失败：缺少或不支持的签名算法")
+            throw QuantumNetworkError.signatureFailed
+        }
+
+        guard #available(macOS 14.0, *), let provider = PQCProviderFactory.makeProvider() else {
+            logger.error("❌ Strict-PQC 验签失败：本机没有可用 PQC Provider")
+            throw QuantumNetworkError.signatureFailed
+        }
+
+        let verified = await provider.verify(data: data, signature: signature, peerId: peerId, algorithm: algorithm)
+        if verified {
+            logger.info("✅ Strict-PQC 验签成功: \(algorithm), peerId: \(peerId)")
+        } else {
+            logger.error("❌ Strict-PQC 验签失败: \(algorithm), peerId: \(peerId)")
+        }
+        return verified
+    }
+
+    private static func normalizedStrictPQCSignatureAlgorithm(_ rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
+        case "ML-DSA", "ML-DSA-65", "MLDSA", "MLDSA-65":
+            return "ML-DSA-65"
+        case "ML-DSA-87", "MLDSA-87":
+            return "ML-DSA-87"
+        default:
+            return nil
+        }
+    }
     
  /// 获取公钥（用于密钥交换）
     public func getPublicKey(for peerId: String) -> P256.Signing.PublicKey? {

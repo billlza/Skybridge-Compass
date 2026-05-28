@@ -288,7 +288,7 @@ final class P2PTrustSyncTests: XCTestCase {
         )
 
         XCTAssertNotNil(updated)
-        XCTAssertEqual(updated?.deviceId, aliasId)
+        XCTAssertEqual(updated?.deviceId, stableId)
         XCTAssertEqual(updated?.protocolSigningAlgorithm, .mlDSA65)
         XCTAssertEqual(updated?.protocolPublicKeyFingerprint, fingerprint)
         XCTAssertEqual(updated?.currentDeviceIdMetadata, stableId)
@@ -453,6 +453,49 @@ final class P2PTrustSyncTests: XCTestCase {
                        "lifecycleState should expose stored metadata")
         XCTAssertEqual(record.currentPathAuthorityFingerprint, String(repeating: "c", count: 64),
                        "currentPathAuthorityFingerprint should normalize lowercase metadata")
+    }
+
+    func testProtocolIdentityPinsSeedLegacyAndReplaceOnlyMatchingAlgorithm() throws {
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let legacyEd25519 = String(repeating: "a", count: 64)
+        let firstMLDSA = String(repeating: "b", count: 64)
+        let secondMLDSA = String(repeating: "c", count: 64)
+        let legacyRecord = TrustRecord(
+            deviceId: deviceId,
+            pubKeyFP: String(repeating: "d", count: 64),
+            publicKey: Data([0x01]),
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: legacyEd25519,
+            signature: Data(),
+            currentDeviceId: deviceId,
+            knownDeviceIds: [deviceId]
+        )
+
+        XCTAssertEqual(legacyRecord.currentPathAuthorityFingerprints, [legacyEd25519])
+
+        let firstUpdated = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [legacyRecord],
+            deviceId: deviceId,
+            preferredCurrentDeviceId: deviceId,
+            knownDeviceIds: [deviceId],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: firstMLDSA,
+            pinSource: .pib1OperatorApproval
+        )
+        XCTAssertEqual(firstUpdated?.currentPathAuthorityFingerprints, [legacyEd25519, firstMLDSA])
+
+        let secondUpdated = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [try XCTUnwrap(firstUpdated)],
+            deviceId: deviceId,
+            preferredCurrentDeviceId: deviceId,
+            knownDeviceIds: [deviceId],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: secondMLDSA,
+            pinSource: .pib1OperatorApproval
+        )
+
+        XCTAssertEqual(secondUpdated?.currentPathAuthorityFingerprints, [legacyEd25519, secondMLDSA])
+        XCTAssertFalse(secondUpdated?.currentPathAuthorityFingerprints.contains(firstMLDSA) ?? true)
     }
     
  /// Test tombstone expiration

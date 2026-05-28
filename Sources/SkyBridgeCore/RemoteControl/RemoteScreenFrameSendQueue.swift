@@ -19,6 +19,16 @@ struct RemoteScreenFrameSendQueue {
 
     @discardableResult
     mutating func enqueue(_ frame: ScreenData) -> RemoteScreenFrameQueueEnqueueResult {
+        if waitingForSyncFrame {
+            guard frame.isDecoderBootstrapFrame else {
+                return .droppedPredictiveFrameWaitingForSync
+            }
+            pendingFrames.removeAll(keepingCapacity: true)
+            pendingFrames.append(frame)
+            waitingForSyncFrame = false
+            return .enqueued
+        }
+
         if frame.isIndependentlyDecodableFrame {
             waitingForSyncFrame = false
             var droppedStaleFrame = false
@@ -28,16 +38,6 @@ struct RemoteScreenFrameSendQueue {
             }
             pendingFrames.append(frame)
             return droppedStaleFrame ? .droppedStaleIndependentFrame : .enqueued
-        }
-
-        if waitingForSyncFrame {
-            guard frame.isIndependentlyDecodableFrame else {
-                return .droppedPredictiveFrameWaitingForSync
-            }
-            pendingFrames.removeAll(keepingCapacity: true)
-            pendingFrames.append(frame)
-            waitingForSyncFrame = false
-            return .enqueued
         }
 
         guard pendingFrames.count < maxQueuedFrames else {
@@ -78,6 +78,17 @@ extension ScreenData {
     var isIndependentlyDecodableFrame: Bool {
         if isCompressedPredictiveVideoFrame {
             return RemoteDesktopScreenFrameWire.containsSyncFrame(
+                format: format,
+                imageData: imageData,
+                advertisedSyncFrame: isSyncFrame
+            )
+        }
+        return true
+    }
+
+    var isDecoderBootstrapFrame: Bool {
+        if isCompressedPredictiveVideoFrame {
+            return RemoteDesktopScreenFrameWire.containsDecoderBootstrapFrame(
                 format: format,
                 imageData: imageData,
                 advertisedSyncFrame: isSyncFrame

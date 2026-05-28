@@ -39,6 +39,9 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
 
 // MARK: - 设备信息
 public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
+    private static let protocolIdentityMirrorDefaultsKey = "SkyBridge.P2P.DeviceIdentity.DeviceID"
+    private static let legacyDeviceDefaultsKey = "SkyBridge.DeviceId"
+
     public let id: String
     public let name: String
     public let type: P2PDeviceType
@@ -64,13 +67,32 @@ public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
     
  /// 获取或创建设备ID
     private static func getOrCreateDeviceId() -> String {
-        let key = "SkyBridge.DeviceId"
-        if let existingId = UserDefaults.standard.string(forKey: key) {
-            return existingId
-        } else {
-            let newId = UUID().uuidString
-            UserDefaults.standard.set(newId, forKey: key)
-            return newId
+        if let protocolIdentity = UserDefaults.standard.string(forKey: protocolIdentityMirrorDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !protocolIdentity.isEmpty {
+            mirrorDeviceIdToLegacyDefaultsIfNeeded(protocolIdentity)
+            return protocolIdentity
+        }
+
+        if let legacyIdentity = UserDefaults.standard.string(forKey: legacyDeviceDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !legacyIdentity.isEmpty {
+            UserDefaults.standard.set(legacyIdentity, forKey: protocolIdentityMirrorDefaultsKey)
+            return legacyIdentity
+        }
+
+        let newId = UUID().uuidString
+        UserDefaults.standard.set(newId, forKey: protocolIdentityMirrorDefaultsKey)
+        mirrorDeviceIdToLegacyDefaultsIfNeeded(newId)
+        return newId
+    }
+
+    private static func mirrorDeviceIdToLegacyDefaultsIfNeeded(_ raw: String) {
+        let deviceId = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !deviceId.isEmpty else { return }
+        if UserDefaults.standard.string(forKey: legacyDeviceDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) != deviceId {
+            UserDefaults.standard.set(deviceId, forKey: legacyDeviceDefaultsKey)
         }
     }
     

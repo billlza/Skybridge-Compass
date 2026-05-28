@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 // MARK: - 远程桌面设置数据模型
 
@@ -19,6 +20,7 @@ public final class RemoteDesktopSettings: ObservableObject, @unchecked Sendable 
     
  // MARK: - 初始化
     public init() {}
+
 }
 
 // MARK: - 显示设置
@@ -66,6 +68,11 @@ public struct DisplaySettings: Codable, Sendable {
     public var lowLatencyMode: Bool = false
     
     public init() {}
+
+    public var boundedCompressionLevelPercent: Int {
+        let rounded = compressionLevel.isFinite ? Int(compressionLevel.rounded()) : 50
+        return max(0, min(rounded, 100))
+    }
 }
 
 /// 视频编码器选项（设置层使用，避免与硬件编码器枚举重名）
@@ -204,6 +211,10 @@ public struct InteractionSettings: Codable, Sendable {
     public var enableContextMenu: Bool = true
     
     public init() {}
+
+    public var boundedDoubleClickIntervalMilliseconds: Int {
+        max(200, min(doubleClickInterval, 1_000))
+    }
 }
 
 /// 键盘映射模式
@@ -227,6 +238,10 @@ public enum KeyboardMapping: String, CaseIterable, Codable, Sendable {
 
 /// 网络优化相关设置配置
 public struct NetworkSettings: Codable, Sendable {
+    public static let defaultBufferSizeKB = 1024
+    public static let minimumBufferSizeKB = 256
+    public static let maximumBufferSizeKB = 8192
+
  /// 连接类型
     public var connectionType: ConnectionType = .auto
     
@@ -252,7 +267,7 @@ public struct NetworkSettings: Codable, Sendable {
     public var enableAdaptiveQuality: Bool = true
     
  /// 缓冲区大小 (KB)
-    public var bufferSize: Int = 1024
+    public var bufferSize: Int = Self.defaultBufferSizeKB
     
  /// 启用网络统计
     public var enableNetworkStats: Bool = true
@@ -270,6 +285,59 @@ public struct NetworkSettings: Codable, Sendable {
     public var encryptionAlgorithm: EncryptionAlgorithm = .tls13
     
     public init() {}
+
+    public var boundedBandwidthLimitMbps: Double {
+        max(0, min(bandwidthLimit, 1000))
+    }
+
+    public var boundedCompressionLevel: Int {
+        max(0, min(compressionLevel, 9))
+    }
+
+    public var boundedBufferSizeKB: Int {
+        max(Self.minimumBufferSizeKB, min(bufferSize, Self.maximumBufferSizeKB))
+    }
+
+    public var boundedConnectionTimeoutSeconds: Int {
+        max(10, min(connectionTimeout, 120))
+    }
+
+    public var boundedMaxReconnectAttempts: Int {
+        max(0, min(maxReconnectAttempts, 10))
+    }
+
+    public var boundedReconnectBackoffInitialMilliseconds: Int {
+        max(100, min(reconnectBackoffInitialMs, 5_000))
+    }
+
+    public var boundedReconnectBackoffMaxMilliseconds: Int {
+        max(boundedReconnectBackoffInitialMilliseconds, max(1_000, min(reconnectBackoffMaxMs, 60_000)))
+    }
+
+    public var boundedReconnectBackoffMultiplier: Double {
+        reconnectBackoffMultiplier.isFinite
+            ? max(1.1, min(reconnectBackoffMultiplier, 4.0))
+            : 2.0
+    }
+
+    public func reconnectBackoffDelayMilliseconds(forAttempt attempt: Int) -> Int {
+        let safeAttempt = max(0, attempt)
+        let initial = Double(boundedReconnectBackoffInitialMilliseconds)
+        let maximum = Double(boundedReconnectBackoffMaxMilliseconds)
+        let scaled = initial * pow(boundedReconnectBackoffMultiplier, Double(safeAttempt))
+        return Int(min(maximum, scaled).rounded())
+    }
+
+    public var maxBufferedAmountOverrideBytes: UInt64? {
+        let bounded = boundedBufferSizeKB
+        guard bounded != Self.defaultBufferSizeKB else { return nil }
+        return UInt64(bounded) * 1024
+    }
+
+    public mutating func enforceStrictTransportSecurity() {
+        enableEncryption = true
+        encryptionAlgorithm = .tls13
+    }
 }
 
 /// 加密算法选项
@@ -304,6 +372,10 @@ public enum ConnectionType: String, CaseIterable, Codable, Sendable {
         case .satellite: return "卫星网络"
         }
     }
+
+    public var remoteDesktopScopeDescription: String {
+        "仅影响 Legacy RDP 配置；P2P/WebRTC 路由由 ICE 和当前网络路径协商决定"
+    }
 }
 
 // MARK: - 设置持久化管理器
@@ -319,12 +391,16 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     
     private let userDefaults = UserDefaults.standard
     private let settingsKey = "com.skybridge.compass.remote_desktop_settings"
+    private var settingsCancellables = Set<AnyCancellable>()
+    private var isLoadingSettings = false
+    private var isSavingSettings = false
     
  // MARK: - 生命周期管理属性
     private var isStarted = false
     
     private init() {
         loadSettings()
+        bindSettingsAutosave()
     }
     
  // MARK: - 生命周期管理方法
@@ -379,12 +455,16 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         
  // 重置设置为默认值
         settings = RemoteDesktopSettings()
+        bindSettingsAutosave()
         
         SkyBridgeLogger.ui.debugOnly("✅ RemoteDesktopSettingsManager 清理完成")
     }
     
  /// 加载设置
     public func loadSettings() {
+        isLoadingSettings = true
+        defer { isLoadingSettings = false }
+
  // 使用 UserDefaults 分别加载各个设置项
         loadDisplaySettings()
         loadInteractionSettings()
@@ -394,6 +474,10 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
     
  /// 保存设置
     public func saveSettings() {
+        guard !isSavingSettings else { return }
+        isSavingSettings = true
+        defer { isSavingSettings = false }
+
  // 使用 UserDefaults 分别保存各个设置项
         saveDisplaySettings()
         saveInteractionSettings()
@@ -404,6 +488,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
  /// 重置为默认设置
     public func resetToDefaults() {
         settings = RemoteDesktopSettings()
+        bindSettingsAutosave()
         saveSettings()
         SkyBridgeLogger.ui.debugOnly("设置已重置为默认值")
     }
@@ -453,6 +538,36 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             SkyBridgeLogger.ui.error("导入设置失败: \(error.localizedDescription, privacy: .private)")
             return false
         }
+    }
+
+    private func bindSettingsAutosave() {
+        settingsCancellables.removeAll()
+
+        settings.$displaySettings
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.persistRuntimeSettingsChange()
+            }
+            .store(in: &settingsCancellables)
+
+        settings.$interactionSettings
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.persistRuntimeSettingsChange()
+            }
+            .store(in: &settingsCancellables)
+
+        settings.$networkSettings
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.persistRuntimeSettingsChange()
+            }
+            .store(in: &settingsCancellables)
+    }
+
+    private func persistRuntimeSettingsChange() {
+        guard !isLoadingSettings, !isSavingSettings else { return }
+        saveSettings()
     }
     
  // MARK: - 私有方法 - 显示设置
@@ -550,7 +665,12 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
             "enableHardwareAcceleration": settings.displaySettings.enableHardwareAcceleration,
             "enableAppleSiliconOptimization": settings.displaySettings.enableAppleSiliconOptimization,
             "fullScreenMode": settings.displaySettings.fullScreenMode,
-            "multiMonitorSupport": settings.displaySettings.multiMonitorSupport
+            "multiMonitorSupport": settings.displaySettings.multiMonitorSupport,
+            "preferredCodec": settings.displaySettings.preferredCodec.rawValue,
+            "keyFrameInterval": settings.displaySettings.keyFrameInterval,
+            "targetFrameRate": settings.displaySettings.targetFrameRate,
+            "encodingProfile": settings.displaySettings.encodingProfile.rawValue,
+            "lowLatencyMode": settings.displaySettings.lowLatencyMode
         ]
     }
     
@@ -593,6 +713,23 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         
         if let multiMonitorSupport = dict["multiMonitorSupport"] as? Bool {
             settings.displaySettings.multiMonitorSupport = multiMonitorSupport
+        }
+        if let codecString = dict["preferredCodec"] as? String,
+           let codec = PreferredVideoCodec(rawValue: codecString) {
+            settings.displaySettings.preferredCodec = codec
+        }
+        if let keyFrameInterval = dict["keyFrameInterval"] as? Int {
+            settings.displaySettings.keyFrameInterval = keyFrameInterval
+        }
+        if let targetFrameRate = dict["targetFrameRate"] as? Int {
+            settings.displaySettings.targetFrameRate = targetFrameRate
+        }
+        if let profileString = dict["encodingProfile"] as? String,
+           let profile = EncodingProfile(rawValue: profileString) {
+            settings.displaySettings.encodingProfile = profile
+        }
+        if let lowLatencyMode = dict["lowLatencyMode"] as? Bool {
+            settings.displaySettings.lowLatencyMode = lowLatencyMode
         }
     }
     
@@ -778,16 +915,25 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
  // MARK: - 私有方法 - 网络设置
     
     private func saveNetworkSettings() {
+        settings.networkSettings.enforceStrictTransportSecurity()
+        settings.networkSettings.compressionLevel = settings.networkSettings.boundedCompressionLevel
+        settings.networkSettings.bufferSize = settings.networkSettings.boundedBufferSizeKB
+        settings.networkSettings.connectionTimeout = settings.networkSettings.boundedConnectionTimeoutSeconds
+        settings.networkSettings.maxReconnectAttempts = settings.networkSettings.boundedMaxReconnectAttempts
+        settings.networkSettings.reconnectBackoffInitialMs = settings.networkSettings.boundedReconnectBackoffInitialMilliseconds
+        settings.networkSettings.reconnectBackoffMaxMs = settings.networkSettings.boundedReconnectBackoffMaxMilliseconds
+        settings.networkSettings.reconnectBackoffMultiplier = settings.networkSettings.boundedReconnectBackoffMultiplier
+
         let prefix = "\(settingsKey).network."
         userDefaults.set(settings.networkSettings.connectionType.rawValue, forKey: "\(prefix)connectionType")
         userDefaults.set(settings.networkSettings.bandwidthLimit, forKey: "\(prefix)bandwidthLimit")
-        userDefaults.set(settings.networkSettings.compressionLevel, forKey: "\(prefix)compressionLevel")
-        userDefaults.set(settings.networkSettings.enableEncryption, forKey: "\(prefix)enableEncryption")
+        userDefaults.set(settings.networkSettings.boundedCompressionLevel, forKey: "\(prefix)compressionLevel")
+        userDefaults.set(true, forKey: "\(prefix)enableEncryption")
         userDefaults.set(settings.networkSettings.enableUDPTransport, forKey: "\(prefix)enableUDPTransport")
         userDefaults.set(settings.networkSettings.connectionTimeout, forKey: "\(prefix)connectionTimeout")
         userDefaults.set(settings.networkSettings.keepAliveInterval, forKey: "\(prefix)keepAliveInterval")
         userDefaults.set(settings.networkSettings.enableAdaptiveQuality, forKey: "\(prefix)enableAdaptiveQuality")
-        userDefaults.set(settings.networkSettings.bufferSize, forKey: "\(prefix)bufferSize")
+        userDefaults.set(settings.networkSettings.boundedBufferSizeKB, forKey: "\(prefix)bufferSize")
         userDefaults.set(settings.networkSettings.enableNetworkStats, forKey: "\(prefix)enableNetworkStats")
         userDefaults.set(settings.networkSettings.maxReconnectAttempts, forKey: "\(prefix)maxReconnectAttempts")
         userDefaults.set(settings.networkSettings.reconnectBackoffInitialMs, forKey: "\(prefix)reconnectBackoffInitialMs")
@@ -810,10 +956,8 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if userDefaults.object(forKey: "\(prefix)compressionLevel") != nil {
             settings.networkSettings.compressionLevel = userDefaults.integer(forKey: "\(prefix)compressionLevel")
         }
-        
-        if userDefaults.object(forKey: "\(prefix)enableEncryption") != nil {
-            settings.networkSettings.enableEncryption = userDefaults.bool(forKey: "\(prefix)enableEncryption")
-        }
+        settings.networkSettings.enforceStrictTransportSecurity()
+        userDefaults.set(true, forKey: "\(prefix)enableEncryption")
         
         if userDefaults.object(forKey: "\(prefix)enableUDPTransport") != nil {
             settings.networkSettings.enableUDPTransport = userDefaults.bool(forKey: "\(prefix)enableUDPTransport")
@@ -834,6 +978,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if userDefaults.object(forKey: "\(prefix)bufferSize") != nil {
             settings.networkSettings.bufferSize = userDefaults.integer(forKey: "\(prefix)bufferSize")
         }
+        settings.networkSettings.bufferSize = settings.networkSettings.boundedBufferSizeKB
         
         if userDefaults.object(forKey: "\(prefix)enableNetworkStats") != nil {
             settings.networkSettings.enableNetworkStats = userDefaults.bool(forKey: "\(prefix)enableNetworkStats")
@@ -857,15 +1002,18 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         return [
             "connectionType": settings.networkSettings.connectionType.rawValue,
             "bandwidthLimit": settings.networkSettings.bandwidthLimit,
-            "compressionLevel": settings.networkSettings.compressionLevel,
-            "enableEncryption": settings.networkSettings.enableEncryption,
+            "compressionLevel": settings.networkSettings.boundedCompressionLevel,
+            "enableEncryption": true,
             "enableUDPTransport": settings.networkSettings.enableUDPTransport,
             "connectionTimeout": settings.networkSettings.connectionTimeout,
             "keepAliveInterval": settings.networkSettings.keepAliveInterval,
             "enableAdaptiveQuality": settings.networkSettings.enableAdaptiveQuality,
-            "bufferSize": settings.networkSettings.bufferSize,
+            "bufferSize": settings.networkSettings.boundedBufferSizeKB,
             "enableNetworkStats": settings.networkSettings.enableNetworkStats,
-            "maxReconnectAttempts": settings.networkSettings.maxReconnectAttempts
+            "maxReconnectAttempts": settings.networkSettings.maxReconnectAttempts,
+            "reconnectBackoffInitialMs": settings.networkSettings.reconnectBackoffInitialMs,
+            "reconnectBackoffMaxMs": settings.networkSettings.reconnectBackoffMaxMs,
+            "reconnectBackoffMultiplier": settings.networkSettings.reconnectBackoffMultiplier
         ]
     }
     
@@ -882,10 +1030,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let compressionLevel = dict["compressionLevel"] as? Int {
             settings.networkSettings.compressionLevel = compressionLevel
         }
-        
-        if let enableEncryption = dict["enableEncryption"] as? Bool {
-            settings.networkSettings.enableEncryption = enableEncryption
-        }
+        settings.networkSettings.enforceStrictTransportSecurity()
         
         if let enableUDPTransport = dict["enableUDPTransport"] as? Bool {
             settings.networkSettings.enableUDPTransport = enableUDPTransport
@@ -906,6 +1051,7 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let bufferSize = dict["bufferSize"] as? Int {
             settings.networkSettings.bufferSize = bufferSize
         }
+        settings.networkSettings.bufferSize = settings.networkSettings.boundedBufferSizeKB
         
         if let enableNetworkStats = dict["enableNetworkStats"] as? Bool {
             settings.networkSettings.enableNetworkStats = enableNetworkStats
@@ -913,6 +1059,15 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         
         if let maxReconnectAttempts = dict["maxReconnectAttempts"] as? Int {
             settings.networkSettings.maxReconnectAttempts = maxReconnectAttempts
+        }
+        if let reconnectBackoffInitialMs = dict["reconnectBackoffInitialMs"] as? Int {
+            settings.networkSettings.reconnectBackoffInitialMs = reconnectBackoffInitialMs
+        }
+        if let reconnectBackoffMaxMs = dict["reconnectBackoffMaxMs"] as? Int {
+            settings.networkSettings.reconnectBackoffMaxMs = reconnectBackoffMaxMs
+        }
+        if let reconnectBackoffMultiplier = dict["reconnectBackoffMultiplier"] as? Double {
+            settings.networkSettings.reconnectBackoffMultiplier = reconnectBackoffMultiplier
         }
     }
 

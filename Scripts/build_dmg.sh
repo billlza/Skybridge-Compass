@@ -3,7 +3,7 @@
 # SkyBridge Compass DMG Builder
 #
 # 功能：
-# 1. 构建 Release 版本应用（发布 DMG 仅接受 Xcode workspace Release app executable 产物）
+# 1. 构建 Release 版本应用（默认使用 SwiftPM Release 主可执行文件，避免 Xcode Package scheme 的 destination 歧义）
 # 2. 复用 package_app.sh 生成兼容 SMAppService 的 .app（含 PowerMetricsHelper）
 # 3. （可选）重新签名
 # 4. 创建 DMG 磁盘映像（带背景与 Applications 快捷方式）
@@ -26,6 +26,7 @@ VOLUME_NAME="SkyBridge Compass Pro"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$PROJECT_ROOT/Scripts/apple_pqc_sdk_probe.sh"
+source "$PROJECT_ROOT/Scripts/framework_artifact_helpers.sh"
 source "$PROJECT_ROOT/Scripts/notarytool_helpers.sh"
 source "$PROJECT_ROOT/Scripts/package_build_policy.sh"
 source "$PROJECT_ROOT/Scripts/xcodebuild_helpers.sh"
@@ -47,6 +48,16 @@ XCODE_PACKAGE_SCHEME="${SKYBRIDGE_MACOS_PACKAGE_SCHEME:-SkyBridgeCompassApp}"
 XCODE_APP_BUNDLE="${SKYBRIDGE_XCODE_APP_BUNDLE:-$XCODE_DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app}"
 XCODE_PACKAGE_WORKSPACE="$PROJECT_ROOT/.swiftpm/xcode/package.xcworkspace"
 XCODE_PACKAGE_EXECUTABLE="$XCODE_DERIVED_DATA_PATH/Build/Products/Release/SkyBridgeCompassApp"
+SWIFTPM_RELEASE_BUILD_DIR="$PROJECT_ROOT/.build/${BUILD_ARCH}-apple-macosx/release"
+SWIFTPM_PACKAGE_EXECUTABLE="$SWIFTPM_RELEASE_BUILD_DIR/SkyBridgeCompassApp"
+MAIN_BUILD_SYSTEM="${SKYBRIDGE_DMG_MAIN_BUILD_SYSTEM:-swiftpm}"
+VENDOR_XCFRAMEWORKS=(
+    "$PROJECT_ROOT/Sources/Vendor/FreeRDP.xcframework"
+    "$PROJECT_ROOT/Sources/Vendor/FreeRDPClient.xcframework"
+    "$PROJECT_ROOT/Sources/Vendor/WinPR.xcframework"
+    "$PROJECT_ROOT/Sources/Vendor/liboqs.xcframework"
+    "$PROJECT_ROOT/Sources/Vendor/libopus.xcframework"
+)
 
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 NOTARIZE_APP="${NOTARIZE_APP:-0}"
@@ -124,7 +135,20 @@ if [[ "$SKIP_SIGN" == true && "$USE_EXISTING_APP" != true ]]; then
     exit 1
 fi
 
+case "$MAIN_BUILD_SYSTEM" in
+    swiftpm|xcode)
+        ;;
+    *)
+        echo "❌ 不支持的 SKYBRIDGE_DMG_MAIN_BUILD_SYSTEM=${MAIN_BUILD_SYSTEM}；允许值为 swiftpm 或 xcode" >&2
+        exit 1
+        ;;
+esac
+
 skybridge_assert_no_smoke_auto_approval_for_release_context "release_dmg build" || exit 1
+
+if [[ "$USE_EXISTING_APP" != true ]]; then
+    skybridge_assert_xcframeworks_support_macos_arch "$BUILD_ARCH" "${VENDOR_XCFRAMEWORKS[@]}"
+fi
 
 if [[ -z "${SKYBRIDGE_REQUIRE_APP_GROUPS+x}" ]]; then
     export SKYBRIDGE_REQUIRE_APP_GROUPS=1
@@ -201,11 +225,14 @@ verify_app_bundle_build_source() {
         build_configuration=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildConfiguration' "$info_plist" 2>/dev/null || true)
     fi
 
-    if [[ "$build_source" == "xcode_release" \
-        && "$build_scheme" == "$XCODE_PACKAGE_SCHEME" \
-        && "$build_configuration" == "Release" ]]; then
-        return 0
-    fi
+    case "$build_source" in
+        xcode_release|swiftpm_release)
+            if [[ "$build_scheme" == "$XCODE_PACKAGE_SCHEME" \
+                && "$build_configuration" == "Release" ]]; then
+                return 0
+            fi
+            ;;
+    esac
 
     log_error "发布 DMG 仅允许使用明确 Release 产物打包。当前 App Bundle 构建来源: ${build_source:-missing}"
     log_error "期望 scheme/config: ${XCODE_PACKAGE_SCHEME}/Release；当前: ${build_scheme:-missing}/${build_configuration:-missing}"
@@ -225,8 +252,13 @@ verify_release_executable_runtime_inputs() {
 
     if otool -L "$executable_path" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
         if [[ ! -e "$build_dir/WebRTC.framework/WebRTC" && ! -e "$build_dir/PackageFrameworks/WebRTC.framework/WebRTC" ]]; then
-            log_error "主可执行文件依赖 WebRTC.framework，但 Release 构建目录缺少 WebRTC.framework"
-            exit 1
+            local framework_source=""
+            if ! framework_source="$(skybridge_resolve_framework_source_dir "WebRTC" "$BUILD_ARCH" "$build_dir" "$XCODE_DERIVED_DATA_PATH" "$PROJECT_ROOT")"; then
+                log_error "主可执行文件依赖 WebRTC.framework，但 Release 构建目录和 SwiftPM artifacts 都缺少 macOS $BUILD_ARCH slice"
+                exit 1
+            fi
+            log_info "Release executable 校验通过: WebRTC.framework 将从 artifact 补齐: $framework_source"
+            return 0
         fi
         log_info "Release executable 校验通过: 主二进制链接 WebRTC.framework，且构建目录包含 WebRTC"
     fi
@@ -254,6 +286,133 @@ verify_app_runtime_layout() {
             exit 1
         fi
     fi
+}
+
+verify_icns_has_full_size_reps() {
+    local icns_path="$1"
+    local label="$2"
+    local tmp_dir=""
+    local iconset_dir=""
+    local required_rep=""
+
+    if ! command -v iconutil >/dev/null 2>&1; then
+        log_error "iconutil 不可用，无法校验 ${label} 图标表示"
+        exit 1
+    fi
+
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-dmg-icon.XXXXXX")"
+    iconset_dir="$tmp_dir/${label}.iconset"
+    if ! iconutil -c iconset "$icns_path" -o "$iconset_dir" >/dev/null 2>&1; then
+        rm -rf "$tmp_dir"
+        log_error "${label} 不是有效 icns 文件：$icns_path"
+        exit 1
+    fi
+
+    for required_rep in icon_512x512.png icon_512x512@2x.png; do
+        if [[ ! -f "$iconset_dir/$required_rep" ]]; then
+            rm -rf "$tmp_dir"
+            log_error "${label} 缺少 full-size 图标表示：$required_rep"
+            exit 1
+        fi
+    done
+
+    rm -rf "$tmp_dir"
+}
+
+verify_file_matches_source_icon() {
+    local app_resource="$1"
+    local source_resource="$2"
+    local label="$3"
+    local app_hash=""
+    local source_hash=""
+
+    if [[ ! -f "$app_resource" ]]; then
+        log_error "App Bundle 缺少图标资源：$label"
+        exit 1
+    fi
+    if [[ ! -f "$source_resource" ]]; then
+        log_error "源码缺少 canonical 图标资源：$source_resource"
+        exit 1
+    fi
+
+    app_hash="$(shasum -a 256 "$app_resource" | awk '{print $1}')"
+    source_hash="$(shasum -a 256 "$source_resource" | awk '{print $1}')"
+    if [[ "$app_hash" != "$source_hash" ]]; then
+        log_error "App Bundle 图标资源已过期或被回退：$label"
+        log_error "app=${app_hash} source=${source_hash}"
+        exit 1
+    fi
+}
+
+verify_icon_resources_match() {
+    local first="$1"
+    local second="$2"
+    local label="$3"
+    local first_hash=""
+    local second_hash=""
+
+    if [[ ! -f "$first" || ! -f "$second" ]]; then
+        log_error "缺少图标资源，无法校验同源 contract：$label"
+        exit 1
+    fi
+
+    first_hash="$(shasum -a 256 "$first" | awk '{print $1}')"
+    second_hash="$(shasum -a 256 "$second" | awk '{print $1}')"
+    if [[ "$first_hash" != "$second_hash" ]]; then
+        log_error "AppIconDock 必须与 canonical AppIcon 完全一致，避免启动后切换到另一套图标：$label"
+        log_error "AppIcon=${first_hash} AppIconDock=${second_hash}"
+        exit 1
+    fi
+}
+
+verify_iconcomposer_source_matches_canonical_icon() {
+    local source_resources_dir="$1"
+    local canonical_png="$source_resources_dir/AppIcon.png"
+    local iconcomposer_png="$source_resources_dir/AppIcon.icon/Assets/Image.png"
+
+    verify_file_matches_source_icon "$iconcomposer_png" "$canonical_png" "AppIcon.icon/Assets/Image.png"
+}
+
+verify_app_icon_contract() {
+    local app_bundle="$1"
+    local info_plist="$app_bundle/Contents/Info.plist"
+    local resources_dir="$app_bundle/Contents/Resources"
+    local source_resources_dir="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources"
+    local icon_file=""
+    local icon_name=""
+
+    [[ -f "$info_plist" ]] || {
+        log_error "缺少主应用 Info.plist，无法校验图标 contract：$info_plist"
+        exit 1
+    }
+
+    icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$info_plist" 2>/dev/null || true)
+    icon_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$info_plist" 2>/dev/null || true)
+    if [[ "$icon_file" != "AppIcon" ]]; then
+        log_error "CFBundleIconFile 必须指向 full-size AppIcon.icns，当前为：${icon_file:-missing}"
+        exit 1
+    fi
+    if [[ "$icon_name" != "AppIcon" ]]; then
+        log_error "CFBundleIconName 必须指向 Icon Composer AppIcon，当前为：${icon_name:-missing}"
+        exit 1
+    fi
+
+    verify_file_matches_source_icon "$resources_dir/AppIcon.icns" "$source_resources_dir/AppIcon.icns" "AppIcon.icns"
+    verify_file_matches_source_icon "$resources_dir/AppIconDock.icns" "$source_resources_dir/AppIconDock.icns" "AppIconDock.icns"
+    verify_file_matches_source_icon "$resources_dir/AppIcon.png" "$source_resources_dir/AppIcon.png" "AppIcon.png"
+    verify_file_matches_source_icon "$resources_dir/AppIconDock.png" "$source_resources_dir/AppIconDock.png" "AppIconDock.png"
+    verify_iconcomposer_source_matches_canonical_icon "$source_resources_dir"
+    verify_icns_has_full_size_reps "$resources_dir/AppIcon.icns" "AppIcon.icns"
+    verify_icns_has_full_size_reps "$resources_dir/AppIconDock.icns" "AppIconDock.icns"
+    verify_icon_resources_match "$resources_dir/AppIcon.icns" "$resources_dir/AppIconDock.icns" "icns"
+    verify_icon_resources_match "$resources_dir/AppIcon.png" "$resources_dir/AppIconDock.png" "png"
+
+    if [[ -e "$resources_dir/icon.json" || -e "$resources_dir/Image.png" ]]; then
+        log_error "App Bundle 根资源目录包含扁平 Icon Composer 源文件，图标来源不明确"
+        exit 1
+    fi
+
+    log_info "App 图标 contract 校验通过：LaunchServices 与运行态 Dock 均使用 full-size 蓝底图标"
 }
 
 verify_app_embedded_privacy_info_plist() {
@@ -385,6 +544,8 @@ verify_app_release_features() {
         log_error "Developer ID DMG 发布要求 Apple 登录采用 web_session，当前模式为：${apple_sign_in_mode:-missing}"
         exit 1
     fi
+
+    verify_app_icon_contract "$app_bundle"
 }
 
 ensure_release_developer_id_profiles() {
@@ -589,26 +750,43 @@ if [[ "$SKIP_BUILD" == false ]]; then
         exit 1
     fi
 
-    if [[ ! -d "$XCODE_PACKAGE_WORKSPACE" ]]; then
-        log_error "缺少 SwiftPM Xcode workspace：$XCODE_PACKAGE_WORKSPACE"
-        exit 1
+    if [[ "$MAIN_BUILD_SYSTEM" == "swiftpm" ]]; then
+        log_info "使用 SwiftPM Release executable 构建主应用（product=${XCODE_PACKAGE_SCHEME}, arch=${BUILD_ARCH}）..."
+        swift build \
+            -c release \
+            --arch "$BUILD_ARCH" \
+            --product "$XCODE_PACKAGE_SCHEME" \
+            --disable-automatic-resolution
+
+        verify_release_executable_runtime_inputs "$SWIFTPM_PACKAGE_EXECUTABLE"
+        skybridge_assert_release_executable_not_instrumented "$SWIFTPM_PACKAGE_EXECUTABLE" "SwiftPM Release 主可执行文件"
+    else
+        if [[ ! -d "$XCODE_PACKAGE_WORKSPACE" ]]; then
+            log_error "缺少 SwiftPM Xcode workspace：$XCODE_PACKAGE_WORKSPACE"
+            exit 1
+        fi
+
+        log_info "使用 Xcode workspace Release executable 构建主应用（scheme=${XCODE_PACKAGE_SCHEME}, arch=${BUILD_ARCH}）..."
+        skybridge_run_xcodebuild -workspace "$XCODE_PACKAGE_WORKSPACE" \
+            -scheme "$XCODE_PACKAGE_SCHEME" \
+            -configuration Release \
+            -destination "$BUILD_DESTINATION" \
+            -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
+            -skipPackageUpdates \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            ENABLE_CODE_COVERAGE=NO \
+            CLANG_ENABLE_CODE_COVERAGE=NO \
+            GCC_GENERATE_TEST_COVERAGE_FILES=NO \
+            GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
+            ARCHS="$BUILD_ARCH" \
+            ONLY_ACTIVE_ARCH=YES \
+            build
+
+        verify_release_executable_runtime_inputs "$XCODE_PACKAGE_EXECUTABLE"
+        skybridge_assert_release_executable_not_instrumented "$XCODE_PACKAGE_EXECUTABLE" "Xcode Release 主可执行文件"
     fi
-
-    log_info "使用 Xcode workspace Release executable 构建主应用（scheme=${XCODE_PACKAGE_SCHEME}, arch=${BUILD_ARCH}）..."
-    skybridge_run_xcodebuild -workspace "$XCODE_PACKAGE_WORKSPACE" \
-        -scheme "$XCODE_PACKAGE_SCHEME" \
-        -configuration Release \
-        -destination "$BUILD_DESTINATION" \
-        -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
-        -skipPackageUpdates \
-        -disableAutomaticPackageResolution \
-        CODE_SIGNING_ALLOWED=NO \
-        COMPILER_INDEX_STORE_ENABLE=NO \
-        ARCHS="$BUILD_ARCH" \
-        ONLY_ACTIVE_ARCH=YES \
-        build
-
-    verify_release_executable_runtime_inputs "$XCODE_PACKAGE_EXECUTABLE"
 
     log_info "构建原生 Xcode app target 以产出 Widget Extension（scheme=${XCODE_MAC_SCHEME}, arch=${BUILD_ARCH}）..."
     skybridge_run_xcodebuild -project "$XCODE_PROJECT" \
@@ -620,6 +798,10 @@ if [[ "$SKIP_BUILD" == false ]]; then
         -disableAutomaticPackageResolution \
         CODE_SIGNING_ALLOWED=NO \
         COMPILER_INDEX_STORE_ENABLE=NO \
+        ENABLE_CODE_COVERAGE=NO \
+        CLANG_ENABLE_CODE_COVERAGE=NO \
+        GCC_GENERATE_TEST_COVERAGE_FILES=NO \
+        GCC_INSTRUMENT_PROGRAM_FLOW_ARCS=NO \
         ARCHS="$BUILD_ARCH" \
         ONLY_ACTIVE_ARCH=YES \
         build
@@ -657,9 +839,9 @@ else
 
     if [[ -n "$SIGNING_IDENTITY" ]]; then
         log_info "使用指定签名身份执行 package_app.sh: $SIGNING_IDENTITY"
-        SKYBRIDGE_XCODE_APP_BUNDLE="$XCODE_APP_BUNDLE" SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKYBRIDGE_XCODE_APP_BUNDLE="$XCODE_APP_BUNDLE" SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM="$MAIN_BUILD_SYSTEM" SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg IDENTITY="$SIGNING_IDENTITY" "$PROJECT_ROOT/Scripts/package_app.sh"
     else
-        SKYBRIDGE_XCODE_APP_BUNDLE="$XCODE_APP_BUNDLE" SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg "$PROJECT_ROOT/Scripts/package_app.sh"
+        SKYBRIDGE_XCODE_APP_BUNDLE="$XCODE_APP_BUNDLE" SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM="$MAIN_BUILD_SYSTEM" SKIP_BUILD=1 ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" SKYBRIDGE_PACKAGE_CONTEXT=release_dmg "$PROJECT_ROOT/Scripts/package_app.sh"
     fi
 fi
 

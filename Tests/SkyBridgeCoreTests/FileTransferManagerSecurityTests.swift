@@ -142,6 +142,34 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         )
     }
 
+    func testClassicTransferPeerResolutionRequiresExplicitPeerEvidenceEvenWithSingleAuthenticatedPeer() {
+        let peerContext = FileTransferPeerContext(
+            declaredSenderDeviceId: nil,
+            endpointHostOrIP: nil,
+            peerLabel: "iPad",
+            transferId: "transfer-no-hints"
+        )
+        let peers = [
+            ClassicTransferAuthenticatedPeerCandidate(
+                matchDeviceId: "id:only-peer",
+                resolvedPeerDeviceId: "id:only-peer",
+                aliases: ["id:only-peer", "only-peer", "host:192.168.31.20"],
+                endpointHostOrIP: "192.168.31.20",
+                capabilities: [ClassicTransferCapability.classicResume]
+            )
+        ]
+
+        let resolved = ClassicTransferPeerResolutionPolicy.resolvePeer(
+            peerContext: peerContext,
+            authenticatedPeers: peers
+        )
+
+        XCTAssertNil(
+            resolved,
+            "Classic file transfer must fail closed when metadata provides no sender id or endpoint evidence; a single authenticated connection is not enough to guess the target."
+        )
+    }
+
     func testClassicTransferRegistryRemovesSessionSnapshotsByPeerKeys() async {
         let sessionId = "registry-session-\(UUID().uuidString)"
         let registry = ClassicTransferSessionRegistry.shared
@@ -390,10 +418,11 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         XCTAssertTrue(ClassicTransferPeerResolutionPolicy.isInboundPreMetadataDisconnect(NWError.posix(.ENOTCONN)))
         XCTAssertTrue(ClassicTransferPeerResolutionPolicy.isInboundPreMetadataDisconnect(NWError.posix(.ECONNRESET)))
         XCTAssertFalse(ClassicTransferPeerResolutionPolicy.isInboundPreMetadataDisconnect(FileTransferError.invalidHeader))
+        XCTAssertFalse(ClassicTransferPeerResolutionPolicy.isInboundPreMetadataDisconnect(FileTransferError.inboundInvalidInitialHeader))
         XCTAssertFalse(ClassicTransferPeerResolutionPolicy.isInboundPreMetadataDisconnect(FileTransferError.secureSessionRequired))
     }
 
-    func testInboundPreMetadataDisconnectIsNonFatalSmokeDiagnostic() throws {
+    func testInboundPreMetadataRejectsAreNonFatalSmokeDiagnostics() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -408,6 +437,7 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         )
 
         XCTAssertTrue(managerSource.contains("zeroByteDisconnectError: .inboundConnectionClosedBeforeMetadata"))
+        XCTAssertTrue(managerSource.contains("throw FileTransferError.inboundInvalidInitialHeader"))
         XCTAssertTrue(managerSource.contains("accumulator.count() == 0"))
         XCTAssertTrue(managerSource.contains("return zeroByteDisconnectError"))
         XCTAssertFalse(
@@ -419,6 +449,9 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         XCTAssertTrue(listenerSource.contains("catch FileTransferError.inboundConnectionClosedBeforeMetadata"))
         XCTAssertTrue(listenerSource.contains("file-transfer inbound-pre-metadata-disconnect"))
         XCTAssertTrue(listenerSource.contains("fatal=0 phase=initial_header bytesRead=0"))
+        XCTAssertTrue(listenerSource.contains("catch FileTransferError.inboundInvalidInitialHeader"))
+        XCTAssertTrue(listenerSource.contains("file-transfer inbound-rejected"))
+        XCTAssertTrue(listenerSource.contains("fatal=0 phase=initial_header reason=invalid_header"))
         XCTAssertTrue(listenerSource.contains("failed stage=file-transfer phase=\\(phase)"))
         XCTAssertTrue(listenerSource.contains("mac_receive_file_connection_closed"))
         let benignCatch = try XCTUnwrap(
@@ -431,6 +464,14 @@ final class FileTransferManagerSecurityTests: XCTestCase {
             benignCatch.lowerBound,
             fatalLog.lowerBound,
             "The listener must classify metadata-free connection aborts before the generic fatal mac_receive_file failure path."
+        )
+        let invalidHeaderCatch = try XCTUnwrap(
+            listenerSource.range(of: "catch FileTransferError.inboundInvalidInitialHeader")
+        )
+        XCTAssertLessThan(
+            invalidHeaderCatch.lowerBound,
+            fatalLog.lowerBound,
+            "The listener must classify invalid initial headers as non-fatal inbound rejects before the generic fatal file-transfer path."
         )
     }
 

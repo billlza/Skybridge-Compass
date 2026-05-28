@@ -16,6 +16,8 @@ pub(crate) struct CheckCommand {
 pub(crate) enum CheckSubcommand {
     Memory(MemoryCheckArgs),
     Performance(PerformanceCheckArgs),
+    Connectivity(ConnectivityCheckArgs),
+    RemoteControlNotice(RemoteControlNoticeCheckArgs),
     Coverage(CoverageCheckArgs),
 }
 
@@ -82,6 +84,34 @@ pub(crate) enum PerformanceKindArg {
     Webrtc,
     P2pRemote,
     FileTransfer,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConnectivityCheckArgs {
+    #[arg(long)]
+    pub(crate) artifact_dir: PathBuf,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RemoteControlNoticeCheckArgs {
+    #[arg(long, value_name = "DIR", conflicts_with = "log_file")]
+    pub(crate) artifact_dir: Option<PathBuf>,
+    #[arg(long, value_name = "PATH", conflicts_with = "artifact_dir")]
+    pub(crate) log_file: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    pub(crate) transport: RemoteControlNoticeTransportArg,
+    #[arg(long)]
+    pub(crate) require_panel: bool,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RemoteControlNoticeTransportArg {
+    P2p,
+    Webrtc,
 }
 
 #[derive(Debug, Args)]

@@ -46,6 +46,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
                 mediaAudioEndpoint: endpoint,
                 mediaSessionId: "media-session-a",
                 streamRefreshToken: 42,
+                securityIdentity: nil,
                 smokeDimensions: nil,
                 smokeTargetFrameRate: nil
             )
@@ -87,6 +88,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
                 mediaAudioEndpoint: nil,
                 mediaSessionId: nil,
                 streamRefreshToken: nil,
+                securityIdentity: nil,
                 smokeDimensions: nil,
                 smokeTargetFrameRate: nil
             )
@@ -123,6 +125,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
                 mediaAudioEndpoint: nil,
                 mediaSessionId: nil,
                 streamRefreshToken: 99,
+                securityIdentity: nil,
                 smokeDimensions: (width: 1600, height: 900),
                 smokeTargetFrameRate: 45
             )

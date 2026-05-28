@@ -244,10 +244,7 @@ final class WebRTCCGDisplayVideoEncoder: @unchecked Sendable {
         if status != noErr || session == nil {
             Self.releaseCompressionCallbackRefcon(callbackRefcon)
             if codec == kCMVideoCodecType_HEVC {
-                logger.warning("⚠️ HEVC VT session unavailable, falling back to H.264")
-                codecType = kCMVideoCodecType_H264
-                try setupCompressionSession(width: width, height: height, codec: kCMVideoCodecType_H264)
-                return
+                logger.error("HEVC VT session unavailable; refusing automatic H.264 fallback")
             }
             throw CocoaError(.featureUnsupported)
         }

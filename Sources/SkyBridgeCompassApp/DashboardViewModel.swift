@@ -17,7 +17,7 @@ final class DashboardViewModel: ObservableObject {
     @Published private(set) var topConnectionPresentation = ConnectionPresentation(
         phase: .disconnected,
         isConnected: false,
-        statusText: LocalizationManager.shared.localizedString("status.disconnected"),
+        statusText: ConnectionStatus.disconnected.displayName,
         detailText: nil
     )
     @Published private(set) var sessions: [RemoteSessionSummary] = []

@@ -5,11 +5,11 @@ fn file_transfer_artifact_requires_bidirectional_success() -> Result<()> {
     let artifact_dir = make_test_dir("file-transfer-bidirectional")?;
     std::fs::write(
         artifact_dir.join("mac.status.log"),
-        "boot role=mac-p2p-host\nsuite peer=id:peer suite=X-Wing\nfile-transfer inbound-complete name=ios-smoke-RUN.txt\nfile-transfer outbound-route-probe source=bonjour-transfer host=mac.local. port=8080\nfile-transfer outbound-complete name=mac-smoke-RUN.txt\nsuccess peer=id:peer suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0\n",
+        "boot role=mac-p2p-host\nsuite peer=id:peer suite=X-Wing\nfile-transfer inbound-complete name=ios-smoke-RUN.txt sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nfile-transfer outbound-route-probe source=bonjour-transfer host=mac.local. port=8080\nfile-transfer outbound-complete name=mac-smoke-RUN.txt sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nsuccess peer=id:peer suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0\n",
     )?;
     std::fs::write(
         artifact_dir.join("ios-real-device-RUN.status.log"),
-        "boot role=ios-p2p-client target=mac\nfile-transfer outbound-complete name=ios-smoke-RUN.txt\nsuccess suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0\n",
+        "boot role=ios-p2p-client target=mac\nfile-transfer outbound-complete name=ios-smoke-RUN.txt sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsuccess suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0\n",
     )?;
     let args = PerformanceCheckArgs {
         kind: PerformanceKindArg::FileTransfer,

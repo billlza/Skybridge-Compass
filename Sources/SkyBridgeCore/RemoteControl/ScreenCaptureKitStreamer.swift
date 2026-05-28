@@ -38,6 +38,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var configuredKeyInterval: Int = 60
     private var preferredProfile: EncodingProfile = .auto
     private var preferredQuality: VideoQuality = .high
+    private var preferredCompressionLevelPercent: Int = 50
     private var lowLatencyEnabled: Bool = false
     private var jpegMode: Bool = false
     private var jpegFallbackProfile: WebRTCDegradedFallbackJPEGProfile = .emergency
@@ -170,6 +171,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         failFastOnMediaFallbacks: Bool = false,
         preserveExactVisibleSize: Bool = false,
         lowLatencyMode: Bool? = nil,
+        videoCompressionLevelPercent: Int? = nil,
         bitstreamFormat: EncodedBitstreamFormat = .native
     ) async throws {
         guard !started else { return }
@@ -203,6 +205,9 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         let settings = RemoteDesktopSettingsManager.shared.settings
         preferredProfile = settings.displaySettings.encodingProfile
         preferredQuality = settings.displaySettings.videoQuality
+        preferredCompressionLevelPercent = videoCompressionLevelPercent
+            .map { Self.boundedVideoCompressionLevelPercent($0) }
+            ?? settings.displaySettings.boundedCompressionLevelPercent
         lowLatencyEnabled = lowLatencyMode ?? settings.displaySettings.lowLatencyMode
 
  // 选择显示内容：优先使用当前主显示器，避免外接屏/切主屏后继续抓错源
@@ -278,7 +283,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         configuration.width = width
         configuration.height = height
         configuration.pixelFormat = kCVPixelFormatType_32BGRA // 原始帧，后续由VTCompressionSession进行压缩
-        configuration.minimumFrameInterval = Self.encodeFrameDuration(forConfiguredFPS: configuredFPS)
+        configuration.minimumFrameInterval = Self.screenCaptureMinimumFrameInterval(forConfiguredFPS: configuredFPS)
         configuration.queueDepth = selectedQueueDepth
         let requestedSystemAudio = captureSystemAudio
         configuration.capturesAudio = requestedSystemAudio
@@ -353,6 +358,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
                     failFastOnMediaFallbacks: failFastOnMediaFallbacks,
                     preserveExactVisibleSize: preserveExactVisibleSize,
                     lowLatencyMode: lowLatencyMode,
+                    videoCompressionLevelPercent: videoCompressionLevelPercent,
                     bitstreamFormat: bitstreamFormat
                 )
                 return
@@ -463,12 +469,19 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     }
 
     @MainActor
-    func requestKeyFrameRefresh(reason: String, count: Int = 2) {
+    func requestKeyFrameRefresh(
+        reason: String,
+        count: Int = 2,
+        reannounceParameterSets: Bool = true
+    ) {
         let clampedCount = max(1, min(count, 4))
         stateLock.lock()
         pendingForcedKeyFrames = max(pendingForcedKeyFrames, clampedCount)
+        if reannounceParameterSets {
+            pendingParameterSetReannounce = true
+        }
         stateLock.unlock()
-        logger.info("🪄 请求关键帧刷新: \(reason, privacy: .public)")
+        logger.info("🪄 请求关键帧刷新并重宣告参数集: \(reason, privacy: .public)")
     }
 
     @MainActor
@@ -623,39 +636,20 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         )
         if createdSession.status != noErr || createdSession.session == nil {
             Self.releaseCompressionCallbackRefcon(createdSession.callbackRefcon)
-            if failFastOnMediaFallbacks {
-                reportStrictMediaFailure(
-                    issue: "strict-video-codec-fallback-forbidden",
-                    detail: "VTCompressionSessionCreate status \(createdSession.status)"
-                )
-                throw NSError(
-                    domain: "com.skybridge.screencapturekit",
-                    code: Int(createdSession.status),
-                    userInfo: [
-                        NSLocalizedDescriptionKey: "VTCompressionSessionCreate failed in strict media mode: \(createdSession.status)"
-                    ]
-                )
-            }
-            logger.error("VTCompressionSession 创建失败：\(createdSession.status)，切换到 H.264")
-	 // 回退到 H.264
-            let fallbackSession = makeCompressionSession(
-                width: width,
-                height: height,
-                codec: kCMVideoCodecType_H264,
-                encoderSpecification: Self.videoEncoderSpecification(
-                    codec: kCMVideoCodecType_H264,
-                    lowLatencyMode: lowLatencyEnabled,
-                    requiresHardwareEncoder: false,
-                    preferredProfile: preferredProfile
-                )
+            let issue = failFastOnMediaFallbacks
+                ? "strict-video-codec-fallback-forbidden"
+                : "video-codec-session-create-failed"
+            reportStrictMediaFailure(
+                issue: issue,
+                detail: "VTCompressionSessionCreate status \(createdSession.status)"
             )
-            guard fallbackSession.status == noErr, let cs2 = fallbackSession.session else {
-                Self.releaseCompressionCallbackRefcon(fallbackSession.callbackRefcon)
-                throw CocoaError(.featureUnsupported)
-            }
-            installCompressionSession(cs2)
-            compressionCallbackRefcon = fallbackSession.callbackRefcon
-            codecType = kCMVideoCodecType_H264
+            throw NSError(
+                domain: "com.skybridge.screencapturekit",
+                code: Int(createdSession.status),
+                userInfo: [
+                    NSLocalizedDescriptionKey: "VTCompressionSessionCreate failed for requested codec \(codec): \(createdSession.status)"
+                ]
+            )
         } else {
             installCompressionSession(createdSession.session)
             compressionCallbackRefcon = createdSession.callbackRefcon
@@ -812,7 +806,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             mac-sck-encoder targetFPS=\(configuredFPS) codec=\(codecType == kCMVideoCodecType_HEVC ? "hevc" : "h264") \
             requestedGOP=\(configuredKeyInterval) keyInterval=\(keyInterval) keyDurationMs=\(Int((keyIntervalDuration * 1000).rounded())) \
             cadenceCatchUpLimit=\(Self.cadenceCatchUpFrameLimit(forConfiguredFPS: configuredFPS)) \
-            maxFrameDelayCount=\(maxFrameDelayCount) maximumRealTimeFrameRate=\(maximumRealTimeFrameRate) maximumRealTimeFrameRateStatus=\(maximumRealTimeFrameRateStatus) lowLatency=\(lowLatencyEnabled) lowLatencyRateControl=\(lowLatencyRateControlEnabled) quality=\(String(format: "%.2f", compressionQuality)) averageBitRate=\(averageBitRate) dataRateLimitBytesPerSecond=\(hardLimitBytesPerSecond) \
+            maxFrameDelayCount=\(maxFrameDelayCount) maximumRealTimeFrameRate=\(maximumRealTimeFrameRate) maximumRealTimeFrameRateStatus=\(maximumRealTimeFrameRateStatus) lowLatency=\(lowLatencyEnabled) lowLatencyRateControl=\(lowLatencyRateControlEnabled) displayCompressionLevel=\(preferredCompressionLevelPercent) quality=\(String(format: "%.2f", compressionQuality)) averageBitRate=\(averageBitRate) dataRateLimitBytesPerSecond=\(hardLimitBytesPerSecond) \
             dataRateBurstLimitBytes=\(burstLimitBytes) dataRateBurstWindowMs=\(burstWindowMs) singleChunkHEVCBudgetBytes=\(Self.lowLatencyHEVC2K60SingleChunkEncodedPayloadBudgetBytes) \
             dataRateLimitsStatus=\(dataRateLimitsStatus) dataRateLimitsReadbackStatus=\(dataRateLimitsReadbackStatus) dataRateLimitsApplied=\(dataRateLimitsApplied ? 1 : 0) \
             dataRateReadbackBurstLimitBytes=\(readbackBurstLimitBytes) dataRateReadbackBurstWindowMs=\(readbackBurstWindowMs) \
@@ -884,13 +878,22 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         }
     }
 
+    private static func boundedVideoCompressionLevelPercent(_ value: Int) -> Int {
+        max(0, min(value, 100))
+    }
+
+    private func compressionLevelRateScale() -> Float {
+        let normalized = (Float(Self.boundedVideoCompressionLevelPercent(preferredCompressionLevelPercent)) - 50.0) / 50.0
+        return max(0.65, min(1.25, 1.0 - normalized * 0.35))
+    }
+
     private func effectiveCompressionQuality(
         width: Int,
         height: Int,
         fps: Int,
         prioritizeEncodingSpeed: Bool
     ) -> Float {
-        var quality = compressionQualityValue()
+        var quality = compressionQualityValue() * compressionLevelRateScale()
         let megapixels = Double(max(width * height, 1)) / 1_000_000.0
 
         if prioritizeEncodingSpeed {
@@ -903,7 +906,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             quality = min(quality, 0.68)
         }
 
-        return quality
+        return max(0.10, min(quality, 0.98))
     }
 
     private func targetAverageBitRate(codec: CMVideoCodecType, width: Int, height: Int, fps: Int) -> Int {
@@ -920,8 +923,10 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             bitsPerPixelPerFrame = codec == kCMVideoCodecType_HEVC ? 0.32 : 0.56
         }
 
-        let rawBitRate = Int((pixelsPerSecond * bitsPerPixelPerFrame).rounded())
-        let minimum = codec == kCMVideoCodecType_HEVC ? 6_000_000 : 10_000_000
+        let compressionScale = Double(compressionLevelRateScale())
+        let rawBitRate = Int((pixelsPerSecond * bitsPerPixelPerFrame * compressionScale).rounded())
+        let baseMinimum = codec == kCMVideoCodecType_HEVC ? 6_000_000 : 10_000_000
+        let minimum = Int((Double(baseMinimum) * min(1.0, max(0.75, compressionScale))).rounded())
         let maximum: Int
         if codec == kCMVideoCodecType_HEVC, fps >= 55, width * height >= 2_500_000 {
             maximum = 12_000_000

@@ -18,6 +18,7 @@ pub(super) fn append_entries(
                 "check_file_transfer_protocol_identity_binding",
                 "check_file_transfer_signed_kem_refresh",
                 "check_file_transfer_bidirectional",
+                "check_file_transfer_payload_integrity",
                 "protocol_identity_binding_required_ok",
                 "file_transfer_artifact_rejects_failed_stage_before_or_after_success",
                 "file_transfer_artifact_requires_signed_kem_refresh",

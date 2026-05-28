@@ -21,18 +21,25 @@ enum RemoteControlInputEventInjector {
         // display coordinate space. Do not flip Y again on injection, or taps in the
         // upper half land in the lower half (and vice versa).
         let point = mouseInjectionPoint(for: event)
+        let clickState = Int64(max(1, min(event.clickCount ?? 1, 2)))
+
+        func mouseEvent(_ type: CGEventType, button: CGMouseButton) -> CGEvent? {
+            let cgEvent = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button)
+            cgEvent?.setIntegerValueField(.mouseEventClickState, value: clickState)
+            return cgEvent
+        }
 
         switch event.type {
         case .mouseMoved:
             post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left))
         case .leftMouseDown:
-            post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left))
+            post(mouseEvent(.leftMouseDown, button: .left))
         case .leftMouseUp:
-            post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left))
+            post(mouseEvent(.leftMouseUp, button: .left))
         case .rightMouseDown:
-            post(CGEvent(mouseEventSource: nil, mouseType: .rightMouseDown, mouseCursorPosition: point, mouseButton: .right))
+            post(mouseEvent(.rightMouseDown, button: .right))
         case .rightMouseUp:
-            post(CGEvent(mouseEventSource: nil, mouseType: .rightMouseUp, mouseCursorPosition: point, mouseButton: .right))
+            post(mouseEvent(.rightMouseUp, button: .right))
         case .scrollUp:
             post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 24, wheel2: 0, wheel3: 0))
         case .scrollDown:

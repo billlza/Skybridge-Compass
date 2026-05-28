@@ -164,6 +164,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
     public let preferredCodec: String?
     public let supportedVideoFormats: [String]
     public let qualityPreset: String?
+    public let videoCompressionLevel: Int?
     public let adaptiveResolutionEnabled: Bool?
     public let targetFrameRate: Int
     public let keyFrameInterval: Int
@@ -194,6 +195,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
     public let performanceValidationMode: String?
     public let mediaFallbackPolicy: String?
     public let streamRefreshToken: UInt64?
+    public let remoteControlSecurityIdentity: RemoteControlSecurityIdentity?
     public let sentAt: TimeInterval
 
     public init(
@@ -202,6 +204,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         preferredCodec: String? = nil,
         supportedVideoFormats: [String] = [],
         qualityPreset: String? = nil,
+        videoCompressionLevel: Int? = nil,
         adaptiveResolutionEnabled: Bool? = nil,
         targetFrameRate: Int,
         keyFrameInterval: Int,
@@ -232,6 +235,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         performanceValidationMode: String? = nil,
         mediaFallbackPolicy: String? = nil,
         streamRefreshToken: UInt64? = nil,
+        remoteControlSecurityIdentity: RemoteControlSecurityIdentity? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
         self.width = width
@@ -239,6 +243,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         self.preferredCodec = preferredCodec
         self.supportedVideoFormats = supportedVideoFormats
         self.qualityPreset = qualityPreset
+        self.videoCompressionLevel = videoCompressionLevel
         self.adaptiveResolutionEnabled = adaptiveResolutionEnabled
         self.targetFrameRate = targetFrameRate
         self.keyFrameInterval = keyFrameInterval
@@ -269,6 +274,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         self.performanceValidationMode = performanceValidationMode
         self.mediaFallbackPolicy = mediaFallbackPolicy
         self.streamRefreshToken = streamRefreshToken
+        self.remoteControlSecurityIdentity = remoteControlSecurityIdentity
         self.sentAt = sentAt
     }
 }

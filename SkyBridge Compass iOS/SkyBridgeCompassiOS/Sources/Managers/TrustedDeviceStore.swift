@@ -47,6 +47,25 @@ public final class TrustedDeviceStore: ObservableObject {
             }
         }
 
+        public struct ProtocolIdentityPin: Codable, Sendable, Equatable, Hashable {
+            public var algorithm: String
+            public var fingerprint: String
+            public var approvedAt: Date
+            public var source: String
+
+            public init(
+                algorithm: String,
+                fingerprint: String,
+                approvedAt: Date = Date(),
+                source: String
+            ) {
+                self.algorithm = algorithm.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.fingerprint = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                self.approvedAt = approvedAt
+                self.source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
         public let id: String // 建议使用 discovery TXT 的 uuid / 或配对 deviceId
         public var name: String
         public var platform: DevicePlatform
@@ -54,6 +73,7 @@ public final class TrustedDeviceStore: ObservableObject {
         public var addedAt: Date
         public var protocolSigningAlgorithm: String?
         public var protocolPublicKeyFingerprint: String?
+        public var protocolIdentityPins: [ProtocolIdentityPin]?
         public var currentDeviceId: String?
         public var knownDeviceIds: [String]?
         public var currentPathLifecycleState: CurrentPathLifecycleState?
@@ -67,6 +87,7 @@ public final class TrustedDeviceStore: ObservableObject {
             addedAt: Date = Date(),
             protocolSigningAlgorithm: String? = nil,
             protocolPublicKeyFingerprint: String? = nil,
+            protocolIdentityPins: [ProtocolIdentityPin]? = nil,
             currentDeviceId: String? = nil,
             knownDeviceIds: [String]? = nil,
             currentPathLifecycleState: CurrentPathLifecycleState? = nil,
@@ -79,6 +100,7 @@ public final class TrustedDeviceStore: ObservableObject {
             self.addedAt = addedAt
             self.protocolSigningAlgorithm = protocolSigningAlgorithm
             self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint?.lowercased()
+            self.protocolIdentityPins = protocolIdentityPins
             self.currentDeviceId = currentDeviceId
             self.knownDeviceIds = knownDeviceIds
             self.currentPathLifecycleState = currentPathLifecycleState
@@ -112,6 +134,18 @@ public final class TrustedDeviceStore: ObservableObject {
             return nil
         }
         return resolvedCurrentDeviceId(for: matched)
+    }
+
+    public func uniqueCanonicalTrustedDeviceId(for deviceId: String) -> String? {
+        let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+        guard !candidates.isEmpty else { return nil }
+
+        let stableMatches = Set(trustedDevices.compactMap { device -> String? in
+            guard isActive(device), matches(device, candidates: candidates) else { return nil }
+            return canonicalStoredTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: device))
+        })
+        guard stableMatches.count == 1 else { return nil }
+        return stableMatches.first
     }
 
     public func canonicalTrustedDeviceId(for device: DiscoveredDevice) -> String? {
@@ -278,7 +312,7 @@ public final class TrustedDeviceStore: ObservableObject {
     public func currentPathTrustRecord(fingerprint: String) -> TrustedDevice? {
         guard let normalized = normalizedFingerprint(fingerprint) else { return nil }
         return trustedDevices.first { device in
-            device.protocolPublicKeyFingerprint == normalized &&
+            authorityFingerprints(for: device).contains(normalized) &&
             (device.currentPathLifecycleState ?? .active) == .active
         }
     }
@@ -289,7 +323,7 @@ public final class TrustedDeviceStore: ObservableObject {
     ) -> TrustedDevice? {
         guard let normalized = normalizedFingerprint(fingerprint) else { return nil }
         return trustedDevices.first { device in
-            guard device.protocolPublicKeyFingerprint == normalized else { return false }
+            guard authorityFingerprints(for: device).contains(normalized) else { return false }
             guard (device.currentPathLifecycleState ?? .active) == .active else { return false }
             return currentPathDeviceMatches(device, deviceId: deviceId)
         }
@@ -298,11 +332,12 @@ public final class TrustedDeviceStore: ObservableObject {
     public func currentPathFingerprints(forAny deviceIds: [String]) -> Set<String> {
         let candidates = Set(deviceIds.flatMap { PeerIdentityAliasResolver.lookupCandidates(for: $0) })
         guard !candidates.isEmpty else { return [] }
-        return Set(trustedDevices.compactMap { device in
-            guard (device.currentPathLifecycleState ?? .active) == .active else { return nil }
-            guard matches(device, candidates: candidates) else { return nil }
-            return normalizedFingerprint(device.protocolPublicKeyFingerprint)
-        })
+        var fingerprints = Set<String>()
+        for device in trustedDevices where (device.currentPathLifecycleState ?? .active) == .active {
+            guard matches(device, candidates: candidates) else { continue }
+            fingerprints.formUnion(authorityFingerprints(for: device))
+        }
+        return fingerprints
     }
 
     func hasCurrentPathAuthorityFingerprint(
@@ -311,7 +346,7 @@ public final class TrustedDeviceStore: ObservableObject {
     ) -> Bool {
         guard let normalized = normalizedFingerprint(fingerprint) else { return false }
         return trustedDevices.contains { device in
-            guard device.protocolPublicKeyFingerprint == normalized else { return false }
+            guard authorityFingerprints(for: device).contains(normalized) else { return false }
             let state = device.currentPathLifecycleState ?? .active
             return lifecycleStates.contains(state)
         }
@@ -334,7 +369,7 @@ public final class TrustedDeviceStore: ObservableObject {
     ) -> CurrentPathTrustConflict? {
         guard let normalized = normalizedFingerprint(protocolPublicKeyFingerprint) else { return nil }
 
-        let fingerprintMatches = trustedDevices.filter { $0.protocolPublicKeyFingerprint == normalized }
+        let fingerprintMatches = trustedDevices.filter { authorityFingerprints(for: $0).contains(normalized) }
         if fingerprintMatches.contains(where: { ($0.currentPathLifecycleState ?? .active) == .revoked }) {
             return .revokedIdentity
         }
@@ -357,14 +392,16 @@ public final class TrustedDeviceStore: ObservableObject {
 
         let deviceMatches = trustedDevices.filter { currentPathDeviceMatches($0, deviceId: deviceId) }
         if deviceMatches.contains(where: {
-            guard let pinnedFingerprint = $0.protocolPublicKeyFingerprint else { return false }
-            return pinnedFingerprint != normalized && ($0.currentPathLifecycleState ?? .active) == .revoked
+            let pinnedFingerprints = authorityFingerprints(for: $0)
+            guard !pinnedFingerprints.isEmpty else { return false }
+            return !pinnedFingerprints.contains(normalized) && ($0.currentPathLifecycleState ?? .active) == .revoked
         }) {
             return .revokedIdentity
         }
         if deviceMatches.contains(where: {
-            guard let pinnedFingerprint = $0.protocolPublicKeyFingerprint else { return false }
-            guard pinnedFingerprint != normalized else { return false }
+            let pinnedFingerprints = authorityFingerprints(for: $0)
+            guard !pinnedFingerprints.isEmpty else { return false }
+            guard !pinnedFingerprints.contains(normalized) else { return false }
             switch $0.currentPathLifecycleState ?? .active {
             case .reverificationRequired, .quarantined:
                 return true
@@ -375,8 +412,9 @@ public final class TrustedDeviceStore: ObservableObject {
             return .quarantinedIdentity
         }
         if deviceMatches.contains(where: {
-            guard let pinnedFingerprint = $0.protocolPublicKeyFingerprint else { return false }
-            return pinnedFingerprint != normalized && ($0.currentPathLifecycleState ?? .active) == .active
+            let pinnedFingerprints = authorityFingerprints(for: $0)
+            guard !pinnedFingerprints.isEmpty else { return false }
+            return !pinnedFingerprints.contains(normalized) && ($0.currentPathLifecycleState ?? .active) == .active
         }) {
             return .identityConflict
         }
@@ -476,10 +514,22 @@ public final class TrustedDeviceStore: ObservableObject {
                 trustedDevices[idx].connectableContext,
                 with: latestConnectableContext
             )
+            let previousAlgorithm = trustedDevices[idx].protocolSigningAlgorithm
+            let previousFingerprint = trustedDevices[idx].protocolPublicKeyFingerprint
             if let normalizedAlgorithm, !normalizedAlgorithm.isEmpty {
                 trustedDevices[idx].protocolSigningAlgorithm = normalizedAlgorithm
             }
             if let normalizedFingerprint {
+                if let normalizedAlgorithm, !normalizedAlgorithm.isEmpty {
+                    trustedDevices[idx].protocolIdentityPins = protocolIdentityPinsByReplacingAlgorithm(
+                        existing: trustedDevices[idx].protocolIdentityPins,
+                        legacyAlgorithm: previousAlgorithm,
+                        legacyFingerprint: previousFingerprint,
+                        addingAlgorithm: normalizedAlgorithm,
+                        addingFingerprint: normalizedFingerprint,
+                        source: Self.authenticatedHandshakePinSource
+                    )
+                }
                 trustedDevices[idx].protocolPublicKeyFingerprint = normalizedFingerprint
             }
             trustedDevices[idx].knownDeviceIds = mergedKnownDeviceIds(
@@ -495,6 +545,17 @@ public final class TrustedDeviceStore: ObservableObject {
                     ipAddress: device.ipAddress,
                     protocolSigningAlgorithm: normalizedAlgorithm,
                     protocolPublicKeyFingerprint: normalizedFingerprint,
+                    protocolIdentityPins: {
+                        guard let normalizedAlgorithm,
+                              let normalizedFingerprint else { return nil }
+                        return [
+                            TrustedDevice.ProtocolIdentityPin(
+                                algorithm: normalizedAlgorithm,
+                                fingerprint: normalizedFingerprint,
+                                source: Self.authenticatedHandshakePinSource
+                            )
+                        ]
+                    }(),
                     currentDeviceId: normalizedDeclaredDeviceId,
                     knownDeviceIds: Array(candidates).sorted(),
                     currentPathLifecycleState: .active,
@@ -541,7 +602,45 @@ public final class TrustedDeviceStore: ObservableObject {
             protocolSigningAlgorithm: normalizedAlgorithm,
             protocolPublicKeyFingerprint: normalizedFingerprint,
             preferredCurrentDeviceId: stableCurrentDeviceId,
-            connectableContext: connectableContext(from: device)
+            connectableContext: connectableContext(from: device),
+            pinSource: Self.authenticatedHandshakePinSource
+        )
+    }
+
+    @discardableResult
+    public func recordApprovedProtocolIdentityBinding(
+        peerId: String,
+        deviceId: String,
+        aliases: [String],
+        displayName: String?,
+        protocolSigningAlgorithm: String,
+        protocolPublicKeyFingerprint: String
+    ) -> Bool {
+        guard let normalizedFingerprint = normalizedFingerprint(protocolPublicKeyFingerprint),
+              let normalizedAlgorithm = normalizedAlgorithm(protocolSigningAlgorithm),
+              let stableCurrentDeviceId = normalizedTrustedDeviceIdentifier(deviceId) else {
+            return false
+        }
+
+        var candidates = Set<String>()
+        for rawId in [peerId, deviceId] + aliases {
+            candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: rawId))
+        }
+        candidates.insert(stableCurrentDeviceId)
+        guard !candidates.isEmpty else { return false }
+
+        return upsertAuthoritativeTrustedDevice(
+            preferredRecordId: stableCurrentDeviceId,
+            candidateAliases: candidates,
+            name: displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? displayName!.trimmingCharacters(in: .whitespacesAndNewlines)
+                : stableCurrentDeviceId,
+            platform: .unknown,
+            ipAddress: nil,
+            protocolSigningAlgorithm: normalizedAlgorithm,
+            protocolPublicKeyFingerprint: normalizedFingerprint,
+            preferredCurrentDeviceId: stableCurrentDeviceId,
+            pinSource: Self.pibOperatorApprovalPinSource
         )
     }
 
@@ -576,7 +675,8 @@ public final class TrustedDeviceStore: ObservableObject {
             protocolSigningAlgorithm: normalizedAlgorithm,
             protocolPublicKeyFingerprint: normalizedFingerprint,
             preferredCurrentDeviceId: stableCurrentDeviceId,
-            connectableContext: connectableContext
+            connectableContext: connectableContext,
+            pinSource: Self.authenticatedHandshakePinSource
         )
     }
 
@@ -613,6 +713,16 @@ public final class TrustedDeviceStore: ObservableObject {
                     current.protocolPublicKeyFingerprint = fingerprint
                     changed = true
                 }
+                let mergedPins = normalizedProtocolIdentityPins(
+                    protocolIdentityPins(for: current) + protocolIdentityPins(for: remote),
+                    legacyAlgorithm: nil,
+                    legacyFingerprint: nil,
+                    approvedAt: Date()
+                )
+                if mergedPins != (current.protocolIdentityPins ?? []) {
+                    current.protocolIdentityPins = mergedPins.isEmpty ? nil : mergedPins
+                    changed = true
+                }
                 if let currentDeviceId = remote.currentDeviceId, !currentDeviceId.isEmpty, currentDeviceId != current.currentDeviceId {
                     current.currentDeviceId = currentDeviceId
                     changed = true
@@ -643,7 +753,7 @@ public final class TrustedDeviceStore: ObservableObject {
                     trustedDevices[idx] = current
                 }
             } else {
-                trustedDevices.append(remote)
+                trustedDevices.append(migratedTrustedDeviceRecord(remote))
                 changed = true
             }
         }
@@ -698,11 +808,131 @@ public final class TrustedDeviceStore: ObservableObject {
         try? Self.trustedDevicesStore.save(trustedDevices)
     }
 
+    private static let authenticatedHandshakePinSource = "authenticated-handshake"
+    private static let legacyMigrationPinSource = "legacy-migration"
+    private static let pibOperatorApprovalPinSource = "pib-1-operator-approval"
+
     private func normalizedFingerprint(_ raw: String?) -> String? {
         guard let raw else { return nil }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard value.count == 64, value.allSatisfy(\.isHexDigit) else { return nil }
         return value
+    }
+
+    private func normalizedAlgorithm(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private func normalizedProtocolIdentityPins(
+        _ pins: [TrustedDevice.ProtocolIdentityPin]?,
+        legacyAlgorithm: String?,
+        legacyFingerprint: String?,
+        approvedAt: Date
+    ) -> [TrustedDevice.ProtocolIdentityPin] {
+        var pinsByAlgorithm: [String: TrustedDevice.ProtocolIdentityPin] = [:]
+
+        func upsert(_ pin: TrustedDevice.ProtocolIdentityPin) {
+            guard let algorithm = normalizedAlgorithm(pin.algorithm),
+                  let fingerprint = normalizedFingerprint(pin.fingerprint) else {
+                return
+            }
+            let normalizedPin = TrustedDevice.ProtocolIdentityPin(
+                algorithm: algorithm,
+                fingerprint: fingerprint,
+                approvedAt: pin.approvedAt,
+                source: pin.source.isEmpty ? Self.authenticatedHandshakePinSource : pin.source
+            )
+            if let existing = pinsByAlgorithm[algorithm],
+               existing.approvedAt > normalizedPin.approvedAt {
+                return
+            }
+            pinsByAlgorithm[algorithm] = normalizedPin
+        }
+
+        for pin in pins ?? [] {
+            upsert(pin)
+        }
+
+        if let algorithm = normalizedAlgorithm(legacyAlgorithm),
+           pinsByAlgorithm[algorithm] == nil,
+           let fingerprint = normalizedFingerprint(legacyFingerprint) {
+            upsert(
+                TrustedDevice.ProtocolIdentityPin(
+                    algorithm: algorithm,
+                    fingerprint: fingerprint,
+                    approvedAt: approvedAt,
+                    source: Self.legacyMigrationPinSource
+                )
+            )
+        }
+
+        return pinsByAlgorithm.values.sorted {
+            if $0.algorithm != $1.algorithm {
+                return $0.algorithm < $1.algorithm
+            }
+            return $0.fingerprint < $1.fingerprint
+        }
+    }
+
+    private func protocolIdentityPins(
+        for device: TrustedDevice
+    ) -> [TrustedDevice.ProtocolIdentityPin] {
+        normalizedProtocolIdentityPins(
+            device.protocolIdentityPins,
+            legacyAlgorithm: device.protocolSigningAlgorithm,
+            legacyFingerprint: device.protocolPublicKeyFingerprint,
+            approvedAt: device.addedAt
+        )
+    }
+
+    private func authorityFingerprints(for device: TrustedDevice) -> Set<String> {
+        Set(protocolIdentityPins(for: device).map(\.fingerprint))
+    }
+
+    private func protocolIdentityPinsByReplacingAlgorithm(
+        existing pins: [TrustedDevice.ProtocolIdentityPin]?,
+        legacyAlgorithm: String?,
+        legacyFingerprint: String?,
+        addingAlgorithm: String,
+        addingFingerprint: String,
+        approvedAt: Date = Date(),
+        source: String
+    ) -> [TrustedDevice.ProtocolIdentityPin] {
+        guard let algorithm = normalizedAlgorithm(addingAlgorithm),
+              let fingerprint = normalizedFingerprint(addingFingerprint) else {
+            return normalizedProtocolIdentityPins(
+                pins,
+                legacyAlgorithm: legacyAlgorithm,
+                legacyFingerprint: legacyFingerprint,
+                approvedAt: approvedAt
+            )
+        }
+
+        var normalized = normalizedProtocolIdentityPins(
+            pins,
+            legacyAlgorithm: legacyAlgorithm,
+            legacyFingerprint: legacyFingerprint,
+            approvedAt: approvedAt
+        )
+        normalized.removeAll { $0.algorithm == algorithm }
+        normalized.append(
+            TrustedDevice.ProtocolIdentityPin(
+                algorithm: algorithm,
+                fingerprint: fingerprint,
+                approvedAt: approvedAt,
+                source: source
+            )
+        )
+        return normalizedProtocolIdentityPins(
+            normalized,
+            legacyAlgorithm: nil,
+            legacyFingerprint: nil,
+            approvedAt: approvedAt
+        )
     }
 
     private func normalizedNameToken(_ raw: String?) -> String {
@@ -725,7 +955,8 @@ public final class TrustedDeviceStore: ObservableObject {
         protocolSigningAlgorithm: String,
         protocolPublicKeyFingerprint: String,
         preferredCurrentDeviceId: String?,
-        connectableContext: TrustedDevice.ConnectableContext? = nil
+        connectableContext: TrustedDevice.ConnectableContext? = nil,
+        pinSource: String
     ) -> Bool {
         let matchingIndices = trustedDevices.indices.filter { index in
             let record = trustedDevices[index]
@@ -736,7 +967,7 @@ public final class TrustedDeviceStore: ObservableObject {
                normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: record)) == preferredCurrentDeviceId {
                 return true
             }
-            return normalizedFingerprint(record.protocolPublicKeyFingerprint) == protocolPublicKeyFingerprint
+            return authorityFingerprints(for: record).contains(protocolPublicKeyFingerprint)
         }
 
         let primaryIndex = preferredPrimaryAuthorityIndex(
@@ -780,6 +1011,14 @@ public final class TrustedDeviceStore: ObservableObject {
                 mergedRecord.connectableContext,
                 with: connectableContext
             )
+            mergedRecord.protocolIdentityPins = protocolIdentityPinsByReplacingAlgorithm(
+                existing: mergedRecord.protocolIdentityPins,
+                legacyAlgorithm: mergedRecord.protocolSigningAlgorithm,
+                legacyFingerprint: mergedRecord.protocolPublicKeyFingerprint,
+                addingAlgorithm: protocolSigningAlgorithm,
+                addingFingerprint: protocolPublicKeyFingerprint,
+                source: pinSource
+            )
             mergedRecord.protocolSigningAlgorithm = protocolSigningAlgorithm
             mergedRecord.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
             mergedRecord.currentDeviceId = canonicalCurrentDeviceId
@@ -802,6 +1041,13 @@ public final class TrustedDeviceStore: ObservableObject {
                     ipAddress: ipAddress,
                     protocolSigningAlgorithm: protocolSigningAlgorithm,
                     protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
+                    protocolIdentityPins: [
+                        TrustedDevice.ProtocolIdentityPin(
+                            algorithm: protocolSigningAlgorithm,
+                            fingerprint: protocolPublicKeyFingerprint,
+                            source: pinSource
+                        )
+                    ],
                     currentDeviceId: canonicalCurrentDeviceId,
                     knownDeviceIds: knownDeviceIds,
                     currentPathLifecycleState: CurrentPathLifecycleState.active,
@@ -837,8 +1083,8 @@ public final class TrustedDeviceStore: ObservableObject {
                 return lhsCurrentMatchesPreferred && !rhsCurrentMatchesPreferred
             }
 
-            let lhsFingerprintMatches = normalizedFingerprint(lhsRecord.protocolPublicKeyFingerprint) == preferredFingerprint
-            let rhsFingerprintMatches = normalizedFingerprint(rhsRecord.protocolPublicKeyFingerprint) == preferredFingerprint
+            let lhsFingerprintMatches = authorityFingerprints(for: lhsRecord).contains(preferredFingerprint)
+            let rhsFingerprintMatches = authorityFingerprints(for: rhsRecord).contains(preferredFingerprint)
             if lhsFingerprintMatches != rhsFingerprintMatches {
                 return lhsFingerprintMatches && !rhsFingerprintMatches
             }
@@ -884,6 +1130,13 @@ public final class TrustedDeviceStore: ObservableObject {
            let duplicateFingerprint = normalizedFingerprint(duplicate.protocolPublicKeyFingerprint) {
             merged.protocolPublicKeyFingerprint = duplicateFingerprint
         }
+        let mergedPins = normalizedProtocolIdentityPins(
+            protocolIdentityPins(for: merged) + protocolIdentityPins(for: duplicate),
+            legacyAlgorithm: nil,
+            legacyFingerprint: nil,
+            approvedAt: Date()
+        )
+        merged.protocolIdentityPins = mergedPins.isEmpty ? nil : mergedPins
         if merged.currentDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
            let duplicateCurrentDeviceId = normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: duplicate)) {
             merged.currentDeviceId = duplicateCurrentDeviceId
@@ -1047,15 +1300,41 @@ public final class TrustedDeviceStore: ObservableObject {
         return PeerIdentityAliasResolver.persistentDeviceId(from: trimmed)
     }
 
+    private func canonicalStoredTrustedDeviceIdentifier(_ raw: String?) -> String? {
+        guard let normalized = PeerIdentityAliasResolver.normalizedIdentifier(raw),
+              !normalized.isEmpty else {
+            return nil
+        }
+
+        if let persistent = canonicalPersistentTrustedDeviceIdentifier(normalized) {
+            return persistent
+        }
+
+        if normalized.hasPrefix("id:") {
+            let payload = String(normalized.dropFirst("id:".count))
+            guard !payload.isEmpty,
+                  !payload.contains(where: \.isWhitespace),
+                  payload.allSatisfy({ character in
+                      character.isASCII
+                          && (character.isLetter || character.isNumber || character == "-" || character == "_" || character == ".")
+                  }),
+                  !PeerIdentityAliasResolver.isEndpointAlias(normalized) else {
+                return nil
+            }
+            return normalized
+        }
+        return nil
+    }
+
     private func bestPersistentTrustedDeviceIdentifier(for device: TrustedDevice) -> String? {
-        if let current = canonicalPersistentTrustedDeviceIdentifier(device.currentDeviceId) {
+        if let current = canonicalStoredTrustedDeviceIdentifier(device.currentDeviceId) {
             return current
         }
-        if let recordID = canonicalPersistentTrustedDeviceIdentifier(device.id) {
+        if let recordID = canonicalStoredTrustedDeviceIdentifier(device.id) {
             return recordID
         }
         for knownDeviceId in device.knownDeviceIds ?? [] {
-            if let known = canonicalPersistentTrustedDeviceIdentifier(knownDeviceId) {
+            if let known = canonicalStoredTrustedDeviceIdentifier(knownDeviceId) {
                 return known
             }
         }
@@ -1065,6 +1344,8 @@ public final class TrustedDeviceStore: ObservableObject {
     private func migratedTrustedDeviceRecord(_ device: TrustedDevice) -> TrustedDevice {
         var migrated = device
         migrated.currentDeviceId = bestPersistentTrustedDeviceIdentifier(for: device)
+        let pins = protocolIdentityPins(for: migrated)
+        migrated.protocolIdentityPins = pins.isEmpty ? nil : pins
         return migrated
     }
 }

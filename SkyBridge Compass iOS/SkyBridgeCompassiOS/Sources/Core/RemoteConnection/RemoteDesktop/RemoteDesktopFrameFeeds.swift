@@ -152,6 +152,10 @@ final class RemoteMetalVideoFrameFeed: ObservableObject {
         hasDisplayedFrame || latestFrame != nil
     }
 
+    var activeConsumerCount: Int {
+        frameConsumers.count
+    }
+
     @discardableResult
     func enqueue(frame: DecodedPixelBufferFrame) -> DeliveryResult {
         let shouldPublishSurfaceAvailability = latestFrame == nil && !hasDisplayedFrame

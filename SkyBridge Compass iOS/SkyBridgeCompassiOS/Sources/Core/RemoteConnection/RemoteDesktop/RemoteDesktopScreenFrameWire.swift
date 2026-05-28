@@ -23,12 +23,14 @@ enum RemoteDesktopScreenFrameWire {
         enum Result: Equatable {
             case waiting(frameId: UInt64, chunkIndex: Int, chunkCount: Int)
             case complete(frameId: UInt64, payload: Data)
-            case failed(reason: String, frameId: UInt64?)
+            case dropped(reason: String, frameId: UInt64?)
+            case suppressed(frameId: UInt64, reason: String)
         }
 
         private let maxFrameBytes: Int
         private let frameTTL: TimeInterval = 1.0
         private var frameId: UInt64?
+        private var suppressedFrameReasons: [UInt64: String] = [:]
         private var expectedChunkCount = 0
         private var expectedTotalBytes = 0
         private var nextChunkIndex = 0
@@ -40,7 +42,7 @@ enum RemoteDesktopScreenFrameWire {
             self.maxFrameBytes = maxFrameBytes
         }
 
-        mutating func reset() {
+        mutating func reset(clearSuppression: Bool = true) {
             frameId = nil
             expectedChunkCount = 0
             expectedTotalBytes = 0
@@ -48,9 +50,46 @@ enum RemoteDesktopScreenFrameWire {
             receivedBytes = 0
             chunks.removeAll(keepingCapacity: true)
             lastUpdatedAt = .distantPast
+            if clearSuppression {
+                clearSuppressedFrames()
+            }
+        }
+
+        private mutating func clearSuppressedFrames() {
+            suppressedFrameReasons.removeAll(keepingCapacity: true)
+        }
+
+        private mutating func drop(
+            reason: String,
+            frameId droppedFrameId: UInt64?,
+            suppressOrphansFor orphanFrameIds: [UInt64] = []
+        ) -> Result {
+            reset(clearSuppression: orphanFrameIds.isEmpty)
+            for orphanFrameId in orphanFrameIds {
+                suppressedFrameReasons[orphanFrameId] = reason
+            }
+            return .dropped(reason: reason, frameId: droppedFrameId)
         }
 
         mutating func append(_ envelope: ChunkEnvelope, now: Date) -> Result {
+            if let suppressedReason = suppressedFrameReasons[envelope.frameId] {
+                return .suppressed(frameId: envelope.frameId, reason: suppressedReason)
+            } else if envelope.chunkIndex == 0 {
+                clearSuppressedFrames()
+            }
+
+            if let currentFrameId = frameId,
+               now.timeIntervalSince(lastUpdatedAt) > frameTTL {
+                reset()
+                if envelope.chunkIndex != 0 {
+                    return drop(
+                        reason: "sbc2-chunk-timeout",
+                        frameId: currentFrameId,
+                        suppressOrphansFor: [envelope.frameId]
+                    )
+                }
+            }
+
             guard envelope.chunkCount > 0,
                   envelope.chunkIndex >= 0,
                   envelope.chunkIndex < envelope.chunkCount,
@@ -58,35 +97,46 @@ enum RemoteDesktopScreenFrameWire {
                   envelope.totalBytes <= maxFrameBytes,
                   envelope.chunkOffset >= 0,
                   envelope.chunkOffset + envelope.payload.count <= envelope.totalBytes else {
-                reset()
-                return .failed(reason: "invalid-sbc2-chunk-metadata", frameId: envelope.frameId)
-            }
-
-            if let currentFrameId = frameId,
-               now.timeIntervalSince(lastUpdatedAt) > frameTTL {
-                reset()
-                return .failed(reason: "sbc2-chunk-timeout", frameId: currentFrameId)
+                return drop(reason: "invalid-sbc2-chunk-metadata", frameId: envelope.frameId)
             }
 
             if frameId == nil {
                 guard envelope.chunkIndex == 0, envelope.chunkOffset == 0 else {
-                    reset()
-                    return .failed(reason: "missing-first-sbc2-chunk", frameId: envelope.frameId)
+                    return drop(
+                        reason: "missing-first-sbc2-chunk",
+                        frameId: envelope.frameId,
+                        suppressOrphansFor: [envelope.frameId]
+                    )
                 }
                 beginFrame(envelope)
             } else if frameId != envelope.frameId
                         || expectedChunkCount != envelope.chunkCount
                         || expectedTotalBytes != envelope.totalBytes {
                 let failedFrameId = frameId
+                guard envelope.chunkIndex == 0,
+                      envelope.chunkOffset == 0,
+                      frameId != envelope.frameId else {
+                    let orphanFrameIds = frameId == envelope.frameId
+                        ? [failedFrameId ?? envelope.frameId]
+                        : [failedFrameId, envelope.frameId].compactMap { $0 }
+                    return drop(
+                        reason: "interleaved-or-restarted-sbc2-frame",
+                        frameId: orphanFrameIds.first ?? envelope.frameId,
+                        suppressOrphansFor: orphanFrameIds
+                    )
+                }
                 reset()
-                return .failed(reason: "interleaved-or-restarted-sbc2-frame", frameId: failedFrameId ?? envelope.frameId)
+                beginFrame(envelope)
             }
 
             guard envelope.chunkIndex == nextChunkIndex,
                   envelope.chunkOffset == receivedBytes else {
                 let failedFrameId = frameId ?? envelope.frameId
-                reset()
-                return .failed(reason: "out-of-order-sbc2-chunk", frameId: failedFrameId)
+                return drop(
+                    reason: "out-of-order-sbc2-chunk",
+                    frameId: failedFrameId,
+                    suppressOrphansFor: [failedFrameId]
+                )
             }
 
             chunks.append(envelope.payload)
@@ -97,8 +147,7 @@ enum RemoteDesktopScreenFrameWire {
             if nextChunkIndex == expectedChunkCount {
                 guard receivedBytes == expectedTotalBytes else {
                     let failedFrameId = frameId
-                    reset()
-                    return .failed(reason: "sbc2-total-bytes-mismatch", frameId: failedFrameId)
+                    return drop(reason: "sbc2-total-bytes-mismatch", frameId: failedFrameId)
                 }
                 let completeFrameId = frameId ?? envelope.frameId
                 var payload = Data(capacity: expectedTotalBytes)
@@ -117,6 +166,7 @@ enum RemoteDesktopScreenFrameWire {
         }
 
         private mutating func beginFrame(_ envelope: ChunkEnvelope) {
+            clearSuppressedFrames()
             frameId = envelope.frameId
             expectedChunkCount = envelope.chunkCount
             expectedTotalBytes = envelope.totalBytes
@@ -260,10 +310,62 @@ enum RemoteDesktopScreenFrameWire {
             }
         case .hevc:
             return parseNALUnits(from: imageData).contains { nalu in
-                guard let first = nalu.first else { return false }
+                guard nalu.count >= 2, let first = nalu.first else { return false }
                 let type = Int((first >> 1) & 0x3F)
                 return (16...21).contains(type)
             }
+        }
+    }
+
+    static func containsDecoderBootstrapFrame(
+        format: String?,
+        imageData: Data,
+        advertisedSyncFrame: Bool?
+    ) -> Bool {
+        switch CodecTag(format: format) {
+        case .jpeg, .bgra, .unknown:
+            return advertisedSyncFrame ?? true
+        case .h264:
+            let nalus = parseNALUnits(from: imageData)
+            var hasSPS = false
+            var hasPPS = false
+            var hasIDR = false
+            for nalu in nalus {
+                guard let first = nalu.first else { continue }
+                switch Int(first & 0x1F) {
+                case 5:
+                    hasIDR = true
+                case 7:
+                    hasSPS = true
+                case 8:
+                    hasPPS = true
+                default:
+                    break
+                }
+            }
+            return hasSPS && hasPPS && hasIDR
+        case .hevc:
+            let nalus = parseNALUnits(from: imageData)
+            var hasVPS = false
+            var hasSPS = false
+            var hasPPS = false
+            var hasIRAP = false
+            for nalu in nalus {
+                guard nalu.count >= 2, let first = nalu.first else { continue }
+                switch Int((first >> 1) & 0x3F) {
+                case 16...21:
+                    hasIRAP = true
+                case 32:
+                    hasVPS = true
+                case 33:
+                    hasSPS = true
+                case 34:
+                    hasPPS = true
+                default:
+                    break
+                }
+            }
+            return hasVPS && hasSPS && hasPPS && hasIRAP
         }
     }
 
@@ -392,6 +494,17 @@ extension ScreenData {
         }
         return true
     }
+
+    var isDecoderBootstrapFrame: Bool {
+        if isCompressedPredictiveVideoFrame {
+            return RemoteDesktopScreenFrameWire.containsDecoderBootstrapFrame(
+                format: format,
+                imageData: imageData,
+                advertisedSyncFrame: isSyncFrame
+            )
+        }
+        return true
+    }
 }
 
 enum RemoteDesktopDecodeQueuePolicy {
@@ -462,13 +575,17 @@ enum RemoteDesktopDecodeQueuePolicy {
             return .replacedStillFrame
         }
 
-        if screenData.isIndependentlyDecodableFrame {
-            if waitingForSyncFrame {
-                pendingFrames.removeAll(keepingCapacity: true)
-                waitingForSyncFrame = false
-                pendingFrames.append(screenData)
-                return .recoveredWithIndependentFrame
+        if waitingForSyncFrame {
+            guard screenData.isDecoderBootstrapFrame else {
+                return .droppedIncomingPredictiveFrame
             }
+            pendingFrames.removeAll(keepingCapacity: true)
+            pendingFrames.append(screenData)
+            waitingForSyncFrame = false
+            return .recoveredWithIndependentFrame
+        }
+
+        if screenData.isIndependentlyDecodableFrame {
             pendingFrames.append(screenData)
             return pendingFrames.count > maxPredictiveVideoFrames ? .enqueuedAboveSoftLimit : .enqueued
         }
@@ -493,4 +610,3 @@ enum RemoteDesktopDecodeQueuePolicy {
         return pendingFrames.removeFirst()
     }
 }
-

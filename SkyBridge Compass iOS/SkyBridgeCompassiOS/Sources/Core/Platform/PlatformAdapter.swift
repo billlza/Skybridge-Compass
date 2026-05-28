@@ -372,7 +372,9 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         peerSupportedSuites: [CryptoSuite]? = nil,
         localSOAPeerId: Data? = nil,
         expectedRemoteSOAPeerId: Data? = nil,
-        trustProvider: (any HandshakeTrustProvider)? = nil
+        trustProvider: (any HandshakeTrustProvider)? = nil,
+        authenticatedIncomingEstablishedPolicy: PeerSessionArbiter.IncomingEstablishedPolicy = .rejectDuplicate,
+        soaSessionScope: PeerSessionArbiter.SessionScope = .p2p
     ) throws -> HandshakeDriver {
         guard isInitialized,
               let provider = cryptoProvider,
@@ -400,7 +402,9 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             offeredSuites: handshakeSuites,
             trustProvider: trustProvider,
             localSOAPeerId: localSOAPeerId,
-            expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
+            expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
+            authenticatedIncomingEstablishedPolicy: authenticatedIncomingEstablishedPolicy,
+            soaSessionScope: soaSessionScope
         )
     }
     
@@ -413,6 +417,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         localSOAPeerId: Data? = nil,
         expectedRemoteSOAPeerId: Data? = nil,
         trustProvider: (any HandshakeTrustProvider)? = nil,
+        soaSessionScope: PeerSessionArbiter.SessionScope = .p2p,
         onDriverCreated: (@Sendable (HandshakeDriver) async -> Void)? = nil
     ) async throws -> SessionKeys {
         guard isInitialized,
@@ -471,7 +476,8 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 trustProvider: trustProvider,
                 soaMetadata: attemptSOAMetadata,
                 localSOAPeerId: localSOAPeerId,
-                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
+                expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
+                soaSessionScope: soaSessionScope
             )
 
             if let onDriverCreated {

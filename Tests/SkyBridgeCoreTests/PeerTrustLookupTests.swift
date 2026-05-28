@@ -18,6 +18,9 @@ final class PeerTrustLookupTests: XCTestCase {
     func testPersistentDeviceIdRejectsDisplayNamesAndDoesNotSynthesizeBogusHostAliases() {
         XCTAssertNil(PeerTrustLookup.persistentDeviceId(from: "Lza的MacBook Pro"))
         XCTAssertNil(PeerTrustLookup.persistentDeviceId(from: "id:lza的macbook pro"))
+        XCTAssertNil(PeerTrustLookup.persistentDeviceId(from: "192.168.10.22"))
+        XCTAssertNil(PeerTrustLookup.persistentDeviceId(from: "id:192.168.10.22"))
+        XCTAssertNil(PeerTrustLookup.persistentDeviceId(from: "fe80::81d:bb45:8c18:6d6a%en0"))
         XCTAssertNil(PeerTrustLookup.hostAlias(fromIPAddress: "id:lza的macbook pro"))
 
         let candidates = PeerTrustLookup.lookupCandidates(for: "id:lza的macbook pro")
@@ -75,9 +78,11 @@ final class PeerTrustLookupTests: XCTestCase {
         )
 
         let provider = DefaultHandshakeTrustProvider()
-        let resolved = await provider.trustedKEMPublicKeys(for: "host:[fe80::81d:bb45:8c18:6d6a%en0].9527")
+        let resolved = await provider.trustedKEMPublicKeys(for: canonicalId)
+        let endpointOnly = await provider.trustedKEMPublicKeys(for: "host:[fe80::81d:bb45:8c18:6d6a%en0].9527")
 
         XCTAssertEqual(resolved[CryptoSuite(wireId: 257)], expectedKey)
+        XCTAssertNil(endpointOnly[CryptoSuite(wireId: 257)])
     }
 
     @MainActor

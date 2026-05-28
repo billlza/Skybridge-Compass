@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import OSLog
 import SkyBridgeProtocolCore
@@ -6,11 +5,13 @@ import SkyBridgeRealtimeMedia
 
 @available(macOS 14.0, iOS 17.0, *)
 actor WebRTCAudioFallbackSender {
+    typealias SecurePayloadSealer = @Sendable (Data) async throws -> Data
+
     private let logger = Logger(subsystem: "com.skybridge.connection", category: "WebRTCAudioFallback")
     private let sessionID: String
     private let session: WebRTCSession
-    private let keys: SessionKeys
     private let maxBufferedAmountBytes: UInt64
+    private let securePayloadSealer: SecurePayloadSealer
     private var pendingPayloads: [Data] = []
     private var isSending = false
     private var isClosed = false
@@ -22,13 +23,13 @@ actor WebRTCAudioFallbackSender {
     init(
         sessionID: String,
         session: WebRTCSession,
-        keys: SessionKeys,
-        maxBufferedAmountBytes: UInt64
+        maxBufferedAmountBytes: UInt64,
+        securePayloadSealer: @escaping SecurePayloadSealer
     ) {
         self.sessionID = sessionID
         self.session = session
-        self.keys = keys
         self.maxBufferedAmountBytes = maxBufferedAmountBytes
+        self.securePayloadSealer = securePayloadSealer
     }
 
     func submit(_ plaintext: Data) {
@@ -77,7 +78,7 @@ actor WebRTCAudioFallbackSender {
               !pendingPayloads.isEmpty {
             let plaintext = pendingPayloads.removeFirst()
             do {
-                let ciphertext = try encrypt(plaintext, with: keys)
+                let ciphertext = try await securePayloadSealer(plaintext)
                 let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-audio")
                 guard self.generation == generation else { break }
                 try await session.sendFramedPayloadAsync(
@@ -94,12 +95,6 @@ actor WebRTCAudioFallbackSender {
                 )
             }
         }
-    }
-
-    private func encrypt(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
-        let key = SymmetricKey(data: keys.sendKey)
-        let sealed = try AES.GCM.seal(plaintext, using: key)
-        return sealed.combined ?? Data()
     }
 
     private func logDropIfNeeded(droppedCount: Int) {

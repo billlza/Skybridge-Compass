@@ -28,6 +28,7 @@ pub(crate) fn build_p2p_remote_performance_report(
         check_p2p_remote_xwing(&evidence),
         check_p2p_remote_protocol_identity_binding(&evidence),
         check_p2p_remote_signed_kem_refresh(&evidence),
+        check_p2p_remote_mac_ipad_online_connect_button(&evidence),
         check_p2p_remote_hevc_main_path(&evidence),
         check_p2p_remote_resolution(&evidence, args),
         check_p2p_remote_ios_window_fps(&evidence, args.min_fps),
@@ -77,10 +78,14 @@ pub(crate) fn build_p2p_remote_performance_report(
             args.min_fps
         ),
         checks,
-        fault_stage: evidence
-            .first_failure
-            .as_ref()
-            .map(|_| "p2p_remote_failed_stage"),
+        fault_stage: if evidence.already_connected_rejection_count > 0 {
+            Some("p2p_remote_already_connected")
+        } else {
+            evidence
+                .first_failure
+                .as_ref()
+                .map(|_| "p2p_remote_failed_stage")
+        },
         latest_diagnostic_at: None,
         latest_video_evidence_at: None,
         latest_receiver_evidence_at: None,

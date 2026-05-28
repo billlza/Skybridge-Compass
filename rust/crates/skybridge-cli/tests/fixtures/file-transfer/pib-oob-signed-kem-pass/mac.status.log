@@ -2,7 +2,7 @@
 [2026-05-16T01:00:00.100Z] PIB-1 protocol identity binding served: requester=ios target=mac fingerprint=abc code=123456 lifecycle=identity-oob>served
 [2026-05-16T01:00:00.420Z] SKR-1 signed LAN KEM refresh served requester=ios target=mac keyId=skr1 generation=100 suites=0x0001 wireId=0x0001 lifecycle=request>served
 [2026-05-16T01:00:00.550Z] suite peer=id:peer suite=X-Wing
-[2026-05-16T01:00:00.560Z] file-transfer inbound-complete name=ios-smoke-GOLDEN.txt
+[2026-05-16T01:00:00.560Z] file-transfer inbound-complete name=ios-smoke-GOLDEN.txt sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 [2026-05-16T01:00:00.570Z] file-transfer outbound-route-probe source=bonjour-transfer host=mac.local. port=8080
-[2026-05-16T01:00:00.580Z] file-transfer outbound-complete name=mac-smoke-GOLDEN.txt
+[2026-05-16T01:00:00.580Z] file-transfer outbound-complete name=mac-smoke-GOLDEN.txt sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 [2026-05-16T01:00:00.630Z] success peer=id:peer suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0

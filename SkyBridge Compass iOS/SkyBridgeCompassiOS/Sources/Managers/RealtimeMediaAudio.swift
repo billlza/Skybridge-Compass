@@ -60,6 +60,7 @@ struct RemoteRealtimeMediaKeySnapshot: Sendable, Equatable {
     let sessionId: String
     let sendKey: Data
     let receiveKey: Data
+    let localRole: HandshakeRole
     let transcriptHash: Data
     let mediaAdmissionToken: String?
 }
@@ -131,6 +132,9 @@ actor IOSRealtimeMediaAudioPlayer {
     private var hardQueuedFrames: Int = 0
     private var playbackState: PlaybackState = .stopped
     private var lastDropLogAt = Date.distantPast
+    private var lastConfigurationFailureDescription: String?
+    private var lastConfigurationFailureLogAt: Date?
+    private static let insufficientPriorityOSStatus = 561_017_449
 
     private init() {}
 
@@ -146,7 +150,7 @@ actor IOSRealtimeMediaAudioPlayer {
         do {
             try ensureConfigured(profile: profile, mode: mode, effectiveProfile: effectiveProfile)
         } catch {
-            SkyBridgeLogger.shared.debug("PQC media audio player unavailable: \(error.localizedDescription)")
+            noteConfigurationFailure(error)
             return false
         }
         guard let renderBuffer else { return false }
@@ -156,7 +160,10 @@ actor IOSRealtimeMediaAudioPlayer {
                 do {
                     try startEngineIfReady()
                 } catch {
-                    SkyBridgeLogger.shared.debug("PQC media audio player start failed: \(error.localizedDescription)")
+                    let nsError = error as NSError
+                    SkyBridgeLogger.shared.warning(
+                        "⚠️ PQC media audio player start failed: domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+                    )
                     return false
                 }
             }
@@ -229,10 +236,9 @@ actor IOSRealtimeMediaAudioPlayer {
         }
         stop()
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-        try session.setPreferredSampleRate(Double(profile.sampleRate))
-        try session.setPreferredIOBufferDuration(mode == .lowLatency ? 0.005 : 0.01)
-        try session.setActive(true)
+        try configureAudioSession(session, profile: profile, mode: mode)
+        lastConfigurationFailureDescription = nil
+        lastConfigurationFailureLogAt = nil
 
         let targetMs = effectiveProfile.targetQueuedMs
         let rebufferResumeMs = effectiveProfile.rebufferResumeMs
@@ -270,6 +276,121 @@ actor IOSRealtimeMediaAudioPlayer {
         SkyBridgeLogger.shared.info(
             "🎧 PQC media audio playback prebuffering: codec=opus path=pqc-opus-source-node-ring mode=\(mode.rawValue) targetQueuedMs=\(targetMs) rebufferResumeMs=\(rebufferResumeMs) softUnderflowBridgeMs=\(softUnderflowBridgeMs) capacityMs=\(hardMs)"
         )
+    }
+
+    private func configureAudioSession(
+        _ session: AVAudioSession,
+        profile: SkyBridgeMediaAudioProfile,
+        mode: SkyBridgeMediaAudioMode
+    ) throws {
+        do {
+            try configurePlaybackCategory(session)
+            setSessionPreferences(session, profile: profile, mode: mode)
+            try activateSession(session, stage: "playback_set_active")
+            return
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio session playback category activation failed: domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            guard Self.shouldUseNonInterruptingAmbientSession(for: nsError) else {
+                throw error
+            }
+        }
+
+        do {
+            try configureAmbientCategory(session)
+            setSessionPreferences(session, profile: profile, mode: mode)
+            try activateSession(session, stage: "ambient_set_active")
+            SkyBridgeLogger.shared.info(
+                "🎧 PQC media audio session active with non-interrupting ambient category"
+            )
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio ambient session activation failed: domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            throw error
+        }
+    }
+
+    private func configurePlaybackCategory(_ session: AVAudioSession) throws {
+        do {
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio session stage=playback_set_category domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            throw error
+        }
+    }
+
+    private func configureAmbientCategory(_ session: AVAudioSession) throws {
+        do {
+            try session.setCategory(.ambient, mode: .default, options: [])
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio session stage=ambient_set_category domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            throw error
+        }
+    }
+
+    private func setSessionPreferences(
+        _ session: AVAudioSession,
+        profile: SkyBridgeMediaAudioProfile,
+        mode: SkyBridgeMediaAudioMode
+    ) {
+        do {
+            try session.setPreferredSampleRate(Double(profile.sampleRate))
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.debug(
+                "ℹ️ PQC media audio sample-rate preference not applied: domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+        }
+
+        do {
+            try session.setPreferredIOBufferDuration(mode == .lowLatency ? 0.005 : 0.01)
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.debug(
+                "ℹ️ PQC media audio IO-buffer preference not applied: domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func activateSession(_ session: AVAudioSession, stage: String) throws {
+        do {
+            try session.setActive(true)
+        } catch {
+            let nsError = error as NSError
+            SkyBridgeLogger.shared.warning(
+                "⚠️ PQC media audio session stage=\(stage) domain=\(nsError.domain) code=\(nsError.code) err=\(error.localizedDescription)"
+            )
+            throw error
+        }
+    }
+
+    private func noteConfigurationFailure(_ error: Error) {
+        let nsError = error as NSError
+        let description = "\(error.localizedDescription) [domain=\(nsError.domain) code=\(nsError.code)]"
+        let now = Date()
+        if lastConfigurationFailureDescription == description,
+           let lastLogAt = lastConfigurationFailureLogAt,
+           now.timeIntervalSince(lastLogAt) < 1.0 {
+            return
+        }
+        lastConfigurationFailureDescription = description
+        lastConfigurationFailureLogAt = now
+        SkyBridgeLogger.shared.warning("⚠️ PQC media audio player unavailable: \(description)")
+    }
+
+    private static func shouldUseNonInterruptingAmbientSession(for error: NSError) -> Bool {
+        error.domain == NSOSStatusErrorDomain
+            && (error.code == insufficientPriorityOSStatus || error.code == -50)
     }
 
     private func frames(for milliseconds: Int, profile: SkyBridgeMediaAudioProfile) -> Int {
@@ -674,6 +795,7 @@ actor IOSRealtimeMediaAudioReceiver {
     private var effectiveJitterMaxMs: Int
     private var stableJitterWindowCount = 0
     private var lastJitterAdaptationReason = "baseline"
+    private var lastTransportStarvedJitterDiagnosticAt = Date.distantPast
     private var arrivalIntervalStats = RollingMillisecondStats(maxSamples: 96)
     private var lastAcceptedPacketArrivalAt: TimeInterval?
 
@@ -682,7 +804,8 @@ actor IOSRealtimeMediaAudioReceiver {
             sendSecret: snapshot.sendKey,
             receiveSecret: snapshot.receiveKey,
             sessionId: snapshot.sessionId,
-            transcriptHash: snapshot.transcriptHash
+            transcriptHash: snapshot.transcriptHash,
+            localRole: snapshot.localRole == .initiator ? .initiator : .responder
         )
         self.sessionIdHash = SkyBridgeMediaPacketCodec.sessionIdHash(snapshot.sessionId)
         self.sessionId = snapshot.sessionId
@@ -709,13 +832,12 @@ actor IOSRealtimeMediaAudioReceiver {
     func handle(datagram: SkyBridgeMediaReceivedDatagram) async {
         datagramsSeen &+= 1
         do {
-            let opened = try SkyBridgeMediaPacketCodec.open(packet: datagram.packet, keys: keys)
-            guard opened.header.sessionIdHash == sessionIdHash else {
-                sessionHashRejected &+= 1
-                rejected &+= 1
-                await logTelemetryIfNeeded()
-                return
-            }
+            let opened = try SkyBridgeMediaPacketCodec.open(
+                packet: datagram.packet,
+                keys: keys,
+                expectedSessionIdHash: sessionIdHash,
+                expectedStreamId: SkyBridgeRealtimeMediaConstants.defaultStreamId
+            )
             guard let sourceDecision = acceptAuthenticatedSource(
                 datagram.remoteEndpoint,
                 sequence: opened.header.sequence
@@ -759,6 +881,16 @@ actor IOSRealtimeMediaAudioReceiver {
                 jitterEvicted &+= 1
                 lateOrDuplicate &+= 1
             }
+        } catch let error as SkyBridgeMediaPacketError {
+            switch error {
+            case .sessionIdMismatch, .streamMismatch:
+                sessionHashRejected &+= 1
+                rejected &+= 1
+            default:
+                authRejected &+= 1
+                rejected &+= 1
+                SkyBridgeLogger.shared.debug("PQC media audio packet rejected: \(error.localizedDescription)")
+            }
         } catch {
             authRejected &+= 1
             rejected &+= 1
@@ -767,9 +899,21 @@ actor IOSRealtimeMediaAudioReceiver {
         await logTelemetryIfNeeded()
     }
 
-    func close() async {
+    func close(reason: String = "unspecified") async {
         playoutTask?.cancel()
         playoutTask = nil
+        let sourceEndpoint = lockedRemoteEndpoint.map { "\($0.host):\($0.port)" } ?? "-"
+        let line =
+            "audioRxRendererClose session=\(sessionId) reason=\(reason) " +
+            "datagramsSeen=\(datagramsSeen) recv=\(received) decoded=\(decoded) " +
+            "played=\(played) rejected=\(rejected) authRejected=\(authRejected) " +
+            "sessionHashRejected=\(sessionHashRejected) replayRejected=\(replayRejected) " +
+            "sourceRejected=\(sourceRejected) sourceMigrated=\(sourceMigrated) " +
+            "jitterLate=\(jitterLate) jitterDuplicate=\(jitterDuplicate) " +
+            "jitterEvicted=\(jitterEvicted) playbackDropped=\(playbackDropped) " +
+            "lateOrDuplicate=\(lateOrDuplicate) mode=\(mode.rawValue) source=\(sourceEndpoint)"
+        SkyBridgeLogger.shared.info("🎧 \(line)")
+        SkyBridgeSmokeTraceWriter.appendStatus(line)
         await IOSRealtimeMediaAudioPlayer.shared.stop()
     }
 
@@ -1184,6 +1328,23 @@ actor IOSRealtimeMediaAudioReceiver {
             || window.jitterEvicted > 0
             || evictionRatio >= 0.02
             || queuePressure
+        if played > 0,
+           window.datagramsSeen == 0,
+           window.received == 0 {
+            stableJitterWindowCount = 0
+            lastJitterAdaptationReason = "transport-starved:zero-rx-after-playback,underflow=\(underflow),rebuffer=\(rebuffer),queuedMs=\(Int(queuedMs.rounded())),targetQueuedMs=\(Int(targetQueuedMs.rounded())),scheduleLeadMs=\(Int(scheduleLeadMs.rounded()))"
+            let now = Date()
+            if now.timeIntervalSince(lastTransportStarvedJitterDiagnosticAt) >= 5 {
+                lastTransportStarvedJitterDiagnosticAt = now
+                let message =
+                    "audio-rx-starved session=\(sessionId) probable=zero-rx-after-playback " +
+                    "datagrams=0 recv=0 playedTotal=\(played) underflow=\(underflow) rebuffer=\(rebuffer) " +
+                    "action=no-jitter-adaptation reason=transport-starved"
+                SkyBridgeLogger.shared.warning("🎧 \(message)")
+                SkyBridgeSmokeTraceWriter.appendStatus(message)
+            }
+            return
+        }
         let oldTarget = effectiveJitterTargetMs
         let oldMax = effectiveJitterMaxMs
         if pressure {

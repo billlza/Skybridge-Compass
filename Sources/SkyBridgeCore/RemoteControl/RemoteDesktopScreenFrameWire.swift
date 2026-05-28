@@ -243,10 +243,62 @@ enum RemoteDesktopScreenFrameWire {
             }
         case .hevc:
             return parseNALUnits(from: imageData).contains { nalu in
-                guard let first = nalu.first else { return false }
+                guard nalu.count >= 2, let first = nalu.first else { return false }
                 let type = Int((first >> 1) & 0x3F)
                 return (16...21).contains(type)
             }
+        }
+    }
+
+    static func containsDecoderBootstrapFrame(
+        format: String?,
+        imageData: Data,
+        advertisedSyncFrame: Bool?
+    ) -> Bool {
+        switch CodecTag(format: format) {
+        case .jpeg, .bgra, .unknown:
+            return advertisedSyncFrame ?? true
+        case .h264:
+            let nalus = parseNALUnits(from: imageData)
+            var hasSPS = false
+            var hasPPS = false
+            var hasIDR = false
+            for nalu in nalus {
+                guard let first = nalu.first else { continue }
+                switch Int(first & 0x1F) {
+                case 5:
+                    hasIDR = true
+                case 7:
+                    hasSPS = true
+                case 8:
+                    hasPPS = true
+                default:
+                    break
+                }
+            }
+            return hasSPS && hasPPS && hasIDR
+        case .hevc:
+            let nalus = parseNALUnits(from: imageData)
+            var hasVPS = false
+            var hasSPS = false
+            var hasPPS = false
+            var hasIRAP = false
+            for nalu in nalus {
+                guard nalu.count >= 2, let first = nalu.first else { continue }
+                switch Int((first >> 1) & 0x3F) {
+                case 16...21:
+                    hasIRAP = true
+                case 32:
+                    hasVPS = true
+                case 33:
+                    hasSPS = true
+                case 34:
+                    hasPPS = true
+                default:
+                    break
+                }
+            }
+            return hasVPS && hasSPS && hasPPS && hasIRAP
         }
     }
 

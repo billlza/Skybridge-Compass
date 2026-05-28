@@ -6,6 +6,7 @@ public struct HandshakeSOAMetadata: Sendable, Equatable {
     public let initiatorPeerId: Data // 32 bytes
     public let targetPeerId: Data // 32 bytes
     public let attemptId: Data // 16 bytes
+    public let extensionRaw: Data
 
     public init(initiatorPeerId: Data, targetPeerId: Data, attemptId: Data) throws {
         guard initiatorPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength else {
@@ -20,14 +21,11 @@ public struct HandshakeSOAMetadata: Sendable, Equatable {
         self.initiatorPeerId = initiatorPeerId
         self.targetPeerId = targetPeerId
         self.attemptId = attemptId
-    }
-
-    public var extensionRaw: Data {
-        (try? HandshakeSOAExtension(
+        self.extensionRaw = try HandshakeSOAExtension(
             initiatorPeerId: initiatorPeerId,
             targetPeerId: targetPeerId,
             attemptId: attemptId
-        ).encodedTLV) ?? Data()
+        ).encodedTLV
     }
 }
 
@@ -38,6 +36,16 @@ public actor PeerSessionArbiter {
     public enum IncomingAuthenticationState: Sendable {
         case authenticated
         case unauthenticated
+    }
+
+    public enum IncomingEstablishedPolicy: Sendable {
+        case rejectDuplicate
+        case replaceAuthenticated
+    }
+
+    public enum SessionScope: String, Sendable {
+        case p2p = "p2p"
+        case remoteControl = "remote-control"
     }
 
     public enum RegisterDecision: Sendable {
@@ -52,6 +60,7 @@ public actor PeerSessionArbiter {
         case rejectBinding
         case rejectRateLimited
         case rejectLocalWinner
+        case acceptAndReplaceEstablished
         case acceptAndSupersedeLocal(winnerPeerId: Data, winnerAttemptId: Data)
     }
 
@@ -105,16 +114,24 @@ public actor PeerSessionArbiter {
         targetPeerId: Data,
         expectedRemotePeerId: Data,
         localPeerId: Data,
-        authenticationState: IncomingAuthenticationState
+        authenticationState: IncomingAuthenticationState,
+        establishedPolicy: IncomingEstablishedPolicy = .rejectDuplicate
     ) -> IncomingDecision {
         guard authenticationState == .authenticated else {
             return .rejectBinding
         }
-        if establishedPairs.contains(pairKey) {
-            return .rejectAlreadyConnected
-        }
         guard targetPeerId == localPeerId, remoteInitiatorPeerId == expectedRemotePeerId else {
             return .rejectBinding
+        }
+        if establishedPairs.contains(pairKey) {
+            switch establishedPolicy {
+            case .rejectDuplicate:
+                return .rejectAlreadyConnected
+            case .replaceAuthenticated:
+                establishedPairs.remove(pairKey)
+                outgoingByPair.removeValue(forKey: pairKey)
+                return .acceptAndReplaceEstablished
+            }
         }
 
         guard let local = outgoingByPair[pairKey] else {
@@ -150,17 +167,33 @@ public actor PeerSessionArbiter {
         return .rejectLocalWinner
     }
 
-    public nonisolated static func pairKey(localPeerId: Data, remotePeerId: Data) -> Data {
+    public nonisolated static func pairKey(
+        localPeerId: Data,
+        remotePeerId: Data,
+        scope: SessionScope = .p2p
+    ) -> Data {
+        let baseKey: Data
         if localPeerId.lexicographicallyPrecedes(remotePeerId) {
-            return localPeerId + remotePeerId
+            baseKey = localPeerId + remotePeerId
+        } else {
+            baseKey = remotePeerId + localPeerId
         }
-        return remotePeerId + localPeerId
+        guard scope != .p2p else { return baseKey }
+
+        var scoped = Data(scope.rawValue.utf8)
+        scoped.append(0)
+        scoped.append(baseKey)
+        return scoped
     }
 
-    public nonisolated static func pairKey(localIdentifier: String, remoteIdentifier: String) -> Data {
+    public nonisolated static func pairKey(
+        localIdentifier: String,
+        remoteIdentifier: String,
+        scope: SessionScope = .p2p
+    ) -> Data {
         let localPeerId = soaPeerId(from: localIdentifier)
         let remotePeerId = soaPeerId(from: remoteIdentifier)
-        return pairKey(localPeerId: localPeerId, remotePeerId: remotePeerId)
+        return pairKey(localPeerId: localPeerId, remotePeerId: remotePeerId, scope: scope)
     }
 
     public nonisolated static func soaPeerId(from identifier: String) -> Data {

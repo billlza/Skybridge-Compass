@@ -40,7 +40,10 @@ public actor P2PKEMIdentityKeyStore {
 
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *) {
-            let nativeProviders: [any CryptoProvider] = [ApplePQCCryptoProvider(), AppleXWingCryptoProvider()]
+            var nativeProviders: [any CryptoProvider] = [ApplePQCCryptoProvider()]
+            if AppleXWingCryptoProvider.quickRuntimeProbe() {
+                nativeProviders.append(AppleXWingCryptoProvider())
+            }
             for nativeProvider in nativeProviders {
                 for suite in nativeProvider.supportedSuites where suite.isPQCGroup {
                     let (publicKey, _) = try await getOrCreateIdentityKey(for: suite, provider: nativeProvider)

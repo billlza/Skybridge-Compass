@@ -434,6 +434,7 @@ public actor HandshakeContext {
         secureEnclavePublicKey: Data? = nil,
         rawSignaturePreimage: Data? = nil
     ) async throws {
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA begin")
         guard !isZeroized else {
             throw HandshakeError.contextZeroized
         }
@@ -445,7 +446,11 @@ public actor HandshakeContext {
         let identityKeys: IdentityPublicKeys
         do {
             identityKeys = try messageA.decodedIdentityPublicKeys()
+            RemoteControlSmokeStatusWriter.append(
+                "mac-handshake processA identity-decoded alg=\(identityKeys.protocolAlgorithm.rawValue)"
+            )
         } catch {
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA identity-decode-failed error=\(error.localizedDescription)")
             throw HandshakeError.failed(.invalidMessageFormat("IdentityPublicKeys decode failed: \(error.localizedDescription)"))
         }
 
@@ -454,11 +459,13 @@ public actor HandshakeContext {
         let rawDigest = rawSignaturePreimage.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined().prefix(16) }
 
  // 验证签名
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-canonical-start")
         var isValid = try await verifyHandshakeData(
             canonicalPreimage,
             signature: messageA.signature,
             publicKey: identityKeys.protocolPublicKey
         )
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-canonical-done ok=\(isValid)")
         SkyBridgeLogger.p2p.info(
             "🧪 processMessageA verify canonical alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) sigBytes=\(messageA.signature.count, privacy: .public) pubBytes=\(identityKeys.protocolPublicKey.count, privacy: .public) preimageSha256=\(canonicalDigest, privacy: .public) ok=\(isValid, privacy: .public)"
         )
@@ -466,11 +473,13 @@ public actor HandshakeContext {
         if !isValid,
            let rawSignaturePreimage,
            rawSignaturePreimage != canonicalPreimage {
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-raw-start")
             let rawValid = try await verifyHandshakeData(
                 rawSignaturePreimage,
                 signature: messageA.signature,
                 publicKey: identityKeys.protocolPublicKey
             )
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-raw-done ok=\(rawValid)")
             SkyBridgeLogger.p2p.info(
                 "🧪 processMessageA verify raw alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) preimageSha256=\(rawDigest ?? "n/a", privacy: .public) ok=\(rawValid, privacy: .public)"
             )
@@ -487,13 +496,17 @@ public actor HandshakeContext {
         }
 
         guard isValid else {
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA verify-failed")
             throw HandshakeError.failed(.signatureVerificationFailed)
         }
 
         authenticatedRemoteAuthority = try makeAuthenticatedRemoteAuthority(from: identityKeys)
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA authority-made")
 
         if let postSignatureValidation {
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA post-validation-start")
             try await postSignatureValidation(identityKeys)
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA post-validation-done")
         }
 
         if policy.requireSecureEnclavePoP, messageA.secureEnclaveSignature == nil {
@@ -538,19 +551,23 @@ public actor HandshakeContext {
                 ))
             }
         }
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA se-check-done")
 
  // 保存对端 KeyShare
         peerKeyShares = Dictionary(uniqueKeysWithValues: messageA.keyShares.map { ($0.suite, $0.shareBytes) })
         peerNonce = SecureBytes(data: messageA.clientNonce)
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA keyshares-saved count=\(messageA.keyShares.count)")
 
  // 保存对端能力（用于降级攻击检测）
         peerCapabilities = messageA.capabilities
 
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA select-suite-start")
         let selectedSuite = try selectSuite(
             from: messageA,
             localPolicy: policy
         )
         negotiatedSuite = selectedSuite
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA select-suite-done suite=\(selectedSuite.rawValue)")
         if selectedSuite.requiresV2EphemeralContribution {
             guard let contribution = messageA.initiatorContribution else {
                 throw HandshakeError.failed(.invalidMessageFormat("Missing v2 initiator contribution"))
@@ -566,22 +583,29 @@ public actor HandshakeContext {
                 throw HandshakeError.invalidState("Missing KEM key share for \(selectedSuite.rawValue)")
             }
 
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA kem-identity-start suite=\(selectedSuite.rawValue)")
             let localKEM = try await kemIdentityStore.getOrCreateKEMIdentityKey(
                 for: selectedSuite.canonicalKEMSuite,
                 provider: provider
             )
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA kem-identity-done suite=\(selectedSuite.rawValue)")
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA kem-decapsulate-start suite=\(selectedSuite.rawValue)")
             let sharedSecret = try await provider.kemDecapsulate(
                 encapsulatedKey: encapsulatedKey,
                 privateKey: localKEM.privateKey
             )
             kemSharedSecrets[selectedSuite] = sharedSecret
+            RemoteControlSmokeStatusWriter.append("mac-handshake processA kem-decapsulate-done suite=\(selectedSuite.rawValue)")
         }
 
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA replay-check-start suite=\(selectedSuite.rawValue)")
         try await ensureNotReplay(for: selectedSuite, replayTag: .messageA)
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA replay-check-done suite=\(selectedSuite.rawValue)")
 
  // 更新 transcriptA
         let transcriptA = SHA256.hash(data: messageA.transcriptBytes)
         transcriptHashA = SecureBytes(data: Data(transcriptA))
+        RemoteControlSmokeStatusWriter.append("mac-handshake processA transcriptA-done suite=\(selectedSuite.rawValue)")
     }
 
  /// 对端能力（收到后设置）

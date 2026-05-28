@@ -82,9 +82,19 @@ public final class FileTransferSettingsBridge: ObservableObject {
         fileTransferManager.updateSettings(
             maxConcurrentTransfers: Int(settings.maxConcurrentConnections),
             chunkSize: settings.transferBufferSize,
-            enableCompression: settings.enableConnectionEncryption, // 保持与UI一致的命名：这里代表传输层开关
             enableEncryption: settings.enableConnectionEncryption,
-            maxTransferSpeedBytesPerSecond: speedLimitBytesPerSecond
+            maxTransferSpeedBytesPerSecond: speedLimitBytesPerSecond,
+            keepTransferHistory: settings.keepTransferHistory,
+            keepSystemAwakeDuringTransfer: settings.keepSystemAwakeDuringTransfer,
+            encryptionAlgorithm: settings.encryptionAlgorithm
+        )
+        ResumableTransferManager.shared.applyRuntimeSettings(
+            autoRetryFailedTransfers: settings.autoRetryFailedTransfers,
+            maxRetryAttempts: settings.retryCount,
+            maxConcurrentTransfers: Int(settings.maxConcurrentConnections),
+            keepTransferHistory: settings.keepTransferHistory,
+            keepSystemAwakeDuringTransfer: settings.keepSystemAwakeDuringTransfer,
+            encryptionAlgorithm: settings.encryptionAlgorithm
         )
         fileTransferManager.updateSecuritySettings(
             virusScanEnabled: settings.scanTransferFilesForVirus,

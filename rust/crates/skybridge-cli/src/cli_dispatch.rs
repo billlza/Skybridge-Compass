@@ -6,6 +6,7 @@ use skybridge_agent::run_agent;
 mod smoke;
 
 use crate::auth_commands::{login, logout};
+use crate::connectivity_check::check_connectivity;
 use crate::device_commands::{device_approve, device_enroll, device_status};
 use crate::doctor_commands::{
     diagnose_webrtc_media, doctor_media_lease, doctor_signaling, doctor_webrtc_media,
@@ -63,8 +64,13 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Check(check) => match check.command {
             CheckSubcommand::Memory(args) => crate::memory_check::check_memory(args).await,
             CheckSubcommand::Performance(args) => check_performance(args).await,
+            CheckSubcommand::Connectivity(args) => check_connectivity(args).await,
+            CheckSubcommand::RemoteControlNotice(args) => {
+                crate::remote_control_notice_check::check_remote_control_notice(args).await
+            }
             CheckSubcommand::Coverage(args) => crate::check_coverage::check_coverage(args).await,
         },
+        Commands::Test(command) => crate::test_commands::run_test_command(command).await,
         Commands::Diagnose(args) => match args.command {
             DiagnoseSubcommand::WebRtcMedia(webrtc_media) => {
                 diagnose_webrtc_media(webrtc_media).await

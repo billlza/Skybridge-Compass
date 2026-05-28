@@ -55,6 +55,8 @@ final class CrossNetworkSignalingLifecycleCoordinator {
     func scheduleRecovery(
         for sessionID: String,
         tokenExpired: Bool,
+        maxAttempts: Int,
+        reconnectDelayMilliseconds: @escaping @MainActor (_ attempt: Int) -> Int,
         currentShardKey: @escaping @MainActor () -> String?,
         isHandshakeComplete: @escaping @MainActor (String) -> Bool,
         ensureConnected: @escaping @MainActor (String) async throws -> Void,
@@ -68,10 +70,10 @@ final class CrossNetworkSignalingLifecycleCoordinator {
         }
         recoveryTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
-            let maxAttempts = tokenExpired ? 1 : 3
-            for attempt in 0..<maxAttempts where !Task.isCancelled {
+            let effectiveMaxAttempts = tokenExpired ? 1 : max(1, maxAttempts)
+            for attempt in 0..<effectiveMaxAttempts where !Task.isCancelled {
                 if attempt > 0 {
-                    try? await Task.sleep(for: .milliseconds(500 * (attempt + 1)))
+                    try? await Task.sleep(for: .milliseconds(reconnectDelayMilliseconds(attempt - 1)))
                 }
                 do {
                     try await ensureConnected(sessionID)

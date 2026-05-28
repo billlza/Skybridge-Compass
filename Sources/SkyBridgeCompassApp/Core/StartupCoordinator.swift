@@ -221,7 +221,14 @@ public class StartupCoordinator: ObservableObject {
  /// 初始化网络管理服务
     private func initializeNetworkServices() async {
  // 预热网络偏好与 QoS 基础服务
-        _ = NetworkPreferenceService.shared
+        let networkPreferenceService = NetworkPreferenceService.shared
+        networkPreferenceService.applyRuntimeSettings(
+            prefer5GHz: SettingsManager.shared.prefer5GHz,
+            autoConnectKnownNetworks: SettingsManager.shared.autoConnectKnownNetworks,
+            scanIntervalSeconds: SettingsManager.shared.wifiScanTimeout
+        )
+        _ = BackgroundScanningService.shared
+        _ = AutoConnectService.shared
         _ = QoSManager.shared
         logger.debug("🌐 网络管理服务初始化完成")
     }

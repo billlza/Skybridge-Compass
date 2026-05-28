@@ -386,7 +386,7 @@ public class DeviceNameResolver: ObservableObject {
  /// 解析Apple设备标准命名格式 - 基于用户论文的命名规则
     private nonisolated func parseAppleDeviceNameFormat(_ name: String) -> String? {
  // Apple设备命名格式：用户名's 设备类型 型号
- // 例如：Ziang's iPhone 16 Pro, John's MacBook Pro
+ // 例如：Alex's iPhone 16 Pro, John's MacBook Pro
         let patterns = [
             #"^(.+)'s\s+(iPhone|iPad|Mac|MacBook|Apple\s*TV|HomePod|Apple\s*Watch)\s*(.*)$"#,
             #"^(.+)的\s*(iPhone|iPad|Mac|MacBook|Apple\s*TV|HomePod|Apple\s*Watch)\s*(.*)$"#,

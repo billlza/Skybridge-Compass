@@ -300,7 +300,7 @@ public actor CryptoProviderSelector {
             return true
         }
 
-        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
+        return UserDefaults.standard.bool(forKey: SettingsStorageKeys.preferXWingHybrid)
     }
 
  /// 运行时能力协商

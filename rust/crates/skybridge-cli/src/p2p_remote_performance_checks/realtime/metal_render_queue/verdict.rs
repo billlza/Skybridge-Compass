@@ -11,6 +11,7 @@ pub(super) struct MetalRenderQueueVerdict {
     pub(super) max_allowed_draw_callback_fps: f64,
     pub(super) max_allowed_queue_depth: u64,
     pub(super) max_allowed_coalesced: u64,
+    pub(super) min_allowed_sample_fps: f64,
     pub(super) realtime_replacement_is_structured: bool,
     pub(super) min_telemetry_samples: u64,
 }
@@ -29,6 +30,7 @@ pub(super) fn evaluate(
     let max_allowed_draw_callback_fps =
         selected.pump_fps.max(selected.target_fps).max(1) as f64 + 3.0;
     let max_allowed_queue_depth = P2P_REMOTE_STRICT_METAL_QUEUE_DEPTH_MAX;
+    let min_allowed_sample_fps = min_fps;
     let max_allowed_coalesced = if selected.uses_final_window {
         ((selected.submitted_total as f64) * P2P_REMOTE_STRICT_METAL_REPLACEMENT_RATIO_MAX).ceil()
             as u64
@@ -50,7 +52,14 @@ pub(super) fn evaluate(
         && selected.coalesced_total <= max_allowed_coalesced
         && realtime_replacement_is_structured
         && selected.manual_draw_total == 0
+        && selected.input_fps_gate.is_some_and(|fps| fps >= min_fps)
+        && selected
+            .input_fps_min
+            .is_some_and(|fps| fps >= min_allowed_sample_fps)
         && selected.display_fps_gate.is_some_and(|fps| fps >= min_fps)
+        && selected
+            .display_fps_min
+            .is_some_and(|fps| fps >= min_allowed_sample_fps)
         && selected
             .draw_callback_fps_gate
             .is_some_and(|fps| fps >= min_fps)
@@ -79,6 +88,7 @@ pub(super) fn evaluate(
         max_allowed_draw_callback_fps,
         max_allowed_queue_depth,
         max_allowed_coalesced,
+        min_allowed_sample_fps,
         realtime_replacement_is_structured,
         min_telemetry_samples,
     }

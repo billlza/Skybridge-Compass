@@ -227,6 +227,8 @@ final class LocalWebRTCSmokeHarness {
                         reporter.append(
                             "remote-view required=1 uiSurface=remoteDesktopView streamOwner=RemoteDesktopView"
                         )
+                    } else if expectsHandshakeOnly {
+                        reporter.append("stream-config skipped reason=handshakeOnly")
                     } else if !streamConfigurationSent {
                         streamConfigurationSent = await sendSmokeViewerStreamConfiguration(
                             manager: manager,
@@ -438,11 +440,7 @@ final class LocalWebRTCSmokeHarness {
     }
 
     private func resolvedLocalDeviceID() -> String {
-        if let explicit = environmentValue("SKYBRIDGE_DEVICE_ID") {
-            return explicit
-        }
-        return KeychainManager.shared.getOrGenerateDeviceId()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        ProtocolDeviceIdentity.stableDeviceId()
     }
 
     private func decodeBase64Key(
@@ -528,7 +526,7 @@ final class LocalWebRTCSmokeHarness {
             let data = try encoder.encode(report)
             try writeProtectedData(data, to: reportURL)
             reporter.append(
-                "pqc-report device=\(Self.sanitize(report.deviceId)) keys=\(report.keys.count) file=\(reportURL.lastPathComponent)"
+                "pqc-report device=\(Self.sanitize(report.deviceId)) keys=\(report.keys.count) file=\(reportURL.lastPathComponent) reportJSONBase64=\(data.base64EncodedString())"
             )
         } catch {
             reporter.append("failed stage=pqc-report error=\(Self.sanitize(error.localizedDescription))")

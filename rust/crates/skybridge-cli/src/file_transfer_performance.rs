@@ -15,9 +15,9 @@ use crate::{
 
 use checks::{
     check_file_transfer_bidirectional, check_file_transfer_no_hidden_failure,
-    check_file_transfer_protocol_identity_binding, check_file_transfer_route_evidence,
-    check_file_transfer_signed_kem_refresh, check_file_transfer_skr_direct_route,
-    check_file_transfer_sources, check_file_transfer_success,
+    check_file_transfer_payload_integrity, check_file_transfer_protocol_identity_binding,
+    check_file_transfer_route_evidence, check_file_transfer_signed_kem_refresh,
+    check_file_transfer_skr_direct_route, check_file_transfer_sources, check_file_transfer_success,
     classify_file_transfer_probable_fault_stage,
 };
 use evidence::read_file_transfer_performance_evidence;
@@ -39,6 +39,7 @@ pub(crate) fn build_file_transfer_performance_report(
         check_file_transfer_skr_direct_route(&evidence),
         check_file_transfer_bidirectional(&evidence),
         check_file_transfer_success(&evidence),
+        check_file_transfer_payload_integrity(&evidence),
         check_file_transfer_route_evidence(&evidence),
     ];
     let required = required_file_transfer_performance_check_names();

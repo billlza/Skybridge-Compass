@@ -109,6 +109,14 @@ skybridge_prepare_signing_entitlements \
   "${APP_INFO_PLIST}" \
   "${EMBEDDED_PROFILE_PATH}"
 
+if [[ -f "${EMBEDDED_PROFILE_PATH}" ]] && \
+   ! skybridge_profile_supports_requested_profile_backed_entitlements \
+     "${EMBEDDED_PROFILE_PATH}" \
+     "${ACTIVE_APP_ENTITLEMENTS}"; then
+  echo "错误：embedded.provisionprofile 不覆盖最终签名 entitlements，禁止生成会被 AMFI 拒绝启动的 App。" >&2
+  exit 1
+fi
+
 APPLE_SIGN_IN_FEATURE_FLAG="$(skybridge_read_plist_bool "${APP_INFO_PLIST}" "SKYBRIDGE_ENABLE_APPLE_SIGN_IN" 2>/dev/null || echo "unknown")"
 APPLE_SIGN_IN_MODE="$(skybridge_read_plist_string "${APP_INFO_PLIST}" "SKYBRIDGE_APPLE_SIGN_IN_MODE" 2>/dev/null || echo "unknown")"
 if [[ "${APPLE_SIGN_IN_FEATURE_FLAG}" == "1" ]]; then

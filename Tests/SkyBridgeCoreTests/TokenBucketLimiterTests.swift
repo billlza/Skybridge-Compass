@@ -45,17 +45,12 @@ final class TokenBucketLimiterTests: XCTestCase {
                 "Iteration \(iteration): Initial tokens (\(initialTokens)) should equal burst (\(burst))"
             )
             
- // Property 2: Can consume up to burst tokens immediately
-            var consumedCount = 0
-            for _ in 0..<burst {
-                let consumed = await limiter.tryConsume()
-                if consumed {
-                    consumedCount += 1
-                }
-            }
-            XCTAssertEqual(
-                consumedCount, burst,
-                "Iteration \(iteration): Should consume exactly \(burst) tokens, consumed \(consumedCount)"
+ // Property 2: Can consume up to burst tokens immediately.
+ // Use the atomic count API so the property is not distorted by refill time during hundreds of awaits.
+            let consumedBurst = await limiter.tryConsume(count: burst)
+            XCTAssertTrue(
+                consumedBurst,
+                "Iteration \(iteration): Should consume exactly \(burst) tokens"
             )
             
  // Property 3: After exhausting burst, next consume should fail
@@ -145,10 +140,8 @@ final class TokenBucketLimiterTests: XCTestCase {
         let limiter1 = TokenBucketLimiter(rate: rate, burst: burst)
         let limiter2 = TokenBucketLimiter(rate: rate, burst: burst)
         
- // Exhaust limiter1
-        for _ in 0..<burst {
-            _ = await limiter1.tryConsume()
-        }
+ // Exhaust limiter1 atomically so high-rate refill cannot race the assertion.
+        _ = await limiter1.tryConsume(count: burst)
         
  // limiter1 should be exhausted
         let limiter1CanConsume = await limiter1.tryConsume()
@@ -190,10 +183,8 @@ final class TokenBucketLimiterTests: XCTestCase {
         let burst = 100
         let limiter = TokenBucketLimiter(rate: 100.0, burst: burst)
         
- // Exhaust tokens
-        for _ in 0..<burst {
-            _ = await limiter.tryConsume()
-        }
+ // Exhaust tokens atomically so refill time does not make the assertion timing-sensitive.
+        _ = await limiter.tryConsume(count: burst)
         
  // Verify exhausted
         let afterExhaust = await limiter.availableTokens

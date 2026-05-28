@@ -45,6 +45,11 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
 
     func testP2PAudioDrainIsDecoupledFromVideoFramePump() throws {
         let source = try remoteControlManagerSource()
+        let pumpBody = try sourceSlice(
+            from: "actor RemoteControlOutboundFramePump",
+            to: "private final class PeerConnection",
+            in: source
+        )
 
         XCTAssertTrue(
             source.contains("scheduleAudioDrainIfNeeded()"),
@@ -67,32 +72,41 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "Stopping or restarting remote control should cancel in-flight audio drain work."
         )
         XCTAssertTrue(
-            source.contains("private let maxQueuedAudioPayloads = 3"),
-            "P2P audio must keep only a tiny live queue because it shares the LAN remote-control connection with video frames."
+            pumpBody.contains("private static let maxAudioPayloadsPerDrain = 4"),
+            "P2P audio must interleave small bounded send batches without dropping live audio behind video."
         )
         XCTAssertTrue(
-            source.contains("private let maxAudioVideoFrameGap: TimeInterval = 0.08"),
-            "Audio should be suppressed when video is already below an acceptable live cadence."
+            pumpBody.contains("scheduler=independent-interleaved"),
+            "Audio tx telemetry must prove the shared LAN connection no longer gates audio behind video cadence."
         )
         XCTAssertTrue(
-            source.contains("guard canSendAudioWithoutCompetingWithVideo else"),
-            "Audio should be dropped whenever the video sender has backlog or an in-flight frame send."
+            pumpBody.contains("mac-remote-audio-tx"),
+            "Real-device smoke logs must show audio submitted/sent/failed/queued evidence instead of inferring zero-rx from jitter."
         )
         XCTAssertTrue(
-            source.contains("&& inFlightVideoSends == 0"),
-            "Dedicated audio must not compete with the bounded in-flight video send pipeline."
-        )
-        XCTAssertTrue(
-            source.contains("Date().timeIntervalSince(lastSentFrameAt) <= maxAudioVideoFrameGap"),
-            "The video-priority gate must stop audio if video cadence has already collapsed."
-        )
-        XCTAssertTrue(
-            source.contains("Task.detached(priority: .utility) {\n                    await outboundFramePump.submitAudioPayload(wirePayload)\n                }"),
-            "Captured audio chunks should enter the outbound pump at utility priority so they cannot preempt screen-frame work."
+            pumpBody.contains("private static let maxAudioQueuedPayloads = 240") &&
+            pumpBody.contains("private static let maxAudioQueuedBytes = 2 * 1024 * 1024") &&
+            pumpBody.contains("result=failed-closed reason=audio-queue-hard-limit"),
+            "Audio queue backpressure must have a hard fail-closed bound instead of growing indefinitely."
         )
         XCTAssertFalse(
-            source.contains("Task.detached(priority: .userInitiated) {\n                    await outboundFramePump.submitAudioPayload(wirePayload)"),
-            "Audio chunk submission must not run at the same priority as latency-critical video."
+            pumpBody.contains("canSendAudioWithoutCompetingWithVideo"),
+            "Audio must not be silently suppressed when video has in-flight frames, pending frames, or a waiting-for-sync state."
+        )
+        XCTAssertFalse(
+            pumpBody.contains("reason: \"video-priority\"") ||
+            pumpBody.contains("reason: \"video-backlog\"") ||
+            pumpBody.contains("reason: \"queue-overflow\"") ||
+            pumpBody.contains("audioPayloadQueue.removeFirst(overflow)"),
+            "Audio continuity must not be manufactured by dropping packets whenever video cadence collapses or the old tiny queue overflows."
+        )
+        XCTAssertTrue(
+            source.contains("Task.detached(priority: .userInitiated) {\n                    await outboundFramePump.submitAudioPayload(wirePayload)\n                }"),
+            "Captured audio chunks should reach the outbound pump promptly instead of being starved behind 2K60 video work."
+        )
+        XCTAssertFalse(
+            source.contains("Task.detached(priority: .utility) {\n                    await outboundFramePump.submitAudioPayload(wirePayload)\n                }"),
+            "Legacy shared-channel audio should not be scheduled at utility priority during strict 2K60 sessions."
         )
     }
 
@@ -160,7 +174,7 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "P2P video must bound TCP/NWConnection flight depth so 60 fps HEVC does not accumulate hundreds of milliseconds of queued video."
         )
         XCTAssertTrue(
-            pumpBody.contains("private static let maxChunkedContentProcessedBacklogFrames = 12"),
+            pumpBody.contains("private static let maxChunkedContentProcessedBacklogFrames = 18"),
             "SBC2 chunked video must absorb measured Network.framework contentProcessed callback tails while iOS frame-age telemetry remains the viewer latency gate."
         )
         XCTAssertTrue(
@@ -172,8 +186,8 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "Lower-rate SBC2 video must schedule at most one frame per writer-clock tick so aggregate FPS cannot be manufactured by catch-up bursts."
         )
         XCTAssertTrue(
-            pumpBody.contains("private static let maxChunkedHighFPSVideoFramesPerDrain = 3"),
-            "Strict 2K60 SBC2 may recover up to two late writer-clock slots, but only through a bounded non-stale catch-up path."
+            pumpBody.contains("private static let maxChunkedHighFPSVideoFramesPerDrain = 1"),
+            "Strict 2K60 SBC2 must not manufacture aggregate FPS with multi-frame catch-up bursts that can overload the iOS parser."
         )
         XCTAssertTrue(
             pumpBody.contains("private static let boundedCadenceCatchUpFrameAgeLimitMs: Double = 50"),
@@ -184,8 +198,8 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "The strict remote sender should use a dedicated writer clock instead of parking actor work on Task.sleep."
         )
         XCTAssertTrue(
-            source.contains("DispatchSource.makeTimerSource(queue: queue)"),
-            "The strict remote sender wake should be driven by a userInteractive dispatch timer."
+            source.contains("DispatchSource.makeTimerSource(flags: .strict, queue: queue)"),
+            "The strict remote sender wake should be driven by a non-coalesced userInteractive dispatch timer."
         )
         XCTAssertTrue(
             source.contains("leeway: .nanoseconds(100_000)"),
@@ -341,8 +355,12 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "Cadence recovery must stay capped by maxVideoFramesPerDrain and the contentProcessed window."
         )
         XCTAssertTrue(
-            pumpBody.contains("noteVideoScheduleBudget(budget, elapsedCadenceSlots: elapsedCadenceSlots)"),
-            "Cadence misses must be logged as bottleneck evidence instead of hidden by aggregate sent FPS."
+            pumpBody.contains("schedulableCadenceSlots: schedulableCadenceSlots"),
+            "Cadence misses must compare against schedulable slots so timer lateness remains covered by schedule gap/jitter gates instead of being hidden by aggregate sent FPS."
+        )
+        XCTAssertTrue(
+            pumpBody.contains("await drainIfNeeded(maxVideoFramesToSchedule: videoScheduleBudget(now: firedAt))"),
+            "Cadence-slot accounting must use the DispatchSource fire time; actor hop delay is tracked separately by clockFireToDrainMaxMs."
         )
         XCTAssertTrue(
             pumpBody.contains("cadenceAnchorMode: isStaleQueueCatchUpFrame ? .staleQueueCatchUp : .normal"),
@@ -385,16 +403,16 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "P2P remote 2K60 pacing must not depend on Swift concurrency sleep jitter."
         )
         XCTAssertTrue(
-            paceWakeBody.contains("videoPaceClock.schedule(after: delay, generation: generation)"),
-            "P2P remote 2K60 pacing should arm the dedicated writer clock at the next frame deadline."
+            paceWakeBody.contains("interval: videoSendInterval"),
+            "P2P remote 2K60 pacing should arm the dedicated repeating writer clock at the frame deadline cadence."
         )
         XCTAssertTrue(
             pumpBody.contains("let drainStartedAt = Date()"),
-            "Writer-clock catch-up must be based on the measured drain start so timer lateness is visible and bounded."
+            "Writer-clock telemetry must measure actor drain start so timer-to-actor latency is visible and bounded."
         )
         XCTAssertTrue(
-            pumpBody.contains("await drainIfNeeded(maxVideoFramesToSchedule: videoScheduleBudget(now: drainStartedAt))"),
-            "Each writer-clock tick may fill only elapsed cadence slots inside the explicit bounded budget."
+            pumpBody.contains("await drainIfNeeded(maxVideoFramesToSchedule: videoScheduleBudget(now: firedAt))"),
+            "Each writer-clock tick may fill only elapsed DispatchSource cadence slots; actor hop delay is separate telemetry."
         )
         XCTAssertTrue(
             pumpBody.contains("private func videoPaceWakeDelay(from now: Date) -> TimeInterval"),
@@ -459,6 +477,10 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
         XCTAssertTrue(
             source.contains("writerClock=dispatch-source-userinteractive"),
             "Real-device smoke logs must prove which writer clock produced the 60fps send cadence."
+        )
+        XCTAssertTrue(
+            source.contains("writerClockStrict=1"),
+            "Real-device smoke logs must prove strict DispatchSource timer mode so timer coalescing cannot masquerade as 60fps."
         )
         XCTAssertTrue(
             source.contains("sendScheduler=dispatch-clock-only"),
@@ -578,7 +600,7 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "The real-device smoke log should expose whether a strict stream accidentally re-enabled damage traffic."
         )
         XCTAssertTrue(
-            source.contains("damage=\\(config.damageTrackingEnabled ?? false)"),
+            source.contains("damage=\\(effectiveConfig.damageTrackingEnabled ?? false)"),
             "Mac stream configuration telemetry must include the damage flag that can contend with video sends."
         )
         XCTAssertTrue(
@@ -666,7 +688,7 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "The real-device smoke gate must mirror the bounded HEVC short-window headroom used to prevent VT realtime rate-control drops."
         )
         XCTAssertTrue(
-            smokeScript.contains("hevc_single_chunk_encoded_budget_bytes = 256 * 1024 - 36 - 28 - 36"),
+            smokeScript.contains("hevc_single_chunk_encoded_budget_bytes = 256 * 1024 - 36 - 68 - 36"),
             "The real-device smoke gate must bind HEVC burst size to the actual SBC2 single-chunk encrypted frame budget."
         )
         XCTAssertTrue(
@@ -698,8 +720,8 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "The real-device smoke gate must fail if the SCK producer exceeds the bounded two-frame cadence recovery path."
         )
         XCTAssertTrue(
-            smokeScript.contains("sender_cadence_catch_up_limit = 3"),
-            "The real-device smoke gate must prove the Mac sender can cover one 50ms writer-clock slip without opening unbounded catch-up."
+            smokeScript.contains("sender_cadence_catch_up_limit = 1"),
+            "The real-device smoke gate must prove the Mac sender stays on the single-frame strict dispatch-clock path."
         )
         XCTAssertTrue(
             smokeScript.contains("bounded strict producer path: cadenceCatchUpLimit"),
@@ -730,15 +752,24 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "The real-device smoke gate must fail when the sender regresses to the old 16 KB chunk cap."
         )
         XCTAssertTrue(
-            smokeScript.contains("contentBacklogLimit\") != 12"),
+            smokeScript.contains("sender_content_backlog_frame_limit = 18"),
             "The real-device smoke gate must require the bounded contentProcessed backlog window used by the strict SBC2 sender."
+        )
+        XCTAssertTrue(
+            smokeScript.contains("minimum_source_observed_seconds = max(2.0, soak_seconds - 4.0)") &&
+            smokeScript.contains("minimum_source_samples = 2") &&
+            smokeScript.contains("source_observed_seconds = (source_time_end - source_time_start).total_seconds()") &&
+            smokeScript.contains("Mac smoke source heartbeat coverage was too short inside final pass window") &&
+            smokeScript.contains("source_frame_delta = source_frame_end - source_frame_start") &&
+            smokeScript.contains("macSourceRenderProgressFPS="),
+            "The smoke source gate must prove helper liveness while treating helper aggregate render cadence as diagnostic evidence behind the SCK and remote-display hard gates."
         )
         XCTAssertTrue(
             smokeScript.contains("strict_mac_sender_queue_limit = 6"),
             "The Mac pending queue cap must be enforced on the normal one-chunk path, not hidden under the multi-chunk failure branch."
         )
         XCTAssertTrue(
-            smokeScript.contains("\nif tx_content_backlog_max >= 12:"),
+            smokeScript.contains("\nif tx_content_backlog_max >= sender_content_backlog_frame_limit:"),
             "The contentProcessed backlog ceiling must be enforced even when cadence telemetry is otherwise clean."
         )
         XCTAssertTrue(
@@ -746,7 +777,7 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "The real-device smoke gate must require the byte-bounded contentProcessed backlog window used by the strict SBC2 sender."
         )
         XCTAssertTrue(
-            smokeScript.contains("contentProcessed backlog exceeded the strict 12-frame limit"),
+            smokeScript.contains("contentProcessed backlog exceeded the strict frame limit"),
             "The real-device smoke gate must still fail if decoupled scheduling hides an excessive NWConnection completion backlog."
         )
         XCTAssertTrue(
@@ -774,7 +805,7 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "The real-device smoke gate must prove encoded frames bypass the old peer queue hop before entering the sender pump."
         )
         XCTAssertTrue(
-            smokeScript.contains("contentProcessed backlog hit the strict 12-frame ceiling"),
+            smokeScript.contains("contentProcessed backlog hit the strict frame ceiling"),
             "The real-device smoke gate must fail if the writer repeatedly reaches the contentProcessed ceiling."
         )
         XCTAssertTrue(
@@ -960,6 +991,20 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
         XCTAssertFalse(
             source.contains("await directAudioFallbackSender?.close()\n                    }\n#endif\n                    encodedFrameStore.clear()"),
             "WebRTC fallback audio close should not be fire-and-forget from the screen streaming defer."
+        )
+
+        let fallbackSenderInit = try sourceSlice(
+            from: "directAudioFallbackSender = WebRTCAudioFallbackSender(",
+            to: "scheduleRealtimeAudioAttachIfNeeded()",
+            in: source
+        )
+        XCTAssertTrue(
+            fallbackSenderInit.contains("packetType: .remoteDesktopAudio"),
+            "Fallback audio must use its own secure envelope packet type so control-channel audio cannot advance the screen replay lane."
+        )
+        XCTAssertFalse(
+            fallbackSenderInit.contains("packetType: .remoteDesktop\n"),
+            "Fallback audio must not share the screen packet type across independently ordered WebRTC data channels."
         )
     }
 

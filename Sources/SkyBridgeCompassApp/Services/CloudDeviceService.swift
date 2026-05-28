@@ -52,7 +52,7 @@ public final class PreviewCloudDeviceService: CloudDeviceService, @unchecked Sen
         [
             iCloudDevice(
                 id: "local-mac",
-                name: "Lza 的 MacBook Pro",
+                name: "Preview MacBook Pro",
                 model: "MacBookPro18,4",
                 osVersion: "macOS 14.1",
                 appVersion: "1.0.0",
@@ -64,7 +64,7 @@ public final class PreviewCloudDeviceService: CloudDeviceService, @unchecked Sen
             ),
             iCloudDevice(
                 id: "iphone",
-                name: "Lza 的 iPhone",
+                name: "Preview iPhone",
                 model: "iPhone16,2",
                 osVersion: "iOS 18.0",
                 appVersion: "1.0.0",

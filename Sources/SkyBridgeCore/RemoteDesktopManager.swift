@@ -491,6 +491,7 @@ final class RemoteDesktopSession {
 
     private var connectionContinuation: CheckedContinuation<Void, Error>?
     private let continuationLock = NSLock()
+    private var lastPointerLocation: CGPoint?
 
     private(set) var clientState: CBFreeRDPClientState = .idle
     private(set) var summary: RemoteSessionSummary
@@ -588,6 +589,11 @@ final class RemoteDesktopSession {
             return
         }
 
+        let interactionSettings = RemoteDesktopSettingsManager.shared.settings.interactionSettings
+        guard interactionSettings.enableContextMenu || !Self.isRightMouseEvent(eventType) else {
+            return
+        }
+
         var mask: UInt16 = 0
 
         switch eventType {
@@ -601,8 +607,13 @@ final class RemoteDesktopSession {
             mask = 0
         }
 
-        let nx = UInt16(max(0, min(65535, x)))
-        let ny = UInt16(max(0, min(65535, y)))
+        let adjustedPoint = adjustedPointerLocation(
+            CGPoint(x: CGFloat(x), y: CGFloat(y)),
+            eventType: eventType,
+            settings: interactionSettings
+        )
+        let nx = UInt16(max(0, min(65535, adjustedPoint.x)))
+        let ny = UInt16(max(0, min(65535, adjustedPoint.y)))
         client.submitPointerEvent(with: nx, y: ny, buttonMask: mask)
     }
 
@@ -619,9 +630,49 @@ final class RemoteDesktopSession {
             log.warning("尝试发送滚轮事件到未连接会话")
             return
         }
-        let mask: UInt16 = deltaY > 0 ? 0x0078 : 0x0088
+        let interactionSettings = RemoteDesktopSettingsManager.shared.settings.interactionSettings
+        guard interactionSettings.enableTrackpadGestures else {
+            return
+        }
+        let scaledDeltaY = Double(deltaY) * max(0.1, min(interactionSettings.scrollSensitivity, 5.0))
+        let mask: UInt16 = scaledDeltaY > 0 ? 0x0078 : 0x0088
+        let repeatCount = max(1, min(8, Int((abs(scaledDeltaY) / 8).rounded(.up))))
  // 使用当前光标附近的坐标（RDP 这边一般不敏感）
-        client.submitPointerEvent(with: 400, y: 300, buttonMask: mask)
+        for _ in 0..<repeatCount {
+            client.submitPointerEvent(with: 400, y: 300, buttonMask: mask)
+        }
+    }
+
+    private static func isRightMouseEvent(_ eventType: NSEvent.EventType) -> Bool {
+        eventType == .rightMouseDown || eventType == .rightMouseUp || eventType == .rightMouseDragged
+    }
+
+    private static func isPointerMovementEvent(_ eventType: NSEvent.EventType) -> Bool {
+        eventType == .mouseMoved || eventType == .leftMouseDragged || eventType == .rightMouseDragged
+    }
+
+    private func adjustedPointerLocation(
+        _ location: CGPoint,
+        eventType: NSEvent.EventType,
+        settings: InteractionSettings
+    ) -> CGPoint {
+        defer { lastPointerLocation = location }
+        guard Self.isPointerMovementEvent(eventType),
+              let previous = lastPointerLocation else {
+            return location
+        }
+
+        let sensitivity = max(0.1, min(settings.mouseSensitivity, 5.0))
+        let deltaX = location.x - previous.x
+        let deltaY = location.y - previous.y
+        let distance = hypot(deltaX, deltaY)
+        let acceleration = settings.enableMouseAcceleration
+            ? max(1.0, min(2.0, distance / 48.0))
+            : 1.0
+        return CGPoint(
+            x: previous.x + (deltaX * sensitivity * acceleration),
+            y: previous.y + (deltaY * sensitivity * acceleration)
+        )
     }
 
  // MARK: - 回调配置
@@ -730,7 +781,8 @@ final class RemoteDesktopSession {
             "multiMonitor": settings.displaySettings.multiMonitorSupport,
             "preferredCodec": settings.displaySettings.preferredCodec.rawValue,
             "targetFrameRate": settings.displaySettings.targetFrameRate,
-            "keyFrameInterval": settings.displaySettings.keyFrameInterval
+            "keyFrameInterval": settings.displaySettings.keyFrameInterval,
+            "compressionLevel": settings.displaySettings.boundedCompressionLevelPercent
         ]
         if let dim = settings.displaySettings.resolution.dimensions {
             display["width"] = dim.width
@@ -743,7 +795,14 @@ final class RemoteDesktopSession {
             "connectionType": settings.networkSettings.connectionType.rawValue,
             "enableEncryption": settings.networkSettings.enableEncryption,
             "enableUDPTransport": settings.networkSettings.enableUDPTransport,
-            "enableAdaptiveQuality": settings.networkSettings.enableAdaptiveQuality
+            "enableAdaptiveQuality": settings.networkSettings.enableAdaptiveQuality,
+            "connectionTimeout": settings.networkSettings.boundedConnectionTimeoutSeconds * 1_000,
+            "compressionLevel": settings.networkSettings.boundedCompressionLevel,
+            "enableNetworkStats": settings.networkSettings.enableNetworkStats,
+            "maxReconnectAttempts": settings.networkSettings.boundedMaxReconnectAttempts,
+            "reconnectBackoffInitialMs": settings.networkSettings.boundedReconnectBackoffInitialMilliseconds,
+            "reconnectBackoffMaxMs": settings.networkSettings.boundedReconnectBackoffMaxMilliseconds,
+            "reconnectBackoffMultiplier": settings.networkSettings.boundedReconnectBackoffMultiplier
         ]
         dict["networkSettings"] = network
 

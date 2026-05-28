@@ -126,6 +126,46 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("signedRefreshEvidenceSuites(initialSignedRefreshEvidence)"))
     }
 
+    func testStrictOutboundHandshakePassesPinnedTrustProviderToFinalDriver() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+
+        XCTAssertTrue(source.contains("stage: \"outbound\""))
+        XCTAssertTrue(source.contains("throw P2PError.missingPinnedProtocolIdentity"))
+        XCTAssertTrue(source.contains("trustProvider: strictTrustContext?.provider"))
+        XCTAssertTrue(
+            source.contains("expectedRemoteSOAPeerId: soaPeerIdBytes(for: strictTrustContext?.stablePeerId ?? peerId) ?? remotePeerId")
+        )
+        XCTAssertFalse(
+            source.contains("trustProvider: nil"),
+            "strict outbound P2P must not silently fall back to DefaultHandshakeTrustProvider after preflight."
+        )
+    }
+
+    func testStrictOutboundSOAUsesResolvedStablePeerInsteadOfEndpointAlias() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func performPQCHandshake("))
+        let end = try XCTUnwrap(source.range(of: "public func rekeyToPreferPQC(", range: start.lowerBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        let trustContext = try XCTUnwrap(body.range(of: "let strictTrustContext"))
+        let target = try XCTUnwrap(body.range(of: "let outboundSOATargetPeerId = strictTrustContext?.stablePeerId ?? peerId"))
+        let shouldAdvertise = try XCTUnwrap(body.range(of: "let shouldAdvertiseSOA = allowSOA && (shouldUseSOA(for: device) || canBindSOATarget)"))
+        let outboundSOA = try XCTUnwrap(body.range(of: "let outboundSOA: HandshakeSOAMetadata?"))
+
+        XCTAssertLessThan(trustContext.lowerBound, target.lowerBound)
+        XCTAssertLessThan(target.lowerBound, shouldAdvertise.lowerBound)
+        XCTAssertLessThan(shouldAdvertise.lowerBound, outboundSOA.lowerBound)
+        XCTAssertTrue(body.contains("let remotePeerId = shouldAdvertiseSOA ? soaPeerIdBytes(for: outboundSOATargetPeerId) : nil"))
+        XCTAssertFalse(
+            body.contains("let remotePeerId = shouldAdvertiseSOA ? soaPeerIdBytes(for: device.id) : nil"),
+            "Strict outbound SOA must bind to the resolved stable peer id, not the current host/Bonjour endpoint alias."
+        )
+    }
+
     func testStrictPreflightMissingKEMWithPinnedIdentityChoosesPIBBeforeSKR() {
         let action = P2PConnectionManager.strictPQCPreflightAction(
             trustedPeerKEMSuites: [],
@@ -307,6 +347,29 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertEqual(action, .proceed)
     }
 
+    func testStrictPreflightSignedEvidenceStillRequiresPinnedProtocolIdentity() {
+        let evidence = KEMTrustStore.SignedRefreshEvidence(
+            deviceId: "id:mac-skr-without-pin",
+            suiteWireIds: [CryptoSuite.xwing.wireId],
+            source: "signed_lan_kem_refresh",
+            keyId: "skr1-test",
+            generation: 1,
+            expiresAt: Date().addingTimeInterval(60),
+            protocolIdentityFingerprint: String(repeating: "a", count: 64),
+            signingFingerprint: String(repeating: "a", count: 64),
+            payloadHashHex: String(repeating: "b", count: 64),
+            updatedAt: Date()
+        )
+        let action = P2PConnectionManager.strictPQCPreflightAction(
+            trustedPeerKEMSuites: [],
+            signedRefreshEvidence: evidence,
+            pinnedProtocolFingerprints: [],
+            preferredTargetSuite: .xwing
+        )
+
+        XCTAssertEqual(action, .attemptOOBProtocolIdentityBindingThenRefresh)
+    }
+
     func testStrictPreflightSKRIdentityMismatchChoosesPIBThenSKR() {
         let action = P2PConnectionManager.strictPQCPreflightAction(
             trustedPeerKEMSuites: [],
@@ -332,6 +395,25 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("startDeviceConfirmationPairing(dev)"))
         XCTAssertTrue(source.contains("P2PConnectionManager.instance.connect(to: device)"))
         XCTAssertTrue(source.contains("设备确认码配对"))
+    }
+
+    func testSettingsSecurityControlsDoNotExposeFakeRuntimeBindings() throws {
+        let settingsSource = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift"
+        )
+        let contentSource = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/ContentView.swift"
+        )
+
+        XCTAssertFalse(settingsSource.contains(".constant(false)"))
+        XCTAssertFalse(settingsSource.contains("Toggle(isOn: $settingsManager.requireBiometricAuth)"))
+        XCTAssertFalse(settingsSource.contains("Toggle(isOn: $settingsManager.endToEndEncryption)"))
+        XCTAssertFalse(settingsSource.contains("Image(systemName: \"checkmark.circle.fill\")\n                        .foregroundColor(.green)"))
+        XCTAssertFalse(settingsSource.contains("try? await pqcManager.generateKeyPair()"))
+        XCTAssertFalse(settingsSource.contains("try? await pqcManager.regenerateKeyPair()"))
+        XCTAssertFalse(contentSource.contains(".sheet(\n            item: Binding(\n                get: { connectionManager.pendingPairingTrustRequest }"))
+        XCTAssertTrue(contentSource.contains("PairingTrustPromptWindowPresenter"))
+        XCTAssertTrue(contentSource.contains("Button(RuntimeLocalization.string(\"关闭\")) { onDecision(.reject) }"))
     }
 
     func testLegacyPQCVerificationCannotPersistTrustWithoutProtocolIdentityPin() throws {
@@ -786,6 +868,23 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         await KEMTrustStore.shared.clearForTesting()
     }
 
+    func testProtocolIdentityTrustStoreResolvesPinnedFingerprintDeviceIds() async throws {
+        let peerId = "id:stable-p2p-mac"
+        let fingerprint = String(repeating: "b", count: 64)
+
+        await ProtocolIdentityTrustStore.shared.clearForTesting()
+        await ProtocolIdentityTrustStore.shared.upsert(deviceId: peerId, fingerprints: [fingerprint])
+
+        let deviceIds = await ProtocolIdentityTrustStore.shared.deviceIds(containingFingerprint: fingerprint)
+        XCTAssertTrue(deviceIds.contains(peerId))
+        XCTAssertTrue(deviceIds.contains("stable-p2p-mac"))
+        let invalidFingerprintMatches = await ProtocolIdentityTrustStore.shared
+            .deviceIds(containingFingerprint: String(repeating: "z", count: 64))
+        XCTAssertTrue(invalidFingerprintMatches.isEmpty)
+
+        await ProtocolIdentityTrustStore.shared.clearForTesting()
+    }
+
     func testForgetClearsKEMAndProtocolIdentityCaches() async throws {
         let peerId = "id:forgotten-peer"
         let key = Data(repeating: 0xA1, count: 1_216)
@@ -939,6 +1038,140 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("PIB-1 -> SKR-1 recovery completed"))
         XCTAssertTrue(source.contains("requester_protocol_identity_not_pinned"))
         XCTAssertFalse(source.contains("policyAllowClassicFallback: true"))
+    }
+
+    func testTrustedPeerKEMRequiresStableProtocolIdentityCandidate() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func trustedPeerKEM(for device: DiscoveredDevice)"))
+        let end = try XCTUnwrap(source.range(of: "private func peerKEMLookupCandidates", range: start.lowerBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("guard let stablePeerId = stableProtocolIdentityCandidate(from: candidates)"))
+        XCTAssertTrue(body.contains("missing stable protocol identity"))
+        XCTAssertTrue(body.contains("refusing endpoint alias target"))
+        XCTAssertTrue(body.contains("return nil"))
+        XCTAssertTrue(body.contains("return (stablePeerId, keys)"))
+        XCTAssertFalse(body.contains("?? candidates.first ?? device.id"))
+    }
+
+    func testStableProtocolIdentityCandidateResolvesEndpointAliasesBeforeTrustMaterial() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "private func stableProtocolIdentityCandidate(from candidates: [String])"))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private func strictInboundHandshakeTrustContext",
+                range: start.lowerBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("PeerIdentityAliasResolver.persistentDeviceId(from: normalized)"))
+        XCTAssertTrue(body.contains("peerAliasToCanonicalDeviceId[normalized]"))
+        XCTAssertTrue(body.contains("TrustedDeviceStore.shared.uniqueCanonicalTrustedDeviceId(for: normalized)"))
+        XCTAssertTrue(body.contains("lastKnownDevices[normalized]"))
+        XCTAssertTrue(body.contains("PeerIdentityAliasResolver.aliasKeys(for: knownDevice)"))
+        XCTAssertTrue(body.contains("discoveryManager.discoveredDevices.first"))
+        XCTAssertTrue(body.contains("visited.insert(normalized).inserted"))
+        XCTAssertFalse(body.contains("return candidates.first"))
+
+        let connectStart = try XCTUnwrap(
+            source.range(of: "public func connect(to device: DiscoveredDevice) async throws"))
+        let connectEnd = try XCTUnwrap(
+            source.range(
+                of: "public func disconnect(from device: DiscoveredDevice) async -> Bool",
+                range: connectStart.lowerBound..<source.endIndex))
+        let connectBody = String(source[connectStart.lowerBound..<connectEnd.lowerBound])
+        XCTAssertTrue(connectBody.contains("let stableProtocolPeerId = stableProtocolIdentityCandidate("))
+        XCTAssertTrue(connectBody.contains("primaryPeerId: preferredTrustedPeerId ?? stableProtocolPeerId ?? resolvedTargetDevice.id"))
+    }
+
+    func testStrictInboundHandshakeUsesMessageASOAStableIdentityCandidates() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let helperStart = try XCTUnwrap(
+            source.range(of: "private func stableProtocolIdentityCandidates(from messageA: HandshakeMessageA?)"))
+        let helperEnd = try XCTUnwrap(
+            source.range(
+                of: "private func strictInboundHandshakeTrustContext",
+                range: helperStart.lowerBound..<source.endIndex))
+        let helperBody = String(source[helperStart.lowerBound..<helperEnd.lowerBound])
+
+        XCTAssertTrue(helperBody.contains("messageA.soaExtension"))
+        XCTAssertTrue(helperBody.contains("soa.initiatorPeerId"))
+        XCTAssertTrue(helperBody.contains("soaPeerIdBytes(for: normalizedStablePeerId)"))
+        XCTAssertTrue(helperBody.contains("TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: fingerprint)"))
+        XCTAssertTrue(helperBody.contains("ProtocolIdentityTrustStore.shared.deviceIds(containingFingerprint: fingerprint)"))
+        XCTAssertTrue(helperBody.contains("TrustedDeviceStore.shared.trustedDevices"))
+        XCTAssertTrue(helperBody.contains("PeerIdentityAliasResolver.aliasKeys(for: device)"))
+        XCTAssertTrue(helperBody.contains("lastAcceptedPairingIdentityDeviceIdByPeerId"))
+
+        let trustStart = try XCTUnwrap(
+            source.range(
+                of: "private func strictInboundHandshakeTrustContext",
+                range: helperEnd.lowerBound..<source.endIndex))
+        let trustEnd = try XCTUnwrap(
+            source.range(
+                of: "private func preferredStrictPQCHandshakeTargetSuite",
+                range: trustStart.lowerBound..<source.endIndex))
+        let trustBody = String(source[trustStart.lowerBound..<trustEnd.lowerBound])
+
+        XCTAssertTrue(trustBody.contains("messageA: HandshakeMessageA? = nil"))
+        XCTAssertTrue(trustBody.contains("let messageAStableCandidates = await stableProtocolIdentityCandidates(from: messageA)"))
+        XCTAssertTrue(trustBody.contains("reason=ambiguous_message_a_soa_identity"))
+        XCTAssertTrue(trustBody.contains("let candidates = messageAStableCandidates + [peerId, runtimePeerId, presentationPeerId, canonicalPeerId]"))
+        XCTAssertTrue(trustBody.contains("requirePinnedProtocolIdentity: true"))
+        XCTAssertTrue(trustBody.contains("resolved stable peer from MessageA SOA"))
+
+        let inboundStart = try XCTUnwrap(
+            source.range(of: "private func ensureInboundHandshakeDriverIfNeeded("))
+        let inboundEnd = try XCTUnwrap(
+            source.range(of: "private func processHandshakeFrame(", range: inboundStart.lowerBound..<source.endIndex))
+        let inboundBody = String(source[inboundStart.lowerBound..<inboundEnd.lowerBound])
+        XCTAssertTrue(inboundBody.contains("stage: \"inbound-handshake\""))
+        XCTAssertTrue(inboundBody.contains("messageA: messageA"))
+
+        let rekeyStart = try XCTUnwrap(
+            source.range(of: "private func ensureInboundRekeyDriverIfNeeded("))
+        let rekeyEnd = try XCTUnwrap(
+            source.range(of: "private func isLikelyHandshakeControlPacket", range: rekeyStart.lowerBound..<source.endIndex))
+        let rekeyBody = String(source[rekeyStart.lowerBound..<rekeyEnd.lowerBound])
+        XCTAssertTrue(rekeyBody.contains("stage: \"inbound-rekey\""))
+        XCTAssertTrue(rekeyBody.contains("messageA: messageA"))
+    }
+
+    func testStrictPQCTrustProviderDoesNotUseEndpointAliasesAsPinMaterial() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private struct P2PStoredHandshakeTrustProvider"))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "/// P2P 连接管理器",
+                range: start.lowerBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("!PeerIdentityAliasResolver.isEndpointAlias(trimmed)"))
+        XCTAssertTrue(body.contains("where !PeerIdentityAliasResolver.isEndpointAlias(alias)"))
+        XCTAssertTrue(body.contains("requirePinnedProtocolIdentity"))
+    }
+
+    func testPIB1RequestRequiresStableProtocolIdentityTarget() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func attemptOOBProtocolIdentityBinding("))
+        let end = try XCTUnwrap(source.range(of: "private func localProtocolIdentityProofForProtocolBinding", range: start.lowerBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("guard let targetProtocolDeviceId = stableProtocolIdentityCandidate(from: candidates)"))
+        XCTAssertTrue(body.contains("missing stable protocol identity target"))
+        XCTAssertTrue(body.contains("refusing endpoint alias target"))
+        XCTAssertTrue(body.contains("targetDeviceId: targetProtocolDeviceId"))
+        XCTAssertFalse(body.contains("targetDeviceId: candidates.first ?? device.id"))
     }
 
     func testPIB1ImporterUsesExistingProtocolIdentityPinAfterVerifiedBinding() {
@@ -1161,6 +1394,14 @@ final class P2PBootstrapPolicyTests: XCTestCase {
 @available(iOS 17.0, *)
 @MainActor
 final class P2PBootstrapRekeyTargetTests: XCTestCase {
+    private func readRepositorySource(_ relativePath: String) throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(contentsOf: repoRoot.appendingPathComponent(relativePath), encoding: .utf8)
+    }
+
     func testStrictPQCRecognizesCanonicalMLKEMAsSatisfyingForwardSecureTarget() {
         XCTAssertTrue(
             P2PConnectionManager.canSatisfyStrictPQCWithTrustedKEM(
@@ -1174,6 +1415,19 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768, target: .mlkem768fs))
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768fs, target: .mlkem768))
         XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(.xwing, target: .mlkem768fs))
+    }
+
+    func testInboundResponderRequiresXWingRuntimeSupportForXWingOnlyPeer() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/CryptoProviderFactory.swift"
+        )
+        let branchStart = try XCTUnwrap(source.range(of: "case (true, false):"))
+        let branchEnd = try XCTUnwrap(source.range(of: "case (false, true):", range: branchStart.lowerBound..<source.endIndex))
+        let xwingOnlyBranch = String(source[branchStart.lowerBound..<branchEnd.lowerBound])
+
+        XCTAssertTrue(xwingOnlyBranch.contains("guard isAppleXWingAvailable() else"))
+        XCTAssertTrue(xwingOnlyBranch.contains("return UnavailablePQCProvider()"))
+        XCTAssertTrue(xwingOnlyBranch.contains("return AppleXWingCryptoProvider()"))
     }
 
     func testPreferredBootstrapRekeyTargetMatchesPreparedHandshakeOfferOrder() throws {

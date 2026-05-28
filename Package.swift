@@ -51,6 +51,7 @@ let package = Package(
         .executable(name: "SkyBridgeCompassApp", targets: ["SkyBridgeCompassApp"]),
         .executable(name: "MacUIBaselineCapture", targets: ["MacUIBaselineCapture"]),
         .executable(name: "LocalLanInteropHost", targets: ["LocalLanInteropHost"]),
+        .executable(name: "LocalLanSmokeSourceHost", targets: ["LocalLanSmokeSourceHost"]),
         .executable(name: "LocalWebRTCSmokeHost", targets: ["LocalWebRTCSmokeHost"]),
         .executable(name: "CurrentPathProbe", targets: ["CurrentPathProbe"]),
         .executable(name: "BaselineBenchRunner", targets: ["BaselineBenchRunner"]),
@@ -124,12 +125,31 @@ let package = Package(
                 .linkedFramework("CoreMedia")
             ]
         ),
+        .target(
+            name: "SkyBridgeSmokeSupport",
+            dependencies: [],
+            path: "Sources/SkyBridgeSmokeSupport",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
         .executableTarget(
             name: "LocalLanInteropHost",
             dependencies: [
-                "SkyBridgeCore"
+                "SkyBridgeCore",
+                "SkyBridgeSmokeSupport"
             ],
             path: "Sources/LocalLanInteropHost",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
+        .executableTarget(
+            name: "LocalLanSmokeSourceHost",
+            dependencies: [
+                "SkyBridgeSmokeSupport"
+            ],
+            path: "Sources/LocalLanSmokeSourceHost",
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")
             ]
@@ -230,6 +250,7 @@ let package = Package(
                 "SkyBridgeAppleTransport",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
+                "SkyBridgeSmokeSupport",
                 "FreeRDPBridge",
                 "WebRTCAudioDeviceBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
@@ -375,6 +396,7 @@ let package = Package(
                 "SkyBridgeCore",
                 "SkyBridgeUI",
                 "SkyBridgeVisualParity",
+                "SkyBridgeSmokeSupport",
                 .product(name: "OrderedCollections", package: "swift-collections")
             ],
             path: "Sources/SkyBridgeCompassApp",
@@ -430,7 +452,8 @@ let package = Package(
         .executableTarget(
             name: "LocalWebRTCSmokeHost",
             dependencies: [
-                "SkyBridgeCore"
+                "SkyBridgeCore",
+                "SkyBridgeSmokeSupport"
             ],
             path: "Sources/LocalWebRTCSmokeHost",
             swiftSettings: [

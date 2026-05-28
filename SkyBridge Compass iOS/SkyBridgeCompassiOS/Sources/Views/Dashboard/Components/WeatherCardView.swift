@@ -213,7 +213,7 @@ public struct WeatherCardView: View {
 
     private var disabledView: some View {
         HStack(spacing: 12) {
-            Image(systemName: "cloud.slash")
+            Image(systemName: "icloud.slash")
                 .font(.title2)
                 .foregroundStyle(.secondary)
 

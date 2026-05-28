@@ -1,6 +1,6 @@
 # macOS Release Packaging Runbook
 
-Last verified: 2026-05-13
+Last verified: 2026-05-26
 
 This runbook records the only supported release packaging path for SkyBridge
 Compass Pro on macOS. Its purpose is to prevent four regressions that are easy
@@ -40,8 +40,19 @@ dist/SkyBridgeCompassPro-1.0.0.dmg
 
 ## Correct Build Source
 
-The release app must be assembled from the Xcode workspace Release executable
-product:
+The release app must be assembled from an explicit Release executable product.
+The default release path uses SwiftPM Release because Xcode Package schemes can
+emit ambiguous macOS/Catalyst destination warnings on Xcode 26:
+
+```text
+.build/arm64-apple-macosx/release/SkyBridgeCompassApp
+SkyBridgePackagingBuildSource = swiftpm_release
+SkyBridgePackagingBuildScheme = SkyBridgeCompassApp
+SkyBridgePackagingBuildConfiguration = Release
+```
+
+An Xcode workspace Release executable remains valid when the destination is
+warning-free:
 
 ```text
 .swiftpm/xcode/package.xcworkspace
@@ -56,13 +67,13 @@ be copied as the final app. The bad-signature smell is an app around 126 MB with
 an 83 MB main binary. The expected release smell is an app around 175-180 MB
 with a 113 MB main binary.
 
-The final app Info.plist must record:
+The final app Info.plist must record a release provenance:
 
 ```text
-SkyBridgePackagingBuildSource = xcode_release
+SkyBridgePackagingBuildSource = swiftpm_release or xcode_release
 SkyBridgePackagingBuildScheme = SkyBridgeCompassApp
 SkyBridgePackagingBuildConfiguration = Release
-SkyBridgePackagingBuildProductPath = .../Build/Products/Release/SkyBridgeCompassApp
+SkyBridgePackagingBuildProductPath = .../SkyBridgeCompassApp
 ```
 
 ## Mandatory Payload
@@ -148,13 +159,13 @@ Generate derived assets only through:
 Scripts/regenerate_app_icons.sh
 ```
 
-Correct derived assets as verified on 2026-05-12:
+Correct derived assets as verified on 2026-05-28:
 
 ```text
 98a2ab817277e4ab3f05edb48e1d908c7c4d1870c544bc2edce29b1af7dc673c  Sources/SkyBridgeCompassApp/Resources/AppIcon.png
 98a2ab817277e4ab3f05edb48e1d908c7c4d1870c544bc2edce29b1af7dc673c  Sources/SkyBridgeCompassApp/Resources/AppIconDock.png
 98a2ab817277e4ab3f05edb48e1d908c7c4d1870c544bc2edce29b1af7dc673c  Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/Assets/Image.png
-a97e95e1bc187b3d0486402218ea5aa4c9f8c530d81e552fd1113ee18e5975d8  Sources/SkyBridgeCompassApp/Resources/AppIcon.icns
+706dd8153720f12ed9a89ab3725a7ad0ef1553c0e25bae9e6d650a2043079ded  Sources/SkyBridgeCompassApp/Resources/AppIcon.icns
 706dd8153720f12ed9a89ab3725a7ad0ef1553c0e25bae9e6d650a2043079ded  Sources/SkyBridgeCompassApp/Resources/AppIconDock.icns
 270943495835f20e8520e72c14fa4b41d013e7b2f73038b91c2bb3882b96f76c  Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/icon.json
 ```
@@ -163,6 +174,9 @@ a97e95e1bc187b3d0486402218ea5aa4c9f8c530d81e552fd1113ee18e5975d8  Sources/SkyBri
 icon is the compass over blue clouds filling the rounded square, without the
 extra white inset box. If Finder shows a smaller icon nested inside another
 rounded rectangle, reject that build and regenerate from `AppIconMaster.svg`.
+Both `AppIcon.icns` and `AppIconDock.icns` must include 512x512 and 1024x1024
+representations so LaunchServices and the runtime Dock icon resolve the same
+full-size artwork.
 
 The app plist must continue to point at `AppIcon`:
 
@@ -185,13 +199,15 @@ Scripts/check_macos_release_readiness.sh \
   --steady-state 8 \
   --app-path "dist/SkyBridge Compass Pro.app" \
   --dmg-path "dist/SkyBridgeCompassPro-1.0.0.dmg" \
+  --connectivity-artifact-dir "Artifacts/<real-device-connectivity-matrix>" \
   --p2p-remote-artifact-dir "Artifacts/<real-device-p2p-remote-smoke>" \
   --file-transfer-artifact-dir "Artifacts/<real-device-file-transfer-smoke>"
 ```
 
 This gate runs the Rust CLI operator check-surface coverage threshold
-(`>=88%`), real-device performance checks for P2P remote and file transfer,
-and a `leaks` scan against the launched app process. The 88% threshold is an
+(`>=88%`), the Mac/iOS connectivity matrix check, real-device performance
+checks for P2P remote and file transfer, and a `leaks` scan against the
+launched app process. The 88% threshold is an
 operator check-surface gate, not Rust line or branch coverage.
 
 Useful manual size and payload check:
@@ -218,6 +234,31 @@ Expected scale from the 2026-05-12 known-good package:
 Size is a smell, not the contract. The contract is the build source metadata,
 the linked/present WebRTC framework, the app resource bundle, the embedded TCC
 keys, signing validity, notarization/stapling, and launch smoke.
+
+## Update Discovery Contract
+
+The in-app Check for Updates flow is backed by a GitHub Releases manifest, not
+a placeholder alert. Release builds must point
+`SKYBRIDGE_UPDATE_MANIFEST_URL` at a GitHub Releases HTTPS asset such as:
+
+```text
+https://github.com/billlza/Skybridge-Compass/releases/download/stable/macos-stable.json
+```
+
+The manifest must be signed with Ed25519. The app verifies the detached
+signature with the public keys in
+`SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS` before comparing versions or
+opening the DMG URL. Unsigned manifests, untrusted key ids, insecure URLs,
+non-Developer-ID distributions, and packages not marked notarized are rejected
+fail-closed.
+
+The signing private key must live outside the repository, for example in a
+release keychain item or a GitHub/self-hosted-runner secret. Do not commit the
+private key. The release readiness script also rejects update metadata that is
+not a GitHub Releases HTTPS asset or that lacks trusted public-key material.
+
+Operational publishing details live in
+[`Docs/ops/macos-update-management.md`](macos-update-management.md).
 
 ## P2P Identity Drift Gate
 

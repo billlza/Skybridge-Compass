@@ -78,6 +78,62 @@ final class RemoteScreenFrameSendQueueTests: XCTestCase {
         XCTAssertTrue(queue.pendingFrames.isEmpty)
     }
 
+    func testQueueDoesNotRecoverFromWaitingSyncUsingH264IDRWithoutParameterSets() {
+        var queue = RemoteScreenFrameSendQueue(maxQueuedFrames: 1)
+        _ = queue.enqueue(makeFrame(sync: true))
+        _ = queue.enqueue(makeFrame(sync: false))
+
+        let idrOnly = ScreenData(
+            width: 1920,
+            height: 1080,
+            imageData: Data([0x00, 0x00, 0x00, 0x01, 0x65, 0x88]),
+            timestamp: 2,
+            format: "h264",
+            isSyncFrame: true
+        )
+
+        XCTAssertEqual(queue.enqueue(idrOnly), .droppedPredictiveFrameWaitingForSync)
+        XCTAssertTrue(queue.waitingForSyncFrame)
+        XCTAssertTrue(queue.pendingFrames.isEmpty)
+    }
+
+    func testQueueRequiresHEVCParameterSetsWhenRecoveringFromWaitingSync() {
+        var queue = RemoteScreenFrameSendQueue(maxQueuedFrames: 1)
+        _ = queue.enqueue(makeFrame(sync: true))
+        _ = queue.enqueue(makeFrame(sync: false))
+
+        let hevcIRAPWithoutParameterSets = ScreenData(
+            width: 2056,
+            height: 1329,
+            imageData: Data([0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0x88]),
+            timestamp: 2,
+            format: "hevc",
+            isSyncFrame: true
+        )
+        XCTAssertEqual(
+            queue.enqueue(hevcIRAPWithoutParameterSets),
+            .droppedPredictiveFrameWaitingForSync
+        )
+        XCTAssertTrue(queue.waitingForSyncFrame)
+
+        let hevcBootstrap = ScreenData(
+            width: 2056,
+            height: 1329,
+            imageData: Data([
+                0x00, 0x00, 0x00, 0x01, 0x40, 0x01,
+                0x00, 0x00, 0x00, 0x01, 0x42, 0x01,
+                0x00, 0x00, 0x00, 0x01, 0x44, 0x01,
+                0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0x88
+            ]),
+            timestamp: 3,
+            format: "hevc",
+            isSyncFrame: true
+        )
+        XCTAssertEqual(queue.enqueue(hevcBootstrap), .enqueued)
+        XCTAssertFalse(queue.waitingForSyncFrame)
+        XCTAssertEqual(queue.pendingFrames.first?.imageData, hevcBootstrap.imageData)
+    }
+
     func testIndependentFramesStayDecodableWhenQueueRolls() {
         var queue = RemoteScreenFrameSendQueue(maxQueuedFrames: 2)
 
@@ -91,11 +147,17 @@ final class RemoteScreenFrameSendQueueTests: XCTestCase {
     }
 
     private func makeFrame(sync: Bool) -> ScreenData {
-        let nalType: UInt8 = sync ? 0x65 : 0x41
+        let payload = sync
+            ? Data([
+                0x00, 0x00, 0x00, 0x01, 0x67, 0x42,
+                0x00, 0x00, 0x00, 0x01, 0x68, 0xCE,
+                0x00, 0x00, 0x00, 0x01, 0x65, 0x88
+            ])
+            : Data([0x00, 0x00, 0x00, 0x01, 0x41])
         return ScreenData(
             width: 1920,
             height: 1080,
-            imageData: Data([0x00, 0x00, 0x00, 0x01, nalType]),
+            imageData: payload,
             timestamp: 1,
             format: "h264",
             isSyncFrame: sync

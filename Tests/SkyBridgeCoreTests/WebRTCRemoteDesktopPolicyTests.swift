@@ -215,6 +215,12 @@ final class WebRTCRemoteDesktopPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("strict-audio-start-failed"))
         XCTAssertTrue(source.contains("strict-video-codec-fallback-forbidden"))
         XCTAssertTrue(source.contains("strict-aac-encode-failed"))
+        let managerSourceURL = root.appendingPathComponent(
+            "Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"
+        )
+        let managerSource = try String(contentsOf: managerSourceURL, encoding: .utf8)
+        XCTAssertTrue(managerSource.contains("action=strict-fail-closed"))
+        XCTAssertTrue(managerSource.contains("strict-startup-retry-forbidden"))
         XCTAssertTrue(source.contains("encodeDegradedFallbackJPEG"))
         XCTAssertTrue(source.contains("profile.maxEncodedFrameBytes"))
         XCTAssertTrue(source.contains("profile.qualityLadder"))

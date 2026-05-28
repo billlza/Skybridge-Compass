@@ -181,6 +181,13 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         }
     }
 
+    internal static func resolvedNebulaId(from userInfo: NebulaPublicClientOAuth.UserInfo) -> String? {
+        NebulaIdentityContract.normalizedNebulaId(userInfo.nebulaId)
+            ?? (NebulaIdentityContract.isCanonicalNebulaId(userInfo.subject)
+                ? NebulaIdentityContract.normalizedNebulaId(userInfo.subject)
+                : nil)
+    }
+
  // MARK: - 发布属性
 
     @Published var currentSession: AuthSession? {
@@ -1108,10 +1115,12 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         let userInfo = try await NebulaPublicClientOAuth.shared.fetchUserInfo(accessToken: tokenResponse.accessToken)
 
         let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? t("auth.displayName.default.nebula")
+        let nebulaId = Self.resolvedNebulaId(from: userInfo)
         let session = AuthSession(
             accessToken: tokenResponse.accessToken,
             refreshToken: tokenResponse.refreshToken,
             userIdentifier: userInfo.subject,
+            nebulaId: nebulaId,
             displayName: displayName,
             avatarURL: userInfo.picture,
             issuedAt: Date()

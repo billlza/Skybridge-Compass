@@ -119,6 +119,66 @@ final class SOABindingAliasRegressionTests: XCTestCase {
         }
     }
 
+    func testEstablishedReplacementRequiresAuthenticatedBoundIncoming() async {
+        let arbiter = PeerSessionArbiter()
+        let localPeerId = Data(repeating: 0x10, count: 32)
+        let remotePeerId = Data(repeating: 0x20, count: 32)
+        let forgedTargetPeerId = Data(repeating: 0x30, count: 32)
+        let pairKey = PeerSessionArbiter.pairKey(localPeerId: localPeerId, remotePeerId: remotePeerId)
+
+        await arbiter.markEstablished(pairKey: pairKey)
+        let unauthenticatedDecision = await arbiter.evaluateIncoming(
+            pairKey: pairKey,
+            remoteInitiatorPeerId: remotePeerId,
+            remoteAttemptId: Data(repeating: 0x40, count: 16),
+            targetPeerId: localPeerId,
+            expectedRemotePeerId: remotePeerId,
+            localPeerId: localPeerId,
+            authenticationState: .unauthenticated,
+            establishedPolicy: .replaceAuthenticated
+        )
+        XCTAssertEqualDecision(unauthenticatedDecision, .rejectBinding)
+
+        let forgedBindingDecision = await arbiter.evaluateIncoming(
+            pairKey: pairKey,
+            remoteInitiatorPeerId: remotePeerId,
+            remoteAttemptId: Data(repeating: 0x41, count: 16),
+            targetPeerId: forgedTargetPeerId,
+            expectedRemotePeerId: remotePeerId,
+            localPeerId: localPeerId,
+            authenticationState: .authenticated,
+            establishedPolicy: .replaceAuthenticated
+        )
+        XCTAssertEqualDecision(forgedBindingDecision, .rejectBinding)
+
+        let authenticatedDecision = await arbiter.evaluateIncoming(
+            pairKey: pairKey,
+            remoteInitiatorPeerId: remotePeerId,
+            remoteAttemptId: Data(repeating: 0x42, count: 16),
+            targetPeerId: localPeerId,
+            expectedRemotePeerId: remotePeerId,
+            localPeerId: localPeerId,
+            authenticationState: .authenticated,
+            establishedPolicy: .replaceAuthenticated
+        )
+        XCTAssertEqualDecision(authenticatedDecision, .acceptAndReplaceEstablished)
+
+        let reconnectAfterReplace = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x43, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        if case .accepted = reconnectAfterReplace {
+            // expected
+        } else {
+            XCTFail("Replacing an authenticated established inbound attempt should release the old established guard")
+        }
+    }
+
     func testSupersedeReasonIsFixedToConcurrentAttempt() {
         let winnerPeerId = Data([0x10, 0x20, 0x30])
         let winnerAttemptId = Data([0xAA, 0xBB, 0xCC])
@@ -193,6 +253,53 @@ final class SOABindingAliasRegressionTests: XCTestCase {
         }
     }
 
+    func testRemoteControlSOAScopeDoesNotCollideWithEstablishedP2PSession() async {
+        let arbiter = PeerSessionArbiter()
+        let localPeerId = Data(repeating: 0x51, count: 32)
+        let remotePeerId = Data(repeating: 0x52, count: 32)
+        let p2pPairKey = PeerSessionArbiter.pairKey(
+            localPeerId: localPeerId,
+            remotePeerId: remotePeerId
+        )
+        let remoteControlPairKey = PeerSessionArbiter.pairKey(
+            localPeerId: localPeerId,
+            remotePeerId: remotePeerId,
+            scope: .remoteControl
+        )
+
+        XCTAssertNotEqual(p2pPairKey, remoteControlPairKey)
+        await arbiter.markEstablished(pairKey: p2pPairKey)
+
+        let remoteControlRegistration = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: remoteControlPairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x53, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted = remoteControlRegistration else {
+            XCTFail("Remote control must be allowed to establish an independent SOA channel while P2P/file-transfer is already connected")
+            return
+        }
+
+        await arbiter.markEstablished(pairKey: remoteControlPairKey)
+        let duplicateRemoteControlRegistration = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: remoteControlPairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x54, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .alreadyConnected = duplicateRemoteControlRegistration else {
+            XCTFail("Remote control duplicates inside the same SOA scope must still be rejected")
+            return
+        }
+    }
+
     private func makeMessageA(
         initiatorPeerId: Data,
         targetPeerId: Data,
@@ -229,5 +336,27 @@ final class SOABindingAliasRegressionTests: XCTestCase {
             secureEnclaveSignature: nil,
             initiatorContribution: nil
         )
+    }
+
+    private func XCTAssertEqualDecision(
+        _ actual: PeerSessionArbiter.IncomingDecision,
+        _ expected: PeerSessionArbiter.IncomingDecision,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        switch (actual, expected) {
+        case (.accept, .accept),
+             (.rejectAlreadyConnected, .rejectAlreadyConnected),
+             (.rejectBinding, .rejectBinding),
+             (.rejectRateLimited, .rejectRateLimited),
+             (.rejectLocalWinner, .rejectLocalWinner),
+             (.acceptAndReplaceEstablished, .acceptAndReplaceEstablished):
+            return
+        case let (.acceptAndSupersedeLocal(actualPeer, actualAttempt), .acceptAndSupersedeLocal(expectedPeer, expectedAttempt)):
+            XCTAssertEqual(actualPeer, expectedPeer, file: file, line: line)
+            XCTAssertEqual(actualAttempt, expectedAttempt, file: file, line: line)
+        default:
+            XCTFail("Expected \(expected), got \(actual)", file: file, line: line)
+        }
     }
 }

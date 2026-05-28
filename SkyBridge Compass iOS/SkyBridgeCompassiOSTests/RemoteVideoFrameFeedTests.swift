@@ -394,14 +394,15 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
             in: source
         )
         XCTAssertTrue(decodeLoopBody.contains("Task.detached(priority: .high)"))
-        XCTAssertTrue(decodeLoopBody.contains("try await decoder.decode(screenData: screenData)"))
+        XCTAssertTrue(decodeLoopBody.contains("try await decoder.submit(screenData: screenData)"))
+        XCTAssertTrue(decodeLoopBody.contains("try await handle.wait()"))
         XCTAssertFalse(
             decodeLoopBody.contains("Task { @MainActor"),
-            "HEVC decode must not run on MainActor; only decoded results should return to MainActor for UI/Metal state."
+            "HEVC submission and callback wait must not run on MainActor; only decoded results should return to MainActor for UI/Metal state."
         )
     }
 
-    func testSuccessfulDecodeKeepsDecodeSlotUntilMetalFeedMutationCompletes() throws {
+    func testSuccessfulDecodeUsesOrderedCompletionDrainBeforeApplyingMetalFrame() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -409,32 +410,24 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
             "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
         )
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        let finishBody = try sourceSlice(
-            from: "private func finishDecodeTask(",
+        let drainBody = try sourceSlice(
+            from: "private func drainDecodeCompletionsIfNeeded()",
+            to: "private func applyDecodeCompletion(",
+            in: source
+        )
+        let applyBody = try sourceSlice(
+            from: "private func applyDecodeCompletion(",
             to: "consecutiveDecodeMisses += 1",
             in: source
         )
 
-        XCTAssertTrue(finishBody.contains("func releaseDecodeSlotAndContinue()"))
-        XCTAssertTrue(finishBody.contains("defer {\n            releaseDecodeSlotAndContinue()\n        }"))
-        let successStart = try XCTUnwrap(finishBody.range(of: "if let decoded {")?.lowerBound)
-        let releaseIndex = try XCTUnwrap(
-            finishBody.range(
-                of: "releaseDecodeSlotAndContinue()",
-                range: successStart..<finishBody.endIndex
-            )?.lowerBound
-        )
-        let applyIndex = try XCTUnwrap(
-            finishBody.range(
-                of: "await applyDecodedOutput(",
-                range: successStart..<finishBody.endIndex
-            )?.lowerBound
-        )
-        XCTAssertGreaterThan(
-            releaseIndex,
-            applyIndex,
-            "Successful HEVC decode should not start the next ordered decode until the decoded frame has entered the bounded Metal feed."
-        )
+        XCTAssertTrue(source.contains("pendingDecodeCompletions[decodeOrder]"))
+        XCTAssertTrue(source.contains("completeDecodeTask(for: decodeGeneration)"))
+        XCTAssertTrue(source.contains("await drainDecodeCompletionsIfNeeded()"))
+        XCTAssertTrue(drainBody.contains("pendingDecodeCompletions.removeValue(forKey: nextDecodeCompletionOrder)"))
+        XCTAssertTrue(drainBody.contains("nextDecodeCompletionOrder &+= 1"))
+        XCTAssertTrue(applyBody.contains("await applyDecodedOutput("))
+        XCTAssertTrue(applyBody.contains("guard applied else { return }"))
     }
 
     func testNativeVideoPromotionRequiresNonNilRenderedFrame() throws {

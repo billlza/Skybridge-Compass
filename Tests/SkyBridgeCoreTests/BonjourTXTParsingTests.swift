@@ -20,6 +20,28 @@ final class BonjourTXTParsingTests: XCTestCase {
         XCTAssertEqual(deviceInfo.remoteVideoFormats, ["jpeg", "h264", "hevc"])
     }
 
+    func testDeviceInfoTreatsUUIDAndUniqueIdAsStableIdentityFallbacks() {
+        let uuidOnly = BonjourTXTParser.extractDeviceInfo(from: [
+            "uuid": "F951B140-A4D8-4664-AB9D-D90118738C54",
+            "name": "iPad",
+            "platform": "ipados"
+        ])
+        XCTAssertEqual(uuidOnly.deviceId, "F951B140-A4D8-4664-AB9D-D90118738C54")
+
+        let uniqueIdOnly = BonjourTXTParser.extractDeviceInfo(from: [
+            "uniqueId": "E0715A9A-D0D3-47E6-B353-DE0A30293E1F",
+            "name": "Lza MacBook Pro",
+            "platform": "macos"
+        ])
+        XCTAssertEqual(uniqueIdOnly.deviceId, "E0715A9A-D0D3-47E6-B353-DE0A30293E1F")
+        var record = NWTXTRecord()
+        record["unique_id"] = "ABCDEF12-3456-7890-ABCD-EF1234567890"
+        XCTAssertEqual(
+            BonjourTXTParser.getDeviceIdentifier(record),
+            "ABCDEF12-3456-7890-ABCD-EF1234567890"
+        )
+    }
+
     func testStructuredBonjourExtractionIgnoresInjectedKEMMaterial() {
         let maliciousTXT = [
             "deviceId": "id:mac-1",

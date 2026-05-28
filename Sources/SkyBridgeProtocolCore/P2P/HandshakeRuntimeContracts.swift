@@ -25,6 +25,7 @@ public protocol HandshakeTrustProvider: Sendable {
     func trustedFingerprint(for deviceId: String) async -> String?
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data]
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data?
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool
 }
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -41,6 +42,11 @@ public protocol MultiFingerprintHandshakeTrustProvider: HandshakeTrustProvider {
 
 @available(macOS 14.0, iOS 17.0, *)
 public extension HandshakeTrustProvider {
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool {
+        _ = deviceId
+        return false
+    }
+
     func trustedFingerprintSet(for deviceId: String) async -> Set<String> {
         if let multi = self as? any MultiFingerprintHandshakeTrustProvider {
             return await multi.trustedFingerprints(for: deviceId)

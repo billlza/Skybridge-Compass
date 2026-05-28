@@ -1,7 +1,9 @@
 import AppKit
+import CryptoKit
 import Darwin
 import Foundation
 import SkyBridgeCore
+import SkyBridgeSmokeSupport
 
 @available(macOS 14.0, *)
 @MainActor
@@ -269,7 +271,8 @@ final class LocalP2PFileTransferSmokeHarness {
             expectedRole: "ios",
             fileName: inboundName
         )
-        reporter.append("file-transfer inbound-complete name=\(Self.sanitize(inboundName))")
+        let inboundHash = try Self.sha256Hex(url: URL(fileURLWithPath: inboundPath))
+        reporter.append("file-transfer inbound-complete name=\(Self.sanitize(inboundName)) sha256=\(inboundHash)")
 
         let outboundURL = try makeSmokeTransferFile(
             fileName: outboundName,
@@ -279,6 +282,7 @@ final class LocalP2PFileTransferSmokeHarness {
             sentAt=\(ISO8601DateFormatter().string(from: Date()))
             """
         )
+        let outboundHash = try Self.sha256Hex(url: outboundURL)
         reporter.append("file-transfer outbound-start name=\(Self.sanitize(outboundName))")
         let targetDeviceId = Self.stableBonjourTargetDeviceId(inboundTransfer.deviceId)
         if let route = await LocalP2PBonjourFileTransferRouteResolver().resolve(
@@ -303,7 +307,7 @@ final class LocalP2PFileTransferSmokeHarness {
             ].compactMap { $0 },
             preferredDeviceName: inboundTransfer.deviceName
         )
-        reporter.append("file-transfer outbound-complete name=\(Self.sanitize(outboundName))")
+        reporter.append("file-transfer outbound-complete name=\(Self.sanitize(outboundName)) sha256=\(outboundHash)")
 
         return LocalP2PSmokePeerContext(
             deviceId: inboundTransfer.deviceId,
@@ -375,7 +379,7 @@ final class LocalP2PFileTransferSmokeHarness {
             """
         )
         reporter.append("mac-reconnect connect-start")
-        try await P2PDiscoveryService.shared.connectToDevice(target)
+        try await connectToDeviceForMacReconnect(target, peer: peer, reporter: reporter)
         reporter.append("mac-reconnect connected")
 
         let outboundURL = try makeSmokeTransferFile(
@@ -387,6 +391,7 @@ final class LocalP2PFileTransferSmokeHarness {
             target=\(target.deviceId ?? target.uniqueIdentifier ?? target.id.uuidString)
             """
         )
+        let outboundHash = try Self.sha256Hex(url: outboundURL)
         let reconnectPeerIds = Self.reconnectPeerIds(peer: peer, target: target)
         let routeProbe = await waitForActiveRouteProbe(
             matchingPeerIds: reconnectPeerIds,
@@ -419,11 +424,41 @@ final class LocalP2PFileTransferSmokeHarness {
             matchingPeerIds: reconnectPeerIds,
             preferredDeviceName: target.name
         )
-        reporter.append("mac-reconnect outbound-complete name=\(Self.sanitize(outboundName))")
+        reporter.append("mac-reconnect outbound-complete name=\(Self.sanitize(outboundName)) sha256=\(outboundHash)")
         return MacInitiatedReconnectSmokeResult(
             route: "control:\(routeProbe?.routeSource ?? "active-peer")",
             controlReconnect: true
         )
+    }
+
+    private func connectToDeviceForMacReconnect(
+        _ target: DiscoveredDevice,
+        peer: LocalP2PSmokePeerContext,
+        reporter: LocalP2PSmokeStatusReporter
+    ) async throws {
+        let maxAttempts = 6
+        var lastAlreadyConnected: Error?
+        for attempt in 1...maxAttempts {
+            do {
+                try await P2PDiscoveryService.shared.connectToDevice(target)
+                return
+            } catch {
+                guard Self.isAlreadyConnectedHandshakeRejection(error) else {
+                    throw error
+                }
+                lastAlreadyConnected = error
+                reporter.append(
+                    """
+                    mac-reconnect already-connected \
+                    peer=\(Self.sanitize(peer.deviceId)) action=wait-remote-cleanup attempt=\(attempt)
+                    """
+                )
+                if attempt < maxAttempts {
+                    try await Task.sleep(for: .seconds(2))
+                }
+            }
+        }
+        throw lastAlreadyConnected ?? HandshakeError.failed(.peerRejected(message: "already_connected"))
     }
 
     private func performMacInitiatedTransferRouteReconnect(
@@ -477,6 +512,7 @@ final class LocalP2PFileTransferSmokeHarness {
             routeSource=bonjour-transfer
             """
         )
+        let outboundHash = try Self.sha256Hex(url: outboundURL)
         reporter.append(
             """
             mac-reconnect outbound-route-probe source=bonjour-transfer \
@@ -490,7 +526,7 @@ final class LocalP2PFileTransferSmokeHarness {
             ipAddress: transferRoute.host,
             port: transferRoute.port
         )
-        reporter.append("mac-reconnect outbound-complete name=\(Self.sanitize(outboundName))")
+        reporter.append("mac-reconnect outbound-complete name=\(Self.sanitize(outboundName)) sha256=\(outboundHash)")
         return MacInitiatedReconnectSmokeResult(route: "bonjour-transfer", controlReconnect: false)
     }
 
@@ -589,9 +625,67 @@ final class LocalP2PFileTransferSmokeHarness {
         }
     }
 
+    private nonisolated static func sha256Hex(url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func fileTransferFailureLine(for error: Error) -> String {
         let phase = fileTransferFailurePhase(for: error)
-        return "failed stage=file-transfer phase=\(sanitizePhase(phase)) error=\(sanitize(error.localizedDescription))"
+        let category = fileTransferFailureCategory(for: error, phase: phase)
+        return "failed stage=file-transfer phase=\(sanitizePhase(phase)) category=\(sanitizePhase(category)) error=\(sanitize(error.localizedDescription))"
+    }
+
+    private static func fileTransferFailureCategory(for error: Error, phase: String) -> String {
+        let normalizedPhase = phase.lowercased()
+        if error is P2PDiscoveryError {
+            return "discovery"
+        }
+        if let transferError = error as? FileTransferError {
+            switch transferError {
+            case .secureSessionRequired, .securityThreatDetected, .receiverNotConfirmed, .receiverRejected:
+                return "auth_policy"
+            case .invalidHeader,
+                 .inboundInvalidInitialHeader,
+                 .integrityCheckFailed,
+                 .transferCancelled,
+                 .connectionClosed,
+                 .inboundConnectionClosedBeforeMetadata,
+                 .fileNotFound,
+                 .timeout,
+                 .receiptWaitFailed:
+                return "payload_framing"
+            }
+        }
+        let nsError = error as NSError
+        if nsError.domain == "SkyBridge.Smoke" {
+            switch nsError.code {
+            case 2010, 2011, 2012, 2013:
+                return "discovery"
+            default:
+                return "payload_framing"
+            }
+        }
+        if normalizedPhase.contains("secure_channel")
+            || normalizedPhase.contains("encryption")
+            || normalizedPhase.contains("decrypt") {
+            return "secure_channel"
+        }
+        if normalizedPhase.contains("secure_session")
+            || normalizedPhase.contains("security")
+            || normalizedPhase.contains("receiver_rejected")
+            || normalizedPhase.contains("receiver_not_confirmed") {
+            return "auth_policy"
+        }
+        if normalizedPhase.contains("connect")
+            || normalizedPhase.contains("handshake") {
+            return "handshake"
+        }
+        if normalizedPhase.contains("discovery")
+            || normalizedPhase.contains("route") {
+            return "discovery"
+        }
+        return "payload_framing"
     }
 
     private static func fileTransferFailurePhase(for error: Error) -> String {
@@ -607,6 +701,8 @@ final class LocalP2PFileTransferSmokeHarness {
                 return "mac_smoke_reconnect_control_timeout"
             case .scanningFailed:
                 return "mac_smoke_reconnect_scanning_failed"
+            case .strictPQCTrustPreflightFailed:
+                return "mac_smoke_reconnect_strict_pqc_trust_preflight_failed"
             }
         }
 
@@ -614,6 +710,8 @@ final class LocalP2PFileTransferSmokeHarness {
             switch transferError {
             case .invalidHeader:
                 return "mac_file_transfer_invalid_header"
+            case .inboundInvalidInitialHeader:
+                return "mac_file_transfer_initial_header_rejected"
             case .integrityCheckFailed:
                 return "mac_file_transfer_integrity_check_failed"
             case .transferCancelled:
@@ -670,6 +768,14 @@ final class LocalP2PFileTransferSmokeHarness {
             return true
         }
         return false
+    }
+
+    private static func isAlreadyConnectedHandshakeRejection(_ error: Error) -> Bool {
+        guard let handshakeError = error as? HandshakeError,
+              case .failed(.peerRejected(let message)) = handshakeError else {
+            return false
+        }
+        return message.trimmingCharacters(in: .whitespacesAndNewlines) == "already_connected"
     }
 
     private func statusURL() -> URL? {
@@ -871,21 +977,21 @@ private struct LocalP2PSmokeStatusReporter {
 
     func reset() {
         guard let statusURL else { return }
-        try? LocalP2PSmokeFiles.writeProtectedData(Data(), to: statusURL)
+        try? SmokeStatusFileAppender.reset(
+            at: statusURL,
+            protection: .completeUntilFirstUserAuthentication
+        )
     }
 
     func append(_ line: String) {
         guard let statusURL else { return }
         let formatted = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
         guard let data = formatted.data(using: .utf8) else { return }
-        if FileManager.default.fileExists(atPath: statusURL.path),
-           let handle = try? FileHandle(forWritingTo: statusURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? LocalP2PSmokeFiles.writeProtectedData(data, to: statusURL)
-        }
+        try? SmokeStatusFileAppender.append(
+            data,
+            to: statusURL,
+            protection: .completeUntilFirstUserAuthentication
+        )
     }
 }
 

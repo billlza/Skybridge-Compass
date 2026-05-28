@@ -1,0 +1,295 @@
+import AppKit
+import Combine
+import SkyBridgeCore
+import SwiftUI
+
+@available(macOS 14.0, *)
+@MainActor
+final class RemoteControlSecurityNoticePanelController: NSObject, ObservableObject {
+    static let shared = RemoteControlSecurityNoticePanelController()
+
+    private var cancellable: AnyCancellable?
+    private var panel: NSPanel?
+    private var lastRenderedNotice: RemoteControlSecurityNotice?
+
+    private override init() {
+        super.init()
+    }
+
+    func start() {
+        guard cancellable == nil else { return }
+        cancellable = RemoteControlSecurityNoticeCenter.shared.$currentNotice
+            .sink { [weak self] notice in
+                Task { @MainActor in
+                    self?.render(notice)
+                }
+            }
+    }
+
+    private func render(_ notice: RemoteControlSecurityNotice?) {
+        guard let notice else {
+            if let lastRenderedNotice {
+                RemoteControlSecurityNoticeCenter.shared.recordPanelHiddenEvidence(
+                    descriptor: lastRenderedNotice.descriptor,
+                    phase: lastRenderedNotice.phase
+                )
+            }
+            lastRenderedNotice = nil
+            panel?.orderOut(nil)
+            return
+        }
+
+        let content = RemoteControlSecurityNoticePanelView(notice: notice)
+        if let panel {
+            panel.contentView = NSHostingView(rootView: content)
+            position(panel: panel, notice: notice)
+            lastRenderedNotice = notice
+            panel.orderFrontRegardless()
+            return
+        }
+
+        let newPanel = NSPanel(
+            contentRect: .zero,
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        newPanel.title = LocalizationManager.shared.localizedString("remoteControl.securityNotice.windowTitle")
+        newPanel.titleVisibility = .hidden
+        newPanel.titlebarAppearsTransparent = true
+        newPanel.isMovable = false
+        newPanel.isMovableByWindowBackground = false
+        newPanel.isFloatingPanel = true
+        newPanel.hidesOnDeactivate = false
+        newPanel.level = .statusBar
+        newPanel.backgroundColor = .clear
+        newPanel.isOpaque = false
+        newPanel.hasShadow = true
+        newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        newPanel.contentView = NSHostingView(rootView: content)
+        newPanel.isReleasedWhenClosed = false
+        position(panel: newPanel, notice: notice)
+        panel = newPanel
+        lastRenderedNotice = notice
+        newPanel.orderFrontRegardless()
+    }
+
+    private func position(
+        panel: NSPanel,
+        notice: RemoteControlSecurityNotice
+    ) {
+        let phase = notice.phase
+        let visibleFrame = currentScreen()?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let width = min(max(visibleFrame.width - 48, 360), 760)
+        let height: CGFloat = phase == .awaitingApproval ? 188 : 154
+        let origin = CGPoint(
+            x: visibleFrame.midX - width / 2,
+            y: visibleFrame.maxY - height - 18
+        )
+        panel.setFrame(
+            CGRect(origin: origin, size: CGSize(width: width, height: height)),
+            display: true
+        )
+        let panelFrame = panel.frame
+        let centerDelta = abs(panelFrame.midX - visibleFrame.midX)
+        let topOffset = visibleFrame.maxY - panelFrame.maxY
+        let topCentered = centerDelta <= 1.0 && topOffset >= 0 && topOffset <= 32
+        RemoteControlSecurityNoticeCenter.shared.recordPanelPresentedEvidence(
+            descriptor: notice.descriptor,
+            phase: notice.phase,
+            frame: statusRect(panelFrame),
+            visibleFrame: statusRect(visibleFrame),
+            windowLevel: "statusBar",
+            collectionBehavior: ["canJoinAllSpaces", "fullScreenAuxiliary", "transient"],
+            buttons: buttons(for: notice.phase),
+            topCentered: topCentered
+        )
+    }
+
+    private func currentScreen() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        return NSScreen.screens.first { screen in
+            screen.frame.contains(mouseLocation)
+        } ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func buttons(for phase: RemoteControlSecurityNoticePhase) -> [String] {
+        switch phase {
+        case .awaitingApproval:
+            return ["close", "reject", "approve"]
+        case .active:
+            return ["close", "disconnect"]
+        }
+    }
+
+    private func statusRect(_ rect: CGRect) -> String {
+        String(
+            format: "%.1f,%.1f,%.1f,%.1f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            Double(rect.origin.x),
+            Double(rect.origin.y),
+            Double(rect.size.width),
+            Double(rect.size.height)
+        )
+    }
+}
+
+@available(macOS 14.0, *)
+private struct RemoteControlSecurityNoticePanelView: View {
+    let notice: RemoteControlSecurityNotice
+
+    private var descriptor: RemoteControlSecurityDescriptor {
+        notice.descriptor
+    }
+
+    private var isPending: Bool {
+        notice.phase == .awaitingApproval
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: isPending ? "hand.raised.fill" : "display.and.arrow.down")
+                    .font(.system(size: 24, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(isPending ? Color.orange : Color.green)
+                    .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(titleText)
+                        .font(.system(size: 17, weight: .semibold))
+                        .lineLimit(2)
+                    Text(subtitleText)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 12)
+
+                Button {
+                    RemoteControlSecurityNoticeCenter.shared.closeCurrentNoticeFailClosed()
+                } label: {
+                    Image(systemName: "xmark")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("remoteControlSecurityNoticeCloseButton")
+                .help(localized("remoteControl.securityNotice.close"))
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(minimum: 160), spacing: 12),
+                    GridItem(.flexible(minimum: 160), spacing: 12)
+                ],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                field(localized("remoteControl.securityNotice.remoteIP"), descriptor.remoteIPAddress)
+                field(localized("remoteControl.securityNotice.transport"), transportText)
+                field(
+                    localized("remoteControl.securityNotice.account"),
+                    masked(descriptor.remoteAccountDisplayName)
+                )
+                field(
+                    localized("remoteControl.securityNotice.nebulaID"),
+                    masked(descriptor.remoteNebulaId)
+                )
+                field(localized("remoteControl.securityNotice.device"), RemoteControlSecurityNoticePresenter.deviceIdentity(descriptor))
+                field(localized("remoteControl.securityNotice.pqc"), descriptor.cryptoSuite)
+            }
+
+            HStack(spacing: 10) {
+                Spacer()
+                if isPending {
+                    Button {
+                        RemoteControlSecurityNoticeCenter.shared.rejectCurrentNotice()
+                    } label: {
+                        Label(localized("remoteControl.securityNotice.reject"), systemImage: "xmark.circle")
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("remoteControlSecurityNoticeRejectButton")
+
+                    Button {
+                        RemoteControlSecurityNoticeCenter.shared.approveCurrentNotice()
+                    } label: {
+                        Label(localized("remoteControl.securityNotice.approve"), systemImage: "checkmark.shield")
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("remoteControlSecurityNoticeApproveButton")
+                } else {
+                    Button(role: .destructive) {
+                        RemoteControlSecurityNoticeCenter.shared.disconnectCurrentNotice()
+                    } label: {
+                        Label(localized("remoteControl.securityNotice.disconnect"), systemImage: "power")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("remoteControlSecurityNoticeDisconnectButton")
+                }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+        )
+        .accessibilityIdentifier("remoteControlSecurityNoticePanel")
+    }
+
+    private var titleText: String {
+        let key = isPending
+            ? "remoteControl.securityNotice.pendingTitle"
+            : "remoteControl.securityNotice.activeTitle"
+        return String(
+            format: localized(key),
+            RemoteControlSecurityNoticePresenter.appName()
+        )
+    }
+
+    private var subtitleText: String {
+        String(
+            format: localized("remoteControl.securityNotice.subtitle"),
+            transportText
+        )
+    }
+
+    private var transportText: String {
+        RemoteControlSecurityNoticePresenter.transportName(descriptor.transportKind)
+    }
+
+    private func field(_ label: String, _ value: String?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(valueText(value))
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func masked(_ value: String?) -> String {
+        RemoteControlSecurityNoticePresenter.maskedIdentity(value)
+    }
+
+    private func valueText(_ value: String?) -> String {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return RemoteControlSecurityNoticePresenter.unavailableValue()
+        }
+        return value
+    }
+
+    private func localized(_ key: String) -> String {
+        LocalizationManager.shared.localizedString(key)
+    }
+}

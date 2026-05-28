@@ -55,4 +55,49 @@ final class FileTransferHistoryPersistenceTests: XCTestCase {
         let cleared = FileTransferManager(historyStore: historyStore)
         XCTAssertTrue(cleared.transferHistory.isEmpty)
     }
+
+    func testDisabledTransferHistoryDoesNotAppendOrPersistCompletedAndFailedTransfers() throws {
+        let relativePath = "FileTransferTests/\(UUID().uuidString).json"
+        let historyStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
+            location: .protectedApplicationSupport(path: relativePath),
+            rootDirectoryName: "SkyBridgeStateTests"
+        )
+        defer { try? historyStore.remove() }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("skybridge-transfer-history-tests", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        let fileURL = tempDirectory.appendingPathComponent("\(UUID().uuidString).txt")
+        try Data("history-disabled".utf8).write(to: fileURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let manager = FileTransferManager(historyStore: historyStore)
+        manager.updateSettings(keepTransferHistory: false)
+
+        let completedTransferId = UUID().uuidString
+        manager.beginExternalOutboundTransfer(
+            transferId: completedTransferId,
+            fileURL: fileURL,
+            fileSize: 16,
+            toDeviceId: "peer-device",
+            toDeviceName: "Bill iPhone"
+        )
+        manager.completeExternalOutboundTransfer(transferId: completedTransferId)
+
+        let failedTransferId = UUID().uuidString
+        manager.beginExternalOutboundTransfer(
+            transferId: failedTransferId,
+            fileURL: fileURL,
+            fileSize: 16,
+            toDeviceId: "peer-device",
+            toDeviceName: "Bill iPhone"
+        )
+        manager.failExternalOutboundTransfer(transferId: failedTransferId, errorMessage: "network failed")
+
+        XCTAssertTrue(manager.transferHistory.isEmpty)
+        XCTAssertTrue(manager.activeTransfers.isEmpty)
+
+        let reloaded = FileTransferManager(historyStore: historyStore)
+        XCTAssertTrue(reloaded.transferHistory.isEmpty)
+    }
 }

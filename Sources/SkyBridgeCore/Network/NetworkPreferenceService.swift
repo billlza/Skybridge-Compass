@@ -119,6 +119,7 @@ public class NetworkPreferenceService: ObservableObject {
         setupWiFiClient()
         setupSettingsObserver()
         loadKnownNetworks()
+        applyRuntimeSettingsSnapshot()
     }
     
  // MARK: - 初始化
@@ -139,17 +140,54 @@ public class NetworkPreferenceService: ObservableObject {
  // 监听设置变化
         SettingsManager.shared.$prefer5GHz
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] enabled in
-                self?.prefer5GHz = enabled
+            .sink { [weak self] _ in
+                self?.applyRuntimeSettingsSnapshot()
             }
             .store(in: &cancellables)
         
         SettingsManager.shared.$autoConnectKnownNetworks
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] enabled in
-                self?.autoConnectKnownNetworks = enabled
+            .sink { [weak self] _ in
+                self?.applyRuntimeSettingsSnapshot()
             }
             .store(in: &cancellables)
+
+        SettingsManager.shared.$wifiScanTimeout
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.applyRuntimeSettingsSnapshot()
+            }
+            .store(in: &cancellables)
+    }
+
+    public func applyRuntimeSettings(
+        prefer5GHz: Bool,
+        autoConnectKnownNetworks: Bool,
+        scanIntervalSeconds: Int
+    ) {
+        if self.prefer5GHz != prefer5GHz {
+            self.prefer5GHz = prefer5GHz
+        }
+        if self.autoConnectKnownNetworks != autoConnectKnownNetworks {
+            self.autoConnectKnownNetworks = autoConnectKnownNetworks
+        }
+
+        updateRecommendedNetwork()
+
+        if prefer5GHz || autoConnectKnownNetworks {
+            startNetworkMonitoring(interval: TimeInterval(max(10, scanIntervalSeconds)))
+        } else {
+            stopNetworkMonitoring()
+        }
+    }
+
+    private func applyRuntimeSettingsSnapshot() {
+        let settings = SettingsManager.shared
+        applyRuntimeSettings(
+            prefer5GHz: settings.prefer5GHz,
+            autoConnectKnownNetworks: settings.autoConnectKnownNetworks,
+            scanIntervalSeconds: settings.wifiScanTimeout
+        )
     }
     
     private func loadKnownNetworks() {
@@ -210,6 +248,7 @@ public class NetworkPreferenceService: ObservableObject {
             await MainActor.run {
                 self.availableNetworks = networkList
                 self.updateRecommendedNetwork()
+                self.autoConnectRecommendedNetworkIfAppropriate()
             }
             
             logger.info("✅ 扫描完成，发现 \(networkList.count) 个网络")
@@ -356,8 +395,20 @@ public class NetworkPreferenceService: ObservableObject {
         } catch {
             logger.error("❌ 连接失败: \(error.localizedDescription)")
         }
-        
+
         return false
+    }
+
+    private func autoConnectRecommendedNetworkIfAppropriate() {
+        guard autoConnectKnownNetworks,
+              currentNetwork == nil,
+              recommendedNetwork?.isKnown == true else {
+            return
+        }
+
+        Task { @MainActor in
+            _ = await connectToRecommendedNetwork()
+        }
     }
     
  /// 启动周期性网络监控
@@ -369,6 +420,11 @@ public class NetworkPreferenceService: ObservableObject {
                 self?.updateCurrentNetwork()
                 await self?.scanAvailableNetworks()
             }
+        }
+
+        Task { @MainActor [weak self] in
+            self?.updateCurrentNetwork()
+            await self?.scanAvailableNetworks()
         }
         
         logger.info("🔄 启动网络监控 (间隔: \(interval)秒)")

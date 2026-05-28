@@ -2,6 +2,9 @@ import SwiftUI
 import SkyBridgeCore
 import UniformTypeIdentifiers
 import UserNotifications
+import CoreLocation
+import Darwin
+import Security
 
 // 确保可以访问天气管理器
 import Combine
@@ -12,7 +15,6 @@ struct PreferencesView: View {
  // MARK: - 状态管理
     @EnvironmentObject private var settingsManager: SettingsManager
     @EnvironmentObject private var weatherManager: WeatherIntegrationManager
-    @EnvironmentObject private var weatherSettings: WeatherEffectsSettings
 
     @State private var selectedTab: PreferencesTab = .general
 
@@ -597,9 +599,7 @@ struct DevicePreferencesView: View {
 struct PermissionPreferencesView: View {
     @State private var isLocationAuthorized = false
     @State private var isNotificationAuthorized = false
-    // macOS App Sandbox 的网络权限是 entitlement 级别，不存在运行时“授权/未授权”弹窗；
-    // 这里用“已配置/未配置”表达（避免占位假数据）。
-    @State private var isNetworkConfigured = true
+    @State private var networkState: PermissionRowState = .unavailable
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -615,21 +615,21 @@ struct PermissionPreferencesView: View {
                 PermissionSimpleRow(
                     title: "位置权限",
                     description: "用于获取天气信息",
-                    isGranted: isLocationAuthorized,
+                    state: isLocationAuthorized ? .granted : .denied,
                     icon: "location.fill"
                 )
 
                 PermissionSimpleRow(
                     title: "通知权限",
                     description: "用于设备连接提醒",
-                    isGranted: isNotificationAuthorized,
+                    state: isNotificationAuthorized ? .granted : .denied,
                     icon: "bell.fill"
                 )
 
                 PermissionSimpleRow(
                     title: "网络权限",
-                    description: "用于设备发现和连接",
-                    isGranted: isNetworkConfigured,
+                    description: "用于设备发现和连接；由 App Sandbox 网络 entitlement 提供",
+                    state: networkState,
                     icon: "network"
                 )
             }
@@ -657,30 +657,89 @@ struct PermissionPreferencesView: View {
 
     @MainActor
     private func refreshPermissionStatus() async {
-        // Location: CLLocationManager.authorizationStatus() 需要 CoreLocation；如果项目已有 LocationManager，则复用其判断逻辑。
-        // 这里做“最小侵入”实现：有 LocationManager 就用它；否则保持 false 并让用户去系统设置打开。
-        if let lm = try? await LocationAuthorizationProbe.current() {
-            isLocationAuthorized = lm
-        }
+        isLocationAuthorized = await LocationAuthorizationProbe.current()
 
         // Notifications: 使用 UNUserNotificationCenter 查询真实授权状态
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         isNotificationAuthorized = (settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional)
 
-        // Network entitlement configured (best-effort): sandbox 默认有 network.client；如果 app-sandbox 关闭也视为可用
-        isNetworkConfigured = true
+        networkState = NetworkEntitlementProbe.current()
     }
 }
 
 // MARK: - Best-effort location authorization probe
-// 说明：主工程里有自己的 LocationManager/Weather 体系；这里不强依赖 CoreLocation，
-// 只在可用时探测，避免引入新的 capability/编译依赖。
 @MainActor
 private enum LocationAuthorizationProbe {
-    static func current() async throws -> Bool {
-        // If CoreLocation is linked in this target, you can switch to CLLocationManager.authorizationStatus().
-        // For now, return false so UI won't lie.
-        return false
+    static func current() async -> Bool {
+        let locationManager = CLLocationManager()
+        switch locationManager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            return true
+        case .notDetermined, .restricted, .denied:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+}
+
+private enum NetworkEntitlementProbe {
+    private static let networkClientEntitlement = "com.apple.security.network.client"
+
+    static func current() -> PermissionRowState {
+        guard let task = SecTaskCreateFromSelf(nil),
+              let value = SecTaskCopyValueForEntitlement(
+                task,
+                networkClientEntitlement as CFString,
+                nil
+              ) as? Bool else {
+            return .unavailable
+        }
+        return value ? .configured : .unavailable
+    }
+}
+
+enum PermissionRowState {
+    case granted
+    case denied
+    case configured
+    case unavailable
+
+    var color: Color {
+        switch self {
+        case .granted:
+            return .green
+        case .denied:
+            return .orange
+        case .configured:
+            return .blue
+        case .unavailable:
+            return .red
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .granted, .configured:
+            return "checkmark.circle.fill"
+        case .denied:
+            return "xmark.circle.fill"
+        case .unavailable:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var accessibilityText: String {
+        switch self {
+        case .granted:
+            return "已授权"
+        case .denied:
+            return "未授权"
+        case .configured:
+            return "已配置"
+        case .unavailable:
+            return "未配置"
+        }
     }
 }
 
@@ -688,14 +747,14 @@ private enum LocationAuthorizationProbe {
 struct PermissionSimpleRow: View {
     let title: String
     let description: String
-    let isGranted: Bool
+    let state: PermissionRowState
     let icon: String
 
     var body: some View {
         HStack {
  // 使用通用符号视图以实现全局一致的符号兜底，避免图标缺失
             SystemSymbolIcon(name: icon,
-                              color: isGranted ? .green : .orange,
+                              color: state.color,
                               size: 16,
                               weight: .regular)
                 .frame(width: 24)
@@ -710,8 +769,9 @@ struct PermissionSimpleRow: View {
 
             Spacer()
 
-            Image(systemName: isGranted ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundColor(isGranted ? .green : .red)
+            Image(systemName: state.systemImage)
+                .foregroundColor(state.color)
+                .accessibilityLabel(state.accessibilityText)
         }
         .padding(.vertical, 4)
     }
@@ -885,9 +945,7 @@ struct PermissionRowView: View {
 struct AdvancedPreferencesView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
     @EnvironmentObject private var weatherManager: WeatherIntegrationManager
-    @EnvironmentObject private var weatherSettings: WeatherEffectsSettings
     @AppStorage("ssh.trustOnFirstUse") private var trustOnFirstUse: Bool = false
-    @AppStorage("Settings.PreferXWingHybrid") private var preferXWingHybrid: Bool = false
     @State private var knownHosts: [SSHKnownHostEntry] = []
     @State private var showingKnownHostsImporter = false
     @State private var knownHostsMessage: String?
@@ -923,10 +981,6 @@ struct AdvancedPreferencesView: View {
                 Toggle("启用握手隐私诊断（ALPN/SNI）", isOn: $settingsManager.enableHandshakeDiagnostics)
                     .help("采集TLS握手期间的ALPN与SNI，仅用于诊断，默认关闭以保护隐私")
 
- // 实时FPS显示开关（默认关闭），开启后在仪表盘顶部显示渲染FPS
-                Toggle("显示实时FPS", isOn: $settingsManager.showRealtimeFPS)
-                    .help("在仪表盘顶部显示Metal渲染FPS（每0.5秒更新，发布频率2Hz）")
-
  // 兼容/更多设备发现开关（默认关闭）；开启后将扫描 AirPlay/SSH/RDP 等更多服务类型
                 Toggle("兼容/更多设备", isOn: $settingsManager.enableCompatibilityMode)
                     .help("默认仅扫描 _skybridge._tcp；开启后按需广域扫描更多设备类型，可能增加网络唤醒与能耗")
@@ -944,13 +998,8 @@ struct AdvancedPreferencesView: View {
             }
 
             Section("量子安全套件") {
-                Toggle("优先 X-Wing 混合套件（macOS 26+）", isOn: $preferXWingHybrid)
+                Toggle("优先 X-Wing 混合套件（macOS 26+）", isOn: $settingsManager.preferXWingHybrid)
                     .help("仅调整本机套件优先顺序；若系统支持，启动时会同时声明 ML-KEM-768 与 X-Wing 能力。")
-                    .onChange(of: preferXWingHybrid) { _, _ in
-                        Task {
-                            await CryptoProviderSelector.shared.clearCache()
-                        }
-                    }
             }
 
             Section("性能优化") {
@@ -972,8 +1021,6 @@ struct AdvancedPreferencesView: View {
             Section("天气效果") {
                 Toggle("实时天气API", isOn: $settingsManager.enableRealTimeWeather)
                     .help("启用实时天气API和动态天气粒子效果（雨、雪、雾霾等）")
-                    .onChange(of: settingsManager.enableRealTimeWeather) { _, newValue in
-                    }
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -1032,9 +1079,9 @@ struct AdvancedPreferencesView: View {
                             }
                         }
                         .buttonStyle(.bordered)
-                        .disabled(!weatherSettings.isEnabled)
+                        .disabled(!settingsManager.enableRealTimeWeather)
 
-                        if !weatherManager.isInitialized {
+                        if settingsManager.enableRealTimeWeather && !weatherManager.isInitialized {
                             Button("启动天气系统") {
                                 Task {
                                     await weatherManager.start()
@@ -1148,7 +1195,7 @@ struct AdvancedPreferencesView: View {
                         title: "应用信息",
                         items: [
                             ("名称", "SkyBridge Compass Pro"),
-                            ("版本", "1.0.0 (Build 2025.10.31)"),
+                            ("版本", SkyBridgeAppVersionInfo.displayVersion()),
                             ("开发商", "SkyBridge Team"),
                             ("类别", "远程桌面 / 生产力工具")
                         ]
@@ -1404,7 +1451,7 @@ struct AboutPreferencesView: View {
                 Text("SkyBridge Compass Pro")
                     .font(.system(size: 28, weight: .bold))
 
-                Text("版本 1.0.0 (Build 2025.10.31)")
+                Text("版本 \(SkyBridgeAppVersionInfo.displayVersion())")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
 
@@ -1489,7 +1536,9 @@ struct AboutPreferencesView: View {
 
  // MARK: - 系统要求
     private var systemRequirementsView: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        let requirements = SystemRequirementProbe.current()
+
+        return VStack(alignment: .leading, spacing: 20) {
             Text("系统要求")
                 .font(.title2)
                 .fontWeight(.bold)
@@ -1501,11 +1550,11 @@ struct AboutPreferencesView: View {
                         .font(.headline)
                         .foregroundColor(.orange)
 
-                    RequirementRow(icon: "cpu", title: "处理器", requirement: "Apple M1 或更新", met: true)
-                    RequirementRow(icon: "memorychip", title: "内存", requirement: "8 GB", met: true)
-                    RequirementRow(icon: "internaldrive", title: "存储空间", requirement: "500 MB 可用空间", met: true)
-                    RequirementRow(icon: "macwindow", title: "操作系统", requirement: "macOS 14.0 (Sonoma) 或更新", met: true)
-                    RequirementRow(icon: "display", title: "显示器", requirement: "1280 x 720 或更高分辨率", met: true)
+                    RequirementRow(icon: "cpu", title: "处理器", requirement: "Apple M1 或更新", status: requirements.minimumProcessor)
+                    RequirementRow(icon: "memorychip", title: "内存", requirement: "8 GB", status: requirements.minimumMemory)
+                    RequirementRow(icon: "internaldrive", title: "存储空间", requirement: "500 MB 可用空间", status: requirements.minimumStorage)
+                    RequirementRow(icon: "macwindow", title: "操作系统", requirement: "macOS 14.0 (Sonoma) 或更新", status: requirements.minimumOS)
+                    RequirementRow(icon: "display", title: "显示器", requirement: "1280 x 720 或更高分辨率", status: requirements.minimumDisplay)
                 }
                 .padding()
             }
@@ -1517,12 +1566,12 @@ struct AboutPreferencesView: View {
                         .font(.headline)
                         .foregroundColor(.green)
 
-                    RequirementRow(icon: "cpu", title: "处理器", requirement: "Apple M3 Pro/Max/Ultra", met: true)
-                    RequirementRow(icon: "memorychip", title: "内存", requirement: "16 GB 或更多", met: false)
-                    RequirementRow(icon: "internaldrive", title: "存储空间", requirement: "2 GB 可用空间（用于缓存）", met: true)
-                    RequirementRow(icon: "macwindow", title: "操作系统", requirement: "macOS 14.0 或更高", met: true)
-                    RequirementRow(icon: "display", title: "显示器", requirement: "2560 x 1440 (Retina) 或 4K", met: false)
-                    RequirementRow(icon: "wifi", title: "网络", requirement: "Wi-Fi 6E (802.11ax)", met: false)
+                    RequirementRow(icon: "cpu", title: "处理器", requirement: "Apple M3 Pro/Max/Ultra", status: requirements.recommendedProcessor)
+                    RequirementRow(icon: "memorychip", title: "内存", requirement: "16 GB 或更多", status: requirements.recommendedMemory)
+                    RequirementRow(icon: "internaldrive", title: "存储空间", requirement: "2 GB 可用空间（用于缓存）", status: requirements.recommendedStorage)
+                    RequirementRow(icon: "macwindow", title: "操作系统", requirement: "macOS 14.0 或更高", status: requirements.minimumOS)
+                    RequirementRow(icon: "display", title: "显示器", requirement: "2560 x 1440 (Retina) 或 4K", status: requirements.recommendedDisplay)
+                    RequirementRow(icon: "wifi", title: "网络", requirement: "Wi-Fi 6E (802.11ax)", status: requirements.wifi6E)
                 }
                 .padding()
             }
@@ -1909,7 +1958,7 @@ struct RequirementRow: View {
     let icon: String
     let title: String
     let requirement: String
-    let met: Bool
+    let status: SystemRequirementStatus
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1932,9 +1981,138 @@ struct RequirementRow: View {
 
             Spacer()
 
-            Image(systemName: met ? "checkmark.circle.fill" : "circle")
-                .foregroundColor(met ? .green : .secondary)
+            Image(systemName: status.systemImage)
+                .foregroundColor(status.color)
+                .accessibilityLabel(status.accessibilityText)
         }
+    }
+}
+
+enum SystemRequirementStatus {
+    case met
+    case unmet
+    case unknown
+
+    var systemImage: String {
+        switch self {
+        case .met:
+            return "checkmark.circle.fill"
+        case .unmet:
+            return "xmark.circle.fill"
+        case .unknown:
+            return "questionmark.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .met:
+            return .green
+        case .unmet:
+            return .red
+        case .unknown:
+            return .secondary
+        }
+    }
+
+    var accessibilityText: String {
+        switch self {
+        case .met:
+            return "满足"
+        case .unmet:
+            return "不满足"
+        case .unknown:
+            return "无法检测"
+        }
+    }
+}
+
+private struct SystemRequirementSnapshot {
+    let minimumProcessor: SystemRequirementStatus
+    let recommendedProcessor: SystemRequirementStatus
+    let minimumMemory: SystemRequirementStatus
+    let recommendedMemory: SystemRequirementStatus
+    let minimumStorage: SystemRequirementStatus
+    let recommendedStorage: SystemRequirementStatus
+    let minimumOS: SystemRequirementStatus
+    let minimumDisplay: SystemRequirementStatus
+    let recommendedDisplay: SystemRequirementStatus
+    let wifi6E: SystemRequirementStatus
+}
+
+private enum SystemRequirementProbe {
+    static func current() -> SystemRequirementSnapshot {
+        SystemRequirementSnapshot(
+            minimumProcessor: isAppleSilicon() ? .met : .unmet,
+            recommendedProcessor: appleSiliconGenerationStatus(minimumGeneration: 3),
+            minimumMemory: memoryStatus(minimumBytes: 8 * 1024 * 1024 * 1024),
+            recommendedMemory: memoryStatus(minimumBytes: 16 * 1024 * 1024 * 1024),
+            minimumStorage: storageStatus(minimumBytes: 500 * 1024 * 1024),
+            recommendedStorage: storageStatus(minimumBytes: 2 * 1024 * 1024 * 1024),
+            minimumOS: osStatus(major: 14),
+            minimumDisplay: displayStatus(minimumWidth: 1280, minimumHeight: 720),
+            recommendedDisplay: displayStatus(minimumWidth: 2560, minimumHeight: 1440),
+            wifi6E: .unknown
+        )
+    }
+
+    private static func isAppleSilicon() -> Bool {
+        #if arch(arm64)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    private static func appleSiliconGenerationStatus(minimumGeneration: Int) -> SystemRequirementStatus {
+        guard isAppleSilicon() else { return .unmet }
+        let brand = sysctlString("machdep.cpu.brand_string")
+        guard let generation = appleSiliconGeneration(from: brand) else { return .unknown }
+        return generation >= minimumGeneration ? .met : .unmet
+    }
+
+    private static func appleSiliconGeneration(from brand: String) -> Int? {
+        guard let marker = brand.range(of: "M", options: [.caseInsensitive]) else { return nil }
+        let suffix = brand[marker.upperBound...]
+        let digits = suffix.prefix { $0.isNumber }
+        return Int(digits)
+    }
+
+    private static func memoryStatus(minimumBytes: UInt64) -> SystemRequirementStatus {
+        ProcessInfo.processInfo.physicalMemory >= minimumBytes ? .met : .unmet
+    }
+
+    private static func storageStatus(minimumBytes: Int64) -> SystemRequirementStatus {
+        do {
+            let values = try FileManager.default.homeDirectoryForCurrentUser.resourceValues(
+                forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+            )
+            guard let available = values.volumeAvailableCapacityForImportantUsage else { return .unknown }
+            return available >= minimumBytes ? .met : .unmet
+        } catch {
+            return .unknown
+        }
+    }
+
+    private static func osStatus(major: Int) -> SystemRequirementStatus {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= major ? .met : .unmet
+    }
+
+    private static func displayStatus(minimumWidth: CGFloat, minimumHeight: CGFloat) -> SystemRequirementStatus {
+        guard let screen = NSScreen.main else { return .unknown }
+        let scale = screen.backingScaleFactor
+        let pixelWidth = screen.frame.width * scale
+        let pixelHeight = screen.frame.height * scale
+        return pixelWidth >= minimumWidth && pixelHeight >= minimumHeight ? .met : .unmet
+    }
+
+    private static func sysctlString(_ name: String) -> String {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "" }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return "" }
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }
 

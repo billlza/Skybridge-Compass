@@ -94,6 +94,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var sessionSnapshotMetadataBySessionId: [String: SessionSnapshotMetadata] = [:]
     private var webrtcJoinHeartbeatTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcOfferResendTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private var webrtcConnectionTimeoutTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcControlTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var webrtcInboundQueuesBySessionId: [String: InboundChunkQueue] = [:]
     private var webrtcOutboundHeartbeatTasksBySessionId: [String: Task<Void, Never>] = [:]
@@ -108,8 +109,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     private var webrtcPendingStreamRefreshSessionIds: Set<String> = []
     private var webrtcAwaitingStreamConfigurationSessionIds: Set<String> = []
     private var webrtcSessionReadyDiagnosticSessionIds: Set<String> = []
+    private var webrtcRemoteControlNoticeApprovedSessionIds: Set<String> = []
+    private var webrtcRemoteControlNoticePendingSessionIds: Set<String> = []
+    private var webrtcRemoteSecurityIdentityBySessionId: [String: RemoteControlSecurityIdentity] = [:]
     private var webrtcBootstrapReplyFingerprintBySessionId: [String: String] = [:]
     var webrtcSessionKeysBySessionId: [String: SessionKeys] = [:]
+    var webrtcSecureEnvelopeSendCounterBySessionId: [String: UInt64] = [:]
+    var webrtcSecureEnvelopeReplayWindowBySessionId: [String: WebRTCAppSecureReplayWindow] = [:]
+    var webrtcSecureEnvelopeKeyFingerprintBySessionId: [String: String] = [:]
     private var activeWebRTCClipboardSessionId: String?
     private var activeWebRTCClipboardToken: UUID?
 
@@ -233,9 +240,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     private func scheduleSignalingRecovery(for sessionID: String, tokenExpired: Bool = false) {
+        let networkSettings = RemoteDesktopSettingsManager.shared.settings.networkSettings
         signalingLifecycle.scheduleRecovery(
             for: sessionID,
             tokenExpired: tokenExpired,
+            maxAttempts: networkSettings.boundedMaxReconnectAttempts,
+            reconnectDelayMilliseconds: { attempt in
+                RemoteDesktopSettingsManager.shared.settings.networkSettings
+                    .reconnectBackoffDelayMilliseconds(forAttempt: attempt)
+            },
             currentShardKey: { [weak self] in self?.signalingShardKey },
             isHandshakeComplete: { [weak self] sessionID in
                 self?.isHandshakeComplete(for: sessionID) ?? false
@@ -369,6 +382,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         for sessionID: String,
         session: WebRTCSession
     ) {
+        guard webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
+            stopWebRTCClipboardSyncIfNeeded(for: sessionID)
+            appendSmokeStatus(
+                "remoteControlClipboardBlocked session=\(sessionID) transport=webrtc reason=awaiting_security_notice"
+            )
+            return
+        }
+
         let shouldEnable = webrtcRemoteStreamConfigurationBySessionId[sessionID]?.clipboardSyncEnabled ?? false
         let clipboard = ClipboardRedirectionManager.shared
 
@@ -410,12 +431,144 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         activeWebRTCClipboardToken = nil
     }
 
+    private func noteWebRTCRemoteSecurityIdentity(
+        sessionID: String,
+        accountDisplayName: String?,
+        nebulaId: String?,
+        deviceId: String?,
+        deviceName: String?
+    ) {
+        let identity = RemoteControlSecurityIdentity(
+            accountDisplayName: accountDisplayName,
+            nebulaId: nebulaId,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+        guard identity.accountDisplayName != nil
+            || identity.nebulaId != nil
+            || identity.deviceId != nil
+            || identity.deviceName != nil else {
+            return
+        }
+        webrtcRemoteSecurityIdentityBySessionId[sessionID] = identity
+    }
+
+    private func waitForWebRTCRemoteControlNoticeMetadata(
+        sessionID: String,
+        session: WebRTCSession,
+        timeout: Duration = .seconds(2)
+    ) async -> (identity: RemoteControlSecurityIdentity?, remoteIPAddress: String?) {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        var lastRemoteIPAddress = await session.currentSelectedRemoteCandidateAddress()
+
+        while clock.now < deadline {
+            let identity = webrtcRemoteSecurityIdentityBySessionId[sessionID]
+            lastRemoteIPAddress = await session.currentSelectedRemoteCandidateAddress()
+            if Self.noticeMetadataPresent(identity?.accountDisplayName),
+               Self.noticeMetadataPresent(identity?.nebulaId),
+               Self.noticeMetadataPresent(lastRemoteIPAddress) {
+                return (identity, lastRemoteIPAddress)
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+
+        return (webrtcRemoteSecurityIdentityBySessionId[sessionID], lastRemoteIPAddress)
+    }
+
+    private static func noticeMetadataPresent(_ value: String?) -> Bool {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !trimmed.isEmpty && trimmed != "missing" && trimmed != "-"
+    }
+
+    private func ensureWebRTCRemoteControlSecurityApproved(
+        sessionID: String,
+        session: WebRTCSession,
+        keys: SessionKeys
+    ) async -> Bool {
+        if webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) {
+            RemoteControlSecurityNoticeCenter.shared.updateCryptoSuite(
+                webRTCSecurityCryptoSuite(keys),
+                sessionId: sessionID,
+                transportKind: .webrtc
+            )
+            return true
+        }
+        guard webrtcRemoteControlNoticePendingSessionIds.insert(sessionID).inserted else {
+            appendSmokeStatus(
+                "remoteControlStartBlocked session=\(sessionID) transport=webrtc reason=security_notice_pending"
+            )
+            return false
+        }
+        defer {
+            webrtcRemoteControlNoticePendingSessionIds.remove(sessionID)
+        }
+
+        let noticeCenter = RemoteControlSecurityNoticeCenter.shared
+        let localIdentity = noticeCenter.localIdentitySnapshot()
+        let noticeMetadata = await waitForWebRTCRemoteControlNoticeMetadata(
+            sessionID: sessionID,
+            session: session
+        )
+        let remoteIdentity = noticeMetadata.identity
+        let remoteDeviceId = remoteIdentity?.deviceId
+            ?? webrtcRemoteIdBySessionId[sessionID]
+            ?? sessionID
+        let descriptor = RemoteControlSecurityDescriptor(
+            sessionId: sessionID,
+            transportKind: .webrtc,
+            remoteIPAddress: noticeMetadata.remoteIPAddress,
+            remoteDeviceId: remoteDeviceId,
+            remoteDeviceName: remoteIdentity?.deviceName,
+            remoteAccountDisplayName: remoteIdentity?.accountDisplayName,
+            remoteNebulaId: remoteIdentity?.nebulaId,
+            localAccountDisplayName: localIdentity?.accountDisplayName,
+            localNebulaId: localIdentity?.nebulaId,
+            cryptoSuite: webRTCSecurityCryptoSuite(keys)
+        )
+        noticeCenter.setDisconnectHandler(for: descriptor.id) { [weak self] in
+            self?.cleanupWebRTCSession(
+                sessionID,
+                reason: "remote_control_notice_disconnect",
+                disconnectKind: .explicit
+            )
+        }
+
+        let decision = await noticeCenter.requestApproval(descriptor)
+        guard decision == .approved, webrtcSessionsBySessionId[sessionID] != nil else {
+            webrtcRemoteControlNoticeApprovedSessionIds.remove(sessionID)
+            cleanupWebRTCSession(
+                sessionID,
+                reason: "remote_control_notice_\(decision.rawValue)",
+                disconnectKind: .explicit
+            )
+            return false
+        }
+        webrtcRemoteControlNoticeApprovedSessionIds.insert(sessionID)
+        return true
+    }
+
+    private func webRTCSecurityCryptoSuite(_ keys: SessionKeys) -> String {
+        guard keys.negotiatedSuite.isKnown else { return "" }
+        let rawValue = keys.negotiatedSuite.rawValue
+        return keys.negotiatedSuite.isPQCGroup ? "\(rawValue) PQC" : "\(rawValue) secure channel"
+    }
+
     private func sendWebRTCClipboardPayload(
         data: Data,
         mimeType: String,
         sessionID: String,
         session: WebRTCSession
     ) async {
+        guard webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
+            stopWebRTCClipboardSyncIfNeeded(for: sessionID)
+            appendSmokeStatus(
+                "remoteControlClipboardSendBlocked session=\(sessionID) transport=webrtc reason=awaiting_security_notice"
+            )
+            return
+        }
         do {
             guard let keys = webrtcSessionKeysBySessionId[sessionID] else { return }
             let clipboardPayload = RemoteClipboardPayload(mimeType: mimeType, data: data)
@@ -424,7 +577,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 payload: try JSONEncoder().encode(clipboardPayload)
             )
             let plaintext = try JSONEncoder().encode(remoteMessage)
-            let ciphertext = try encryptAppPayload(plaintext, with: keys)
+            let ciphertext = try sealWebRTCSecurePayload(
+                plaintext,
+                with: keys,
+                sessionID: sessionID,
+                packetType: .remoteControl
+            )
             let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-clipboard")
             try await sendFramed(padded, over: session)
         } catch {
@@ -480,11 +638,69 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcJoinHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
     }
 
+    private var remoteDesktopNetworkStatsEnabled: Bool {
+        RemoteDesktopSettingsManager.shared.settings.networkSettings.enableNetworkStats
+            || ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+    }
+
+    private func remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt attempt: Int) -> Int {
+        RemoteDesktopSettingsManager.shared.settings.networkSettings
+            .reconnectBackoffDelayMilliseconds(forAttempt: attempt)
+    }
+
+    private func startWebRTCConnectionTimeoutWatchdog(
+        for sessionID: String,
+        source: String,
+        snapshotToken: UUID?
+    ) {
+        stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
+        let timeoutSeconds = RemoteDesktopSettingsManager.shared.settings.networkSettings.boundedConnectionTimeoutSeconds
+        webrtcConnectionTimeoutTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(timeoutSeconds))
+            guard !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil else { return }
+            if case .transportReady(let activeSessionID) = self.readiness, activeSessionID == sessionID {
+                return
+            }
+            if case .handshakeComplete(let activeSessionID, _) = self.readiness, activeSessionID == sessionID {
+                return
+            }
+            self.logger.error(
+                "⏱️ WebRTC 连接超时: session=\(sessionID, privacy: .public) source=\(source, privacy: .public) timeoutSeconds=\(timeoutSeconds, privacy: .public)"
+            )
+            self.appendSmokeStatus(
+                "webrtc-connection-timeout session=\(sessionID) source=\(source) timeoutSeconds=\(timeoutSeconds)"
+            )
+            self.cleanupWebRTCSession(
+                sessionID,
+                reason: "connection_timeout_\(timeoutSeconds)s",
+                disconnectKind: .explicit,
+                snapshotToken: snapshotToken
+            )
+            self.connectionStatus = .failed("WebRTC connection timed out after \(timeoutSeconds) seconds")
+            self.readiness = .idle
+        }
+    }
+
+    private func stopWebRTCConnectionTimeoutWatchdog(for sessionID: String) {
+        if let task = webrtcConnectionTimeoutTasksBySessionId.removeValue(forKey: sessionID) {
+            task.cancel()
+        }
+    }
+
+    private func stopAllWebRTCConnectionTimeoutWatchdogs() {
+        for (_, task) in webrtcConnectionTimeoutTasksBySessionId {
+            task.cancel()
+        }
+        webrtcConnectionTimeoutTasksBySessionId.removeAll()
+    }
+
     private func startJoinHeartbeat(for sessionID: String, attempts: Int = 30) {
         stopJoinHeartbeat(for: sessionID)
         webrtcJoinHeartbeatTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
             guard let self else { return }
             var remaining = max(0, attempts)
+            let totalAttempts = remaining
             while remaining > 0, !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil {
                 if case .handshakeComplete(let activeSessionID, _) = self.readiness, activeSessionID == sessionID {
                     break
@@ -492,14 +708,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 // The initial join is sent by the caller. Delay the heartbeat loop so we
                 // do not immediately duplicate the bootstrap frame burst on fresh sessions.
                 if remaining == attempts {
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.sleep(for: .milliseconds(self.remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt: 1)))
                     guard !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil else { return }
                 }
                 let localDeviceId = self.webrtcSessionsBySessionId[sessionID]?.localDeviceId ?? self.deviceFingerprint
                 await self.sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .join, payload: nil), retries: 2)
                 remaining -= 1
                 if remaining == 0 { break }
-                try? await Task.sleep(for: .seconds(1))
+                let attemptIndex = max(0, totalAttempts - remaining)
+                try? await Task.sleep(
+                    for: .milliseconds(self.remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt: attemptIndex))
+                )
             }
         }
     }
@@ -581,8 +800,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     ) {
         logger.info("🧹 清理 WebRTC 会话: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
 
+        RemoteControlSecurityNoticeCenter.shared.endNotice(
+            sessionId: sessionID,
+            transportKind: .webrtc
+        )
         stopJoinHeartbeat(for: sessionID)
         stopOfferResendLoop(for: sessionID)
+        stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
         pendingWebRTCOfferSessionIds.remove(sessionID)
         webrtcLatestOfferBySessionId.removeValue(forKey: sessionID)
         webrtcLatestAnswerBySessionId.removeValue(forKey: sessionID)
@@ -598,6 +822,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         strictPQCClassicBootstrapOnlySessionIds.remove(sessionID)
         currentPathSignalingOriginBySessionId.removeValue(forKey: sessionID)
         webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
+        clearWebRTCSecureEnvelopeState(for: sessionID)
         webrtcRekeyInProgressSessionIds.remove(sessionID)
         webrtcRemoteDesktopHeartbeatAtBySessionId.removeValue(forKey: sessionID)
         webrtcRemoteVideoFormatsBySessionId.removeValue(forKey: sessionID)
@@ -606,6 +831,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
         webrtcSessionReadyDiagnosticSessionIds.remove(sessionID)
         webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+        webrtcRemoteControlNoticeApprovedSessionIds.remove(sessionID)
+        webrtcRemoteControlNoticePendingSessionIds.remove(sessionID)
+        webrtcRemoteSecurityIdentityBySessionId.removeValue(forKey: sessionID)
         webrtcBootstrapReplyFingerprintBySessionId.removeValue(forKey: sessionID)
         stopWebRTCClipboardSyncIfNeeded(for: sessionID)
         stopWebRTCLivenessWatchdog(for: sessionID)
@@ -650,6 +878,74 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         Task {
             await TURNCredentialService.shared.clearCache(sessionID: sessionID)
         }
+    }
+
+    func sealWebRTCSecurePayload(
+        _ plaintext: Data,
+        with keys: SessionKeys,
+        sessionID: String,
+        packetType: WebRTCAppSecurePacketType
+    ) throws -> Data {
+        resetWebRTCSecureEnvelopeStateIfNeeded(sessionID: sessionID, keys: keys)
+        let counter = try nextWebRTCSecureEnvelopeCounter(for: sessionID)
+        return try WebRTCControlChannelCodec.encryptAppPayload(
+            plaintext,
+            with: keys,
+            packetType: packetType,
+            counter: counter
+        )
+    }
+
+    func openWebRTCSecurePayload(
+        _ ciphertext: Data,
+        with keys: SessionKeys,
+        sessionID: String,
+        allowedPacketTypes: Set<WebRTCAppSecurePacketType> = Set(WebRTCAppSecurePacketType.allCases)
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        resetWebRTCSecureEnvelopeStateIfNeeded(sessionID: sessionID, keys: keys)
+        let opened = try WebRTCControlChannelCodec.decryptAppPayload(
+            ciphertext,
+            with: keys,
+            allowedPacketTypes: allowedPacketTypes
+        )
+        var replayWindow = webrtcSecureEnvelopeReplayWindowBySessionId[sessionID] ?? WebRTCAppSecureReplayWindow()
+        try replayWindow.validateAndRecord(opened)
+        webrtcSecureEnvelopeReplayWindowBySessionId[sessionID] = replayWindow
+        return opened
+    }
+
+    func clearWebRTCSecureEnvelopeState(for sessionID: String) {
+        webrtcSecureEnvelopeSendCounterBySessionId.removeValue(forKey: sessionID)
+        webrtcSecureEnvelopeReplayWindowBySessionId.removeValue(forKey: sessionID)
+        webrtcSecureEnvelopeKeyFingerprintBySessionId.removeValue(forKey: sessionID)
+    }
+
+    private func resetWebRTCSecureEnvelopeStateIfNeeded(sessionID: String, keys: SessionKeys) {
+        let fingerprint = Self.webRTCSecureEnvelopeKeyFingerprint(for: keys)
+        guard webrtcSecureEnvelopeKeyFingerprintBySessionId[sessionID] != fingerprint else { return }
+        webrtcSecureEnvelopeSendCounterBySessionId[sessionID] = 0
+        webrtcSecureEnvelopeReplayWindowBySessionId[sessionID] = WebRTCAppSecureReplayWindow()
+        webrtcSecureEnvelopeKeyFingerprintBySessionId[sessionID] = fingerprint
+    }
+
+    private func nextWebRTCSecureEnvelopeCounter(for sessionID: String) throws -> UInt64 {
+        let current = webrtcSecureEnvelopeSendCounterBySessionId[sessionID] ?? 0
+        guard current < UInt64.max else {
+            throw WebRTCAppSecureEnvelopeError.counterExhausted
+        }
+        let next = current + 1
+        webrtcSecureEnvelopeSendCounterBySessionId[sessionID] = next
+        return next
+    }
+
+    nonisolated private static func webRTCSecureEnvelopeKeyFingerprint(for keys: SessionKeys) -> String {
+        var input = Data("SkyBridge-WebRTC-App-State-v1|".utf8)
+        input.append(Data(keys.sessionId.utf8))
+        input.append(0)
+        input.append(Data(keys.role.rawValue.utf8))
+        input.append(0)
+        input.append(keys.transcriptHash)
+        return SHA256.hash(data: input).map { String(format: "%02x", $0) }.joined()
     }
 
     private func resolvedCrossNetworkDisplayName(
@@ -743,7 +1039,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             kind: nil,
             suite: negotiatedSuite
         ) ?? "Current Path"
-        let peerId = Self.crossNetworkPresencePeerID(sessionID: sessionID)
+        let stablePeerId = resolvedStableCrossNetworkPresencePeerID(sessionID: sessionID)
+        let peerId = stablePeerId ?? Self.crossNetworkPresencePeerID(sessionID: sessionID)
+        let sessionRoutePeerId = Self.crossNetworkPresencePeerID(sessionID: sessionID)
+
+        if peerId != sessionRoutePeerId {
+            ConnectionPresenceService.shared.markDisconnected(peerId: sessionRoutePeerId)
+        }
 
         ConnectionPresenceService.shared.markConnected(
             peerId: peerId,
@@ -752,25 +1054,52 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             cryptoKind: cryptoKind,
             suite: negotiatedSuite
         )
-        UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
-            peerId: peerId,
-            displayName: displayName,
-            cryptoKind: cryptoKind,
-            suite: negotiatedSuite,
-            guardStatus: "跨网已连接"
-        )
+        if let stablePeerId {
+            UnifiedOnlineDeviceManager.shared.markDeviceAsConnected(
+                peerId: stablePeerId,
+                displayName: displayName,
+                cryptoKind: cryptoKind,
+                suite: negotiatedSuite,
+                guardStatus: "跨网已连接"
+            )
+        } else {
+            logger.debug(
+                "↪️ cross-network presence skipped UnifiedOnlineDevice recent persistence for session route \(sessionID, privacy: .public)"
+            )
+        }
     }
 
     private func markCrossNetworkPresenceDisconnected(sessionID: String) {
-        let peerId = Self.crossNetworkPresencePeerID(sessionID: sessionID)
+        let stablePeerId = resolvedStableCrossNetworkPresencePeerID(sessionID: sessionID)
+        let peerId = stablePeerId ?? Self.crossNetworkPresencePeerID(sessionID: sessionID)
+        let sessionRoutePeerId = Self.crossNetworkPresencePeerID(sessionID: sessionID)
         let displayName = currentConnection?.deviceName
+        ConnectionPresenceService.shared.markDisconnected(
+            peerId: sessionRoutePeerId
+        )
         ConnectionPresenceService.shared.markDisconnected(
             peerId: peerId
         )
-        UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
-            peerId: peerId,
-            displayName: displayName
-        )
+        if let stablePeerId {
+            UnifiedOnlineDeviceManager.shared.markDeviceAsDisconnected(
+                peerId: stablePeerId,
+                displayName: displayName
+            )
+        }
+    }
+
+    private func resolvedStableCrossNetworkPresencePeerID(sessionID: String) -> String? {
+        let candidates = [
+            sessionSnapshotMetadataBySessionId[sessionID]?.deviceId,
+            activeSessionSnapshot?.sessionId == sessionID ? activeSessionSnapshot?.deviceId : nil,
+            currentPathExpectedRemoteAuthorityBySessionId[sessionID]?.deviceId
+        ]
+        for candidate in candidates {
+            if let stablePeerId = Self.stableCrossNetworkPresencePeerID(deviceId: candidate) {
+                return stablePeerId
+            }
+        }
+        return nil
     }
 
     private func startWebRTCLivenessWatchdogIfNeeded(for sessionID: String) {
@@ -1016,7 +1345,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 // The original offer/ICE burst is sent by the session callbacks. Wait one
                 // interval before the first best-effort resend so startup does not double-send.
                 if remaining == attempts {
-                    try? await Task.sleep(for: .milliseconds(1500))
+                    try? await Task.sleep(for: .milliseconds(self.remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt: 1)))
                     guard !Task.isCancelled, self.webrtcSessionsBySessionId[sessionID] != nil else { return }
                 }
                 if case .connected = self.connectionStatus { break }
@@ -1024,7 +1353,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 await self.resendCachedLocalICECandidatesIfNeeded(for: sessionID, reason: "periodic")
                 remaining -= 1
                 if remaining == 0 { break }
-                try? await Task.sleep(for: .milliseconds(1500))
+                let attemptIndex = max(0, attempts - remaining)
+                try? await Task.sleep(
+                    for: .milliseconds(self.remoteDesktopReconnectBackoffDelayMilliseconds(forAttempt: attemptIndex))
+                )
             }
         }
     }
@@ -1038,6 +1370,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     /// - 取消控制/屏幕推流任务
     /// - 清空会话密钥（防止密钥残留）
     public func disconnect() async {
+        let securityNoticeSessionIDs = Set(webrtcSessionsBySessionId.keys)
+            .union(webrtcRemoteControlNoticeApprovedSessionIds)
+            .union(webrtcRemoteControlNoticePendingSessionIds)
+        for sessionID in securityNoticeSessionIDs {
+            RemoteControlSecurityNoticeCenter.shared.endNotice(
+                sessionId: sessionID,
+                transportKind: .webrtc
+            )
+        }
+
         // 1) 关闭所有 WebRTC 会话
         for (_, session) in webrtcSessionsBySessionId {
             session.close()
@@ -1097,6 +1439,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             task.cancel()
         }
         webrtcOfferResendTasksBySessionId.removeAll()
+        stopAllWebRTCConnectionTimeoutWatchdogs()
 
         // 6) 关闭 WebSocket 信令
         if let sc = signalingClient {
@@ -1158,8 +1501,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func currentPathLocalProtocolSigningAlgorithm() -> ProtocolSigningAlgorithm {
+        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        let handshakePolicy = HandshakePolicy.recommendedDefault(
+            compatibilityModeEnabled: compatibilityModeEnabled
+        )
+        return handshakePolicy.requirePQC ? .mlDSA65 : .ed25519
+    }
+
     private func currentPathLocalBinding() async throws -> ProtocolIdentityBinding {
-        let algorithm: ProtocolSigningAlgorithm = .ed25519
+        let algorithm = currentPathLocalProtocolSigningAlgorithm()
         await SelfIdentityProvider.shared.loadOrCreate()
         let selfIdentity = await SelfIdentityProvider.shared.snapshot()
         let deviceId = selfIdentity.deviceId.isEmpty
@@ -1719,6 +2070,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 guard let self else { return }
                 Task { @MainActor in
                     self.logger.info("✅ WebRTC answerer ready: session=\(sessionID, privacy: .public)")
+                    self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
                     self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                     self.connectionStatus = .connecting
                     self.readiness = .transportReady(sessionId: sessionID)
@@ -1737,6 +2089,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             webrtcSessionsBySessionId[sessionID] = session
 
             do {
+                startWebRTCConnectionTimeoutWatchdog(
+                    for: sessionID,
+                    source: "connection-code-answerer",
+                    snapshotToken: snapshotMetadata.snapshotToken
+                )
                 try session.start()
             } catch {
                 logger.error("❌ connectWithCode(WebRTC) start failed: \(error.localizedDescription, privacy: .public)")
@@ -2037,6 +2394,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.logger.info("✅ WebRTC offerer ready: session=\(sessionID, privacy: .public)")
+                self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: "Remote Device", transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
@@ -2051,6 +2409,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcSessionsBySessionId[sessionID] = session
 
         do {
+            startWebRTCConnectionTimeoutWatchdog(
+                for: sessionID,
+                source: "connection-code-offerer",
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
             try session.start()
             await sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .join, payload: nil), retries: 2)
             startJoinHeartbeat(for: sessionID, attempts: Self.webRTCStartupJoinHeartbeatAttempts)
@@ -2160,6 +2523,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.logger.info("✅ WebRTC QR answerer ready: session=\(sessionID, privacy: .public)")
+                self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
                 self.currentConnection = RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
@@ -2178,6 +2542,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcSessionsBySessionId[sessionID] = session
 
         do {
+            startWebRTCConnectionTimeoutWatchdog(
+                for: sessionID,
+                source: "qr-answerer",
+                snapshotToken: snapshotMetadata.snapshotToken
+            )
             try session.start()
         } catch {
             cleanupWebRTCSession(
@@ -2687,22 +3056,34 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             WebRTCControlChannelCodec.isActiveHandshakeDriverFrame(data)
         }
 
-        func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
-            try WebRTCControlChannelCodec.encryptAppPayload(plaintext, with: keys)
+        func encryptAppPayload(
+            _ plaintext: Data,
+            with keys: SessionKeys,
+            packetType: WebRTCAppSecurePacketType = .appControl
+        ) throws -> Data {
+            try sealWebRTCSecurePayload(
+                plaintext,
+                with: keys,
+                sessionID: sessionID,
+                packetType: packetType
+            )
         }
 
         func makeLocalHeartbeatMessage() async -> AppMessage? {
             let localDeviceId = session.localDeviceId
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !localDeviceId.isEmpty else { return nil }
+            let localIdentity = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
             return CrossNetworkWebRTCLocalAppMessageFactory.heartbeatMessage(
                 deviceId: localDeviceId,
-                remoteVideoFormats: Self.supportedRemoteVideoFormats()
+                remoteVideoFormats: Self.supportedRemoteVideoFormats(),
+                accountDisplayName: localIdentity?.accountDisplayName,
+                nebulaId: localIdentity?.nebulaId
             )
         }
 
-        func decryptAppPayload(_ ciphertext: Data, with keys: SessionKeys) throws -> Data {
-            try WebRTCControlChannelCodec.decryptAppPayload(ciphertext, with: keys)
+        func decryptAppPayload(_ ciphertext: Data, with keys: SessionKeys) throws -> WebRTCAppSecureOpenedPayload {
+            try openWebRTCSecurePayload(ciphertext, with: keys, sessionID: sessionID)
         }
 
         func decodeCompatibilityAppMessage(_ plaintext: Data) -> AppMessage? {
@@ -2807,11 +3188,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 )
             }
 
+            let localIdentity = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
             return CrossNetworkWebRTCLocalAppMessageFactory.pairingIdentityExchangePayload(
                 deviceId: localId,
                 kemPublicKeys: kemKeys,
                 protocolIdentityPublicKeys: await localProtocolIdentityPublicKeysForPairing(),
-                remoteVideoFormats: Self.supportedRemoteVideoFormats()
+                remoteVideoFormats: Self.supportedRemoteVideoFormats(),
+                accountDisplayName: localIdentity?.accountDisplayName,
+                nebulaId: localIdentity?.nebulaId
             )
         }
 
@@ -3531,7 +3915,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             let encodedPayload = try JSONEncoder().encode(payload)
             let message = RemoteMessageWire(type: type, payload: encodedPayload)
             let plaintext = try JSONEncoder().encode(message)
-            let ciphertext = try encryptAppPayload(plaintext, with: sessionKeys)
+            let ciphertext = try encryptAppPayload(
+                plaintext,
+                with: sessionKeys,
+                packetType: .remoteControl
+            )
             let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: label)
             try await session.sendFramedPayloadAsync(
                 padded,
@@ -3541,6 +3929,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
 
         func startInteractionStreamingIfNeeded() {
+            guard self.webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
+                self.appendSmokeStatus(
+                    "interaction-streaming-blocked session=\(sessionID) reason=awaiting_security_notice"
+                )
+                return
+            }
             guard self.webrtcInteractionStreamingTasksBySessionId[sessionID] == nil else { return }
             self.webrtcInteractionStreamingTasksBySessionId[sessionID] = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -3561,6 +3955,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
 
                 while !Task.isCancelled {
+                    guard self.webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
+                        break
+                    }
                     guard let lastHeartbeatAt = self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] else {
                         break
                     }
@@ -3689,6 +4086,44 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
 
         func startScreenStreamingIfNeeded(keys: SessionKeys) {
+            guard RemoteDesktopSettingsManager.shared.settings.networkSettings.enableUDPTransport else {
+                self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+                self.webrtcInteractionStreamingAllowedSessionIds.remove(sessionID)
+                self.logger.warning(
+                    "⛔️ WebRTC 远程桌面推流被设置阻止: session=\(sessionID, privacy: .public) reason=udp_transport_disabled"
+                )
+                self.appendSmokeStatus(
+                    "stream-deferred session=\(sessionID) reason=udp_transport_disabled_by_settings"
+                )
+                self.appendWebRTCSessionDiagnostic(
+                    "stream-deferred session=\(sessionID) reason=udp_transport_disabled_by_settings",
+                    sessionID: sessionID
+                )
+                return
+            }
+            guard self.webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else {
+                guard !self.webrtcRemoteControlNoticePendingSessionIds.contains(sessionID) else {
+                    self.appendSmokeStatus(
+                        "stream-deferred session=\(sessionID) reason=security_notice_pending"
+                    )
+                    return
+                }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard await self.ensureWebRTCRemoteControlSecurityApproved(
+                        sessionID: sessionID,
+                        session: session,
+                        keys: keys
+                    ) else {
+                        return
+                    }
+                    startScreenStreamingIfNeeded(keys: keys)
+                }
+                self.appendSmokeStatus(
+                    "stream-deferred session=\(sessionID) reason=await_security_notice"
+                )
+                return
+            }
             if self.webrtcSessionReadyDiagnosticSessionIds.insert(sessionID).inserted {
                 self.appendWebRTCSessionDiagnostic(
                     "sessionReady session=\(sessionID) suite=\(keys.negotiatedSuite.rawValue)",
@@ -3761,6 +4196,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 var lastAwaitingRefreshReportAt = Date.distantPast
                 var lastNativeVideoStatsReportAt = Date.distantPast
                 let encodedFrameStore = LatestWebRTCEncodedFrameStore()
+                let fallbackFrameSequence = RemoteControlFrameSequenceGenerator()
                 var activeFallbackProducer = "initial"
                 var fallbackProducerSwitchReason = "initial"
                 var lastFallbackSignature = "-"
@@ -3809,7 +4245,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         directSyntheticNativeVideoStartedAt = .distantPast
                         directRealtimeAudioAttachTask?.cancel()
                         directRealtimePCMSubmissionPipe?.close()
-                        await directRealtimeAudioSender?.close()
+                        await directRealtimeAudioSender?.close(reason: "webrtc-session-ended")
                     }
 #endif
                     encodedFrameStore.clear()
@@ -3866,6 +4302,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     videoPolicy: WebRTCRemoteDesktopVideoPolicy
                 ) -> WebRTCRemoteDesktopStreamBudget {
                     let settings = RemoteDesktopSettingsManager.shared.settings.displaySettings
+                    let networkSettings = RemoteDesktopSettingsManager.shared.settings.networkSettings
                     let streamConfig = self.webrtcRemoteStreamConfigurationBySessionId[sessionID]
                     let strictHighFPS =
                         videoPolicy.targetFrameRate >= 59 &&
@@ -3890,14 +4327,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     return WebRTCRemoteDesktopBudgetSelector.select(
                         requestedFrameRate: videoPolicy.targetFrameRate,
                         transportPath: transportPath,
-                        thermalState: ProcessInfo.processInfo.thermalState,
+                        thermalState: networkSettings.enableAdaptiveQuality
+                            ? ProcessInfo.processInfo.thermalState
+                            : .nominal,
                         longEdge: max(1, longEdge),
                         lowLatencyMode: settings.lowLatencyMode || strictHighFPS,
                         codec: videoPolicy.codec,
                         nativeVideoTrackEnabled: session.supportsNativeScreenVideoTrack,
                         enableHardwareAcceleration: settings.enableHardwareAcceleration,
                         enableAppleSiliconOptimization: settings.enableAppleSiliconOptimization,
-                        isAppleSilicon: Self.isAppleSiliconRuntime
+                        isAppleSilicon: Self.isAppleSiliconRuntime,
+                        bandwidthLimitMbps: networkSettings.boundedBandwidthLimitMbps,
+                        enableAdaptiveQuality: networkSettings.enableAdaptiveQuality,
+                        maxBufferedAmountOverrideBytes: networkSettings.maxBufferedAmountOverrideBytes
                     )
                 }
 
@@ -4004,7 +4446,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         directRealtimeAudioAttachTask = nil
                         directRealtimePCMSubmissionPipe?.close()
                         directRealtimePCMSubmissionPipe = nil
-                        await directRealtimeAudioSender?.close()
+                        await directRealtimeAudioSender?.close(reason: "direct-encoder-unavailable")
                         directRealtimeAudioSender = nil
                         directRealtimeAudioSenderRelayEndpoint = nil
                         directRealtimeAudioSenderRelayExpiresAt = nil
@@ -4120,7 +4562,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             directRealtimeAudioAttachGeneration &+= 1
                             directRealtimeAudioRetryAfter = .distantPast
                             directRealtimePCMSubmissionPipe?.detachSender()
-                            await senderToRenew.close()
+                            await senderToRenew.close(reason: "relay-lease-renewal")
                             directRealtimeAudioSender = nil
                             directRealtimeAudioSenderRelayEndpoint = nil
                             directRealtimeAudioSenderRelayExpiresAt = nil
@@ -4164,7 +4606,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         directRealtimeAudioAttachTask = nil
                         directRealtimePCMSubmissionPipe?.close()
                         directRealtimePCMSubmissionPipe = nil
-                        await directRealtimeAudioSender?.close()
+                        await directRealtimeAudioSender?.close(reason: realtimeAudioSenderLeaseReusable ? "video-restart" : "relay-lease-expiring")
                         directRealtimeAudioSender = nil
                         directRealtimeAudioSenderRelayEndpoint = nil
                         directRealtimeAudioSenderRelayExpiresAt = nil
@@ -4196,7 +4638,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 imageData: data,
                                 timestamp: Date().timeIntervalSince1970,
                                 format: Self.remoteFrameFormatName(frameType: frameType, payload: data),
-                                isSyncFrame: isSyncFrame
+                                isSyncFrame: isSyncFrame,
+                                sequenceNumber: fallbackFrameSequence.next()
                             )
                         )
                     }
@@ -4372,7 +4815,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             }
                             guard !Task.isCancelled,
                                   directRealtimeAudioAttachGeneration == attachGeneration else {
-                                await realtimeSender.sender.close()
+                                await realtimeSender.sender.close(reason: "stale-audio-attach-generation")
                                 return
                             }
                             directRealtimeAudioSender = realtimeSender.sender
@@ -4390,7 +4833,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_SYNTHETIC_OPUS_TONE"] == "1" {
                                 if failFastMediaFallbacks {
                                     realtimePCMSubmissionPipe.close()
-                                    await realtimeSender.sender.close()
+                                    await realtimeSender.sender.close(reason: "synthetic-audio-forbidden")
                                     directRealtimeAudioSender = nil
                                     directRealtimeAudioSenderRelayEndpoint = nil
                                     directRealtimeAudioSenderRelayExpiresAt = nil
@@ -4441,8 +4884,18 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         directAudioFallbackSender = WebRTCAudioFallbackSender(
                             sessionID: sessionID,
                             session: session,
-                            keys: keys,
-                            maxBufferedAmountBytes: UInt64(audioControlBufferedAmountBytes)
+                            maxBufferedAmountBytes: UInt64(audioControlBufferedAmountBytes),
+                            securePayloadSealer: { [weak self] plaintext in
+                                guard let self else { throw CancellationError() }
+                                return try await MainActor.run {
+                                    try self.sealWebRTCSecurePayload(
+                                        plaintext,
+                                        with: keys,
+                                        sessionID: sessionID,
+                                        packetType: .remoteDesktopAudio
+                                    )
+                                }
+                            }
                         )
                     }
                     scheduleRealtimeAudioAttachIfNeeded()
@@ -4619,6 +5072,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         }
                     }
                     captureStreamer.onCaptureTelemetry = { snapshot in
+                        guard self.remoteDesktopNetworkStatsEnabled else { return }
                         let captureFPS = String(format: "%.1f", snapshot.captureFPS)
                         let meaningfulFPS = String(format: "%.1f", snapshot.meaningfulFPS)
                         let encodedFPS = String(format: "%.1f", snapshot.encodedFPS)
@@ -4681,6 +5135,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             preserveExactVisibleSize: preserveExactVisibleCaptureSize,
                             lowLatencyMode: (streamConfig?.lowLatencyMode ?? false)
                                 || (failFastMediaFallbacks && captureFPS >= 59),
+                            videoCompressionLevelPercent: streamConfig?.videoCompressionLevel
+                                ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.boundedCompressionLevelPercent,
                             bitstreamFormat: nativeVideoTrackEnabled
                                 ? .native
                                 : .annexB
@@ -4759,7 +5215,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         directRealtimeAudioAttachTask = nil
                         directRealtimePCMSubmissionPipe?.close()
                         directRealtimePCMSubmissionPipe = nil
-                        await directRealtimeAudioSender?.close()
+                        await directRealtimeAudioSender?.close(reason: "remote-desktop-task-cleanup")
                         directRealtimeAudioSender = nil
                         directRealtimeAudioSenderRelayEndpoint = nil
                         directRealtimeAudioSenderRelayExpiresAt = nil
@@ -4917,7 +5373,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     }()
                     let nativeWarmupFallbackJPEGProfile =
                         Self.boundedWebRTCWarmupJPEGProfile(
-                            for: nativeWarmupFallbackSourceSize
+                            for: nativeWarmupFallbackSourceSize,
+                            compressionLevel: RemoteDesktopSettingsManager.shared.settings.networkSettings.boundedCompressionLevel
                         )
                     let fallbackSendVideoPolicy =
                         session.supportsNativeScreenVideoTrack && fallbackPolicyShouldDriveMain
@@ -5292,11 +5749,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         self.appendSmokeStatus(
                             "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) normalized=\(sendSnapshot.normalizedFrames) trackEnabled=\(sendSnapshot.trackEnabled) sourceReady=\(sendSnapshot.sourceReady) capturerReady=\(sendSnapshot.capturerReady) senderReady=\(sendSnapshot.senderReady) direction=\(sendSnapshot.transceiverDirection ?? "-") currentDirection=\(sendSnapshot.negotiatedTransceiverDirection ?? "-") lastFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) visibleFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) codedFrame=\(sendSnapshot.lastSubmittedFrameWidth)x\(sendSnapshot.lastSubmittedFrameHeight) rawPixelFormat=\(sendSnapshot.lastRawFramePixelFormat.map(String.init) ?? "-") submittedPixelFormat=\(sendSnapshot.lastSubmittedFramePixelFormat.map(String.init) ?? "-") pixelFormat=\(sendSnapshot.lastFramePixelFormat.map(String.init) ?? "-") frameNormalized=\(sendSnapshot.lastFrameWasNormalized) rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-") timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-") timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted) framesEncoded=\(rtcStats.framesEncoded) framesSent=\(rtcStats.framesSent) keyFramesEncoded=\(rtcStats.keyFramesEncoded) packetsSent=\(rtcStats.packetsSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent) codec=\(rtcStats.codec ?? "-") encoder=\(rtcStats.encoderImplementation ?? "-") qualityLimit=\(rtcStats.qualityLimitationReason ?? "-") encodeSize=\(rtcStats.frameWidth)x\(rtcStats.frameHeight) encodeFPS=\(rtcStats.framesPerSecond) totalEncodeTime=\(rtcStats.totalEncodeTime.map { String(format: "%.3f", $0) } ?? "-") targetBitrate=\(rtcStats.targetBitrate) availableOutgoingBitrate=\(rtcStats.availableOutgoingBitrate) currentRTT=\(rtcStats.currentRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remoteRTT=\(rtcStats.remoteRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remotePacketsLost=\(rtcStats.remotePacketsLost) remoteJitter=\(rtcStats.remoteJitter.map { String(format: "%.3f", $0) } ?? "-") nack=\(rtcStats.nackCount) pli=\(rtcStats.pliCount) fir=\(rtcStats.firCount)"
                         )
-                        self.appendWebRTCSessionDiagnostic(
-                            "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) normalized=\(sendSnapshot.normalizedFrames) trackEnabled=\(sendSnapshot.trackEnabled) sourceReady=\(sendSnapshot.sourceReady) capturerReady=\(sendSnapshot.capturerReady) senderReady=\(sendSnapshot.senderReady) direction=\(sendSnapshot.transceiverDirection ?? "-") currentDirection=\(sendSnapshot.negotiatedTransceiverDirection ?? "-") lastFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) visibleFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) codedFrame=\(sendSnapshot.lastSubmittedFrameWidth)x\(sendSnapshot.lastSubmittedFrameHeight) rawPixelFormat=\(sendSnapshot.lastRawFramePixelFormat.map(String.init) ?? "-") submittedPixelFormat=\(sendSnapshot.lastSubmittedFramePixelFormat.map(String.init) ?? "-") pixelFormat=\(sendSnapshot.lastFramePixelFormat.map(String.init) ?? "-") frameNormalized=\(sendSnapshot.lastFrameWasNormalized) rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-") timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-") timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted) framesEncoded=\(rtcStats.framesEncoded) framesSent=\(rtcStats.framesSent) keyFramesEncoded=\(rtcStats.keyFramesEncoded) packetsSent=\(rtcStats.packetsSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent) codec=\(rtcStats.codec ?? "-") encoder=\(rtcStats.encoderImplementation ?? "-") qualityLimit=\(rtcStats.qualityLimitationReason ?? "-") encodeSize=\(rtcStats.frameWidth)x\(rtcStats.frameHeight) encodeFPS=\(rtcStats.framesPerSecond) totalEncodeTime=\(rtcStats.totalEncodeTime.map { String(format: "%.3f", $0) } ?? "-") targetBitrate=\(rtcStats.targetBitrate) availableOutgoingBitrate=\(rtcStats.availableOutgoingBitrate) currentRTT=\(rtcStats.currentRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remoteRTT=\(rtcStats.remoteRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remotePacketsLost=\(rtcStats.remotePacketsLost) remoteJitter=\(rtcStats.remoteJitter.map { String(format: "%.3f", $0) } ?? "-") nack=\(rtcStats.nackCount) pli=\(rtcStats.pliCount) fir=\(rtcStats.firCount)",
-                            sessionID: sessionID
-                        )
-                        if rtcStats.framesPerSecond > 0 {
+                        if self.remoteDesktopNetworkStatsEnabled {
+                            self.appendWebRTCSessionDiagnostic(
+                                "native-video-tx session=\(sessionID) state=\(nativeVideoHealthState.rawValue) fallbackMode=\(nativeVideoTrackReadyForStats ? "heartbeat" : "main") fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) submitted=\(sendSnapshot.submittedFrames) normalized=\(sendSnapshot.normalizedFrames) trackEnabled=\(sendSnapshot.trackEnabled) sourceReady=\(sendSnapshot.sourceReady) capturerReady=\(sendSnapshot.capturerReady) senderReady=\(sendSnapshot.senderReady) direction=\(sendSnapshot.transceiverDirection ?? "-") currentDirection=\(sendSnapshot.negotiatedTransceiverDirection ?? "-") lastFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) visibleFrame=\(sendSnapshot.lastFrameWidth)x\(sendSnapshot.lastFrameHeight) codedFrame=\(sendSnapshot.lastSubmittedFrameWidth)x\(sendSnapshot.lastSubmittedFrameHeight) rawPixelFormat=\(sendSnapshot.lastRawFramePixelFormat.map(String.init) ?? "-") submittedPixelFormat=\(sendSnapshot.lastSubmittedFramePixelFormat.map(String.init) ?? "-") pixelFormat=\(sendSnapshot.lastFramePixelFormat.map(String.init) ?? "-") frameNormalized=\(sendSnapshot.lastFrameWasNormalized) rawTimestampNs=\(sendSnapshot.lastRawFrameTimestampNs.map(String.init) ?? "-") timestampNs=\(sendSnapshot.lastFrameTimestampNs.map(String.init) ?? "-") timestampAdjusted=\(sendSnapshot.lastFrameTimestampWasAdjusted) framesEncoded=\(rtcStats.framesEncoded) framesSent=\(rtcStats.framesSent) keyFramesEncoded=\(rtcStats.keyFramesEncoded) packetsSent=\(rtcStats.packetsSent) bytesSent=\(rtcStats.bytesSent) outboundStats=\(rtcStats.outboundStatsPresent) codec=\(rtcStats.codec ?? "-") encoder=\(rtcStats.encoderImplementation ?? "-") qualityLimit=\(rtcStats.qualityLimitationReason ?? "-") encodeSize=\(rtcStats.frameWidth)x\(rtcStats.frameHeight) encodeFPS=\(rtcStats.framesPerSecond) totalEncodeTime=\(rtcStats.totalEncodeTime.map { String(format: "%.3f", $0) } ?? "-") targetBitrate=\(rtcStats.targetBitrate) availableOutgoingBitrate=\(rtcStats.availableOutgoingBitrate) currentRTT=\(rtcStats.currentRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remoteRTT=\(rtcStats.remoteRoundTripTime.map { String(format: "%.3f", $0) } ?? "-") remotePacketsLost=\(rtcStats.remotePacketsLost) remoteJitter=\(rtcStats.remoteJitter.map { String(format: "%.3f", $0) } ?? "-") nack=\(rtcStats.nackCount) pli=\(rtcStats.pliCount) fir=\(rtcStats.firCount)",
+                                sessionID: sessionID
+                            )
+                        }
+                        if self.remoteDesktopNetworkStatsEnabled, rtcStats.framesPerSecond > 0 {
                             WebRTCMediaDiagnosticWriter.append(
                                 WebRTCMediaDiagnosticEvent(
                                     sessionId: sessionID,
@@ -5522,7 +5981,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 imageData: encodedFrame.imageData,
                                 timestamp: encodedFrame.timestamp,
                                 format: encodedFrame.format,
-                                isSyncFrame: encodedFrame.isSyncFrame
+                                isSyncFrame: encodedFrame.isSyncFrame,
+                                sequenceNumber: encodedFrame.sequenceNumber
                             )
                         } else if nativeVideoWarmBackupEnabled {
                             if activeFallbackProducer != Self.webRTCFallbackBoundedJPEGWarmupProducer {
@@ -5647,7 +6107,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                             imageData: jpegResult.data,
                             timestamp: Date().timeIntervalSince1970,
                             format: "jpeg",
-                            isSyncFrame: true
+                            isSyncFrame: true,
+                            sequenceNumber: fallbackFrameSequence.next()
                         )
                     }
                     guard let sd = capturedFrame else {
@@ -5690,7 +6151,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         RemoteMessageWire(type: .damageReport, payload: damagePayload)
                        ) {
                         do {
-                            let damageCiphertext = try encryptAppPayload(damageEnvelope, with: keys)
+                            let damageCiphertext = try encryptAppPayload(
+                                damageEnvelope,
+                                with: keys,
+                                packetType: .remoteControl
+                            )
                             let paddedDamage = TrafficPadding.wrapIfEnabled(damageCiphertext, label: "tx/webrtc-damage")
                             try await session.sendFramedPayloadAsync(
                                 paddedDamage,
@@ -5782,12 +6247,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         imageData: sd.imageData,
                         timestamp: sd.timestamp,
                         format: sd.format,
-                        isSyncFrame: sd.isSyncFrame
+                        isSyncFrame: sd.isSyncFrame,
+                        sequenceNumber: sd.sequenceNumber
                     )
 
                     do {
                         let sendStartedAt = Date()
-                        let enc = try encryptAppPayload(plain, with: keys)
+                        let enc = try encryptAppPayload(plain, with: keys, packetType: .remoteDesktop)
                         let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-screen")
                         let payloadMagic = Self.describeWebRTCScreenPayloadMagic(padded)
                         let wireFormat = useChunkedScreenWire ? WebRTCSession.screenChunkedWireFormat : "length-framed"
@@ -5904,37 +6370,39 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 sendLatencyMs=\(lastSendLatencyMs) dropReason=\(nativeWarmupNonJPEGFallbackDrops > 0 ? "native-warmup-non-jpeg-fallback" : (framesDroppedBackpressure > 0 ? "backpressure" : "none")) droppedBackpressure=\(framesDroppedBackpressure) droppedNativeWarmupNonJPEG=\(nativeWarmupNonJPEGFallbackDrops)
                                 """
                             )
-                            self.appendWebRTCSessionDiagnostic(
-                                """
-                                stream-stats session=\(sessionID) fps=\(String(format: "%.1f", fps)) \
-                                screenBuffered=\(Int(bufferedAmount)) format=\(formatLabel) wire=\(wireFormat) \
-                                screenChannel=\(useDedicatedScreenChannel) screenChannelState=\(screenRoute.state) payloadMagic=\(payloadMagic) \
-                                fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) \
-                                fallbackLoopTickFPS=\(String(format: "%.1f", fallbackLoopTickFPS)) \
-                                directEncodedFPS=\(String(format: "%.1f", directEncodedFPS)) \
-                                sckLatestFPS=\(String(format: "%.1f", sckLatestFPS)) \
-                                sckLatestAgeMs=\(String(format: "%.1f", avgSCKLatestAgeMs)) \
-                                cgdisplayCaptureFPS=\(String(format: "%.1f", cgDisplayFPS)) \
-                                cgdisplayCaptureMs=\(String(format: "%.1f", avgCGDisplayCaptureMs)) \
-                                jpegEncodeMs=\(String(format: "%.1f", avgJPEGEncodeMs)) \
-                                sendSuccessFPS=\(String(format: "%.1f", fps)) \
-                                sendLatencyMs=\(lastSendLatencyMs) dropReason=\(nativeWarmupNonJPEGFallbackDrops > 0 ? "native-warmup-non-jpeg-fallback" : (framesDroppedBackpressure > 0 ? "backpressure" : "none")) droppedNativeWarmupNonJPEG=\(nativeWarmupNonJPEGFallbackDrops)
-                                """,
-                                sessionID: sessionID
-                            )
-                            WebRTCMediaDiagnosticWriter.append(
-                                WebRTCMediaDiagnosticEvent(
-                                    sessionId: sessionID,
-                                    kind: "videoStats",
-                                    probable: nativeWarmupNonJPEGFallbackDrops > 0
-                                        ? "native-warmup-non-jpeg-fallback"
-                                        : (framesDroppedBackpressure > 0 ? "backpressure" : (fps <= 2.0 ? "low-fps" : nil)),
-                                    videoFPS: fps,
-                                    fallbackProducer: activeFallbackProducer,
-                                    nativeVideoHealth: nativeVideoHealthState.rawValue,
-                                    screenBuffered: Int(bufferedAmount)
+                            if self.remoteDesktopNetworkStatsEnabled {
+                                self.appendWebRTCSessionDiagnostic(
+                                    """
+                                    stream-stats session=\(sessionID) fps=\(String(format: "%.1f", fps)) \
+                                    screenBuffered=\(Int(bufferedAmount)) format=\(formatLabel) wire=\(wireFormat) \
+                                    screenChannel=\(useDedicatedScreenChannel) screenChannelState=\(screenRoute.state) payloadMagic=\(payloadMagic) \
+                                    fallbackProducer=\(activeFallbackProducer) fallbackSignature=\(lastFallbackSignature) \
+                                    fallbackLoopTickFPS=\(String(format: "%.1f", fallbackLoopTickFPS)) \
+                                    directEncodedFPS=\(String(format: "%.1f", directEncodedFPS)) \
+                                    sckLatestFPS=\(String(format: "%.1f", sckLatestFPS)) \
+                                    sckLatestAgeMs=\(String(format: "%.1f", avgSCKLatestAgeMs)) \
+                                    cgdisplayCaptureFPS=\(String(format: "%.1f", cgDisplayFPS)) \
+                                    cgdisplayCaptureMs=\(String(format: "%.1f", avgCGDisplayCaptureMs)) \
+                                    jpegEncodeMs=\(String(format: "%.1f", avgJPEGEncodeMs)) \
+                                    sendSuccessFPS=\(String(format: "%.1f", fps)) \
+                                    sendLatencyMs=\(lastSendLatencyMs) dropReason=\(nativeWarmupNonJPEGFallbackDrops > 0 ? "native-warmup-non-jpeg-fallback" : (framesDroppedBackpressure > 0 ? "backpressure" : "none")) droppedNativeWarmupNonJPEG=\(nativeWarmupNonJPEGFallbackDrops)
+                                    """,
+                                    sessionID: sessionID
                                 )
-                            )
+                                WebRTCMediaDiagnosticWriter.append(
+                                    WebRTCMediaDiagnosticEvent(
+                                        sessionId: sessionID,
+                                        kind: "videoStats",
+                                        probable: nativeWarmupNonJPEGFallbackDrops > 0
+                                            ? "native-warmup-non-jpeg-fallback"
+                                            : (framesDroppedBackpressure > 0 ? "backpressure" : (fps <= 2.0 ? "low-fps" : nil)),
+                                        videoFPS: fps,
+                                        fallbackProducer: activeFallbackProducer,
+                                        nativeVideoHealth: nativeVideoHealthState.rawValue,
+                                        screenBuffered: Int(bufferedAmount)
+                                    )
+                                )
+                            }
                             bytesSent = 0
                             framesSent = 0
                             framesDroppedBackpressure = 0
@@ -5998,12 +6466,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         logger.info("🤝 WebRTC 控制通道：启动入站握手/消息循环 session=\(sessionID, privacy: .public)")
 
         let maxInboundFrameBytes = 8_000_000
+        var lastInboundFrameLength = 0
+        var lastDecodedFrameLength = 0
+        var lastHandshakeDriverState = "none"
+        var lastControlLoopEvent = "start"
 
         do {
             while true {
                 let lenData = try await receiveExactly(4)
                 let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
-                guard totalLen > 0 && totalLen < maxInboundFrameBytes else {
+                lastInboundFrameLength = Int(totalLen)
+                guard totalLen > 0 && totalLen <= maxInboundFrameBytes else {
                     logger.warning("⚠️ WebRTC frame length out of range: len=\(Int(totalLen), privacy: .public) max=\(maxInboundFrameBytes, privacy: .public)")
                     break
                 }
@@ -6014,20 +6487,18 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
                 let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc")
                 let frame = HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx/webrtc")
+                lastDecodedFrameLength = frame.count
 
                 if let activeDriver = handshakeState.driver {
                     let driverState = await activeDriver.getCurrentState()
+                    lastHandshakeDriverState = String(describing: driverState)
                     if case .waitingFinished(_, _, .initiator) = driverState,
                        (try? HandshakeMessageA.decode(from: frame)) != nil {
+                        lastControlLoopEvent = "duplicate_message_a_while_waiting_finished"
                         logger.warning(
-                            "♻️ WebRTC responder restarting unfinished handshake from fresh MessageA: session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public)"
+                            "♻️ WebRTC responder ignored duplicate fresh MessageA while waiting for Finished: session=\(sessionID, privacy: .public) peer=\(peerDeviceId, privacy: .public) frameBytes=\(frame.count, privacy: .public)"
                         )
-                        handshakeState.driver = nil
-                        handshakeState.sessionKeys = nil
-                        handshakeState.previousSessionKeysBeforeRekey = nil
-                        self.webrtcRekeyInProgressSessionIds.remove(sessionID)
-                        self.webrtcSessionKeysBySessionId.removeValue(forKey: sessionID)
-                        self.lastRekeyEvent = "restart peer=\(peerDeviceId)"
+                        continue
                     }
                 }
 
@@ -6035,8 +6506,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                    !isLikelyHandshakeControlPacket(frame),
                    !(handshakeState.driver != nil && isActiveHandshakeDriverFrame(frame)) {
                     do {
-                        let plaintext = try decryptAppPayload(frame, with: keys)
-                        if let msg = decodeCompatibilityAppMessage(plaintext) {
+                        let openedPayload = try decryptAppPayload(frame, with: keys)
+                        let plaintext = openedPayload.payload
+                        if openedPayload.packetType == .appControl,
+                           let msg = decodeCompatibilityAppMessage(plaintext) {
                             if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                                 switch msg {
                                 case .pairingIdentityExchange(let payload):
@@ -6074,6 +6547,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                             self.webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] = Date()
                                             self.updateCrossNetworkRemoteMetadata(
                                                 sessionID: sessionID,
+                                                deviceId: payload.deviceId,
+                                                deviceName: payload.deviceName
+                                            )
+                                            self.noteWebRTCRemoteSecurityIdentity(
+                                                sessionID: sessionID,
+                                                accountDisplayName: payload.accountDisplayName,
+                                                nebulaId: payload.nebulaId,
                                                 deviceId: payload.deviceId,
                                                 deviceName: payload.deviceName
                                             )
@@ -6122,6 +6602,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 )
                                 self.updateCrossNetworkRemoteMetadata(
                                     sessionID: sessionID,
+                                    deviceId: payload.deviceId,
+                                    deviceName: payload.deviceName
+                                )
+                                self.noteWebRTCRemoteSecurityIdentity(
+                                    sessionID: sessionID,
+                                    accountDisplayName: payload.accountDisplayName,
+                                    nebulaId: payload.nebulaId,
                                     deviceId: payload.deviceId,
                                     deviceName: payload.deviceName
                                 )
@@ -6202,11 +6689,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                         )
                                         return
                                     }
+                                    let localIdentity = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
                                     let replyPayload = CrossNetworkWebRTCLocalAppMessageFactory.pairingIdentityExchangePayload(
                                         deviceId: localId,
                                         kemPublicKeys: kemKeys,
                                         protocolIdentityPublicKeys: await self.localProtocolIdentityPublicKeysForPairing(),
-                                        remoteVideoFormats: Self.supportedRemoteVideoFormats()
+                                        remoteVideoFormats: Self.supportedRemoteVideoFormats(),
+                                        accountDisplayName: localIdentity?.accountDisplayName,
+                                        nebulaId: localIdentity?.nebulaId
                                     )
                                     let replyFingerprint = pairingExchangeFingerprint(replyPayload)
                                     if self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] == replyFingerprint {
@@ -6273,6 +6763,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     deviceId: payload.deviceId,
                                     deviceName: payload.deviceName
                                 )
+                                self.noteWebRTCRemoteSecurityIdentity(
+                                    sessionID: sessionID,
+                                    accountDisplayName: payload.accountDisplayName,
+                                    nebulaId: payload.nebulaId,
+                                    deviceId: payload.deviceId,
+                                    deviceName: payload.deviceName
+                                )
                                 if let formats = payload.remoteVideoFormats {
                                     self.webrtcRemoteVideoFormatsBySessionId[sessionID] = Set(
                                         formats.map { $0.lowercased() }
@@ -6298,7 +6795,30 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                                "ℹ️ WebRTC strictPQC classic bootstrap ignored business payload before PQC rekey: session=\(sessionID, privacy: .public)"
 	                            )
 	                            continue
-		                        } else if let ft = try? JSONDecoder().decode(CrossNetworkFileTransferMessage.self, from: plaintext), ft.version == 1 {
+		                        } else if openedPayload.packetType == .fileTransfer,
+                                      let ft = try? JSONDecoder().decode(CrossNetworkFileTransferMessage.self, from: plaintext),
+                                      ft.version == 1 {
+                                guard RemoteDesktopSettingsManager.shared.settings.interactionSettings.enableFileTransfer else {
+                                    let response = CrossNetworkFileTransferMessage(
+                                        op: .error,
+                                        transferId: ft.transferId,
+                                        message: "remote_desktop_file_transfer_disabled_by_settings"
+                                    )
+                                    let outPlain = try JSONEncoder().encode(response)
+                                    let outCipher = try encryptAppPayload(
+                                        outPlain,
+                                        with: keys,
+                                        packetType: .fileTransfer
+                                    )
+                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx/webrtc-ft-disabled")
+                                    try await sendFramed(outPadded)
+                                    self.failFileTransferWaiters(
+                                        sessionID: sessionID,
+                                        transferId: ft.transferId,
+                                        message: "remote_desktop_file_transfer_disabled_by_settings"
+                                    )
+                                    continue
+                                }
 	                            try await inboundFileTransferReceiver.handle(
 	                                ft,
 	                                sessionID: sessionID,
@@ -6306,7 +6826,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                                keys: keys,
 	                                sendMessage: { response, label in
 	                                    let outPlain = try JSONEncoder().encode(response)
-	                                    let outCipher = try encryptAppPayload(outPlain, with: keys)
+	                                    let outCipher = try encryptAppPayload(
+                                        outPlain,
+                                        with: keys,
+                                        packetType: .fileTransfer
+                                    )
 	                                    let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: label)
 	                                    try await sendFramed(outPadded)
 	                                },
@@ -6322,7 +6846,20 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                                }
 	                            )
 	                            continue
-	                        } else if let rm = try? JSONDecoder().decode(RemoteMessageWire.self, from: plaintext) {
+	                        } else if openedPayload.packetType == .remoteControl,
+                                      let rm = try? JSONDecoder().decode(RemoteMessageWire.self, from: plaintext) {
+                            guard RemoteControlSecurityAdmissionPolicy.allowsInboundWebRTCPayload(
+                                rm.type,
+                                isApproved: self.webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID)
+                            ) else {
+                                self.logger.warning(
+                                    "⛔️ 未经批准的 WebRTC 远控消息被阻断: session=\(sessionID, privacy: .public) type=\(rm.type.rawValue, privacy: .public)"
+                                )
+                                self.appendSmokeStatus(
+                                    "remoteControlPayloadBlocked session=\(sessionID) transport=webrtc type=\(rm.type.rawValue)"
+                                )
+                                continue
+                            }
                             switch rm.type {
                             case .mouseEvent:
                                 if let evt = try? JSONDecoder().decode(MouseEventWire.self, from: rm.payload) {
@@ -6669,6 +7206,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
                 await activeDriver.handleMessage(frame, from: peer)
                 let st = await activeDriver.getCurrentState()
+                lastHandshakeDriverState = String(describing: st)
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                     print("🧪 mac driver state=\(String(describing: st))")
                 }
@@ -6790,7 +7328,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
             }
         } catch {
-            logger.debug("ℹ️ WebRTC 控制通道结束: \(error.localizedDescription, privacy: .public)")
+            logger.warning(
+                """
+                ⚠️ WebRTC 控制通道结束: session=\(sessionID, privacy: .public) \
+                peer=\(peerDeviceId, privacy: .public) error=\(error.localizedDescription, privacy: .public) \
+                lastFrameLen=\(lastInboundFrameLength, privacy: .public) decodedFrameLen=\(lastDecodedFrameLength, privacy: .public) \
+                driverState=\(lastHandshakeDriverState, privacy: .public) lastEvent=\(lastControlLoopEvent, privacy: .public) \
+                lastRekey=\(self.lastRekeyEvent ?? "-", privacy: .public)
+                """
+            )
         }
     }
 

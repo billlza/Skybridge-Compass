@@ -66,6 +66,34 @@ public enum VNCConnectionState: Sendable {
     case failed(Error)
 }
 
+private final class VNCConnectionContinuationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didResume = false
+    private let continuation: CheckedContinuation<Void, Error>
+
+    init(_ continuation: CheckedContinuation<Void, Error>) {
+        self.continuation = continuation
+    }
+
+    @discardableResult
+    func resume(_ result: Result<Void, Error>) -> Bool {
+        lock.lock()
+        guard !didResume else {
+            lock.unlock()
+            return false
+        }
+        didResume = true
+        lock.unlock()
+        switch result {
+        case .success:
+            continuation.resume()
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+        return true
+    }
+}
+
 /// VNC 客户端配置
 public struct VNCClientConfiguration: Sendable {
     public let host: String
@@ -326,14 +354,21 @@ public actor VNCClientImpl {
         connection.start(queue: queue)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let gate = VNCConnectionContinuationGate(continuation)
+            let timeout = max(1, configuration.connectionTimeout)
+            queue.asyncAfter(deadline: .now() + timeout) {
+                if gate.resume(.failure(VNCClientError.timeout)) {
+                    connection.cancel()
+                }
+            }
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    continuation.resume()
+                    gate.resume(.success(()))
                 case .failed(let error):
-                    continuation.resume(throwing: VNCClientError.connectionFailed(error.localizedDescription))
+                    gate.resume(.failure(VNCClientError.connectionFailed(error.localizedDescription)))
                 case .cancelled:
-                    continuation.resume(throwing: CancellationError())
+                    gate.resume(.failure(CancellationError()))
                 default:
                     break
                 }

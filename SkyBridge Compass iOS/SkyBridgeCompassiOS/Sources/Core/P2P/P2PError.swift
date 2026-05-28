@@ -13,6 +13,7 @@ public enum P2PError: Error, LocalizedError {
     case alreadyConnected
     case selfConnectionBlocked
     case pqcRequiredUnavailable
+    case missingPinnedProtocolIdentity
 
     public var errorDescription: String? {
         switch self {
@@ -28,6 +29,7 @@ public enum P2PError: Error, LocalizedError {
         case .alreadyConnected: return "设备已建立连接"
         case .selfConnectionBlocked: return "已阻止自连接目标"
         case .pqcRequiredUnavailable: return "严格 PQC 已启用，但当前构建/设备不具备 PQC 能力；已拒绝自动降级到 Classic"
+        case .missingPinnedProtocolIdentity: return "严格 PQC 需要已固定的协议身份；当前不会自动降级或继续握手"
         }
     }
 }

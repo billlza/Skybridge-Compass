@@ -222,6 +222,25 @@ final class CryptoProviderFactoryTests: XCTestCase {
         XCTAssertTrue(source.contains("return ApplePQCAvailabilityCache.applePQC"))
         XCTAssertTrue(source.contains("return ApplePQCAvailabilityCache.xwing"))
     }
+
+    func testInboundResponderRequiresXWingRuntimeSupportForXWingOnlyPeer() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift"),
+            encoding: .utf8
+        )
+
+        let branchStart = try XCTUnwrap(source.range(of: "case (true, false):"))
+        let branchEnd = try XCTUnwrap(source.range(of: "case (false, true):", range: branchStart.lowerBound..<source.endIndex))
+        let xwingOnlyBranch = String(source[branchStart.lowerBound..<branchEnd.lowerBound])
+
+        XCTAssertTrue(xwingOnlyBranch.contains("guard isAppleXWingAvailable() else"))
+        XCTAssertTrue(xwingOnlyBranch.contains("return UnavailablePQCProvider()"))
+        XCTAssertTrue(xwingOnlyBranch.contains("return AppleXWingCryptoProvider()"))
+    }
 }
 
 // MARK: - HPKESealedBox Tests

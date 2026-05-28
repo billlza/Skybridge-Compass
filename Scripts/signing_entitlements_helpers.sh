@@ -151,20 +151,20 @@ skybridge_set_effective_apple_sign_in_mode() {
   skybridge_set_plist_string "${info_plist_path}" "SKYBRIDGE_APPLE_SIGN_IN_MODE" "${mode}"
 
   if [[ "${mode}" == "native" ]]; then
-    SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=1
-    SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=1
+    export SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=1
+    export SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=1
     skybridge_set_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 1
   else
-    SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=0
+    export SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=0
     if [[ "${mode}" == "disabled" ]]; then
-      SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=0
+      export SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=0
     else
-      SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=1
+      export SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=1
     fi
     skybridge_set_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN" 0
   fi
 
-  SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN_MODE="${mode}"
+  export SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN_MODE="${mode}"
 }
 
 skybridge_entitlements_request_applesignin() {
@@ -290,12 +290,52 @@ if not entitlements_path.exists():
 with entitlements_path.open("rb") as fh:
     requested = plistlib.load(fh)
 
-requested_apple_sign_in = requested.get("com.apple.developer.applesignin") or []
-requested_app_groups = requested.get("com.apple.security.application-groups") or []
-requested_apple_sign_in = [str(item).strip() for item in requested_apple_sign_in if str(item).strip()]
-requested_app_groups = [str(item).strip() for item in requested_app_groups if str(item).strip()]
+array_entitlements = [
+    "com.apple.developer.applesignin",
+    "com.apple.security.application-groups",
+    "keychain-access-groups",
+    "com.apple.developer.icloud-container-identifiers",
+    "com.apple.developer.icloud-services",
+    "com.apple.developer.ubiquity-container-identifiers",
+]
+string_entitlements = [
+    "com.apple.application-identifier",
+    "aps-environment",
+    "com.apple.developer.ubiquity-kvstore-identifier",
+    "com.apple.developer.icloud-container-environment",
+]
+boolean_entitlements = [
+    "com.apple.developer.device-information.user-assigned-device-name",
+]
 
-if not requested_apple_sign_in and not requested_app_groups:
+def collect_requested_entitlements(entitlements):
+    requested_arrays = {}
+    for key in array_entitlements:
+        value = entitlements.get(key) or []
+        if isinstance(value, str):
+            values = [value.strip()] if value.strip() else []
+        else:
+            values = [str(item).strip() for item in value if str(item).strip()]
+        if values:
+            requested_arrays[key] = set(values)
+
+    requested_strings = {}
+    for key in string_entitlements:
+        value = entitlements.get(key)
+        if isinstance(value, str) and value.strip():
+            requested_strings[key] = value.strip()
+
+    requested_booleans = {}
+    for key in boolean_entitlements:
+        if entitlements.get(key) is True:
+            requested_booleans[key] = True
+
+    return requested_arrays, requested_strings, requested_booleans
+
+
+requested_arrays, requested_strings, requested_booleans = collect_requested_entitlements(requested)
+
+if not requested_arrays and not requested_strings and not requested_booleans:
     raise SystemExit(0)
 
 if not profile_arg:
@@ -308,22 +348,85 @@ if not profile_path.exists():
 profile = load_profile(profile_path)
 profile_entitlements = profile.get("Entitlements", {})
 
-profile_apple_sign_in = [
-    str(item).strip()
-    for item in (profile_entitlements.get("com.apple.developer.applesignin") or [])
-    if str(item).strip()
-]
-profile_app_groups = {
-    str(item).strip()
-    for item in (profile_entitlements.get("com.apple.security.application-groups") or [])
-    if str(item).strip()
-}
+def dotted(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    return value if value.endswith(".") else f"{value}."
 
-if requested_apple_sign_in and not set(requested_apple_sign_in).issubset(set(profile_apple_sign_in)):
-    raise SystemExit(1)
 
-if requested_app_groups and not set(requested_app_groups).issubset(profile_app_groups):
-    raise SystemExit(1)
+def replace_tokens(value, replacements):
+    if isinstance(value, str):
+        expanded = value
+        for token, replacement in replacements.items():
+            if replacement:
+                expanded = expanded.replace(token, replacement)
+        return expanded
+    if isinstance(value, list):
+        return [replace_tokens(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {key: replace_tokens(item, replacements) for key, item in value.items()}
+    return value
+
+
+team_identifier = ""
+profile_team = profile.get("TeamIdentifier") or []
+if profile_team:
+    team_identifier = str(profile_team[0]).strip()
+
+application_prefix = ""
+profile_application_prefix = profile.get("ApplicationIdentifierPrefix") or []
+if profile_application_prefix:
+    application_prefix = str(profile_application_prefix[0]).strip()
+application_prefix = application_prefix or team_identifier
+
+requested = replace_tokens(
+    requested,
+    {
+        "$(TeamIdentifierPrefix)": dotted(team_identifier),
+        "${TeamIdentifierPrefix}": dotted(team_identifier),
+        "$(AppIdentifierPrefix)": dotted(application_prefix),
+        "${AppIdentifierPrefix}": dotted(application_prefix),
+    },
+)
+requested_arrays, requested_strings, requested_booleans = collect_requested_entitlements(requested)
+
+def normalize_values(value):
+    if isinstance(value, str):
+        return {value.strip()} if value.strip() else set()
+    if isinstance(value, (list, tuple, set)):
+        return {str(item).strip() for item in value if str(item).strip()}
+    return set()
+
+
+def profile_value_covers_requested(profile_value: str, requested_value: str) -> bool:
+    if profile_value == requested_value or profile_value == "*":
+        return True
+    if profile_value.endswith(".*"):
+        return requested_value.startswith(profile_value[:-1])
+    return False
+
+
+def profile_values_cover_requested(profile_values, requested_values) -> bool:
+    return all(
+        any(profile_value_covers_requested(profile_value, requested_value) for profile_value in profile_values)
+        for requested_value in requested_values
+    )
+
+
+for key, requested_values in requested_arrays.items():
+    profile_values = normalize_values(profile_entitlements.get(key))
+    if not profile_values_cover_requested(profile_values, requested_values):
+        raise SystemExit(1)
+
+for key, requested_value in requested_strings.items():
+    profile_values = normalize_values(profile_entitlements.get(key))
+    if not profile_values_cover_requested(profile_values, {requested_value}):
+        raise SystemExit(1)
+
+for key in requested_booleans:
+    if profile_entitlements.get(key) is not True:
+        raise SystemExit(1)
 
 raise SystemExit(0)
 PY
@@ -587,9 +690,9 @@ skybridge_prepare_signing_entitlements() {
 
   cp "${source_entitlements}" "${output_entitlements}"
   skybridge_expand_build_setting_entitlements "${output_entitlements}" "${profile_path}" || return 1
-  SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=0
-  SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=0
-  SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN_MODE="disabled"
+  export SKYBRIDGE_SIGNING_EFFECTIVE_NATIVE_APPLE_SIGN_IN=0
+  export SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN=0
+  export SKYBRIDGE_SIGNING_EFFECTIVE_APPLE_SIGN_IN_MODE="disabled"
   required_apple_sign_in_mode="$(skybridge_resolve_required_apple_sign_in_mode)" || return 1
 
   if [[ "$(skybridge_read_plist_bool "${info_plist_path}" "SKYBRIDGE_ENABLE_APPLE_SIGN_IN" 2>/dev/null || echo "0")" == "1" ]]; then

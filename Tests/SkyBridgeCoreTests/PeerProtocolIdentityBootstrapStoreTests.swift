@@ -49,6 +49,25 @@ final class PeerProtocolIdentityBootstrapStoreTests: XCTestCase {
         await store.clearForTesting()
     }
 
+    func testContainsTrustedFingerprintMatchesApprovedPinsAcrossEndpointAliases() async throws {
+        let store = PeerProtocolIdentityBootstrapStore.shared
+        await store.clearForTesting()
+
+        let fingerprint = String(repeating: "e", count: 64)
+        await store.upsert(deviceIds: ["id:requester"], fingerprints: [fingerprint.uppercased()])
+
+        let containsLowercase = await store.containsTrustedFingerprint(fingerprint)
+        let containsUppercase = await store.containsTrustedFingerprint(fingerprint.uppercased())
+        let containsOther = await store.containsTrustedFingerprint(String(repeating: "f", count: 64))
+        let containsInvalid = await store.containsTrustedFingerprint("not-a-fingerprint")
+
+        XCTAssertTrue(containsLowercase)
+        XCTAssertTrue(containsUppercase)
+        XCTAssertFalse(containsOther)
+        XCTAssertFalse(containsInvalid)
+        await store.clearForTesting()
+    }
+
     func testClearRemovesOnlyRequestedProtocolIdentityAliases() async throws {
         let store = PeerProtocolIdentityBootstrapStore.shared
         await store.clearForTesting()

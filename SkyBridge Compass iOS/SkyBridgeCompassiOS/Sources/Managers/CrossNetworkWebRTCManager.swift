@@ -84,6 +84,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             sessionId: sessionId,
             sendKey: keys.sendKey,
             receiveKey: keys.receiveKey,
+            localRole: keys.role,
             transcriptHash: keys.transcriptHash,
             mediaAdmissionToken: webrtcMediaAdmissionTokenBySessionId[sessionId]
         )
@@ -478,12 +479,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var remoteVideoHeartbeatRenderer: RemoteVideoTrackHeartbeatRenderer?
 #endif
     private let localDeviceId: String = {
-        let envID = ProcessInfo.processInfo.environment["SKYBRIDGE_DEVICE_ID"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !envID.isEmpty {
-            return envID
-        }
-        return KeychainManager.shared.getOrGenerateDeviceId()
+        ProtocolDeviceIdentity.stableDeviceId()
     }()
     private var currentPathExpectedRemoteAuthorityBySessionId: [String: CurrentPathRemoteAuthorityCompat] = [:]
     private var currentPathAdditionalProtocolFingerprintsBySessionId: [String: Set<String>] = [:]
@@ -542,6 +538,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     // File transfer waiters (transferId|op|chunkIndex -> continuation)
     var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
+    var webRTCSecureEnvelopeSendCounterBySessionId: [String: UInt64] = [:]
+    var webRTCSecureEnvelopeReplayWindowBySessionId: [String: WebRTCAppSecureReplayWindow] = [:]
+    var webRTCSecureEnvelopeKeyFingerprintBySessionId: [String: String] = [:]
 
     private var sessionSnapshotMetadataBySessionId: [String: SessionSnapshotMetadata] = [:]
 
@@ -848,8 +847,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         currentPathAdditionalProtocolFingerprintsBySessionId[sessionId] ?? []
     }
 
+    private func currentPathLocalProtocolSigningAlgorithm() -> ProtocolSigningAlgorithm {
+        let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        return CrossNetworkWebRTCPQCHandshakePolicy.shouldRequestStrictPQC(
+            compatibilityModeEnabled: compatibilityModeEnabled
+        ) ? .mlDSA65 : .ed25519
+    }
+
     private func currentPathLocalBinding() async throws -> ProtocolIdentityBindingCompat {
-        let algorithm: ProtocolSigningAlgorithm = .ed25519
+        let algorithm = currentPathLocalProtocolSigningAlgorithm()
         let publicKey = try await SkyBridgeiOSCore.shared.getProtocolSigningPublicKey(for: algorithm)
         return try ProtocolIdentityBindingCompat(
             deviceId: localDeviceId,
@@ -1135,7 +1141,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
             let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
-            let localDeviceName = UIDevice.current.name
+            let localDeviceName = AppleMobileDeviceIdentity.currentSnapshot().deviceName
             #else
             let localDeviceName = Host.current().localizedName ?? "Apple Device"
             #endif
@@ -1249,7 +1255,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             let localBinding = try await currentPathLocalBinding()
             let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
-            let localDeviceName = UIDevice.current.name
+            let localDeviceName = AppleMobileDeviceIdentity.currentSnapshot().deviceName
             #else
             let localDeviceName = Host.current().localizedName ?? "Apple Device"
             #endif
@@ -1376,6 +1382,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         activeSignalingHandleBySessionId.removeAll()
         session?.close()
         session = nil
+        if let currentSessionId {
+            clearWebRTCSecureEnvelopeState(for: currentSessionId)
+        }
         currentSessionId = nil
         lastScreenData = nil
 #if canImport(WebRTC)
@@ -2710,7 +2719,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public func sendRemoteDesktopMessage(_ message: RemoteMessage) async throws {
         guard let session, let keys = sessionKeys else { throw RemoteDesktopError.disconnected }
         let data = try JSONEncoder().encode(message)
-        let encrypted = try encrypt(plaintext: data, with: keys)
+        let encrypted = try encrypt(plaintext: data, with: keys, packetType: .remoteControl)
         let padded = TrafficPadding.wrapIfEnabled(encrypted, label: "tx/webrtc-remote")
         try await sendFramed(padded, over: session)
     }
@@ -2737,13 +2746,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 }
 
                 #if canImport(UIKit)
-                let localName = UIDevice.current.name
-                let localModel = UIDevice.current.model
+                let localIdentity = AppleMobileDeviceIdentity.currentSnapshot()
+                let localName = localIdentity.deviceName
+                let localModel = localIdentity.modelName
                 #else
                 let localName: String? = nil
                 let localModel: String? = nil
                 #endif
                 let mediaDiagnostics = await self.smokeMediaHeartbeatDiagnosticsProvider?()
+                let identity = AuthenticationManager.instance.remoteControlSecurityIdentityMetadata
 
                 let heartbeat = AppMessage.heartbeat(.init(
                     sentAt: Date(),
@@ -2753,6 +2764,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     platform: "iOS",
                     osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                     chip: nil,
+                    accountDisplayName: identity.accountDisplayName,
+                    nebulaId: identity.nebulaId,
                     remoteVideoFormats: RemoteDesktopManager.supportedRemoteVideoFormats(),
                     webrtcMedia: mediaDiagnostics
                 ))
@@ -3378,7 +3391,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 // MARK: - WebRTC framed handshake (iOS)
 
 @available(iOS 17.0, *)
-private extension CrossNetworkWebRTCManager {
+extension CrossNetworkWebRTCManager {
     func startHandshakeOverWebRTC(
         sessionId: String,
         peerDeviceId: String,
@@ -3431,6 +3444,18 @@ private extension CrossNetworkWebRTCManager {
             }
             if peerIdCandidates.isEmpty {
                 peerIdCandidates = [peerDeviceId]
+            }
+            if strictPQCRequested,
+               currentPathExpectedRemoteAuthorityBySessionId[sessionId] == nil {
+                let message = "strictPQC WebRTC initial handshake requires pinned current-path protocol identity"
+                SkyBridgeLogger.shared.error(
+                    "⛔️ \(message): session=\(sessionId), peer=\(peerDeviceId)"
+                )
+                throw NSError(
+                    domain: "CrossNetworkWebRTCManager",
+                    code: -1206,
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                )
             }
 
             var trustedPeerKEMKeys: [CryptoSuite: Data] = [:]
@@ -3963,6 +3988,7 @@ private extension CrossNetworkWebRTCManager {
         lastRekeyEvent = "failed strict reason=\(message)"
         handshakeDriver = nil
         sessionKeys = nil
+        clearWebRTCSecureEnvelopeState(for: sessionId)
         inboundInitialHandshakeResponderSessionIds.remove(sessionId)
         inboundClassicAuthorityBootstrapSessionIds.remove(sessionId)
         inboundRekeyResponderSessionIds.remove(sessionId)
@@ -4197,7 +4223,7 @@ private extension CrossNetworkWebRTCManager {
         guard currentSessionId == sessionId else { return }
         guard let keys = sessionKeys else { throw RemoteDesktopError.disconnected }
         let payload = try JSONEncoder().encode(message)
-        let ciphertext = try encrypt(plaintext: payload, with: keys)
+        let ciphertext = try encrypt(plaintext: payload, with: keys, packetType: .appControl)
         let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: label)
         try await sendFramed(padded, over: session)
     }
@@ -4226,16 +4252,20 @@ private extension CrossNetworkWebRTCManager {
             )
             return
         }
+        let identity = AuthenticationManager.instance.remoteControlSecurityIdentityMetadata
+        let localIdentity = AppleMobileDeviceIdentity.currentSnapshot()
 
         let message = AppMessage.pairingIdentityExchange(.init(
             deviceId: localDeviceId,
             kemPublicKeys: kemKeys,
             protocolIdentityPublicKeys: await localProtocolIdentityPublicKeysForPairing(),
-            deviceName: nil,
-            modelName: nil,
+            deviceName: localIdentity.deviceName,
+            modelName: localIdentity.modelName,
             platform: "iOS",
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             chip: nil,
+            accountDisplayName: identity.accountDisplayName,
+            nebulaId: identity.nebulaId,
             remoteVideoFormats: RemoteDesktopManager.supportedRemoteVideoFormats()
         ))
         try await sendAppMessageOverWebRTC(
@@ -4759,12 +4789,14 @@ private extension CrossNetworkWebRTCManager {
     @discardableResult
     private func handleDecodedControlPlaintext(
         _ plaintext: Data,
+        packetType: WebRTCAppSecurePacketType,
         sessionId: String,
         peer: PeerIdentifier,
         session: WebRTCSession,
         strictPQCRequested: Bool
     ) async -> Bool {
-        if let appMessage = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
+        if packetType == .appControl,
+           let appMessage = try? JSONDecoder().decode(AppMessage.self, from: plaintext) {
             if strictPQCClassicBootstrapOnlySessionIds.contains(sessionId) {
                 let messageKind = Self.bootstrapAppMessageKind(appMessage)
                 switch appMessage {
@@ -4798,18 +4830,33 @@ private extension CrossNetworkWebRTCManager {
             return true
         }
 
-        if let fileTransfer = try? JSONDecoder().decode(CrossNetworkFileTransferMessage.self, from: plaintext),
+        if packetType == .fileTransfer,
+           let fileTransfer = try? JSONDecoder().decode(CrossNetworkFileTransferMessage.self, from: plaintext),
            fileTransfer.version == 1 {
             await handleInboundFileTransferFromMac(fileTransfer)
             return true
         }
 
-        if let audioChunk = RemoteDesktopAudioChunkWire.decodeIfPresent(plaintext) {
-            RemoteDesktopManager.instance.handleInboundRemoteAudioChunk(audioChunk)
-            return true
+        if packetType == .remoteDesktopAudio {
+            if let audioChunk = RemoteDesktopAudioChunkWire.decodeIfPresent(plaintext) {
+                RemoteDesktopManager.instance.handleInboundRemoteAudioChunk(audioChunk)
+                return true
+            }
+            return false
         }
 
-        if handleDecodedScreenPlaintext(plaintext) { return true }
+        if packetType == .remoteDesktop {
+            if let audioChunk = RemoteDesktopAudioChunkWire.decodeIfPresent(plaintext) {
+                RemoteDesktopManager.instance.handleInboundRemoteAudioChunk(audioChunk)
+                return true
+            }
+
+            if handleDecodedScreenPlaintext(plaintext) { return true }
+        }
+
+        guard packetType == .remoteControl else {
+            return false
+        }
 
         guard let msg = try? JSONDecoder().decode(RemoteMessage.self, from: plaintext) else {
             return false
@@ -4966,8 +5013,44 @@ private extension CrossNetworkWebRTCManager {
                     if let keys = await sessionKeysIfCurrent(
                         sessionId: sessionId,
                         sessionObjectIdentifier: sessionObjectIdentifier
-                    ), let plaintext = Self.decryptDirectControlProbePayload(chunk, keys: keys) {
-                        if let decoded = Self.decodeRemoteDesktopHighThroughputPayload(plaintext) {
+                    ), let openedCandidate = Self.openDirectControlProbePayload(chunk, keys: keys) {
+                        let openedPayload: WebRTCAppSecureOpenedPayload
+                        do {
+                            openedPayload = try await validateWebRTCSecureOpenedPayload(
+                                openedCandidate,
+                                with: keys,
+                                sessionId: sessionId
+                            )
+                        } catch {
+                            self.appendSmokeTrace(
+                                "control-channel direct secure payload rejected session=\(sessionId) err=\(error.localizedDescription)"
+                            )
+                            continue
+                        }
+
+                        let plaintext = openedPayload.payload
+                        if openedPayload.packetType == .remoteDesktopAudio,
+                           let audioChunk = RemoteDesktopAudioChunkWire.decodeIfPresent(plaintext) {
+                            let published = await publishHighThroughputRemoteDesktopPayloadIfCurrent(
+                                .audio(audioChunk),
+                                sessionId: sessionId,
+                                sessionObjectIdentifier: sessionObjectIdentifier
+                            )
+                            if published && !usesDirectControlPayloads {
+                                usesDirectControlPayloads = true
+                                parser = InboundFrameParser(maxInboundFrameBytes: maxInboundFrameBytes)
+                                self.appendSmokeTrace(
+                                    "control-channel direct-audio-payload compatibility mode session=\(sessionId) bytes=\(chunk.count)"
+                                )
+                                SkyBridgeLogger.shared.info(
+                                    "ℹ️ WebRTC 控制通道检测到直发远桌音频数据模式，已在后台数据面处理: session=\(sessionId)"
+                                )
+                            }
+                            continue
+                        }
+
+                        if openedPayload.packetType == .remoteDesktop,
+                           let decoded = Self.decodeRemoteDesktopHighThroughputPayload(plaintext) {
                             let published = await publishHighThroughputRemoteDesktopPayloadIfCurrent(
                                 decoded,
                                 sessionId: sessionId,
@@ -4988,6 +5071,7 @@ private extension CrossNetworkWebRTCManager {
 
                         if await handleDecodedControlPlaintext(
                             plaintext,
+                            packetType: openedPayload.packetType,
                             sessionId: sessionId,
                             peer: peer,
                             session: session,
@@ -5064,8 +5148,20 @@ private extension CrossNetworkWebRTCManager {
                     ) {
                         hasSessionKeys = true
                         do {
-                            let plaintext = try decrypt(ciphertext: trafficUnwrapped, with: keys)
-                            if let decoded = Self.decodeRemoteDesktopHighThroughputPayload(plaintext) {
+                            let openedPayload = try await decrypt(ciphertext: trafficUnwrapped, with: keys)
+                            let plaintext = openedPayload.payload
+                            if openedPayload.packetType == .remoteDesktopAudio,
+                               let audioChunk = RemoteDesktopAudioChunkWire.decodeIfPresent(plaintext) {
+                                _ = await publishHighThroughputRemoteDesktopPayloadIfCurrent(
+                                    .audio(audioChunk),
+                                    sessionId: sessionId,
+                                    sessionObjectIdentifier: sessionObjectIdentifier
+                                )
+                                continue
+                            }
+
+                            if openedPayload.packetType == .remoteDesktop,
+                               let decoded = Self.decodeRemoteDesktopHighThroughputPayload(plaintext) {
                                 _ = await publishHighThroughputRemoteDesktopPayloadIfCurrent(
                                     decoded,
                                     sessionId: sessionId,
@@ -5075,6 +5171,7 @@ private extension CrossNetworkWebRTCManager {
                             }
                             if await handleDecodedControlPlaintext(
                                 plaintext,
+                                packetType: openedPayload.packetType,
                                 sessionId: sessionId,
                                 peer: peer,
                                 session: session,
@@ -5142,7 +5239,11 @@ private extension CrossNetworkWebRTCManager {
 
                 if let keys,
                    let pending = wireDecoder.takePendingDirectCandidate(now: now) {
-                    if let screenData = Self.decodeDirectScreenChannelPayload(pending, keys: keys) {
+                    if let screenData = await decodeDirectScreenChannelPayloadIfFresh(
+                        pending,
+                        keys: keys,
+                        sessionId: sessionId
+                    ) {
                         wireDecoder.markDirectPayloadMode()
                         if announcedWireMode != wireDecoder.mode {
                             announcedWireMode = wireDecoder.mode
@@ -5198,7 +5299,11 @@ private extension CrossNetworkWebRTCManager {
                             continue
                         }
                         do {
-                            guard let screenData = try Self.decodeEncryptedScreenChannelPayload(payload, keys: frameKeys) else {
+                            guard let screenData = try await decodeEncryptedScreenChannelPayloadIfFresh(
+                                payload,
+                                keys: frameKeys,
+                                sessionId: sessionId
+                            ) else {
                                 continue
                             }
                             wireDecoder.markChunkedPayloadMode()
@@ -5237,7 +5342,11 @@ private extension CrossNetworkWebRTCManager {
                         continue
                     }
 
-                    if let screenData = Self.decodeDirectScreenChannelPayload(chunk, keys: keys) {
+                    if let screenData = await decodeDirectScreenChannelPayloadIfFresh(
+                        chunk,
+                        keys: keys,
+                        sessionId: sessionId
+                    ) {
                         await publishDecodedScreenDataIfCurrent(
                             screenData,
                             sessionId: sessionId,
@@ -5253,7 +5362,11 @@ private extension CrossNetworkWebRTCManager {
 
                 if wireDecoder.canProbeDirectPayload,
                    let keys,
-                   let screenData = Self.decodeDirectScreenChannelPayload(chunk, keys: keys) {
+                   let screenData = await decodeDirectScreenChannelPayloadIfFresh(
+                       chunk,
+                       keys: keys,
+                       sessionId: sessionId
+                   ) {
                     wireDecoder.markDirectPayloadMode()
                     if announcedWireMode != wireDecoder.mode {
                         announcedWireMode = wireDecoder.mode
@@ -5303,7 +5416,11 @@ private extension CrossNetworkWebRTCManager {
                     }
 
                     do {
-                        guard let screenData = try Self.decodeEncryptedScreenChannelPayload(payload, keys: frameKeys) else {
+                        guard let screenData = try await decodeEncryptedScreenChannelPayloadIfFresh(
+                            payload,
+                            keys: frameKeys,
+                            sessionId: sessionId
+                        ) else {
                             wireDecoder.resetLengthFramedAfterDecodeFailure()
                             announcedWireMode = nil
                             self.appendSmokeTrace(
@@ -5327,20 +5444,65 @@ private extension CrossNetworkWebRTCManager {
                             sessionObjectIdentifier: sessionObjectIdentifier
                         )
                     } catch {
-                        wireDecoder.resetLengthFramedAfterDecodeFailure()
-                        announcedWireMode = nil
-                        self.appendSmokeTrace(
-                            "screen-channel wire=length-framed decryptFailed reset session=\(sessionId)"
-                        )
-                        SkyBridgeLogger.shared.debug(
-                            "ℹ️ screen-channel payload 解密/解析失败，已重置 length parser: wireMode=lengthFramed \(error.localizedDescription)"
-                        )
+                        switch Self.screenLengthFramedDecodeFailureAction(for: error) {
+                        case .dropAuthenticatedReplay(let packetType, let counter, let highestCounter, let reason):
+                            self.appendSmokeTrace(
+                                """
+                                screen-channel wire=length-framed replayDrop session=\(sessionId) packetType=\(packetType.rawValue) \
+                                counter=\(counter) highestCounter=\(highestCounter) reason=\(reason.rawValue) action=drop-authenticated-replay
+                                """
+                            )
+                            SkyBridgeLogger.shared.debug(
+                                "ℹ️ screen-channel authenticated replay 已丢弃且保留 length parser: packetType=\(packetType.rawValue) counter=\(counter) highestCounter=\(highestCounter) reason=\(reason.rawValue)"
+                            )
+                        case .resetParser:
+                            wireDecoder.resetLengthFramedAfterDecodeFailure()
+                            announcedWireMode = nil
+                            self.appendSmokeTrace(
+                                "screen-channel wire=length-framed decryptFailed reset session=\(sessionId)"
+                            )
+                            SkyBridgeLogger.shared.debug(
+                                "ℹ️ screen-channel payload 解密/解析失败，已重置 length parser: wireMode=lengthFramed \(error.localizedDescription)"
+                            )
+                        }
                     }
                 }
             }
         } catch {
             self.appendSmokeTrace("screen-receiveLoop ended error=\(error.localizedDescription)")
         }
+    }
+
+    nonisolated private func decodeDirectScreenChannelPayloadIfFresh(
+        _ payload: Data,
+        keys: SessionKeys,
+        sessionId: String
+    ) async -> ScreenData? {
+        guard let openedPayload = try? Self.openScreenChannelPayload(payload, keys: keys) else {
+            return nil
+        }
+        guard let freshPayload = try? await validateWebRTCSecureOpenedPayload(
+            openedPayload,
+            with: keys,
+            sessionId: sessionId
+        ) else {
+            return nil
+        }
+        return Self.decodeScreenChannelPayload(freshPayload)
+    }
+
+    nonisolated private func decodeEncryptedScreenChannelPayloadIfFresh(
+        _ payload: Data,
+        keys: SessionKeys,
+        sessionId: String
+    ) async throws -> ScreenData? {
+        let openedPayload = try Self.openScreenChannelPayload(payload, keys: keys)
+        let freshPayload = try await validateWebRTCSecureOpenedPayload(
+            openedPayload,
+            with: keys,
+            sessionId: sessionId
+        )
+        return Self.decodeScreenChannelPayload(freshPayload)
     }
 
     @MainActor
@@ -5379,17 +5541,104 @@ private extension CrossNetworkWebRTCManager {
         return true
     }
 
-    nonisolated func decrypt(ciphertext: Data, with keys: SessionKeys) throws -> Data {
-        let key = SymmetricKey(data: keys.receiveKey)
-        let box = try AES.GCM.SealedBox(combined: ciphertext)
-        return try AES.GCM.open(box, using: key)
-    }
-
     nonisolated func appendSmokeTrace(_ line: String) {
         SkyBridgeSmokeTraceWriter.append(line)
     }
 
     nonisolated private func describeEnvelope(_ envelope: WebRTCSignalingEnvelope) -> String {
         CrossNetworkWebRTCTraceDescription.describeEnvelope(envelope)
+    }
+}
+
+@available(iOS 17.0, *)
+extension CrossNetworkWebRTCManager {
+    func decrypt(
+        ciphertext: Data,
+        with keys: SessionKeys,
+        allowedPacketTypes: Set<WebRTCAppSecurePacketType> = Set(WebRTCAppSecurePacketType.allCases)
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        try openWebRTCSecurePayload(
+            ciphertext,
+            with: keys,
+            sessionId: currentSessionId ?? keys.sessionId,
+            allowedPacketTypes: allowedPacketTypes
+        )
+    }
+
+    func sealWebRTCSecurePayload(
+        _ plaintext: Data,
+        with keys: SessionKeys,
+        sessionId: String,
+        packetType: WebRTCAppSecurePacketType
+    ) throws -> Data {
+        resetWebRTCSecureEnvelopeStateIfNeeded(sessionId: sessionId, keys: keys)
+        let counter = try nextWebRTCSecureEnvelopeCounter(for: sessionId)
+        return try CrossNetworkWebRTCControlChannelCodec.encryptAppPayload(
+            plaintext,
+            with: keys,
+            packetType: packetType,
+            counter: counter
+        )
+    }
+
+    func openWebRTCSecurePayload(
+        _ ciphertext: Data,
+        with keys: SessionKeys,
+        sessionId: String,
+        allowedPacketTypes: Set<WebRTCAppSecurePacketType> = Set(WebRTCAppSecurePacketType.allCases)
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        resetWebRTCSecureEnvelopeStateIfNeeded(sessionId: sessionId, keys: keys)
+        let opened = try CrossNetworkWebRTCControlChannelCodec.decryptAppPayload(
+            ciphertext,
+            with: keys,
+            allowedPacketTypes: allowedPacketTypes
+        )
+        return try validateWebRTCSecureOpenedPayload(opened, with: keys, sessionId: sessionId)
+    }
+
+    func validateWebRTCSecureOpenedPayload(
+        _ opened: WebRTCAppSecureOpenedPayload,
+        with keys: SessionKeys,
+        sessionId: String
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        resetWebRTCSecureEnvelopeStateIfNeeded(sessionId: sessionId, keys: keys)
+        var replayWindow = webRTCSecureEnvelopeReplayWindowBySessionId[sessionId] ?? WebRTCAppSecureReplayWindow()
+        try replayWindow.validateAndRecord(opened)
+        webRTCSecureEnvelopeReplayWindowBySessionId[sessionId] = replayWindow
+        return opened
+    }
+
+    func clearWebRTCSecureEnvelopeState(for sessionId: String) {
+        webRTCSecureEnvelopeSendCounterBySessionId.removeValue(forKey: sessionId)
+        webRTCSecureEnvelopeReplayWindowBySessionId.removeValue(forKey: sessionId)
+        webRTCSecureEnvelopeKeyFingerprintBySessionId.removeValue(forKey: sessionId)
+    }
+
+    private func resetWebRTCSecureEnvelopeStateIfNeeded(sessionId: String, keys: SessionKeys) {
+        let fingerprint = Self.webRTCSecureEnvelopeKeyFingerprint(for: keys)
+        guard webRTCSecureEnvelopeKeyFingerprintBySessionId[sessionId] != fingerprint else { return }
+        webRTCSecureEnvelopeSendCounterBySessionId[sessionId] = 0
+        webRTCSecureEnvelopeReplayWindowBySessionId[sessionId] = WebRTCAppSecureReplayWindow()
+        webRTCSecureEnvelopeKeyFingerprintBySessionId[sessionId] = fingerprint
+    }
+
+    private func nextWebRTCSecureEnvelopeCounter(for sessionId: String) throws -> UInt64 {
+        let current = webRTCSecureEnvelopeSendCounterBySessionId[sessionId] ?? 0
+        guard current < UInt64.max else {
+            throw WebRTCAppSecureEnvelopeError.counterExhausted
+        }
+        let next = current + 1
+        webRTCSecureEnvelopeSendCounterBySessionId[sessionId] = next
+        return next
+    }
+
+    nonisolated private static func webRTCSecureEnvelopeKeyFingerprint(for keys: SessionKeys) -> String {
+        var input = Data("SkyBridge-WebRTC-App-State-v1|".utf8)
+        input.append(Data(keys.sessionId.utf8))
+        input.append(0)
+        input.append(Data(keys.role.rawValue.utf8))
+        input.append(0)
+        input.append(keys.transcriptHash)
+        return SHA256.hash(data: input).map { String(format: "%02x", $0) }.joined()
     }
 }

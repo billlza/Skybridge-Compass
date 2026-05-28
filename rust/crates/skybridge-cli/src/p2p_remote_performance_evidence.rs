@@ -15,6 +15,7 @@ mod files;
 mod final_window;
 mod ios_lan_rx;
 mod log_order;
+mod mac_ipad_online;
 mod mac_tx;
 mod markers;
 mod metal_render;
@@ -30,6 +31,7 @@ pub(crate) use final_window::update_p2p_remote_final_window_ios_evidence;
 use final_window::update_p2p_remote_final_window_mac_evidence;
 use ios_lan_rx::update_p2p_remote_ios_lan_rx_evidence;
 use log_order::{P2pRemoteLogEntry, sort_log_entries_chronologically};
+use mac_ipad_online::update_p2p_remote_mac_ipad_online_evidence;
 use mac_tx::update_p2p_remote_mac_tx_evidence;
 use markers::update_p2p_remote_marker_evidence;
 use metal_render::update_p2p_remote_metal_render_evidence;
@@ -165,10 +167,18 @@ fn update_p2p_remote_evidence_with_observed_at(
         observed_at,
     );
     update_p2p_remote_marker_evidence(evidence, line, &lower, line_sequence);
+    update_p2p_remote_mac_ipad_online_evidence(
+        evidence,
+        line,
+        &lower,
+        is_mac,
+        is_ios,
+        line_sequence,
+    );
     update_p2p_remote_route_evidence(evidence, line, is_mac, is_ios);
     update_p2p_remote_mac_tx_evidence(evidence, line, is_mac);
     update_p2p_remote_ios_lan_rx_evidence(evidence, line, is_ios);
     update_p2p_remote_metal_render_evidence(evidence, line, is_ios);
     update_p2p_remote_remote_desktop_evidence(evidence, line, is_ios);
-    update_p2p_remote_audio_evidence(evidence, line, is_ios);
+    update_p2p_remote_audio_evidence(evidence, line, is_mac, is_ios);
 }

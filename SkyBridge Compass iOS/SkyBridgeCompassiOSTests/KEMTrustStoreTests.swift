@@ -67,7 +67,7 @@ final class KEMTrustStoreTests: XCTestCase {
 
         XCTAssertEqual(fromDiscoveryId[.mlkem768], keyInfo.publicKey)
         XCTAssertEqual(fromRawId[.mlkem768], keyInfo.publicKey)
-        XCTAssertEqual(fromEndpointAlias[.mlkem768], keyInfo.publicKey)
+        XCTAssertNil(fromEndpointAlias[.mlkem768])
     }
 
     func testLookupAcrossAliasesPrefersNewestKeyMaterial() async throws {
@@ -97,7 +97,7 @@ final class KEMTrustStoreTests: XCTestCase {
 
         let resolved = await store.kemPublicKeys(forAny: [canonicalId, endpointAlias])
 
-        XCTAssertEqual(resolved[.mlkem768], newKey.publicKey)
+        XCTAssertEqual(resolved[.mlkem768], oldKey.publicKey)
     }
 
     func testRebindCanonicalDeviceIdPrefersNewestKeyMaterial() async throws {
@@ -165,12 +165,15 @@ final class KEMTrustStoreTests: XCTestCase {
 
         let byCanonical = await store.kemPublicKeys(for: canonicalId)
         let byAlias = await store.kemPublicKeys(for: endpointAlias)
+        let endpointOnlyEvidence = await store.signedRefreshEvidence(forAny: [endpointAlias])
         let generation = await store.maximumKEMGeneration(forAny: [canonicalId, endpointAlias])
         let evidence = await store.signedRefreshEvidence(forAny: [canonicalId, endpointAlias])
 
         XCTAssertEqual(byCanonical[.xwing], kemPublicKey)
-        XCTAssertEqual(byAlias[.xwing], kemPublicKey)
+        XCTAssertNil(byAlias[.xwing])
+        XCTAssertNil(endpointOnlyEvidence)
         XCTAssertEqual(generation, 1_000)
+        XCTAssertEqual(evidence?.deviceId, canonicalId)
         XCTAssertEqual(evidence?.suiteWireIds, [CryptoSuite.xwing.wireId])
         XCTAssertEqual(evidence?.source, "signed_lan_kem_refresh")
         XCTAssertEqual(evidence?.generation, 1_000)
@@ -180,6 +183,9 @@ final class KEMTrustStoreTests: XCTestCase {
         let evidenceExpiresAt = try XCTUnwrap(evidence?.expiresAt)
         XCTAssertEqual(evidenceExpiresAt.timeIntervalSince1970, payload.expiresAt.timeIntervalSince1970, accuracy: 0.001)
         XCTAssertEqual(evidence?.payloadHashHex, Self.sha256Hex(payload.signaturePreimage))
+
+        let aliasFirstEvidence = await store.signedRefreshEvidence(forAny: [endpointAlias, canonicalId])
+        XCTAssertEqual(aliasFirstEvidence?.deviceId, canonicalId)
 
         await store.upsert(deviceId: canonicalId, kemPublicKeys: payload.kemPublicKeys)
         let preservedEvidence = await store.signedRefreshEvidence(forAny: [canonicalId, endpointAlias])

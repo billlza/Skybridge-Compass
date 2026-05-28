@@ -1800,6 +1800,41 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #endif
     }
 
+    public func currentSelectedRemoteCandidateAddress() async -> String? {
+#if canImport(WebRTC)
+        guard let peerConnection = withState({ self.peerConnection }) else { return nil }
+        return await withCheckedContinuation { continuation in
+            final class ResumeState: @unchecked Sendable {
+                private let lock = NSLock()
+                private var resumed = false
+
+                func resume(
+                    _ address: String?,
+                    continuation: CheckedContinuation<String?, Never>
+                ) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !resumed else { return }
+                    resumed = true
+                    continuation.resume(returning: address)
+                }
+            }
+
+            let state = ResumeState()
+
+            peerConnection.statistics { report in
+                state.resume(Self.selectedRemoteCandidateAddress(from: report), continuation: continuation)
+            }
+
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+                state.resume(nil, continuation: continuation)
+            }
+        }
+#else
+        return nil
+#endif
+    }
+
     private func waitForBufferedAmountBelow(
         _ threshold: UInt64,
         pollInterval: Duration,
@@ -2497,6 +2532,54 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
 
         return .direct
+    }
+
+    private static func selectedRemoteCandidateAddress(from report: RTCStatisticsReport) -> String? {
+        let statsById = report.statistics
+
+        func stringValue(_ stat: RTCStatistics, key: String) -> String? {
+            guard let value = stat.values[key] else { return nil }
+            if let text = value as? String { return text }
+            if let number = value as? NSNumber { return number.stringValue }
+            return nil
+        }
+
+        func boolValue(_ stat: RTCStatistics, key: String) -> Bool {
+            guard let value = stat.values[key] else { return false }
+            if let number = value as? NSNumber { return number.boolValue }
+            if let text = value as? String {
+                let lowered = text.lowercased()
+                return lowered == "true" || lowered == "1"
+            }
+            return false
+        }
+
+        let selectedPair = statsById.values.first { stat in
+            guard stat.type.lowercased() == "candidate-pair" else { return false }
+            let state = stringValue(stat, key: "state")?.lowercased()
+            let selected = boolValue(stat, key: "selected")
+            let nominated = boolValue(stat, key: "nominated")
+            return selected || (nominated && state == "succeeded")
+        }
+        guard let selectedPair,
+              let remoteCandidateId = stringValue(selectedPair, key: "remoteCandidateId"),
+              let candidate = statsById[remoteCandidateId] else {
+            return nil
+        }
+
+        for key in ["address", "ip"] {
+            if let value = stringValue(candidate, key: key)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+
+        guard let candidateLine = stringValue(candidate, key: "candidate") else { return nil }
+        let fields = candidateLine.split(separator: " ").map(String.init)
+        guard fields.count > 4 else { return nil }
+        let address = fields[4].trimmingCharacters(in: .whitespacesAndNewlines)
+        return address.isEmpty ? nil : address
     }
 
     private static func nativeScreenVideoRTCStats(from report: RTCStatisticsReport) -> NativeScreenVideoRTCStats {

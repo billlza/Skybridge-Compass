@@ -18,15 +18,7 @@ public struct SettingsView: View {
     @StateObject private var remoteDesktopSettingsManager = RemoteDesktopSettingsManager.shared
  // 启用性能模式管理器
     @StateObject private var performanceModeManager = PerformanceModeManager.shared
- // Metal Performance HUD
-    @StateObject private var hud: MetalPerformanceHUD = {
-        if let device = MTLCreateSystemDefaultDevice(),
-           let hudInstance = try? MetalPerformanceHUD(device: device) {
-            return hudInstance
-        } else {
-            return MetalPerformanceHUD.fallback()
-        }
-    }()
+    @StateObject private var hud = MetalPerformanceHUD.shared
     
     @State private var selectedTab: SettingsTab = .general
     @StateObject private var ftBridge = FileTransferSettingsBridge.shared
@@ -37,7 +29,6 @@ public struct SettingsView: View {
     @State private var showingTransferPathFallbackAlert = false
     @State private var transferPathFallbackMessage = ""
     @State private var newCustomServiceType = ""
-    @AppStorage("Settings.PreferXWingHybrid") private var preferXWingHybrid: Bool = false
     
  // MARK: - 设置标签页
     enum SettingsTab: String, CaseIterable {
@@ -892,109 +883,111 @@ public struct SettingsView: View {
                         Toggle(localizationManager.localizedString("settings.advanced.memory.optimize"), isOn: $settingsManager.optimizeMemoryUsage)
                         Toggle(localizationManager.localizedString("settings.advanced.backgroundScanning"), isOn: $settingsManager.enableBackgroundScanning)
                         
- // Metal Performance HUD 设置
-                        if hud.isEnabled {
-                            Divider()
-                            
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("Metal Performance HUD")
-                                        .font(.system(size: 13, weight: .medium))
-                                    Spacer()
-                                    if hud.isEnabled {
-                                        Text(localizationManager.localizedString("status.enabled"))
-                                            .font(.caption)
-                                            .foregroundColor(.green)
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Metal Performance HUD")
+                                    .font(.system(size: 13, weight: .medium))
+                                Spacer()
+                                if !hud.isAvailable {
+                                    Text(localizationManager.localizedString("status.unavailable"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                } else if hud.isEnabled {
+                                    Text(localizationManager.localizedString("status.enabled"))
+                                        .font(.caption)
+                                        .foregroundColor(.green)
+                                } else {
+                                    Text(localizationManager.localizedString("status.disabled"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                            Toggle(localizationManager.localizedString("settings.hud.enableRealtimeMonitoring"), isOn: Binding(
+                                get: { hud.isEnabled },
+                                set: { enabled in
+                                    if enabled {
+                                        hud.enable()
                                     } else {
-                                        Text(localizationManager.localizedString("status.disabled"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
+                                        hud.disable()
                                     }
                                 }
-                                
-                                Toggle(localizationManager.localizedString("settings.hud.enableRealtimeMonitoring"), isOn: Binding(
-                                    get: { hud.isEnabled },
-                                    set: { enabled in
-                                        if enabled {
-                                            hud.enable()
-                                        } else {
-                                            hud.disable()
-                                        }
-                                    }
-                                ))
-                                .help(localizationManager.localizedString("settings.hud.enableRealtimeMonitoring.help"))
-                                
-                                if hud.isEnabled {
-                                    Toggle(localizationManager.localizedString("settings.hud.showHUD"), isOn: Binding(
-                                         get: { hud.isVisible },
-                                         set: { visible in
-                                             if visible {
-                                                 self.hud.isVisible = true
+                            ))
+                            .disabled(!hud.isAvailable)
+                            .help(localizationManager.localizedString("settings.hud.enableRealtimeMonitoring.help"))
+
+                            if hud.isEnabled {
+                                Toggle(localizationManager.localizedString("settings.hud.showHUD"), isOn: Binding(
+                                     get: { hud.isVisible },
+                                     set: { visible in
+                                         if visible {
+                                             self.hud.isVisible = true
                             } else {
                                 self.hud.isVisible = false
-                                             }
                                          }
-                                     ))
-                                    .help(localizationManager.localizedString("settings.hud.showHUD.help"))
-                                    
+                                        }
+                                 ))
+                                .help(localizationManager.localizedString("settings.hud.showHUD.help"))
+
+                                HStack {
+                                    Text(localizationManager.localizedString("settings.hud.position"))
+                                    Picker("", selection: Binding(
+                                        get: { hud.hudConfiguration.position },
+                                        set: { position in
+                                            var config = hud.hudConfiguration
+                                            config.position = position
+                                            hud.updateConfiguration(config)
+                                        }
+                                    )) {
+                                        Text(localizationManager.localizedString("position.topLeft")).tag(HUDPosition.topLeft)
+                                        Text(localizationManager.localizedString("position.topRight")).tag(HUDPosition.topRight)
+                                        Text(localizationManager.localizedString("position.bottomLeft")).tag(HUDPosition.bottomLeft)
+                                        Text(localizationManager.localizedString("position.bottomRight")).tag(HUDPosition.bottomRight)
+                                    }
+                                    .pickerStyle(MenuPickerStyle())
+                                    .frame(width: 100)
+                                }
+
+ // 性能指标显示选项
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(localizationManager.localizedString("settings.hud.metrics.title"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+
                                     HStack {
-                                        Text(localizationManager.localizedString("settings.hud.position"))
-                                        Picker("", selection: Binding(
-                                            get: { hud.hudConfiguration.position },
-                                            set: { position in
+                                        Toggle(localizationManager.localizedString("metric.frameRate"), isOn: Binding(
+                                            get: { hud.hudConfiguration.showFrameRate },
+                                            set: { show in
                                                 var config = hud.hudConfiguration
-                                                config.position = position
+                                                config.showFrameRate = show
                                                 hud.updateConfiguration(config)
                                             }
-                                        )) {
-                                            Text(localizationManager.localizedString("position.topLeft")).tag(HUDPosition.topLeft)
-                                            Text(localizationManager.localizedString("position.topRight")).tag(HUDPosition.topRight)
-                                            Text(localizationManager.localizedString("position.bottomLeft")).tag(HUDPosition.bottomLeft)
-                                            Text(localizationManager.localizedString("position.bottomRight")).tag(HUDPosition.bottomRight)
-                                        }
-                                        .pickerStyle(MenuPickerStyle())
-                                        .frame(width: 100)
+                                        ))
+                                        .toggleStyle(.checkbox)
+
+                                        Toggle(localizationManager.localizedString("metric.gpuTime"), isOn: Binding(
+                                            get: { hud.hudConfiguration.showGPUTime },
+                                            set: { show in
+                                                var config = hud.hudConfiguration
+                                                config.showGPUTime = show
+                                                hud.updateConfiguration(config)
+                                            }
+                                        ))
+                                        .toggleStyle(.checkbox)
+
+                                        Toggle(localizationManager.localizedString("metric.memory"), isOn: Binding(
+                                            get: { hud.hudConfiguration.showMemoryUsage },
+                                            set: { show in
+                                                var config = hud.hudConfiguration
+                                                config.showMemoryUsage = show
+                                                hud.updateConfiguration(config)
+                                            }
+                                        ))
+                                        .toggleStyle(.checkbox)
                                     }
-                                    
- // 性能指标显示选项
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(localizationManager.localizedString("settings.hud.metrics.title"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        
-                                        HStack {
-                                            Toggle(localizationManager.localizedString("metric.frameRate"), isOn: Binding(
-                                                get: { hud.hudConfiguration.showFrameRate },
-                                                set: { show in
-                                                    var config = hud.hudConfiguration
-                                                    config.showFrameRate = show
-                                                    hud.updateConfiguration(config)
-                                                }
-                                            ))
-                                            .toggleStyle(.checkbox)
-                                            
-                                            Toggle(localizationManager.localizedString("metric.gpuTime"), isOn: Binding(
-                                                get: { hud.hudConfiguration.showGPUTime },
-                                                set: { show in
-                                                    var config = hud.hudConfiguration
-                                                    config.showGPUTime = show
-                                                    hud.updateConfiguration(config)
-                                                }
-                                            ))
-                                            .toggleStyle(.checkbox)
-                                            
-                                            Toggle(localizationManager.localizedString("metric.memory"), isOn: Binding(
-                                                get: { hud.hudConfiguration.showMemoryUsage },
-                                                set: { show in
-                                                    var config = hud.hudConfiguration
-                                                    config.showMemoryUsage = show
-                                                    hud.updateConfiguration(config)
-                                                }
-                                            ))
-                                            .toggleStyle(.checkbox)
-                                        }
-                                        .font(.caption)
-                                    }
+                                    .font(.caption)
                                 }
                             }
                         }
@@ -1024,24 +1017,29 @@ public struct SettingsView: View {
                 
                 settingsSection(localizationManager.localizedString("settings.advanced.pqc.title")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.enableAppLayer"), isOn: $settingsManager.enablePQC)
+                        HStack(spacing: 8) {
+                            Image(systemName: "lock.shield.fill")
+                                .foregroundColor(.green)
+                            Text(localizationManager.localizedString("settings.advanced.pqc.enableAppLayer"))
+                            Spacer()
+                            Text(localizationManager.localizedString("status.enabled"))
+                                .font(.caption)
+                                .foregroundColor(.green)
+                        }
+                        Text("策略强制启用")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                         Toggle(localizationManager.localizedString("settings.advanced.pqc.enableHybridTLS"), isOn: $settingsManager.enablePQCHybridTLS)
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.preferXWing"), isOn: $preferXWingHybrid)
+                        Toggle(localizationManager.localizedString("settings.advanced.pqc.preferXWing"), isOn: $settingsManager.preferXWingHybrid)
                             .help(localizationManager.localizedString("settings.advanced.pqc.preferXWing.help"))
-                            .onChange(of: preferXWingHybrid) { _, _ in
-                                Task {
-                                    await CryptoProviderSelector.shared.clearCache()
-                                }
-                            }
                         Text(localizationManager.localizedString("settings.advanced.pqc.preferXWing.caption"))
                             .font(.caption)
                             .foregroundColor(.secondary)
                         HStack {
                             Text(localizationManager.localizedString("settings.advanced.pqc.signatureAlgorithm"))
                             Picker("", selection: $settingsManager.pqcSignatureAlgorithm) {
-                                Text("ML-DSA").tag("ML-DSA")
-                                Text("SLH-DSA").tag("SLH-DSA")
-                                Text("Falcon").tag("Falcon")
+                                Text("ML-DSA-65").tag("ML-DSA-65")
+                                Text("ML-DSA-87").tag("ML-DSA-87")
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 120)
@@ -1282,13 +1280,9 @@ public struct SettingsView: View {
                         
                         HStack {
                             Text(localizationManager.localizedString("settings.fileTransfer.security.algorithm"))
-                            Picker("", selection: $settingsManager.encryptionAlgorithm) {
-                                Text("AES-256").tag("AES-256")
-                                Text("ChaCha20").tag("ChaCha20")
-                                Text("AES-128").tag("AES-128")
-                            }
-                            .pickerStyle(MenuPickerStyle())
-                            .frame(width: 120)
+                            Spacer()
+                            Text(settingsManager.encryptionAlgorithm.displayName)
+                                .foregroundColor(.secondary)
                         }
                     }
                 }
@@ -1614,6 +1608,17 @@ public struct SettingsView: View {
     }
     
  // MARK: - 远程桌面设置
+    private var remoteNetworkCompressionEnabled: Binding<Bool> {
+        Binding(
+            get: { remoteDesktopSettingsManager.settings.networkSettings.compressionLevel > 0 },
+            set: { isEnabled in
+                let currentLevel = remoteDesktopSettingsManager.settings.networkSettings.compressionLevel
+                let restoredLevel = currentLevel > 0 ? currentLevel : 6
+                remoteDesktopSettingsManager.settings.networkSettings.compressionLevel = isEnabled ? restoredLevel : 0
+            }
+        )
+    }
+
     private var remoteDesktopSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -1674,7 +1679,14 @@ public struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle(localizationManager.localizedString("settings.remote.network.enableBandwidthAdaptive"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableAdaptiveQuality)
                         Toggle(localizationManager.localizedString("settings.remote.network.enableUDP"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableUDPTransport)
-                        Toggle(localizationManager.localizedString("settings.remote.network.enableCompression"), isOn: $remoteDesktopSettingsManager.settings.networkSettings.enableEncryption)
+                        HStack {
+                            Text(localizationManager.localizedString("settings.remote.network.enableEncryption"))
+                            Spacer()
+                            Text("Strict-PQC / TLS 1.3")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.green)
+                        }
+                        Toggle(localizationManager.localizedString("settings.remote.network.enableCompression"), isOn: remoteNetworkCompressionEnabled)
                         
                         HStack {
                             Text(localizationManager.localizedString("settings.remote.network.bandwidthLimit"))
@@ -1692,10 +1704,10 @@ public struct SettingsView: View {
                         HStack {
                             Text(localizationManager.localizedString("settings.remote.network.bufferSize"))
                             Picker("", selection: $remoteDesktopSettingsManager.settings.networkSettings.bufferSize) {
-                                Text("32KB").tag(32768)
-                                Text("64KB").tag(65536)
-                                Text("128KB").tag(131072)
-                                Text("256KB").tag(262144)
+                                Text("512KB").tag(512)
+                                Text("1MB").tag(1024)
+                                Text("2MB").tag(2048)
+                                Text("4MB").tag(4096)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 100)
@@ -1762,7 +1774,7 @@ public struct SettingsView: View {
                         }
 
                         HStack {
-                            Text(localizationManager.localizedString("settings.systemMonitor.config.enableHistory"))
+                            Text(localizationManager.localizedString("settings.systemMonitor.config.maxHistoryPoints"))
                             Slider(value: $settingsManager.maxHistoryPoints, in: 50...2000, step: 50)
                             Text("\(Int(settingsManager.maxHistoryPoints))")
                                 .foregroundColor(.secondary)
@@ -1811,7 +1823,7 @@ public struct SettingsView: View {
                                 .frame(width: 40)
                         }
 
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.temperature"), isOn: $settingsManager.enableTemperatureMonitoring)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.enableTemperatureMonitoring"), isOn: $settingsManager.enableTemperatureMonitoring)
 
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.alerts.temperatureThreshold"))
@@ -1822,7 +1834,7 @@ public struct SettingsView: View {
                                 .frame(width: 50)
                         }
 
-                        Toggle(localizationManager.localizedString("settings.systemMonitor.display.fanSpeed"), isOn: $settingsManager.enableFanSpeedMonitoring)
+                        Toggle(localizationManager.localizedString("settings.systemMonitor.alerts.enableFanSpeedMonitoring"), isOn: $settingsManager.enableFanSpeedMonitoring)
 
                         HStack {
                             Text(localizationManager.localizedString("settings.systemMonitor.alerts.fanSpeedThreshold"))
@@ -2030,6 +2042,7 @@ public struct SettingsView: View {
     private func syncVideoQualityToRemoteDesktopSettings() {
         remoteDesktopSettingsManager.settings.displaySettings.resolution = remoteResolution(from: videoSettingsManager.selectedResolution)
         remoteDesktopSettingsManager.settings.displaySettings.refreshRate = remoteRefreshRate(from: videoSettingsManager.selectedFrameRate)
+        remoteDesktopSettingsManager.settings.displaySettings.targetFrameRate = videoSettingsManager.selectedFrameRate.rawValue
         remoteDesktopSettingsManager.settings.displaySettings.videoQuality = remoteVideoQuality(from: videoSettingsManager.compressionQuality)
         remoteDesktopSettingsManager.settings.displaySettings.enableHardwareAcceleration = videoSettingsManager.enableHardwareAcceleration
         remoteDesktopSettingsManager.settings.displaySettings.enableAppleSiliconOptimization = videoSettingsManager.enableAppleSiliconOptimization
@@ -2043,7 +2056,10 @@ public struct SettingsView: View {
         if let mappedResolution = videoResolution(from: displaySettings.resolution) {
             videoSettingsManager.selectedResolution = mappedResolution
         }
-        videoSettingsManager.selectedFrameRate = videoFrameRate(from: displaySettings.refreshRate)
+        videoSettingsManager.selectedFrameRate = videoFrameRate(
+            fromTargetFrameRate: displaySettings.targetFrameRate,
+            legacyRefreshRate: displaySettings.refreshRate
+        )
         videoSettingsManager.compressionQuality = compressionQuality(from: displaySettings.videoQuality)
         videoSettingsManager.enableHardwareAcceleration = displaySettings.enableHardwareAcceleration
         videoSettingsManager.enableAppleSiliconOptimization = displaySettings.enableAppleSiliconOptimization
@@ -2098,6 +2114,25 @@ public struct SettingsView: View {
         case .hz120, .hz144:
             return .fps120
         }
+    }
+
+    private func videoFrameRate(
+        fromTargetFrameRate targetFrameRate: Int,
+        legacyRefreshRate: RefreshRate
+    ) -> VideoFrameRate {
+        guard targetFrameRate > 0 else {
+            return videoFrameRate(from: legacyRefreshRate)
+        }
+        if targetFrameRate <= 45 {
+            return .fps30
+        }
+        if targetFrameRate < 90 {
+            return .fps60
+        }
+        if targetFrameRate >= 90 {
+            return .fps120
+        }
+        return videoFrameRate(from: legacyRefreshRate)
     }
 
     private func remoteVideoQuality(from compressionQuality: VideoCompressionQuality) -> VideoQuality {

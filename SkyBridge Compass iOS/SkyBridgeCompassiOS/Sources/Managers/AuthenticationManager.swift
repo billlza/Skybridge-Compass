@@ -4,6 +4,11 @@ import AuthenticationServices
 import Security
 import UIKit
 
+public struct RemoteControlSecurityIdentityMetadata: Sendable, Equatable {
+    public let accountDisplayName: String?
+    public let nebulaId: String?
+}
+
 /// 认证管理器 - 管理用户认证和会话
 @MainActor
 public class AuthenticationManager: ObservableObject {
@@ -69,6 +74,45 @@ public class AuthenticationManager: ObservableObject {
         Self.appleSignInLaunchReady
     }
 
+    public var remoteControlSecurityIdentityMetadata: RemoteControlSecurityIdentityMetadata {
+        let environment = ProcessInfo.processInfo.environment
+        let isSmoke = environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+        let smokeAccount = isSmoke
+            ? Self.normalizedIdentityValue(
+                environment["SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME"]
+                    ?? environment["SKYBRIDGE_DISPLAY_NAME"]
+            )
+            : nil
+        let smokeNebulaId = isSmoke
+            ? Self.normalizedIdentityValue(
+                environment["SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID"]
+                    ?? environment["SKYBRIDGE_NEBULA_ID"]
+                    ?? environment["SKYBRIDGE_TENANT_ID"]
+            )
+            : nil
+        let account = smokeAccount
+            ?? Self.normalizedIdentityValue(currentUser?.displayName)
+            ?? Self.normalizedIdentityValue(session?.displayName)
+            ?? Self.normalizedIdentityValue(currentUser?.email)
+            ?? Self.normalizedIdentityValue(session?.email)
+            ?? Self.normalizedIdentityValue(currentUser?.id)
+            ?? Self.normalizedIdentityValue(session?.userIdentifier)
+        let nebulaId = smokeNebulaId
+            ?? Self.normalizedIdentityValue(currentUser?.nebulaId)
+            ?? Self.normalizedIdentityValue(session?.nebulaId)
+        return RemoteControlSecurityIdentityMetadata(
+            accountDisplayName: account,
+            nebulaId: nebulaId
+        )
+    }
+
+    internal static func resolvedNebulaId(from userInfo: NebulaPublicClientOAuth.UserInfo) -> String? {
+        Self.normalizedIdentityValue(userInfo.nebulaId)
+            ?? (Self.isCanonicalNebulaId(userInfo.subject)
+                ? Self.normalizedIdentityValue(userInfo.subject)
+                : nil)
+    }
+
     public enum AuthFlowError: LocalizedError {
         case emailVerificationRequired
         case registrationBlocked(String)
@@ -123,6 +167,18 @@ public class AuthenticationManager: ObservableObject {
         ].joined(separator: "|")
         let digest = SHA256.hash(data: Data(seed.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func normalizedIdentityValue(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func isCanonicalNebulaId(_ raw: String?) -> Bool {
+        normalizedIdentityValue(raw)?.hasPrefix("NEBULA-") == true
     }
 
     private func formattedRiskMessage(reason: String?, retryAfter: Int?, fallback: String) -> String {
@@ -604,6 +660,7 @@ public class AuthenticationManager: ObservableObject {
         let (tokenResponse, userInfo) = try await NebulaPublicClientOAuth.shared.authenticateUsingSystemBrowser()
         let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? "Nebula User"
         let email = userInfo.email ?? "\(userInfo.subject)@nebula.local"
+        let nebulaId = Self.resolvedNebulaId(from: userInfo)
         let session = AuthSession(
             accessToken: tokenResponse.accessToken,
             refreshToken: tokenResponse.refreshToken,
@@ -611,7 +668,7 @@ public class AuthenticationManager: ObservableObject {
             displayName: displayName,
             email: userInfo.email,
             avatarURL: userInfo.picture,
-            nebulaId: nil,
+            nebulaId: nebulaId,
             issuedAt: Date()
         )
         applySession(session, emailFallback: email)
@@ -623,6 +680,7 @@ public class AuthenticationManager: ObservableObject {
         let (tokenResponse, userInfo) = try await NebulaPublicClientOAuth.shared.registerUsingSystemBrowser()
         let displayName = userInfo.name ?? userInfo.preferredUsername ?? userInfo.email ?? "Nebula User"
         let email = userInfo.email ?? "\(userInfo.subject)@nebula.local"
+        let nebulaId = Self.resolvedNebulaId(from: userInfo)
         let session = AuthSession(
             accessToken: tokenResponse.accessToken,
             refreshToken: tokenResponse.refreshToken,
@@ -630,7 +688,7 @@ public class AuthenticationManager: ObservableObject {
             displayName: displayName,
             email: userInfo.email,
             avatarURL: userInfo.picture,
-            nebulaId: nil,
+            nebulaId: nebulaId,
             issuedAt: Date()
         )
         applySession(session, emailFallback: email)

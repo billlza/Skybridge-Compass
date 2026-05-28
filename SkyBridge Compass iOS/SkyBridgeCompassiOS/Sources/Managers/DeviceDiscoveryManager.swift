@@ -141,6 +141,7 @@ enum PeerIdentityAliasResolver {
         if normalized.hasPrefix("id:") {
             let payload = String(normalized.dropFirst("id:".count))
             guard isPlausibleStableDeviceIdentifierPayload(payload) else { return nil }
+            guard !isLiteralIPAddress(payload) else { return nil }
             return "id:\(payload)"
         }
         if normalized.hasPrefix("host:")
@@ -151,7 +152,23 @@ enum PeerIdentityAliasResolver {
             return nil
         }
         guard isPlausibleStableDeviceIdentifierPayload(normalized) else { return nil }
+        guard !isLiteralIPAddress(normalized) else { return nil }
         return "id:\(normalized)"
+    }
+
+    static func isEndpointAlias(_ raw: String?) -> Bool {
+        guard let normalized = normalizedIdentifier(raw) else { return false }
+        if normalized.hasPrefix("recent:") {
+            return isEndpointAlias(String(normalized.dropFirst("recent:".count)))
+        }
+        if normalized.hasPrefix("host:") || normalized.hasPrefix("peer:") {
+            return true
+        }
+        if normalized.hasPrefix("id:") {
+            let payload = String(normalized.dropFirst("id:".count))
+            return isLiteralIPAddress(payload)
+        }
+        return isLiteralIPAddress(normalized)
     }
 
     static func lookupCandidates(for identifier: String?) -> [String] {
@@ -294,8 +311,10 @@ enum PeerIdentityAliasResolver {
             token = String(token.dropFirst("peer:".count))
         }
 
-        if token.hasPrefix("[") && token.hasSuffix("]") && token.count >= 2 {
-            token = String(token.dropFirst().dropLast())
+        if token.hasPrefix("["),
+           let closeBracket = token.firstIndex(of: "]"),
+           closeBracket > token.startIndex {
+            token = String(token[token.index(after: token.startIndex)..<closeBracket])
         }
 
         if let percent = token.firstIndex(of: "%") {
@@ -400,6 +419,9 @@ public class DeviceDiscoveryManager: ObservableObject {
 
     /// host/bonjour 等别名 -> 稳定 deviceId，避免入站连接退化成临时 host 身份
     private var identityAliasToDeviceId: [String: String] = [:]
+
+    /// 从 Bonjour TXT/endpoint 捕获的身份别名；用于保留 link-local IPv6 等不可路由但可认证的来源地址
+    private var discoveryIdentityAliasesByDeviceId: [String: Set<String>] = [:]
     
     /// 设备最后活动时间
     private var deviceLastActivity: [String: Date] = [:]
@@ -612,6 +634,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             deviceCache.removeAll()
             endpointToDeviceId.removeAll()
             identityAliasToDeviceId.removeAll()
+            discoveryIdentityAliasesByDeviceId.removeAll()
             deviceLastActivity.removeAll()
             liveBrowseEndpointKeysByServiceType.removeAll()
             updateDiscoveredDevices()
@@ -655,8 +678,9 @@ public class DeviceDiscoveryManager: ObservableObject {
             return
         }
         
-        // 创建 TXT 记录
-        let txtRecord = createTXTRecord(port: port)
+        // 创建 TXT 记录。Bonjour `deviceId` must be the same protocol authority
+        // identity used by MessageA/PIB; Apple mobile/vendor IDs are aliases only.
+        let txtRecord = await createTXTRecord(port: port)
         
         // 创建监听器参数
         let parameters = NWParameters.tcp
@@ -934,6 +958,8 @@ public class DeviceDiscoveryManager: ObservableObject {
             deviceCache[device.id] = device
         }
         endpointToDeviceId[result.endpoint.debugDescription] = device.id
+        discoveryIdentityAliasesByDeviceId[device.id, default: []]
+            .formUnion(identityAliases(from: result, txtRecord: extractTXTRecord(from: result)))
         deviceLastActivity[device.id] = Date()
         updateDiscoveredDevices()
         
@@ -982,6 +1008,9 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         endpointToDeviceId.removeValue(forKey: endpointKey)
+        if deviceCache[deviceId] == nil {
+            discoveryIdentityAliasesByDeviceId.removeValue(forKey: deviceId)
+        }
         updateDiscoveredDevices()
     }
     
@@ -995,6 +1024,8 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         endpointToDeviceId[result.endpoint.debugDescription] = device.id
+        discoveryIdentityAliasesByDeviceId[device.id, default: []]
+            .formUnion(identityAliases(from: result, txtRecord: extractTXTRecord(from: result)))
         deviceLastActivity[device.id] = Date()
         updateDiscoveredDevices()
     }
@@ -1200,6 +1231,48 @@ public class DeviceDiscoveryManager: ObservableObject {
         return record
     }
 
+    private func identityAliases(from result: NWBrowser.Result, txtRecord: [String: String]) -> Set<String> {
+        var aliases = Set<String>()
+
+        func appendHost(_ raw: String?) {
+            guard let alias = PeerIdentityAliasResolver.hostAlias(fromIPAddress: raw) else { return }
+            aliases.insert(alias)
+        }
+
+        func appendBonjour(name: String?, domain: String?) {
+            guard let name = BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(name) else { return }
+            let trimmedDomain = domain?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedDomain: String
+            if let trimmedDomain, !trimmedDomain.isEmpty {
+                resolvedDomain = trimmedDomain
+            } else {
+                resolvedDomain = "local."
+            }
+            for candidate in PeerIdentityAliasResolver.lookupCandidates(for: "bonjour:\(name)@\(resolvedDomain)") {
+                aliases.insert(candidate)
+            }
+        }
+
+        switch result.endpoint {
+        case .hostPort(let host, _):
+            appendHost(String(describing: host))
+        case .service(let name, _, let domain, _):
+            appendBonjour(name: name, domain: domain)
+        default:
+            break
+        }
+
+        let hostFields = [
+            "lanHost", "lanIPv4", "lanIPv6",
+            "host", "ip", "ipv4", "ipv6", "address", "hostAddress"
+        ]
+        for key in hostFields {
+            appendHost(txtValue(txtRecord, key))
+        }
+
+        return aliases
+    }
+
     // MARK: - Merge / Capabilities helpers
 
     private func merge(existing: DiscoveredDevice, update: DiscoveredDevice) -> DiscoveredDevice {
@@ -1215,9 +1288,19 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         // platform/osVersion/model：尽量补齐（避免 Unknown 覆盖有效值）
-        if merged.platform == .unknown && update.platform != .unknown { merged.platform = update.platform }
+        if merged.platform == .unknown && update.platform != .unknown {
+            merged.platform = update.platform
+        } else if merged.platform == .iOS,
+                  update.platform == .iPadOS,
+                  isIPadPresentation(update) {
+            merged.platform = .iPadOS
+        }
         if isUnknownValue(merged.osVersion) && !isUnknownValue(update.osVersion) { merged.osVersion = update.osVersion }
-        if isUnknownValue(merged.modelName) && !isUnknownValue(update.modelName) { merged.modelName = update.modelName }
+        if isUnknownValue(merged.modelName) && !isUnknownValue(update.modelName) {
+            merged.modelName = update.modelName
+        } else if discoveryGenericModel(normalizedDiscoveryName(merged.modelName), containsDetailedModel: normalizedDiscoveryName(update.modelName)) {
+            merged.modelName = update.modelName
+        }
 
         // 最新 IP / Bonjour type/domain（优先保留可路由 LAN 地址，避免 Bonjour service 解析退回 link-local）。
         if let bestAddress = ConnectableAddressCanonicalizer.bestLANAddress([
@@ -1278,7 +1361,9 @@ public class DeviceDiscoveryManager: ObservableObject {
 
         for device in deviceCache.values.sorted(by: { $0.lastSeen > $1.lastSeen }) {
             let score = aliasPriority(for: device)
-            for alias in PeerIdentityAliasResolver.aliasKeys(for: device) {
+            let aliases = Set(PeerIdentityAliasResolver.aliasKeys(for: device))
+                .union(discoveryIdentityAliasesByDeviceId[device.id] ?? [])
+            for alias in aliases {
                 let existingScore = ownerScores[alias] ?? Int.min
                 if aliasMap[alias] == nil || score >= existingScore {
                     aliasMap[alias] = device.id
@@ -1592,16 +1677,25 @@ public class DeviceDiscoveryManager: ObservableObject {
 
         if isLoopbackEndpoint(connection.endpoint) {
             SkyBridgeLogger.shared.warning("⚠️ 已忽略回环地址入站连接: \(endpointDescription)")
+            SkyBridgeSmokeTraceWriter.appendStatus(
+                "p2p-listener inbound-ignored reason=loopback endpoint=\(Self.smokeSanitize(endpointDescription))"
+            )
             connection.cancel()
             return
         }
 
         SkyBridgeLogger.shared.info("📞 收到新连接: \(endpointDescription)")
+        SkyBridgeSmokeTraceWriter.appendStatus(
+            "p2p-listener inbound-new endpoint=\(Self.smokeSanitize(endpointDescription))"
+        )
 
         let peerId = extractPeerId(from: connection)
         if let localStableDeviceId,
            peerId.caseInsensitiveCompare(localStableDeviceId) == .orderedSame {
             SkyBridgeLogger.shared.warning("⚠️ 已忽略疑似自连接入站连接: \(peerId)")
+            SkyBridgeSmokeTraceWriter.appendStatus(
+                "p2p-listener inbound-ignored reason=self peer=\(Self.smokeSanitize(peerId))"
+            )
             connection.cancel()
             return
         }
@@ -1611,13 +1705,22 @@ public class DeviceDiscoveryManager: ObservableObject {
                 switch state {
                 case .ready:
                     SkyBridgeLogger.shared.info("✅ 入站连接就绪: \(peerId)")
+                    SkyBridgeSmokeTraceWriter.appendStatus(
+                        "p2p-listener inbound-ready peer=\(Self.smokeSanitize(peerId))"
+                    )
                     self?.onNewConnection?(connection, peerId)
 
                 case .failed(let error):
                     SkyBridgeLogger.shared.error("❌ 入站连接失败: \(error.localizedDescription)")
+                    SkyBridgeSmokeTraceWriter.appendStatus(
+                        "p2p-listener inbound-failed peer=\(Self.smokeSanitize(peerId)) error=\(Self.smokeSanitize(error.localizedDescription))"
+                    )
 
                 case .cancelled:
                     SkyBridgeLogger.shared.info("⏹️ 入站连接已取消")
+                    SkyBridgeSmokeTraceWriter.appendStatus(
+                        "p2p-listener inbound-cancelled peer=\(Self.smokeSanitize(peerId))"
+                    )
 
                 default:
                     break
@@ -1626,6 +1729,13 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
 
         connection.start(queue: queue)
+    }
+
+    private nonisolated static func smokeSanitize(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
     private func extractPeerId(from connection: NWConnection) -> String {
@@ -1702,7 +1812,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     // MARK: - Private Methods - TXT Record
     
     /// 创建 TXT 记录（用于广播）
-    private func createTXTRecord(port: UInt16) -> NWTXTRecord {
+    private func createTXTRecord(port: UInt16) async -> NWTXTRecord {
         var record = NWTXTRecord()
         
         // 平台信息
@@ -1740,17 +1850,58 @@ public class DeviceDiscoveryManager: ObservableObject {
         
         // 设备 ID（用于与 macOS 端对齐的稳定主键；不要截断，避免碰撞）
         #if canImport(UIKit)
-        let snapshot = AppleMobileDeviceIdentity.currentSnapshot()
-        if !snapshot.stableDeviceId.isEmpty {
-            record["deviceId"] = snapshot.stableDeviceId
-            record["uuid"] = snapshot.stableDeviceId
+        let mobileSnapshot = AppleMobileDeviceIdentity.currentSnapshot()
+        let protocolDeviceId = ProtocolDeviceIdentity.stableDeviceId()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let mobileStableId = mobileSnapshot.stableDeviceId
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let advertisedDeviceId = protocolDeviceId.isEmpty ? mobileStableId : protocolDeviceId
+
+        if !advertisedDeviceId.isEmpty {
+            record["deviceId"] = advertisedDeviceId
+            record["uuid"] = advertisedDeviceId
+            record["uniqueId"] = advertisedDeviceId
         }
-        if let vendorDeviceId = snapshot.vendorDeviceId, !vendorDeviceId.isEmpty {
+        if let protocolFingerprint = await localProtocolIdentityFingerprintForAdvertisement() {
+            record["pubKeyFP"] = protocolFingerprint
+            record["identityFingerprint"] = protocolFingerprint
+        }
+        if !mobileStableId.isEmpty, mobileStableId != advertisedDeviceId {
+            record["legacyDeviceId"] = mobileStableId
+            record["appleMobileStableId"] = mobileStableId
+        }
+        if let vendorDeviceId = mobileSnapshot.vendorDeviceId, !vendorDeviceId.isEmpty {
             record["vendorDeviceId"] = vendorDeviceId
         }
         #endif
         
         return record
+    }
+
+    private func localProtocolIdentityFingerprintForAdvertisement() async -> String? {
+        do {
+            try await SkyBridgeiOSCore.shared.initialize(policy: .requirePQC)
+            for algorithm in [ProtocolSigningAlgorithm.mlDSA65, .ed25519] {
+                let publicKey = try await SkyBridgeiOSCore.shared.getProtocolSigningPublicKey(for: algorithm)
+                let keyInfo = AppMessage.ProtocolIdentityPublicKeyInfo(
+                    protocolSigningAlgorithm: algorithm.rawValue,
+                    publicKey: publicKey
+                )
+                if let fingerprint = keyInfo.authoritativeFingerprint?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased(),
+                   fingerprint.count == 64,
+                   fingerprint.allSatisfy(\.isHexDigit) {
+                    return fingerprint
+                }
+            }
+        } catch {
+            SkyBridgeLogger.shared.debug(
+                "ℹ️ Bonjour protocol identity fingerprint unavailable: \(error.localizedDescription)"
+            )
+        }
+
+        return nil
     }
     
     // MARK: - Private Methods - Cleanup
@@ -1833,6 +1984,7 @@ public class DeviceDiscoveryManager: ObservableObject {
     
     /// 更新发现的设备列表
     private func updateDiscoveredDevices() {
+        coalesceEquivalentCachedDevices()
         rebuildIdentityAliasIndex()
 
         // 按最后活动时间排序
@@ -1844,6 +1996,337 @@ public class DeviceDiscoveryManager: ObservableObject {
             grouped[device.platform, default: []].append(device)
         }
         devicesByPlatform = grouped
+    }
+
+    private func coalesceEquivalentCachedDevices() {
+        let devices = Array(deviceCache.values)
+        guard devices.count > 1 else { return }
+
+        var parent = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0.id) })
+
+        func find(_ id: String) -> String {
+            var current = id
+            while let next = parent[current], next != current {
+                current = next
+            }
+            return current
+        }
+
+        func union(_ lhs: String, _ rhs: String) {
+            let lhsRoot = find(lhs)
+            let rhsRoot = find(rhs)
+            guard lhsRoot != rhsRoot else { return }
+            parent[rhsRoot] = lhsRoot
+        }
+
+        for lhsIndex in devices.indices {
+            for rhsIndex in devices.index(after: lhsIndex)..<devices.endIndex {
+                if shouldCoalesceDiscoveryDevices(devices[lhsIndex], devices[rhsIndex]) {
+                    union(devices[lhsIndex].id, devices[rhsIndex].id)
+                }
+            }
+        }
+
+        var groups: [String: [DiscoveredDevice]] = [:]
+        for device in devices {
+            groups[find(device.id), default: []].append(device)
+        }
+
+        guard groups.values.contains(where: { $0.count > 1 }) else { return }
+
+        var replacementByOriginalId: [String: String] = [:]
+        var nextCache: [String: DiscoveredDevice] = [:]
+        var nextLastActivity: [String: Date] = [:]
+
+        for group in groups.values {
+            let merged = mergeEquivalentDiscoveryGroup(group)
+            nextCache[merged.id] = merged
+            nextLastActivity[merged.id] = group
+                .compactMap { deviceLastActivity[$0.id] }
+                .max()
+                ?? group.map(\.lastSeen).max()
+                ?? Date()
+            for device in group {
+                replacementByOriginalId[device.id] = merged.id
+            }
+        }
+
+        deviceCache = nextCache
+        deviceLastActivity = nextLastActivity
+        endpointToDeviceId = endpointToDeviceId.reduce(into: [:]) { result, element in
+            result[element.key] = replacementByOriginalId[element.value] ?? element.value
+        }
+        discoveryIdentityAliasesByDeviceId = discoveryIdentityAliasesByDeviceId.reduce(into: [:]) { result, element in
+            let replacementId = replacementByOriginalId[element.key] ?? element.key
+            result[replacementId, default: []].formUnion(element.value)
+        }
+    }
+
+    private func shouldCoalesceDiscoveryDevices(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
+        guard lhs.id != rhs.id else { return true }
+
+        let lhsPersistent = PeerIdentityAliasResolver.persistentDeviceId(from: lhs.id)
+        let rhsPersistent = PeerIdentityAliasResolver.persistentDeviceId(from: rhs.id)
+        if let lhsPersistent, let rhsPersistent, lhsPersistent != rhsPersistent {
+            return false
+        }
+
+        let lhsAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: lhs))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: lhs.id))
+        let rhsAliases = Set(PeerIdentityAliasResolver.aliasKeys(for: rhs))
+            .union(PeerIdentityAliasResolver.lookupCandidates(for: rhs.id))
+        if !lhsAliases.isEmpty, !lhsAliases.isDisjoint(with: rhsAliases) {
+            return true
+        }
+
+        guard discoveryModelsCompatible(lhs.modelName, rhs.modelName) else { return false }
+        guard discoveryPlatformsCompatible(lhs.platform, rhs.platform) else { return false }
+        guard discoveryCandidateAddressesCompatible(lhs, rhs) else { return false }
+        guard hasAuthoritativeDiscoveryAnchor(lhs, rhs) else { return false }
+        guard hasEndpointDiscoveryRoute(lhs, rhs) else { return false }
+
+        if discoveryNamesRepresentSameDevice(lhs.name, rhs.name) {
+            return true
+        }
+
+        return discoveryMacNamesRepresentSameDevice(lhs.name, rhs.name)
+            && isAppleMacPresentation(lhs)
+            && isAppleMacPresentation(rhs)
+            && hasSkyBridgeDiscoveryRouteEvidence(lhs)
+            && hasSkyBridgeDiscoveryRouteEvidence(rhs)
+    }
+
+    private func mergeEquivalentDiscoveryGroup(_ group: [DiscoveredDevice]) -> DiscoveredDevice {
+        guard var merged = group.sorted(by: shouldPreferDiscoveryDevice).first else {
+            fatalError("mergeEquivalentDiscoveryGroup requires at least one device")
+        }
+
+        for device in group where device.id != merged.id {
+            merged = merge(existing: merged, update: device)
+        }
+
+        if let preferredId = group.map(\.id).max(by: { identifierPriority($0) < identifierPriority($1) }),
+           preferredId != merged.id {
+            merged = copyDiscoveryDevice(merged, id: preferredId)
+        }
+
+        merged.lastSeen = group.map(\.lastSeen).max() ?? merged.lastSeen
+        merged.isConnected = group.contains(where: \.isConnected)
+        merged.isTrusted = group.contains(where: \.isTrusted)
+        return merged
+    }
+
+    private func copyDiscoveryDevice(_ device: DiscoveredDevice, id: String) -> DiscoveredDevice {
+        DiscoveredDevice(
+            id: id,
+            name: device.name,
+            bonjourServiceName: device.bonjourServiceName,
+            modelName: device.modelName,
+            platform: device.platform,
+            osVersion: device.osVersion,
+            ipAddress: device.ipAddress,
+            bonjourServiceType: device.bonjourServiceType,
+            bonjourServiceDomain: device.bonjourServiceDomain,
+            services: device.services,
+            portMap: device.portMap,
+            signalStrength: device.signalStrength,
+            lastSeen: device.lastSeen,
+            isConnected: device.isConnected,
+            isTrusted: device.isTrusted,
+            publicKey: device.publicKey,
+            advertisedCapabilities: device.advertisedCapabilities,
+            capabilities: device.capabilities
+        )
+    }
+
+    private func shouldPreferDiscoveryDevice(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
+        let lhsPriority = identifierPriority(lhs.id)
+        let rhsPriority = identifierPriority(rhs.id)
+        if lhsPriority != rhsPriority {
+            return lhsPriority > rhsPriority
+        }
+        if hasBonjourRoute(lhs) != hasBonjourRoute(rhs) {
+            return hasBonjourRoute(lhs)
+        }
+        if lhs.ipAddress != nil, rhs.ipAddress == nil { return true }
+        if lhs.ipAddress == nil, rhs.ipAddress != nil { return false }
+        return lhs.lastSeen > rhs.lastSeen
+    }
+
+    private func identifierPriority(_ id: String) -> Int {
+        let normalized = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("id:") { return 500 }
+        if normalized.hasPrefix("bonjour:") { return 320 }
+        if normalized.hasPrefix("host:") { return 220 }
+        if normalized.hasPrefix("endpoint:") { return 120 }
+        return 80
+    }
+
+    private func isStrongDiscoveryIdentifier(_ id: String) -> Bool {
+        id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("id:")
+    }
+
+    private func hasBonjourRoute(_ device: DiscoveredDevice) -> Bool {
+        device.bonjourServiceName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            || device.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("bonjour:")
+    }
+
+    private func hasAuthoritativeDiscoveryAnchor(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
+        authoritativeDiscoveryAnchor(lhs) || authoritativeDiscoveryAnchor(rhs)
+    }
+
+    private func authoritativeDiscoveryAnchor(_ device: DiscoveredDevice) -> Bool {
+        isStrongDiscoveryIdentifier(device.id) && (device.isTrusted || device.isConnected)
+    }
+
+    private func hasEndpointDiscoveryRoute(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
+        hasEndpointDiscoveryRoute(lhs) || hasEndpointDiscoveryRoute(rhs)
+    }
+
+    private func hasEndpointDiscoveryRoute(_ device: DiscoveredDevice) -> Bool {
+        !isStrongDiscoveryIdentifier(device.id) && hasSkyBridgeDiscoveryRouteEvidence(device)
+    }
+
+    private func discoveryCandidateAddressesCompatible(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
+        guard let lhsIP = normalizedDiscoveryAddress(lhs.ipAddress),
+              let rhsIP = normalizedDiscoveryAddress(rhs.ipAddress) else {
+            return true
+        }
+        return lhsIP == rhsIP
+    }
+
+    private func normalizedDiscoveryAddress(_ raw: String?) -> String? {
+        guard var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !token.isEmpty else {
+            return nil
+        }
+        if let percent = token.firstIndex(of: "%") {
+            token = String(token[..<percent])
+        }
+        return token
+    }
+
+    private func isIPadPresentation(_ device: DiscoveredDevice) -> Bool {
+        [
+            device.name,
+            device.modelName,
+            device.platform.rawValue
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        .contains("ipad")
+    }
+
+    private func discoveryNamesRepresentSameDevice(_ lhs: String, _ rhs: String) -> Bool {
+        let lhs = normalizedDiscoveryName(lhs)
+        let rhs = normalizedDiscoveryName(rhs)
+        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        if lhs == rhs { return true }
+        let minLength = min(lhs.count, rhs.count)
+        guard minLength >= 8 else { return false }
+        return lhs.contains(rhs) || rhs.contains(lhs)
+    }
+
+    private func discoveryMacNamesRepresentSameDevice(_ lhs: String, _ rhs: String) -> Bool {
+        let lhsName = normalizedDiscoveryName(lhs)
+        let rhsName = normalizedDiscoveryName(rhs)
+        let lhsIsModelIdentifier = isAppleMacHardwareModelIdentifier(lhsName)
+        let rhsIsModelIdentifier = isAppleMacHardwareModelIdentifier(rhsName)
+        guard lhsIsModelIdentifier != rhsIsModelIdentifier else {
+            return false
+        }
+
+        let presentationName = lhsIsModelIdentifier ? rhsName : lhsName
+        return discoveryAppleDeviceFamilyToken(presentationName) == "mac"
+    }
+
+    private func isAppleMacHardwareModelIdentifier(_ normalizedName: String) -> Bool {
+        guard normalizedName.contains(where: { $0.isNumber }) else { return false }
+        return normalizedName.hasPrefix("macbookpro")
+            || normalizedName.hasPrefix("macbookair")
+            || normalizedName.hasPrefix("macmini")
+            || normalizedName.hasPrefix("macstudio")
+            || normalizedName.hasPrefix("macpro")
+            || normalizedName.hasPrefix("imac")
+    }
+
+    private func isAppleMacPresentation(_ device: DiscoveredDevice) -> Bool {
+        if device.platform == .macOS { return true }
+        return discoveryAppleDeviceFamilyToken(
+            [
+                device.modelName,
+                device.name,
+                device.platform.rawValue
+            ].joined(separator: " ")
+        ) == "mac"
+    }
+
+    private func discoveryAppleDeviceFamilyToken(_ raw: String) -> String? {
+        let normalized = normalizedDiscoveryName(raw)
+        guard !normalized.isEmpty else { return nil }
+        if normalized.contains("ipad") { return "ipad" }
+        if normalized.contains("iphone") || normalized.contains("ios") { return "iphone" }
+        if normalized.contains("macbook")
+            || normalized.contains("macmini")
+            || normalized.contains("macstudio")
+            || normalized.contains("macpro")
+            || normalized.contains("imac")
+            || normalized == "mac"
+            || normalized == "macos" {
+            return "mac"
+        }
+        return nil
+    }
+
+    private func hasSkyBridgeDiscoveryRouteEvidence(_ device: DiscoveredDevice) -> Bool {
+        if hasBonjourRoute(device) || device.ipAddress != nil {
+            return true
+        }
+
+        let routeHints = device.services
+            + Array(device.portMap.keys)
+            + [device.bonjourServiceType, device.id].compactMap { $0 }
+        return routeHints.contains { hint in
+            hint.trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .contains("skybridge")
+        }
+    }
+
+    private func discoveryModelsCompatible(_ lhs: String, _ rhs: String) -> Bool {
+        let lhs = normalizedDiscoveryName(lhs)
+        let rhs = normalizedDiscoveryName(rhs)
+        guard !lhs.isEmpty, !rhs.isEmpty else { return true }
+        if lhs == rhs { return true }
+        return discoveryGenericModel(lhs, containsDetailedModel: rhs)
+            || discoveryGenericModel(rhs, containsDetailedModel: lhs)
+    }
+
+    private func discoveryGenericModel(_ generic: String, containsDetailedModel detailed: String) -> Bool {
+        switch generic {
+        case "ipad":
+            return detailed.hasPrefix("ipad")
+        case "iphone":
+            return detailed.hasPrefix("iphone")
+        case "mac":
+            return detailed.hasPrefix("mac")
+        default:
+            return false
+        }
+    }
+
+    private func discoveryPlatformsCompatible(_ lhs: DevicePlatform, _ rhs: DevicePlatform) -> Bool {
+        if lhs == .unknown || rhs == .unknown || lhs == rhs {
+            return true
+        }
+        let mobile: Set<DevicePlatform> = [.iOS, .iPadOS]
+        return mobile.contains(lhs) && mobile.contains(rhs)
+    }
+
+    private func normalizedDiscoveryName(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
     }
     
     // MARK: - Public Helpers
@@ -2041,12 +2524,13 @@ extension NWTXTRecord {
         // 但我们需要遍历已知的键
         let knownKeys = [
             // identity
-            "deviceId", "deviceID", "device_id", "uuid", "id", "uniqueId", "unique_id", "pubKeyFP", "pubKeyFp",
+            "deviceId", "deviceID", "device_id", "uuid", "id", "uniqueId", "unique_id",
+            "pubKeyFP", "pubKeyFp", "pub_key_fp", "identityFingerprint",
             // system
             "platform", "osVersion", "os_version", "platformVersion", "platform_version", "os", "systemVersion",
             "model", "hardwareModel", "hwModel", "name",
             // features
-            "capabilities", "pqc", "version", "kemRefreshVersion", "kemKeyDigest",
+            "capabilities", "pqc", "version", "kemRefreshVersion", "kemKeyDigest", "hs_soa", "HS_SOA",
             // signal
             "rssi", "signalStrength", "signal_strength", "signal",
             // ports (for UI)

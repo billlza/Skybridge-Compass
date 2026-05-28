@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Network
 
 @available(iOS 17.0, *)
 @MainActor
@@ -7,11 +9,65 @@ final class LocalP2PSmokeHarness {
     private static let xwingSuiteWireID: UInt16 = 0x0001
     private static let mlkem768SuiteWireID: UInt16 = 0x0101
     private static let mlkem768FSSuiteWireID: UInt16 = 0x0102
+    private static let remoteControlRoutePreflightProbePayload = Data(
+        "SKYBRIDGE_REMOTE_ROUTE_PROBE_V1\n".utf8
+    )
 
     private var didStart = false
     private let runStartedAt = Date()
 
     private init() {}
+
+    private final class ControlRouteProbeGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Void, Error>?
+        private var result: Result<Void, Error>?
+
+        func finish(_ result: Result<Void, Error>) {
+            lock.lock()
+            guard self.result == nil else {
+                lock.unlock()
+                return
+            }
+            self.result = result
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+
+            guard let continuation else { return }
+            switch result {
+            case .success:
+                continuation.resume()
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+        }
+
+        func wait(timeoutSeconds: Double) async throws {
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                guard !Task.isCancelled else { return }
+                self?.finish(.failure(P2PError.connectionFailed))
+            }
+            defer { timeoutTask.cancel() }
+
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                lock.lock()
+                if let result {
+                    lock.unlock()
+                    switch result {
+                    case .success:
+                        continuation.resume()
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                    return
+                }
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
 
     var isEnabled: Bool {
         role == "ios-p2p-client"
@@ -30,6 +86,18 @@ final class LocalP2PSmokeHarness {
     private var targetDeviceName: String {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TARGET_NAME"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var targetControlHost: String? {
+        environmentValue("SKYBRIDGE_SMOKE_TARGET_HOST")
+    }
+
+    private var targetControlPort: UInt16? {
+        positiveEnvironmentUInt16("SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT")
+    }
+
+    private var targetRemoteControlPort: UInt16? {
+        positiveEnvironmentUInt16("SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT")
     }
 
     private var expectsPQCRekey: Bool {
@@ -98,6 +166,14 @@ final class LocalP2PSmokeHarness {
         return value
     }
 
+    private func positiveEnvironmentUInt16(_ name: String) -> UInt16? {
+        guard let value = positiveEnvironmentInteger(name),
+              value <= Int(UInt16.max) else {
+            return nil
+        }
+        return UInt16(value)
+    }
+
     private func positiveEnvironmentDouble(_ name: String) -> Double? {
         guard let raw = environmentValue(name),
               let value = Double(raw),
@@ -122,6 +198,7 @@ final class LocalP2PSmokeHarness {
             expectRekey=\(expectsPQCRekey ? 1 : 0) preferred=\(Self.sanitize(environmentValue("SB_PQC_PREFERRED_SUITE") ?? "default"))
             """
         )
+        await exportLocalPQCIdentityIfNeeded(reporter: reporter)
         if expectsPQCRekey {
             reporter.append("failed stage=pqc-policy error=classic_bootstrap_rekey_disabled_strict_pqc")
             return
@@ -192,9 +269,16 @@ final class LocalP2PSmokeHarness {
 
             if selectedDevice == nil,
                let target = resolveTargetDevice(from: discoveryManager.discoveredDevices) {
-                selectedDevice = target
+                let routedTarget = applySmokePinnedControlRoute(to: target, reporter: reporter)
+                guard await verifySmokePinnedControlRouteIfNeeded(reporter: reporter) else {
+                    return
+                }
+                guard await verifySmokePinnedRemoteControlRouteIfNeeded(reporter: reporter) else {
+                    return
+                }
+                selectedDevice = routedTarget
                 reporter.append(
-                    "target id=\(Self.sanitize(target.id)) name=\(Self.sanitize(target.name))"
+                    "target id=\(Self.sanitize(routedTarget.id)) name=\(Self.sanitize(routedTarget.name))"
                 )
             }
 
@@ -520,6 +604,19 @@ final class LocalP2PSmokeHarness {
             .appendingPathComponent(fileName)
     }
 
+    private func pqcReportURL() -> URL? {
+        guard let fileName = environmentValue("SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME") else {
+            return nil
+        }
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent(fileName)
+    }
+
+    private func resolvedLocalDeviceID() -> String {
+        ProtocolDeviceIdentity.stableDeviceId()
+    }
+
     private func resolveTargetDevice(from devices: [DiscoveredDevice]) -> DiscoveredDevice? {
         let normalizedTarget = targetDeviceID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if !normalizedTarget.isEmpty {
@@ -546,6 +643,256 @@ final class LocalP2PSmokeHarness {
                 || deviceName.contains(normalizedName)
                 || bonjourName.contains(normalizedName)
         }
+    }
+
+    private func applySmokePinnedControlRoute(
+        to target: DiscoveredDevice,
+        reporter: SmokeStatusReporter
+    ) -> DiscoveredDevice {
+        let controlService = "_skybridge._tcp"
+        let remoteService = DiscoveredDevice.remoteControlServiceType
+        let previousHost = target.ipAddress
+        let previousPort = target.portMap[controlService]
+        let previousRemotePort = target.portMap[remoteService]
+        var updated = target
+        var changed = false
+
+        if let host = targetControlHost {
+            updated.ipAddress = host
+            changed = changed || previousHost != host
+        }
+        if let port = targetControlPort {
+            updated.portMap[controlService] = port
+            if !updated.services.contains(controlService) {
+                updated.services.append(controlService)
+            }
+            if updated.bonjourServiceType == nil {
+                updated.bonjourServiceType = controlService
+            }
+            changed = changed || previousPort != port
+        }
+        if let remotePort = targetRemoteControlPort {
+            updated.portMap[remoteService] = remotePort
+            if !updated.services.contains(remoteService) {
+                updated.services.append(remoteService)
+            }
+            changed = changed || previousRemotePort != remotePort
+        }
+
+        if changed {
+            reporter.append(
+                """
+                target-route source=smoke-env host=\(Self.sanitize(updated.ipAddress ?? "-")) \
+                controlPort=\(updated.portMap[controlService].map(String.init) ?? "-") \
+                remotePort=\(updated.portMap[remoteService].map(String.init) ?? "-") \
+                previousHost=\(Self.sanitize(previousHost ?? "-")) previousControlPort=\(previousPort.map(String.init) ?? "-") \
+                previousRemotePort=\(previousRemotePort.map(String.init) ?? "-")
+                """
+            )
+        }
+        return updated
+    }
+
+    private func verifySmokePinnedControlRouteIfNeeded(
+        reporter: SmokeStatusReporter
+    ) async -> Bool {
+        guard let host = targetControlHost,
+              let port = targetControlPort,
+              let endpointPort = NWEndpoint.Port(rawValue: port) else {
+            return true
+        }
+
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: endpointPort)
+        let variants: [(label: String, includePeerToPeer: Bool)] = [
+            ("direct", false),
+            ("peer-to-peer", true)
+        ]
+        var failures: [String] = []
+
+        for variant in variants {
+            reporter.append(
+                """
+                control-route-preflight start host=\(Self.sanitize(host)) port=\(port) \
+                mode=\(variant.label) includePeerToPeer=\(variant.includePeerToPeer ? 1 : 0)
+                """
+            )
+            do {
+                try await probeSmokeControlRoute(
+                    endpoint: endpoint,
+                    label: variant.label,
+                    includePeerToPeer: variant.includePeerToPeer,
+                    markerPrefix: "control-route-preflight",
+                    reporter: reporter
+                )
+                reporter.append(
+                    """
+                    control-route-preflight ready host=\(Self.sanitize(host)) port=\(port) \
+                    mode=\(variant.label)
+                    """
+                )
+                return true
+            } catch {
+                let detail = "\(variant.label):\(Self.sanitize(error.localizedDescription))"
+                failures.append(detail)
+                reporter.append(
+                    """
+                    control-route-preflight failed host=\(Self.sanitize(host)) port=\(port) \
+                    mode=\(variant.label) error=\(Self.sanitize(error.localizedDescription))
+                    """
+                )
+            }
+        }
+
+        reporter.append(
+            """
+            failed stage=control-route-preflight error=ios_app_nwconnection_unable_to_reach_mac_control_port \
+            host=\(Self.sanitize(host)) port=\(port) attempts=\(Self.sanitize(failures.joined(separator: ",")))
+            """
+        )
+        return false
+    }
+
+    private func verifySmokePinnedRemoteControlRouteIfNeeded(
+        reporter: SmokeStatusReporter
+    ) async -> Bool {
+        guard let host = targetControlHost,
+              let port = targetRemoteControlPort,
+              let endpointPort = NWEndpoint.Port(rawValue: port) else {
+            return true
+        }
+
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: endpointPort)
+        let variants: [(label: String, includePeerToPeer: Bool)] = [
+            ("direct", false),
+            ("peer-to-peer", true)
+        ]
+        var failures: [String] = []
+
+        for variant in variants {
+            reporter.append(
+                """
+                remote-route-preflight start host=\(Self.sanitize(host)) port=\(port) \
+                mode=\(variant.label) includePeerToPeer=\(variant.includePeerToPeer ? 1 : 0)
+                """
+            )
+            do {
+                try await probeSmokeControlRoute(
+                    endpoint: endpoint,
+                    label: variant.label,
+                    includePeerToPeer: variant.includePeerToPeer,
+                    markerPrefix: "remote-route-preflight",
+                    probePayload: Self.remoteControlRoutePreflightProbePayload,
+                    reporter: reporter
+                )
+                reporter.append(
+                    """
+                    remote-route-preflight ready host=\(Self.sanitize(host)) port=\(port) \
+                    mode=\(variant.label)
+                    """
+                )
+                return true
+            } catch {
+                let detail = "\(variant.label):\(Self.sanitize(error.localizedDescription))"
+                failures.append(detail)
+                reporter.append(
+                    """
+                    remote-route-preflight failed host=\(Self.sanitize(host)) port=\(port) \
+                    mode=\(variant.label) error=\(Self.sanitize(error.localizedDescription))
+                    """
+                )
+            }
+        }
+
+        reporter.append(
+            """
+            failed stage=remote-route-preflight error=ios_app_nwconnection_unable_to_reach_mac_remote_control_port \
+            host=\(Self.sanitize(host)) port=\(port) attempts=\(Self.sanitize(failures.joined(separator: ",")))
+            """
+        )
+        return false
+    }
+
+    private func probeSmokeControlRoute(
+        endpoint: NWEndpoint,
+        label: String,
+        includePeerToPeer: Bool,
+        markerPrefix: String,
+        probePayload: Data? = nil,
+        reporter: SmokeStatusReporter
+    ) async throws {
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = includePeerToPeer
+        parameters.allowLocalEndpointReuse = true
+        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.noDelay = true
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 30
+            tcp.keepaliveInterval = 15
+            tcp.keepaliveCount = 4
+        }
+
+        let connection = NWConnection(to: endpoint, using: parameters)
+        let gate = ControlRouteProbeGate()
+        let endpointDescription = String(describing: endpoint)
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .setup:
+                reporter.append("\(markerPrefix) state=setup mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
+            case .preparing:
+                reporter.append("\(markerPrefix) state=preparing mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
+            case .waiting(let error):
+                reporter.append(
+                    """
+                    \(markerPrefix) state=waiting mode=\(label) endpoint=\(Self.sanitize(endpointDescription)) \
+                    error=\(Self.sanitize(error.localizedDescription))
+                    """
+                )
+            case .ready:
+                reporter.append("\(markerPrefix) state=ready mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
+                if let probePayload {
+                    connection.send(content: probePayload, completion: .contentProcessed { error in
+                        if let error {
+                            reporter.append(
+                                """
+                                \(markerPrefix) probe-send=failed mode=\(label) endpoint=\(Self.sanitize(endpointDescription)) \
+                                error=\(Self.sanitize(error.localizedDescription))
+                                """
+                            )
+                            gate.finish(.failure(error))
+                        } else {
+                            reporter.append(
+                                """
+                                \(markerPrefix) probe-send=ok mode=\(label) endpoint=\(Self.sanitize(endpointDescription)) \
+                                bytes=\(probePayload.count)
+                                """
+                            )
+                            gate.finish(.success(()))
+                        }
+                    })
+                } else {
+                    gate.finish(.success(()))
+                }
+            case .failed(let error):
+                reporter.append(
+                    """
+                    \(markerPrefix) state=failed mode=\(label) endpoint=\(Self.sanitize(endpointDescription)) \
+                    error=\(Self.sanitize(error.localizedDescription))
+                    """
+                )
+                gate.finish(.failure(error))
+            case .cancelled:
+                reporter.append("\(markerPrefix) state=cancelled mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
+            @unknown default:
+                reporter.append("\(markerPrefix) state=unknown mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
+            }
+        }
+        connection.start(queue: .global(qos: .userInitiated))
+        defer {
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+        }
+
+        try await gate.wait(timeoutSeconds: 8.0)
     }
 
     private func decodeBase64Key(
@@ -600,6 +947,42 @@ final class LocalP2PSmokeHarness {
         await KEMTrustStore.shared.upsert(deviceId: peerDeviceID, kemPublicKeys: keys)
         let suites = keys.map { String(format: "0x%04x", $0.suiteWireId) }.joined(separator: ",")
         reporter.append("pqc-preseed device=\(Self.sanitize(peerDeviceID)) suites=\(suites)")
+    }
+
+    private func exportLocalPQCIdentityIfNeeded(reporter: SmokeStatusReporter) async {
+        guard let reportURL = pqcReportURL() else { return }
+
+        struct LocalPQCReport: Encodable {
+            struct PublicKeyEntry: Encodable {
+                let suiteWireId: UInt16
+                let publicKeyBase64: String
+            }
+
+            let deviceId: String
+            let keys: [PublicKeyEntry]
+        }
+
+        do {
+            let keys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+            let report = LocalPQCReport(
+                deviceId: resolvedLocalDeviceID(),
+                keys: keys.map { key in
+                    LocalPQCReport.PublicKeyEntry(
+                        suiteWireId: key.suiteWireId,
+                        publicKeyBase64: key.publicKey.base64EncodedString()
+                    )
+                }
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(report)
+            try writeProtectedData(data, to: reportURL)
+            reporter.append(
+                "pqc-report device=\(Self.sanitize(report.deviceId)) keys=\(report.keys.count) file=\(reportURL.lastPathComponent) reportJSONBase64=\(data.base64EncodedString())"
+            )
+        } catch {
+            reporter.append("failed stage=pqc-report error=\(Self.sanitize(error.localizedDescription))")
+        }
     }
 
     private func preseedResolvedTargetKEMTrustIfNeeded(
@@ -960,10 +1343,11 @@ final class LocalP2PSmokeHarness {
             target=\(target.id)
             """
         )
+        let outboundHash = try Self.sha256Hex(url: outboundURL)
 
         reporter.append("file-transfer outbound-start name=\(Self.sanitize(outboundName))")
         try await FileTransferManager.instance.sendFile(at: outboundURL, to: target)
-        reporter.append("file-transfer outbound-complete name=\(Self.sanitize(outboundName))")
+        reporter.append("file-transfer outbound-complete name=\(Self.sanitize(outboundName)) sha256=\(outboundHash)")
 
         let inboundTransfer = try await waitForCompletedTransfer(
             fileName: inboundName,
@@ -983,9 +1367,10 @@ final class LocalP2PSmokeHarness {
             expectedRole: "mac",
             fileName: inboundName
         )
+        let inboundHash = try Self.sha256Hex(url: localURL)
 
         reporter.append(
-            "file-transfer inbound-complete name=\(Self.sanitize(inboundName)) path=\(Self.sanitize(localURL.lastPathComponent))"
+            "file-transfer inbound-complete name=\(Self.sanitize(inboundName)) path=\(Self.sanitize(localURL.lastPathComponent)) sha256=\(inboundHash)"
         )
     }
 
@@ -1011,8 +1396,9 @@ final class LocalP2PSmokeHarness {
             expectedRole: "mac-reconnect",
             fileName: inboundName
         )
+        let inboundHash = try Self.sha256Hex(url: localURL)
         reporter.append(
-            "mac-reconnect inbound-complete name=\(Self.sanitize(inboundName)) path=\(Self.sanitize(localURL.lastPathComponent))"
+            "mac-reconnect inbound-complete name=\(Self.sanitize(inboundName)) path=\(Self.sanitize(localURL.lastPathComponent)) sha256=\(inboundHash)"
         )
     }
 
@@ -1072,8 +1458,18 @@ final class LocalP2PSmokeHarness {
         }
     }
 
+    private nonisolated static func sha256Hex(url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     private nonisolated static func sanitize(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+    }
+
+    private nonisolated static func smokePhaseName(from phaseField: String) -> String {
+        guard phaseField.hasPrefix("phase=") else { return phaseField }
+        return String(phaseField.dropFirst("phase=".count))
     }
 
     private nonisolated static func fileTransferFailureLine(for error: Error) -> String {
@@ -1081,50 +1477,160 @@ final class LocalP2PSmokeHarness {
             switch transferError {
             case .networkStageFailed(let stage, let endpoint, let details):
                 let endpointField = endpoint.map { " endpoint=\(Self.sanitize($0))" } ?? ""
-                return "failed stage=file-transfer phase=\(Self.sanitize(stage))\(endpointField) error=\(Self.sanitize(details))"
+                return fileTransferFailureLine(
+                    phase: stage,
+                    category: fileTransferFailureCategory(forNetworkStage: stage),
+                    error: details,
+                    extraFields: endpointField
+                )
             case .receiptWaitFailed(let stage, let details):
                 let detailField = details.map { " detail=\(Self.sanitize($0))" } ?? ""
-                return "failed stage=file-transfer phase=receipt_\(Self.sanitize(stage.rawValue))\(detailField) error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "receipt_\(stage.rawValue)",
+                    category: "payload_framing",
+                    error: transferError.localizedDescription,
+                    extraFields: detailField
+                )
             case .networkError(let reason):
-                return "failed stage=file-transfer phase=network_error error=\(Self.sanitize(reason))"
+                return fileTransferFailureLine(
+                    phase: "network_error",
+                    category: "payload_framing",
+                    error: reason
+                )
             case .transferFailed(let reason):
-                return "failed stage=file-transfer phase=transfer_failed error=\(Self.sanitize(reason))"
+                return fileTransferFailureLine(
+                    phase: "transfer_failed",
+                    category: "payload_framing",
+                    error: reason
+                )
             case .invalidDestination:
-                return "failed stage=file-transfer phase=route_resolution_invalid_destination error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "route_resolution_invalid_destination",
+                    category: "discovery",
+                    error: transferError.localizedDescription
+                )
             case .connectionFailed:
-                return "failed stage=file-transfer phase=connect_failed error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "connect_failed",
+                    category: "handshake",
+                    error: transferError.localizedDescription
+                )
             case .timeout:
-                return "failed stage=file-transfer phase=timeout error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "timeout",
+                    category: "payload_framing",
+                    error: transferError.localizedDescription
+                )
             case .invalidMetadata:
-                return "failed stage=file-transfer phase=invalid_metadata error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "invalid_metadata",
+                    category: "payload_framing",
+                    error: transferError.localizedDescription
+                )
             case .checksumMismatch:
-                return "failed stage=file-transfer phase=checksum_mismatch error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "checksum_mismatch",
+                    category: "payload_framing",
+                    error: transferError.localizedDescription
+                )
             case .secureSessionRequired:
-                return "failed stage=file-transfer phase=secure_session_required error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "secure_session_required",
+                    category: "auth_policy",
+                    error: transferError.localizedDescription
+                )
             case .fileNotFound:
-                return "failed stage=file-transfer phase=file_not_found error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "file_not_found",
+                    category: "payload_framing",
+                    error: transferError.localizedDescription
+                )
             case .transferCancelled:
-                return "failed stage=file-transfer phase=transfer_cancelled error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "transfer_cancelled",
+                    category: "payload_framing",
+                    error: transferError.localizedDescription
+                )
             case .diskFull:
-                return "failed stage=file-transfer phase=disk_full error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "disk_full",
+                    category: "payload_framing",
+                    error: transferError.localizedDescription
+                )
             case .permissionDenied:
-                return "failed stage=file-transfer phase=permission_denied error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "permission_denied",
+                    category: "auth_policy",
+                    error: transferError.localizedDescription
+                )
             case .encryptionFailed:
-                return "failed stage=file-transfer phase=encryption_failed error=\(Self.sanitize(transferError.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: "encryption_failed",
+                    category: "secure_channel",
+                    error: transferError.localizedDescription
+                )
             }
         }
         let nsError = error as NSError
+        let signedKEMRefreshEvidenceMissingPhaseField = "phase=signed_kem_refresh_evidence_missing"
+        let signedKEMRefreshWrongSuitePhaseField = "phase=signed_kem_refresh_wrong_suite"
         if nsError.domain == "SkyBridge.Smoke" {
             switch nsError.code {
             case 4101:
-                return "failed stage=file-transfer phase=signed_kem_refresh_evidence_missing error=\(Self.sanitize(error.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: Self.smokePhaseName(from: signedKEMRefreshEvidenceMissingPhaseField),
+                    category: "auth_policy",
+                    error: error.localizedDescription
+                )
             case 4102:
-                return "failed stage=file-transfer phase=signed_kem_refresh_wrong_suite error=\(Self.sanitize(error.localizedDescription))"
+                return fileTransferFailureLine(
+                    phase: Self.smokePhaseName(from: signedKEMRefreshWrongSuitePhaseField),
+                    category: "auth_policy",
+                    error: error.localizedDescription
+                )
             default:
                 break
             }
         }
-        return "failed stage=file-transfer phase=unknown error=\(Self.sanitize(error.localizedDescription))"
+        return fileTransferFailureLine(
+            phase: "unknown",
+            category: "payload_framing",
+            error: error.localizedDescription
+        )
+    }
+
+    private nonisolated static func fileTransferFailureLine(
+        phase: String,
+        category: String,
+        error: String,
+        extraFields: String = ""
+    ) -> String {
+        "failed stage=file-transfer phase=\(Self.sanitize(phase)) category=\(Self.sanitize(category))\(extraFields) error=\(Self.sanitize(error))"
+    }
+
+    private nonisolated static func fileTransferFailureCategory(forNetworkStage stage: String) -> String {
+        let normalized = stage.lowercased()
+        if normalized.contains("secure_channel")
+            || normalized.contains("encryption")
+            || normalized.contains("decrypt") {
+            return "secure_channel"
+        }
+        if normalized.contains("secure_session")
+            || normalized.contains("security")
+            || normalized.contains("permission")
+            || normalized.contains("signed_kem") {
+            return "auth_policy"
+        }
+        if normalized.contains("connect")
+            || normalized.contains("handshake") {
+            return "handshake"
+        }
+        if normalized.contains("route")
+            || normalized.contains("discovery")
+            || normalized.contains("destination") {
+            return "discovery"
+        }
+        return "payload_framing"
     }
 
     private nonisolated static func remoteDesktopFailureLine(for error: Error) -> String {
@@ -1138,6 +1644,8 @@ final class LocalP2PSmokeHarness {
             phase = "media_main_path_error"
         } else if normalized.contains("timeout") || message.contains("超时") {
             phase = "performance_window_timeout"
+        } else if normalized.contains("already_connected") {
+            phase = "already_connected"
         } else if normalized.contains("media") || message.contains("媒体主路径") {
             phase = "media_main_path_error"
         } else {

@@ -2,7 +2,7 @@ import Foundation
 
 /// 远程桌面常量
 public enum RemoteDesktopConstants {
-    /// 默认端口（5901：避免与系统 VNC 5900 冲突；与 macOS `RemoteControlServer` 对齐）
+    /// 旧版直连兜底端口；正常路径使用 macOS Bonjour/TXT 发布的实际远控端口。
     public static let defaultPort: UInt16 = 5901
 
     /// 默认帧率

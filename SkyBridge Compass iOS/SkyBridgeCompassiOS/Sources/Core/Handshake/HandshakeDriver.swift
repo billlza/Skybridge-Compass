@@ -31,6 +31,7 @@ public protocol HandshakeTrustProvider: Sendable {
     func trustedFingerprint(for deviceId: String) async -> String?
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data]
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data?
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool
 }
 
 @available(iOS 17.0, *)
@@ -45,6 +46,11 @@ public protocol MultiFingerprintHandshakeTrustProvider: HandshakeTrustProvider {
 
 @available(iOS 17.0, *)
 public extension HandshakeTrustProvider {
+    func requiresPinnedProtocolIdentity(for deviceId: String) async -> Bool {
+        _ = deviceId
+        return false
+    }
+
     func trustedFingerprintSet(for deviceId: String) async -> Set<String> {
         if let multi = self as? any MultiFingerprintHandshakeTrustProvider {
             return await multi.trustedFingerprints(for: deviceId)
@@ -121,12 +127,23 @@ public actor PeerSessionArbiter {
         case alreadyInProgress
     }
 
+    public enum IncomingEstablishedPolicy: Sendable {
+        case rejectDuplicate
+        case replaceAuthenticated
+    }
+
+    public enum SessionScope: String, Sendable {
+        case p2p = "p2p"
+        case remoteControl = "remote-control"
+    }
+
     public enum IncomingDecision: Sendable {
         case accept
         case rejectAlreadyConnected
         case rejectBinding
         case rejectRateLimited
         case rejectLocalWinner
+        case acceptAndReplaceEstablished
         case acceptAndSupersedeLocal(winnerPeerId: Data, winnerAttemptId: Data)
     }
 
@@ -179,13 +196,21 @@ public actor PeerSessionArbiter {
         remoteAttemptId: Data,
         targetPeerId: Data,
         expectedRemotePeerId: Data,
-        localPeerId: Data
+        localPeerId: Data,
+        establishedPolicy: IncomingEstablishedPolicy = .rejectDuplicate
     ) -> IncomingDecision {
-        if establishedPairs.contains(pairKey) {
-            return .rejectAlreadyConnected
-        }
         guard targetPeerId == localPeerId, remoteInitiatorPeerId == expectedRemotePeerId else {
             return .rejectBinding
+        }
+        if establishedPairs.contains(pairKey) {
+            switch establishedPolicy {
+            case .rejectDuplicate:
+                return .rejectAlreadyConnected
+            case .replaceAuthenticated:
+                establishedPairs.remove(pairKey)
+                outgoingByPair.removeValue(forKey: pairKey)
+                return .acceptAndReplaceEstablished
+            }
         }
 
         guard let local = outgoingByPair[pairKey] else {
@@ -218,11 +243,23 @@ public actor PeerSessionArbiter {
         return .rejectLocalWinner
     }
 
-    public nonisolated static func pairKey(localPeerId: Data, remotePeerId: Data) -> Data {
+    public nonisolated static func pairKey(
+        localPeerId: Data,
+        remotePeerId: Data,
+        scope: SessionScope = .p2p
+    ) -> Data {
+        let baseKey: Data
         if localPeerId.lexicographicallyPrecedes(remotePeerId) {
-            return localPeerId + remotePeerId
+            baseKey = localPeerId + remotePeerId
+        } else {
+            baseKey = remotePeerId + localPeerId
         }
-        return remotePeerId + localPeerId
+        guard scope != .p2p else { return baseKey }
+
+        var scoped = Data(scope.rawValue.utf8)
+        scoped.append(0)
+        scoped.append(baseKey)
+        return scoped
     }
 
     private func isRemoteWinner(
@@ -308,6 +345,10 @@ public actor HandshakeDriver {
     
     /// 早到的结果
     private var pendingResult: Result<SessionKeys, Error>?
+
+    /// FINISHED can arrive while MessageB verification awaits trust/KEM work.
+    /// Buffer it so the initiator does not drop key confirmation and later time out.
+    private var pendingFinished: HandshakeFinished?
     
     /// 对端标识
     private var currentPeer: PeerIdentifier?
@@ -335,6 +376,12 @@ public actor HandshakeDriver {
 
     /// 会话仲裁器
     private let sessionArbiter: PeerSessionArbiter
+
+    /// 已认证入站 MessageA 命中旧 established guard 时的处理策略。
+    private let authenticatedIncomingEstablishedPolicy: PeerSessionArbiter.IncomingEstablishedPolicy
+
+    /// SOA 仲裁会话域。P2P 控制/文件传输与远控需要独立仲裁槽位。
+    private let soaSessionScope: PeerSessionArbiter.SessionScope
 
     /// 当前尝试 pair key
     private var soaPairKey: Data?
@@ -365,7 +412,9 @@ public actor HandshakeDriver {
         soaMetadata: HandshakeSOAMetadata? = nil,
         localSOAPeerId: Data? = nil,
         expectedRemoteSOAPeerId: Data? = nil,
-        sessionArbiter: PeerSessionArbiter = .shared
+        sessionArbiter: PeerSessionArbiter = .shared,
+        authenticatedIncomingEstablishedPolicy: PeerSessionArbiter.IncomingEstablishedPolicy = .rejectDuplicate,
+        soaSessionScope: PeerSessionArbiter.SessionScope = .p2p
     ) {
         self.transport = transport
         self.cryptoProvider = cryptoProvider
@@ -382,6 +431,8 @@ public actor HandshakeDriver {
         self.localSOAPeerId = localSOAPeerId
         self.expectedRemoteSOAPeerId = expectedRemoteSOAPeerId
         self.sessionArbiter = sessionArbiter
+        self.authenticatedIncomingEstablishedPolicy = authenticatedIncomingEstablishedPolicy
+        self.soaSessionScope = soaSessionScope
     }
 
     public func getAuthenticatedRemoteAuthority() -> AuthenticatedRemoteAuthority? {
@@ -403,7 +454,8 @@ public actor HandshakeDriver {
         if let outboundSOA {
             let pairKey = PeerSessionArbiter.pairKey(
                 localPeerId: outboundSOA.initiatorPeerId,
-                remotePeerId: outboundSOA.targetPeerId
+                remotePeerId: outboundSOA.targetPeerId,
+                scope: soaSessionScope
             )
             let decision = await sessionArbiter.registerOutgoing(.init(
                 pairKey: pairKey,
@@ -485,8 +537,27 @@ public actor HandshakeDriver {
         
         // 等待 MessageB（带超时）
         let clock = ContinuousClock()
-        let deadline = clock.now + timeout
-        state = .waitingMessageB(deadline: deadline)
+        let shouldScheduleMessageBTimeout: Bool
+        if case .sendingMessageA = state {
+            let deadline = clock.now + timeout
+            state = .waitingMessageB(deadline: deadline)
+            shouldScheduleMessageBTimeout = true
+        } else {
+            // Actor reentrancy can deliver MessageB/Finished while transport.send(MessageA) is awaiting.
+            // Preserve the advanced state instead of rolling it back to waitingMessageB.
+            shouldScheduleMessageBTimeout = false
+        }
+
+        if pendingResult == nil {
+            switch state {
+            case .established(let keys):
+                pendingResult = .success(keys)
+            case .failed(let reason):
+                pendingResult = .failure(HandshakeError.failed(reason))
+            default:
+                break
+            }
+        }
         
         return try await withCheckedThrowingContinuation { continuation in
             // 检查是否有早到的结果
@@ -504,16 +575,18 @@ public actor HandshakeDriver {
             self.pendingContinuation = continuation
             
             // 设置超时任务
-            self.timeoutTask = Task {
-                do {
-                    try await Task.sleep(
-                        until: clock.now + self.timeout,
-                        tolerance: HandshakeConstants.timeoutTolerance,
-                        clock: clock
-                    )
-                    await self.handleTimeout()
-                } catch {
-                    // 取消/中断时忽略
+            if shouldScheduleMessageBTimeout {
+                self.timeoutTask = Task {
+                    do {
+                        try await Task.sleep(
+                            until: clock.now + self.timeout,
+                            tolerance: HandshakeConstants.timeoutTolerance,
+                            clock: clock
+                        )
+                        await self.handleTimeout()
+                    } catch {
+                        // 取消/中断时忽略
+                    }
                 }
             }
         }
@@ -635,7 +708,8 @@ public actor HandshakeDriver {
                 let expectedRemotePeerId = expectedRemoteSOAPeerId ?? soa.initiatorPeerId
                 let pairKey = PeerSessionArbiter.pairKey(
                     localPeerId: localPeerId,
-                    remotePeerId: soa.initiatorPeerId
+                    remotePeerId: soa.initiatorPeerId,
+                    scope: soaSessionScope
                 )
                 let decision = await sessionArbiter.evaluateIncoming(
                     pairKey: pairKey,
@@ -643,10 +717,13 @@ public actor HandshakeDriver {
                     remoteAttemptId: soa.attemptId,
                     targetPeerId: soa.targetPeerId,
                     expectedRemotePeerId: expectedRemotePeerId,
-                    localPeerId: localPeerId
+                    localPeerId: localPeerId,
+                    establishedPolicy: authenticatedIncomingEstablishedPolicy
                 )
                 switch decision {
                 case .accept:
+                    soaPairKey = pairKey
+                case .acceptAndReplaceEstablished:
                     soaPairKey = pairKey
                 case .acceptAndSupersedeLocal:
                     soaPairKey = pairKey
@@ -734,6 +811,11 @@ public actor HandshakeDriver {
                     // 取消/中断时忽略
                 }
             }
+
+            if let pending = pendingFinished {
+                pendingFinished = nil
+                await handleFinished(pending, from: peer)
+            }
             
         } catch {
             await handleHandshakeError(error, rawHandshakeData: data, messageKind: .messageA)
@@ -787,6 +869,11 @@ public actor HandshakeDriver {
                     // 取消/中断时忽略
                 }
             }
+
+            if let pending = pendingFinished {
+                pendingFinished = nil
+                await handleFinished(pending, from: currentPeer ?? PeerIdentifier(deviceId: "unknown"))
+            }
             
         } catch {
             await handleHandshakeError(error, context: ctx, rawHandshakeData: data, messageKind: .messageB)
@@ -828,6 +915,12 @@ public actor HandshakeDriver {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
         guard !trustedFingerprints.isEmpty else {
+            if await trustProvider.requiresPinnedProtocolIdentity(for: deviceId) {
+                throw HandshakeError.failed(.identityMismatch(
+                    expected: "pinned_protocol_identity",
+                    actual: "missing"
+                ))
+            }
             return
         }
         let actualFingerprint = try authoritativeFingerprint(for: identityPublicKey).lowercased()
@@ -923,6 +1016,9 @@ public actor HandshakeDriver {
     
     private func handleFinished(_ finished: HandshakeFinished, from peer: PeerIdentifier) async {
         switch state {
+        case .waitingMessageB, .processingMessageB:
+            pendingFinished = finished
+            return
         case .waitingFinished(_, let sessionKeys, let expectingFrom):
             guard verifyFinished(finished, sessionKeys: sessionKeys, expectingFrom: expectingFrom) else {
                 await transitionToFailed(.keyConfirmationFailed, negotiatedSuite: sessionKeys.negotiatedSuite)
@@ -2044,6 +2140,7 @@ public actor HandshakeContext {
             sendKey: sendKey.withUnsafeBytes { Data($0) },
             receiveKey: receiveKey.withUnsafeBytes { Data($0) },
             negotiatedSuite: suite,
+            role: role,
             transcriptHash: fullTranscriptHash
         )
     }

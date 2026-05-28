@@ -203,7 +203,7 @@ private struct BaselineCaptureView: View {
                     Text("Next-Gen Cross-Platform Connection Experience")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.62))
-                    Text("Lza的MacBook Pro • Apple M1 Max")
+                    Text("Fixture MacBook Pro • Apple M1 Max")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.white.opacity(0.46))
                 }
@@ -330,7 +330,7 @@ private struct BaselineCaptureView: View {
                                 roundedSearch("Search", width: 112)
                             }
                             if capture.state.contains("Connected") || capture.state.contains("Discovering") {
-                                ForEach(["Lza的MacBook Pro", "iPhone 16 Pro", "Ubuntu Studio"], id: \.self) { name in
+                                ForEach(["Fixture MacBook Pro", "iPhone 16 Pro", "Ubuntu Studio"], id: \.self) { name in
                                     HStack {
                                         Image(systemName: "desktopcomputer")
                                             .foregroundStyle(.white.opacity(0.92))

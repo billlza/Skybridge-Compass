@@ -384,13 +384,7 @@ public actor TURNCredentialService {
     }
 
     private func resolvedDeviceIdentifier() -> String? {
-        let envID = ProcessInfo.processInfo.environment["SKYBRIDGE_DEVICE_ID"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !envID.isEmpty {
-            return envID
-        }
-        let keychainID = KeychainManager.shared.getOrGenerateDeviceId()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return keychainID.isEmpty ? nil : keychainID
+        let deviceID = ProtocolDeviceIdentity.stableDeviceId()
+        return deviceID.isEmpty ? nil : deviceID
     }
 }

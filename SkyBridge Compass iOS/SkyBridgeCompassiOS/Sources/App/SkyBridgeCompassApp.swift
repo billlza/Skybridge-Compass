@@ -382,7 +382,7 @@ struct SkyBridgeCompassApp: App {
         if started {
             SkyBridgeLogger.shared.info("✅ 灵动岛 Live Activity 已启动")
         } else {
-            SkyBridgeLogger.shared.warning("ℹ️ 灵动岛 Live Activity 未启动（请检查系统开关或 Info.plist 配置）")
+            SkyBridgeLogger.shared.info("ℹ️ 灵动岛 Live Activity 未启动（请检查系统开关或 Info.plist 配置）")
         }
     }
 
@@ -411,11 +411,15 @@ struct SkyBridgeCompassApp: App {
 
         Task { @MainActor in
             let wasRunning = discoveryManager.isDiscovering
-            try? await discoveryManager.startDiscovery(mode: mode)
-            if !wasRunning {
-                SkyBridgeLogger.shared.info("✅ 设备发现服务已启动（preset=\(settings.discoveryModePreset)）")
-            } else {
-                SkyBridgeLogger.shared.debug("ℹ️ 设备发现已在运行（preset=\(settings.discoveryModePreset)）")
+            do {
+                try await discoveryManager.startDiscovery(mode: mode)
+                if !wasRunning {
+                    SkyBridgeLogger.shared.info("✅ 设备发现服务已启动（preset=\(settings.discoveryModePreset)）")
+                } else {
+                    SkyBridgeLogger.shared.debug("ℹ️ 设备发现已在运行（preset=\(settings.discoveryModePreset)）")
+                }
+            } catch {
+                SkyBridgeLogger.shared.error("❌ 设备发现服务启动失败（preset=\(settings.discoveryModePreset)）: \(error.localizedDescription)")
             }
         }
     }
@@ -451,7 +455,9 @@ struct SkyBridgeCompassApp: App {
             if !connectionManager.isListening {
                 try? await connectionManager.startListening()
             }
-            ICloudDevicePresenceService.shared.refreshNow()
+            if !shouldSkipInteractiveStartup {
+                ICloudDevicePresenceService.shared.refreshNow()
+            }
             applyClipboardSettings()
 
         case .background:

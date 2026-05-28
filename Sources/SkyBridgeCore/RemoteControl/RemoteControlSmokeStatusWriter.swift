@@ -1,5 +1,6 @@
 import Foundation
 import Dispatch
+import SkyBridgeSmokeSupport
 
 enum RemoteControlSmokeStatusWriter {
     private final class WriterState: @unchecked Sendable {
@@ -8,22 +9,9 @@ enum RemoteControlSmokeStatusWriter {
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             return formatter
         }()
-        private var cachedHandle: FileHandle?
 
         func timestamp() -> String {
             timestampFormatter.string(from: Date())
-        }
-
-        func cachedFileHandle(for url: URL) -> FileHandle? {
-            if let cachedHandle {
-                return cachedHandle
-            }
-            guard let handle = try? FileHandle(forWritingTo: url) else {
-                return nil
-            }
-            _ = try? handle.seekToEnd()
-            cachedHandle = handle
-            return handle
         }
     }
 
@@ -55,22 +43,6 @@ enum RemoteControlSmokeStatusWriter {
     }
 
     private static func write(_ data: Data, to statusURL: URL) {
-        try? FileManager.default.createDirectory(
-            at: statusURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        if !FileManager.default.fileExists(atPath: statusURL.path) {
-            FileManager.default.createFile(atPath: statusURL.path, contents: nil)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: statusURL.path
-            )
-        }
-        guard let handle = cachedFileHandle(for: statusURL) else { return }
-        try? handle.write(contentsOf: data)
-    }
-
-    private static func cachedFileHandle(for url: URL) -> FileHandle? {
-        writerState.cachedFileHandle(for: url)
+        try? SmokeStatusFileAppender.append(data, to: statusURL)
     }
 }

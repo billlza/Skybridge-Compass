@@ -236,6 +236,28 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertEqual(sorted.first?.deviceId, "bonjour:iPhone@local.")
     }
 
+    func testRecentAuthenticatedInboundTransferRouteBeatsStaleClassicRegistry() {
+        let staleRegistry = FileTransferManager.ActivePeerRoute(
+            deviceId: "id:31bb9d78-11f6-4843-91ee-0a0c4c003632",
+            deviceName: "iPad",
+            ipAddress: "192.168.0.102",
+            port: 8080,
+            routeSource: "classic-session-registry"
+        )
+        let recentInbound = FileTransferManager.ActivePeerRoute(
+            deviceId: staleRegistry.deviceId,
+            deviceName: "iPad",
+            ipAddress: "192.168.0.106",
+            port: 8080,
+            routeSource: "recent-authenticated-inbound-transfer"
+        )
+
+        let sorted = FileTransferManager.sortedActivePeerRoutes([staleRegistry, recentInbound])
+
+        XCTAssertEqual(sorted.first?.routeSource, "recent-authenticated-inbound-transfer")
+        XCTAssertEqual(sorted.first?.ipAddress, "192.168.0.106")
+    }
+
     func testActivePeerRouteDedupeKeepsAuthenticatedSourceForSameEndpoint() {
         let stalePresence = FileTransferManager.ActivePeerRoute(
             deviceId: "id:31bb9d78-11f6-4843-91ee-0a0c4c003632",
@@ -289,6 +311,13 @@ final class FileTransferRouteResolutionTests: XCTestCase {
 
         XCTAssertTrue(source.contains("mac-reconnect control-discovery-timeout"))
         XCTAssertTrue(source.contains("mac-reconnect control-connect-unavailable"))
+        XCTAssertTrue(source.contains("mac-reconnect already-connected"))
+        XCTAssertTrue(source.contains("action=wait-remote-cleanup"))
+        XCTAssertTrue(source.contains("connectToDeviceForMacReconnect"))
+        XCTAssertTrue(source.contains("let maxAttempts = 6"))
+        XCTAssertTrue(source.contains("isAlreadyConnectedHandshakeRejection"))
+        XCTAssertTrue(source.contains("case .failed(.peerRejected(let message))"))
+        XCTAssertTrue(source.contains("== \"already_connected\""))
         XCTAssertTrue(source.contains("shouldFallbackToTransferRouteAfterControlReconnectFailure"))
         XCTAssertTrue(source.contains("case .noConnectableEndpoint"))
         XCTAssertTrue(source.contains("macInitiatedTransfer=1"))
@@ -305,6 +334,24 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("mac_smoke_reconnect_control_endpoint_missing"))
         XCTAssertTrue(source.contains("mac_smoke_reconnect_stable_identity_missing"))
         XCTAssertTrue(source.contains("mac_smoke_reconnect_transfer_route_timeout"))
+    }
+
+    func testP2PDiscoveryDisconnectTracksInboundControlSessions() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("private var inboundControlSessions"))
+        XCTAssertTrue(source.contains("upsertInboundControlSession"))
+        XCTAssertTrue(source.contains("removeInboundControlSession"))
+        XCTAssertTrue(source.contains("refreshInboundControlSessionAliases"))
+        XCTAssertTrue(source.contains("let inboundSessionsToDisconnect = inboundControlSessions.filter"))
+        XCTAssertTrue(source.contains("session.connection.cancel()"))
+        XCTAssertTrue(source.contains("self?.removeInboundControlSession(id: inboundControlSessionId)"))
     }
 
     func testInboundPresenceResolverPrefersRouteCompleteTransferCandidate() throws {
@@ -454,6 +501,8 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("activeAuthenticatedConnectionsForClassicTransfer()"))
         XCTAssertTrue(source.contains("ClassicTransferSessionRegistry.shared.activeConnections()"))
         XCTAssertTrue(source.contains("ClassicTransferSessionRegistry.shared.activeSessions()"))
+        XCTAssertTrue(source.contains("recent-authenticated-inbound-transfer"))
+        XCTAssertTrue(source.contains("transfer.deviceIPAddress = inboundEndpointAddress"))
         XCTAssertTrue(source.contains("advertisedClassicTransferPort"))
         XCTAssertTrue(source.contains("deduplicatedActivePeerRoutes"))
         XCTAssertTrue(source.contains("routeSource: \"authenticated-session\""))
@@ -533,10 +582,27 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         let startMetrics = try XCTUnwrap(source.range(of: "startMetricsIfNeeded()", range: authenticateStart.lowerBound..<source.endIndex))
         let authenticateBody = String(source[authenticateStart.lowerBound..<startMetrics.upperBound])
         let publishRange = try XCTUnwrap(authenticateBody.range(of: "await publishAuthenticatedPresence(keys: keys)"))
-        let pairingRange = try XCTUnwrap(authenticateBody.range(of: "sendPairingIdentityExchange(force: true)"))
+        let pairingRange = try XCTUnwrap(authenticateBody.range(of: "schedulePostAuthPairingIdentityExchange()"))
 
         XCTAssertLessThan(publishRange.lowerBound, pairingRange.lowerBound)
         XCTAssertFalse(authenticateBody.contains("await publishClassicTransferSessionSnapshot(keys: keys)"))
+
+        let scheduleStart = try XCTUnwrap(source.range(of: "private func schedulePostAuthPairingIdentityExchange()"))
+        let sendWithTimeout = try XCTUnwrap(
+            source.range(
+                of: "private func sendPostAuthPairingIdentityExchangeWithTimeout",
+                range: scheduleStart.lowerBound..<source.endIndex
+            )
+        )
+        let scheduledPath = String(source[scheduleStart.lowerBound..<sendWithTimeout.upperBound])
+        XCTAssertTrue(scheduledPath.contains("sendPostAuthPairingIdentityExchangeWithTimeout()"))
+        let scheduledSend = try XCTUnwrap(
+            source.range(
+                of: "sendPairingIdentityExchange(force: true)",
+                range: sendWithTimeout.lowerBound..<source.endIndex
+            )
+        )
+        XCTAssertLessThan(sendWithTimeout.lowerBound, scheduledSend.lowerBound)
     }
 
     func testMacInboundKeepsControlSessionUntilRouteMetadataArrives() throws {
@@ -632,22 +698,52 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCompassApp/LocalP2PFileTransferSmokeHarness.swift"),
             encoding: .utf8
         )
+        let localLanInteropHost = try String(
+            contentsOf: root.appendingPathComponent("Sources/LocalLanInteropHost/main.swift"),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(appSource.contains("case .networkStageFailed(let stage, let endpoint, let details):"))
-        XCTAssertTrue(appSource.contains("phase=route_resolution_invalid_destination"))
-        XCTAssertTrue(appSource.contains("phase=connect_failed"))
-        XCTAssertTrue(appSource.contains("phase=secure_session_required"))
-        XCTAssertTrue(appSource.contains("phase=transfer_failed"))
+        XCTAssertTrue(appSource.contains("phase: \"route_resolution_invalid_destination\""))
+        XCTAssertTrue(appSource.contains("phase: \"connect_failed\""))
+        XCTAssertTrue(appSource.contains("phase: \"secure_session_required\""))
+        XCTAssertTrue(appSource.contains("phase: \"transfer_failed\""))
+        XCTAssertTrue(appSource.contains("category=\\(Self.sanitize(category))"))
+        XCTAssertTrue(appSource.contains("fileTransferFailureCategory(forNetworkStage: stage)"))
+        XCTAssertTrue(appSource.contains("category: \"discovery\""))
+        XCTAssertTrue(appSource.contains("category: \"handshake\""))
+        XCTAssertTrue(appSource.contains("category: \"secure_channel\""))
+        XCTAssertTrue(appSource.contains("category: \"payload_framing\""))
+        XCTAssertTrue(appSource.contains("category: \"auth_policy\""))
         XCTAssertTrue(smokeScript.contains("failed stage=file-transfer phase=unknown"))
         XCTAssertTrue(smokeScript.contains("has_file_transfer_failure_without_phase"))
         XCTAssertTrue(smokeScript.contains("Detected file-transfer missing phase"))
         XCTAssertTrue(smokeScript.contains("Detected file-transfer instrumentation gap"))
         XCTAssertTrue(macSmokeHarness.contains("private static func fileTransferFailureLine(for error: Error) -> String"))
-        XCTAssertTrue(macSmokeHarness.contains("phase=\\(sanitizePhase(phase))"))
+        XCTAssertTrue(macSmokeHarness.contains("phase=\\(sanitizePhase(phase)) category=\\(sanitizePhase(category))"))
+        XCTAssertTrue(macSmokeHarness.contains("private static func fileTransferFailureCategory(for error: Error, phase: String) -> String"))
+        XCTAssertTrue(macSmokeHarness.contains("return \"discovery\""))
+        XCTAssertTrue(macSmokeHarness.contains("return \"handshake\""))
+        XCTAssertTrue(macSmokeHarness.contains("return \"secure_channel\""))
+        XCTAssertTrue(macSmokeHarness.contains("return \"payload_framing\""))
+        XCTAssertTrue(macSmokeHarness.contains("return \"auth_policy\""))
         XCTAssertTrue(macSmokeHarness.contains("case .receiptWaitFailed(let stage, _):"))
         XCTAssertFalse(
             macSmokeHarness.contains("failed stage=file-transfer error=\\(Self.sanitize(error.localizedDescription))"),
             "macOS smoke output must not collapse file-transfer failures into a phase-less network error."
+        )
+        XCTAssertTrue(localLanInteropHost.contains("private func fileTransferFailureLine(for error: Error) -> String"))
+        XCTAssertTrue(localLanInteropHost.contains("phase=\\(sanitizePhase(phase)) category=\\(sanitizePhase(category))"))
+        XCTAssertTrue(localLanInteropHost.contains("private func fileTransferFailureCategory(for error: Error, phase: String) -> String"))
+        XCTAssertTrue(localLanInteropHost.contains("return \"discovery\""))
+        XCTAssertTrue(localLanInteropHost.contains("return \"handshake\""))
+        XCTAssertTrue(localLanInteropHost.contains("return \"secure_channel\""))
+        XCTAssertTrue(localLanInteropHost.contains("return \"payload_framing\""))
+        XCTAssertTrue(localLanInteropHost.contains("return \"auth_policy\""))
+        XCTAssertTrue(localLanInteropHost.contains("case .receiptWaitFailed(let stage, _):"))
+        XCTAssertFalse(
+            localLanInteropHost.contains("failed stage=file-transfer error=\\(sanitize(error.localizedDescription))"),
+            "LocalLanInteropHost output must classify real file-transfer failures with phase/category."
         )
     }
 
@@ -822,5 +918,44 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             source.contains("self.disconnect()"),
             "Receive-loop EOF/errors must run the same cleanup as explicit disconnect so presence, unified status, and transfer session registry cannot retain stale routes."
         )
+    }
+
+    func testIOSStrictInboundReconnectUsesAuthenticatedEstablishedReplacement() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let manager = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"),
+            encoding: .utf8
+        )
+        let driver = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Handshake/HandshakeDriver.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(manager.contains("authenticatedIncomingEstablishedPolicy: strictTrustContext == nil"))
+        XCTAssertTrue(manager.contains(": .replaceAuthenticated"))
+        XCTAssertTrue(manager.contains("strictInboundStablePeerIdByRuntimePeerId[peerId] = context.stablePeerId"))
+        XCTAssertTrue(manager.contains("replaceStrictInboundStableSession("))
+        XCTAssertTrue(driver.contains("case acceptAndReplaceEstablished"))
+        XCTAssertTrue(driver.contains("establishedPolicy: authenticatedIncomingEstablishedPolicy"))
+    }
+
+    func testIOSConnectionStateCleanupIsConnectionAware() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("connection: NWConnection? = nil"))
+        XCTAssertTrue(source.contains("if let connection, !isTrackedConnection(connection)"))
+        XCTAssertTrue(source.contains("stale-state-ignored"))
+        XCTAssertTrue(source.contains("handleConnectionStateChange(state, for: device, connection: connection)"))
+        XCTAssertTrue(source.contains("connections.values.contains { $0 === connection }"))
     }
 }

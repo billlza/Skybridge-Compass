@@ -15,7 +15,11 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"),
             encoding: .utf8
         )
-        return [pumpSource, managerSource].joined(separator: "\n")
+        let videoSubmissionPipeSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlEncodedFrameSubmissionPipe.swift"),
+            encoding: .utf8
+        )
+        return [pumpSource, managerSource, videoSubmissionPipeSource].joined(separator: "\n")
     }
 
     func testOpusRoundTripAndPLC() throws {
@@ -81,6 +85,8 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             sessionIdHash: SkyBridgeMediaPacketCodec.sessionIdHash("media-session-test"),
             sequence: 42,
             timestampSamples: 42 * 960,
+            wireDirection: keys.send.wireDirection,
+            transcriptPrefix: keys.send.transcriptPrefix,
             keyEpoch: keys.send.epoch,
             nonceCounter: 42
         )
@@ -101,6 +107,173 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         }
     }
 
+    func testMediaPacketRejectsWrongSessionAndStreamBeforeAuthentication() throws {
+        let keys = SkyBridgeMediaKeyMaterial.derive(
+            sendSecret: Data(repeating: 0x11, count: 32),
+            receiveSecret: Data(repeating: 0x22, count: 32),
+            sessionId: "media-session-test",
+            transcriptHash: Data(repeating: 0x33, count: 32),
+            epoch: 7
+        )
+        let header = SkyBridgeMediaPacketHeader(
+            sessionIdHash: SkyBridgeMediaPacketCodec.sessionIdHash("media-session-test"),
+            streamId: 99,
+            sequence: 43,
+            timestampSamples: 43 * 960,
+            wireDirection: keys.send.wireDirection,
+            transcriptPrefix: keys.send.transcriptPrefix,
+            keyEpoch: keys.send.epoch,
+            nonceCounter: 43
+        )
+        let packet = try SkyBridgeMediaPacketCodec.seal(
+            payload: Data([0xca, 0xfe]),
+            header: header,
+            keys: keys.send
+        )
+
+        XCTAssertThrowsError(
+            try SkyBridgeMediaPacketCodec.open(
+                packet: packet,
+                keys: keys.send,
+                expectedSessionIdHash: SkyBridgeMediaPacketCodec.sessionIdHash("other-session"),
+                expectedStreamId: 99
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeMediaPacketError,
+                .sessionIdMismatch(
+                    expected: SkyBridgeMediaPacketCodec.sessionIdHash("other-session"),
+                    actual: header.sessionIdHash
+                )
+            )
+        }
+
+        XCTAssertThrowsError(
+            try SkyBridgeMediaPacketCodec.open(
+                packet: packet,
+                keys: keys.send,
+                expectedSessionIdHash: header.sessionIdHash,
+                expectedStreamId: SkyBridgeRealtimeMediaConstants.defaultStreamId
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeMediaPacketError,
+                .streamMismatch(expected: SkyBridgeRealtimeMediaConstants.defaultStreamId, actual: 99)
+            )
+        }
+    }
+
+    func testMediaPacketRejectsKeyEpochMismatchBeforeAuthentication() throws {
+        let epoch7Keys = SkyBridgeMediaKeyMaterial.derive(
+            sendSecret: Data(repeating: 0x11, count: 32),
+            receiveSecret: Data(repeating: 0x22, count: 32),
+            sessionId: "media-session-test",
+            transcriptHash: Data(repeating: 0x33, count: 32),
+            epoch: 7
+        )
+        let epoch8Keys = SkyBridgeMediaKeyMaterial.derive(
+            sendSecret: Data(repeating: 0x11, count: 32),
+            receiveSecret: Data(repeating: 0x22, count: 32),
+            sessionId: "media-session-test",
+            transcriptHash: Data(repeating: 0x33, count: 32),
+            epoch: 8
+        )
+        let header = SkyBridgeMediaPacketHeader(
+            sessionIdHash: SkyBridgeMediaPacketCodec.sessionIdHash("media-session-test"),
+            sequence: 44,
+            timestampSamples: 44 * 960,
+            wireDirection: epoch7Keys.send.wireDirection,
+            transcriptPrefix: epoch7Keys.send.transcriptPrefix,
+            keyEpoch: epoch7Keys.send.epoch,
+            nonceCounter: 44
+        )
+        let packet = try SkyBridgeMediaPacketCodec.seal(
+            payload: Data([0xba, 0xad]),
+            header: header,
+            keys: epoch7Keys.send
+        )
+
+        XCTAssertThrowsError(
+            try SkyBridgeMediaPacketCodec.open(
+                packet: packet,
+                keys: epoch8Keys.send,
+                expectedSessionIdHash: header.sessionIdHash,
+                expectedStreamId: header.streamId
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeMediaPacketError,
+                .epochMismatch(expected: epoch8Keys.send.epoch, actual: epoch7Keys.send.epoch)
+            )
+        }
+    }
+
+    func testMediaPacketRejectsWrongDirectionAndTranscriptBeforeAuthentication() throws {
+        let sessionId = "media-session-direction-transcript"
+        let keys = SkyBridgeMediaKeyMaterial.derive(
+            sendSecret: Data(repeating: 0x11, count: 32),
+            receiveSecret: Data(repeating: 0x22, count: 32),
+            sessionId: sessionId,
+            transcriptHash: Data(repeating: 0x33, count: 32),
+            epoch: 7
+        )
+        let wrongTranscriptKeys = SkyBridgeMediaKeyMaterial.derive(
+            sendSecret: Data(repeating: 0x11, count: 32),
+            receiveSecret: Data(repeating: 0x22, count: 32),
+            sessionId: sessionId,
+            transcriptHash: Data(repeating: 0x44, count: 32),
+            epoch: 7
+        )
+        let header = SkyBridgeMediaPacketHeader(
+            sessionIdHash: SkyBridgeMediaPacketCodec.sessionIdHash(sessionId),
+            sequence: 45,
+            timestampSamples: 45 * 960,
+            wireDirection: keys.send.wireDirection,
+            transcriptPrefix: keys.send.transcriptPrefix,
+            keyEpoch: keys.send.epoch,
+            nonceCounter: 45
+        )
+        let packet = try SkyBridgeMediaPacketCodec.seal(
+            payload: Data([0x45, 0x45]),
+            header: header,
+            keys: keys.send
+        )
+
+        XCTAssertThrowsError(
+            try SkyBridgeMediaPacketCodec.open(
+                packet: packet,
+                keys: keys.receive,
+                expectedSessionIdHash: header.sessionIdHash,
+                expectedStreamId: header.streamId
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeMediaPacketError,
+                .directionMismatch(
+                    expected: keys.receive.wireDirection.rawValue,
+                    actual: keys.send.wireDirection.rawValue
+                )
+            )
+        }
+
+        XCTAssertThrowsError(
+            try SkyBridgeMediaPacketCodec.open(
+                packet: packet,
+                keys: wrongTranscriptKeys.send,
+                expectedSessionIdHash: header.sessionIdHash,
+                expectedStreamId: header.streamId
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeMediaPacketError,
+                .transcriptMismatch(
+                    expected: wrongTranscriptKeys.send.transcriptPrefix,
+                    actual: keys.send.transcriptPrefix
+                )
+            )
+        }
+    }
+
     func testMediaKeysOpenAcrossPeerDirections() throws {
         let initiatorToResponder = Data(repeating: 0x41, count: 32)
         let responderToInitiator = Data(repeating: 0x52, count: 32)
@@ -116,12 +289,15 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             sendSecret: responderToInitiator,
             receiveSecret: initiatorToResponder,
             sessionId: sessionId,
-            transcriptHash: transcriptHash
+            transcriptHash: transcriptHash,
+            localRole: .responder
         )
         let header = SkyBridgeMediaPacketHeader(
             sessionIdHash: SkyBridgeMediaPacketCodec.sessionIdHash(sessionId),
             sequence: 7,
             timestampSamples: 7 * 960,
+            wireDirection: initiatorKeys.send.wireDirection,
+            transcriptPrefix: initiatorKeys.send.transcriptPrefix,
             keyEpoch: initiatorKeys.send.epoch,
             nonceCounter: 99
         )
@@ -136,7 +312,13 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertEqual(openedByPeer.header, header)
         XCTAssertEqual(openedByPeer.payload, payload)
         XCTAssertThrowsError(try SkyBridgeMediaPacketCodec.open(packet: packet, keys: initiatorKeys.receive)) { error in
-            XCTAssertEqual(error as? SkyBridgeMediaPacketError, .authenticationFailed)
+            XCTAssertEqual(
+                error as? SkyBridgeMediaPacketError,
+                .directionMismatch(
+                    expected: initiatorKeys.receive.wireDirection.rawValue,
+                    actual: initiatorKeys.send.wireDirection.rawValue
+                )
+            )
         }
     }
 
@@ -977,7 +1159,23 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(p2pSource.contains("legacyAudioFallbackEnabled"))
         XCTAssertTrue(p2pSource.contains("if legacyAudioFallbackEnabled {\n            policy = policy.protectingRealtimeAudio()"))
         XCTAssertTrue(p2pSource.contains("private var realtimeAudioCaptureStreamer: ScreenCaptureKitStreamer?"))
-        XCTAssertTrue(p2pSource.contains("realtimeAudioCapture=\\(realtimeAudioCaptureStreamerForAttempt == nil ? \"none\" : \"separate-sck\""))
+        XCTAssertTrue(p2pSource.contains("private var realtimeAudioCaptureStrictMediaFallbacks: Bool?"))
+        XCTAssertTrue(p2pSource.contains("let shouldPreserveRealtimeAudioCaptureStreamer = didReuseRealtimeAudioSender"))
+        XCTAssertTrue(p2pSource.contains("&& realtimeAudioCaptureStrictMediaFallbacks == strictMediaFallbacks"))
+        XCTAssertTrue(p2pSource.contains("let preservedRealtimeAudioCaptureStreamer = shouldPreserveRealtimeAudioCaptureStreamer"))
+        XCTAssertTrue(p2pSource.contains("if !shouldPreserveRealtimeAudioCaptureStreamer {\n            realtimeAudioCaptureStreamer?.stop()"))
+        XCTAssertTrue(p2pSource.contains("if preservedRealtimeAudioCaptureStreamer != nil {\n                realtimeAudioCaptureStreamerForAttempt = nil"))
+        XCTAssertTrue(p2pSource.contains("preservedRealtimeAudioCaptureStreamer?.stop()"))
+        XCTAssertTrue(p2pSource.contains("if reason.hasPrefix(\"p2p-realtime-audio-\") {\n            realtimeAudioCaptureStreamer?.stop()"))
+        XCTAssertTrue(p2pSource.contains("realtimeAudioCapture=\\(preservedRealtimeAudioCaptureStreamer != nil ? \"preserved-sck\""))
+        XCTAssertTrue(p2pSource.contains("startedRealtimeAudioCaptureStreamer?.stop()"))
+        XCTAssertTrue(p2pSource.contains("p2p-realtime-audio-start-failed"))
+        XCTAssertTrue(p2pSource.contains("action=video-preserved"))
+        XCTAssertTrue(p2pSource.contains("didCloseRealtimeAudioSenderForAudioStartFailure"))
+        XCTAssertFalse(
+            p2pSource.contains("captureStreamer = nil\n                    realtimeAudioCaptureStreamer?.stop()"),
+            "Viewer video config restarts must not cut a reused realtime audio capture before the new attempt is ready."
+        )
         XCTAssertTrue(p2pSource.contains("Remote frame tx telemetry"))
         XCTAssertTrue(p2pSource.contains("sampleMs=\\(sampleMs"))
         XCTAssertTrue(p2pSource.contains("submittedFPS="))
@@ -1063,10 +1261,22 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlSmokeStatusWriter.swift"),
             encoding: .utf8
         )
+        let smokeAppenderSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeSmokeSupport/SmokeStatusFileAppender.swift"),
+            encoding: .utf8
+        )
         XCTAssertTrue(smokeWriterSource.contains("private static let writerQueue"))
         XCTAssertTrue(smokeWriterSource.contains("writerQueue.async"))
         XCTAssertTrue(smokeWriterSource.contains("private final class WriterState: @unchecked Sendable"))
-        XCTAssertTrue(smokeWriterSource.contains("private var cachedHandle"))
+        XCTAssertTrue(smokeWriterSource.contains("import SkyBridgeSmokeSupport"))
+        XCTAssertTrue(smokeWriterSource.contains("SmokeStatusFileAppender.append(data, to: statusURL)"))
+        XCTAssertFalse(smokeWriterSource.contains("cachedHandle"))
+        XCTAssertFalse(smokeWriterSource.contains("FileHandle(forWritingTo:"))
+        XCTAssertTrue(smokeAppenderSource.contains("O_APPEND"))
+        XCTAssertTrue(smokeAppenderSource.contains("O_NOFOLLOW"))
+        XCTAssertTrue(smokeAppenderSource.contains("Darwin.fstat"))
+        XCTAssertTrue(smokeAppenderSource.contains("S_IFREG"))
+        XCTAssertTrue(smokeAppenderSource.contains("Darwin.write"))
         XCTAssertFalse(
             smokeWriterSource.contains("NSLock"),
             "Smoke status diagnostics must not serialize media hot paths behind a synchronous lock and file open/seek/write."
@@ -1102,8 +1312,17 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(remoteControlSource.contains("scheduleJitterMaxMs="))
         XCTAssertTrue(remoteControlSource.contains("completionGapMaxMs="))
         XCTAssertTrue(remoteControlSource.contains("RemoteControlFrameSequenceGenerator"))
+        XCTAssertTrue(remoteControlSource.contains("RemoteControlEncodedFrameSubmissionPipe"))
+        XCTAssertTrue(remoteControlSource.contains("bufferingPolicy: .bufferingNewest(Self.bufferedFrameLimit)"))
+        XCTAssertTrue(remoteControlSource.contains("mac-video-submit-pipe result=dropped reason=bounded-newest"))
+        XCTAssertTrue(remoteControlSource.contains("let videoFrameSubmissionPipe = RemoteControlEncodedFrameSubmissionPipe("))
+        XCTAssertTrue(remoteControlSource.contains("videoFrameSubmissionPipe.submit(frame)"))
         XCTAssertTrue(remoteControlSource.contains("sequenceNumber: videoFrameSequence.next()"))
         XCTAssertTrue(remoteControlSource.contains("sequenceNumber: frame.sequenceNumber"))
+        XCTAssertFalse(
+            remoteControlSource.contains("Task(priority: .userInitiated) {\n                await outboundFramePump.submitFrame(frame)\n            }"),
+            "Encoded video frames must use a single high-priority submission pipe instead of spawning one Swift task per frame."
+        )
         XCTAssertFalse(
             remoteControlSource.contains("peer.queue.async {\n                let frame = ScreenData("),
             "Encoded video frames must enter the sender pump directly so peer queue stalls cannot be hidden from telemetry."
@@ -1139,9 +1358,34 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(senderSource.contains("sentOrAttemptedFrames"))
         XCTAssertTrue(senderSource.contains("func matches(sessionId: String, endpoint: SkyBridgeMediaEndpoint, mode: SkyBridgeMediaAudioMode) -> Bool"))
         XCTAssertTrue(senderSource.contains("func diagnosticSnapshot() -> RealtimeMediaAudioSenderDiagnosticSnapshot"))
+        XCTAssertTrue(senderSource.contains("func close(reason: String = \"unspecified\") async"))
+        XCTAssertTrue(senderSource.contains("kind: \"audioTxSenderClosed\""))
+        XCTAssertTrue(senderSource.contains("failureReason: reason"))
+        XCTAssertTrue(senderSource.contains("RemoteControlSmokeStatusWriter.append("))
+        XCTAssertTrue(senderSource.contains("audioTxSenderClose session="))
+        XCTAssertTrue(senderSource.contains("reason=\\(Self.sanitizeSmokeField(reason))"))
+        XCTAssertTrue(senderSource.contains("sentTotal=\\(sentPackets)"))
+        XCTAssertTrue(senderSource.contains("sendFail=\\(sendFailedPackets)"))
+        XCTAssertTrue(senderSource.contains("let queuedFramesAtClose = pendingPCM.count / max(frameBytes, 1)"))
+        XCTAssertTrue(senderSource.contains("let queuedMsAtClose = queuedFramesAtClose * profile.frameDurationMs"))
+        XCTAssertTrue(senderSource.contains("queuedFrames=\\(queuedFramesAtClose)"))
+        XCTAssertTrue(senderSource.contains("queuedMs=\\(queuedMsAtClose)"))
+        XCTAssertTrue(senderSource.contains("endpoint=\\(Self.sanitizeSmokeField(endpoint.host)):\\(endpoint.port)"))
+        XCTAssertTrue(senderSource.contains("audioTxCapturedTotal: capturedPackets"))
+        XCTAssertTrue(senderSource.contains("audioTxEncodedTotal: encodedPackets"))
         XCTAssertTrue(senderSource.contains("private let diagnosticSessionId: String"))
         XCTAssertTrue(senderSource.contains("diagnosticSessionId: String? = nil"))
         XCTAssertTrue(senderSource.contains("self.diagnosticSessionId = diagnosticSessionId ?? sessionId"))
+        XCTAssertTrue(senderSource.contains("kind: \"audioRxReceiverClosed\""))
+        XCTAssertTrue(senderSource.contains("audioRxRecv: receivedPackets"))
+        XCTAssertTrue(senderSource.contains("audioRxDecoded: decodedPackets"))
+        XCTAssertTrue(senderSource.contains("audioRxPlayed: playedPackets"))
+        XCTAssertTrue(senderSource.contains("audioRxRejected: rejectedPackets"))
+        XCTAssertTrue(senderSource.contains("probable: receivedPackets == 0 ? \"audio-rx-no-positive-evidence\" : nil"))
+        XCTAssertTrue(
+            senderSource.contains("self.diagnosticSessionId = sessionId"),
+            "Realtime audio receiver close diagnostics must preserve the session id for zero-rx correlation."
+        )
         XCTAssertTrue(senderSource.contains("if didPrimeTelemetryWindow"))
         XCTAssertTrue(senderSource.contains("sessionId: diagnosticSessionId"))
         XCTAssertTrue(senderSource.contains("RemoteRealtimeSyntheticPCM16ToneSource"))
@@ -1194,7 +1438,7 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let remoteControlSource = try remoteControlSource(root: root)
-        XCTAssertTrue(remoteControlSource.contains("try await sendRemoteFrame(payload)"))
+        XCTAssertTrue(remoteControlSource.contains("try await sendRemoteFrame(payload, packetType: .audio)"))
         XCTAssertTrue(remoteControlSource.contains("makeOutboundRemoteFrame("))
         XCTAssertTrue(remoteControlSource.contains("sampleMs=\\(sampleMs"))
         XCTAssertTrue(remoteControlSource.contains("sentFPS=\\(sentFPS)"))
@@ -1208,10 +1452,10 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(remoteControlSource.contains("sentChunks=\\(snapshot.sentChunks)"))
         XCTAssertTrue(remoteControlSource.contains("maxChunksPerFrame=\\(snapshot.maxChunksPerFrame)"))
         XCTAssertTrue(remoteControlSource.contains("private static let maxInFlightVideoSends = 3"))
-        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedContentProcessedBacklogFrames = 12"))
+        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedContentProcessedBacklogFrames = 18"))
         XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedContentProcessedBacklogBytes = 12 * 256 * 1024"))
         XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedVideoFramesPerDrain = 1"))
-        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedHighFPSVideoFramesPerDrain = 3"))
+        XCTAssertTrue(remoteControlSource.contains("private static let maxChunkedHighFPSVideoFramesPerDrain = 1"))
         XCTAssertTrue(remoteControlSource.contains("private static let boundedCadenceCatchUpFrameAgeLimitMs: Double = 50"))
         XCTAssertFalse(remoteControlSource.contains("maxChunkedStaleQueueCatchUpFramesPerDrain"))
         XCTAssertFalse(remoteControlSource.contains("staleQueuedFrameCatchUpEligible"))
@@ -1253,23 +1497,33 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(remoteControlSource.contains("submitGapMaxMs=\\(submitGapMaxMs)"))
         XCTAssertTrue(remoteControlSource.contains("clockFireToDrainMaxMs=\\(clockFireToDrainMaxMs)"))
         XCTAssertTrue(remoteControlSource.contains("final class RemoteControlVideoPaceClock"))
-        XCTAssertTrue(remoteControlSource.contains("DispatchSource.makeTimerSource(queue: queue)"))
+        XCTAssertTrue(remoteControlSource.contains("DispatchSource.makeTimerSource(flags: .strict, queue: queue)"))
         XCTAssertTrue(remoteControlSource.contains("leeway: .nanoseconds(100_000)"))
-        XCTAssertTrue(remoteControlSource.contains("videoPaceClock.schedule(after: delay, generation: generation)"))
+        XCTAssertTrue(remoteControlSource.contains("interval: videoSendInterval"))
         XCTAssertFalse(remoteControlSource.contains("try await Task.sleep(nanoseconds: UInt64((delay * 1_000_000_000).rounded(.up)))"))
         XCTAssertTrue(remoteControlSource.contains("scheduleVideoPaceWakeIfNeeded()"))
-        XCTAssertTrue(remoteControlSource.contains("await drainIfNeeded(maxVideoFramesToSchedule: videoScheduleBudget(now: drainStartedAt))"))
+        XCTAssertTrue(remoteControlSource.contains("await drainIfNeeded(maxVideoFramesToSchedule: videoScheduleBudget(now: firedAt))"))
         XCTAssertTrue(remoteControlSource.contains("catchUp=bounded-cadence-catch-up-no-stale"))
+        XCTAssertTrue(remoteControlSource.contains("writerClockStrict=1"))
+
+        let remoteControlManagerSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(remoteControlManagerSource.contains("beginRealtimeStreamingActivity(for: peer, strictMediaFallbacks: strictMediaFallbacks)"))
+        XCTAssertTrue(remoteControlManagerSource.contains("ProcessInfo.processInfo.beginActivity("))
+        XCTAssertTrue(remoteControlManagerSource.contains(".latencyCritical"))
+        XCTAssertTrue(remoteControlManagerSource.contains("mac-remote-realtime-activity active=1 appNapDisabled=1"))
 
         let remoteServerSource = try String(
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlServer.swift"),
             encoding: .utf8
         )
         XCTAssertTrue(remoteServerSource.contains("tcp.noDelay = true"))
-        XCTAssertTrue(remoteServerSource.contains("parameters.serviceClass = .interactiveVideo"))
+        XCTAssertFalse(remoteServerSource.contains("parameters.serviceClass = .interactiveVideo"))
         XCTAssertTrue(remoteServerSource.contains("qos: .userInteractive"))
         XCTAssertTrue(remoteServerSource.contains("listener.start(queue: queue)"))
-        XCTAssertTrue(remoteServerSource.contains("connection.start(queue: queue)"))
+        XCTAssertTrue(remoteServerSource.contains("connection.start(queue: connectionQueue)"))
         XCTAssertTrue(remoteServerSource.contains("parameters.includePeerToPeer = false"))
         XCTAssertTrue(remoteServerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)"))
         XCTAssertGreaterThanOrEqual(
@@ -1303,22 +1557,28 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             encoding: .utf8
         )
         XCTAssertTrue(iosRemoteDesktopSource.contains("tcp.noDelay = true"))
-        XCTAssertTrue(iosRemoteDesktopSource.contains("parameters.serviceClass = .interactiveVideo"))
+        XCTAssertFalse(iosRemoteDesktopSource.contains("parameters.serviceClass = .interactiveVideo"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("activeTransportMode == .crossNetwork || activeTransportMode == .lan"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("RemoteDesktopScreenFrameWire.ChunkedPayloadReassembler"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("unwrapLANChunkedPayloadIfNeeded("))
-        XCTAssertTrue(iosRemoteDesktopSource.contains("sbc2-chunk-reassembly-failed"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("handleLANSBC2FrameDrops"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("lan-sbc2-frame-drop reason="))
         XCTAssertTrue(iosRemoteDesktopSource.contains("screenWire=\\(lanInboundScreenWireFormat)"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("sbc2Frames=\\(lanInboundChunkedScreenFramesInWindow)"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("sbc2Chunks=\\(lanInboundScreenChunksInWindow)"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("parser=\\(lanInboundReceiveParserMode)"))
         XCTAssertTrue(iosSecurePipelineSource.contains("actor LANRemoteSecureReceivePipeline"))
-        XCTAssertTrue(iosSecurePipelineSource.contains("AES.GCM.open(sealedBox, using: key)"))
+        XCTAssertTrue(iosSecurePipelineSource.contains("RemoteControlSecureEnvelope.open("))
         XCTAssertTrue(iosRemoteDesktopSource.contains("pipeline.appendAndDrain("))
         XCTAssertTrue(iosRemoteDesktopSource.contains("private var needsLANReceiveBufferDrain = false"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("needsLANReceiveBufferDrain = true"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("let shouldDrainAgain = needsLANReceiveBufferDrain || hasCompleteLANFramedPayloadPending()"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("await self?.processLANReceiveBuffer(from: connection)"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("let shouldContinueReceiving = error == nil && !isComplete"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("self.receiveNextLANChunk(from: connection)"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("let previousParse = lanSecureReceiveChain"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("await previousParse?.value"))
+        XCTAssertFalse(iosRemoteDesktopSource.contains("if error == nil, !isComplete {\n                self?.receiveNextLANChunk(from: connection)\n            }"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("private func hasCompleteLANFramedPayloadPending() -> Bool"))
     }
 
@@ -1423,6 +1683,20 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(audioSource.contains("output[frame] = 0"))
         XCTAssertTrue(audioSource.contains("engine.prepare()"))
         XCTAssertTrue(audioSource.contains("engine.start()"))
+        XCTAssertTrue(audioSource.contains("private func configureAudioSession("))
+        XCTAssertTrue(audioSource.contains("private func setSessionPreferences("))
+        XCTAssertTrue(audioSource.contains("activateSession(session, stage: \"playback_set_active\")"))
+        XCTAssertTrue(audioSource.contains("PQC media audio session stage=\\(stage)"))
+        XCTAssertTrue(audioSource.contains("PQC media audio session active with non-interrupting ambient category"))
+        XCTAssertTrue(audioSource.contains("[domain=\\(nsError.domain) code=\\(nsError.code)]"))
+        XCTAssertFalse(
+            audioSource.contains("try session.setPreferredSampleRate(Double(profile.sampleRate))\n        try session.setPreferredIOBufferDuration"),
+            "AVAudioSession preferences are not contractual capabilities; preference failures should be logged with domain/code instead of killing PQC media playback."
+        )
+        XCTAssertFalse(
+            audioSource.contains("PQC media audio player unavailable: \\(error.localizedDescription)"),
+            "Audio-session activation failures need domain/code diagnostics and throttled logging; localized text alone hides the production root cause."
+        )
         XCTAssertFalse(audioSource.contains("scheduleBuffer("))
         XCTAssertFalse(
             audioSource.contains("resetPlayerQueue(playerNode, reason: \"playback-backpressure\")"),
@@ -1686,7 +1960,9 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         }
         let decodeLoopBody = managerSource[decodeLoopStart.lowerBound..<finishDecodeStart.lowerBound]
         XCTAssertTrue(decodeLoopBody.contains("Task.detached(priority: .high)"))
-        XCTAssertTrue(decodeLoopBody.contains("try await decoder.decode(screenData: screenData)"))
+        XCTAssertTrue(decodeLoopBody.contains("try await decoder.submit(screenData: screenData)"))
+        XCTAssertTrue(decodeLoopBody.contains("try await handle.wait()"))
+        XCTAssertTrue(decodeLoopBody.contains("await previousSubmission?.value"))
         XCTAssertFalse(decodeLoopBody.contains("Task { @MainActor"))
         XCTAssertTrue(managerSource.contains("metal-feed-awaiting-renderer-consumer"))
         XCTAssertTrue(managerSource.contains("metal-feed-renderer-rejected"))

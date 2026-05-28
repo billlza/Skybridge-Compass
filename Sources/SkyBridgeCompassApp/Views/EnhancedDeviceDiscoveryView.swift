@@ -1,5 +1,6 @@
 import SwiftUI
 import SkyBridgeCore
+import SkyBridgeSmokeSupport
 import os
 
 /// 增强版设备发现视图 - 整合三种连接方式
@@ -35,6 +36,7 @@ public struct EnhancedDeviceDiscoveryView: View {
  // 跨网络连接（使用共享实例，确保与文件传输/远程桌面等模块状态一致）
     @StateObject private var crossNetworkManager = CrossNetworkConnectionManager.shared
     @StateObject private var p2pDiscoveryService = P2PDiscoveryService.shared
+    @ObservedObject private var presenceService = ConnectionPresenceService.shared
 
  // 🆕 真实iCloud设备发现(不再单独使用,已整合到统一管理器中)
  // @StateObject private var iCloudManager = iCloudDeviceDiscoveryManager()
@@ -49,6 +51,7 @@ public struct EnhancedDeviceDiscoveryView: View {
     @State private var lastScannerErrorFingerprint: String?
     @State private var lastScannerErrorAt: Date = .distantPast
     @State private var connectionCodeErrorMessage: String?
+    @State private var onlineDeviceConnectionErrorMessage: String?
     @State private var extendedSearchCountdown: Int = 0
     @State private var showManualConnectSheet: Bool = false
     @State private var manualIP: String = ""
@@ -59,6 +62,7 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     @State private var selectedTrustedGroupSelection: TrustedGroupSelection?
     @StateObject private var trustedBonjourMetadata = TrustedBonjourMetadataStore()
+    @State private var didAppendMacOnlineIPadSmokeBoot = false
 
 
 
@@ -87,6 +91,12 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
         .navigationTitle(LocalizationManager.shared.localizedString("discovery.title"))
+        .task {
+            appendMacOnlineIPadSmokeRowsIfNeeded()
+        }
+        .onChange(of: smokeOnlineDeviceSnapshotKey) { _, _ in
+            appendMacOnlineIPadSmokeRowsIfNeeded()
+        }
         .sheet(isPresented: $showManualConnectSheet) {
             VStack(alignment: .leading, spacing: 12) {
                 Text(LocalizationManager.shared.localizedString("discovery.manualConnect.title")).font(.headline)
@@ -388,23 +398,35 @@ public struct EnhancedDeviceDiscoveryView: View {
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
             )
 
+            if let onlineDeviceConnectionErrorMessage,
+               !onlineDeviceConnectionErrorMessage.isEmpty {
+                Text(onlineDeviceConnectionErrorMessage)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             // 我的设备（固定展示，不依赖扫描结果；避免被“在线设备”列表/过滤逻辑吞掉）
             if let my = unifiedDeviceManager.localDevice {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("我的设备")
                         .font(.headline)
 
-                    OnlineDeviceCard(device: my) {
+                    OnlineDeviceCard(
+                        device: my,
+                        accessibilityIdentity: resolvedPresentationIdentityKey(for: my)
+                    ) {
                         // no-op: 本机不需要“连接”
                     }
 
                     // 当前已连接设备（即使尚未“信任/配对”，也应在这里可见）
-                    let connectedNow = unifiedDeviceManager.onlineDevices
-                        .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
-                        .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+                    let connectedNow = connectedOnlineDevicesNonLocal
                     if !connectedNow.isEmpty {
                         ForEach(connectedNow) { dev in
-                            OnlineDeviceCard(device: dev) {
+                            OnlineDeviceCard(
+                                device: dev,
+                                accessibilityIdentity: resolvedPresentationIdentityKey(for: dev)
+                            ) {
                                 // already connected; no-op
                             }
                         }
@@ -419,7 +441,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
 
             // 受信任设备（已配对/已允许）——来自 TrustSyncService
-            let trustedRecords = trustedRecordsForUI
+            let trustedRecords = displayedTrustedRecordsForUI
             if !trustedRecords.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("已信任设备")
@@ -452,7 +474,9 @@ public struct EnhancedDeviceDiscoveryView: View {
                     ForEach(recentlyConnected) { device in
                         OnlineDeviceCard(
                             device: device,
-                            isConnecting: connectingOnlineDeviceIds.contains(device.id)
+                            accessibilityIdentity: resolvedPresentationIdentityKey(for: device),
+                            isConnecting: connectingOnlineDeviceIds.contains(device.id),
+                            canConnect: unifiedDeviceManager.hasResolvedConnectableControlRoute(for: device)
                         ) {
                             // If already connected, no-op; otherwise, we keep this as a future reconnect entry.
                             connectToOnlineDevice(device)
@@ -470,7 +494,7 @@ public struct EnhancedDeviceDiscoveryView: View {
  // 设备列表
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text(String(format: LocalizationManager.shared.localizedString("discovery.onlineDevices"), onlineNonLocalDevices.count))
+                    Text(String(format: LocalizationManager.shared.localizedString("discovery.onlineDevices"), activeOnlineDevicesNonLocal.count))
                         .font(.headline)
 
                     Spacer()
@@ -502,7 +526,9 @@ public struct EnhancedDeviceDiscoveryView: View {
                     ForEach(filteredOnlineDevicesNonLocal) { device in
                         OnlineDeviceCard(
                             device: device,
-                            isConnecting: connectingOnlineDeviceIds.contains(device.id)
+                            accessibilityIdentity: resolvedPresentationIdentityKey(for: device),
+                            isConnecting: connectingOnlineDeviceIds.contains(device.id),
+                            canConnect: unifiedDeviceManager.hasResolvedConnectableControlRoute(for: device)
                         ) {
                             connectToOnlineDevice(device)
                         }
@@ -839,16 +865,84 @@ public struct EnhancedDeviceDiscoveryView: View {
         return token.isEmpty ? nil : token
     }
 
+    private func effectiveConnectionStatus(for device: OnlineDevice) -> OnlineDeviceStatus {
+        matchingPresenceConnection(for: device) == nil ? device.connectionStatus : .connected
+    }
+
+    private func matchingPresenceConnection(
+        for device: OnlineDevice
+    ) -> ConnectionPresenceService.ActiveConnection? {
+        guard !device.isLocalDevice,
+              !presenceService.activeConnections.isEmpty else {
+            return nil
+        }
+
+        let deviceTokens = presenceMatchTokens(
+            identifier: device.uniqueIdentifier,
+            displayName: device.name,
+            addresses: [device.ipv4, device.ipv6]
+        )
+        guard !deviceTokens.isEmpty else { return nil }
+
+        return presenceService.activeConnections
+            .filter { connection in
+                let connectionTokens = presenceMatchTokens(
+                    identifier: connection.id,
+                    displayName: connection.displayName,
+                    addresses: [connection.address]
+                )
+                return !deviceTokens.isDisjoint(with: connectionTokens)
+            }
+            .max(by: { $0.connectedAt < $1.connectedAt })
+    }
+
+    private func presenceMatchTokens(
+        identifier: String?,
+        displayName: String?,
+        addresses: [String?]
+    ) -> Set<String> {
+        var tokens = Set<String>()
+        tokens.formUnion(trustedDeviceTokens(from: identifier))
+        tokens.formUnion(trustedDeviceTokens(from: displayName))
+        for address in addresses {
+            tokens.formUnion(trustedDeviceTokens(from: normalizedPresenceAddress(address)))
+        }
+        return tokens
+    }
+
+    private func normalizedPresenceAddress(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        if value.hasPrefix("[") && value.hasSuffix("]") {
+            value = String(value.dropFirst().dropLast())
+        }
+        if let percent = value.firstIndex(of: "%") {
+            value = String(value[..<percent])
+        }
+        return value
+    }
+
     private var onlineNonLocalDevices: [OnlineDevice] {
         unifiedDeviceManager.onlineDevices.filter { !$0.isLocalDevice }
     }
 
+    private var connectedOnlineDevicesNonLocal: [OnlineDevice] {
+        onlineNonLocalDevices
+            .filter { effectiveConnectionStatus(for: $0) == .connected }
+            .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
+    }
+
+    private var activeOnlineDevicesNonLocal: [OnlineDevice] {
+        presentationDedupeOnlineDevices(
+            onlineNonLocalDevices.filter { effectiveConnectionStatus(for: $0) == .online }
+        )
+    }
+
     private var filteredOnlineDevicesNonLocal: [OnlineDevice] {
         let settings = SettingsManager.shared
-        let base = onlineNonLocalDevices.filter { device in
-            if settings.hideOfflineDevices && device.connectionStatus == .offline {
-                return false
-            }
+        let base = activeOnlineDevicesNonLocal.filter { device in
             if settings.showConnectableDevicesOnly && !device.isConnectable {
                 return false
             }
@@ -867,8 +961,14 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     private var groupedRecentlyConnectedDevices: [OnlineDevice] {
+        let liveRepresentations = connectedOnlineDevicesNonLocal + activeOnlineDevicesNonLocal
         let candidates = unifiedDeviceManager.onlineDevices
-            .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil && $0.connectionStatus != .connected }
+            .filter { !$0.isLocalDevice && $0.lastConnectedAt != nil && $0.connectionStatus == .offline }
+            .filter { device in
+                !liveRepresentations.contains { live in
+                    shouldCoalesceAppleMobilePresentation(device, live)
+                }
+            }
         guard !candidates.isEmpty else { return [] }
 
         let trustRecords = trustedRecordsForUI.map(\.displayRecord)
@@ -889,7 +989,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
 
-        return grouped.values.sorted { lhs, rhs in
+        let presentationDevices = presentationDedupeOnlineDevices(Array(grouped.values))
+        return presentationDevices.sorted { lhs, rhs in
             if statusPriority(lhs.connectionStatus) != statusPriority(rhs.connectionStatus) {
                 return statusPriority(lhs.connectionStatus) > statusPriority(rhs.connectionStatus)
             }
@@ -902,6 +1003,248 @@ public struct EnhancedDeviceDiscoveryView: View {
                 return lhs.lastSeen > rhs.lastSeen
             }
             return lhs.name < rhs.name
+        }
+    }
+
+    private func presentationDedupeOnlineDevices(_ devices: [OnlineDevice]) -> [OnlineDevice] {
+        var passthrough: [OnlineDevice] = []
+        var appleMobileGroups: [[OnlineDevice]] = []
+
+        for device in devices {
+            guard appleMobilePresentationFamily(for: device) != nil,
+                  !appleMobileStrongPresentationTokens(for: device).isEmpty else {
+                passthrough.append(device)
+                continue
+            }
+
+            let matchingIndices = appleMobileGroups.indices.filter { index in
+                let group = appleMobileGroups[index]
+                return group.contains { existing in
+                    shouldCoalesceAppleMobilePresentation(existing, device)
+                }
+            }
+            if let firstIndex = matchingIndices.first {
+                var mergedGroup = appleMobileGroups[firstIndex]
+                mergedGroup.append(device)
+                for index in matchingIndices.dropFirst().reversed() {
+                    mergedGroup.append(contentsOf: appleMobileGroups.remove(at: index))
+                }
+                appleMobileGroups[firstIndex] = mergedGroup
+            } else {
+                appleMobileGroups.append([device])
+            }
+        }
+
+        let coalescedAppleMobile = appleMobileGroups.flatMap { group -> [OnlineDevice] in
+            guard group.count > 1,
+                  let winner = group.max(by: { preferredOnlinePresentationOrder($1, $0) }) else {
+                return group
+            }
+            return [winner]
+        }
+
+        return (passthrough + coalescedAppleMobile).sorted(by: preferredOnlinePresentationOrder)
+    }
+
+    private func shouldCoalesceAppleMobilePresentation(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> Bool {
+        guard let lhsFamily = appleMobilePresentationFamily(for: lhs),
+              let rhsFamily = appleMobilePresentationFamily(for: rhs),
+              lhsFamily == rhsFamily else {
+            return false
+        }
+
+        guard appleMobilePresentationMetadataCompatible(lhs.modelName, rhs.modelName, family: lhsFamily),
+              appleMobilePresentationPlatformCompatible(lhs.platformName, rhs.platformName) else {
+            return false
+        }
+
+        let lhsRoutes = appleMobilePresentationRouteTokens(for: lhs)
+        let rhsRoutes = appleMobilePresentationRouteTokens(for: rhs)
+        if !lhsRoutes.isEmpty, !lhsRoutes.isDisjoint(with: rhsRoutes) {
+            return true
+        }
+
+        let lhsTokens = appleMobileStrongPresentationTokens(for: lhs)
+        let rhsTokens = appleMobileStrongPresentationTokens(for: rhs)
+        return !lhsTokens.isEmpty && !rhsTokens.isEmpty && !lhsTokens.isDisjoint(with: rhsTokens)
+    }
+
+    private func appleMobilePresentationFamily(for device: OnlineDevice) -> String? {
+        let haystack = [
+            device.name,
+            device.modelName ?? "",
+            device.platformName ?? ""
+        ].joined(separator: " ").lowercased()
+        if haystack.contains("ipad") || haystack.contains("ipados") {
+            return "ipad"
+        }
+        if haystack.contains("iphone") || haystack.contains("ios") {
+            return "iphone"
+        }
+        return nil
+    }
+
+    private func appleMobilePresentationMetadataCompatible(
+        _ lhs: String?,
+        _ rhs: String?,
+        family: String
+    ) -> Bool {
+        let lhs = normalizedSmokeToken(lhs ?? "")
+        let rhs = normalizedSmokeToken(rhs ?? "")
+        guard !lhs.isEmpty, !rhs.isEmpty else { return true }
+        if lhs == rhs { return true }
+        return lhs == family && rhs.hasPrefix(family)
+            || rhs == family && lhs.hasPrefix(family)
+    }
+
+    private func appleMobilePresentationPlatformCompatible(_ lhs: String?, _ rhs: String?) -> Bool {
+        let lhs = normalizedSmokeToken(lhs ?? "")
+        let rhs = normalizedSmokeToken(rhs ?? "")
+        guard !lhs.isEmpty, !rhs.isEmpty else { return true }
+        if lhs == rhs { return true }
+        let mobilePlatforms: Set<String> = ["ios", "ipados"]
+        return mobilePlatforms.contains(lhs) && mobilePlatforms.contains(rhs)
+    }
+
+    private func appleMobilePresentationRouteTokens(for device: OnlineDevice) -> Set<String> {
+        var tokens = Set<String>()
+        let rawValues: [String?] = [Optional.some(device.uniqueIdentifier)] + device.routeIdentifiers.map(Optional.some)
+        for raw in rawValues {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else {
+                continue
+            }
+            let normalized = raw.lowercased()
+            guard normalized.hasPrefix("bonjour:") || normalized.hasPrefix("recent:bonjour:") else {
+                continue
+            }
+            if let routeToken = appleMobileCanonicalBonjourRouteToken(from: raw) {
+                tokens.insert(routeToken)
+            }
+        }
+        return tokens
+    }
+
+    private func appleMobileCanonicalBonjourRouteToken(from raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+
+        let lowercased = raw.lowercased()
+        let payload: String
+        if lowercased.hasPrefix("recent:bonjour:") {
+            payload = String(raw.dropFirst("recent:bonjour:".count))
+        } else if lowercased.hasPrefix("bonjour:") {
+            payload = String(raw.dropFirst("bonjour:".count))
+        } else {
+            return nil
+        }
+
+        let parts = payload.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let rawServiceName = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawServiceName.isEmpty else {
+            return nil
+        }
+
+        let rawDomain = parts.count > 1
+            ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            : "local."
+        let domain: String
+        if rawDomain.isEmpty {
+            domain = "local."
+        } else if rawDomain.hasSuffix(".") {
+            domain = rawDomain.lowercased()
+        } else {
+            domain = "\(rawDomain.lowercased())."
+        }
+
+        return "bonjour:\(rawServiceName.lowercased())@\(domain)"
+    }
+
+    private func appleMobileStrongPresentationTokens(for device: OnlineDevice) -> Set<String> {
+        var tokens = appleMobilePresentationRouteTokens(for: device)
+
+        if let identityToken = appleMobilePresentationIdentityToken(from: device.uniqueIdentifier) {
+            tokens.insert(identityToken)
+        }
+        for routeIdentifier in device.routeIdentifiers {
+            if let identityToken = appleMobilePresentationIdentityToken(from: routeIdentifier) {
+                tokens.insert(identityToken)
+            }
+        }
+
+        let trustRecords = trustedRecordsForUI.map(\.displayRecord)
+        if let trustRecord = unifiedDeviceManager.resolvedTrustRecord(for: device, among: trustRecords) {
+            let stableDeviceId = trustRecord.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !stableDeviceId.isEmpty {
+                tokens.insert("trust:\(stableDeviceId)")
+            }
+        }
+
+        return tokens
+    }
+
+    private func appleMobilePresentationIdentityToken(from raw: String?) -> String? {
+        guard var normalized = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !normalized.isEmpty else {
+            return nil
+        }
+        if normalized.hasPrefix("recent:") {
+            normalized = String(normalized.dropFirst("recent:".count))
+        }
+
+        if normalized.hasPrefix("id:") {
+            let payload = String(normalized.dropFirst("id:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !payload.isEmpty else { return nil }
+            if let uuid = UUID(uuidString: payload) {
+                return "id:\(uuid.uuidString.lowercased())"
+            }
+            return payload.count >= 8 ? "id:\(payload)" : nil
+        }
+
+        if normalized.hasPrefix("fp:") {
+            let payload = String(normalized.dropFirst("fp:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return payload.count >= 16 ? "fp:\(payload)" : nil
+        }
+
+        if let uuid = UUID(uuidString: normalized) {
+            return "id:\(uuid.uuidString.lowercased())"
+        }
+
+        return nil
+    }
+
+    private func preferredOnlinePresentationOrder(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> Bool {
+        let lhsConnectable = unifiedDeviceManager.hasResolvedConnectableControlRoute(for: lhs)
+        let rhsConnectable = unifiedDeviceManager.hasResolvedConnectableControlRoute(for: rhs)
+        if lhsConnectable != rhsConnectable {
+            return lhsConnectable
+        }
+        if lhs.isConnectable != rhs.isConnectable {
+            return lhs.isConnectable
+        }
+        if lhs.lastSeen != rhs.lastSeen {
+            return lhs.lastSeen > rhs.lastSeen
+        }
+        return lhs.name < rhs.name
+    }
+
+    private var displayedTrustedRecordsForUI: [TrustRecordDisplayGroup] {
+        trustedRecordsForUI.filter { group in
+            !hasVisibleOnlineRepresentation(for: group)
+        }
+    }
+
+    private func hasVisibleOnlineRepresentation(for group: TrustRecordDisplayGroup) -> Bool {
+        let displayRecord = group.displayRecord
+        let representedDevices = connectedOnlineDevicesNonLocal
+            + activeOnlineDevicesNonLocal
+            + groupedRecentlyConnectedDevices
+        return representedDevices.contains { device in
+            unifiedDeviceManager.resolvedTrustRecord(for: device, among: [displayRecord]) != nil
         }
     }
 
@@ -922,6 +1265,381 @@ public struct EnhancedDeviceDiscoveryView: View {
             .joined(separator: "|")
         let discoverySummary = unifiedDeviceManager.discoveryMetadataSummary
         return "\(selectedConnectionMode.id)|\(trustIds)|\(trustEndpoints)|\(onlineSummary)|\(discoverySummary)|scan:\(unifiedDeviceManager.isScanning)"
+    }
+
+    private var smokeOnlineDeviceSnapshotKey: String {
+        guard isMacOnlineIPadSmokeClient else { return "" }
+        let deviceSummary = unifiedDeviceManager.onlineDevices
+            .filter { !$0.isLocalDevice }
+            .map { device in
+                [
+                    device.uniqueIdentifier,
+                    device.name,
+                    effectiveConnectionStatus(for: device).rawValue,
+                    device.platformName ?? "",
+                    device.modelName ?? "",
+                    device.ipv4 ?? "",
+                    device.ipv6 ?? "",
+                    device.sources.map(\.rawValue).sorted().joined(separator: ","),
+                    device.routeIdentifiers.joined(separator: ","),
+                    device.services.joined(separator: ","),
+                    device.portMap
+                        .map { "\($0.key)=\($0.value)" }
+                        .sorted()
+                        .joined(separator: ",")
+                ].joined(separator: "|")
+            }
+            .sorted()
+            .joined(separator: "\n")
+        let presenceSummary = presenceService.activeConnections
+            .map {
+                [
+                    $0.id,
+                    $0.displayName,
+                    $0.address ?? "",
+                    $0.cryptoKind,
+                    $0.suite
+                ].joined(separator: "|")
+            }
+            .sorted()
+            .joined(separator: "\n")
+        return "\(deviceSummary)\npresence:\(presenceSummary)"
+    }
+
+    private var isMacOnlineIPadSmokeClient: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "mac-online-ipad-client"
+    }
+
+    private var smokeStatusURL: URL? {
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: raw)
+    }
+
+    private struct MacOnlineIPadSmokeVisibleRow {
+        let device: OnlineDevice
+        let surface: String
+    }
+
+    private func appendMacOnlineIPadSmokeRowsIfNeeded() {
+        guard isMacOnlineIPadSmokeClient,
+              let statusURL = smokeStatusURL else {
+            return
+        }
+
+        if !didAppendMacOnlineIPadSmokeBoot {
+            didAppendMacOnlineIPadSmokeBoot = true
+            appendSmokeStatusLine(
+                [
+                    "boot",
+                    "role=mac-online-ipad-client",
+                    "process=SkyBridgeCompassApp",
+                    "uiRole=root-container",
+                    "source=app",
+                    "pid=\(ProcessInfo.processInfo.processIdentifier)"
+                ].joined(separator: " "),
+                to: statusURL
+            )
+        }
+
+        let rows = macOnlineIPadSmokeVisibleRows()
+        guard !rows.isEmpty else { return }
+
+        for row in rows {
+            appendSmokeStatusLine(smokeOnlineDeviceStatusLine(for: row.device, surface: row.surface), to: statusURL)
+        }
+    }
+
+    private func macOnlineIPadSmokeVisibleRows() -> [MacOnlineIPadSmokeVisibleRow] {
+        var rows: [MacOnlineIPadSmokeVisibleRow] = []
+        for device in connectedOnlineDevicesNonLocal where isIPadPresentation(device) {
+            rows.append(MacOnlineIPadSmokeVisibleRow(device: device, surface: "connected"))
+        }
+        for device in groupedRecentlyConnectedDevices where isIPadPresentation(device) {
+            rows.append(MacOnlineIPadSmokeVisibleRow(device: device, surface: "recent"))
+        }
+        for device in filteredOnlineDevicesNonLocal where isIPadPresentation(device) {
+            rows.append(MacOnlineIPadSmokeVisibleRow(device: device, surface: "online"))
+        }
+        return rows
+    }
+
+    private func smokeOnlineDeviceStatusLine(for device: OnlineDevice, surface: String) -> String {
+        let connectableCandidates = unifiedDeviceManager.resolvedConnectableDiscoveredCandidates(
+            for: device,
+            limit: 6
+        )
+        let hasControlEndpoint = unifiedDeviceManager.hasResolvedConnectableControlRoute(for: device)
+        let preferredCandidate = connectableCandidates.first
+        let bonjourServiceName = preferredCandidate
+            .flatMap(smokeBonjourServiceName)
+            ?? smokeBonjourServiceName(from: device)
+            ?? "-"
+        let endpointHost = preferredCandidate?.ipv4 ?? preferredCandidate?.ipv6 ?? device.ipv4 ?? device.ipv6 ?? "-"
+        let endpointPort = preferredCandidate?.portMap["_skybridge._tcp"]
+            ?? device.portMap["_skybridge._tcp"]
+            ?? 0
+        let service = (preferredCandidate?.services ?? device.services).contains("_skybridge._tcp")
+            ? "_skybridge._tcp"
+            : "-"
+        let effectiveStatus = effectiveConnectionStatus(for: device)
+        let status = effectiveStatus == .connected
+            ? "connected"
+            : (effectiveStatus == .online ? "online" : "offline")
+        let buttonEnabled = effectiveStatus == .online && hasControlEndpoint
+        let disabledReason: String = {
+            if buttonEnabled { return "-" }
+            if effectiveStatus != .online { return "not_online" }
+            return "no_resolved_control_route"
+        }()
+        let matchStrength = smokeMatchStrength(for: device)
+        let resolvedSource = smokeResolvedSource(for: device)
+        let protocolIdentity = smokeProtocolIdentity(for: device)
+        let routeIdentifier = preferredSmokeRouteIdentifier(for: device) ?? "-"
+        let fields = [
+            "mac-online-device-ui",
+            "targetFamily=ipad",
+            "visible=1",
+            "source=OnlineDeviceCard",
+            "evidenceSource=app-smoke",
+            "surface=\(surface)",
+            "status=\(status)",
+            "buttonEnabled=\(buttonEnabled ? 1 : 0)",
+            "disabledReason=\(disabledReason)",
+            "matchStrength=\(matchStrength)",
+            "resolvedSource=\(resolvedSource)",
+            "controlEndpoint=\(hasControlEndpoint ? 1 : 0)",
+            "candidateCount=\(connectableCandidates.count)",
+            "identityKey=\(smokeFieldValue(resolvedPresentationIdentityKey(for: device)))",
+            "targetDeviceId=\(smokeFieldValue(protocolIdentity.authorityDeviceId ?? "-"))",
+            "p2pDeviceId=\(smokeFieldValue(protocolIdentity.protocolDeviceId ?? "-"))",
+            "pubKeyFP=\(smokeFieldValue(protocolIdentity.pubKeyFP ?? "-"))",
+            "routeIdentifier=\(smokeFieldValue(routeIdentifier))",
+            "dedupeKey=\(smokePhysicalDedupeKey(for: device))",
+            "device=\(smokeFieldValue(device.name))",
+            "platform=\(smokeFieldValue(device.platformName ?? "-"))",
+            "model=\(smokeFieldValue(device.modelName ?? "-"))",
+            "service=\(service)",
+            "bonjourServiceName=\(smokeFieldValue(bonjourServiceName))",
+            "endpointHost=\(smokeFieldValue(endpointHost))",
+            "endpointPort=\(endpointPort)"
+        ]
+        return fields.joined(separator: " ")
+    }
+
+    private func smokeProtocolIdentity(
+        for device: OnlineDevice
+    ) -> (authorityDeviceId: String?, protocolDeviceId: String?, pubKeyFP: String?) {
+        let liveProtocolIdentity = resolvedLiveProtocolIdentity(for: device)
+        let trustRecords = trustedRecordsForUI.flatMap { [$0.displayRecord] + $0.relatedRecords }
+        if let trustRecord = unifiedDeviceManager.resolvedTrustRecord(for: device, among: trustRecords) {
+            let authorityDeviceId = liveProtocolIdentity.deviceId ?? nonEmptySmokeIdentity(trustRecord.deviceId)
+            let protocolDeviceId = liveProtocolIdentity.deviceId
+                ?? nonEmptySmokeIdentity(trustRecord.currentDeviceId)
+                ?? authorityDeviceId
+            let pubKeyFP = liveProtocolIdentity.pubKeyFP ?? nonEmptySmokeIdentity(trustRecord.pubKeyFP)
+            return (authorityDeviceId, protocolDeviceId, pubKeyFP)
+        }
+
+        let deviceId = liveProtocolIdentity.deviceId
+            ?? stableSmokeDeviceId(from: device.uniqueIdentifier)
+            ?? device.routeIdentifiers.lazy.compactMap { stableSmokeDeviceId(from: $0) }.first
+        let pubKeyFP = liveProtocolIdentity.pubKeyFP
+            ?? fingerprintSmokeIdentity(from: device.uniqueIdentifier)
+            ?? device.routeIdentifiers.lazy.compactMap { fingerprintSmokeIdentity(from: $0) }.first
+        return (deviceId, deviceId, pubKeyFP)
+    }
+
+    private func resolvedPresentationIdentityKey(for device: OnlineDevice) -> String {
+        let protocolIdentity = smokeProtocolIdentity(for: device)
+        if let stableDeviceId = protocolIdentity.protocolDeviceId ?? protocolIdentity.authorityDeviceId {
+            return stableIdentityKey(for: stableDeviceId)
+        }
+        return device.uniqueIdentifier
+    }
+
+    private func resolvedLiveProtocolIdentity(for device: OnlineDevice) -> (deviceId: String?, pubKeyFP: String?) {
+        let candidates = unifiedDeviceManager.resolvedConnectableDiscoveredCandidates(for: device, limit: 6)
+            + unifiedDeviceManager.resolvedDiscoveredCandidates(for: device, limit: 6)
+        for candidate in candidates {
+            if let deviceId = nonEmptySmokeIdentity(candidate.deviceId) {
+                let pubKeyFP = nonEmptySmokeIdentity(candidate.pubKeyFP)
+                return (stableIdentityPayload(from: deviceId), pubKeyFP)
+            }
+        }
+        return (nil, nil)
+    }
+
+    private func stableIdentityKey(for stableDeviceId: String) -> String {
+        let payload = stableIdentityPayload(from: stableDeviceId)
+        if stableDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("id:") {
+            return stableDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return "id:\(payload)"
+    }
+
+    private func stableIdentityPayload(from raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.lowercased().hasPrefix("id:") {
+            value = String(value.dropFirst("id:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value
+    }
+
+    private func preferredSmokeRouteIdentifier(for device: OnlineDevice) -> String? {
+        for routeIdentifier in device.routeIdentifiers {
+            let trimmed = routeIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        let uniqueIdentifier = device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        return uniqueIdentifier.isEmpty ? nil : uniqueIdentifier
+    }
+
+    private func nonEmptySmokeIdentity(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    private func stableSmokeDeviceId(from raw: String?) -> String? {
+        guard var value = nonEmptySmokeIdentity(raw) else { return nil }
+        if value.lowercased().hasPrefix("recent:") {
+            value = String(value.dropFirst("recent:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard value.lowercased().hasPrefix("id:") else { return nil }
+        let payload = String(value.dropFirst("id:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return payload.isEmpty ? nil : payload
+    }
+
+    private func fingerprintSmokeIdentity(from raw: String?) -> String? {
+        guard var value = nonEmptySmokeIdentity(raw) else { return nil }
+        if value.lowercased().hasPrefix("recent:") {
+            value = String(value.dropFirst("recent:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard value.lowercased().hasPrefix("fp:") else { return nil }
+        let payload = String(value.dropFirst("fp:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return payload.isEmpty ? nil : payload
+    }
+
+    private func appendSmokeStatusLine(_ line: String, to statusURL: URL) {
+        let rendered = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        let data = Data(rendered.utf8)
+        try? SmokeStatusFileAppender.append(data, to: statusURL)
+    }
+
+    private func appendMacOnlineIPadConnectAppActionIfNeeded(
+        result: String,
+        device: OnlineDevice,
+        error: Error? = nil
+    ) {
+        guard isMacOnlineIPadSmokeClient,
+              let statusURL = smokeStatusURL else {
+            return
+        }
+
+        let protocolIdentity = smokeProtocolIdentity(for: device)
+        var fields = [
+            "mac-online-connect-app",
+            "action=button",
+            "targetFamily=ipad",
+            "result=\(smokeFieldValue(result))",
+            "source=OnlineDeviceCard",
+            "evidenceSource=app-action",
+            "identityKey=\(smokeFieldValue(resolvedPresentationIdentityKey(for: device)))",
+            "targetDeviceId=\(smokeFieldValue(protocolIdentity.authorityDeviceId ?? "-"))",
+            "p2pDeviceId=\(smokeFieldValue(protocolIdentity.protocolDeviceId ?? "-"))",
+            "pubKeyFP=\(smokeFieldValue(protocolIdentity.pubKeyFP ?? "-"))",
+            "device=\(smokeFieldValue(device.name))"
+        ]
+        if let error {
+            fields.append("error=\(smokeFieldValue(error.localizedDescription))")
+        }
+        appendSmokeStatusLine(fields.joined(separator: " "), to: statusURL)
+    }
+
+    private func smokeResolvedSource(for device: OnlineDevice) -> String {
+        if device.sources.contains(.skybridgeBonjour) { return "skybridgeBonjour" }
+        if device.sources.contains(.skybridgeP2P) { return "skybridgeP2P" }
+        if device.sources.contains(.skybridgeUSB) { return "skybridgeUSB" }
+        if device.sources.contains(.skybridgeCloud) { return "skybridgeCloud" }
+        return "unknown"
+    }
+
+    private func smokeMatchStrength(for device: OnlineDevice) -> String {
+        if device.uniqueIdentifier.hasPrefix("id:") || device.uniqueIdentifier.hasPrefix("fp:") {
+            return "stable-id"
+        }
+        if device.uniqueIdentifier.hasPrefix("bonjour:") || device.uniqueIdentifier.hasPrefix("ip:") {
+            return "endpoint"
+        }
+        return "name"
+    }
+
+    private func smokePhysicalDedupeKey(for device: OnlineDevice) -> String {
+        let family = isIPadPresentation(device) ? "ipad" : "device"
+        let modelFamily = normalizedSmokeToken(device.modelName ?? "").hasPrefix("ipad") ? "ipad" : family
+        let name = normalizedSmokeToken(device.name)
+        let stable = [name, modelFamily]
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+        return smokeFieldValue(stable.isEmpty ? device.uniqueIdentifier : stable)
+    }
+
+    private func isIPadPresentation(_ device: OnlineDevice) -> Bool {
+        let haystack = [
+            device.name,
+            device.modelName ?? "",
+            device.platformName ?? ""
+        ].joined(separator: " ").lowercased()
+        return haystack.contains("ipad") || haystack.contains("ipados")
+    }
+
+    private func smokeBonjourServiceName(_ candidate: DiscoveredDevice) -> String? {
+        smokeBonjourServiceName(from: candidate.uniqueIdentifier)
+            ?? candidate.routeIdentifiers.compactMap(smokeBonjourServiceName).first
+    }
+
+    private func smokeBonjourServiceName(from device: OnlineDevice) -> String? {
+        smokeBonjourServiceName(from: device.uniqueIdentifier)
+            ?? device.routeIdentifiers.compactMap(smokeBonjourServiceName).first
+    }
+
+    private func smokeBonjourServiceName(from identifier: String?) -> String? {
+        guard let identifier = identifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !identifier.isEmpty else {
+            return nil
+        }
+        let prefixes = ["recent:bonjour:", "bonjour:"]
+        guard let prefix = prefixes.first(where: { identifier.lowercased().hasPrefix($0) }) else {
+            return nil
+        }
+        let payload = String(identifier.dropFirst(prefix.count))
+        let name = payload.split(separator: "@", maxSplits: 1).first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return name?.isEmpty == false ? name : nil
+    }
+
+    private func normalizedSmokeToken(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
+    }
+
+    private func smokeFieldValue(_ raw: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".:-_"))
+        let scalars = raw.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars
+        let sanitized = scalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar).description : "_"
+        }.joined()
+        return sanitized.isEmpty ? "-" : sanitized
     }
 
     private func preferredRecentDisplayDevice(_ lhs: OnlineDevice, _ rhs: OnlineDevice) -> OnlineDevice {
@@ -1312,15 +2030,25 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     struct OnlineDeviceCard: View {
         let device: OnlineDevice
+        let accessibilityIdentity: String?
         let isConnecting: Bool
+        let canConnect: Bool
         let onConnect: () -> Void
         @EnvironmentObject var themeConfiguration: ThemeConfiguration
         @StateObject private var settingsManager = SettingsManager.shared
         @ObservedObject private var presenceService = ConnectionPresenceService.shared
 
-        init(device: OnlineDevice, isConnecting: Bool = false, onConnect: @escaping () -> Void) {
+        init(
+            device: OnlineDevice,
+            accessibilityIdentity: String? = nil,
+            isConnecting: Bool = false,
+            canConnect: Bool = true,
+            onConnect: @escaping () -> Void
+        ) {
             self.device = device
+            self.accessibilityIdentity = accessibilityIdentity
             self.isConnecting = isConnecting
+            self.canConnect = canConnect
             self.onConnect = onConnect
         }
 
@@ -1383,7 +2111,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                         }
                     }
 
-                    if settingsManager.showConnectionStats {
+                    if settingsManager.showConnectionStats || effectiveConnectionStatus == .connected {
                         Text(statusText)
                             .font(.caption2)
                             .foregroundColor(.secondary)
@@ -1406,15 +2134,12 @@ public struct EnhancedDeviceDiscoveryView: View {
                 Spacer()
 
                 // 连接按钮(仅对非本机在线设备显示)
-                if !device.isLocalDevice && device.connectionStatus == .online {
+                if !device.isLocalDevice && effectiveConnectionStatus == .online && canConnect {
                     if isConnecting {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
-                            onConnect()
-                        }
-                        .buttonStyle(.borderedProminent)
+                        connectButton
                     }
                 }
             }
@@ -1424,6 +2149,34 @@ public struct EnhancedDeviceDiscoveryView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(device.isLocalDevice ? Color.blue : themeConfiguration.borderColor, lineWidth: device.isLocalDevice ? 2 : 1)
             )
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("skybridge-online-device-row-\(accessibilityIdentifierToken(for: canonicalAccessibilityIdentity(for: effectiveAccessibilityIdentity)))")
+            .accessibilityLabel(Text(device.name))
+            .accessibilityValue(Text(statusText))
+        }
+
+        private var connectButton: some View {
+            let buttonIdentity = canonicalAccessibilityIdentity(for: effectiveAccessibilityIdentity)
+            let buttonIdentifier = "skybridge-online-device-connect-button-\(accessibilityIdentifierToken(for: buttonIdentity))"
+            let connectLabel = LocalizationManager.shared.localizedString("discovery.action.connect")
+            return Button(connectLabel) {
+                onConnect()
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier(buttonIdentifier)
+            .accessibilityLabel(Text(connectLabel))
+            .accessibilityHint(Text(device.name))
+            .accessibilityAction {
+                onConnect()
+            }
+        }
+
+        private var effectiveAccessibilityIdentity: String {
+            let candidate = accessibilityIdentity?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let candidate, !candidate.isEmpty {
+                return candidate
+            }
+            return device.uniqueIdentifier
         }
 
         private var resolvedCryptoKind: String? {
@@ -1434,32 +2187,36 @@ public struct EnhancedDeviceDiscoveryView: View {
             matchingPresenceConnection?.suite ?? device.lastCryptoSuite
         }
 
+        private var effectiveConnectionStatus: OnlineDeviceStatus {
+            matchingPresenceConnection == nil ? device.connectionStatus : .connected
+        }
+
         private var resolvedGuardStatus: String? {
             if device.isLocalDevice { return nil }
             if let guardStatus = device.guardStatus,
                !guardStatus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return guardStatus
             }
-            return device.connectionStatus == .connected ? "守护中" : nil
+            return effectiveConnectionStatus == .connected ? "守护中" : nil
         }
 
         private var statusText: String {
             if device.isLocalDevice {
                 return "在线"
             }
-            guard device.connectionStatus == .connected else {
-                return device.connectionStatus.rawValue
+            guard effectiveConnectionStatus == .connected else {
+                return effectiveConnectionStatus.rawValue
             }
             return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
                 kind: resolvedCryptoKind,
                 suite: resolvedCryptoSuite,
-                baseConnectedText: device.connectionStatus.rawValue,
+                baseConnectedText: effectiveConnectionStatus.rawValue,
                 compatibilityModeEnabled: settingsManager.enableCompatibilityMode
             )
         }
 
         private var connectionDetailText: String? {
-            guard device.connectionStatus == .connected else { return nil }
+            guard effectiveConnectionStatus == .connected else { return nil }
             return ConnectionCryptoPresentation.detailText(
                 kind: resolvedCryptoKind,
                 suite: resolvedCryptoSuite,
@@ -1517,6 +2274,20 @@ public struct EnhancedDeviceDiscoveryView: View {
             raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }
 
+        private func canonicalAccessibilityIdentity(for identity: String) -> String {
+            let normalized = normalizedToken(identity)
+            guard !normalized.isEmpty else { return identity }
+            if normalized.hasPrefix("id:") {
+                let payload = String(normalized.dropFirst("id:".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return payload.isEmpty ? normalized : "id:\(payload)"
+            }
+            if UUID(uuidString: normalized) != nil {
+                return "id:\(normalized)"
+            }
+            return normalized
+        }
+
         private func presenceMatchTokens(
             identifier: String?,
             displayName: String?,
@@ -1559,6 +2330,19 @@ public struct EnhancedDeviceDiscoveryView: View {
             return tokens
         }
 
+        private func accessibilityIdentifierToken(for identity: String) -> String {
+            identity.unicodeScalars.map { scalar -> String in
+                switch scalar.value {
+                case 48...57, 65...90, 97...122:
+                    return String(scalar)
+                default:
+                    return "_"
+                }
+            }
+            .joined()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        }
+
         private var deviceIcon: String {
             switch device.deviceType {
             case .computer: return "laptopcomputer"
@@ -1574,7 +2358,7 @@ public struct EnhancedDeviceDiscoveryView: View {
         }
 
         private var statusColor: Color {
-            switch device.connectionStatus {
+            switch effectiveConnectionStatus {
             case .connected: return .green
             case .online: return .blue
             case .offline: return .gray
@@ -2092,6 +2876,8 @@ public struct EnhancedDeviceDiscoveryView: View {
     private func connectToOnlineDevice(_ device: OnlineDevice) {
         if connectingOnlineDeviceIds.contains(device.id) { return }
         connectingOnlineDeviceIds.insert(device.id)
+        onlineDeviceConnectionErrorMessage = nil
+        appendMacOnlineIPadConnectAppActionIfNeeded(result: "start", device: device)
         Task {
             defer {
                 Task { @MainActor in
@@ -2105,17 +2891,21 @@ public struct EnhancedDeviceDiscoveryView: View {
                     p2pDiscoveryService: p2pDiscoveryService
                 )
                 connectionCodeErrorMessage = nil
+                onlineDeviceConnectionErrorMessage = nil
+                appendMacOnlineIPadConnectAppActionIfNeeded(result: "success", device: device)
                 logger.info("✅ 在线设备连接成功: \(device.name)")
             } catch {
                 logger.error("❌ 在线设备连接失败: \(device.name, privacy: .public), \(error.localizedDescription, privacy: .public)")
-                connectionCodeErrorMessage = userFacingConnectionErrorMessage(error)
+                let message = userFacingConnectionErrorMessage(error)
+                onlineDeviceConnectionErrorMessage = message
+                appendMacOnlineIPadConnectAppActionIfNeeded(result: "failure", device: device, error: error)
             }
         }
     }
 
     private func connectToCloudDevice(_ device: iCloudDevice) {
         if let liveDevice = unifiedDeviceManager.resolvedOnlineDevice(for: device),
-           liveDevice.connectionStatus != .offline || liveDevice.isConnectable {
+           unifiedDeviceManager.hasResolvedConnectableControlRoute(for: liveDevice) {
             connectToOnlineDevice(liveDevice)
             return
         }

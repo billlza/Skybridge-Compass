@@ -16,6 +16,7 @@ Options:
   --widget-path <path>          Widget appex to validate; defaults to <app>/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex
   --widget-source-entitlements <path>
                                 Source widget entitlements plist
+  --package-integrity-only      Validate package identity, signing, stapling, and Gatekeeper only
   --skip-launch-smoke           Skip open/launch smoke test
   --skip-cli-quality-gates      Skip Rust CLI coverage, performance, and memory gates
   --skip-performance-gates      Skip real-device performance artifact gates
@@ -24,6 +25,14 @@ Options:
                                 Real-device P2P remote smoke artifact for `skybridge check performance`
   --file-transfer-artifact-dir <path>
                                 Real-device file-transfer smoke artifact for `skybridge check performance`
+  --connectivity-artifact-dir <path>
+                                Real-device Mac/iOS connectivity matrix artifact for `skybridge check connectivity`
+  --p2p-notice-artifact-dir <path>
+                                P2P remote-control security notice artifact for `skybridge check remote-control-notice`
+  --webrtc-notice-artifact-dir <path>
+                                WebRTC remote-control security notice artifact for `skybridge check remote-control-notice`
+  --notice-panel-artifact-dir <path>
+                                Production macOS AppKit security notice panel artifact for `skybridge check remote-control-notice --require-panel`
   --coverage-min-percent <n>    Minimum CLI operator check-surface coverage (default: 88)
   --memory-timeout <seconds>    Timeout for `skybridge check memory` leaks scan (default: 60)
   --launch-timeout <seconds>    Seconds to wait for a fresh process to appear (default: 20)
@@ -38,7 +47,10 @@ Checks:
   - Widget appex 已嵌入、签名、带 profile，并与主应用共享一致的 App Groups
   - codesign identity, signed entitlements, embedded profiles, and source entitlements stay consistent
   - Gatekeeper/notarization status is surfaced with warnings or failures
+  - Mac/iOS connectivity matrix artifacts cover PQC-XWing, PQC, and Classic interop paths
   - Rust CLI operator check-surface coverage is at least 88%
+  - P2P and WebRTC remote-control security notice artifacts pass lifecycle and metadata gates
+  - Production macOS AppKit security notice panel artifacts prove top-center placement and approval/disconnect actions
   - real-device P2P remote and file-transfer artifacts pass CLI performance gates
   - launched app process passes a CLI memory leak scan
   - release readiness fails if smoke-only trust auto-approval is enabled
@@ -62,8 +74,13 @@ SKIP_LAUNCH_SMOKE=0
 SKIP_CLI_QUALITY_GATES=0
 SKIP_PERFORMANCE_GATES=0
 SKIP_MEMORY_CHECK=0
+PACKAGE_INTEGRITY_ONLY=0
 P2P_REMOTE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR:-}"
 FILE_TRANSFER_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR:-}"
+CONNECTIVITY_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR:-}"
+P2P_NOTICE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR:-}"
+WEBRTC_NOTICE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR:-}"
+NOTICE_PANEL_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR:-}"
 CLI_COVERAGE_MIN_PERCENT="${SKYBRIDGE_RELEASE_GATE_COVERAGE_MIN_PERCENT:-88}"
 MEMORY_TIMEOUT_SECONDS="${SKYBRIDGE_RELEASE_GATE_MEMORY_TIMEOUT_SECONDS:-60}"
 LAUNCH_TIMEOUT_SECONDS="${SKYBRIDGE_RELEASE_GATE_LAUNCH_TIMEOUT_SECONDS:-20}"
@@ -95,6 +112,10 @@ while [[ $# -gt 0 ]]; do
       SOURCE_WIDGET_ENTITLEMENTS="${2:-}"
       shift 2
       ;;
+    --package-integrity-only)
+      PACKAGE_INTEGRITY_ONLY=1
+      shift
+      ;;
     --skip-launch-smoke)
       SKIP_LAUNCH_SMOKE=1
       shift
@@ -119,6 +140,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --file-transfer-artifact-dir)
       FILE_TRANSFER_ARTIFACT_DIR="${2:-}"
+      shift 2
+      ;;
+    --connectivity-artifact-dir)
+      CONNECTIVITY_ARTIFACT_DIR="${2:-}"
+      shift 2
+      ;;
+    --p2p-notice-artifact-dir)
+      P2P_NOTICE_ARTIFACT_DIR="${2:-}"
+      shift 2
+      ;;
+    --webrtc-notice-artifact-dir)
+      WEBRTC_NOTICE_ARTIFACT_DIR="${2:-}"
+      shift 2
+      ;;
+    --notice-panel-artifact-dir)
+      NOTICE_PANEL_ARTIFACT_DIR="${2:-}"
       shift 2
       ;;
     --coverage-min-percent)
@@ -219,6 +256,95 @@ run_cli_coverage_gate() {
     --min-percent "${CLI_COVERAGE_MIN_PERCENT}"
 }
 
+validate_swift_toolchain_baseline() {
+  local root_manifest="${PROJECT_ROOT}/Package.swift"
+  local ios_manifest="${PROJECT_ROOT}/SkyBridge Compass iOS/Package.swift"
+  local verifier="${PROJECT_ROOT}/Scripts/verify_xcode_toolchain.sh"
+
+  [[ -f "${root_manifest}" ]] || fail "missing root SwiftPM manifest: ${root_manifest}"
+  [[ -f "${ios_manifest}" ]] || fail "missing iOS SwiftPM manifest: ${ios_manifest}"
+  grep -q '^// swift-tools-version: 6\.3$' "${root_manifest}" \
+    || fail "root Package.swift must stay on swift-tools-version 6.3"
+  grep -q '^// swift-tools-version: 6\.3$' "${ios_manifest}" \
+    || fail "iOS Package.swift must stay on swift-tools-version 6.3"
+
+  [[ -x "${verifier}" ]] || fail "missing executable Xcode/Swift baseline verifier: ${verifier}"
+  "${verifier}"
+}
+
+validate_update_check_configuration() {
+  local info_plist="$1"
+  local manifest_source="${PROJECT_ROOT}/Sources/SkyBridgeCore/Updates/AppUpdateManifest.swift"
+  local checker_source="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/Services/AppUpdateChecker.swift"
+  local manifest_generator="${PROJECT_ROOT}/Scripts/generate_macos_update_manifest.swift"
+  local github_publisher="${PROJECT_ROOT}/Scripts/publish_macos_update_release.sh"
+  local manifest_url=""
+  local signing_keys=""
+
+  manifest_url="$(plist_read_value "${info_plist}" "SKYBRIDGE_UPDATE_MANIFEST_URL" 2>/dev/null || true)"
+  signing_keys="$(plist_read_value "${info_plist}" "SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS" 2>/dev/null || true)"
+
+  [[ -n "${manifest_url}" ]] || fail "app Info.plist is missing SKYBRIDGE_UPDATE_MANIFEST_URL"
+  [[ "${manifest_url}" == https://github.com/billlza/Skybridge-Compass/releases/download/* ]] \
+    || fail "release update manifest must be a GitHub Releases HTTPS asset, actual: ${manifest_url}"
+  [[ -n "${signing_keys}" ]] || fail "app Info.plist is missing trusted update manifest Ed25519 public keys"
+  [[ "${signing_keys}" == *":"* ]] \
+    || fail "SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS must use key-id:base64-public-key entries"
+  if [[ "${signing_keys}" =~ (PRIVATE|private|BEGIN|END) ]]; then
+    fail "update manifest signing configuration must contain public keys only"
+  fi
+  grep -q '"published_at"' "${manifest_source}" \
+    || fail "update manifest must bind published_at into the signed anti-replay payload"
+  grep -q '"expires_at"' "${manifest_source}" \
+    || fail "update manifest must bind expires_at into the signed anti-replay payload"
+  grep -q '"sequence"' "${manifest_source}" \
+    || fail "update manifest must bind sequence into the signed anti-replay payload"
+  grep -q 'manifestSequenceRollback' "${manifest_source}" \
+    || fail "update manifest evaluator must reject signed manifest sequence rollback"
+  grep -q 'recordAcceptedSequence(decision.manifest.sequence)' "${checker_source}" \
+    || fail "update checker must persist the highest accepted signed manifest sequence"
+  [[ -f "${manifest_generator}" ]] \
+    || fail "missing signed macOS update manifest generator: ${manifest_generator}"
+  grep -q 'SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64' "${manifest_generator}" \
+    || fail "manifest generator must read the Ed25519 private key from file or secret environment only"
+  grep -q 'appendSignedField("published_at"' "${manifest_generator}" \
+    || fail "manifest generator must sign published_at with the same canonical payload as the app evaluator"
+  grep -q 'appendSignedField("expires_at"' "${manifest_generator}" \
+    || fail "manifest generator must sign expires_at with the same canonical payload as the app evaluator"
+  grep -q 'appendSignedField("sequence"' "${manifest_generator}" \
+    || fail "manifest generator must sign sequence with the same canonical payload as the app evaluator"
+  grep -q 'manifest generation requires --notarized' "${manifest_generator}" \
+    || fail "manifest generator must refuse to advertise unnotarized packages"
+  [[ -f "${github_publisher}" ]] \
+    || fail "missing GitHub release update publisher: ${github_publisher}"
+  grep -q 'macos-stable.json' "${github_publisher}" \
+    || fail "GitHub update publisher must upload the stable manifest asset name expected by the app"
+  grep -q 'gh release upload' "${github_publisher}" \
+    || fail "GitHub update publisher must upload DMG and manifest assets through GitHub Releases"
+  grep -q 'gh release download' "${github_publisher}" \
+    || fail "GitHub update publisher must download uploaded release assets for post-upload verification"
+  grep -q 'xcrun stapler validate' "${github_publisher}" \
+    || fail "GitHub update publisher must verify notarization/stapling before advertising a DMG update"
+  grep -Fq "https://github.com/\${REPOSITORY}/releases/download/\${TAG_NAME}" "${github_publisher}" \
+    || fail "GitHub update publisher must build a download URL matching GitHub Releases asset URLs"
+}
+
+run_cli_connectivity_gate() {
+  if [[ "${SKIP_CLI_QUALITY_GATES}" == "1" ]]; then
+    log_warn "Rust CLI connectivity gate was skipped by request"
+    return
+  fi
+
+  [[ -n "${CONNECTIVITY_ARTIFACT_DIR}" ]] \
+    || fail "missing --connectivity-artifact-dir for release connectivity gate"
+  [[ -d "${CONNECTIVITY_ARTIFACT_DIR}" ]] \
+    || fail "connectivity artifact dir does not exist: ${CONNECTIVITY_ARTIFACT_DIR}"
+
+  log_info "Running Rust CLI Mac/iOS connectivity matrix gate"
+  run_skybridge_cli check connectivity \
+    --artifact-dir "${CONNECTIVITY_ARTIFACT_DIR}"
+}
+
 run_cli_performance_gates() {
   if [[ "${SKIP_CLI_QUALITY_GATES}" == "1" || "${SKIP_PERFORMANCE_GATES}" == "1" ]]; then
     log_warn "Rust CLI performance gates were skipped by request"
@@ -246,6 +372,42 @@ run_cli_performance_gates() {
   run_skybridge_cli check performance \
     --kind file-transfer \
     --artifact-dir "${FILE_TRANSFER_ARTIFACT_DIR}"
+}
+
+run_cli_remote_control_notice_gates() {
+  if [[ "${SKIP_CLI_QUALITY_GATES}" == "1" ]]; then
+    log_warn "Rust CLI remote-control security notice gates were skipped by request"
+    return
+  fi
+
+  [[ -n "${P2P_NOTICE_ARTIFACT_DIR}" ]] \
+    || fail "missing --p2p-notice-artifact-dir for remote-control security notice gate"
+  [[ -d "${P2P_NOTICE_ARTIFACT_DIR}" ]] \
+    || fail "P2P remote-control notice artifact dir does not exist: ${P2P_NOTICE_ARTIFACT_DIR}"
+  [[ -n "${WEBRTC_NOTICE_ARTIFACT_DIR}" ]] \
+    || fail "missing --webrtc-notice-artifact-dir for remote-control security notice gate"
+  [[ -d "${WEBRTC_NOTICE_ARTIFACT_DIR}" ]] \
+    || fail "WebRTC remote-control notice artifact dir does not exist: ${WEBRTC_NOTICE_ARTIFACT_DIR}"
+  [[ -n "${NOTICE_PANEL_ARTIFACT_DIR}" ]] \
+    || fail "missing --notice-panel-artifact-dir for remote-control security notice panel gate"
+  [[ -d "${NOTICE_PANEL_ARTIFACT_DIR}" ]] \
+    || fail "remote-control notice panel artifact dir does not exist: ${NOTICE_PANEL_ARTIFACT_DIR}"
+
+  log_info "Running Rust CLI P2P remote-control security notice gate"
+  run_skybridge_cli check remote-control-notice \
+    --artifact-dir "${P2P_NOTICE_ARTIFACT_DIR}" \
+    --transport p2p
+
+  log_info "Running Rust CLI WebRTC remote-control security notice gate"
+  run_skybridge_cli check remote-control-notice \
+    --artifact-dir "${WEBRTC_NOTICE_ARTIFACT_DIR}" \
+    --transport webrtc
+
+  log_info "Running Rust CLI production AppKit remote-control security notice panel gate"
+  run_skybridge_cli check remote-control-notice \
+    --artifact-dir "${NOTICE_PANEL_ARTIFACT_DIR}" \
+    --transport webrtc \
+    --require-panel
 }
 
 run_cli_memory_check_for_pid() {
@@ -403,8 +565,13 @@ validate_dmg_embedded_app() {
     || fail "DMG app version (${dmg_version}) does not match dist app (${expected_version})"
   [[ "${dmg_build}" == "${expected_build}" ]] \
     || fail "DMG app build (${dmg_build}) does not match dist app (${expected_build})"
-  [[ "${dmg_build_source}" == "xcode_release" ]] \
-    || fail "DMG app was not packaged from Xcode Release (actual: ${dmg_build_source:-missing})"
+  case "${dmg_build_source}" in
+    xcode_release|swiftpm_release)
+      ;;
+    *)
+      fail "DMG app was not packaged from an explicit Release product (actual: ${dmg_build_source:-missing})"
+      ;;
+  esac
   [[ "${dmg_build_scheme}" == "SkyBridgeCompassApp" ]] \
     || fail "DMG app build scheme drifted (actual: ${dmg_build_scheme:-missing})"
   [[ "${dmg_build_configuration}" == "Release" ]] \
@@ -672,12 +839,64 @@ for key in required_keys:
 PY
 }
 
+validate_icns_contains_full_size_reps() {
+  local icns_path="$1"
+  local label="$2"
+  local tmp_dir
+  local iconset_dir
+
+  if ! command -v iconutil >/dev/null 2>&1; then
+    echo "iconutil is required to validate ${label} icon representations" >&2
+    return 1
+  fi
+
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-icns-check.XXXXXX")"
+  iconset_dir="${tmp_dir}/${label}.iconset"
+  if ! iconutil -c iconset "${icns_path}" -o "${iconset_dir}" >/dev/null 2>&1; then
+    rm -rf "${tmp_dir}"
+    echo "${label} is not a valid icns file: ${icns_path}" >&2
+    return 1
+  fi
+
+  if [[ ! -f "${iconset_dir}/icon_512x512.png" || ! -f "${iconset_dir}/icon_512x512@2x.png" ]]; then
+    rm -rf "${tmp_dir}"
+    echo "${label} must include full-size 512x512 and 1024x1024 icon representations" >&2
+    return 1
+  fi
+
+  rm -rf "${tmp_dir}"
+}
+
+validate_icon_resources_match() {
+  local first="$1"
+  local second="$2"
+  local label="$3"
+  local first_hash
+  local second_hash
+
+  if [[ ! -f "${first}" || ! -f "${second}" ]]; then
+    echo "missing icon resources required for ${label} identity check" >&2
+    return 1
+  fi
+
+  first_hash="$(shasum -a 256 "${first}" | awk '{print $1}')"
+  second_hash="$(shasum -a 256 "${second}" | awk '{print $1}')"
+  if [[ "${first_hash}" != "${second_hash}" ]]; then
+    echo "AppIconDock must exactly match canonical AppIcon for ${label}; otherwise the app can switch icons after launch" >&2
+    echo "AppIcon=${first_hash} AppIconDock=${second_hash}" >&2
+    return 1
+  fi
+}
+
 validate_modern_app_icon_contract() {
   local info_plist="$1"
   local resources_dir="$2"
+  local source_resources_dir="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/Resources"
 
   local icon_file
   local icon_name
+  local canonical_png_hash
+  local iconcomposer_png_hash
   icon_file="$(plist_read_value "${info_plist}" "CFBundleIconFile" 2>/dev/null || true)"
   icon_name="$(plist_read_value "${info_plist}" "CFBundleIconName" 2>/dev/null || true)"
 
@@ -691,8 +910,25 @@ validate_modern_app_icon_contract() {
     return 1
   fi
 
-  if [[ ! -f "${resources_dir}/AppIcon.icns" || ! -f "${resources_dir}/AppIcon.png" || ! -f "${resources_dir}/Assets.car" ]]; then
-    echo "app bundle is missing AppIcon.icns/AppIcon.png/Assets.car resources" >&2
+  if [[ ! -f "${resources_dir}/AppIcon.icns" || ! -f "${resources_dir}/AppIconDock.icns" || ! -f "${resources_dir}/AppIcon.png" || ! -f "${resources_dir}/Assets.car" ]]; then
+    echo "app bundle is missing AppIcon.icns/AppIconDock.icns/AppIcon.png/Assets.car resources" >&2
+    return 1
+  fi
+
+  validate_icns_contains_full_size_reps "${resources_dir}/AppIcon.icns" "AppIcon.icns" || return 1
+  validate_icns_contains_full_size_reps "${resources_dir}/AppIconDock.icns" "AppIconDock.icns" || return 1
+  validate_icon_resources_match "${resources_dir}/AppIcon.icns" "${resources_dir}/AppIconDock.icns" "icns" || return 1
+  validate_icon_resources_match "${resources_dir}/AppIcon.png" "${resources_dir}/AppIconDock.png" "png" || return 1
+
+  if [[ ! -f "${source_resources_dir}/AppIcon.png" || ! -f "${source_resources_dir}/AppIcon.icon/Assets/Image.png" ]]; then
+    echo "source resources are missing AppIcon.png or AppIcon.icon/Assets/Image.png; Icon Composer source cannot be proven canonical" >&2
+    return 1
+  fi
+  canonical_png_hash="$(shasum -a 256 "${source_resources_dir}/AppIcon.png" | awk '{print $1}')"
+  iconcomposer_png_hash="$(shasum -a 256 "${source_resources_dir}/AppIcon.icon/Assets/Image.png" | awk '{print $1}')"
+  if [[ "${canonical_png_hash}" != "${iconcomposer_png_hash}" ]]; then
+    echo "Icon Composer AppIcon.icon/Assets/Image.png must match canonical AppIcon.png; otherwise Assets.car and runtime AppIcon can drift" >&2
+    echo "AppIcon.png=${canonical_png_hash} IconComposerImage=${iconcomposer_png_hash}" >&2
     return 1
   fi
 
@@ -791,7 +1027,6 @@ assess_gatekeeper_target() {
   local target_type="$2"
   local label="$3"
   local output=""
-  local stapler_output=""
 
   output="$(skybridge_assess_gatekeeper "${target_path}" "${target_type}" 2>&1 || true)"
 
@@ -809,7 +1044,7 @@ assess_gatekeeper_target() {
   fi
 
   if skybridge_gatekeeper_is_accepted "${output}"; then
-    if [[ "${target_path}" == *.dmg ]] && stapler_output="$(xcrun stapler validate "${target_path}" 2>&1)"; then
+    if [[ "${target_path}" == *.dmg ]] && xcrun stapler validate "${target_path}" >/dev/null 2>&1; then
       log_info "${label} Gatekeeper assessment lacked notarization context, but stapler validation confirmed a stapled ticket"
       return 0
     fi
@@ -927,6 +1162,14 @@ if otool -L "${APP_EXECUTABLE_PATH}" 2>/dev/null | grep -q "@rpath/WebRTC.framew
 fi
 [[ -d "${APP_RESOURCES_DIR}/SkyBridgeCompassApp_SkyBridgeCompassApp.bundle" ]] \
   || fail "missing SkyBridgeCompassApp_SkyBridgeCompassApp.bundle; Bundle.module app resources were not packaged"
+APP_MODULE_RESOURCES_DIR="${APP_RESOURCES_DIR}/SkyBridgeCompassApp_SkyBridgeCompassApp.bundle/Contents/Resources"
+CORE_MODULE_RESOURCES_DIR="${APP_RESOURCES_DIR}/SkyBridgeCompassApp_SkyBridgeCore.bundle/Contents/Resources"
+[[ -f "${APP_MODULE_RESOURCES_DIR}/Assets.car" ]] \
+  || fail "missing compiled App Assets.car inside SkyBridgeCompassApp_SkyBridgeCompassApp.bundle; asset catalogs were not packaged as a release resource bundle"
+[[ -f "${APP_MODULE_RESOURCES_DIR}/default.metallib" ]] \
+  || fail "missing compiled App default.metallib inside SkyBridgeCompassApp_SkyBridgeCompassApp.bundle; Metal shaders were not packaged as a release resource bundle"
+[[ -f "${CORE_MODULE_RESOURCES_DIR}/default.metallib" ]] \
+  || fail "missing compiled SkyBridgeCore default.metallib inside SkyBridgeCompassApp_SkyBridgeCore.bundle; Metal shaders were not packaged as a release resource bundle"
 [[ -f "${APP_HELPER_PLIST_PATH}" ]] || fail "missing PowerMetricsHelper launchd plist: ${APP_HELPER_PLIST_PATH}"
 [[ -x "${APP_HELPER_BIN_PATH}" ]] || fail "PowerMetricsHelper binary is missing or not executable: ${APP_HELPER_BIN_PATH}"
 APP_HELPER_VERSION="$(extract_helper_version "${APP_HELPER_BIN_PATH}")"
@@ -938,10 +1181,10 @@ fi
 [[ -f "${SOURCE_WIDGET_ENTITLEMENTS}" ]] || fail "missing widget source entitlements: ${SOURCE_WIDGET_ENTITLEMENTS}"
 
 case "${APP_BUILD_SOURCE}" in
-  xcode_release)
+  xcode_release|swiftpm_release)
     ;;
   *)
-    fail "app bundle was not packaged from an explicit Xcode Release product (actual: ${APP_BUILD_SOURCE:-missing})"
+    fail "app bundle was not packaged from an explicit Release product (actual: ${APP_BUILD_SOURCE:-missing})"
     ;;
 esac
 [[ "${APP_BUILD_SCHEME}" == "SkyBridgeCompassApp" ]] \
@@ -1053,6 +1296,9 @@ compare_apple_sign_in_mode_alignment "${EXPECTED_INFO_PLIST}" "${APP_INFO_PLIST}
 compare_required_privacy_usage_descriptions "${SOURCE_INFO_PLIST}" "${APP_INFO_PLIST}" "app Info.plist" \
   || fail "app Info.plist privacy usage descriptions drifted from the source Info.plist"
 
+validate_swift_toolchain_baseline
+validate_update_check_configuration "${APP_INFO_PLIST}"
+
 validate_modern_app_icon_contract "${APP_INFO_PLIST}" "${APP_RESOURCES_DIR}" \
   || fail "app icon contract drifted from the modern Icon Composer release path"
 
@@ -1123,7 +1369,14 @@ fi
 assess_gatekeeper_target "${APP_PATH}" "execute" "App Bundle"
 assess_gatekeeper_target "${DMG_PATH}" "open" "DMG"
 
+if [[ "${PACKAGE_INTEGRITY_ONLY}" == "1" ]]; then
+  log_info "Package integrity-only validation complete"
+  exit 0
+fi
+
 run_cli_coverage_gate
+run_cli_connectivity_gate
+run_cli_remote_control_notice_gates
 run_cli_performance_gates
 
 if [[ "${SKIP_LAUNCH_SMOKE}" == "1" ]]; then

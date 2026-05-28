@@ -335,6 +335,20 @@ public final class FileTransferListenerService: ObservableObject {
                 )
                 connection.stateUpdateHandler = nil
                 connection.cancel()
+            } catch FileTransferError.inboundInvalidInitialHeader {
+                self.log.info(
+                    "📥 FileTransfer inbound connection rejected before metadata: peer=\(deviceId, privacy: .public)"
+                )
+                RemoteControlSmokeStatusWriter.append(
+                    """
+                    file-transfer inbound-rejected \
+                    fatal=0 phase=initial_header reason=invalid_header \
+                    peer=\(Self.sanitizeForSmoke(deviceId)) \
+                    endpoint=\(Self.sanitizeForSmoke(endpointDescription))
+                    """
+                )
+                connection.stateUpdateHandler = nil
+                connection.cancel()
             } catch {
                 self.log.error("❌ receiveFile failed: \(error.localizedDescription)")
                 let phase = Self.fileTransferFailurePhase(for: error)
@@ -358,6 +372,8 @@ public final class FileTransferListenerService: ObservableObject {
         switch transferError {
         case .invalidHeader:
             return "mac_receive_file_invalid_header"
+        case .inboundInvalidInitialHeader:
+            return "mac_receive_file_initial_header_rejected"
         case .integrityCheckFailed:
             return "mac_receive_file_integrity_check_failed"
         case .transferCancelled:

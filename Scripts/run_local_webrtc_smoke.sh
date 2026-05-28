@@ -15,6 +15,10 @@ SMOKE_REQUIRE_AUDIO="${SKYBRIDGE_SMOKE_REQUIRE_AUDIO:-0}"
 SMOKE_MIN_FPS="${SKYBRIDGE_SMOKE_MIN_FPS:-0}"
 SMOKE_AUTH_SESSION_SOURCE_FILE="${SKYBRIDGE_SMOKE_AUTH_SESSION_FILE:-${SKYBRIDGE_AUTH_SESSION_FILE:-}}"
 SMOKE_SYNTHETIC_OPUS_TONE="${SKYBRIDGE_SMOKE_SYNTHETIC_OPUS_TONE:-0}"
+SMOKE_HOLD_AFTER_SUCCESS_SECONDS="${SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS:-0}"
+if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" == "1" && "$SMOKE_HOLD_AFTER_SUCCESS_SECONDS" == "0" ]]; then
+  SMOKE_HOLD_AFTER_SUCCESS_SECONDS=5
+fi
 SMOKE_EXTREME_MEDIA=0
 if [[ "${SKYBRIDGE_SMOKE_EXTREME_MEDIA:-0}" == "1" \
    || "${SKYBRIDGE_WEBRTC_EXTREME_MEDIA:-0}" == "1" \
@@ -186,6 +190,24 @@ resolve_ios_status_path() {
   find "$root" -name "$basename" -print 2>/dev/null | tail -n 1
 }
 
+resolve_ios_artifact_path() {
+  local basename="$1"
+  local root="$HOME/Library/Developer/CoreSimulator/Devices/${SIM_ID}/data/Containers/Data/Application"
+  find "$root" -name "$basename" -print 2>/dev/null | tail -n 1
+}
+
+copy_ios_artifact_file() {
+  local basename="$1"
+  local destination="$2"
+  local source_path
+  source_path="$(resolve_ios_artifact_path "$basename" || true)"
+  if [[ -z "$source_path" || ! -f "$source_path" ]]; then
+    echo "Unable to resolve iOS artifact ${basename}" >&2
+    return 1
+  fi
+  cp "$source_path" "$destination"
+}
+
 copy_recent_media_diagnostics() {
   local media_log_dir="$HOME/Library/Logs/SkyBridge"
   if [[ -d "$media_log_dir" ]]; then
@@ -335,6 +357,36 @@ PY
 
   if [[ -z "$MAC_PQC_DEVICE_ID" || -z "$MAC_PQC_XWING_PUBLIC_KEY_BASE64" ]]; then
     echo "PQC report is missing required deviceId/X-Wing key: ${report_path}" >&2
+    return 1
+  fi
+}
+
+load_ios_pqc_report() {
+  local report_path="$1"
+  local parsed
+  parsed="$(python3 - "$report_path" <<'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+keys = {
+    int(entry.get("suiteWireId", -1)): entry.get("publicKeyBase64", "")
+    for entry in report.get("keys", [])
+}
+print(report.get("deviceId", ""))
+print(keys.get(0x0001, ""))
+print(keys.get(0x0101, ""))
+print(keys.get(0x0102, ""))
+PY
+)"
+
+  IOS_PQC_DEVICE_ID="$(printf '%s\n' "$parsed" | sed -n '1p')"
+  IOS_PQC_XWING_PUBLIC_KEY_BASE64="$(printf '%s\n' "$parsed" | sed -n '2p')"
+  IOS_PQC_MLKEM768_PUBLIC_KEY_BASE64="$(printf '%s\n' "$parsed" | sed -n '3p')"
+  IOS_PQC_MLKEM768FS_PUBLIC_KEY_BASE64="$(printf '%s\n' "$parsed" | sed -n '4p')"
+
+  if [[ -z "$IOS_PQC_DEVICE_ID" || -z "$IOS_PQC_XWING_PUBLIC_KEY_BASE64" ]]; then
+    echo "iOS PQC report is missing required deviceId/X-Wing key: ${report_path}" >&2
     return 1
   fi
 }
@@ -780,13 +832,21 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
   MAC_PQC_REPORT="$ARTIFACT_DIR/mac_round_${round}.pqc.json"
   MAC_STDOUT="$ARTIFACT_DIR/mac_round_${round}.stdout.log"
   IOS_STATUS_BASENAME="ios_round_${round}.status.log"
+  IOS_PREFLIGHT_STATUS_BASENAME="ios_round_${round}.preflight.status.log"
+  IOS_PQC_REPORT_BASENAME="ios_round_${round}.pqc.json"
+  IOS_PQC_REPORT="$ARTIFACT_DIR/$IOS_PQC_REPORT_BASENAME"
+  IOS_PREFLIGHT_STDOUT="$ARTIFACT_DIR/ios_round_${round}.preflight.stdout.log"
+  IOS_PREFLIGHT_STDERR="$ARTIFACT_DIR/ios_round_${round}.preflight.stderr.log"
   IOS_STATUS_PATH=""
   IOS_STDOUT="$ARTIFACT_DIR/ios_round_${round}.stdout.log"
   IOS_STDERR="$ARTIFACT_DIR/ios_round_${round}.stderr.log"
   ROUND_MAC_DEVICE_ID="${MAC_DEVICE_ID}-${round}"
   ROUND_IOS_DEVICE_ID="${IOS_DEVICE_ID}-${round}"
 
-  rm -f "$MAC_STATUS" "$MAC_CODE" "$MAC_TOKEN" "$MAC_TENANT" "$MAC_PQC_REPORT" "$MAC_STDOUT" "$IOS_STATUS_PATH" "$IOS_STDOUT" "$IOS_STDERR"
+  rm -f "$MAC_STATUS" "$MAC_CODE" "$MAC_TOKEN" "$MAC_TENANT" "$MAC_PQC_REPORT" "$MAC_STDOUT" \
+    "$IOS_STATUS_PATH" "$ARTIFACT_DIR/$IOS_PREFLIGHT_STATUS_BASENAME" \
+    "$ARTIFACT_DIR/$IOS_PREFLIGHT_STATUS_BASENAME.trace.log" \
+    "$IOS_PQC_REPORT" "$IOS_PREFLIGHT_STDOUT" "$IOS_PREFLIGHT_STDERR" "$IOS_STDOUT" "$IOS_STDERR"
 
   xcrun simctl terminate "$SIM_ID" "$IOS_BUNDLE_ID" >/dev/null 2>&1 || true
   if [[ -n "${MAC_PID}" ]]; then
@@ -795,6 +855,24 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     MAC_PID=""
   fi
   pkill -x LocalWebRTCSmokeHost >/dev/null 2>&1 || true
+
+  if [[ "$SMOKE_SCENARIO" == "xwing-only" ]]; then
+    SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
+    SIMCTL_CHILD_SKYBRIDGE_SMOKE_ROLE=ios-client \
+    SIMCTL_CHILD_SKYBRIDGE_SMOKE_STATUS_BASENAME="$IOS_PREFLIGHT_STATUS_BASENAME" \
+    SIMCTL_CHILD_SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME="$IOS_PQC_REPORT_BASENAME" \
+    xcrun simctl launch \
+      --terminate-running-process \
+      --stdout="$IOS_PREFLIGHT_STDOUT" \
+      --stderr="$IOS_PREFLIGHT_STDERR" \
+      "$SIM_ID" \
+      "$IOS_BUNDLE_ID" >/dev/null
+    wait_for_ios_status_pattern "$IOS_PREFLIGHT_STATUS_BASENAME" 'pqc-report device=.* keys=' 60 "iOS PQC preflight report"
+    copy_ios_smoke_diagnostics "$IOS_PREFLIGHT_STATUS_BASENAME"
+    copy_ios_artifact_file "$IOS_PQC_REPORT_BASENAME" "$IOS_PQC_REPORT"
+    xcrun simctl terminate "$SIM_ID" "$IOS_BUNDLE_ID" >/dev/null 2>&1 || true
+    load_ios_pqc_report "$IOS_PQC_REPORT"
+  fi
 
   if [[ "$SMOKE_SCENARIO" == "bootstrap-rekey" ]]; then
     SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
@@ -821,7 +899,7 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK="$SMOKE_EXTREME_MEDIA" \
     SKYBRIDGE_SMOKE_ALLOW_CLASSIC_MEDIA_SUCCESS="$SMOKE_MEDIA_GATE" \
     SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=1 \
-    SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS=20 \
+    SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS="${SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS:-20}" \
     SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY=1 \
     SKYBRIDGE_SMOKE_TIMEOUT_SECONDS="$SMOKE_TIMEOUT_SECONDS" \
     "$MAC_APP_BIN" >"$MAC_STDOUT" 2>&1 &
@@ -830,6 +908,10 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     SKYBRIDGE_AUTH_SESSION_FILE="$AUTH_SESSION_FILE" \
     SB_PQC_PREFERRED_SUITE=xwing \
     SKYBRIDGE_DEVICE_ID="$ROUND_MAC_DEVICE_ID" \
+    SKYBRIDGE_PQC_PEER_DEVICE_ID="$IOS_PQC_DEVICE_ID" \
+    SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64="$IOS_PQC_XWING_PUBLIC_KEY_BASE64" \
+    SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64="$IOS_PQC_MLKEM768_PUBLIC_KEY_BASE64" \
+    SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64="$IOS_PQC_MLKEM768FS_PUBLIC_KEY_BASE64" \
     SKYBRIDGE_SIGNALING_SERVER_URL="$SIGNALING_SERVER_URL" \
     SKYBRIDGE_SIGNALING_WEBSOCKET_URL="$SIGNALING_WS_URL" \
     SKYBRIDGE_SMOKE_SUPABASE_URL="${SUPABASE_URL:-}" \
@@ -850,7 +932,7 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     SKYBRIDGE_WEBRTC_EXTREME_MEDIA="$SMOKE_EXTREME_MEDIA" \
     SKYBRIDGE_WEBRTC_FAIL_ON_MEDIA_FALLBACK="$SMOKE_EXTREME_MEDIA" \
     SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=1 \
-    SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS=10 \
+    SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS="$SMOKE_HOLD_AFTER_SUCCESS_SECONDS" \
     SKYBRIDGE_SMOKE_TIMEOUT_SECONDS="$SMOKE_TIMEOUT_SECONDS" \
     "$MAC_APP_BIN" >"$MAC_STDOUT" 2>&1 &
   fi
@@ -881,12 +963,14 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
 
   if [[ "$SMOKE_SCENARIO" == "bootstrap-rekey" ]]; then
     SIMCTL_CHILD_SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
-    SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
-    SIMCTL_CHILD_SKYBRIDGE_ACCESS_TOKEN="$ACCESS_TOKEN" \
-    SIMCTL_CHILD_SKYBRIDGE_TENANT_ID="$TENANT_ID" \
-    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_SERVER_URL="$SIGNALING_SERVER_URL" \
-    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_WEBSOCKET_URL="$SIGNALING_WS_URL" \
-    SIMCTL_CHILD_SKYBRIDGE_STUN_URL="" \
+	    SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
+	    SIMCTL_CHILD_SKYBRIDGE_ACCESS_TOKEN="$ACCESS_TOKEN" \
+	    SIMCTL_CHILD_SKYBRIDGE_TENANT_ID="$TENANT_ID" \
+	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-Smoke Remote Viewer}" \
+	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="$TENANT_ID" \
+	    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_SERVER_URL="$SIGNALING_SERVER_URL" \
+	    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_WEBSOCKET_URL="$SIGNALING_WS_URL" \
+	    SIMCTL_CHILD_SKYBRIDGE_STUN_URL="" \
     SIMCTL_CHILD_SKYBRIDGE_TURN_URLS="" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_ROLE=ios-client \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_CONNECT_CODE="$CONNECTION_CODE" \
@@ -905,14 +989,15 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
       "$SIM_ID" \
       "$IOS_BUNDLE_ID" >/dev/null
   else
-    SIMCTL_CHILD_SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
     SIMCTL_CHILD_SB_PQC_PREFERRED_SUITE=xwing \
-    SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
-    SIMCTL_CHILD_SKYBRIDGE_ACCESS_TOKEN="$ACCESS_TOKEN" \
-    SIMCTL_CHILD_SKYBRIDGE_TENANT_ID="$TENANT_ID" \
-    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_SERVER_URL="$SIGNALING_SERVER_URL" \
-    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_WEBSOCKET_URL="$SIGNALING_WS_URL" \
-    SIMCTL_CHILD_SKYBRIDGE_STUN_URL="" \
+	    SIMCTL_CHILD_SKYBRIDGE_DEVICE_ID="$ROUND_IOS_DEVICE_ID" \
+	    SIMCTL_CHILD_SKYBRIDGE_ACCESS_TOKEN="$ACCESS_TOKEN" \
+	    SIMCTL_CHILD_SKYBRIDGE_TENANT_ID="$TENANT_ID" \
+	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-Smoke Remote Viewer}" \
+	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="$TENANT_ID" \
+	    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_SERVER_URL="$SIGNALING_SERVER_URL" \
+	    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_WEBSOCKET_URL="$SIGNALING_WS_URL" \
+	    SIMCTL_CHILD_SKYBRIDGE_STUN_URL="" \
     SIMCTL_CHILD_SKYBRIDGE_TURN_URLS="" \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_ROLE=ios-client \
     SIMCTL_CHILD_SKYBRIDGE_SMOKE_CONNECT_CODE="$CONNECTION_CODE" \
@@ -956,6 +1041,14 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
     require_file_pattern "$IOS_STDOUT" 'handshake session=.*suite=X-Wing' "iOS X-Wing handshake"
     require_file_absent_pattern "$MAC_STATUS" 'suite=X25519' "macOS unexpected classic suite"
     require_file_absent_pattern "$IOS_STDOUT" 'suite=X25519' "iOS unexpected classic suite"
+  fi
+
+  if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" == "1" ]]; then
+    wait_for_file_pattern "$MAC_STATUS" 'remoteControlNoticeDisconnected .*transport=webrtc' 15 "macOS remote-control notice disconnect"
+    if [[ -n "${MAC_PID}" ]]; then
+      wait "${MAC_PID}"
+      MAC_PID=""
+    fi
   fi
 
   ROUND_SESSION_ID="$(grep -Eo 'success session=[^ ]+' "$MAC_STATUS" 2>/dev/null | tail -n 1 | cut -d= -f2 || true)"

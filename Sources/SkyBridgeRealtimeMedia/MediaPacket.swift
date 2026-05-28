@@ -7,6 +7,10 @@ public enum SkyBridgeMediaPacketError: Error, Equatable, Sendable, LocalizedErro
     case unsupportedMagic(UInt32)
     case unsupportedVersion(UInt8)
     case epochMismatch(expected: UInt32, actual: UInt32)
+    case sessionIdMismatch(expected: UInt64, actual: UInt64)
+    case streamMismatch(expected: UInt32, actual: UInt32)
+    case directionMismatch(expected: UInt8, actual: UInt8)
+    case transcriptMismatch(expected: UInt64, actual: UInt64)
     case authenticationFailed
 
     public var errorDescription: String? {
@@ -21,6 +25,14 @@ public enum SkyBridgeMediaPacketError: Error, Equatable, Sendable, LocalizedErro
             return "unsupportedVersion(\(version))"
         case .epochMismatch(let expected, let actual):
             return "epochMismatch(expected:\(expected), actual:\(actual))"
+        case .sessionIdMismatch(let expected, let actual):
+            return "sessionIdMismatch(expected:\(expected), actual:\(actual))"
+        case .streamMismatch(let expected, let actual):
+            return "streamMismatch(expected:\(expected), actual:\(actual))"
+        case .directionMismatch(let expected, let actual):
+            return "directionMismatch(expected:\(expected), actual:\(actual))"
+        case .transcriptMismatch(let expected, let actual):
+            return "transcriptMismatch(expected:\(expected), actual:\(actual))"
         case .authenticationFailed:
             return "authenticationFailed"
         }
@@ -33,6 +45,8 @@ public struct SkyBridgeMediaPacketHeader: Equatable, Sendable {
     public let sequence: UInt64
     public let timestampSamples: UInt64
     public let flags: UInt16
+    public let wireDirection: SkyBridgeMediaWireDirection
+    public let transcriptPrefix: UInt64
     public let keyEpoch: UInt32
     public let nonceCounter: UInt64
 
@@ -42,6 +56,8 @@ public struct SkyBridgeMediaPacketHeader: Equatable, Sendable {
         sequence: UInt64,
         timestampSamples: UInt64,
         flags: UInt16 = 0,
+        wireDirection: SkyBridgeMediaWireDirection,
+        transcriptPrefix: UInt64,
         keyEpoch: UInt32,
         nonceCounter: UInt64
     ) {
@@ -50,6 +66,8 @@ public struct SkyBridgeMediaPacketHeader: Equatable, Sendable {
         self.sequence = sequence
         self.timestampSamples = timestampSamples
         self.flags = flags
+        self.wireDirection = wireDirection
+        self.transcriptPrefix = transcriptPrefix
         self.keyEpoch = keyEpoch
         self.nonceCounter = nonceCounter
     }
@@ -69,8 +87,8 @@ public enum SkyBridgeMediaPacketCodec {
     public static let maxPayloadBytes = 1_100
 
     private static let magic: UInt32 = 0x53424D41 // "SBMA"
-    private static let version: UInt8 = 1
-    private static let headerLength = 52
+    private static let version: UInt8 = 2
+    private static let headerLength = 61
     private static let tagLength = 16
 
     public static func seal(
@@ -84,12 +102,26 @@ public enum SkyBridgeMediaPacketCodec {
         guard header.keyEpoch == keys.epoch else {
             throw SkyBridgeMediaPacketError.epochMismatch(expected: keys.epoch, actual: header.keyEpoch)
         }
+        guard header.wireDirection == keys.wireDirection else {
+            throw SkyBridgeMediaPacketError.directionMismatch(
+                expected: keys.wireDirection.rawValue,
+                actual: header.wireDirection.rawValue
+            )
+        }
+        guard header.transcriptPrefix == keys.transcriptPrefix else {
+            throw SkyBridgeMediaPacketError.transcriptMismatch(
+                expected: keys.transcriptPrefix,
+                actual: header.transcriptPrefix
+            )
+        }
         var headerData = Data()
         headerData.reserveCapacity(headerLength)
         appendUInt32(magic, to: &headerData)
         headerData.append(version)
         headerData.append(UInt8(headerLength))
         appendUInt16(header.flags, to: &headerData)
+        headerData.append(header.wireDirection.rawValue)
+        appendUInt64(header.transcriptPrefix, to: &headerData)
         appendUInt64(header.sessionIdHash, to: &headerData)
         appendUInt32(header.streamId, to: &headerData)
         appendUInt64(header.sequence, to: &headerData)
@@ -113,8 +145,60 @@ public enum SkyBridgeMediaPacketCodec {
 
     public static func open(
         packet: Data,
-        keys: SkyBridgeMediaDirectionKeys
+        keys: SkyBridgeMediaDirectionKeys,
+        expectedSessionIdHash: UInt64? = nil,
+        expectedStreamId: UInt32? = nil
     ) throws -> SkyBridgeMediaOpenedPacket {
+        let parsedHeader = try peekHeader(packet: packet)
+        guard parsedHeader.keyEpoch == keys.epoch else {
+            throw SkyBridgeMediaPacketError.epochMismatch(expected: keys.epoch, actual: parsedHeader.keyEpoch)
+        }
+        if let expectedSessionIdHash,
+           parsedHeader.sessionIdHash != expectedSessionIdHash {
+            throw SkyBridgeMediaPacketError.sessionIdMismatch(
+                expected: expectedSessionIdHash,
+                actual: parsedHeader.sessionIdHash
+            )
+        }
+        if let expectedStreamId,
+           parsedHeader.streamId != expectedStreamId {
+            throw SkyBridgeMediaPacketError.streamMismatch(expected: expectedStreamId, actual: parsedHeader.streamId)
+        }
+        guard parsedHeader.wireDirection == keys.wireDirection else {
+            throw SkyBridgeMediaPacketError.directionMismatch(
+                expected: keys.wireDirection.rawValue,
+                actual: parsedHeader.wireDirection.rawValue
+            )
+        }
+        guard parsedHeader.transcriptPrefix == keys.transcriptPrefix else {
+            throw SkyBridgeMediaPacketError.transcriptMismatch(
+                expected: keys.transcriptPrefix,
+                actual: parsedHeader.transcriptPrefix
+            )
+        }
+
+        let payloadLength = Int(readUInt32(packet, at: 57))
+        guard payloadLength <= maxPayloadBytes,
+              packet.count == headerLength + payloadLength + tagLength else {
+            throw SkyBridgeMediaPacketError.malformedPacket
+        }
+        let headerData = packet.prefix(headerLength)
+        let ciphertext = packet.dropFirst(headerLength).prefix(payloadLength)
+        let tag = packet.suffix(tagLength)
+        let box = try AES.GCM.SealedBox(
+            nonce: try nonce(salt: keys.nonceSalt, counter: parsedHeader.nonceCounter),
+            ciphertext: ciphertext,
+            tag: tag
+        )
+        do {
+            let payload = try AES.GCM.open(box, using: keys.key, authenticating: headerData)
+            return SkyBridgeMediaOpenedPacket(header: parsedHeader, payload: payload)
+        } catch {
+            throw SkyBridgeMediaPacketError.authenticationFailed
+        }
+    }
+
+    public static func peekHeader(packet: Data) throws -> SkyBridgeMediaPacketHeader {
         guard packet.count >= headerLength + tagLength else {
             throw SkyBridgeMediaPacketError.malformedPacket
         }
@@ -131,45 +215,33 @@ public enum SkyBridgeMediaPacketCodec {
             throw SkyBridgeMediaPacketError.malformedPacket
         }
         let flags = readUInt16(packet, at: 6)
-        let sessionIdHash = readUInt64(packet, at: 8)
-        let streamId = readUInt32(packet, at: 16)
-        let sequence = readUInt64(packet, at: 20)
-        let timestampSamples = readUInt64(packet, at: 28)
-        let keyEpoch = readUInt32(packet, at: 36)
-        let nonceCounter = readUInt64(packet, at: 40)
-        let payloadLength = Int(readUInt32(packet, at: 48))
-        guard keyEpoch == keys.epoch else {
-            throw SkyBridgeMediaPacketError.epochMismatch(expected: keys.epoch, actual: keyEpoch)
+        let directionRaw = packet[packet.startIndex + 8]
+        guard let wireDirection = SkyBridgeMediaWireDirection(rawValue: directionRaw) else {
+            throw SkyBridgeMediaPacketError.directionMismatch(expected: 0, actual: directionRaw)
         }
+        let transcriptPrefix = readUInt64(packet, at: 9)
+        let sessionIdHash = readUInt64(packet, at: 17)
+        let streamId = readUInt32(packet, at: 25)
+        let sequence = readUInt64(packet, at: 29)
+        let timestampSamples = readUInt64(packet, at: 37)
+        let keyEpoch = readUInt32(packet, at: 45)
+        let nonceCounter = readUInt64(packet, at: 49)
+        let payloadLength = Int(readUInt32(packet, at: 57))
         guard payloadLength <= maxPayloadBytes,
               packet.count == headerLength + payloadLength + tagLength else {
             throw SkyBridgeMediaPacketError.malformedPacket
         }
-        let headerData = packet.prefix(headerLength)
-        let ciphertext = packet.dropFirst(headerLength).prefix(payloadLength)
-        let tag = packet.suffix(tagLength)
-        let box = try AES.GCM.SealedBox(
-            nonce: try nonce(salt: keys.nonceSalt, counter: nonceCounter),
-            ciphertext: ciphertext,
-            tag: tag
+        return SkyBridgeMediaPacketHeader(
+            sessionIdHash: sessionIdHash,
+            streamId: streamId,
+            sequence: sequence,
+            timestampSamples: timestampSamples,
+            flags: flags,
+            wireDirection: wireDirection,
+            transcriptPrefix: transcriptPrefix,
+            keyEpoch: keyEpoch,
+            nonceCounter: nonceCounter
         )
-        do {
-            let payload = try AES.GCM.open(box, using: keys.key, authenticating: headerData)
-            return SkyBridgeMediaOpenedPacket(
-                header: SkyBridgeMediaPacketHeader(
-                    sessionIdHash: sessionIdHash,
-                    streamId: streamId,
-                    sequence: sequence,
-                    timestampSamples: timestampSamples,
-                    flags: flags,
-                    keyEpoch: keyEpoch,
-                    nonceCounter: nonceCounter
-                ),
-                payload: payload
-            )
-        } catch {
-            throw SkyBridgeMediaPacketError.authenticationFailed
-        }
     }
 
     public static func sessionIdHash(_ sessionId: String) -> UInt64 {

@@ -64,6 +64,10 @@ public struct SettingsExportData: Codable {
     public let appVersion: String
 }
 
+public enum SettingsStorageKeys {
+    public static let preferXWingHybrid = "Settings.PreferXWingHybrid"
+}
+
 /// 设置错误类型
 public enum SettingsError: Error, LocalizedError {
     case fileAccessDenied
@@ -220,10 +224,12 @@ public class SettingsManager: ObservableObject, Sendable {
  /// 量子安全：启用后量子密码（应用层）
  /// 🔧 优化：默认启用PQC，提供量子安全保护
     @Published public var enablePQC: Bool = true
- /// 量子安全：优先签名算法（ML-DSA/SLH-DSA/Falcon）
-    @Published public var pqcSignatureAlgorithm: String = "ML-DSA"
+ /// 量子安全：优先签名算法（当前运行时支持 ML-DSA-65/ML-DSA-87）
+    @Published public var pqcSignatureAlgorithm: String = "ML-DSA-65"
  /// 量子安全：是否启用TLS混合协商（视系统支持而定）
     @Published public var enablePQCHybridTLS: Bool = false
+ /// 量子安全：是否优先协商 X-Wing 混合套件（仅调整套件优先级）
+    @Published public var preferXWingHybrid: Bool = false
 
  // MARK: - 系统监控设置
     @Published public var systemMonitorRefreshInterval: Double = 1.0
@@ -276,7 +282,7 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var scanTransferFilesForVirus: Bool = false
  /// 文件传输速率限制（MB/s），0 表示不限速
     @Published public var transferSpeedLimitMBps: Double = 0
-    @Published public var encryptionAlgorithm: String = "AES-256"
+    @Published public var encryptionAlgorithm: FileTransferEncryptionAlgorithm = .aes256GCM
  /// 文件扫描级别：Quick/Standard/Deep
     @Published public var scanLevel: FileScanService.ScanLevel = .standard
  /// MetalFX 降级缩放：是否优先选择最近邻（更快但质量低），默认关闭（使用双线性）
@@ -340,6 +346,9 @@ public class SettingsManager: ObservableObject, Sendable {
         retryCount = 3
         enableConnectionEncryption = true
         verifyCertificates = true
+        discoveryPassiveMode = true
+        requireAuthorizationForConnection = true
+        enableWiFiAwareDiscovery = true
         customServiceTypes = []
 
  // 设备设置
@@ -354,6 +363,9 @@ public class SettingsManager: ObservableObject, Sendable {
         showDeviceIcons = true
         minimumSignalStrength = -80.0
         signalStrengthAlpha = 0.6
+        sortWeightVerified = 2000
+        sortWeightConnected = 1000
+        sortWeightSignalMultiplier = 100
 
  // 高级设置
         enableVerboseLogging = false
@@ -367,14 +379,31 @@ public class SettingsManager: ObservableObject, Sendable {
         enableIPv6Support = false
         useNewDiscoveryAlgorithm = false
         enableP2PDirectConnection = false
+        enableRealTimeWeather = false
         performanceMode = .balanced
+        showRealtimeFPS = false
+        enableCompatibilityMode = false
+        enableCompanionLink = false
         enableHandshakeDiagnostics = false
         useSecureEnclaveMLDSA = true
         useSecureEnclaveMLKEM = true
         // 默认启用应用层 PQC（与属性默认值/注释保持一致）
         enablePQC = true
-        pqcSignatureAlgorithm = "ML-DSA"
+        pqcSignatureAlgorithm = "ML-DSA-65"
         enablePQCHybridTLS = false
+        preferXWingHybrid = false
+        strictModeForSensitiveGroups = false
+        aqiThresholdCautionUrban = 100
+        aqiThresholdSensitiveUrban = 150
+        aqiThresholdUnhealthyUrban = 200
+        aqiThresholdVeryUnhealthyUrban = 300
+        aqiThresholdCautionSuburban = 120
+        aqiThresholdSensitiveSuburban = 170
+        aqiThresholdUnhealthySuburban = 220
+        aqiThresholdVeryUnhealthySuburban = 300
+        uvThresholdModerate = 6.0
+        uvThresholdStrong = 8.0
+        onlyNotifyVerifiedDevices = false
 
  // 系统监控设置
         resetSystemMonitorSettingsToDefaults()
@@ -387,7 +416,7 @@ public class SettingsManager: ObservableObject, Sendable {
         keepSystemAwakeDuringTransfer = false
         scanTransferFilesForVirus = false
         transferSpeedLimitMBps = 0
-        encryptionAlgorithm = "AES-256"
+        encryptionAlgorithm = .aes256GCM
         scanLevel = .standard
 
         applyRuntimeSettingsSnapshot()
@@ -444,9 +473,138 @@ public class SettingsManager: ObservableObject, Sendable {
         )
 
         NetworkActivityLogStore.shared.setEnabled(saveNetworkLogs)
+        applyLoggingRuntimeSettings()
 
         Task { @MainActor in
             FileTransferSettingsBridge.shared.apply()
+            NetworkPreferenceService.shared.applyRuntimeSettings(
+                prefer5GHz: self.prefer5GHz,
+                autoConnectKnownNetworks: self.autoConnectKnownNetworks,
+                scanIntervalSeconds: self.wifiScanTimeout
+            )
+            let sharedScanInterval = Double(self.scanInterval)
+            DeviceManagementSettingsManager.shared.wifiScanInterval = sharedScanInterval
+            DeviceManagementSettingsManager.shared.bluetoothScanInterval = sharedScanInterval
+            DeviceManagementSettingsManager.shared.airplayScanInterval = sharedScanInterval
+            self.postWiFiSettingsChanged(["scanInterval": sharedScanInterval])
+            self.postBluetoothSettingsChanged(["scanInterval": sharedScanInterval])
+            self.postAirPlaySettingsChanged([
+                "scanInterval": sharedScanInterval,
+                "autoDiscoverAppleTV": self.autoDiscoverAppleTV,
+                "showHomePodDevices": self.showHomePodDevices,
+                "showThirdPartyAirPlayDevices": self.showThirdPartyAirPlayDevices
+            ])
+            DeviceDiscoveryService.shared.applyRuntimeDiscoverySettings(restartIfNeeded: false)
+            if #available(macOS 14.0, *) {
+                UnifiedOnlineDeviceManager.shared.applyRuntimeDiscoverySettings(restartIfNeeded: false)
+            }
+            self.applyWeatherRuntimeSetting(self.enableRealTimeWeather)
+            self.applyRemotePerformanceSettings(self.enableHardwareAcceleration)
+        }
+    }
+
+    private func scheduleFileTransferSettingsApply() {
+        Task { @MainActor in
+            FileTransferSettingsBridge.shared.apply()
+        }
+    }
+
+    private func scheduleDiscoveryRuntimeApply(restartIfNeeded: Bool) {
+        Task { @MainActor in
+            DeviceDiscoveryService.shared.applyRuntimeDiscoverySettings(restartIfNeeded: restartIfNeeded)
+            if #available(macOS 14.0, *) {
+                UnifiedOnlineDeviceManager.shared.applyRuntimeDiscoverySettings(restartIfNeeded: restartIfNeeded)
+            }
+        }
+    }
+
+    private func scheduleOnlineDevicePresentationRefresh() {
+        Task { @MainActor in
+            if #available(macOS 14.0, *) {
+                UnifiedOnlineDeviceManager.shared.refreshDevices()
+            }
+        }
+    }
+
+    private func postWiFiSettingsChanged(_ userInfo: [String: Any]) {
+        NotificationCenter.default.post(
+            name: NSNotification.Name("WiFiSettingsChanged"),
+            object: self,
+            userInfo: userInfo
+        )
+    }
+
+    private func postBluetoothSettingsChanged(_ userInfo: [String: Any]) {
+        NotificationCenter.default.post(
+            name: NSNotification.Name("BluetoothSettingsChanged"),
+            object: self,
+            userInfo: userInfo
+        )
+    }
+
+    private func postAirPlaySettingsChanged(_ userInfo: [String: Any]) {
+        NotificationCenter.default.post(
+            name: NSNotification.Name("AirPlaySettingsChanged"),
+            object: self,
+            userInfo: userInfo
+        )
+    }
+
+    private func clearCryptoProviderCacheForSettingsChange() {
+        Task {
+            await CryptoProviderSelector.shared.clearCache()
+        }
+    }
+
+    private func applyLoggingRuntimeSettings() {
+        SkyBridgeLogger.minimumLogLevel = enableVerboseLogging
+            ? .debug
+            : Self.logLevel(from: logLevel)
+    }
+
+    private static func logLevel(from rawValue: String) -> LogLevel {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "trace":
+            return .trace
+        case "debug":
+            return .debug
+        case "warning", "warn":
+            return .warning
+        case "error":
+            return .error
+        case "critical", "fault":
+            return .critical
+        default:
+            return .info
+        }
+    }
+
+    public static func normalizedPQCSignatureAlgorithm(_ rawValue: String) -> String {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
+        case "ML-DSA", "ML-DSA-65", "MLDSA", "MLDSA-65":
+            return "ML-DSA-65"
+        case "ML-DSA-87", "MLDSA-87":
+            return "ML-DSA-87"
+        default:
+            return "ML-DSA-65"
+        }
+    }
+
+    private func applyWeatherRuntimeSetting(_ enabled: Bool) {
+        Task { @MainActor in
+            if enabled {
+                await WeatherIntegrationManager.shared.start()
+            } else {
+                WeatherIntegrationManager.shared.stop()
+            }
+        }
+    }
+
+    private func applyRemotePerformanceSettings(_ hardwareAccelerationEnabled: Bool) {
+        Task { @MainActor in
+            let remoteSettings = RemoteDesktopSettingsManager.shared
+            remoteSettings.settings.displaySettings.enableHardwareAcceleration = hardwareAccelerationEnabled
+            remoteSettings.saveSettings()
         }
     }
 
@@ -474,6 +632,9 @@ public class SettingsManager: ObservableObject, Sendable {
             "discoveryTimeout": discoveryTimeout,
             "connectionTimeout": connectionTimeout,
             "retryCount": retryCount,
+            "discoveryPassiveMode": discoveryPassiveMode,
+            "requireAuthorizationForConnection": requireAuthorizationForConnection,
+            "enableWiFiAwareDiscovery": enableWiFiAwareDiscovery,
             "enableConnectionEncryption": enableConnectionEncryption,
             "verifyCertificates": verifyCertificates,
             "customServiceTypes": customServiceTypes,
@@ -489,6 +650,10 @@ public class SettingsManager: ObservableObject, Sendable {
             "sortBySignalStrength": sortBySignalStrength,
             "showDeviceIcons": showDeviceIcons,
             "minimumSignalStrength": minimumSignalStrength,
+            "signalStrengthAlpha": signalStrengthAlpha,
+            "sortWeightVerified": sortWeightVerified,
+            "sortWeightConnected": sortWeightConnected,
+            "sortWeightSignalMultiplier": sortWeightSignalMultiplier,
 
  // 高级设置
             "enableVerboseLogging": enableVerboseLogging,
@@ -502,11 +667,30 @@ public class SettingsManager: ObservableObject, Sendable {
             "enableIPv6Support": enableIPv6Support,
             "useNewDiscoveryAlgorithm": useNewDiscoveryAlgorithm,
             "enableP2PDirectConnection": enableP2PDirectConnection,
+            "enableRealTimeWeather": enableRealTimeWeather,
             "performanceMode": performanceMode.rawValue,
             "enableHandshakeDiagnostics": enableHandshakeDiagnostics,
             "showRealtimeFPS": showRealtimeFPS,
             "enableCompatibilityMode": enableCompatibilityMode,
             "enableCompanionLink": enableCompanionLink,
+            "strictModeForSensitiveGroups": strictModeForSensitiveGroups,
+            "aqiThresholdCautionUrban": aqiThresholdCautionUrban,
+            "aqiThresholdSensitiveUrban": aqiThresholdSensitiveUrban,
+            "aqiThresholdUnhealthyUrban": aqiThresholdUnhealthyUrban,
+            "aqiThresholdVeryUnhealthyUrban": aqiThresholdVeryUnhealthyUrban,
+            "aqiThresholdCautionSuburban": aqiThresholdCautionSuburban,
+            "aqiThresholdSensitiveSuburban": aqiThresholdSensitiveSuburban,
+            "aqiThresholdUnhealthySuburban": aqiThresholdUnhealthySuburban,
+            "aqiThresholdVeryUnhealthySuburban": aqiThresholdVeryUnhealthySuburban,
+            "uvThresholdModerate": uvThresholdModerate,
+            "uvThresholdStrong": uvThresholdStrong,
+            "onlyNotifyVerifiedDevices": onlyNotifyVerifiedDevices,
+            "enablePQC": enablePQC,
+            "pqcSignatureAlgorithm": pqcSignatureAlgorithm,
+            "enablePQCHybridTLS": enablePQCHybridTLS,
+            "preferXWingHybrid": preferXWingHybrid,
+            "useSecureEnclaveMLDSA": useSecureEnclaveMLDSA,
+            "useSecureEnclaveMLKEM": useSecureEnclaveMLKEM,
 
  // 系统监控设置
             "systemMonitorRefreshInterval": systemMonitorRefreshInterval,
@@ -543,7 +727,7 @@ public class SettingsManager: ObservableObject, Sendable {
             "keepSystemAwakeDuringTransfer": keepSystemAwakeDuringTransfer,
             "scanTransferFilesForVirus": scanTransferFilesForVirus,
             "transferSpeedLimitMBps": transferSpeedLimitMBps,
-            "encryptionAlgorithm": encryptionAlgorithm,
+            "encryptionAlgorithm": encryptionAlgorithm.rawValue,
             "scanLevel": scanLevel.rawValue,
 
  // 元数据
@@ -661,6 +845,14 @@ public class SettingsManager: ObservableObject, Sendable {
                 throw SettingsError.validationFailed("重试次数必须在1-10次之间")
             }
         }
+
+        if let value = settings["encryptionAlgorithm"] as? String {
+            do {
+                _ = try FileTransferEncryptionAlgorithm(persistedValue: value)
+            } catch {
+                throw SettingsError.validationFailed("文件传输仅支持 AES-256-GCM 加密")
+            }
+        }
     }
 
  /// 应用旧格式导入的设置
@@ -686,6 +878,9 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["discoveryTimeout"] as? Int { discoveryTimeout = value }
         if let value = settings["connectionTimeout"] as? Int { connectionTimeout = value }
         if let value = settings["retryCount"] as? Int { retryCount = value }
+        if let value = settings["discoveryPassiveMode"] as? Bool { discoveryPassiveMode = value }
+        if let value = settings["requireAuthorizationForConnection"] as? Bool { requireAuthorizationForConnection = value }
+        if let value = settings["enableWiFiAwareDiscovery"] as? Bool { enableWiFiAwareDiscovery = value }
         if let value = settings["enableConnectionEncryption"] as? Bool { enableConnectionEncryption = value }
         if let value = settings["verifyCertificates"] as? Bool {
             verifyCertificates = value
@@ -704,6 +899,10 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["sortBySignalStrength"] as? Bool { sortBySignalStrength = value }
         if let value = settings["showDeviceIcons"] as? Bool { showDeviceIcons = value }
         if let value = settings["minimumSignalStrength"] as? Double { minimumSignalStrength = value }
+        if let value = settings["signalStrengthAlpha"] as? Double { signalStrengthAlpha = value }
+        if let value = settings["sortWeightVerified"] as? Int { sortWeightVerified = value }
+        if let value = settings["sortWeightConnected"] as? Int { sortWeightConnected = value }
+        if let value = settings["sortWeightSignalMultiplier"] as? Int { sortWeightSignalMultiplier = value }
 
  // 高级设置
         if let value = settings["enableVerboseLogging"] as? Bool { enableVerboseLogging = value }
@@ -717,11 +916,30 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["enableIPv6Support"] as? Bool { enableIPv6Support = value }
         if let value = settings["useNewDiscoveryAlgorithm"] as? Bool { useNewDiscoveryAlgorithm = value }
         if let value = settings["enableP2PDirectConnection"] as? Bool { enableP2PDirectConnection = value }
+        if let value = settings["enableRealTimeWeather"] as? Bool { enableRealTimeWeather = value }
         if let value = settings["enableHandshakeDiagnostics"] as? Bool { enableHandshakeDiagnostics = value }
         if let value = settings["performanceMode"] as? String, let pm = PerformanceMode(rawValue: value) { performanceMode = pm }
         if let value = settings["showRealtimeFPS"] as? Bool { showRealtimeFPS = value }
         if let value = settings["enableCompatibilityMode"] as? Bool { enableCompatibilityMode = value }
         if let value = settings["enableCompanionLink"] as? Bool { enableCompanionLink = value }
+        if let value = settings["strictModeForSensitiveGroups"] as? Bool { strictModeForSensitiveGroups = value }
+        if let value = settings["aqiThresholdCautionUrban"] as? Int { aqiThresholdCautionUrban = value }
+        if let value = settings["aqiThresholdSensitiveUrban"] as? Int { aqiThresholdSensitiveUrban = value }
+        if let value = settings["aqiThresholdUnhealthyUrban"] as? Int { aqiThresholdUnhealthyUrban = value }
+        if let value = settings["aqiThresholdVeryUnhealthyUrban"] as? Int { aqiThresholdVeryUnhealthyUrban = value }
+        if let value = settings["aqiThresholdCautionSuburban"] as? Int { aqiThresholdCautionSuburban = value }
+        if let value = settings["aqiThresholdSensitiveSuburban"] as? Int { aqiThresholdSensitiveSuburban = value }
+        if let value = settings["aqiThresholdUnhealthySuburban"] as? Int { aqiThresholdUnhealthySuburban = value }
+        if let value = settings["aqiThresholdVeryUnhealthySuburban"] as? Int { aqiThresholdVeryUnhealthySuburban = value }
+        if let value = settings["uvThresholdModerate"] as? Double { uvThresholdModerate = value }
+        if let value = settings["uvThresholdStrong"] as? Double { uvThresholdStrong = value }
+        if let value = settings["onlyNotifyVerifiedDevices"] as? Bool { onlyNotifyVerifiedDevices = value }
+        if settings["enablePQC"] is Bool { enablePQC = true }
+        if let value = settings["pqcSignatureAlgorithm"] as? String { pqcSignatureAlgorithm = value }
+        if let value = settings["enablePQCHybridTLS"] as? Bool { enablePQCHybridTLS = value }
+        if let value = settings["preferXWingHybrid"] as? Bool { preferXWingHybrid = value }
+        if let value = settings["useSecureEnclaveMLDSA"] as? Bool { useSecureEnclaveMLDSA = value }
+        if let value = settings["useSecureEnclaveMLKEM"] as? Bool { useSecureEnclaveMLKEM = value }
 
  // 系统监控设置
         if let value = settings["systemMonitorRefreshInterval"] as? Double { systemMonitorRefreshInterval = value }
@@ -765,7 +983,10 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["scanTransferFilesForVirus"] as? Bool { scanTransferFilesForVirus = value }
         if let value = settings["transferSpeedLimitMBps"] as? Double { transferSpeedLimitMBps = value }
         if let value = settings["transferSpeedLimitMBps"] as? Int { transferSpeedLimitMBps = Double(value) }
-        if let value = settings["encryptionAlgorithm"] as? String { encryptionAlgorithm = value }
+        if let value = settings["encryptionAlgorithm"] as? String,
+           let algorithm = try? FileTransferEncryptionAlgorithm(persistedValue: value) {
+            encryptionAlgorithm = algorithm
+        }
         if let value = settings["scanLevel"] as? String, let level = FileScanService.ScanLevel(rawValue: value) { scanLevel = level }
 
         enforceStrictCertificateValidationIfNeeded(context: "legacy import payload")
@@ -889,6 +1110,9 @@ public class SettingsManager: ObservableObject, Sendable {
         enableMDNSResolution = true
         scanCustomPorts = false
         discoveryTimeout = 30
+        discoveryPassiveMode = true
+        requireAuthorizationForConnection = true
+        enableWiFiAwareDiscovery = true
 
  // 重置连接设置
         connectionTimeout = 10
@@ -898,6 +1122,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
  // 清空自定义服务类型
         customServiceTypes = []
+        applyRuntimeSettingsSnapshot()
     }
 
  /// 获取缓存大小
@@ -1256,9 +1481,13 @@ public class SettingsManager: ObservableObject, Sendable {
         enableCompatibilityMode = userDefaults.bool(forKey: "Settings.EnableCompatibilityMode", defaultValue: false)
         enableCompanionLink = userDefaults.bool(forKey: "Settings.EnableCompanionLink", defaultValue: false)
         // PQC settings (previously not persisted)
-        enablePQC = userDefaults.bool(forKey: "Settings.EnablePQC", defaultValue: true)
-        pqcSignatureAlgorithm = userDefaults.string(forKey: "Settings.PQCSignatureAlgorithm") ?? "ML-DSA"
+        enablePQC = true
+        userDefaults.set(true, forKey: "Settings.EnablePQC")
+        pqcSignatureAlgorithm = Self.normalizedPQCSignatureAlgorithm(
+            userDefaults.string(forKey: "Settings.PQCSignatureAlgorithm") ?? "ML-DSA-65"
+        )
         enablePQCHybridTLS = userDefaults.bool(forKey: "Settings.EnablePQCHybridTLS", defaultValue: false)
+        preferXWingHybrid = userDefaults.bool(forKey: SettingsStorageKeys.preferXWingHybrid, defaultValue: false)
         useSecureEnclaveMLDSA = userDefaults.bool(forKey: "Settings.UseSecureEnclaveMLDSA", defaultValue: true)
         useSecureEnclaveMLKEM = userDefaults.bool(forKey: "Settings.UseSecureEnclaveMLKEM", defaultValue: true)
         strictModeForSensitiveGroups = userDefaults.bool(forKey: "Settings.StrictModeForSensitiveGroups", defaultValue: false)
@@ -1309,7 +1538,9 @@ public class SettingsManager: ObservableObject, Sendable {
         keepSystemAwakeDuringTransfer = userDefaults.bool(forKey: "Settings.KeepSystemAwakeDuringTransfer", defaultValue: false)
         scanTransferFilesForVirus = userDefaults.bool(forKey: "Settings.ScanTransferFilesForVirus", defaultValue: false)
         transferSpeedLimitMBps = userDefaults.double(forKey: "Settings.TransferSpeedLimitMBps", defaultValue: 0)
-        encryptionAlgorithm = userDefaults.string(forKey: "Settings.EncryptionAlgorithm") ?? "AES-256"
+        let persistedFileTransferAlgorithm = userDefaults.string(forKey: "Settings.EncryptionAlgorithm") ?? FileTransferEncryptionAlgorithm.aes256GCM.rawValue
+        encryptionAlgorithm = (try? FileTransferEncryptionAlgorithm(persistedValue: persistedFileTransferAlgorithm)) ?? .aes256GCM
+        userDefaults.set(encryptionAlgorithm.rawValue, forKey: "Settings.EncryptionAlgorithm")
         scanLevel = FileScanService.ScanLevel(rawValue: userDefaults.string(forKey: "Settings.ScanLevel") ?? "") ?? .standard
         enableZeroCopyBGRA = userDefaults.bool(forKey: "Settings.EnableZeroCopyBGRA", defaultValue: false)
         preferNearestNeighborScaling = userDefaults.bool(forKey: "Settings.PreferNearestNeighborScaling", defaultValue: false)
@@ -1333,6 +1564,13 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $scanInterval.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ScanInterval")
+            let interval = Double(value)
+            DeviceManagementSettingsManager.shared.wifiScanInterval = interval
+            DeviceManagementSettingsManager.shared.bluetoothScanInterval = interval
+            DeviceManagementSettingsManager.shared.airplayScanInterval = interval
+            self?.postWiFiSettingsChanged(["scanInterval": interval])
+            self?.postBluetoothSettingsChanged(["scanInterval": interval])
+            self?.postAirPlaySettingsChanged(["scanInterval": interval])
         }.store(in: &settingsCancellables)
 
         $showDeviceDetails.sink { [weak self] value in
@@ -1395,38 +1633,47 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $transferBufferSize.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.TransferBufferSize")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $autoRetryFailedTransfers.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.AutoRetryFailedTransfers")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $keepTransferHistory.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.KeepTransferHistory")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $keepSystemAwakeDuringTransfer.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.KeepSystemAwakeDuringTransfer")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $scanTransferFilesForVirus.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ScanTransferFilesForVirus")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $transferSpeedLimitMBps.sink { [weak self] value in
             self?.userDefaults.set(max(0, value), forKey: "Settings.TransferSpeedLimitMBps")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $scanLevel.sink { [weak self] value in
             self?.userDefaults.set(value.rawValue, forKey: "Settings.ScanLevel")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $encryptionAlgorithm.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EncryptionAlgorithm")
+            self?.userDefaults.set(value.rawValue, forKey: "Settings.EncryptionAlgorithm")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $showHiddenNetworks.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowHiddenNetworks")
+            self?.postWiFiSettingsChanged(["showHiddenNetworks": value])
         }.store(in: &settingsCancellables)
 
         $prefer5GHz.sink { [weak self] value in
@@ -1435,18 +1682,22 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $wifiScanTimeout.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.WiFiScanTimeout")
+            self?.postWiFiSettingsChanged(["scanInterval": Double(value)])
         }.store(in: &settingsCancellables)
 
         $enableBonjourDiscovery.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableBonjourDiscovery")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
 
         $enableMDNSResolution.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableMDNSResolution")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: false)
         }.store(in: &settingsCancellables)
 
         $discoveryPassiveMode.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.DiscoveryPassiveMode")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
 
         $requireAuthorizationForConnection.sink { [weak self] value in
@@ -1455,14 +1706,17 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $enableWiFiAwareDiscovery.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableWiFiAwareDiscovery")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
 
         $scanCustomPorts.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ScanCustomPorts")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
 
         $discoveryTimeout.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.DiscoveryTimeout")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: false)
         }.store(in: &settingsCancellables)
 
         $connectionTimeout.sink { [weak self] value in
@@ -1471,10 +1725,12 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $retryCount.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.RetryCount")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $enableConnectionEncryption.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableConnectionEncryption")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $verifyCertificates.sink { [weak self] value in
@@ -1492,6 +1748,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $customServiceTypes.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.CustomServiceTypes")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
 
  // 设备设置观察者
@@ -1505,22 +1762,27 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $showConnectableDevicesOnly.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowOnlyConnectableDevices")
+            self?.scheduleOnlineDevicePresentationRefresh()
         }.store(in: &settingsCancellables)
 
         $autoDiscoverAppleTV.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.AutoDiscoverAppleTV")
+            self?.postAirPlaySettingsChanged(["autoDiscoverAppleTV": value])
         }.store(in: &settingsCancellables)
 
         $showHomePodDevices.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowHomePodDevices")
+            self?.postAirPlaySettingsChanged(["showHomePodDevices": value])
         }.store(in: &settingsCancellables)
 
         $showThirdPartyAirPlayDevices.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowThirdPartyAirPlay")
+            self?.postAirPlaySettingsChanged(["showThirdPartyAirPlayDevices": value])
         }.store(in: &settingsCancellables)
 
         $hideOfflineDevices.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.HideOfflineDevices")
+            self?.scheduleOnlineDevicePresentationRefresh()
         }.store(in: &settingsCancellables)
 
         $sortBySignalStrength.sink { [weak self] value in
@@ -1533,6 +1795,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $minimumSignalStrength.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.MinimumSignalStrength")
+            self?.scheduleOnlineDevicePresentationRefresh()
         }.store(in: &settingsCancellables)
 
         $signalStrengthAlpha.sink { [weak self] value in
@@ -1542,6 +1805,7 @@ public class SettingsManager: ObservableObject, Sendable {
  // 高级设置观察者
         $enableVerboseLogging.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableVerboseLogging")
+            self?.applyLoggingRuntimeSettings()
         }.store(in: &settingsCancellables)
 
         $showDebugInfo.sink { [weak self] value in
@@ -1555,10 +1819,12 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $logLevel.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.LogLevel")
+            self?.applyLoggingRuntimeSettings()
         }.store(in: &settingsCancellables)
 
         $enableHardwareAcceleration.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableHardwareAcceleration")
+            self?.applyRemotePerformanceSettings(value)
         }.store(in: &settingsCancellables)
 
         $optimizeMemoryUsage.sink { [weak self] value in
@@ -1571,14 +1837,17 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $maxConcurrentConnections.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.MaxConcurrentConnections")
+            self?.scheduleFileTransferSettingsApply()
         }.store(in: &settingsCancellables)
 
         $enableIPv6Support.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableIPv6Support")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: false)
         }.store(in: &settingsCancellables)
 
         $useNewDiscoveryAlgorithm.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.UseNewDiscoveryAlgorithm")
+            self?.scheduleDiscoveryRuntimeApply(restartIfNeeded: true)
         }.store(in: &settingsCancellables)
 
         $enableP2PDirectConnection.sink { [weak self] value in
@@ -1591,6 +1860,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
         $enableRealTimeWeather.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnableRealTimeWeather")
+            self?.applyWeatherRuntimeSetting(value)
         }.store(in: &settingsCancellables)
 
         $performanceMode.sink { [weak self] value in
@@ -1605,13 +1875,25 @@ public class SettingsManager: ObservableObject, Sendable {
         $showRealtimeFPS.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowRealtimeFPS")
         }.store(in: &settingsCancellables)
- // 兼容/更多设备模式与 companion‑link 开关持久化
-        $enableCompatibilityMode.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EnableCompatibilityMode")
-        }.store(in: &settingsCancellables)
-        $enableCompanionLink.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EnableCompanionLink")
-        }.store(in: &settingsCancellables)
+	 // 兼容/更多设备模式与 companion‑link 开关持久化，并实时驱动 P2P Bonjour 浏览器集合。
+        $enableCompatibilityMode
+            .combineLatest($enableCompanionLink)
+            .removeDuplicates { lhs, rhs in
+                lhs.0 == rhs.0 && lhs.1 == rhs.1
+            }
+            .sink { [weak self] runtime in
+                let compatibilityMode = runtime.0
+                let companionLink = runtime.1
+                self?.userDefaults.set(compatibilityMode, forKey: "Settings.EnableCompatibilityMode")
+                self?.userDefaults.set(companionLink, forKey: "Settings.EnableCompanionLink")
+                Task { @MainActor in
+                    P2PDiscoveryService.shared.applyDiscoverySettings(
+                        compatibilityMode: compatibilityMode,
+                        companionLink: companionLink
+                    )
+                }
+            }
+            .store(in: &settingsCancellables)
 
         $preferNearestNeighborScaling.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.PreferNearestNeighborScaling")
@@ -1619,19 +1901,41 @@ public class SettingsManager: ObservableObject, Sendable {
 
         // PQC settings persistence
         $enablePQC.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EnablePQC")
+            guard let self else { return }
+            guard value else {
+                self.userDefaults.set(true, forKey: "Settings.EnablePQC")
+                self.enablePQC = true
+                self.clearCryptoProviderCacheForSettingsChange()
+                return
+            }
+            self.userDefaults.set(true, forKey: "Settings.EnablePQC")
+            self.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
         $pqcSignatureAlgorithm.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.PQCSignatureAlgorithm")
+            guard let self else { return }
+            let normalized = Self.normalizedPQCSignatureAlgorithm(value)
+            guard normalized == value else {
+                self.pqcSignatureAlgorithm = normalized
+                return
+            }
+            self.userDefaults.set(normalized, forKey: "Settings.PQCSignatureAlgorithm")
+            self.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
         $enablePQCHybridTLS.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnablePQCHybridTLS")
+            self?.clearCryptoProviderCacheForSettingsChange()
+        }.store(in: &settingsCancellables)
+        $preferXWingHybrid.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: SettingsStorageKeys.preferXWingHybrid)
+            self?.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
         $useSecureEnclaveMLDSA.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.UseSecureEnclaveMLDSA")
+            self?.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
         $useSecureEnclaveMLKEM.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.UseSecureEnclaveMLKEM")
+            self?.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
 
  // 系统监控设置观察者

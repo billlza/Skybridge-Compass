@@ -7,7 +7,7 @@ mod p2p_remote_media;
 mod p2p_remote_realtime;
 mod webrtc;
 
-const PERFORMANCE_ENTRY_COUNT: usize = 14;
+const PERFORMANCE_ENTRY_COUNT: usize = 15;
 
 pub(super) fn append_entries(
     source: &SearchableCheckSource,

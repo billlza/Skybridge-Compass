@@ -10,7 +10,10 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
             supportedSuites: [.xwingMLDSA]
         )
 
-        let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: provider)
+        let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            appleXWingAvailable: true
+        )
         XCTAssertEqual(suites.map(\.wireId), [0x0001, 0x0101, 0x0102])
     }
 
@@ -21,8 +24,25 @@ final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
             supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
         )
 
-        let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(using: provider)
+        let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            appleXWingAvailable: true
+        )
         XCTAssertEqual(suites.map(\.wireId), [0x0001, 0x0101, 0x0102])
+    }
+
+    func testNativeTierDoesNotAdvertiseXWingWhenRuntimeUnavailable() {
+        let provider = MockCryptoProvider(
+            tier: .nativePQC,
+            activeSuite: .mlkem768MLDSA65,
+            supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
+        )
+
+        let suites = DeviceIdentityKeyManager.pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            appleXWingAvailable: false
+        )
+        XCTAssertEqual(suites.map(\.wireId), [0x0101, 0x0102])
     }
 
     func testLiboqsTierKeepsProviderSuites() {

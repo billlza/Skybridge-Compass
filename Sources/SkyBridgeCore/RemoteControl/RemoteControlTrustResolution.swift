@@ -59,7 +59,7 @@ enum RemoteControlInboundTrustResolver {
         let fingerprints = Array(
             Set(
                 matches
-                    .compactMap(\.currentPathAuthorityFingerprint)
+                    .flatMap { $0.currentPathAuthorityFingerprints }
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
                     .filter { !$0.isEmpty }
             )
@@ -79,11 +79,12 @@ enum RemoteControlInboundTrustResolver {
         var fingerprintsByAlgorithm: [String: Set<String>] = [:]
 
         for record in matches {
-            guard let fingerprint = canonicalFingerprint(record.currentPathAuthorityFingerprint) else {
-                continue
+            for pin in record.currentPathAuthorityPins {
+                guard let fingerprint = canonicalFingerprint(pin.fingerprint) else {
+                    continue
+                }
+                fingerprintsByAlgorithm[pin.algorithm.rawValue, default: []].insert(fingerprint)
             }
-            let algorithm = record.protocolSigningAlgorithm?.rawValue ?? "unknown"
-            fingerprintsByAlgorithm[algorithm, default: []].insert(fingerprint)
         }
 
         return fingerprintsByAlgorithm.values.contains { $0.count > 1 }

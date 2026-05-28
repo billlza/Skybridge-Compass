@@ -57,6 +57,90 @@ final class FramedReaderTests: XCTestCase {
         }
     }
 
+    func testReceiveFrameHandles8192ByteFrameWithStickyNextFrameAndShortReads() async throws {
+        let firstPayload = Data((0..<8192).map { UInt8($0 % 251) })
+        let secondPayload = Data([0x53, 0x4B, 0x59])
+
+        func encodedFrame(_ payload: Data) -> Data {
+            var frame = Data()
+            var length = UInt32(payload.count).bigEndian
+            frame.append(Data(bytes: &length, count: 4))
+            frame.append(payload)
+            return frame
+        }
+
+        var stickyFrames = Data()
+        stickyFrames.append(encodedFrame(firstPayload))
+        stickyFrames.append(encodedFrame(secondPayload))
+
+        let source = ChunkSource(chunks: [stickyFrames])
+        let reader = FramedReader(chunkLimit: 137) { maxLen in
+            await source.next(maximumLength: maxLen)
+        }
+
+        let decodedFirst = try await reader.receiveFrame()
+        let decodedSecond = try await reader.receiveFrame()
+
+        XCTAssertEqual(decodedFirst, firstPayload)
+        XCTAssertEqual(decodedSecond, secondPayload)
+    }
+
+    func testReceiveFrameHandlesHandshakeBoundarySizes() async throws {
+        for size in [8191, 8192, 8193] {
+            let payload = Data((0..<size).map { UInt8($0 % 251) })
+            var frame = Data()
+            var length = UInt32(payload.count).bigEndian
+            frame.append(Data(bytes: &length, count: 4))
+            frame.append(payload)
+
+            let source = ChunkSource(chunks: chunked(frame, seed: UInt64(size)))
+            let reader = FramedReader(chunkLimit: 127) { maxLen in
+                await source.next(maximumLength: maxLen)
+            }
+
+            let decoded = try await reader.receiveFrame(maxFrameLength: 16_384)
+            XCTAssertEqual(decoded, payload, "handshake boundary size \(size) should round-trip")
+        }
+    }
+
+    func testReceiveFrameAcceptsExactMaximumLength() async throws {
+        let payload = Data((0..<8192).map { UInt8($0 % 251) })
+        var frame = Data()
+        var length = UInt32(payload.count).bigEndian
+        frame.append(Data(bytes: &length, count: 4))
+        frame.append(payload)
+
+        let source = ChunkSource(chunks: chunked(frame, seed: 8192))
+        let reader = FramedReader(chunkLimit: 127) { maxLen in
+            await source.next(maximumLength: maxLen)
+        }
+
+        let decoded = try await reader.receiveFrame(maxFrameLength: 8192)
+        XCTAssertEqual(decoded, payload)
+    }
+
+    func testReceiveFrameHandlesSplitLengthPrefixes() async throws {
+        let payload = Data((0..<512).map { UInt8($0 % 251) })
+        var frame = Data()
+        var length = UInt32(payload.count).bigEndian
+        frame.append(Data(bytes: &length, count: 4))
+        frame.append(payload)
+
+        for prefixSplit in [1, 2, 3] {
+            let source = ChunkSource(chunks: [
+                Data(frame.prefix(prefixSplit)),
+                Data(frame.dropFirst(prefixSplit).prefix(4 - prefixSplit)),
+                Data(frame.dropFirst(4))
+            ])
+            let reader = FramedReader(chunkLimit: 64) { maxLen in
+                await source.next(maximumLength: maxLen)
+            }
+
+            let decoded = try await reader.receiveFrame()
+            XCTAssertEqual(decoded, payload, "length prefix split \(prefixSplit)+\(4 - prefixSplit) should round-trip")
+        }
+    }
+
     func testReceiveExactlyFailsClosedWhenPeerEndsEarly() async {
         let source = ChunkSource(chunks: [Data([0xAA, 0xBB])], closesWhenEmpty: true)
         let reader = FramedReader { maxLen in

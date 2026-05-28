@@ -9,8 +9,9 @@ enum OnlineDeviceConnectionCoordinator {
         unifiedDeviceManager: UnifiedOnlineDeviceManager = .shared,
         p2pDiscoveryService: P2PDiscoveryService = .shared
     ) async throws {
-        var discoveredCandidates = unifiedDeviceManager.resolvedDiscoveredCandidates(for: device, limit: 6)
-        if let fallback = fallbackDiscoveredDevice(for: device),
+        let liveDiscoveredCandidates = unifiedDeviceManager.resolvedConnectableDiscoveredCandidates(for: device, limit: 6)
+        var discoveredCandidates = liveDiscoveredCandidates
+        if let fallback = fallbackDiscoveredDevice(for: device, unifiedDeviceManager: unifiedDeviceManager),
            !discoveredCandidates.contains(where: { isSameConnectTarget($0, fallback) }) {
             discoveredCandidates.append(fallback)
         }
@@ -19,7 +20,7 @@ enum OnlineDeviceConnectionCoordinator {
             throw P2PDiscoveryError.noConnectableEndpoint
         }
 
-        let preferUSBRoute = shouldPreferUSBRoute(for: device, candidates: discoveredCandidates)
+        let preferUSBRoute = shouldPreferUSBRoute(for: device, candidates: liveDiscoveredCandidates)
         let routePreference: P2PDiscoveryService.ConnectionRoutePreference = {
             if !SettingsManager.shared.enableP2PDirectConnection {
                 return .managedRelayOnly
@@ -73,60 +74,39 @@ enum OnlineDeviceConnectionCoordinator {
             candidate.connectionTypes.contains(.usb)
                 && ((candidate.portMap["_skybridge._tcp"] ?? 0) > 0
                     || (candidate.portMap["_skybridge._udp"] ?? 0) > 0
-                    || candidate.uniqueIdentifier?.hasPrefix("bonjour:") == true
-                    || candidate.uniqueIdentifier?.hasPrefix("recent:bonjour:") == true)
+                    || candidate.uniqueIdentifier.map(isUsableBonjourIdentifier) == true
+                    || candidate.routeIdentifiers.contains(where: isUsableBonjourIdentifier))
         }
     }
 
-    private static func fallbackDiscoveredDevice(for device: OnlineDevice) -> DiscoveredDevice? {
+    private static func fallbackDiscoveredDevice(
+        for device: OnlineDevice,
+        unifiedDeviceManager: UnifiedOnlineDeviceManager
+    ) -> DiscoveredDevice? {
         var normalizedServices = device.services
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { $0.hasPrefix("_") && ($0.hasSuffix("._tcp") || $0.hasSuffix("._udp")) }
 
         let hasSkyBridgeSource = device.sources.contains(.skybridgeBonjour) || device.sources.contains(.skybridgeP2P)
-        let hasBonjourIdentifier = device.uniqueIdentifier.hasPrefix("bonjour:")
-            || device.uniqueIdentifier.hasPrefix("recent:bonjour:")
+        let hasBonjourIdentifier = UnifiedOnlineDeviceManager.hasBonjourSkyBridgeControlRoute(
+            identifier: device.uniqueIdentifier,
+            services: normalizedServices,
+            portMap: device.portMap,
+            routeIdentifiers: device.routeIdentifiers
+        )
         let hasSkyBridgeControlPort = (device.portMap["_skybridge._tcp"] ?? 0) > 0
             || (device.portMap["_skybridge._udp"] ?? 0) > 0
-        let hasSkyBridgeControlService = normalizedServices.contains("_skybridge._tcp")
-            || normalizedServices.contains("_skybridge._udp")
+        let hasDirectRoute = UnifiedOnlineDeviceManager.hasDirectSkyBridgeControlRoute(device)
 
-        if normalizedServices.isEmpty, hasSkyBridgeSource, hasBonjourIdentifier {
+        if normalizedServices.isEmpty, hasSkyBridgeControlPort {
+            normalizedServices = (device.portMap["_skybridge._udp"] ?? 0) > 0
+                ? ["_skybridge._udp"]
+                : ["_skybridge._tcp"]
+        } else if normalizedServices.isEmpty, hasSkyBridgeSource, hasBonjourIdentifier {
             normalizedServices = ["_skybridge._tcp"]
         }
 
-        guard hasSkyBridgeControlService
-            || hasSkyBridgeControlPort
-            || (hasSkyBridgeSource && hasBonjourIdentifier)
-        else {
-            SkyBridgeLogger.discovery.warning(
-                "跳过在线设备 fallback 候选：缺少真实 SkyBridge 控制端点 device=\(device.name, privacy: .public) id=\(device.uniqueIdentifier, privacy: .public)"
-            )
-            return nil
-        }
-
-        let mappedDeviceId: String? = {
-            guard device.uniqueIdentifier.hasPrefix("id:") else { return nil }
-            return String(device.uniqueIdentifier.dropFirst("id:".count))
-        }()
-        let inferredDeviceId: String? = {
-            let trimmed = device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            guard !trimmed.contains(":") else { return nil }
-            guard trimmed.count >= 8 else { return nil }
-            return trimmed
-        }()
-        let mappedPubKeyFP: String? = {
-            guard device.uniqueIdentifier.hasPrefix("fp:") else { return nil }
-            return String(device.uniqueIdentifier.dropFirst("fp:".count))
-        }()
-        let source: DeviceSource = {
-            if device.sources.contains(.skybridgeP2P) { return .skybridgeP2P }
-            if device.sources.contains(.skybridgeBonjour) { return .skybridgeBonjour }
-            return .unknown
-        }()
-
-        return DiscoveredDevice(
+        let fallback = DiscoveredDevice(
             id: device.id,
             name: device.name,
             ipv4: device.ipv4,
@@ -134,12 +114,127 @@ enum OnlineDeviceConnectionCoordinator {
             services: normalizedServices,
             portMap: device.portMap,
             connectionTypes: device.connectionTypes,
-            uniqueIdentifier: device.uniqueIdentifier,
+            uniqueIdentifier: preferredRouteIdentifier(for: device) ?? device.uniqueIdentifier,
+            routeIdentifiers: device.routeIdentifiers,
             signalStrength: device.signalStrength,
-            source: source,
+            source: {
+                if device.sources.contains(.skybridgeP2P) { return .skybridgeP2P }
+                if device.sources.contains(.skybridgeBonjour) { return .skybridgeBonjour }
+                return .unknown
+            }(),
             isLocalDevice: device.isLocalDevice,
-            deviceId: mappedDeviceId ?? inferredDeviceId,
-            pubKeyFP: mappedPubKeyFP
+            deviceId: authoritativeProtocolDeviceId(for: device, unifiedDeviceManager: unifiedDeviceManager),
+            pubKeyFP: authoritativeProtocolFingerprint(for: device, unifiedDeviceManager: unifiedDeviceManager)
         )
+
+        guard hasDirectRoute || UnifiedOnlineDeviceManager.hasResolvedSkyBridgeControlRoute(fallback) else {
+            SkyBridgeLogger.discovery.warning(
+                "跳过在线设备 fallback 候选：缺少可拨 SkyBridge 控制路由 device=\(device.name, privacy: .public) id=\(device.uniqueIdentifier, privacy: .public)"
+            )
+            return nil
+        }
+
+        return fallback
+    }
+
+    private static func authoritativeProtocolDeviceId(
+        for device: OnlineDevice,
+        unifiedDeviceManager: UnifiedOnlineDeviceManager
+    ) -> String? {
+        let records = TrustSyncService.shared.activeTrustRecords.filter { !$0.isTombstone && !$0.isExpired }
+        guard let record = unifiedDeviceManager.resolvedTrustRecord(for: device, among: records) else {
+            return nil
+        }
+        return stableIdPayload(from: record.currentDeviceId)
+            ?? stableIdPayload(from: record.deviceId)
+            ?? nonEmptyIdentity(record.currentDeviceId)
+            ?? nonEmptyIdentity(record.deviceId)
+    }
+
+    private static func authoritativeProtocolFingerprint(
+        for device: OnlineDevice,
+        unifiedDeviceManager: UnifiedOnlineDeviceManager
+    ) -> String? {
+        let records = TrustSyncService.shared.activeTrustRecords.filter { !$0.isTombstone && !$0.isExpired }
+        if let record = unifiedDeviceManager.resolvedTrustRecord(for: device, among: records) {
+            let fingerprint = record.pubKeyFP.trimmingCharacters(in: .whitespacesAndNewlines)
+            return fingerprint.isEmpty ? nil : fingerprint
+        }
+        let identifier = device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard identifier.hasPrefix("fp:") else { return nil }
+        let payload = String(identifier.dropFirst("fp:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return payload.isEmpty ? nil : payload
+    }
+
+    private static func stableIdPayload(from raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        if value.lowercased().hasPrefix("id:") {
+            value = String(value.dropFirst("id:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value.isEmpty ? nil : value
+    }
+
+    private static func nonEmptyIdentity(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private static func preferredRouteIdentifier(for device: OnlineDevice) -> String? {
+        for routeIdentifier in device.routeIdentifiers {
+            let trimmed = routeIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if isUsableBonjourIdentifier(trimmed) {
+                return trimmed
+            }
+        }
+        let identifier = device.uniqueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isUsableBonjourIdentifier(identifier) {
+            return identifier
+        }
+        return nil
+    }
+
+    private static func isUsableBonjourIdentifier(_ identifier: String) -> Bool {
+        let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.lowercased()
+        guard normalized.hasPrefix("bonjour:") || normalized.hasPrefix("recent:bonjour:") else {
+            return false
+        }
+        let prefixLength = normalized.hasPrefix("recent:bonjour:")
+            ? "recent:bonjour:".count
+            : "bonjour:".count
+        let payload = String(trimmed.dropFirst(prefixLength))
+        guard let serviceName = payload.split(separator: "@", maxSplits: 1).first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !serviceName.isEmpty else {
+            return false
+        }
+        let lowercasedName = serviceName.lowercased()
+        guard !lowercasedName.hasPrefix("id:"),
+              !lowercasedName.hasPrefix("fp:"),
+              !lowercasedName.hasPrefix("host:"),
+              !lowercasedName.hasPrefix("peer:"),
+              UUID(uuidString: serviceName.uppercased()) == nil,
+              !isLikelyIPAddress(lowercasedName) else {
+            return false
+        }
+        return true
+    }
+
+    private static func isLikelyIPAddress(_ value: String) -> Bool {
+        if value.contains(":") { return true }
+        let segments = value.split(separator: ".")
+        return segments.count == 4 && segments.allSatisfy { segment in
+            guard let intValue = Int(segment), (0...255).contains(intValue) else {
+                return false
+            }
+            return String(intValue) == String(segment) || segment == "0"
+        }
     }
 }

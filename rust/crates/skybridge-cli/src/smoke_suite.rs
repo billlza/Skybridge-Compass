@@ -1,5 +1,4 @@
-use std::path::PathBuf;
-
+use crate::repo_paths::resolve_repo_root;
 use crate::webrtc_media_dimensions::{MAINSTREAM_WEBRTC_VIDEO_SIZES, VideoDimensions};
 use anyhow::{Context, Result, bail};
 
@@ -17,6 +16,7 @@ fn is_real_device_smoke_profile(profile: SmokeSuiteProfile) -> bool {
         profile,
         SmokeSuiteProfile::RealDevice
             | SmokeSuiteProfile::RealDeviceP2p
+            | SmokeSuiteProfile::RealDeviceP2pSecurityNotice
             | SmokeSuiteProfile::RealDeviceFileTransfer
     )
 }
@@ -168,24 +168,6 @@ pub(crate) async fn smoke_local_p2p(args: SmokeLocalP2pArgs) -> Result<()> {
         args.output.json,
         steps,
     )
-}
-
-fn resolve_repo_root() -> Result<PathBuf> {
-    let mut current = std::env::current_dir()?;
-    loop {
-        if current.join("Scripts").is_dir()
-            && current.join("rust").join("Cargo.toml").is_file()
-            && current.join("Package.swift").is_file()
-        {
-            return Ok(current);
-        }
-
-        if !current.pop() {
-            break;
-        }
-    }
-
-    bail!("Could not locate SkyBridge repository root from current directory")
 }
 
 #[cfg(test)]

@@ -89,15 +89,12 @@ public enum RemoteDesktopViewerCodec: String, CaseIterable, Codable, Sendable {
     func resolvedWireValue(supportedFormats: [String]) -> String? {
         switch self {
         case .automatic:
-            if supportedFormats.contains("h264") {
-                return "h264"
-            }
             if supportedFormats.contains("hevc") {
                 return "hevc"
             }
             return supportedFormats.first
         case .jpeg:
-            return supportedFormats.first { $0 == "h264" || $0 == "hevc" }
+            return supportedFormats.first { $0 == "hevc" }
                 ?? supportedFormats.first
         default:
             guard let raw = wireValue else { return nil }

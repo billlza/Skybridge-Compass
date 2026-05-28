@@ -37,6 +37,33 @@ enum P2PDiscoveryBonjourPolicy {
         return normalized.hasPrefix("bonjour:") || normalized.hasPrefix("recent:bonjour:")
     }
 
+    nonisolated static func preferredRoutableBonjourIdentifier(for device: DiscoveredDevice) -> String? {
+        for routeIdentifier in device.routeIdentifiers {
+            if let routable = routableBonjourIdentifier(routeIdentifier) {
+                return routable
+            }
+        }
+        return routableBonjourIdentifier(device.uniqueIdentifier)
+    }
+
+    nonisolated static func connectionPeerIdentifier(
+        for device: DiscoveredDevice,
+        usesBonjourServiceEndpoint: Bool
+    ) -> String? {
+        if usesBonjourServiceEndpoint,
+           let routeIdentifier = preferredRoutableBonjourIdentifier(for: device) {
+            return routeIdentifier
+        }
+        if let persistentDeviceId = trimmedNonEmpty(device.deviceId) {
+            return persistentDeviceId
+        }
+        return trimmedNonEmpty(device.uniqueIdentifier)
+    }
+
+    nonisolated static func isRoutableBonjourIdentifier(_ identifier: String?) -> Bool {
+        routableBonjourIdentifier(identifier) != nil
+    }
+
     nonisolated static func isLikelyIPAddress(_ raw: String) -> Bool {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.contains(":") { return true }
@@ -67,6 +94,10 @@ enum P2PDiscoveryBonjourPolicy {
             candidates.append(sanitized)
         }
 
+        for routeIdentifier in device.routeIdentifiers {
+            append(extractBonjourServiceName(fromIdentifier: routeIdentifier))
+        }
+
         let identifierName = extractBonjourServiceName(fromIdentifier: device.uniqueIdentifier)
         let inferredAppleName = inferredDefaultAppleBonjourServiceName(fromDisplayName: device.name)
 
@@ -82,6 +113,27 @@ enum P2PDiscoveryBonjourPolicy {
             append(inferredAppleName)
         }
         return candidates
+    }
+
+    private nonisolated static func routableBonjourIdentifier(_ identifier: String?) -> String? {
+        guard let raw = trimmedNonEmpty(identifier),
+              isBonjourIdentifier(raw),
+              let serviceName = extractBonjourServiceName(fromIdentifier: raw) else {
+            return nil
+        }
+        let trimmedServiceName = serviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercasedServiceName = trimmedServiceName.lowercased()
+        guard !trimmedServiceName.isEmpty,
+              !lowercasedServiceName.hasPrefix("id:"),
+              !lowercasedServiceName.hasPrefix("fp:"),
+              !lowercasedServiceName.hasPrefix("host:"),
+              !lowercasedServiceName.hasPrefix("peer:"),
+              UUID(uuidString: trimmedServiceName.uppercased()) == nil,
+              !isLikelyIPAddress(lowercasedServiceName),
+              !sanitizedBonjourServiceName(trimmedServiceName).isEmpty else {
+            return nil
+        }
+        return raw
     }
 
     nonisolated static func extractBonjourServiceName(fromIdentifier identifier: String?) -> String? {
@@ -220,7 +272,10 @@ enum P2PDiscoveryBonjourPolicy {
     ) -> String? {
         if let deviceId, !deviceId.isEmpty { return "id:\(deviceId)" }
         if let pubKeyFP, !pubKeyFP.isEmpty { return "fp:\(pubKeyFP)" }
-        return bonjourIdentifier ?? ipv4 ?? ipv6
+        if let bonjourIdentifier, !bonjourIdentifier.isEmpty { return bonjourIdentifier }
+        if let ipv4, !ipv4.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "ip:\(ipv4)" }
+        if let ipv6, !ipv6.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "ip:\(ipv6)" }
+        return nil
     }
 
     nonisolated static func normalizeIdentifierForMatching(_ raw: String?) -> String? {
@@ -244,5 +299,12 @@ enum P2PDiscoveryBonjourPolicy {
 
     nonisolated static func normalizedNameTokenForMatching(_ raw: String) -> String {
         raw.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private nonisolated static func trimmedNonEmpty(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 }

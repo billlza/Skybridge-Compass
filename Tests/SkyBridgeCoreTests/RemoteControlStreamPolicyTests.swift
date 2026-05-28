@@ -36,7 +36,7 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertEqual(policy.targetFrameRate, 120)
     }
 
-    func testSelectorFallsBackToH264ForUnknownLegacyPeer() {
+    func testSelectorUsesH264OnlyForUnknownLegacyPeerCompatibility() {
         let policy = RemoteControlStreamPolicySelector.select(
             request: makeRequest(size: CGSize(width: 1920, height: 1080), codec: .hevc, fps: 60),
             peerFormats: [],
@@ -48,7 +48,7 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
         XCTAssertEqual(policy.targetFrameRate, 60)
     }
 
-    func testSelectorPrefersH264WhenLowLatencyIsEnabled() {
+    func testSelectorKeepsHEVCWhenLowLatencyIsEnabled() {
         let policy = RemoteControlStreamPolicySelector.select(
             request: makeRequest(
                 size: CGSize(width: 1920, height: 1080),
@@ -62,7 +62,7 @@ final class RemoteControlStreamPolicyTests: XCTestCase {
             isAppleSilicon: true
         )
 
-        XCTAssertEqual(policy.codec, .h264)
+        XCTAssertEqual(policy.codec, .hevc)
         XCTAssertEqual(policy.targetFrameRate, 60)
         XCTAssertLessThanOrEqual(policy.keyFrameInterval, 30)
     }

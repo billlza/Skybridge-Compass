@@ -43,4 +43,32 @@ final class NebulaPublicClientOAuthTests: XCTestCase {
         XCTAssertEqual(items["code_challenge"], request.codeChallenge)
         XCTAssertEqual(items["state"], request.state)
     }
+
+    func testUserInfoDecodesNebulaIdClaimsForNoticeIdentity() throws {
+        let snakeCase = Data(
+            """
+            {
+              "sub": "subject-1",
+              "preferred_username": "ziang",
+              "name": "Ziang",
+              "email": "ziang@example.com",
+              "picture": "https://example.com/avatar.png",
+              "nebula_id": "NEBULA-2026-REMOTE"
+            }
+            """.utf8
+        )
+        let snakeDecoded = try JSONDecoder().decode(NebulaPublicClientOAuth.UserInfo.self, from: snakeCase)
+        XCTAssertEqual(snakeDecoded.nebulaId, "NEBULA-2026-REMOTE")
+
+        let camelCase = Data(
+            """
+            {
+              "sub": "subject-2",
+              "nebulaId": "NEBULA-2026-CAMEL"
+            }
+            """.utf8
+        )
+        let camelDecoded = try JSONDecoder().decode(NebulaPublicClientOAuth.UserInfo.self, from: camelCase)
+        XCTAssertEqual(camelDecoded.nebulaId, "NEBULA-2026-CAMEL")
+    }
 }

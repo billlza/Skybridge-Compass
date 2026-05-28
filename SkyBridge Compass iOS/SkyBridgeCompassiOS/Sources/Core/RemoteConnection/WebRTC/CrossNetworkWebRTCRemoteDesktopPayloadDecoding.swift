@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
@@ -39,40 +38,57 @@ extension CrossNetworkWebRTCManager {
         _ payload: Data,
         keys: SessionKeys
     ) -> ScreenData? {
-        let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc-screen")
-        guard let plaintext = try? decryptScreenPayload(ciphertext: trafficUnwrapped, with: keys) else {
+        guard let openedPayload = try? openScreenChannelPayload(payload, keys: keys) else {
             return nil
         }
-        return decodeScreenDataPayload(plaintext)
+        return decodeScreenChannelPayload(openedPayload)
     }
 
     nonisolated static func decodeEncryptedScreenChannelPayload(
         _ payload: Data,
         keys: SessionKeys
     ) throws -> ScreenData? {
-        let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc-screen")
-        let plaintext = try decryptScreenPayload(ciphertext: trafficUnwrapped, with: keys)
-        return decodeScreenDataPayload(plaintext)
+        let openedPayload = try openScreenChannelPayload(payload, keys: keys)
+        return decodeScreenChannelPayload(openedPayload)
     }
 
-    nonisolated private static func decryptScreenPayload(
-        ciphertext: Data,
+    nonisolated static func openScreenChannelPayload(
+        _ payload: Data,
         with keys: SessionKeys
-    ) throws -> Data {
-        let key = SymmetricKey(data: keys.receiveKey)
-        let box = try AES.GCM.SealedBox(combined: ciphertext)
-        return try AES.GCM.open(box, using: key)
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        try openScreenChannelPayload(payload, keys: keys)
     }
 
-    nonisolated static func decryptDirectControlProbePayload(
+    nonisolated static func openScreenChannelPayload(
         _ payload: Data,
         keys: SessionKeys
-    ) -> Data? {
-        let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc")
-        let key = SymmetricKey(data: keys.receiveKey)
-        guard let box = try? AES.GCM.SealedBox(combined: trafficUnwrapped) else {
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc-screen")
+        return try WebRTCAppSecureEnvelope.open(
+            trafficUnwrapped,
+            keys: keys,
+            allowedPacketTypes: [.remoteDesktop]
+        )
+    }
+
+    nonisolated static func decodeScreenChannelPayload(
+        _ openedPayload: WebRTCAppSecureOpenedPayload
+    ) -> ScreenData? {
+        guard openedPayload.packetType == .remoteDesktop else {
             return nil
         }
-        return try? AES.GCM.open(box, using: key)
+        return decodeScreenDataPayload(openedPayload.payload)
+    }
+
+    nonisolated static func openDirectControlProbePayload(
+        _ payload: Data,
+        keys: SessionKeys
+    ) -> WebRTCAppSecureOpenedPayload? {
+        let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx/webrtc")
+        return try? WebRTCAppSecureEnvelope.open(
+            trafficUnwrapped,
+            keys: keys,
+            allowedPacketTypes: [.appControl, .remoteDesktop, .remoteDesktopAudio]
+        )
     }
 }

@@ -133,7 +133,7 @@ public struct SessionKeys: Sendable {
         negotiatedSuite: CryptoSuite,
         role: HandshakeRole,
         transcriptHash: Data,
-        sessionId: String = UUID().uuidString,
+        sessionId: String? = nil,
         createdAt: Date = Date()
     ) {
         self.sendKey = sendKey
@@ -141,8 +141,16 @@ public struct SessionKeys: Sendable {
         self.negotiatedSuite = negotiatedSuite
         self.role = role
         self.transcriptHash = transcriptHash
-        self.sessionId = sessionId
+        self.sessionId = sessionId ?? Self.deterministicSessionId(transcriptHash: transcriptHash)
         self.createdAt = createdAt
+    }
+
+    public static func deterministicSessionId(transcriptHash: Data) -> String {
+        var input = Data("SkyBridge-SessionId-v1|".utf8)
+        input.append(transcriptHash)
+        let digest = SHA256.hash(data: input)
+        let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+        return "hs-\(hex)"
     }
 }
 

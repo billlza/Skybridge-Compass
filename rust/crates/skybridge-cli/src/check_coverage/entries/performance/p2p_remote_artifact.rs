@@ -30,6 +30,7 @@ pub(super) fn append_entries(
             &[
                 "build_p2p_remote_performance_report",
                 "check_p2p_remote_complete_artifact",
+                "remote_desktop_pass",
                 "p2p_remote_artifact_requires_smoke_final_success_sentinel",
             ],
         ),
@@ -47,9 +48,11 @@ pub(super) fn append_entries(
                 "check_p2p_remote_no_hidden_failure",
                 "missing_failure_phase_count",
                 "p2p_remote_artifact_rejects_failed_stage_before_or_after_success",
+                "p2p_remote_artifact_rejects_already_connected_rejection",
+                "p2p_remote_artifact_rejects_plain_remote_desktop_connection_failure",
             ],
         ),
-        evidence: "rejects P2P remote artifacts that mix success sentinels with failed stage lines, unknown phases, or missing phase evidence".to_owned(),
+        evidence: "rejects P2P remote artifacts that mix success sentinels with failed stage lines, unknown phases, missing phase evidence, or already_connected SOA rejections".to_owned(),
     });
     entries.push(CheckCoverageEntry {
         id: "performance_p2p_remote_lan_route_gate",
@@ -64,6 +67,36 @@ pub(super) fn append_entries(
             ],
         ),
         evidence: "requires routable LAN direct route and rejects link-local or peer-to-peer remote video paths".to_owned(),
+    });
+    entries.push(CheckCoverageEntry {
+        id: "performance_p2p_remote_mac_ipad_online_connect_gate",
+        domain: "correctness",
+        command: "skybridge check performance --kind p2p-remote --artifact-dir <p2p-artifact>",
+        covered: source_has_all(
+            source,
+            &[
+                "check_p2p_remote_mac_ipad_online_connect_button",
+                "ios_ipad_presence_heartbeat_samples",
+                "mac_ipad_online_connectable_enabled_rows",
+                "mac_ipad_online_strong_match_rows",
+                "mac_ipad_connect_real_endpoint_samples",
+                "mac_ipad_connect_success_samples",
+                "is_external_ax_connected_result",
+                "mac_ipad_online_connectable_identity_sequences",
+                "p2p_remote_mac_ipad_ordered_connect_success_identity",
+                "p2p_remote_mac_ipad_duplicate_physical_row_summary",
+                "clickSource=accessibility",
+                "clickMechanism=AXUIElementPerformAction",
+                "targetRowBound",
+                "mac-online-connect-result",
+                "launch method=open-app-bundle pid",
+                "mac_ipad_online_connect_button_rejects_script_only_launch_marker_as_dashboard_boot",
+                "mac_ipad_online_connect_button_rejects_duplicate_physical_device_rows",
+                "mac_ipad_online_connect_button_rejects_display_only_or_fake_connect",
+                "mac_ipad_online_connect_button_rejects_mismatched_or_unsuccessful_click_chain",
+            ],
+        ),
+        evidence: "requires iOS iPad presence heartbeat plus a real Mac app dashboard/root-container boot, Mac UI online-row, enabled-button, strong identity match, real route-backed connectability, no duplicate physical iPad rows, external Accessibility click evidence, and ordered same-identity click -> connect-start -> connected-row result evidence before a P2P remote artifact can pass".to_owned(),
     });
     entries.push(CheckCoverageEntry {
         id: "performance_p2p_remote_signed_kem_refresh_gate",

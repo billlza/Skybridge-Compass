@@ -7,6 +7,10 @@ pub(super) const CHECK_COVERAGE_ENTRY_CATALOG_SOURCES: &[(&str, &str)] = &[
         include_str!("entries/control_plane.rs"),
     ),
     (
+        "check_coverage/entries/connectivity.rs",
+        include_str!("entries/connectivity.rs"),
+    ),
+    (
         "check_coverage/entries/coverage.rs",
         include_str!("entries/coverage.rs"),
     ),
@@ -37,6 +41,10 @@ pub(super) const CHECK_COVERAGE_ENTRY_CATALOG_SOURCES: &[(&str, &str)] = &[
     (
         "check_coverage/entries/performance/webrtc.rs",
         include_str!("entries/performance/webrtc.rs"),
+    ),
+    (
+        "check_coverage/entries/release.rs",
+        include_str!("entries/release.rs"),
     ),
     (
         "check_coverage/entries/smoke.rs",

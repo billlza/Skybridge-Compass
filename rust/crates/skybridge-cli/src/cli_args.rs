@@ -7,12 +7,14 @@ mod common;
 mod doctor;
 mod operator;
 mod smoke;
+mod test;
 
 pub(crate) use check::*;
 pub(crate) use common::*;
 pub(crate) use doctor::*;
 pub(crate) use operator::*;
 pub(crate) use smoke::*;
+pub(crate) use test::*;
 
 #[derive(Debug, Parser)]
 #[command(name = "skybridge")]
@@ -36,6 +38,7 @@ pub(crate) enum Commands {
     Disconnect(DisconnectCommand),
     File(FileCommand),
     Check(CheckCommand),
+    Test(TestCommand),
     Diagnose(DiagnoseCommand),
     Doctor(DoctorCommand),
     Smoke(SmokeCommand),

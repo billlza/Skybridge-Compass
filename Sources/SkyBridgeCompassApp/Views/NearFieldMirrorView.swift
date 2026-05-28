@@ -19,6 +19,7 @@ struct NearFieldMirrorView: View {
     @State private var isConnecting = false
     @State private var connectionError: String?
     @State private var currentDeviceId: String?
+    @State private var lastPointerLocationByDeviceId: [String: CGPoint] = [:]
     
     var body: some View {
         ZStack {
@@ -32,11 +33,19 @@ struct NearFieldMirrorView: View {
                     textureFeed: remoteControlManager.textureFeed,
                     onMouseEvent: { point, eventType, button in
                         guard let did = currentDeviceId else { return }
+                        let interactionSettings = RemoteDesktopSettingsManager.shared.settings.interactionSettings
+                        guard interactionSettings.enableContextMenu || !isRightMouseEvent(eventType) else { return }
+                        let adjustedPoint = adjustedPointerLocation(
+                            point,
+                            eventType: eventType,
+                            deviceId: did,
+                            settings: interactionSettings
+                        )
                         let mapped: MouseEventType = mapMouseEventType(eventType)
                         let ev = RemoteMouseEvent(
                             type: mapped,
-                            x: Double(point.x),
-                            y: Double(point.y),
+                            x: Double(adjustedPoint.x),
+                            y: Double(adjustedPoint.y),
                             timestamp: Date().timeIntervalSince1970
                         )
                         Task { try? await remoteControlManager.sendMouseEvent(ev, to: did) }
@@ -50,7 +59,27 @@ struct NearFieldMirrorView: View {
                         )
                         Task { try? await remoteControlManager.sendKeyboardEvent(kev, to: did) }
                     },
-                    onScrollEvent: { _, _ in /* 暂不支持滚轮事件的近距远端编码 */ }
+                    onScrollEvent: { _, deltaY in
+                        let interactionSettings = RemoteDesktopSettingsManager.shared.settings.interactionSettings
+                        guard interactionSettings.enableTrackpadGestures,
+                              let did = currentDeviceId else { return }
+                        let type: MouseEventType = deltaY > 0 ? .scrollUp : .scrollDown
+                        let repeatCount = max(
+                            1,
+                            min(8, Int((Double(abs(deltaY)) * interactionSettings.scrollSensitivity / 8).rounded(.up)))
+                        )
+                        Task {
+                            for _ in 0..<repeatCount {
+                                let ev = RemoteMouseEvent(
+                                    type: type,
+                                    x: 0,
+                                    y: 0,
+                                    timestamp: Date().timeIntervalSince1970
+                                )
+                                try? await remoteControlManager.sendMouseEvent(ev, to: did)
+                            }
+                        }
+                    }
                 )
                 .overlay(alignment: .top) {
  // 顶部工具条：断开、返回设备列表
@@ -441,6 +470,39 @@ struct NearFieldMirrorView: View {
             return String(raw.dropFirst("recent:".count)).lowercased()
         }
         return raw.lowercased()
+    }
+
+    private func isRightMouseEvent(_ eventType: NSEvent.EventType) -> Bool {
+        eventType == .rightMouseDown || eventType == .rightMouseUp || eventType == .rightMouseDragged
+    }
+
+    private func isPointerMovementEvent(_ eventType: NSEvent.EventType) -> Bool {
+        eventType == .mouseMoved || eventType == .leftMouseDragged || eventType == .rightMouseDragged
+    }
+
+    private func adjustedPointerLocation(
+        _ location: CGPoint,
+        eventType: NSEvent.EventType,
+        deviceId: String,
+        settings: InteractionSettings
+    ) -> CGPoint {
+        defer { lastPointerLocationByDeviceId[deviceId] = location }
+        guard isPointerMovementEvent(eventType),
+              let previous = lastPointerLocationByDeviceId[deviceId] else {
+            return location
+        }
+
+        let sensitivity = max(0.1, min(settings.mouseSensitivity, 5.0))
+        let deltaX = location.x - previous.x
+        let deltaY = location.y - previous.y
+        let distance = hypot(deltaX, deltaY)
+        let acceleration = settings.enableMouseAcceleration
+            ? max(1.0, min(2.0, distance / 48.0))
+            : 1.0
+        return CGPoint(
+            x: previous.x + (deltaX * sensitivity * acceleration),
+            y: previous.y + (deltaY * sensitivity * acceleration)
+        )
     }
 }
 

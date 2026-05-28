@@ -148,7 +148,11 @@ extension CrossNetworkConnectionManager {
             }
             switch conflict {
             case .identityConflict:
-                return (false, "二维码 authoritative key 与现有 deviceId 绑定冲突", .selfAsserted)
+                // QR verification only proves the signed payload is internally
+                // consistent. Let same-device authority rotations reach the
+                // server redemption and handshake path as self-asserted input;
+                // those stages perform the authenticated binding update.
+                return (true, nil, .selfAsserted)
             case .deviceIdMigrationRequired:
                 return (false, "二维码 deviceId 与已 pinned authoritative key 不匹配", .selfAsserted)
             case .quarantinedIdentity:

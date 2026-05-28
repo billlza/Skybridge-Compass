@@ -439,6 +439,7 @@ extension P2PDiscoveryService {
             platform: "iOS",
             osVersion: nil,
             verificationCode: code,
+            requesterProtocolSigningAlgorithm: requesterAlgorithm,
             requesterProtocolIdentityFingerprint: requesterFingerprint
         )
         guard approval != PairingTrustApprovalService.Decision.reject else {

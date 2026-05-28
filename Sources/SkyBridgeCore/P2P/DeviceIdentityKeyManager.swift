@@ -194,6 +194,9 @@ public actor DeviceIdentityKeyManager {
     private nonisolated static let inMemoryLock = NSLock()
     private nonisolated(unsafe) static var inMemoryKEMStore: [String: Data] = [:]
     private nonisolated static let inMemoryKEMLock = NSLock()
+    private nonisolated static let keychainAccessGroupLock = NSLock()
+    private nonisolated(unsafe) static var didResolvePreferredKeychainAccessGroup = false
+    private nonisolated(unsafe) static var cachedPreferredKeychainAccessGroup: String?
 
     private nonisolated static func inMemoryGet(_ key: String) -> Data? {
         inMemoryLock.lock()
@@ -217,6 +220,64 @@ public actor DeviceIdentityKeyManager {
 #if os(macOS)
         query[kSecUseDataProtectionKeychain as String] = true
 #endif
+    }
+
+    private nonisolated static func preferredKeychainAccessGroup() -> String? {
+        if useInMemoryKeychain { return nil }
+
+        keychainAccessGroupLock.lock()
+        if didResolvePreferredKeychainAccessGroup {
+            let cached = cachedPreferredKeychainAccessGroup
+            keychainAccessGroupLock.unlock()
+            return cached
+        }
+        keychainAccessGroupLock.unlock()
+
+        var resolved: String?
+        if let task = SecTaskCreateFromSelf(nil),
+           let entitlement = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil),
+           let groups = entitlement as? [String] {
+            let normalizedGroups = groups
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            resolved = normalizedGroups.first { $0.hasSuffix(".group.com.skybridge.compass") }
+                ?? normalizedGroups.first { $0.hasSuffix(".com.skybridge.compass.pro") }
+        }
+
+        keychainAccessGroupLock.lock()
+        cachedPreferredKeychainAccessGroup = resolved
+        didResolvePreferredKeychainAccessGroup = true
+        keychainAccessGroupLock.unlock()
+        return resolved
+    }
+
+    private nonisolated static func keychainAccessGroupSearchScopes() -> [String?] {
+        guard let preferred = preferredKeychainAccessGroup() else {
+            return [nil]
+        }
+        return [preferred, nil]
+    }
+
+    private nonisolated static func applyKeychainAccessGroup(_ accessGroup: String?, to query: inout [String: Any]) {
+        if let accessGroup {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        } else {
+            query.removeValue(forKey: kSecAttrAccessGroup as String)
+        }
+    }
+
+    private nonisolated static func applyPreferredKeychainAccessGroup(_ query: inout [String: Any]) {
+        applyKeychainAccessGroup(preferredKeychainAccessGroup(), to: &query)
+    }
+
+    private nonisolated static func applyPreferredKeychainAccessGroup(toKeyAttributes attributes: inout [String: Any]) {
+        guard let accessGroup = preferredKeychainAccessGroup() else { return }
+        attributes[kSecAttrAccessGroup as String] = accessGroup
+
+        if var privateKeyAttributes = attributes[kSecPrivateKeyAttrs as String] as? [String: Any] {
+            privateKeyAttributes[kSecAttrAccessGroup as String] = accessGroup
+            attributes[kSecPrivateKeyAttrs as String] = privateKeyAttributes
+        }
     }
     
  // MARK: - Properties
@@ -683,10 +744,22 @@ public actor DeviceIdentityKeyManager {
     public nonisolated static func pairingIdentityAdvertisedPQCSuites(
         using provider: any CryptoProvider
     ) -> [CryptoSuite] {
+        pairingIdentityAdvertisedPQCSuites(
+            using: provider,
+            appleXWingAvailable: isAppleXWingAvailable()
+        )
+    }
+
+    public nonisolated static func pairingIdentityAdvertisedPQCSuites(
+        using provider: any CryptoProvider,
+        appleXWingAvailable: Bool
+    ) -> [CryptoSuite] {
         var suites = provider.supportedSuites.filter { $0.isPQCGroup }
 
         if provider.tier == .nativePQC {
-            suites.append(.xwingMLDSA)
+            if appleXWingAvailable {
+                suites.append(.xwingMLDSA)
+            }
             suites.append(.mlkem768MLDSA65)
             suites.append(.mlkem768MLDSA65FS)
         }
@@ -695,6 +768,15 @@ public actor DeviceIdentityKeyManager {
             partialResult[suite.wireId] = suite
         }
         return dedupedByWire.values.sorted { $0.wireId < $1.wireId }
+    }
+
+    private nonisolated static func isAppleXWingAvailable() -> Bool {
+        #if HAS_APPLE_PQC_SDK
+        if #available(macOS 26.0, iOS 26.0, *) {
+            return AppleXWingCryptoProvider.selfTest()
+        }
+        #endif
+        return false
     }
 
     public func pairingIdentityKEMPublicKeys(
@@ -893,6 +975,7 @@ public actor DeviceIdentityKeyManager {
                 ] as [String: Any]
             }
 
+            Self.applyPreferredKeychainAccessGroup(toKeyAttributes: &attributes)
             return attributes
         }
 
@@ -999,7 +1082,7 @@ public actor DeviceIdentityKeyManager {
     private func getPrivateKeyReference() throws -> SecKey? {
         if Self.useInMemoryKeychain { return nil }
 
-        var query: [String: Any] = [
+        let baseQuery: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -1007,27 +1090,32 @@ public actor DeviceIdentityKeyManager {
             kSecReturnRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        Self.forbidKeychainAuthenticationUI(&query)
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecItemNotFound {
-            return nil
+
+        for accessGroup in Self.keychainAccessGroupSearchScopes() {
+            var query = baseQuery
+            Self.applyKeychainAccessGroup(accessGroup, to: &query)
+            Self.forbidKeychainAuthenticationUI(&query)
+
+            var result: AnyObject?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+            if status == errSecItemNotFound {
+                continue
+            }
+
+            guard status == errSecSuccess else {
+                throw DeviceIdentityKeyError.keychainError(status)
+            }
+
+            guard let result else {
+                throw DeviceIdentityKeyError.keychainError(errSecInternalError)
+            }
+            guard CFGetTypeID(result) == SecKeyGetTypeID() else {
+                throw DeviceIdentityKeyError.keychainError(errSecInternalError)
+            }
+            return unsafeDowncast(result, to: SecKey.self)
         }
-        
-        guard status == errSecSuccess else {
-            throw DeviceIdentityKeyError.keychainError(status)
-        }
-        
-        guard let result else {
-            throw DeviceIdentityKeyError.keychainError(errSecInternalError)
-        }
-        guard CFGetTypeID(result) == SecKeyGetTypeID() else {
-            throw DeviceIdentityKeyError.keychainError(errSecInternalError)
-        }
-        let secKey = unsafeDowncast(result, to: SecKey.self)
-        return secKey
+        return nil
     }
     
  /// 保存密钥信息
@@ -1161,22 +1249,24 @@ public actor DeviceIdentityKeyManager {
     
  /// 删除现有密钥
     private func deleteExistingKey() throws {
- // 删除私钥
-        var keyQuery: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data
-        ]
-        Self.forbidKeychainAuthenticationUI(&keyQuery)
-        SecItemDelete(keyQuery as CFDictionary)
-        
- // 删除密钥信息
-        var infoQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecAttrAccount as String: "keyInfo"
-        ]
-        Self.forbidKeychainAuthenticationUI(&infoQuery)
-        SecItemDelete(infoQuery as CFDictionary)
+        for accessGroup in Self.keychainAccessGroupSearchScopes() {
+            var keyQuery: [String: Any] = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data
+            ]
+            Self.applyKeychainAccessGroup(accessGroup, to: &keyQuery)
+            Self.forbidKeychainAuthenticationUI(&keyQuery)
+            SecItemDelete(keyQuery as CFDictionary)
+
+            var infoQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: KeychainConstants.service,
+                kSecAttrAccount as String: "keyInfo"
+            ]
+            Self.applyKeychainAccessGroup(accessGroup, to: &infoQuery)
+            Self.forbidKeychainAuthenticationUI(&infoQuery)
+            SecItemDelete(infoQuery as CFDictionary)
+        }
     }
     
  /// 计算公钥指纹
@@ -1200,51 +1290,21 @@ public actor DeviceIdentityKeyManager {
             return value
         }
 
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecAttrAccount as String: KeychainConstants.deviceIdKey,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        Self.forbidKeychainAuthenticationUI(&query)
-        Self.preferDataProtectionKeychain(&query)
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecSuccess, let data = result as? Data {
-            let value = String(data: data, encoding: .utf8)
-            if let value, !value.isEmpty {
-                saveMirroredDeviceId(value)
-            }
-            return value
-        }
-
-        if status != errSecItemNotFound {
-            SkyBridgeLogger.p2p.warning(
-                "⚠️ Data Protection Keychain 读取设备 ID 失败: status=\(status, privacy: .public)"
-            )
-        }
-
-        guard allowLegacyFallback else {
-            return nil
-        }
-
         do {
-            if let migrated = try readGenericPasswordData(
+            if let data = try readGenericPasswordData(
                 service: KeychainConstants.service,
                 account: KeychainConstants.deviceIdKey,
                 migrateAccessible: kSecAttrAccessibleAfterFirstUnlock,
-                allowLegacyFallbackOnly: true
+                includeLegacyMigration: allowLegacyFallback
             ),
-               let value = String(data: migrated, encoding: .utf8),
+               let value = String(data: data, encoding: .utf8),
                !value.isEmpty {
                 saveMirroredDeviceId(value)
                 return value
             }
         } catch {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ 读取 legacy 设备 ID 失败: \(error.localizedDescription, privacy: .public)"
+                "⚠️ 读取设备 ID 失败: \(error.localizedDescription, privacy: .public)"
             )
         }
         return nil
@@ -1303,9 +1363,10 @@ public actor DeviceIdentityKeyManager {
         service: String,
         account: String,
         migrateAccessible: CFString,
-        allowLegacyFallbackOnly: Bool = false
+        allowLegacyFallbackOnly: Bool = false,
+        includeLegacyMigration: Bool = true
     ) throws -> Data? {
-        func makeQuery(useDataProtection: Bool) -> [String: Any] {
+        func makeQuery(useDataProtection: Bool, accessGroup: String?) -> [String: Any] {
             var query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: service,
@@ -1313,6 +1374,7 @@ public actor DeviceIdentityKeyManager {
                 kSecReturnData as String: true,
                 kSecMatchLimit as String: kSecMatchLimitOne
             ]
+            Self.applyKeychainAccessGroup(accessGroup, to: &query)
             Self.forbidKeychainAuthenticationUI(&query)
             if useDataProtection {
                 Self.preferDataProtectionKeychain(&query)
@@ -1321,34 +1383,57 @@ public actor DeviceIdentityKeyManager {
         }
 
         if !allowLegacyFallbackOnly {
-            var dpResult: AnyObject?
-            let dpStatus = SecItemCopyMatching(makeQuery(useDataProtection: true) as CFDictionary, &dpResult)
-            if dpStatus == errSecSuccess, let data = dpResult as? Data {
-                return data
-            }
-            if dpStatus != errSecItemNotFound {
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ Data Protection Keychain 读取失败: service=\(service, privacy: .public) account=\(account, privacy: .public) status=\(dpStatus, privacy: .public)"
+            for accessGroup in Self.keychainAccessGroupSearchScopes() {
+                var dpResult: AnyObject?
+                let dpStatus = SecItemCopyMatching(
+                    makeQuery(useDataProtection: true, accessGroup: accessGroup) as CFDictionary,
+                    &dpResult
                 )
+                if dpStatus == errSecSuccess, let data = dpResult as? Data {
+                    if accessGroup == nil, Self.preferredKeychainAccessGroup() != nil {
+                        try upsertGenericPassword(
+                            service: service,
+                            account: account,
+                            data: data,
+                            accessible: migrateAccessible
+                        )
+                    }
+                    return data
+                }
+                if dpStatus != errSecItemNotFound {
+                    SkyBridgeLogger.p2p.warning(
+                        "⚠️ Data Protection Keychain 读取失败: service=\(service, privacy: .public) account=\(account, privacy: .public) status=\(dpStatus, privacy: .public)"
+                    )
+                }
             }
         }
 
-        var legacyResult: AnyObject?
-        let legacyStatus = SecItemCopyMatching(makeQuery(useDataProtection: false) as CFDictionary, &legacyResult)
-        if legacyStatus == errSecItemNotFound {
+        guard includeLegacyMigration || allowLegacyFallbackOnly else {
             return nil
         }
-        guard legacyStatus == errSecSuccess, let data = legacyResult as? Data else {
-            throw DeviceIdentityKeyError.keychainError(legacyStatus)
-        }
 
-        try upsertGenericPassword(
-            service: service,
-            account: account,
-            data: data,
-            accessible: migrateAccessible
-        )
-        return data
+        for accessGroup in Self.keychainAccessGroupSearchScopes() {
+            var legacyResult: AnyObject?
+            let legacyStatus = SecItemCopyMatching(
+                makeQuery(useDataProtection: false, accessGroup: accessGroup) as CFDictionary,
+                &legacyResult
+            )
+            if legacyStatus == errSecItemNotFound {
+                continue
+            }
+            guard legacyStatus == errSecSuccess, let data = legacyResult as? Data else {
+                throw DeviceIdentityKeyError.keychainError(legacyStatus)
+            }
+
+            try upsertGenericPassword(
+                service: service,
+                account: account,
+                data: data,
+                accessible: migrateAccessible
+            )
+            return data
+        }
+        return nil
     }
     
  // MARK: - Ed25519 Protocol Signing Key Helpers ( 5.1)
@@ -1396,36 +1481,12 @@ public actor DeviceIdentityKeyManager {
             return (publicKey: privateKey.publicKey.rawRepresentation, privateKey: privateKeyData)
         }
 
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecAttrAccount as String: KeychainConstants.protocolSigningKeyTag,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        Self.forbidKeychainAuthenticationUI(&query)
-        Self.preferDataProtectionKeychain(&query)
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        let privateKeyData: Data
-        if status == errSecSuccess, let data = result as? Data {
-            privateKeyData = data
-        } else {
-            if status != errSecItemNotFound {
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ Data Protection Keychain 读取 Ed25519 协议私钥失败: status=\(status, privacy: .public)"
-                )
-            }
-            guard let migrated = try readGenericPasswordData(
-                service: KeychainConstants.service,
-                account: KeychainConstants.protocolSigningKeyTag,
-                migrateAccessible: kSecAttrAccessibleAfterFirstUnlock,
-                allowLegacyFallbackOnly: true
-            ) else {
-                return nil
-            }
-            privateKeyData = migrated
+        guard let privateKeyData = try readGenericPasswordData(
+            service: KeychainConstants.service,
+            account: KeychainConstants.protocolSigningKeyTag,
+            migrateAccessible: kSecAttrAccessibleAfterFirstUnlock
+        ) else {
+            return nil
         }
         
  // 从私钥派生公钥
@@ -1579,6 +1640,7 @@ public actor DeviceIdentityKeyManager {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
+        Self.applyPreferredKeychainAccessGroup(&matchQuery)
         Self.forbidKeychainAuthenticationUI(&matchQuery)
         Self.preferDataProtectionKeychain(&matchQuery)
 
@@ -1614,7 +1676,7 @@ public actor DeviceIdentityKeyManager {
     private func getSEPoPKeyReference() throws -> SecKey? {
         if Self.useInMemoryKeychain { return nil }
 
-        var query: [String: Any] = [
+        let baseQuery: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: KeychainConstants.sePoPKeyTag.utf8Data,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -1622,26 +1684,32 @@ public actor DeviceIdentityKeyManager {
             kSecReturnRef as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        Self.forbidKeychainAuthenticationUI(&query)
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecItemNotFound {
-            return nil
+
+        for accessGroup in Self.keychainAccessGroupSearchScopes() {
+            var query = baseQuery
+            Self.applyKeychainAccessGroup(accessGroup, to: &query)
+            Self.forbidKeychainAuthenticationUI(&query)
+
+            var result: AnyObject?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+            if status == errSecItemNotFound {
+                continue
+            }
+
+            guard status == errSecSuccess else {
+                throw DeviceIdentityKeyError.keychainError(status)
+            }
+
+            guard let result else {
+                throw DeviceIdentityKeyError.keychainError(errSecInternalError)
+            }
+            guard CFGetTypeID(result) == SecKeyGetTypeID() else {
+                throw DeviceIdentityKeyError.keychainError(errSecInternalError)
+            }
+            return unsafeDowncast(result, to: SecKey.self)
         }
-        
-        guard status == errSecSuccess else {
-            throw DeviceIdentityKeyError.keychainError(status)
-        }
-        
-        guard let result else {
-            throw DeviceIdentityKeyError.keychainError(errSecInternalError)
-        }
-        guard CFGetTypeID(result) == SecKeyGetTypeID() else {
-            throw DeviceIdentityKeyError.keychainError(errSecInternalError)
-        }
-        return unsafeDowncast(result, to: SecKey.self)
+        return nil
     }
     
  /// 复制旧密钥到 SE PoP tag
@@ -1675,7 +1743,7 @@ public actor DeviceIdentityKeyManager {
             }
             
  // 创建新的密钥条目（SE 密钥不能复制，所以我们创建一个新的）
-            let attributes: [String: Any] = [
+            var attributes: [String: Any] = [
                 kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
                 kSecAttrKeySizeInBits as String: 256,
                 kSecAttrApplicationTag as String: KeychainConstants.sePoPKeyTag.utf8Data,
@@ -1686,6 +1754,7 @@ public actor DeviceIdentityKeyManager {
                     kSecAttrAccessControl as String: access
                 ] as [String: Any]
             ]
+            Self.applyPreferredKeychainAccessGroup(toKeyAttributes: &attributes)
             
             if SecKeyCreateRandomKey(attributes as CFDictionary, &error) == nil {
                 let cfErr: CFError? = error?.takeRetainedValue()
@@ -1713,6 +1782,7 @@ public actor DeviceIdentityKeyManager {
                 kSecValueData as String: keyData,
                 kSecAttrIsPermanent as String: true
             ]
+            Self.applyPreferredKeychainAccessGroup(&query)
             Self.forbidKeychainAuthenticationUI(&query)
             
  // 先删除旧的

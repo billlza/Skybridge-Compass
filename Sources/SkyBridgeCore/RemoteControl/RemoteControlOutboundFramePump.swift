@@ -6,7 +6,6 @@
 import Foundation
 import Network
 import OSLog
-import CryptoKit
 
 // MARK: - 基础模型：消息/事件
 
@@ -46,6 +45,7 @@ final class RemoteControlVideoPaceClock: @unchecked Sendable {
     @discardableResult
     func schedule(
         after delay: TimeInterval,
+        interval: TimeInterval,
         generation: UInt64,
         handler: @escaping @Sendable (UInt64, Date) async -> Void
     ) -> Bool {
@@ -55,18 +55,20 @@ final class RemoteControlVideoPaceClock: @unchecked Sendable {
             return false
         }
 
-        let source = DispatchSource.makeTimerSource(queue: queue)
+        let source = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
         timer = source
         lock.unlock()
 
         let nanoseconds = max(0, Int((delay * 1_000_000_000).rounded(.up)))
+        let intervalNanoseconds = max(1, Int((interval * 1_000_000_000).rounded(.up)))
         source.schedule(
             deadline: .now() + .nanoseconds(nanoseconds),
+            repeating: .nanoseconds(intervalNanoseconds),
             leeway: .nanoseconds(100_000)
         )
         source.setEventHandler { [weak self] in
             let firedAt = Date()
-            self?.markFired()
+            guard self?.isScheduled == true else { return }
             Task(priority: .high) {
                 await handler(generation, firedAt)
             }
@@ -84,11 +86,6 @@ final class RemoteControlVideoPaceClock: @unchecked Sendable {
         activeTimer?.cancel()
     }
 
-    private func markFired() {
-        lock.lock()
-        timer = nil
-        lock.unlock()
-    }
 }
 
 final class RemoteControlFrameSequenceGenerator: @unchecked Sendable {
@@ -128,8 +125,10 @@ actor RemoteControlOutboundFramePump {
     private var damageTrackingEnabled = true
     private var allowsInsecureLegacy = false
     private var sessionKeys: SessionKeys?
+    private let secureEnvelopeSendSequencer: RemoteControlSecureEnvelopeSendSequencer
     private var frameQueue = RemoteScreenFrameSendQueue()
     private var audioPayloadQueue: [Data] = []
+    private var audioPayloadQueuedBytes = 0
     private var latestDamageReport: RemoteDesktopDamageReport?
     private var sending = false
     private var inFlightVideoSends = 0
@@ -154,10 +153,14 @@ actor RemoteControlOutboundFramePump {
     private var lastSentFrameAt: Date = .distantPast
     private var waitingForSyncSince: Date?
     private var lastSyncRefreshRequestAt: Date = .distantPast
-    private var lastAudioDropLogAt: Date = .distantPast
+    private var audioTelemetryWindowStartedAt = Date()
+    private var telemetryAudioSubmittedPayloads = 0
+    private var telemetryAudioSentPayloads = 0
+    private var telemetryAudioFailedPayloads = 0
+    private var telemetryAudioSentBytes = 0
+    private var telemetryAudioQueuedPayloadsMax = 0
+    private var telemetryAudioBacklogWarnings = 0
     private var syncRecoveryTask: Task<Void, Never>?
-    private let maxQueuedAudioPayloads = 3
-    private let maxAudioVideoFrameGap: TimeInterval = 0.08
     private var frameTelemetryWindowStartedAt = Date()
     private var telemetrySubmittedFrames = 0
     private var telemetrySentFrames = 0
@@ -203,14 +206,18 @@ actor RemoteControlOutboundFramePump {
     private static let waitingForSyncFrameRefreshMinimumInterval: TimeInterval = 2.0
     private static let harmfulBackpressurePendingFrameThreshold = 6
     private static let maxInFlightVideoSends = 3
-    private static let maxChunkedContentProcessedBacklogFrames = 12
+    private static let maxChunkedContentProcessedBacklogFrames = 18
     private static let maxChunkedContentProcessedBacklogBytes = 12 * 256 * 1024
     private static let maxChunkedScreenFrameMessageBytes = 256 * 1024
     private static let maxChunkedVideoFramesPerDrain = 1
-    private static let maxChunkedHighFPSVideoFramesPerDrain = 3
+    private static let maxChunkedHighFPSVideoFramesPerDrain = 1
     private static let boundedCadenceCatchUpFrameAgeLimitMs: Double = 50
     private static let videoPaceEarlySendTolerance: TimeInterval = 0.0005
     private static let videoCadenceResetThreshold: TimeInterval = 0.250
+    private static let maxAudioPayloadsPerDrain = 4
+    private static let audioBacklogWarningPayloads = 120
+    private static let maxAudioQueuedPayloads = 240
+    private static let maxAudioQueuedBytes = 2 * 1024 * 1024
 
     private var effectiveMaxContentProcessedBacklogFrames: Int {
         usesChunkedScreenFrameWire ? Self.maxChunkedContentProcessedBacklogFrames : Self.maxInFlightVideoSends
@@ -304,10 +311,16 @@ actor RemoteControlOutboundFramePump {
         case batchMulti = "batch-multi"
     }
 
-    init(peerId: String, connection: NWConnection, maxFramedMessageBytes: Int) {
+    init(
+        peerId: String,
+        connection: NWConnection,
+        maxFramedMessageBytes: Int,
+        secureEnvelopeSendSequencer: RemoteControlSecureEnvelopeSendSequencer = RemoteControlSecureEnvelopeSendSequencer()
+    ) {
         self.peerId = peerId
         self.connection = connection
         self.maxFramedMessageBytes = maxFramedMessageBytes
+        self.secureEnvelopeSendSequencer = secureEnvelopeSendSequencer
     }
 
     func updateTransportState(
@@ -330,6 +343,7 @@ actor RemoteControlOutboundFramePump {
         }
         damageTrackingEnabled = requestedStreamConfiguration?.damageTrackingEnabled ?? true
         self.allowsInsecureLegacy = allowsInsecureLegacy
+        secureEnvelopeSendSequencer.resetIfSessionChanged(sessionId: sessionKeys?.sessionId)
         self.sessionKeys = sessionKeys
         if !damageTrackingEnabled {
             latestDamageReport = nil
@@ -337,7 +351,8 @@ actor RemoteControlOutboundFramePump {
         if !streamingEnabled {
             noteFrameTelemetry(dropped: frameQueue.pendingFrames.count)
             frameQueue.clear()
-            audioPayloadQueue.removeAll(keepingCapacity: true)
+            logAudioQueueClearedIfNeeded(reason: "stream-stop")
+            clearAudioPayloadQueue(keepingCapacity: true)
             latestDamageReport = nil
             videoSendGeneration &+= 1
             inFlightVideoSends = 0
@@ -414,24 +429,44 @@ actor RemoteControlOutboundFramePump {
     }
 
     func submitAudioPayload(_ plaintext: Data) async {
-        guard !closed, streamingEnabled else { return }
-        guard canSendAudioWithoutCompetingWithVideo else {
-            logAudioDropIfNeeded(droppedCount: 1, reason: "video-priority")
+        guard !closed, streamingEnabled else {
+            logAudioQueueClearedIfNeeded(reason: closed ? "closed" : "streaming-disabled")
             return
         }
         guard plaintext.count <= maxFramedMessageBytes else {
             Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-                .warning(
-                    "⚠️ 已丢弃超限远控音频块: peer=\(self.peerId, privacy: .public) bytes=\(plaintext.count, privacy: .public)"
+                .error(
+                    "⛔️ 远控音频块超出安全帧上限，已拒绝发送: peer=\(self.peerId, privacy: .public) bytes=\(plaintext.count, privacy: .public) max=\(self.maxFramedMessageBytes, privacy: .public)"
                 )
+            RemoteControlSmokeStatusWriter.append(
+                "mac-remote-audio-tx peer=\(peerId) result=rejected reason=oversize bytes=\(plaintext.count) max=\(maxFramedMessageBytes)"
+            )
+            return
+        }
+        let queuedPayloadsAfterAppend = audioPayloadQueue.count + 1
+        let queuedBytesAfterAppend = audioPayloadQueuedBytes + plaintext.count
+        guard queuedPayloadsAfterAppend <= Self.maxAudioQueuedPayloads,
+              queuedBytesAfterAppend <= Self.maxAudioQueuedBytes else {
+            Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+                .error(
+                    "⛔️ 远控音频发送队列超过硬上限，已 fail-closed: peer=\(self.peerId, privacy: .public) queued=\(self.audioPayloadQueue.count, privacy: .public) queuedBytes=\(self.audioPayloadQueuedBytes, privacy: .public) nextBytes=\(plaintext.count, privacy: .public) maxQueued=\(Self.maxAudioQueuedPayloads, privacy: .public) maxBytes=\(Self.maxAudioQueuedBytes, privacy: .public)"
+                )
+            RemoteControlSmokeStatusWriter.append(
+                "mac-remote-audio-tx peer=\(peerId) result=failed-closed reason=audio-queue-hard-limit queued=\(audioPayloadQueue.count) queuedBytes=\(audioPayloadQueuedBytes) nextBytes=\(plaintext.count) maxQueued=\(Self.maxAudioQueuedPayloads) maxBytes=\(Self.maxAudioQueuedBytes)"
+            )
+            closed = true
+            audioDrainGeneration &+= 1
+            audioDrainTask?.cancel()
+            audioDrainTask = nil
+            sendingAudio = false
+            logAudioQueueClearedIfNeeded(reason: "audio-queue-hard-limit")
+            clearAudioPayloadQueue(keepingCapacity: false)
             return
         }
         audioPayloadQueue.append(plaintext)
-        if audioPayloadQueue.count > maxQueuedAudioPayloads {
-            let overflow = audioPayloadQueue.count - maxQueuedAudioPayloads
-            audioPayloadQueue.removeFirst(overflow)
-            logAudioDropIfNeeded(droppedCount: overflow, reason: "queue-overflow")
-        }
+        audioPayloadQueuedBytes += plaintext.count
+        noteAudioTelemetry(submitted: 1)
+        noteAudioBacklogIfNeeded()
         scheduleAudioDrainIfNeeded()
     }
 
@@ -443,7 +478,8 @@ actor RemoteControlOutboundFramePump {
         closed = true
         noteFrameTelemetry(dropped: frameQueue.pendingFrames.count)
         frameQueue.clear()
-        audioPayloadQueue.removeAll(keepingCapacity: false)
+        logAudioQueueClearedIfNeeded(reason: "pump-close")
+        clearAudioPayloadQueue(keepingCapacity: false)
         latestDamageReport = nil
         videoSendGeneration &+= 1
         inFlightVideoSends = 0
@@ -693,11 +729,16 @@ actor RemoteControlOutboundFramePump {
         )
     }
 
-    private func noteVideoScheduleBudget(_ budget: Int, elapsedCadenceSlots: Int) {
+    private func noteVideoScheduleBudget(
+        _ budget: Int,
+        elapsedCadenceSlots: Int,
+        schedulableCadenceSlots: Int? = nil
+    ) {
         telemetryScheduleBudgetMax = max(telemetryScheduleBudgetMax, max(0, budget))
+        let missedReference = schedulableCadenceSlots ?? elapsedCadenceSlots
         telemetryMissedCadenceSlotsMax = max(
             telemetryMissedCadenceSlotsMax,
-            max(0, elapsedCadenceSlots - budget)
+            max(0, missedReference - budget)
         )
     }
 
@@ -799,6 +840,7 @@ actor RemoteControlOutboundFramePump {
             catchUp=bounded-cadence-catch-up-no-stale \
             cadenceAnchor=strict-deadline-phase-no-stale \
             writerClock=dispatch-source-userinteractive \
+            writerClockStrict=1 \
             sendScheduler=dispatch-clock-only \
             paceWake=\(snapshot.paceWakeDrains, privacy: .public) \
             boundedCadenceCatchUp=\(snapshot.boundedCadenceCatchUpFrames, privacy: .public) \
@@ -839,6 +881,7 @@ actor RemoteControlOutboundFramePump {
             catchUp=bounded-cadence-catch-up-no-stale \
             cadenceAnchor=strict-deadline-phase-no-stale \
             writerClock=dispatch-source-userinteractive \
+            writerClockStrict=1 \
             sendScheduler=dispatch-clock-only \
             paceWake=\(snapshot.paceWakeDrains) \
             boundedCadenceCatchUp=\(snapshot.boundedCadenceCatchUpFrames) \
@@ -873,7 +916,7 @@ actor RemoteControlOutboundFramePump {
         while !closed, remainingVideoFrameBudget > 0 {
             guard streamingEnabled else {
                 frameQueue.clear()
-                audioPayloadQueue.removeAll(keepingCapacity: true)
+                clearAudioPayloadQueue(keepingCapacity: true)
                 latestDamageReport = nil
                 return
             }
@@ -901,7 +944,7 @@ actor RemoteControlOutboundFramePump {
                 if damageTrackingEnabled,
                    let report = latestDamageReport {
                     latestDamageReport = nil
-                    try await sendControlPayload(report, type: .damageReport)
+                try await sendControlPayload(report, type: .damageReport)
                 }
 
                 let payload = try makeScreenPayload(for: nextFrame)
@@ -960,7 +1003,7 @@ actor RemoteControlOutboundFramePump {
         payloadBytes: Int,
         cadenceAnchorMode: VideoCadenceAnchorMode = .normal
     ) throws {
-        let outboundData = try makeOutboundRemoteFrame(plaintext)
+        let outboundData = try makeOutboundRemoteFrame(plaintext, packetType: .screen)
         let wireMessages = try makeOutboundScreenWireMessages(from: outboundData)
         let usedChunkedScreenWire = usesChunkedScreenFrameWire && frameTransport == .binaryWire
         let sendMode = Self.framedMessageSendMode(
@@ -1119,7 +1162,11 @@ actor RemoteControlOutboundFramePump {
         let delay = isContentProcessedBacklogFull
             ? max(videoSendInterval, videoPaceWakeDelay(from: now))
             : videoPaceWakeDelay(from: now)
-        videoPaceClock.schedule(after: delay, generation: generation) { [weak self] generation, firedAt in
+        videoPaceClock.schedule(
+            after: delay,
+            interval: videoSendInterval,
+            generation: generation
+        ) { [weak self] generation, firedAt in
             await self?.runVideoPaceWake(generation: generation, firedAt: firedAt)
         }
     }
@@ -1171,7 +1218,16 @@ actor RemoteControlOutboundFramePump {
             frameQueue.pendingFrames.count,
             availableInFlightSlots
         )
-        noteVideoScheduleBudget(budget, elapsedCadenceSlots: elapsedCadenceSlots)
+        let schedulableCadenceSlots = min(
+            elapsedCadenceSlots,
+            frameQueue.pendingFrames.count,
+            availableInFlightSlots
+        )
+        noteVideoScheduleBudget(
+            budget,
+            elapsedCadenceSlots: elapsedCadenceSlots,
+            schedulableCadenceSlots: schedulableCadenceSlots
+        )
         return budget
     }
 
@@ -1182,8 +1238,12 @@ actor RemoteControlOutboundFramePump {
         let drainStartedAt = Date()
         noteVideoPaceClockDrain(firedAt: firedAt, drainStartedAt: drainStartedAt)
         telemetryPaceWakeDrains += 1
-        await drainIfNeeded(maxVideoFramesToSchedule: videoScheduleBudget(now: drainStartedAt))
-        scheduleVideoPaceWakeIfNeeded()
+        await drainIfNeeded(maxVideoFramesToSchedule: videoScheduleBudget(now: firedAt))
+        if closed || !streamingEnabled || frameQueue.pendingFrames.isEmpty {
+            cancelVideoPaceWake()
+        } else {
+            scheduleVideoPaceWakeIfNeeded()
+        }
     }
 
     private func cancelVideoPaceWake() {
@@ -1218,10 +1278,15 @@ actor RemoteControlOutboundFramePump {
         guard !closed, streamingEnabled, !audioPayloadQueue.isEmpty else { return }
         sendingAudio = true
         let generation = audioDrainGeneration
-        audioDrainTask = Task(priority: .utility) { [weak self] in
+        audioDrainTask = Task(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             await self.drainQueuedAudioPayloads(generation: generation)
         }
+    }
+
+    private func clearAudioPayloadQueue(keepingCapacity: Bool) {
+        audioPayloadQueue.removeAll(keepingCapacity: keepingCapacity)
+        audioPayloadQueuedBytes = 0
     }
 
     private func drainQueuedAudioPayloads(generation: UInt64) async {
@@ -1234,48 +1299,118 @@ actor RemoteControlOutboundFramePump {
                 }
             }
         }
+        var payloadsSentThisDrain = 0
         while !Task.isCancelled,
               audioDrainGeneration == generation,
               !closed,
               streamingEnabled,
-              !audioPayloadQueue.isEmpty {
-            guard canSendAudioWithoutCompetingWithVideo else {
-                let dropped = audioPayloadQueue.count
-                audioPayloadQueue.removeAll(keepingCapacity: true)
-                logAudioDropIfNeeded(droppedCount: dropped, reason: "video-backlog")
-                break
-            }
+              !audioPayloadQueue.isEmpty,
+              payloadsSentThisDrain < Self.maxAudioPayloadsPerDrain {
             let payload = audioPayloadQueue.removeFirst()
+            audioPayloadQueuedBytes -= payload.count
             do {
-                try await sendRemoteFrame(payload)
+                try await sendRemoteFrame(payload, packetType: .audio)
+                payloadsSentThisDrain += 1
+                noteAudioTelemetry(sent: 1, sentBytes: payload.count)
                 guard audioDrainGeneration == generation else { break }
             } catch {
+                noteAudioTelemetry(failed: 1)
                 Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-                    .debug(
-                        "ℹ️ 远控音频块发送失败: peer=\(self.peerId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                    .error(
+                        "❌ 远控音频块发送失败: peer=\(self.peerId, privacy: .public) queued=\(self.audioPayloadQueue.count, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
                     )
+                RemoteControlSmokeStatusWriter.append(
+                    "mac-remote-audio-tx peer=\(peerId) result=send-error queued=\(audioPayloadQueue.count) error=\(Self.sanitizeTelemetryToken(error.localizedDescription))"
+                )
                 break
             }
         }
     }
 
-    private var canSendAudioWithoutCompetingWithVideo: Bool {
-        !sending
-            && inFlightVideoSends == 0
-            && !frameQueue.waitingForSyncFrame
-            && frameQueue.pendingFrames.isEmpty
-            && Date().timeIntervalSince(lastSentFrameAt) <= maxAudioVideoFrameGap
+    private func noteAudioTelemetry(
+        submitted: Int = 0,
+        sent: Int = 0,
+        failed: Int = 0,
+        sentBytes: Int = 0,
+        now: Date = Date()
+    ) {
+        telemetryAudioSubmittedPayloads += max(0, submitted)
+        telemetryAudioSentPayloads += max(0, sent)
+        telemetryAudioFailedPayloads += max(0, failed)
+        telemetryAudioSentBytes += max(0, sentBytes)
+        telemetryAudioQueuedPayloadsMax = max(telemetryAudioQueuedPayloadsMax, audioPayloadQueue.count)
+        emitAudioTelemetryIfNeeded(now: now)
     }
 
-    private func logAudioDropIfNeeded(droppedCount: Int, reason: String) {
-        guard droppedCount > 0 else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastAudioDropLogAt) >= 2 else { return }
-        lastAudioDropLogAt = now
+    private func noteAudioBacklogIfNeeded() {
+        telemetryAudioQueuedPayloadsMax = max(telemetryAudioQueuedPayloadsMax, audioPayloadQueue.count)
+        guard audioPayloadQueue.count >= Self.audioBacklogWarningPayloads else { return }
+        telemetryAudioBacklogWarnings += 1
         Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
-            .debug(
-                "ℹ️ 远控音频发送已让路给视频: peer=\(self.peerId, privacy: .public) dropped=\(droppedCount, privacy: .public) reason=\(reason, privacy: .public)"
+            .warning(
+                "⚠️ 远控音频发送队列积压: peer=\(self.peerId, privacy: .public) queued=\(self.audioPayloadQueue.count, privacy: .public) threshold=\(Self.audioBacklogWarningPayloads, privacy: .public) videoPending=\(self.frameQueue.pendingFrames.count, privacy: .public) inFlightVideo=\(self.inFlightVideoSends, privacy: .public) waitingForSync=\(String(self.frameQueue.waitingForSyncFrame), privacy: .public)"
             )
+    }
+
+    private func emitAudioTelemetryIfNeeded(now: Date = Date()) {
+        let interval = now.timeIntervalSince(audioTelemetryWindowStartedAt)
+        guard interval >= 1 else { return }
+        let sampleMs = Int((interval * 1_000).rounded())
+        let submitted = telemetryAudioSubmittedPayloads
+        let sent = telemetryAudioSentPayloads
+        let failed = telemetryAudioFailedPayloads
+        let sentBytes = telemetryAudioSentBytes
+        let queuedMax = telemetryAudioQueuedPayloadsMax
+        let backlogWarnings = telemetryAudioBacklogWarnings
+        audioTelemetryWindowStartedAt = now
+        telemetryAudioSubmittedPayloads = 0
+        telemetryAudioSentPayloads = 0
+        telemetryAudioFailedPayloads = 0
+        telemetryAudioSentBytes = 0
+        telemetryAudioQueuedPayloadsMax = audioPayloadQueue.count
+        telemetryAudioBacklogWarnings = 0
+
+        Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+            .info(
+                """
+                🎧 Remote audio tx telemetry: peer=\(self.peerId, privacy: .public) \
+                sampleMs=\(sampleMs, privacy: .public) submitted=\(submitted, privacy: .public) \
+                sent=\(sent, privacy: .public) failed=\(failed, privacy: .public) \
+                queued=\(self.audioPayloadQueue.count, privacy: .public) queuedMax=\(queuedMax, privacy: .public) \
+                queuedBytes=\(self.audioPayloadQueuedBytes, privacy: .public) sentBytes=\(sentBytes, privacy: .public) backlogWarnings=\(backlogWarnings, privacy: .public) \
+                scheduler=independent-interleaved maxPayloadsPerDrain=\(Self.maxAudioPayloadsPerDrain, privacy: .public) \
+                videoPending=\(self.frameQueue.pendingFrames.count, privacy: .public) \
+                inFlightVideo=\(self.inFlightVideoSends, privacy: .public) \
+                waitingForSync=\(String(self.frameQueue.waitingForSyncFrame), privacy: .public)
+                """
+            )
+        RemoteControlSmokeStatusWriter.append(
+            """
+            mac-remote-audio-tx peer=\(peerId) sampleMs=\(sampleMs) submitted=\(submitted) sent=\(sent) failed=\(failed) \
+            queued=\(audioPayloadQueue.count) queuedMax=\(queuedMax) queuedBytes=\(audioPayloadQueuedBytes) sentBytes=\(sentBytes) backlogWarnings=\(backlogWarnings) \
+            scheduler=independent-interleaved maxPayloadsPerDrain=\(Self.maxAudioPayloadsPerDrain) \
+            videoPending=\(frameQueue.pendingFrames.count) inFlightVideo=\(inFlightVideoSends) waitingForSync=\(frameQueue.waitingForSyncFrame)
+            """
+        )
+    }
+
+    private func logAudioQueueClearedIfNeeded(reason: String) {
+        guard !audioPayloadQueue.isEmpty else { return }
+        Logger(subsystem: "com.skybridge.compass", category: "RemoteControl")
+            .warning(
+                "⚠️ 远控音频队列随会话状态清理: peer=\(self.peerId, privacy: .public) queued=\(self.audioPayloadQueue.count, privacy: .public) reason=\(reason, privacy: .public)"
+            )
+        RemoteControlSmokeStatusWriter.append(
+            "mac-remote-audio-tx peer=\(peerId) result=queue-cleared queued=\(audioPayloadQueue.count) queuedBytes=\(audioPayloadQueuedBytes) reason=\(reason)"
+        )
+    }
+
+    private static func sanitizeTelemetryToken(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: "_")
+            .replacingOccurrences(of: "\r", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
     }
 
     private func updateSyncRecoveryState() {
@@ -1361,25 +1496,37 @@ actor RemoteControlOutboundFramePump {
         guard framedMessage.count <= maxFramedMessageBytes else {
             throw RemoteControlError.invalidMessageLength(framedMessage.count)
         }
-        try await sendRemoteFrame(framedMessage)
+        try await sendRemoteFrame(framedMessage, packetType: .control)
     }
 
     func sendRawPayload(_ plaintext: Data) async throws {
         guard plaintext.count <= maxFramedMessageBytes else {
             throw RemoteControlError.invalidMessageLength(plaintext.count)
         }
-        try await sendRemoteFrame(plaintext)
+        try await sendRemoteFrame(plaintext, packetType: .control)
     }
 
-    private func sendRemoteFrame(_ plaintext: Data) async throws {
-        let outboundData = try makeOutboundRemoteFrame(plaintext)
+    private func sendRemoteFrame(
+        _ plaintext: Data,
+        packetType: RemoteControlSecurePacketType
+    ) async throws {
+        let outboundData = try makeOutboundRemoteFrame(plaintext, packetType: packetType)
         try await Self.sendFramed(outboundData, over: connection)
     }
 
-    private func makeOutboundRemoteFrame(_ plaintext: Data) throws -> Data {
+    private func makeOutboundRemoteFrame(
+        _ plaintext: Data,
+        packetType: RemoteControlSecurePacketType
+    ) throws -> Data {
         let outboundData: Data
         if #available(macOS 14.0, *), let sessionKeys {
-            outboundData = try Self.encryptRemotePayload(plaintext, with: sessionKeys)
+            let counter = try secureEnvelopeSendSequencer.nextCounter(for: sessionKeys)
+            outboundData = try Self.encryptRemotePayload(
+                plaintext,
+                with: sessionKeys,
+                packetType: packetType,
+                counter: counter
+            )
         } else if #available(macOS 14.0, *), !allowsInsecureLegacy {
             throw RemoteControlError.handshakeInitializationFailed("secure channel not established")
         } else {
@@ -1392,10 +1539,18 @@ actor RemoteControlOutboundFramePump {
     }
 
     @available(macOS 14.0, *)
-    private static func encryptRemotePayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
-        let key = SymmetricKey(data: keys.sendKey)
-        let sealed = try AES.GCM.seal(plaintext, using: key)
-        return sealed.combined ?? Data()
+    private static func encryptRemotePayload(
+        _ plaintext: Data,
+        with keys: SessionKeys,
+        packetType: RemoteControlSecurePacketType,
+        counter: UInt64
+    ) throws -> Data {
+        try RemoteControlSecureEnvelope.seal(
+            plaintext,
+            keys: keys,
+            packetType: packetType,
+            counter: counter
+        )
     }
 
     private static func sendFramed(_ data: Data, over connection: NWConnection) async throws {

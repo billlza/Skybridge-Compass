@@ -140,6 +140,7 @@ public final class WiFiManager: BaseManager {
     private var wifiInterface: CWInterface?
     private var scanTimer: Timer?
     private var wifiCancellables = Set<AnyCancellable>()
+    private var runtimeScanInterval: TimeInterval?
     private let locationManager = CLLocationManager()
     private let locationAuthorizationDelegate = LocationAuthorizationDelegateProxy()
     
@@ -437,7 +438,7 @@ public final class WiFiManager: BaseManager {
         
  // 获取设备管理设置中的扫描间隔
         let deviceSettings = DeviceManagementSettingsManager.shared
-        let scanInterval = deviceSettings.wifiScanInterval
+        let scanInterval = runtimeScanInterval ?? deviceSettings.wifiScanInterval
         
         scanTimer = Timer.scheduledTimer(withTimeInterval: scanInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -478,12 +479,18 @@ public final class WiFiManager: BaseManager {
         }
         
  // 处理扫描间隔变化
-        if let _ = userInfo["scanInterval"] as? Double {
+        if let scanInterval = userInfo["scanInterval"] as? Double {
+            runtimeScanInterval = max(5.0, scanInterval)
             if isScanning {
  // 重新启动定期扫描以应用新间隔
                 startPeriodicScanning()
                 logger.info("WiFi扫描间隔已更新")
             }
+        }
+
+        if userInfo["showHiddenNetworks"] != nil, isScanning {
+            await refreshNetworks()
+            logger.info("WiFi隐藏网络显示设置已更新")
         }
     }
 

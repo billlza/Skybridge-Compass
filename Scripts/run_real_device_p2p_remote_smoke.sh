@@ -2,9 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/Scripts/signing_entitlements_helpers.sh"
+source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_p2p_remote_smoke_$(date +%Y%m%d_%H%M%S)}"
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
+IOS_DEBUG_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements"
 IOS_BUNDLE_ID="com.skybridge.compass.ios"
 IOS_BUILD_DESTINATION="${SKYBRIDGE_IOS_BUILD_DESTINATION:-generic/platform=iOS}"
 SMOKE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_TIMEOUT_SECONDS:-240}"
@@ -19,7 +22,9 @@ SMOKE_EXPECT_RENDER_ORIENTATION="${SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION:-up
 SMOKE_REQUIRE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-1}"
 SMOKE_FORCE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH:-$SMOKE_REQUIRE_SIGNED_KEM_REFRESH}"
 SMOKE_AUTO_APPROVE_PAIRING="${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-1}"
+RUN_MAC_ONLINE_IPAD_SMOKE="${SKYBRIDGE_SMOKE_RUN_MAC_ONLINE_IPAD:-1}"
 RUN_ID="${SKYBRIDGE_SMOKE_P2P_REMOTE_RUN_ID:-$(date +%Y%m%d%H%M%S)}"
+MAC_ONLINE_RUNTIME_DIR="${TMPDIR:-/tmp}/skybridge-mac-online-${RUN_ID}"
 PREFERRED_SUITE="${SB_PQC_PREFERRED_SUITE:-xwing}"
 HOST_PREFERRED_SUITE="${SB_PQC_HOST_PREFERRED_SUITE:-$PREFERRED_SUITE}"
 IOS_PREFERRED_SUITE="${SB_PQC_IOS_PREFERRED_SUITE:-$PREFERRED_SUITE}"
@@ -27,6 +32,13 @@ EXPECTED_TARGET_SUITE="${SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE:-X-Wing}"
 HOST_HANDSHAKE_PATTERN="(success .*suite=${EXPECTED_TARGET_SUITE} .*handshakeOnly=1|mac remote established .*suite=${EXPECTED_TARGET_SUITE})"
 PRESERVE_INSTALL="${SKYBRIDGE_SMOKE_PRESERVE_INSTALL:-1}"
 PQC_TRUST_MODE="${SKYBRIDGE_SMOKE_PQC_TRUST_MODE:-injected}"
+MAC_HOST_LAUNCH_MODE="${SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-direct}"
+SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE="${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-1}"
+SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE="${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-1}"
+SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-Mac Smoke Operator}"
+SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-mac-smoke-nebula}"
+SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-iPad Smoke Operator}"
+SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID="${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-ipad-smoke-nebula}"
 SWIFTPM_CACHE_DIR="${SKYBRIDGE_SWIFTPM_CACHE_DIR:-$ROOT_DIR/.swiftpm-cache}"
 SWIFT_MODULE_CACHE_DIR="${SKYBRIDGE_SWIFT_MODULE_CACHE_DIR:-$ROOT_DIR/.swiftpm-module-cache}"
 
@@ -34,6 +46,14 @@ case "$PQC_TRUST_MODE" in
   user|actual|injected) ;;
   *)
     echo "Unsupported SKYBRIDGE_SMOKE_PQC_TRUST_MODE=$PQC_TRUST_MODE (expected: user, actual, injected)" >&2
+    exit 2
+    ;;
+esac
+
+case "$MAC_HOST_LAUNCH_MODE" in
+  direct|open) ;;
+  *)
+    echo "Unsupported SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=$MAC_HOST_LAUNCH_MODE (expected: direct, open)" >&2
     exit 2
     ;;
 esac
@@ -51,66 +71,235 @@ case "$IOS_LAUNCH_TIMEOUT_SECONDS" in
     ;;
 esac
 
-mkdir -p "$ARTIFACT_DIR" "$SWIFTPM_CACHE_DIR" "$SWIFT_MODULE_CACHE_DIR"
+mkdir -p "$ARTIFACT_DIR" "$SWIFTPM_CACHE_DIR" "$SWIFT_MODULE_CACHE_DIR" "$MAC_ONLINE_RUNTIME_DIR"
 
 pick_real_device_id() {
   python3 - <<'PY'
-import re
+import json
+import sys
 import subprocess
+import tempfile
 
-def pick_from_xctrace():
-    output = subprocess.check_output(["xcrun", "xctrace", "list", "devices"], text=True)
-    in_devices = False
-    for line in output.splitlines():
-        stripped = line.strip()
-        if stripped == "== Devices ==":
-            in_devices = True
-            continue
-        if stripped.startswith("== ") and stripped != "== Devices ==":
-            in_devices = False
-        if not in_devices or not stripped or "Mac" in stripped:
-            continue
-        match = re.search(r"\(([0-9A-Fa-f-]{20,})\)$", stripped)
-        if match:
-            print(match.group(1))
-            return True
-    return False
+def load_devicectl_device_list(context):
+    with tempfile.NamedTemporaryFile(prefix="skybridge-devicectl-devices-", suffix=".json") as handle:
+        try:
+            result = subprocess.run(
+                ["xcrun", "devicectl", "list", "devices", "--json-output", handle.name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                print(f"devicectl JSON device list failed while {context}.", file=sys.stderr)
+                if result.stdout.strip():
+                    print(result.stdout, file=sys.stderr, end="" if result.stdout.endswith("\n") else "\n")
+                if result.stderr.strip():
+                    print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+                raise SystemExit(1)
+            handle.seek(0)
+            return json.load(handle)
+        except subprocess.TimeoutExpired as exc:
+            print(f"devicectl JSON device list timed out while {context}.", file=sys.stderr)
+            if exc.stdout:
+                print(str(exc.stdout), file=sys.stderr)
+            if exc.stderr:
+                print(str(exc.stderr), file=sys.stderr)
+            raise SystemExit(1)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"devicectl JSON device list could not be read while {context}: {exc}", file=sys.stderr)
+            raise SystemExit(1)
 
-def pick_from_devicectl():
-    try:
-        output = subprocess.check_output(
-            ["xcrun", "devicectl", "list", "devices"],
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=30,
+def connected_ipad_identifiers(payload):
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    devices = result.get("devices", []) if isinstance(result, dict) else []
+    identifiers = []
+    for device in devices:
+        if not isinstance(device, dict) or not is_connected_devicectl_device(device):
+            continue
+        if not is_ipad_devicectl_device(device):
+            continue
+        identifier = (
+            string_value(device.get("identifier"))
+            or string_value(nested_value(device, "hardwareProperties", "udid"))
+            or string_value(nested_value(device, "deviceProperties", "udid"))
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        if identifier:
+            identifiers.append(identifier)
+    return identifiers
+
+def is_connected_devicectl_device(device):
+    connection = device.get("connectionProperties", {})
+    if not isinstance(connection, dict):
         return False
+    tunnel_state = string_value(connection.get("tunnelState")).lower()
+    pairing_state = string_value(connection.get("pairingState")).lower()
+    if tunnel_state == "disconnected":
+        return False
+    return tunnel_state == "connected" or pairing_state == "paired"
 
-    candidates = []
-    for line in output.splitlines():
-        if "available" not in line or "paired" not in line:
-            continue
-        match = re.search(r"([0-9A-Fa-f-]{8}(?:-[0-9A-Fa-f-]{4}){3}-[0-9A-Fa-f-]{12})", line)
-        if match:
-            candidates.append((0 if "iPad" in line else 1, match.group(1)))
+def is_ipad_devicectl_device(device):
+    hardware = device.get("hardwareProperties", {})
+    properties = device.get("deviceProperties", {})
+    evidence = [
+        hardware.get("deviceType") if isinstance(hardware, dict) else None,
+        hardware.get("productType") if isinstance(hardware, dict) else None,
+        hardware.get("marketingName") if isinstance(hardware, dict) else None,
+        properties.get("deviceClass") if isinstance(properties, dict) else None,
+    ]
+    return any(string_value(value).lower().startswith("ipad") for value in evidence)
 
-    for _, identifier in sorted(candidates):
-        print(identifier)
+def nested_value(value, *keys):
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+def string_value(value):
+    return value.strip() if isinstance(value, str) else ""
+
+def print_selected_candidate(candidates):
+    if candidates:
+        print(sorted(candidates)[0])
         return True
     return False
 
-if pick_from_xctrace() or pick_from_devicectl():
+payload = load_devicectl_device_list("selecting the real iPad target")
+if print_selected_candidate(connected_ipad_identifiers(payload)):
     raise SystemExit(0)
-raise SystemExit("No connected real iOS device found.")
+raise SystemExit("No connected real iPad found. Set SKYBRIDGE_REAL_DEVICE_ID explicitly to the iPad target UDID if automatic discovery cannot see it.")
 PY
 }
 
 IOS_DEVICE_ID="${SKYBRIDGE_REAL_DEVICE_ID:-$(pick_real_device_id)}"
+validate_real_ipad_device_id() {
+  python3 - "$IOS_DEVICE_ID" <<'PY'
+import json
+import sys
+import subprocess
+import tempfile
+
+target = sys.argv[1].strip()
+
+def load_devicectl_device_list(context):
+    with tempfile.NamedTemporaryFile(prefix="skybridge-devicectl-devices-", suffix=".json") as handle:
+        try:
+            result = subprocess.run(
+                ["xcrun", "devicectl", "list", "devices", "--json-output", handle.name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                print(f"devicectl JSON device list failed while {context}.", file=sys.stderr)
+                if result.stdout.strip():
+                    print(result.stdout, file=sys.stderr, end="" if result.stdout.endswith("\n") else "\n")
+                if result.stderr.strip():
+                    print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+                raise SystemExit(1)
+            handle.seek(0)
+            return json.load(handle)
+        except subprocess.TimeoutExpired as exc:
+            print(f"devicectl JSON device list timed out while {context}.", file=sys.stderr)
+            if exc.stdout:
+                print(str(exc.stdout), file=sys.stderr)
+            if exc.stderr:
+                print(str(exc.stderr), file=sys.stderr)
+            raise SystemExit(1)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"devicectl JSON device list could not be read while {context}: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+
+def connected_ipad_identifiers(payload):
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    devices = result.get("devices", []) if isinstance(result, dict) else []
+    identifiers = []
+    for device in devices:
+        if not isinstance(device, dict) or not is_connected_devicectl_device(device):
+            continue
+        if not is_ipad_devicectl_device(device):
+            continue
+        candidates = [
+            string_value(device.get("identifier")),
+            string_value(nested_value(device, "hardwareProperties", "udid")),
+            string_value(nested_value(device, "deviceProperties", "udid")),
+        ]
+        identifiers.extend(candidate for candidate in candidates if candidate)
+    return identifiers
+
+def is_connected_devicectl_device(device):
+    connection = device.get("connectionProperties", {})
+    if not isinstance(connection, dict):
+        return False
+    tunnel_state = string_value(connection.get("tunnelState")).lower()
+    pairing_state = string_value(connection.get("pairingState")).lower()
+    if tunnel_state == "disconnected":
+        return False
+    return tunnel_state == "connected" or pairing_state == "paired"
+
+def is_ipad_devicectl_device(device):
+    hardware = device.get("hardwareProperties", {})
+    properties = device.get("deviceProperties", {})
+    evidence = [
+        hardware.get("deviceType") if isinstance(hardware, dict) else None,
+        hardware.get("productType") if isinstance(hardware, dict) else None,
+        hardware.get("marketingName") if isinstance(hardware, dict) else None,
+        properties.get("deviceClass") if isinstance(properties, dict) else None,
+    ]
+    return any(string_value(value).lower().startswith("ipad") for value in evidence)
+
+def nested_value(value, *keys):
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+def string_value(value):
+    return value.strip() if isinstance(value, str) else ""
+
+if not target:
+    raise SystemExit("No real iPad target UDID was selected.")
+
+payload = load_devicectl_device_list("validating the real iPad target UDID")
+if target not in set(connected_ipad_identifiers(payload)):
+    raise SystemExit(f"Selected real-device target is not a connected iPad according to devicectl JSON: {target}")
+PY
+}
+validate_real_ipad_device_id
 MAC_TARGET_NAME="${SKYBRIDGE_SMOKE_MAC_TARGET_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname)}"
 HOST_STATUS="$ARTIFACT_DIR/mac.status.log"
 HOST_PQC_REPORT="$ARTIFACT_DIR/mac.pqc.json"
 HOST_STDOUT="$ARTIFACT_DIR/mac.stdout.log"
+MAC_SOURCE_STDOUT="$ARTIFACT_DIR/mac-smoke-source.stdout.log"
+IOS_PQC_REPORT_NAME="ios.pqc.json"
+IOS_PQC_REPORT="$ARTIFACT_DIR/$IOS_PQC_REPORT_NAME"
+IOS_PQC_DEVICE_ID=""
+IOS_PQC_XWING_PUBLIC_KEY_BASE64=""
+MAC_REMOTE_PORT=""
+MAC_ONLINE_STATUS_ARTIFACT="$ARTIFACT_DIR/mac-online-ipad.status.log"
+MAC_ONLINE_STATUS="$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad.status.log"
+MAC_ONLINE_RUNTIME_APP_BUNDLE="$MAC_ONLINE_RUNTIME_DIR/SkyBridge Compass Pro.app"
+MAC_ONLINE_STDOUT="$ARTIFACT_DIR/mac-online-ipad.stdout.log"
+MAC_ONLINE_STDERR="$ARTIFACT_DIR/mac-online-ipad.stderr.log"
+MAC_ONLINE_APP_STDOUT="$ARTIFACT_DIR/mac-online-ipad.app.stdout.log"
+MAC_ONLINE_APP_STDERR="$ARTIFACT_DIR/mac-online-ipad.app.stderr.log"
+MAC_ONLINE_OPEN_STDERR="$ARTIFACT_DIR/mac-online-ipad-open.stderr.log"
+MAC_ONLINE_BUILD_LOG="$ARTIFACT_DIR/mac-online-ipad-build.log"
+MAC_ONLINE_LAUNCH_STDOUT="$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad.app.stdout.log"
+MAC_ONLINE_LAUNCH_STDERR="$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad.app.stderr.log"
+MAC_ONLINE_LAUNCH_OPEN_STDERR="$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad-open.stderr.log"
+MAC_ONLINE_DERIVED_DATA="$ARTIFACT_DIR/DerivedData-mac-online"
+MAC_ONLINE_PACKAGED_APP_BUNDLE="${SKYBRIDGE_SMOKE_MAC_ONLINE_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}"
+MAC_ONLINE_ALLOW_DEBUG_BUILD="${SKYBRIDGE_SMOKE_MAC_ONLINE_ALLOW_DEBUG_BUILD:-0}"
+MAC_APP_BUNDLE="$ARTIFACT_DIR/LocalLanInteropHost.app"
+MAC_DIRECT_BIN="$ROOT_DIR/.build/debug/LocalLanInteropHost"
+MAC_SOURCE_DIRECT_BIN="$ROOT_DIR/.build/debug/LocalLanSmokeSourceHost"
+MAC_APP_BIN=""
+MAC_ONLINE_APP_BUNDLE=""
+MAC_ONLINE_APP_BIN=""
 MAC_SMOKE_SOURCE_FRAME_A="$ARTIFACT_DIR/mac-smoke-source-a.png"
 MAC_SMOKE_SOURCE_FRAME_B="$ARTIFACT_DIR/mac-smoke-source-b.png"
 IOS_STATUS_NAME="ios-p2p-remote-${RUN_ID}.status.log"
@@ -118,14 +307,67 @@ IOS_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME"
 IOS_STATUS_APP_CACHE_LOCAL="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.app-cache.status.log"
 IOS_STATUS_CONSOLE_SNAPSHOT="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.console.status.log"
 IOS_CONSOLE_STDERR="$ARTIFACT_DIR/ios-console.stderr.log"
+IOS_COPY_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_TIMEOUT_SECONDS:-15}"
+IOS_COPY_HARD_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_HARD_TIMEOUT_SECONDS:-25}"
+IOS_COPY_STATUS_APP_CACHE="${SKYBRIDGE_IOS_COPY_STATUS_APP_CACHE:-0}"
 IOS_BUILD_LOG="$ARTIFACT_DIR/ios-build.log"
 LAUNCH_RESULT_JSON="$ARTIFACT_DIR/ios-launch.json"
+IOS_PROCESS_LIST_JSON="$ARTIFACT_DIR/ios-processes.json"
+IOS_PROCESS_LIST_LOG="$ARTIFACT_DIR/ios-processes.log"
+IOS_PROCESS_LIST_STDERR="$ARTIFACT_DIR/ios-processes.stderr.log"
 DEVICE_INFO_TXT="$ARTIFACT_DIR/device-info.txt"
 HOST_PID=""
+MAC_SOURCE_PID=""
+MAC_ONLINE_PID=""
 IOS_CONSOLE_PID=""
-COMMON_REMOTE_SMOKE_FAILURE_PATTERN='classic fallback|compatibility fallback|fallback=true|legacyFallback=true|pipeline=stillImageFallback|orientation=verticalFlip|orientation=horizontalFlip|orientation=inverted|renderOrientation=verticalFlip|renderOrientation=horizontalFlip|renderOrientation=inverted|已立即回退|已回退到|fallback producer|perf=extreme.*h264|h264.*perf=extreme|suite_rejected_unknown|wireId=0x0000|wireId=0X0000|unknown suite|unknown-suite|signed LAN KEM refresh rejected|signed LAN KEM refresh failed|PIB-1 protocol identity binding failed|PIB-1 protocol identity binding rejected|PIB-1 protocol identity binding timed out|lifecycle=request>rejected|lifecycle=missing-kem>failed|lifecycle=identity-oob>failed|lifecycle=identity-oob>timeout|render-main-path-failed|strict-media-failed'
+IOS_APP_PID=""
+COMMON_REMOTE_SMOKE_FAILURE_PATTERN='classic fallback|compatibility fallback|fallback=true|legacyFallback=true|pipeline=stillImageFallback|orientation=verticalFlip|orientation=horizontalFlip|orientation=inverted|renderOrientation=verticalFlip|renderOrientation=horizontalFlip|renderOrientation=inverted|已立即回退|已回退到|fallback producer|perf=extreme.*h264|h264.*perf=extreme|suite_rejected_unknown|wireId=0x0000|wireId=0X0000|unknown suite|unknown-suite|signed LAN KEM refresh rejected|signed LAN KEM refresh failed|PIB-1 protocol identity binding failed|PIB-1 protocol identity binding rejected|PIB-1 protocol identity binding timed out|lifecycle=request>rejected|lifecycle=missing-kem>failed|lifecycle=identity-oob>failed|lifecycle=identity-oob>timeout|remoteControlNoticeRejected .*missing_required_notice_metadata|render-main-path-failed|strict-media-failed|already_connected|rejectAlreadyConnected|对端拒绝连接：already_connected|Peer rejected handshake: already_connected'
 IOS_REMOTE_SMOKE_FAILURE_PATTERN="failed stage=|${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|crossNetwork=1|audioRxPlaybackDrop=[1-9][0-9]*|audioRxJitterEvicted=[1-9][0-9]*|audioRxUnderflow=[1-9][0-9]*|audioRxRebuffer=[1-9][0-9]*|jitterEvicted=[1-9][0-9]*|playbackDrop=[1-9][0-9]*|datagrams=[1-9][0-9][0-9]+ .*probable=rx-decode-stalled|HEVC 连续失败|临时降级 H\\.264|codec=h264"
-HOST_REMOTE_SMOKE_FAILURE_PATTERN="${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|failed stage=(identity|handshake|remote-desktop|remote-control|media)|mac-sck-start .*codec=h264|mac-sck-first-frame codec=h264|mac-sck-tx .*codec=h264 .*capturesAudio=false|mac-sck-encode-failed .*capturesAudio=false|mac-sck-tx .*encodeFailures=[1-9][0-9]*|mac-stream-config .*damage=true .*perf=extreme"
+HOST_REMOTE_SMOKE_FAILURE_PATTERN="${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|failed stage=mac-host|failed stage=mac-smoke-source|failed stage=(identity|handshake|remote-desktop|remote-control|media)|mac-sck-start .*codec=h264|mac-sck-first-frame codec=h264|mac-sck-tx .*codec=h264 .*capturesAudio=false|mac-sck-encode-failed .*capturesAudio=false|mac-sck-tx .*encodeFailures=[1-9][0-9]*|mac-stream-config .*damage=true .*perf=extreme"
+
+fail_if_forbidden_fallback_evidence() {
+  local path="$1"
+  local label="$2"
+  [[ -f "$path" ]] || return 0
+  python3 - "$path" "$label" <<'PY'
+import re
+import sys
+
+path, label = sys.argv[1:]
+allowed = {
+    "attemptedFallback": {"none"},
+    "fallbackResult": {"none", "not-attempted"},
+}
+with open(path, "r", encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        for key, allowed_values in allowed.items():
+            for value in re.findall(rf"\b{key}=([^\s,;]+)", line):
+                if value.lower() not in allowed_values:
+                    print(
+                        f"Detected forbidden fallback evidence while waiting for {label}: "
+                        f"{key}={value} in {path}",
+                        file=sys.stderr,
+                    )
+                    print(line.rstrip(), file=sys.stderr)
+                    raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+sync_mac_online_launch_stdio() {
+  if [[ -f "$MAC_ONLINE_STATUS" ]]; then
+    cp -f "$MAC_ONLINE_STATUS" "$MAC_ONLINE_STATUS_ARTIFACT" 2>/dev/null || true
+  fi
+  if [[ -f "$MAC_ONLINE_LAUNCH_STDOUT" ]]; then
+    cp -f "$MAC_ONLINE_LAUNCH_STDOUT" "$MAC_ONLINE_APP_STDOUT" 2>/dev/null || true
+  fi
+  if [[ -f "$MAC_ONLINE_LAUNCH_STDERR" ]]; then
+    cp -f "$MAC_ONLINE_LAUNCH_STDERR" "$MAC_ONLINE_APP_STDERR" 2>/dev/null || true
+  fi
+  if [[ -f "$MAC_ONLINE_LAUNCH_OPEN_STDERR" ]]; then
+    cp -f "$MAC_ONLINE_LAUNCH_OPEN_STDERR" "$MAC_ONLINE_OPEN_STDERR" 2>/dev/null || true
+  fi
+}
 
 cleanup() {
   if [[ -n "$IOS_CONSOLE_PID" ]]; then
@@ -136,8 +378,47 @@ cleanup() {
     kill "$HOST_PID" >/dev/null 2>&1 || true
     wait "$HOST_PID" >/dev/null 2>&1 || true
   fi
+  if [[ -n "$MAC_SOURCE_PID" ]]; then
+    kill "$MAC_SOURCE_PID" >/dev/null 2>&1 || true
+    wait "$MAC_SOURCE_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$MAC_ONLINE_PID" ]]; then
+    kill "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
+    wait "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${MAC_ONLINE_APP_BIN:-}" ]]; then
+    terminate_stale_macos_online_ipad_clients >/dev/null 2>&1 || true
+  fi
+  sync_mac_online_launch_stdio
+  rm -f -- \
+    "$MAC_ONLINE_LAUNCH_STDOUT" \
+    "$MAC_ONLINE_LAUNCH_STDERR" \
+    "$MAC_ONLINE_LAUNCH_OPEN_STDERR"
+  rm -rf -- "$MAC_ONLINE_RUNTIME_DIR"
 }
 trap cleanup EXIT
+
+require_remote_control_notice_identity_env() {
+  if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" != "1" ]]; then
+    return 0
+  fi
+  if [[ -z "${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-}" ]]; then
+    echo "SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME is required when SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=1" >&2
+    exit 2
+  fi
+  if [[ -z "${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-}" ]]; then
+    echo "SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID is required when SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=1" >&2
+    exit 2
+  fi
+  if [[ -z "${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-}" ]]; then
+    echo "SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME is required when SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=1" >&2
+    exit 2
+  fi
+  if [[ -z "${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-}" ]]; then
+    echo "SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID is required when SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=1" >&2
+    exit 2
+  fi
+}
 
 timestamp_utc() {
   date -u +"[%Y-%m-%dT%H:%M:%SZ]"
@@ -147,8 +428,1328 @@ append_host_status() {
   printf '%s %s\n' "$(timestamp_utc)" "$*" >>"$HOST_STATUS"
 }
 
+reset_smoke_artifacts() {
+  # Rust smoke profiles intentionally reuse stable artifact dirs for follow-up checks.
+  # Clear per-run evidence so waits cannot match a stale ready/notice line.
+  rm -f -- \
+    "$HOST_STATUS" \
+    "$HOST_PQC_REPORT" \
+    "$HOST_STDOUT" \
+    "$MAC_SOURCE_STDOUT" \
+    "$ARTIFACT_DIR/mac-control-port-probe.stderr.log" \
+    "$ARTIFACT_DIR/mac-remote-port-probe.stderr.log" \
+    "$IOS_PQC_REPORT" \
+    "$IOS_STATUS_LOCAL" \
+    "$IOS_STATUS_APP_CACHE_LOCAL" \
+    "$IOS_STATUS_CONSOLE_SNAPSHOT" \
+    "$IOS_CONSOLE_STDERR" \
+    "$LAUNCH_RESULT_JSON" \
+    "$IOS_PROCESS_LIST_JSON" \
+    "$IOS_PROCESS_LIST_LOG" \
+    "$IOS_PROCESS_LIST_STDERR" \
+    "$MAC_ONLINE_STATUS_ARTIFACT" \
+    "$MAC_ONLINE_STATUS" \
+    "$MAC_ONLINE_STDOUT" \
+    "$MAC_ONLINE_STDERR" \
+    "$MAC_ONLINE_APP_STDOUT" \
+    "$MAC_ONLINE_APP_STDERR" \
+    "$MAC_ONLINE_OPEN_STDERR" \
+    "$MAC_ONLINE_BUILD_LOG" \
+    "$DEVICE_INFO_TXT" \
+    "$MAC_ONLINE_LAUNCH_STDOUT" \
+    "$MAC_ONLINE_LAUNCH_STDERR" \
+    "$MAC_ONLINE_LAUNCH_OPEN_STDERR"
+
+  rm -f -- \
+    "$ARTIFACT_DIR"/ios-p2p-remote-*.status.log \
+    "$ARTIFACT_DIR"/ios-p2p-remote-*.app-cache.status.log \
+    "$ARTIFACT_DIR"/ios-p2p-remote-*.console.status.log \
+    "$ARTIFACT_DIR"/ios-copy-*.json \
+    "$ARTIFACT_DIR"/ios-copy-*.log \
+    "$ARTIFACT_DIR"/ios-copy-*.stdout.log \
+    "$ARTIFACT_DIR"/ios-copy-*.stderr.log
+
+  rm -rf -- "$MAC_ONLINE_RUNTIME_DIR"
+  mkdir -p "$MAC_ONLINE_RUNTIME_DIR"
+}
+
+terminate_stale_smoke_scripts() {
+  local pid
+  local pids
+  pids="$(pgrep -f 'Scripts/run_real_device_p2p_remote_smoke\.sh' 2>/dev/null | sort -u || true)"
+
+  [[ -n "$pids" ]] || return 0
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    [[ "$pid" == "$$" || "$pid" == "${BASHPID:-$$}" || "$pid" == "$PPID" ]] && continue
+    echo "==> Terminating stale real-device smoke script pid=$pid"
+    kill "$pid" >/dev/null 2>&1 || true
+  done <<<"$pids"
+
+  sleep 1
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    [[ "$pid" == "$$" || "$pid" == "${BASHPID:-$$}" || "$pid" == "$PPID" ]] && continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      echo "==> Force terminating stale real-device smoke script pid=$pid"
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  done <<<"$pids"
+}
+
+terminate_stale_macos_smoke_hosts() {
+  local pid
+  local pids
+  pids="$(
+    {
+      pgrep -x LocalLanInteropHost 2>/dev/null || true
+      pgrep -x LocalLanSmokeSourceHost 2>/dev/null || true
+      pgrep -f "$MAC_DIRECT_BIN" 2>/dev/null || true
+      pgrep -f "$MAC_SOURCE_DIRECT_BIN" 2>/dev/null || true
+      if [[ -n "$MAC_APP_BIN" ]]; then
+        pgrep -f "$MAC_APP_BIN" 2>/dev/null || true
+      fi
+    } | sort -u
+  )"
+
+  [[ -n "$pids" ]] || return 0
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    [[ "$pid" == "$$" ]] && continue
+    echo "==> Terminating stale macOS smoke host pid=$pid"
+    kill "$pid" >/dev/null 2>&1 || true
+  done <<<"$pids"
+
+  sleep 1
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    [[ "$pid" == "$$" ]] && continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      echo "==> Force terminating stale macOS smoke host pid=$pid"
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  done <<<"$pids"
+}
+
+prepare_macos_smoke_host_app_bundle() {
+  local source_bin="$MAC_DIRECT_BIN"
+  local source_webrtc_framework="$ROOT_DIR/.build/debug/WebRTC.framework"
+  local contents_dir="$MAC_APP_BUNDLE/Contents"
+  local macos_dir="$contents_dir/MacOS"
+  local resources_dir="$contents_dir/Resources"
+  local plist_path="$contents_dir/Info.plist"
+
+  if [[ ! -x "$source_bin" ]]; then
+    echo "macOS LAN host executable not found: $source_bin" >&2
+    exit 1
+  fi
+  if [[ ! -d "$source_webrtc_framework" ]]; then
+    echo "WebRTC framework not found beside the SwiftPM build product: $source_webrtc_framework" >&2
+    exit 1
+  fi
+  if [[ ! -x /usr/libexec/PlistBuddy ]]; then
+    echo "PlistBuddy is unavailable; cannot build the temporary macOS smoke host app bundle." >&2
+    exit 1
+  fi
+
+  rm -rf "$MAC_APP_BUNDLE"
+  mkdir -p "$macos_dir" "$resources_dir"
+  cp "$source_bin" "$macos_dir/LocalLanInteropHost"
+  cp -R "$source_webrtc_framework" "$macos_dir/WebRTC.framework"
+  chmod +x "$macos_dir/LocalLanInteropHost"
+
+  /usr/libexec/PlistBuddy \
+    -c 'Clear dict' \
+    -c 'Add :CFBundleExecutable string LocalLanInteropHost' \
+    -c "Add :CFBundleIdentifier string com.skybridge.compass.LocalLanInteropHostSmoke.${RUN_ID}" \
+    -c 'Add :CFBundleName string LocalLanInteropHostSmoke' \
+    -c 'Add :CFBundlePackageType string APPL' \
+    -c 'Add :CFBundleVersion string 1' \
+    -c 'Add :CFBundleShortVersionString string 1.0' \
+    -c 'Add :NSPrincipalClass string NSApplication' \
+    -c 'Add :NSLocalNetworkUsageDescription string SkyBridge Compass uses the local network to discover and connect to nearby devices for secure P2P remote control.' \
+    -c 'Add :NSBonjourServices array' \
+    -c 'Add :NSBonjourServices:0 string _skybridge._tcp' \
+    -c 'Add :NSBonjourServices:1 string _skybridge._udp' \
+    -c 'Add :NSBonjourServices:2 string _skybridge-transfer._tcp' \
+    -c 'Add :NSBonjourServices:3 string _skybridge-remote._tcp' \
+    "$plist_path" >/dev/null
+  /usr/bin/codesign --force --deep --sign - "$MAC_APP_BUNDLE" >/dev/null
+  xattr -dr com.apple.quarantine "$MAC_APP_BUNDLE" >/dev/null 2>&1 || true
+  register_macos_smoke_host_app_bundle
+
+  MAC_APP_BIN="$macos_dir/LocalLanInteropHost"
+}
+
+register_launch_services_app_bundle() {
+  local app_bundle="$1"
+  local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [[ -x "$lsregister" ]]; then
+    "$lsregister" -f "$app_bundle" >/dev/null 2>&1 || true
+  fi
+}
+
+register_macos_smoke_host_app_bundle() {
+  register_launch_services_app_bundle "$MAC_APP_BUNDLE"
+}
+
+find_macos_smoke_host_pid() {
+  pgrep -nf "$MAC_APP_BIN" || true
+}
+
+open_macos_smoke_host_app_bundle() {
+  /usr/bin/open \
+    -n \
+    --stdout "$HOST_STDOUT" \
+    --stderr "$HOST_STDOUT" \
+    --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=1" \
+    --env "SB_PQC_PREFERRED_SUITE=$HOST_PREFERRED_SUITE" \
+    --env "SKYBRIDGE_SMOKE_ROLE=mac-host" \
+    --env "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=$SMOKE_AUTO_APPROVE_PAIRING" \
+    --env "SKYBRIDGE_SMOKE_STATUS_FILE=$HOST_STATUS" \
+    --env "SKYBRIDGE_SMOKE_PQC_REPORT_FILE=$HOST_PQC_REPORT" \
+    --env "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE=$EXPECTED_TARGET_SUITE" \
+    --env "SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" \
+    --env "SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-0}" \
+    --env "SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME=${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-}" \
+    --env "SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID=${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-}" \
+    "$MAC_APP_BUNDLE"
+}
+
+start_macos_smoke_host_directly() {
+  SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
+  SB_PQC_PREFERRED_SUITE="$HOST_PREFERRED_SUITE" \
+  SKYBRIDGE_SMOKE_ROLE=mac-host \
+  SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING="$SMOKE_AUTO_APPROVE_PAIRING" \
+  SKYBRIDGE_SMOKE_STATUS_FILE="$HOST_STATUS" \
+  SKYBRIDGE_SMOKE_PQC_REPORT_FILE="$HOST_PQC_REPORT" \
+  SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
+  SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE="${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" \
+  SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE="${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-0}" \
+  SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-}" \
+  SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-}" \
+  "$MAC_DIRECT_BIN" >"$HOST_STDOUT" 2>&1 &
+  HOST_PID="$!"
+  append_host_status "launch method=direct-app-binary pid=$HOST_PID mode=direct binary=swiftpm-build-product"
+}
+
+start_macos_smoke_source_host() {
+  : >"$MAC_SOURCE_STDOUT"
+  if [[ ! -x "$MAC_SOURCE_DIRECT_BIN" ]]; then
+    append_host_status "failed stage=mac-smoke-source phase=launch reason=missing-helper binary=$MAC_SOURCE_DIRECT_BIN"
+    echo "macOS smoke source helper executable not found: $MAC_SOURCE_DIRECT_BIN" >&2
+    return 1
+  fi
+
+  SKYBRIDGE_SMOKE_STATUS_FILE="$HOST_STATUS" \
+  SKYBRIDGE_SMOKE_ROLE=mac-smoke-source \
+  "$MAC_SOURCE_DIRECT_BIN" >"$MAC_SOURCE_STDOUT" 2>&1 &
+  MAC_SOURCE_PID="$!"
+  append_host_status "launch method=direct-app-binary pid=$MAC_SOURCE_PID role=mac-smoke-source binary=swiftpm-build-product"
+}
+
+start_macos_smoke_host() {
+  : >"$HOST_STDOUT"
+
+  if [[ "$MAC_HOST_LAUNCH_MODE" == "direct" ]]; then
+    start_macos_smoke_host_directly
+    return 0
+  fi
+
+  local open_attempt=1
+  local open_status=1
+  while (( open_attempt <= 3 )); do
+    if open_macos_smoke_host_app_bundle; then
+      open_status=0
+      break
+    fi
+    open_status=$?
+    append_host_status "launch method=open-app-bundle attempt=$open_attempt status=$open_status"
+    register_macos_smoke_host_app_bundle
+    sleep "$open_attempt"
+    open_attempt=$((open_attempt + 1))
+  done
+
+  if (( open_status != 0 )); then
+    append_host_status "launch method=open-app-bundle attempts=3 result=failed status=$open_status fallback=direct-app-binary"
+    start_macos_smoke_host_directly
+    return 0
+  fi
+
+  local started_at
+  started_at="$(date +%s)"
+  while true; do
+    HOST_PID="$(find_macos_smoke_host_pid)"
+    if [[ -n "$HOST_PID" ]] && kill -0 "$HOST_PID" >/dev/null 2>&1; then
+      append_host_status "launch method=open-app-bundle pid=$HOST_PID"
+      return 0
+    fi
+    if (( "$(date +%s)" - started_at >= 15 )); then
+      if (( open_status == 0 )); then
+        append_host_status "launch method=open-app-bundle result=pid-timeout fallback=direct-app-binary"
+        start_macos_smoke_host_directly
+        return 0
+      fi
+      append_host_status "failed stage=mac-host phase=launch reason=app-pid-not-found"
+      echo "Timed out waiting for LocalLanInteropHost app pid after LaunchServices start." >&2
+      tail -n 80 "$HOST_STDOUT" >&2 2>/dev/null || true
+      return 1
+    fi
+    sleep 0.25
+  done
+}
+
 append_ios_status() {
   printf '%s %s\n' "$(timestamp_utc)" "$*" >>"$IOS_STATUS_LOCAL"
+}
+
+build_macos_online_ipad_app() {
+  if [[ -d "$MAC_ONLINE_PACKAGED_APP_BUNDLE" ]]; then
+    echo "==> Using packaged macOS online iPad UI client"
+    rm -rf -- "$MAC_ONLINE_RUNTIME_APP_BUNDLE"
+    ditto "$MAC_ONLINE_PACKAGED_APP_BUNDLE" "$MAC_ONLINE_RUNTIME_APP_BUNDLE"
+    xattr -dr com.apple.quarantine "$MAC_ONLINE_RUNTIME_APP_BUNDLE" >/dev/null 2>&1 || true
+    MAC_ONLINE_APP_BUNDLE="$MAC_ONLINE_RUNTIME_APP_BUNDLE"
+    MAC_ONLINE_APP_BIN="$MAC_ONLINE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
+    verify_macos_online_ipad_app_bundle "packaged"
+    register_macos_online_ipad_app_bundle
+    return 0
+  fi
+
+  if [[ "$MAC_ONLINE_ALLOW_DEBUG_BUILD" != "1" ]]; then
+    echo "Packaged macOS online iPad app bundle not found: $MAC_ONLINE_PACKAGED_APP_BUNDLE" >&2
+    echo "Build and notarize the packaged app before running the real-device mac-online UI smoke, or set SKYBRIDGE_SMOKE_MAC_ONLINE_ALLOW_DEBUG_BUILD=1 for an explicit diagnostic Debug build." >&2
+    exit 1
+  fi
+
+  echo "==> Building macOS online iPad UI client"
+  SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
+    -project "$ROOT_DIR/SkyBridgeWidgets.xcodeproj" \
+    -scheme "SkyBridgeCompassMac" \
+    -configuration Debug \
+    -destination 'platform=macOS' \
+    -derivedDataPath "$MAC_ONLINE_DERIVED_DATA" \
+    ENABLE_DEBUG_DYLIB=NO \
+    build >"$MAC_ONLINE_BUILD_LOG"
+
+  MAC_ONLINE_APP_BUNDLE="$MAC_ONLINE_DERIVED_DATA/Build/Products/Debug/SkyBridge Compass Pro.app"
+  MAC_ONLINE_APP_BIN="$MAC_ONLINE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
+  if [[ ! -d "$MAC_ONLINE_APP_BUNDLE" ]]; then
+    echo "macOS online iPad app bundle not found: $MAC_ONLINE_APP_BUNDLE" >&2
+    exit 1
+  fi
+  if [[ ! -x "$MAC_ONLINE_APP_BIN" ]]; then
+    echo "macOS online iPad app executable not found: $MAC_ONLINE_APP_BIN" >&2
+    exit 1
+  fi
+  /usr/bin/codesign --force --deep --sign - "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+  xattr -dr com.apple.quarantine "$MAC_ONLINE_APP_BUNDLE" >/dev/null 2>&1 || true
+  verify_macos_online_ipad_app_bundle "debug"
+  register_macos_online_ipad_app_bundle
+}
+
+register_macos_online_ipad_app_bundle() {
+  register_launch_services_app_bundle "$MAC_ONLINE_APP_BUNDLE"
+}
+
+verify_macos_online_ipad_app_bundle() {
+  local source_kind="$1"
+  if [[ ! -d "$MAC_ONLINE_APP_BUNDLE" ]]; then
+    echo "macOS online iPad app bundle not found: $MAC_ONLINE_APP_BUNDLE" >&2
+    exit 1
+  fi
+  if [[ ! -x "$MAC_ONLINE_APP_BIN" ]]; then
+    echo "macOS online iPad app executable not found: $MAC_ONLINE_APP_BIN" >&2
+    exit 1
+  fi
+  codesign --verify --deep --strict "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+  if [[ "$source_kind" == "packaged" ]]; then
+    xcrun stapler validate "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+    spctl --assess --type execute "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+  fi
+  printf '%s mac-online-app source=%s bundle=%s executable=%s\n' "$(timestamp_utc)" "$source_kind" "$MAC_ONLINE_APP_BUNDLE" "$MAC_ONLINE_APP_BIN" >>"$MAC_ONLINE_STATUS"
+}
+
+find_all_macos_online_ipad_client_pids() {
+  local app_bin
+  app_bin="$(canonical_macos_online_ipad_client_bin)" || return 0
+  [[ -n "$app_bin" ]] || return 0
+  pgrep -f "$app_bin" || true
+}
+
+find_macos_online_ipad_client_pid() {
+  find_all_macos_online_ipad_client_pids | head -n 1
+}
+
+canonical_macos_online_ipad_client_bin() {
+  [[ -n "$MAC_ONLINE_APP_BIN" ]] || return 1
+  local app_dir
+  app_dir="$(cd "$(dirname "$MAC_ONLINE_APP_BIN")" && pwd -P)" || return 1
+  printf '%s/%s\n' "$app_dir" "$(basename "$MAC_ONLINE_APP_BIN")"
+}
+
+terminate_stale_macos_online_ipad_clients() {
+  local pids
+  pids="$(find_all_macos_online_ipad_client_pids)"
+  [[ -n "$pids" ]] || return 0
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    echo "==> Terminating stale macOS online iPad UI client pid=$pid"
+    kill "$pid" >/dev/null 2>&1 || true
+  done <<<"$pids"
+
+  sleep 1
+
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      echo "==> Force terminating stale macOS online iPad UI client pid=$pid"
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  done <<<"$pids"
+}
+
+open_macos_online_ipad_app_bundle() {
+  mkdir -p "$MAC_ONLINE_RUNTIME_DIR"
+  : >"$MAC_ONLINE_LAUNCH_STDOUT"
+  : >"$MAC_ONLINE_LAUNCH_STDERR"
+  : >"$MAC_ONLINE_LAUNCH_OPEN_STDERR"
+  /usr/bin/open \
+    -n \
+    --stdout "$MAC_ONLINE_LAUNCH_STDOUT" \
+    --stderr "$MAC_ONLINE_LAUNCH_STDERR" \
+    --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=1" \
+    --env "SKYBRIDGE_SMOKE_ROLE=mac-online-ipad-client" \
+    --env "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=$SMOKE_AUTO_APPROVE_PAIRING" \
+    --env "SKYBRIDGE_SMOKE_AUTO_EXIT=1" \
+    --env "SKYBRIDGE_SMOKE_STATUS_FILE=$MAC_ONLINE_STATUS" \
+    --env "SKYBRIDGE_SMOKE_TIMEOUT_SECONDS=$SMOKE_TIMEOUT_SECONDS" \
+    "$MAC_ONLINE_APP_BUNDLE" \
+    2>>"$MAC_ONLINE_LAUNCH_OPEN_STDERR"
+  local open_status=$?
+  sync_mac_online_launch_stdio
+  return "$open_status"
+}
+
+start_macos_online_ipad_client() {
+  : >"$MAC_ONLINE_STDOUT"
+  : >"$MAC_ONLINE_STDERR"
+  : >"$MAC_ONLINE_APP_STDOUT"
+  : >"$MAC_ONLINE_APP_STDERR"
+  : >"$MAC_ONLINE_OPEN_STDERR"
+
+  local open_attempt=1
+  while (( open_attempt <= 3 )); do
+    register_macos_online_ipad_app_bundle
+    local existing_pids
+    existing_pids="$(find_macos_online_ipad_client_pid | tr '\n' ',' | sed 's/,$//')"
+    printf '%s launch method=open-app-bundle attempt=%s preExistingPids=%s\n' "$(timestamp_utc)" "$open_attempt" "${existing_pids:-none}" >>"$MAC_ONLINE_STATUS"
+    if open_macos_online_ipad_app_bundle; then
+      local started_at
+      started_at="$(date +%s)"
+      while true; do
+        MAC_ONLINE_PID="$(find_macos_online_ipad_client_pid)"
+        if [[ -n "$MAC_ONLINE_PID" ]] && kill -0 "$MAC_ONLINE_PID" >/dev/null 2>&1; then
+          printf '%s launch method=open-app-bundle pid=%s role=mac-online-ipad-client\n' "$(timestamp_utc)" "$MAC_ONLINE_PID" >>"$MAC_ONLINE_STATUS"
+          return 0
+        fi
+        if (( "$(date +%s)" - started_at >= 20 )); then
+          printf '%s launch method=open-app-bundle attempt=%s result=pid-timeout\n' "$(timestamp_utc)" "$open_attempt" >>"$MAC_ONLINE_STATUS"
+          break
+        fi
+        sleep 0.25
+      done
+    else
+      local open_status=$?
+      printf '%s launch method=open-app-bundle attempt=%s result=open-failed status=%s\n' "$(timestamp_utc)" "$open_attempt" "$open_status" >>"$MAC_ONLINE_STATUS"
+    fi
+
+    sleep "$open_attempt"
+    open_attempt=$((open_attempt + 1))
+  done
+
+  printf '%s failed stage=mac-online-ipad phase=launch reason=app-pid-not-found\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
+  echo "Timed out waiting for SkyBridge Compass Pro app pid after LaunchServices start." >&2
+  tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
+  tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
+  tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
+  tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
+  tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+  tail -n 80 "$MAC_ONLINE_OPEN_STDERR" >&2 2>/dev/null || true
+  return 1
+}
+
+wait_for_mac_online_pattern() {
+  local pattern="$1"
+  local timeout_seconds="$2"
+  local label="$3"
+  local started_at
+  started_at="$(date +%s)"
+  while true; do
+    if [[ -n "$MAC_ONLINE_PID" ]] && ! kill -0 "$MAC_ONLINE_PID" >/dev/null 2>&1; then
+      wait "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
+      MAC_ONLINE_PID=""
+      if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE "$pattern" "$MAC_ONLINE_STATUS"; then
+        return 0
+      fi
+      echo "macOS online iPad UI client exited while waiting for ${label}: ${MAC_ONLINE_STATUS}" >&2
+      sync_mac_online_launch_stdio
+      tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      return 1
+    fi
+    if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE 'failed stage=|mac-online-connect-result .*result=failure' "$MAC_ONLINE_STATUS"; then
+      echo "Detected macOS online iPad UI failure while waiting for ${label}: ${MAC_ONLINE_STATUS}" >&2
+      sync_mac_online_launch_stdio
+      tail -n 80 "$MAC_ONLINE_STATUS" >&2 || true
+      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      return 1
+    fi
+    if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE "$pattern" "$MAC_ONLINE_STATUS"; then
+      return 0
+    fi
+    if (( "$(date +%s)" - started_at >= timeout_seconds )); then
+      echo "Timed out waiting for ${label}: ${MAC_ONLINE_STATUS}" >&2
+      sync_mac_online_launch_stdio
+      tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+press_mac_online_ipad_connect_button() {
+  run_stdin_command_with_hard_timeout 20 swift - <<'SWIFT'
+	import ApplicationServices
+	import AppKit
+	import Darwin
+	import Foundation
+
+func fail(_ message: String) -> Never {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    exit(1)
+}
+
+guard AXIsProcessTrusted() else {
+    fail("macOS Accessibility permission is required to press the SkyBridge online iPad Connect button")
+}
+
+let candidates = NSWorkspace.shared.runningApplications.filter { app in
+    app.localizedName == "SkyBridge Compass Pro"
+        || app.executableURL?.lastPathComponent == "SkyBridgeCompassApp"
+}
+guard let app = candidates.sorted(by: { $0.processIdentifier > $1.processIdentifier }).first else {
+    fail("SkyBridge Compass Pro process is not running")
+}
+
+let labels = Set(["连接", "Connect"])
+let statusPath = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]
+let targetIdentityFromEnvironment = ProcessInfo.processInfo.environment["SKYBRIDGE_TARGET_IPAD_IDENTITY"]?
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+let targetNameFromEnvironment = ProcessInfo.processInfo.environment["SKYBRIDGE_TARGET_IPAD_NAME"]?
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+let statusLines = statusPath
+    .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }?
+    .split(whereSeparator: \.isNewline)
+    .map(String.init) ?? []
+
+func fieldValue(_ key: String, in line: String) -> String? {
+    guard let keyRange = line.range(of: "\(key)=") else { return nil }
+    let suffix = line[keyRange.upperBound...]
+    return suffix.split(separator: " ", maxSplits: 1).first.map(String.init)
+}
+
+let targetIdentity: String? = {
+    if let targetIdentityFromEnvironment, !targetIdentityFromEnvironment.isEmpty {
+        return targetIdentityFromEnvironment
+    }
+    guard let targetLine = statusLines.reversed().first(where: { line in
+        line.contains("waiting-connect-click source=OnlineDeviceCard")
+    }) else {
+        return nil
+    }
+    return fieldValue("identity", in: targetLine)
+}()
+
+func accessibilityIdentifierToken(for identity: String) -> String {
+    identity.unicodeScalars.map { scalar -> String in
+        switch scalar.value {
+        case 48...57, 65...90, 97...122:
+            return String(scalar)
+        default:
+            return "_"
+        }
+    }.joined().trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+}
+
+func stableIdentityPayload(from identity: String) -> String? {
+    let trimmed = identity.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let lowercased = trimmed.lowercased()
+    if lowercased.hasPrefix("id:") {
+        let payload = String(trimmed.dropFirst("id:".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return payload.isEmpty ? nil : payload.lowercased()
+    }
+    if trimmed.range(
+        of: "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+        options: .regularExpression
+    ) != nil {
+        return trimmed.lowercased()
+    }
+    return nil
+}
+
+func identityVariants(for identity: String?) -> Set<String> {
+    guard let identity else { return [] }
+    let trimmed = identity.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return [] }
+    let lowercased = trimmed.lowercased()
+    var variants = Set<String>()
+    variants.insert(trimmed)
+    variants.insert(lowercased)
+    if let stable = stableIdentityPayload(from: trimmed) {
+        variants.insert(stable)
+        variants.insert("id:\(stable)")
+        if !lowercased.hasPrefix("id:") {
+            variants.insert("id:\(trimmed)")
+        }
+    }
+    return variants
+}
+
+let targetIdentityVariants = identityVariants(for: targetIdentity)
+let targetIdentifiers: Set<String> = {
+    guard !targetIdentityVariants.isEmpty else { return [] }
+    return Set(targetIdentityVariants.compactMap { identity in
+        let token = accessibilityIdentifierToken(for: identity)
+        guard !token.isEmpty else { return nil }
+        return "skybridge-online-device-connect-button-\(token)"
+    })
+}()
+
+func identityValueMatchesTarget(_ value: String?) -> Bool {
+    guard let value,
+          !targetIdentityVariants.isEmpty else {
+        return false
+    }
+    let variants = identityVariants(for: value)
+    return !variants.isDisjoint(with: targetIdentityVariants)
+}
+
+func normalizedAXText(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: "_", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        .lowercased()
+}
+
+let enabledOnlineDeviceRows = statusLines.filter { line in
+    line.contains("mac-online-device-ui")
+        && line.contains("targetFamily=ipad")
+        && line.contains("source=OnlineDeviceCard")
+        && line.contains("buttonEnabled=1")
+}
+
+let targetRowEvidenceLine: String? = {
+    guard !enabledOnlineDeviceRows.isEmpty else { return nil }
+
+    if targetIdentity != nil,
+       let identityMatched = enabledOnlineDeviceRows.reversed().first(where: { line in
+           identityValueMatchesTarget(fieldValue("identityKey", in: line))
+               || identityValueMatchesTarget(fieldValue("targetDeviceId", in: line))
+               || identityValueMatchesTarget(fieldValue("p2pDeviceId", in: line))
+       }) {
+        return identityMatched
+    }
+
+    let requestedName = normalizedAXText(targetNameFromEnvironment ?? "")
+    if !requestedName.isEmpty,
+       requestedName != "ipad" {
+        let nameMatches = enabledOnlineDeviceRows.filter { line in
+            [fieldValue("device", in: line), fieldValue("bonjourServiceName", in: line)]
+                .compactMap { $0 }
+                .map(normalizedAXText)
+                .contains { $0.contains(requestedName) || requestedName.contains($0) }
+        }
+        if nameMatches.count == 1 {
+            return nameMatches[0]
+        }
+    }
+
+    if targetIdentity == nil, enabledOnlineDeviceRows.count == 1 {
+        return enabledOnlineDeviceRows[0]
+    }
+
+    guard targetIdentity == nil else { return nil }
+    return enabledOnlineDeviceRows.last
+}()
+
+let targetDeviceNames: Set<String> = {
+    let rawValues = [
+        targetNameFromEnvironment,
+        targetRowEvidenceLine.flatMap { fieldValue("device", in: $0) }
+    ].compactMap { $0 }
+    var variants: [String] = []
+    for raw in rawValues {
+        variants.append(raw)
+        variants.append(raw.replacingOccurrences(of: "_", with: " "))
+    }
+    return Set(variants.map(normalizedAXText).filter { !$0.isEmpty && $0 != "-" })
+}()
+
+	func appendStatus(_ body: String) {
+	    guard let statusPath else { return }
+	    let rendered = "[\(ISO8601DateFormatter().string(from: Date()))] \(body)\n"
+	    guard let data = rendered.data(using: .utf8) else {
+	        return
+	    }
+	    let flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW
+	    let fd = open(statusPath, flags, mode_t(S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))
+	    guard fd >= 0 else { return }
+	    defer { close(fd) }
+
+	    var metadata = stat()
+	    guard fstat(fd, &metadata) == 0,
+	          (metadata.st_mode & S_IFMT) == S_IFREG else {
+	        return
+	    }
+
+	    data.withUnsafeBytes { rawBuffer in
+	        guard var current = rawBuffer.baseAddress else { return }
+	        var remaining = rawBuffer.count
+	        while remaining > 0 {
+	            let written = write(fd, current, remaining)
+	            if written <= 0 {
+	                break
+	            }
+	            current = current.advanced(by: written)
+	            remaining -= written
+	        }
+	    }
+	}
+
+func appendButtonClickEvidence(
+    targetRowBound: Bool,
+    axMatch: String,
+    buttonIdentifier: String,
+    didCenterClick: Bool
+) {
+    let identity = targetIdentity ?? "ax-visible-ipad-row"
+    if targetRowEvidenceLine == nil, targetRowBound, targetIdentity == nil {
+        appendStatus([
+            "mac-online-device-ui",
+            "targetFamily=ipad",
+            "visible=1",
+            "source=OnlineDeviceCard",
+            "evidenceSource=external-ax",
+            "status=online",
+            "buttonEnabled=1",
+            "matchStrength=\(targetIdentity == nil ? "visual-label" : "stable-id")",
+            "identityKey=\(identity)",
+            "buttonEvidenceSource=accessibility"
+        ].joined(separator: " "))
+    }
+    var fields = [
+        "mac-online-connect",
+        "action=button",
+        "targetFamily=ipad",
+        "button=1",
+        "source=OnlineDeviceCard",
+        "clickSource=accessibility",
+        "clickMechanism=AXUIElementPerformAction",
+        "clickAssist=\(didCenterClick ? "CGEventCenterClick" : "none")",
+        "targetRowBound=\(targetRowBound ? 1 : 0)",
+        "axMatch=\(axMatch)",
+        "buttonIdentifier=\(buttonIdentifier.isEmpty ? "-" : buttonIdentifier)"
+    ]
+    if targetRowEvidenceLine == nil {
+        fields.append("identityKey=\(identity)")
+        appendStatus(fields.joined(separator: " "))
+        appendConnectStartEvidence(targetRowBound: targetRowBound, didCenterClick: didCenterClick)
+        return
+    }
+    let rowLine = targetRowEvidenceLine!
+    for key in [
+        "resolvedSource",
+        "controlEndpoint",
+        "candidateCount",
+        "service",
+        "endpointClass",
+        "identityKey",
+        "targetDeviceId",
+        "p2pDeviceId",
+        "pubKeyFP",
+        "routeIdentifier",
+        "bonjourServiceName",
+        "endpointHost",
+        "endpointPort",
+        "buttonEnabledAtClick",
+        "disabledReason"
+    ] {
+        if let value = fieldValue(key, in: rowLine) {
+            fields.append("\(key)=\(value)")
+        }
+    }
+    appendStatus(fields.joined(separator: " "))
+    appendConnectStartEvidence(targetRowBound: targetRowBound, didCenterClick: didCenterClick)
+}
+
+func appendConnectStartEvidence(targetRowBound: Bool, didCenterClick: Bool) {
+    let identity = targetIdentity ?? "ax-visible-ipad-row"
+    var fields = [
+        "mac-online-connect-start",
+        "action=button",
+        "targetFamily=ipad",
+        "source=OnlineDeviceCard",
+        "evidenceSource=external-ax",
+        "clickSource=accessibility",
+        "clickMechanism=AXUIElementPerformAction",
+        "clickAssist=\(didCenterClick ? "CGEventCenterClick" : "none")",
+        "targetRowBound=\(targetRowBound ? 1 : 0)"
+    ]
+    guard let rowLine = targetRowEvidenceLine else {
+        fields.append("identityKey=\(identity)")
+        appendStatus(fields.joined(separator: " "))
+        return
+    }
+    for key in [
+        "identityKey",
+        "targetDeviceId",
+        "p2pDeviceId",
+        "pubKeyFP",
+        "buttonEnabledAtClick",
+        "disabledReason"
+    ] {
+        if let value = fieldValue(key, in: rowLine) {
+            fields.append("\(key)=\(value)")
+        }
+    }
+    appendStatus(fields.joined(separator: " "))
+}
+
+let root = AXUIElementCreateApplication(app.processIdentifier)
+
+func value(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
+    var result: CFTypeRef?
+    let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &result)
+    guard error == .success else { return nil }
+    return result as AnyObject?
+}
+
+func stringValue(_ element: AXUIElement, _ attribute: String) -> String? {
+    value(element, attribute) as? String
+}
+
+func boolValue(_ element: AXUIElement, _ attribute: String) -> Bool? {
+    value(element, attribute) as? Bool
+}
+
+func pointValue(_ element: AXUIElement, _ attribute: String) -> CGPoint? {
+    guard let axValue = value(element, attribute) else { return nil }
+    let opaque = axValue as! AXValue
+    guard AXValueGetType(opaque) == .cgPoint else { return nil }
+    var point = CGPoint.zero
+    return AXValueGetValue(opaque, .cgPoint, &point) ? point : nil
+}
+
+func sizeValue(_ element: AXUIElement, _ attribute: String) -> CGSize? {
+    guard let axValue = value(element, attribute) else { return nil }
+    let opaque = axValue as! AXValue
+    guard AXValueGetType(opaque) == .cgSize else { return nil }
+    var size = CGSize.zero
+    return AXValueGetValue(opaque, .cgSize, &size) ? size : nil
+}
+
+@discardableResult
+func clickElementCenter(_ element: AXUIElement) -> Bool {
+    guard let position = pointValue(element, kAXPositionAttribute as String),
+          let size = sizeValue(element, kAXSizeAttribute as String),
+          size.width > 0,
+          size.height > 0 else {
+        return false
+    }
+    let center = CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
+    guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: center, mouseButton: .left),
+          let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: center, mouseButton: .left) else {
+        return false
+    }
+    mouseDown.post(tap: .cghidEventTap)
+    usleep(80_000)
+    mouseUp.post(tap: .cghidEventTap)
+    return true
+}
+
+func textValues(of element: AXUIElement) -> [String] {
+    [
+        kAXTitleAttribute as String,
+        kAXDescriptionAttribute as String,
+        kAXValueAttribute as String,
+        kAXHelpAttribute as String
+    ].compactMap { stringValue(element, $0) }
+}
+
+func children(of element: AXUIElement) -> [AXUIElement] {
+    let childAttributes = [kAXWindowsAttribute as String, kAXChildrenAttribute as String]
+    for attribute in childAttributes {
+        if let values = value(element, attribute) as? [AXUIElement], !values.isEmpty {
+            return values
+        }
+    }
+    return []
+}
+
+func subtreeContainsTargetDevice(_ element: AXUIElement, depth: Int = 0) -> Bool {
+    guard !targetDeviceNames.isEmpty, depth < 16 else { return false }
+    let ownText = normalizedAXText(textValues(of: element).joined(separator: " "))
+    if targetDeviceNames.contains(where: { ownText.contains($0) }) {
+        return true
+    }
+    return children(of: element).contains { subtreeContainsTargetDevice($0, depth: depth + 1) }
+}
+
+func subtreeContainsConnectButton(_ element: AXUIElement, depth: Int = 0) -> Bool {
+    guard depth < 16 else { return false }
+    let role = stringValue(element, kAXRoleAttribute as String) ?? ""
+    let identifier = stringValue(element, kAXIdentifierAttribute as String) ?? ""
+    let title = stringValue(element, kAXTitleAttribute as String)
+        ?? stringValue(element, kAXDescriptionAttribute as String)
+        ?? ""
+    let enabled = boolValue(element, kAXEnabledAttribute as String) ?? true
+    if role == kAXButtonRole as String,
+       enabled,
+       identifier.hasPrefix("skybridge-online-device-connect-button-") || labels.contains(title) {
+        return true
+    }
+    return children(of: element).contains { subtreeContainsConnectButton($0, depth: depth + 1) }
+}
+
+func pressFirstConnectButton(
+    in element: AXUIElement,
+    depth: Int = 0,
+    allowTitleMatch: Bool,
+    targetRowBound: Bool
+) -> Bool {
+    guard depth < 24 else { return false }
+    let role = stringValue(element, kAXRoleAttribute as String) ?? ""
+    let identifier = stringValue(element, kAXIdentifierAttribute as String) ?? ""
+    let title = stringValue(element, kAXTitleAttribute as String)
+        ?? stringValue(element, kAXDescriptionAttribute as String)
+        ?? ""
+    let enabled = boolValue(element, kAXEnabledAttribute as String) ?? true
+    let exactIdentifierMatch = !targetIdentifiers.isEmpty && targetIdentifiers.contains(identifier)
+    let isSkyBridgeDeviceButton = identifier.hasPrefix("skybridge-online-device-connect-button-")
+    let fallbackIdentifierMatch = targetIdentity == nil && isSkyBridgeDeviceButton
+    let targetScopedTitleMatch = allowTitleMatch
+        && targetRowBound
+        && labels.contains(title)
+        && (targetIdentity == nil || targetRowEvidenceLine != nil || !isSkyBridgeDeviceButton)
+    let unscopedTitleMatch = allowTitleMatch
+        && targetIdentity == nil
+        && labels.contains(title)
+    let titleMatch = targetScopedTitleMatch || unscopedTitleMatch
+    if role == kAXButtonRole as String,
+       enabled,
+       exactIdentifierMatch || fallbackIdentifierMatch || titleMatch {
+        let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        let didCenterClick = clickElementCenter(element)
+        if error == .success || didCenterClick {
+            let matchKind = exactIdentifierMatch ? "target-identifier" : (fallbackIdentifierMatch ? "fallback-identifier" : "target-row-title")
+            appendButtonClickEvidence(
+                targetRowBound: targetRowBound || exactIdentifierMatch,
+                axMatch: matchKind,
+                buttonIdentifier: identifier,
+                didCenterClick: didCenterClick
+            )
+            print("pressed connect button title=\(title) identifier=\(identifier)")
+            return true
+        }
+    }
+    for child in children(of: element) {
+        if pressFirstConnectButton(
+            in: child,
+            depth: depth + 1,
+            allowTitleMatch: allowTitleMatch,
+            targetRowBound: targetRowBound
+        ) {
+            return true
+        }
+    }
+    return false
+}
+
+func pressConnectButtonInTargetRow(in element: AXUIElement, depth: Int = 0) -> Bool {
+    guard depth < 20 else { return false }
+    let candidateChildren = children(of: element).filter { child in
+        subtreeContainsTargetDevice(child) && subtreeContainsConnectButton(child)
+    }
+    for child in candidateChildren {
+        if pressConnectButtonInTargetRow(in: child, depth: depth + 1) {
+            return true
+        }
+    }
+    if subtreeContainsTargetDevice(element),
+       subtreeContainsConnectButton(element),
+       pressFirstConnectButton(in: element, allowTitleMatch: true, targetRowBound: true) {
+        return true
+    }
+    return false
+}
+
+NSRunningApplication(processIdentifier: app.processIdentifier)?.activate(options: [.activateAllWindows])
+Thread.sleep(forTimeInterval: 0.5)
+
+let pressed = pressFirstConnectButton(in: root, allowTitleMatch: false, targetRowBound: false)
+    || pressConnectButtonInTargetRow(in: root)
+    || (targetDeviceNames.isEmpty && pressFirstConnectButton(in: root, allowTitleMatch: true, targetRowBound: false))
+
+guard pressed else {
+    fail("unable to find an enabled SkyBridge online iPad Connect button")
+}
+SWIFT
+}
+
+observe_mac_online_ipad_connected_row() {
+  run_stdin_command_with_hard_timeout 20 swift - <<'SWIFT'
+	import ApplicationServices
+	import AppKit
+	import Darwin
+	import Foundation
+
+func fail(_ message: String) -> Never {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    exit(1)
+}
+
+guard AXIsProcessTrusted() else {
+    fail("macOS Accessibility permission is required to observe the SkyBridge online iPad connection result")
+}
+
+let candidates = NSWorkspace.shared.runningApplications.filter { app in
+    app.localizedName == "SkyBridge Compass Pro"
+        || app.executableURL?.lastPathComponent == "SkyBridgeCompassApp"
+}
+guard let app = candidates.sorted(by: { $0.processIdentifier > $1.processIdentifier }).first else {
+    fail("SkyBridge Compass Pro process is not running")
+}
+
+let statusPath = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_FILE"]
+let targetIdentityFromEnvironment = ProcessInfo.processInfo.environment["SKYBRIDGE_TARGET_IPAD_IDENTITY"]?
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+let targetNameFromEnvironment = ProcessInfo.processInfo.environment["SKYBRIDGE_TARGET_IPAD_NAME"]?
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+let statusLines = statusPath
+    .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }?
+    .split(whereSeparator: \.isNewline)
+    .map(String.init) ?? []
+
+func fieldValue(_ key: String, in line: String) -> String? {
+    guard let keyRange = line.range(of: "\(key)=") else { return nil }
+    let suffix = line[keyRange.upperBound...]
+    return suffix.split(separator: " ", maxSplits: 1).first.map(String.init)
+}
+
+let targetIdentity: String? = {
+    if let targetIdentityFromEnvironment, !targetIdentityFromEnvironment.isEmpty {
+        return targetIdentityFromEnvironment
+    }
+    guard let targetLine = statusLines.reversed().first(where: { line in
+        line.contains("mac-online-connect") && line.contains("source=OnlineDeviceCard")
+    }) else {
+        return nil
+    }
+    return fieldValue("identityKey", in: targetLine)
+        ?? fieldValue("targetDeviceId", in: targetLine)
+        ?? fieldValue("p2pDeviceId", in: targetLine)
+}()
+
+func stableIdentityPayload(from identity: String) -> String? {
+    let trimmed = identity.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let lowercased = trimmed.lowercased()
+    if lowercased.hasPrefix("id:") {
+        let payload = String(trimmed.dropFirst("id:".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return payload.isEmpty ? nil : payload.lowercased()
+    }
+    if trimmed.range(
+        of: "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+        options: .regularExpression
+    ) != nil {
+        return trimmed.lowercased()
+    }
+    return nil
+}
+
+func identityVariants(for identity: String?) -> Set<String> {
+    guard let identity else { return [] }
+    let trimmed = identity.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return [] }
+    let lowercased = trimmed.lowercased()
+    var variants = Set<String>()
+    variants.insert(trimmed)
+    variants.insert(lowercased)
+    if let stable = stableIdentityPayload(from: trimmed) {
+        variants.insert(stable)
+        variants.insert("id:\(stable)")
+        if !lowercased.hasPrefix("id:") {
+            variants.insert("id:\(trimmed)")
+        }
+    }
+    return variants
+}
+
+let targetIdentityVariants = identityVariants(for: targetIdentity)
+
+func identityValueMatchesTarget(_ value: String?) -> Bool {
+    guard !targetIdentityVariants.isEmpty else { return false }
+    return !identityVariants(for: value).isDisjoint(with: targetIdentityVariants)
+}
+
+let targetRowEvidenceLine: String? = statusLines.reversed().first { line in
+    guard line.contains("mac-online-device-ui"),
+          line.contains("source=OnlineDeviceCard") else {
+        return false
+    }
+    guard targetIdentity != nil else { return true }
+    return identityValueMatchesTarget(fieldValue("identityKey", in: line))
+        || identityValueMatchesTarget(fieldValue("targetDeviceId", in: line))
+        || identityValueMatchesTarget(fieldValue("p2pDeviceId", in: line))
+}
+
+func normalizedAXText(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: "_", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        .lowercased()
+}
+
+let targetDeviceNames: Set<String> = {
+    let rawValues = [
+        targetNameFromEnvironment,
+        targetRowEvidenceLine.flatMap { fieldValue("device", in: $0) }
+    ].compactMap { $0 }
+    var variants: [String] = []
+    for raw in rawValues {
+        variants.append(raw)
+        variants.append(raw.replacingOccurrences(of: "_", with: " "))
+    }
+    return Set(variants.map(normalizedAXText).filter { !$0.isEmpty && $0 != "-" })
+}()
+
+func appendStatus(_ body: String) {
+    guard let statusPath else { return }
+    let rendered = "[\(ISO8601DateFormatter().string(from: Date()))] \(body)\n"
+    guard let data = rendered.data(using: .utf8) else {
+        return
+    }
+    let flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW
+    let fd = open(statusPath, flags, mode_t(S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+
+    var metadata = stat()
+    guard fstat(fd, &metadata) == 0,
+          (metadata.st_mode & S_IFMT) == S_IFREG else {
+        return
+    }
+
+    data.withUnsafeBytes { rawBuffer in
+        guard var current = rawBuffer.baseAddress else { return }
+        var remaining = rawBuffer.count
+        while remaining > 0 {
+            let written = write(fd, current, remaining)
+            if written <= 0 {
+                break
+            }
+            current = current.advanced(by: written)
+            remaining -= written
+        }
+    }
+}
+
+let root = AXUIElementCreateApplication(app.processIdentifier)
+
+func value(_ element: AXUIElement, _ attribute: String) -> AnyObject? {
+    var result: CFTypeRef?
+    let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &result)
+    guard error == .success else { return nil }
+    return result as AnyObject?
+}
+
+func stringValue(_ element: AXUIElement, _ attribute: String) -> String? {
+    value(element, attribute) as? String
+}
+
+func textValues(of element: AXUIElement) -> [String] {
+    [
+        kAXTitleAttribute as String,
+        kAXDescriptionAttribute as String,
+        kAXValueAttribute as String,
+        kAXHelpAttribute as String
+    ].compactMap { stringValue(element, $0) }
+}
+
+func children(of element: AXUIElement) -> [AXUIElement] {
+    let childAttributes = [kAXWindowsAttribute as String, kAXChildrenAttribute as String]
+    for attribute in childAttributes {
+        if let values = value(element, attribute) as? [AXUIElement], !values.isEmpty {
+            return values
+        }
+    }
+    return []
+}
+
+func subtreeText(of element: AXUIElement, depth: Int = 0) -> String {
+    guard depth < 16 else { return "" }
+    var values = textValues(of: element)
+    for child in children(of: element) {
+        let childText = subtreeText(of: child, depth: depth + 1)
+        if !childText.isEmpty {
+            values.append(childText)
+        }
+    }
+    return values.joined(separator: " ")
+}
+
+func appendConnectedResult() {
+    let identity = targetIdentity
+        ?? targetRowEvidenceLine.flatMap { fieldValue("identityKey", in: $0) }
+        ?? "ax-visible-ipad-row"
+    var fields = [
+        "mac-online-connect-result",
+        "action=button",
+        "targetFamily=ipad",
+        "result=success",
+        "source=OnlineDeviceCard",
+        "evidenceSource=external-ax",
+        "observer=accessibility",
+        "targetRowBound=1",
+        "status=connected",
+        "identityKey=\(identity)"
+    ]
+    if let rowLine = targetRowEvidenceLine {
+        for key in [
+            "targetDeviceId",
+            "p2pDeviceId",
+            "pubKeyFP",
+            "buttonEnabledAtClick",
+            "disabledReason"
+        ] {
+            if let value = fieldValue(key, in: rowLine) {
+                fields.append("\(key)=\(value)")
+            }
+        }
+    }
+    appendStatus(fields.joined(separator: " "))
+}
+
+func connectedTargetRowExists(in element: AXUIElement, depth: Int = 0) -> Bool {
+    guard depth < 12 else { return false }
+    let normalizedText = normalizedAXText(subtreeText(of: element))
+    let containsTarget = !targetDeviceNames.isEmpty && targetDeviceNames.contains { normalizedText.contains($0) }
+    let containsConnected = normalizedText.contains("已连接") || normalizedText.contains("connected")
+    if containsTarget && containsConnected {
+        appendConnectedResult()
+        return true
+    }
+    return children(of: element).contains { connectedTargetRowExists(in: $0, depth: depth + 1) }
+}
+
+guard connectedTargetRowExists(in: root) else {
+    fail("target iPad row has not reached connected state yet")
+}
+SWIFT
+}
+
+wait_for_mac_online_connected_row() {
+  local timeout_seconds="$1"
+  local started_at
+  started_at="$(date +%s)"
+  while true; do
+    if SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_ONLINE_STATUS" \
+      SKYBRIDGE_TARGET_IPAD_IDENTITY="$IOS_PQC_DEVICE_ID" \
+      SKYBRIDGE_TARGET_IPAD_NAME="${SKYBRIDGE_SMOKE_IOS_TARGET_NAME:-iPad}" \
+      observe_mac_online_ipad_connected_row >>"$MAC_ONLINE_STDOUT" 2>&1; then
+      return 0
+    fi
+    if [[ -n "$MAC_ONLINE_PID" ]] && ! kill -0 "$MAC_ONLINE_PID" >/dev/null 2>&1; then
+      wait "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
+      MAC_ONLINE_PID=""
+      printf '%s mac-online-connect-result action=button targetFamily=ipad result=failure source=OnlineDeviceCard evidenceSource=external-ax observer=accessibility status=process-exited identityKey=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
+      sync_mac_online_launch_stdio
+      tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      return 1
+    fi
+    if (( "$(date +%s)" - started_at >= timeout_seconds )); then
+      printf '%s mac-online-connect-result action=button targetFamily=ipad result=failure source=OnlineDeviceCard evidenceSource=external-ax observer=accessibility status=connected-row-timeout identityKey=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
+      sync_mac_online_launch_stdio
+      tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
+      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+run_mac_online_ipad_button_smoke() {
+  mkdir -p "$MAC_ONLINE_RUNTIME_DIR"
+  : >"$MAC_ONLINE_STATUS"
+  : >"$MAC_ONLINE_STATUS_ARTIFACT"
+  build_macos_online_ipad_app
+  terminate_stale_macos_online_ipad_clients
+  load_ios_pqc_report_for_mac_online
+  echo "==> Starting macOS online iPad UI client"
+  printf '%s launch requested role=mac-online-ipad-client process=SkyBridgeCompassApp uiRole=external-accessibility method=open-app-bundle\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
+  start_macos_online_ipad_client
+  wait_for_mac_online_pattern 'boot .*role=mac-online-ipad-client .*source=app' 20 "macOS online iPad app smoke role boot"
+  wait_for_mac_online_pattern 'mac-online-device-ui .*targetFamily=ipad .*source=OnlineDeviceCard .*status=online .*buttonEnabled=1' 60 "macOS online iPad visible connectable row"
+
+  echo "==> Pressing macOS online iPad Connect button"
+  local click_started_at
+  click_started_at="$(date +%s)"
+  while true; do
+    if SKYBRIDGE_SMOKE_STATUS_FILE="$MAC_ONLINE_STATUS" \
+      SKYBRIDGE_TARGET_IPAD_IDENTITY="$IOS_PQC_DEVICE_ID" \
+      SKYBRIDGE_TARGET_IPAD_NAME="${SKYBRIDGE_SMOKE_IOS_TARGET_NAME:-iPad}" \
+      press_mac_online_ipad_connect_button >>"$MAC_ONLINE_STDOUT" 2>&1; then
+      break
+    fi
+    if (( "$(date +%s)" - click_started_at >= SMOKE_TIMEOUT_SECONDS )); then
+      printf '%s failed stage=mac-online-ipad phase=ui-click reason=accessibility-click-failed\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
+      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
+      return 1
+    fi
+    sleep 1
+  done
+
+  wait_for_mac_online_pattern 'mac-online-connect action=button .*source=OnlineDeviceCard .*clickSource=accessibility .*targetRowBound=1 .*axMatch=(target-identifier|target-row-title)' 30 "macOS online iPad real button click evidence"
+  wait_for_mac_online_pattern 'mac-online-connect-start .*targetFamily=ipad .*source=OnlineDeviceCard .*evidenceSource=external-ax' 30 "macOS online iPad connect start from clicked row"
+  wait_for_mac_online_connected_row "$SMOKE_TIMEOUT_SECONDS"
 }
 
 fail_if_host_exited() {
@@ -164,6 +1765,147 @@ fail_if_host_exited() {
   fi
 }
 
+fail_if_smoke_source_exited() {
+  local label="$1"
+  if [[ -n "$MAC_SOURCE_PID" ]] && ! kill -0 "$MAC_SOURCE_PID" >/dev/null 2>&1; then
+    append_host_status "failed stage=mac-smoke-source phase=process-exited label=${label// /_}"
+    echo "macOS smoke source helper exited while waiting for ${label}: ${HOST_STATUS}" >&2
+    echo "---- macOS status tail ($HOST_STATUS) ----" >&2
+    tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+    echo "---- smoke source stdout tail ($MAC_SOURCE_STDOUT) ----" >&2
+    tail -n 80 "$MAC_SOURCE_STDOUT" >&2 2>/dev/null || true
+    return 1
+  fi
+}
+
+fail_if_smoke_source_stale() {
+  local label="$1"
+  local max_age_seconds="${2:-15}"
+  if [[ -z "$MAC_SOURCE_PID" ]] || [[ ! -f "$HOST_STATUS" ]]; then
+    return 0
+  fi
+
+  local freshness
+  set +e
+  freshness="$(python3 - "$HOST_STATUS" "$max_age_seconds" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+path = sys.argv[1]
+max_age = float(sys.argv[2])
+last_timestamp = None
+with open(path, "r", encoding="utf-8", errors="replace") as handle:
+    for line in reversed(handle.readlines()):
+        if "smoke-capture-source active=1" not in line:
+            continue
+        if not line.startswith("[") or "]" not in line:
+            print("unparseable")
+            sys.exit(2)
+        raw = line[1:line.index("]")]
+        try:
+            last_timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            print("unparseable")
+            sys.exit(2)
+        break
+
+if last_timestamp is None:
+    print("missing")
+    sys.exit(3)
+
+now = datetime.now(timezone.utc)
+age = (now - last_timestamp.astimezone(timezone.utc)).total_seconds()
+print(f"{age:.1f}")
+if age > max_age:
+    sys.exit(4)
+PY
+)"
+  local status=$?
+  set -e
+  if (( status != 0 )); then
+    append_host_status "failed stage=mac-smoke-source phase=heartbeat-stale label=${label// /_} ageSeconds=${freshness:-unknown} budgetSeconds=$max_age_seconds"
+    echo "macOS smoke source heartbeat is stale while waiting for ${label}: ageSeconds=${freshness:-unknown}, budgetSeconds=${max_age_seconds}" >&2
+    echo "---- macOS status tail ($HOST_STATUS) ----" >&2
+    tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+    echo "---- smoke source stdout tail ($MAC_SOURCE_STDOUT) ----" >&2
+    tail -n 80 "$MAC_SOURCE_STDOUT" >&2 2>/dev/null || true
+    return 1
+  fi
+}
+
+verify_mac_control_port_reachable() {
+  local host="$1"
+  local port="$2"
+  local started_at
+  local probe_error="$ARTIFACT_DIR/mac-control-port-probe.stderr.log"
+  started_at="$(date +%s)"
+
+  while true; do
+    if tcp_port_reachable "$host" "$port" "$probe_error"
+    then
+      append_host_status "mac-control-port reachable=1 host=$host port=$port source=pre-ios-probe"
+      return 0
+    fi
+
+    fail_if_host_exited "macOS control port reachability" || return 1
+    if (( "$(date +%s)" - started_at >= 10 )); then
+      local detail
+      detail="$(tail -n 1 "$probe_error" 2>/dev/null | tr '[:space:]' '_' || true)"
+      append_host_status "failed stage=mac-host phase=control-port-probe reason=tcp-unreachable host=$host port=$port detail=${detail:-unknown}"
+      echo "macOS host control port is not reachable before iOS launch: ${host}:${port}" >&2
+      tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+      return 1
+    fi
+    sleep 0.5
+  done
+}
+
+verify_mac_remote_port_listening() {
+  local host="$1"
+  local port="$2"
+  local started_at
+  local probe_error="$ARTIFACT_DIR/mac-remote-port-probe.stderr.log"
+  started_at="$(date +%s)"
+
+  while true; do
+    if tcp_port_reachable "$host" "$port" "$probe_error"
+    then
+      append_host_status "mac-remote-control-port reachable=1 host=$host port=$port source=pre-ios-probe"
+      return 0
+    fi
+
+    fail_if_host_exited "macOS remote-control port listener" || return 1
+    if (( "$(date +%s)" - started_at >= 10 )); then
+      local detail
+      detail="$(tail -n 1 "$probe_error" 2>/dev/null | tr '[:space:]' '_' || true)"
+      append_host_status "failed stage=mac-host phase=remote-control-port-probe reason=tcp-unreachable host=$host port=$port detail=${detail:-unknown}"
+      echo "macOS host remote-control port is not reachable before iOS launch: ${host}:${port}" >&2
+      tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+      return 1
+    fi
+    sleep 0.5
+  done
+}
+
+tcp_port_reachable() {
+  local host="$1"
+  local port="$2"
+  local probe_error="$3"
+  python3 - "$host" "$port" > /dev/null 2>"$probe_error" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+try:
+    with socket.create_connection((host, port), timeout=1.5):
+        pass
+except OSError as exc:
+    print(f"{type(exc).__name__}:{exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 wait_for_file_pattern() {
   local path="$1"
   local pattern="$2"
@@ -173,6 +1915,7 @@ wait_for_file_pattern() {
   started_at="$(date +%s)"
   while true; do
     fail_if_host_exited "$label" || return 1
+    fail_if_smoke_source_exited "$label" || return 1
     if [[ -n "$IOS_CONSOLE_PID" ]] \
       && [[ -f "$IOS_STATUS_LOCAL" ]] \
       && grep -qE "$IOS_REMOTE_SMOKE_FAILURE_PATTERN" "$IOS_STATUS_LOCAL"; then
@@ -181,6 +1924,7 @@ wait_for_file_pattern() {
       tail -n 40 "$IOS_CONSOLE_STDERR" >&2 || true
       return 1
     fi
+    fail_if_forbidden_fallback_evidence "$IOS_STATUS_LOCAL" "$label" || return 1
     if [[ -n "$IOS_CONSOLE_PID" ]] && ! kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
       echo "iOS console process exited while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
       tail -n 80 "$IOS_STATUS_LOCAL" >&2 || true
@@ -196,6 +1940,7 @@ wait_for_file_pattern() {
       tail -n 80 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
       return 1
     fi
+    fail_if_forbidden_fallback_evidence "$HOST_STATUS" "$label" || return 1
     if [[ -f "$path" ]] && grep -qE "$pattern" "$path"; then
       return 0
     fi
@@ -211,6 +1956,93 @@ wait_for_file_pattern() {
   done
 }
 
+run_with_hard_timeout() {
+  local timeout_seconds="$1"
+  shift
+  local pid
+  local started_at
+  "$@" &
+  pid="$!"
+  started_at="$(date +%s)"
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if (( "$(date +%s)" - started_at >= timeout_seconds )); then
+      kill "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      kill -9 "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 0.25
+  done
+
+  set +e
+  wait "$pid"
+  local exit_status="$?"
+  set -e
+  return "$exit_status"
+}
+
+run_stdin_command_with_hard_timeout() {
+  local timeout_seconds="$1"
+  shift
+  python3 -c '
+import subprocess
+import sys
+
+timeout_seconds = float(sys.argv[1])
+command = sys.argv[2:]
+input_data = sys.stdin.buffer.read()
+process = subprocess.Popen(command, stdin=subprocess.PIPE)
+try:
+    process.communicate(input=input_data, timeout=timeout_seconds)
+except subprocess.TimeoutExpired:
+    process.terminate()
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    raise SystemExit(124)
+raise SystemExit(process.returncode)
+' "$timeout_seconds" "$@"
+}
+
+copy_ios_app_cache_file() {
+  local remote_name="$1"
+  local local_path="$2"
+  local label="$3"
+  local tmp_path="${local_path}.tmp.${BASHPID:-$$}"
+  local json_log="$ARTIFACT_DIR/ios-copy-${label}.json"
+  local devicectl_log="$ARTIFACT_DIR/ios-copy-${label}.log"
+  local stdout_log="$ARTIFACT_DIR/ios-copy-${label}.stdout.log"
+  local stderr_log="$ARTIFACT_DIR/ios-copy-${label}.stderr.log"
+  local remote_path="Library/Caches/$remote_name"
+
+  rm -f "$tmp_path" "$json_log" "$devicectl_log" "$stdout_log" "$stderr_log"
+  if run_with_hard_timeout "$IOS_COPY_HARD_TIMEOUT_SECONDS" \
+    xcrun devicectl device copy from \
+    --device "$IOS_DEVICE_ID" \
+    --domain-type appDataContainer \
+    --domain-identifier "$IOS_BUNDLE_ID" \
+    --source "$remote_path" \
+    --destination "$tmp_path" \
+    --timeout "$IOS_COPY_TIMEOUT_SECONDS" \
+    --json-output "$json_log" \
+    --log-output "$devicectl_log" >"$stdout_log" 2>"$stderr_log"; then
+    if [[ -s "$tmp_path" ]]; then
+      mv -f "$tmp_path" "$local_path"
+      return 0
+    fi
+    echo "iOS app-cache copy produced an empty file: label=$label remote=$remote_path destination=$local_path json=$json_log log=$devicectl_log" >&2
+  else
+    local copy_exit="$?"
+    echo "iOS app-cache copy failed: label=$label remote=$remote_path destination=$local_path exit=$copy_exit json=$json_log log=$devicectl_log stderr=$stderr_log" >&2
+  fi
+
+  rm -f "$tmp_path"
+  return 1
+}
+
 copy_ios_status() {
   if [[ -f "$IOS_STATUS_LOCAL" ]]; then
     cp "$IOS_STATUS_LOCAL" "$IOS_STATUS_CONSOLE_SNAPSHOT" 2>/dev/null || true
@@ -218,57 +2050,11 @@ copy_ios_status() {
     rm -f "$IOS_STATUS_CONSOLE_SNAPSHOT"
   fi
 
-  python3 - "$IOS_DEVICE_ID" "$IOS_BUNDLE_ID" "Library/Caches/$IOS_STATUS_NAME" "$IOS_STATUS_APP_CACHE_LOCAL" <<'PY'
-import os
-import subprocess
-import sys
+  if [[ "$IOS_COPY_STATUS_APP_CACHE" == "1" || ! -s "$IOS_STATUS_CONSOLE_SNAPSHOT" ]]; then
+    copy_ios_app_cache_file "$IOS_STATUS_NAME" "$IOS_STATUS_APP_CACHE_LOCAL" "status" || true
+  fi
 
-device_id, bundle_id, source, destination = sys.argv[1:]
-temporary_destination = f"{destination}.tmp"
-try:
-    os.remove(temporary_destination)
-except FileNotFoundError:
-    pass
-command = [
-    "xcrun",
-    "devicectl",
-    "device",
-    "copy",
-    "from",
-    "--device",
-    device_id,
-    "--domain-type",
-    "appDataContainer",
-    "--domain-identifier",
-    bundle_id,
-    "--source",
-    source,
-    "--destination",
-    temporary_destination,
-]
-try:
-    completed = subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=15,
-        check=False,
-    )
-    if completed.returncode == 0 and os.path.exists(temporary_destination):
-        os.replace(temporary_destination, destination)
-    else:
-        try:
-            os.remove(temporary_destination)
-        except FileNotFoundError:
-            pass
-except subprocess.TimeoutExpired:
-    try:
-        os.remove(temporary_destination)
-    except FileNotFoundError:
-        pass
-PY
-
-  if [[ -f "$IOS_STATUS_CONSOLE_SNAPSHOT" && -f "$IOS_STATUS_APP_CACHE_LOCAL" ]]; then
+  if [[ -f "$IOS_STATUS_CONSOLE_SNAPSHOT" && -s "$IOS_STATUS_APP_CACHE_LOCAL" ]]; then
     {
       printf '%s\n' "# source=devicectl-console"
       sed -n 'p' "$IOS_STATUS_CONSOLE_SNAPSHOT"
@@ -277,8 +2063,117 @@ PY
       sed -n 'p' "$IOS_STATUS_APP_CACHE_LOCAL"
     } >"$IOS_STATUS_LOCAL.merged"
     mv "$IOS_STATUS_LOCAL.merged" "$IOS_STATUS_LOCAL"
-  elif [[ -f "$IOS_STATUS_APP_CACHE_LOCAL" ]]; then
+  elif [[ -s "$IOS_STATUS_APP_CACHE_LOCAL" ]]; then
     cp "$IOS_STATUS_APP_CACHE_LOCAL" "$IOS_STATUS_LOCAL" 2>/dev/null || true
+  fi
+}
+
+materialize_ios_pqc_report_from_app_authored_status() {
+  [[ -s "$IOS_STATUS_LOCAL" ]] || return 1
+
+  python3 - "$IOS_STATUS_LOCAL" "$IOS_PQC_REPORT" <<'PY'
+import base64
+import json
+import re
+import sys
+
+status_path, output_path = sys.argv[1:]
+pattern = re.compile(r"\bpqc-report\b.*\breportJSONBase64=([A-Za-z0-9+/=]+)")
+
+try:
+    with open(status_path, "r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+except OSError as exc:
+    print(f"unable to read iOS status for app-authored PQC report: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+for line in reversed(lines):
+    match = pattern.search(line)
+    if not match:
+        continue
+    try:
+        data = base64.b64decode(match.group(1), validate=True)
+        report = json.loads(data.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"invalid app-authored iOS PQC report in status: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    device_id = report.get("deviceId")
+    keys = report.get("keys")
+    if not isinstance(device_id, str) or not device_id.strip():
+        print("app-authored iOS PQC report is missing deviceId", file=sys.stderr)
+        raise SystemExit(1)
+    if not isinstance(keys, list) or not keys:
+        print("app-authored iOS PQC report is missing keys", file=sys.stderr)
+        raise SystemExit(1)
+    for key in keys:
+        if not isinstance(key, dict):
+            print("app-authored iOS PQC report contains a non-object key entry", file=sys.stderr)
+            raise SystemExit(1)
+        if not isinstance(key.get("suiteWireId"), int):
+            print("app-authored iOS PQC report key entry is missing suiteWireId", file=sys.stderr)
+            raise SystemExit(1)
+        public_key = key.get("publicKeyBase64")
+        if not isinstance(public_key, str) or not public_key.strip():
+            print("app-authored iOS PQC report key entry is missing publicKeyBase64", file=sys.stderr)
+            raise SystemExit(1)
+
+    with open(output_path, "w", encoding="utf-8") as output:
+        json.dump(report, output, indent=2, sort_keys=True)
+        output.write("\n")
+    print(f"iOS PQC report materialized from app-authored status: device={device_id} keys={len(keys)}")
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+load_ios_pqc_report_for_mac_online() {
+  copy_ios_status
+
+  if [[ ! -s "$IOS_PQC_REPORT" ]]; then
+    materialize_ios_pqc_report_from_app_authored_status || true
+  fi
+
+  if [[ ! -s "$IOS_PQC_REPORT" ]]; then
+    copy_ios_app_cache_file "$IOS_PQC_REPORT_NAME" "$IOS_PQC_REPORT" "pqc-report" || true
+  fi
+
+  if [[ ! -s "$IOS_PQC_REPORT" ]]; then
+    copy_ios_status
+    materialize_ios_pqc_report_from_app_authored_status || true
+  fi
+
+  if [[ ! -s "$IOS_PQC_REPORT" ]]; then
+    echo "iOS PQC report is missing; cannot prove Mac online iPad button with a real trusted KEM key: $IOS_PQC_REPORT" >&2
+    echo "---- iOS PQC report copy log ----" >&2
+    tail -n 80 "$ARTIFACT_DIR/ios-copy-pqc-report.log" >&2 2>/dev/null || true
+    tail -n 80 "$ARTIFACT_DIR/ios-copy-pqc-report.stderr.log" >&2 2>/dev/null || true
+    echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
+    tail -n 80 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+    return 1
+  fi
+
+  local report_data
+  report_data="$(python3 - "$IOS_PQC_REPORT" <<'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+keys = {
+    int(entry.get("suiteWireId", -1)): entry.get("publicKeyBase64", "")
+    for entry in report.get("keys", [])
+}
+print(report.get("deviceId", ""))
+print(keys.get(0x0001, ""))
+PY
+)"
+  IOS_PQC_DEVICE_ID="$(printf '%s\n' "$report_data" | sed -n '1p')"
+  IOS_PQC_XWING_PUBLIC_KEY_BASE64="$(printf '%s\n' "$report_data" | sed -n '2p')"
+
+  if [[ -z "$IOS_PQC_DEVICE_ID" || -z "$IOS_PQC_XWING_PUBLIC_KEY_BASE64" ]]; then
+    echo "iOS PQC report is missing required X-Wing identity: $IOS_PQC_REPORT" >&2
+    return 1
   fi
 }
 
@@ -286,6 +2181,8 @@ verify_mac_smoke_capture_source_visible() {
   local first="$MAC_SMOKE_SOURCE_FRAME_A"
   local second="$MAC_SMOKE_SOURCE_FRAME_B"
   local proof
+
+  detect_macos_loginwindow_occlusion
 
   if ! command -v screencapture >/dev/null 2>&1; then
     append_host_status "failed stage=mac-host phase=smoke-source-preflight reason=missing-screencapture"
@@ -400,6 +2297,77 @@ SWIFT
   append_host_status "smoke-capture-source captureVerified=1 $proof screenshotA=$(basename "$first") screenshotB=$(basename "$second")"
 }
 
+detect_macos_loginwindow_occlusion() {
+  local proof
+  local status
+
+  set +e
+  proof="$(swift - 2>&1 <<'SWIFT'
+import CoreGraphics
+import Foundation
+
+let displayBounds = CGDisplayBounds(CGMainDisplayID())
+let displayArea = max(1.0, displayBounds.width * displayBounds.height)
+let windowOptions: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+
+guard let windows = CGWindowListCopyWindowInfo(windowOptions, kCGNullWindowID) as? [[String: Any]] else {
+    exit(0)
+}
+
+func doubleValue(_ dictionary: [String: Any], _ key: String) -> Double? {
+    if let number = dictionary[key] as? NSNumber {
+        return number.doubleValue
+    }
+    return dictionary[key] as? Double
+}
+
+for window in windows {
+    let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+    guard owner == "loginwindow" else { continue }
+    let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue
+        ?? window[kCGWindowLayer as String] as? Int
+        ?? 0
+    guard layer >= 1000,
+          let boundsDictionary = window[kCGWindowBounds as String] as? [String: Any],
+          let x = doubleValue(boundsDictionary, "X"),
+          let y = doubleValue(boundsDictionary, "Y"),
+          let width = doubleValue(boundsDictionary, "Width"),
+          let height = doubleValue(boundsDictionary, "Height") else {
+        continue
+    }
+    let bounds = CGRect(x: x, y: y, width: width, height: height)
+    let intersection = bounds.intersection(displayBounds)
+    let coverage = max(0.0, intersection.width) * max(0.0, intersection.height) / displayArea
+    if coverage >= 0.90 {
+        print(String(format: "loginwindowLayer=%d loginwindowCoverage=%.3f display=%dx%d window=%d,%d,%dx%d",
+                     layer,
+                     coverage,
+                     Int(displayBounds.width),
+                     Int(displayBounds.height),
+                     Int(bounds.origin.x),
+                     Int(bounds.origin.y),
+                     Int(bounds.width),
+                     Int(bounds.height)))
+        exit(2)
+    }
+}
+SWIFT
+)"
+  status=$?
+  set -e
+  if (( status == 2 )); then
+    append_host_status "failed stage=mac-host phase=smoke-source-preflight reason=screen-locked-loginwindow-occlusion $proof"
+    echo "Mac desktop is covered by loginwindow; unlock the Mac display before running the visible remote desktop smoke." >&2
+    echo "$proof" >&2
+    return 1
+  fi
+  if (( status != 0 )); then
+    append_host_status "failed stage=mac-host phase=smoke-source-preflight reason=loginwindow-occlusion-check-error"
+    echo "$proof" >&2
+    return 1
+  fi
+}
+
 wait_for_ios_status_pattern() {
   local pattern="$1"
   local timeout_seconds="$2"
@@ -411,6 +2379,8 @@ wait_for_ios_status_pattern() {
   last_status_update_at="$started_at"
   while true; do
     fail_if_host_exited "$label" || return 1
+    fail_if_smoke_source_exited "$label" || return 1
+    fail_if_smoke_source_stale "$label" 15 || return 1
     local now
     now="$(date +%s)"
     if [[ -f "$IOS_STATUS_LOCAL" ]]; then
@@ -539,13 +2509,17 @@ min_fps = float(min_fps_raw)
 target_fps = float(target_fps_raw)
 max_transport_fps = target_fps + 3.0
 sck_cadence_catch_up_limit = 2
-sender_cadence_catch_up_limit = 3
+sender_cadence_catch_up_limit = 1
 bounded_missed_cadence_slots_limit = 0
 strict_mac_sender_queue_limit = 6
+sender_content_backlog_frame_limit = 18
+strict_ios_decode_feed_mode = "ordered-vt-decode-metal-direct"
+strict_ios_decode_pending_limit = 12
+strict_ios_decode_in_flight_limit = 4
 max_sck_source_frame_age_ms = 34.0
 max_sck_source_frame_repeat = 3
 hevc_burst_headroom_multiplier = 8
-hevc_single_chunk_encoded_budget_bytes = 256 * 1024 - 36 - 28 - 36
+hevc_single_chunk_encoded_budget_bytes = 256 * 1024 - 36 - 68 - 36
 soak_seconds = float(soak_raw)
 expected_frame = f"{int(width_raw)}x{int(height_raw)}"
 minimum_window_samples = max(1, int(soak_seconds) - 2)
@@ -693,6 +2667,7 @@ audio_played_start = None
 audio_played_end = None
 metal_count = 0
 metal_sample_ms = 0
+metal_input = 0
 metal_draw_callbacks = 0
 metal_submitted = 0
 metal_displayed = 0
@@ -711,6 +2686,7 @@ metal_display_link_pump_fps = 0
 lan_rx_count = 0
 frame_budget_ms = 1000.0 / max(min_fps, 1.0)
 max_raw_chunk_gap_ms = frame_budget_ms * 12.0
+minimum_sampled_lan_fps = min_fps * 0.90
 lan_rx_sample_ms = 0
 lan_rx_screen_frames = 0
 lan_rx_sbc2_frames = 0
@@ -730,9 +2706,23 @@ lan_rx_screen_delivery_delivered = 0
 lan_rx_screen_delivery_backpressure = 0
 lan_rx_screen_delivery_queue_depth_max = 0
 lan_rx_screen_delivery_delay_max_ms = 0.0
+lan_rx_decode_feed_samples = 0
+lan_rx_decode_feed_strict_samples = 0
+lan_rx_decode_attempted = 0
+lan_rx_decode_accepted = 0
+lan_rx_decode_dropped = 0
+lan_rx_decode_pending_max = 0
+lan_rx_decode_in_flight_max = 0
+lan_rx_decode_waiting_sync = 0
+lan_rx_decode_resets = 0
 lan_rx_raw_chunk_gap_max_ms = 0.0
+lan_rx_main_hop_max_ms = 0.0
 lan_rx_raw_chunk_main_hop_max_ms = 0.0
 lan_rx_complete_frames_per_drain_max = 0
+lan_rx_parser_drain_max_ms = 0.0
+lan_rx_parser_budget_samples = 0
+lan_rx_parser_budget_ms_max = 0.0
+lan_rx_parser_budget_hits = 0
 for line in window_lines:
     if "remote-desktop status " in line:
         ios_status_count += 1
@@ -762,6 +2752,7 @@ for line in window_lines:
     if "Metal render telemetry:" in line:
         metal_count += 1
         metal_sample_ms += int_metric(line, "sampleMs")
+        metal_input += int_metric(line, "input")
         metal_draw_callbacks += int_metric(line, "drawCallbacks")
         metal_submitted += int_metric(line, "submitted")
         metal_displayed += int_metric(line, "displayed")
@@ -814,11 +2805,20 @@ for line in window_lines:
             lan_rx_source_to_read_unsynced_clock_samples += 1
         lan_rx_raw_chunks += int_metric(line, "rawChunks")
         lan_rx_raw_chunk_gap_max_ms = max(lan_rx_raw_chunk_gap_max_ms, float_metric(line, "rawChunkGapMaxMs"))
+        lan_rx_main_hop_max_ms = max(lan_rx_main_hop_max_ms, float_metric(line, "maxMainHopMs"))
         lan_rx_raw_chunk_main_hop_max_ms = max(lan_rx_raw_chunk_main_hop_max_ms, float_metric(line, "rawChunkMainHopMaxMs"))
         lan_rx_complete_frames_per_drain_max = max(lan_rx_complete_frames_per_drain_max, int_metric(line, "completeFramesPerDrainMax"))
+        lan_rx_parser_drain_max_ms = max(lan_rx_parser_drain_max_ms, float_metric(line, "parserDrainMaxMs"))
+        if metric(line, "parserBudgetMs") is not None:
+            lan_rx_parser_budget_samples += 1
+            lan_rx_parser_budget_ms_max = max(lan_rx_parser_budget_ms_max, float_metric(line, "parserBudgetMs"))
+        lan_rx_parser_budget_hits += int_metric(line, "parserBudgetHits")
+        if metric(line, "parserDrainMaxMs") is not None and metric(line, "parserBudgetMs") is not None:
+            if float_metric(line, "parserDrainMaxMs") > float_metric(line, "parserBudgetMs"):
+                fail(f"iOS LAN parser drain exceeded its per-sample budget: {line.strip()}")
         if metric(line, "screenWire") != "sbc2-chunked-v1":
             fail(f"iOS LAN receive did not use sbc2-chunked-v1: {line.strip()}")
-        if metric(line, "readAhead") != "stream-parser-low-latency-8k-4frame-drain-budget":
+        if metric(line, "readAhead") != "stream-parser-low-latency-256k-4frame-6ms-drain-budget":
             fail(f"iOS LAN receive did not prove low-latency read-ahead and bounded drain: {line.strip()}")
         lan_rx_read_ahead_samples += 1
         screen_delivery = metric(line, "screenDelivery")
@@ -831,6 +2831,18 @@ for line in window_lines:
         lan_rx_screen_delivery_backpressure += int_metric(line, "screenDeliveryBackpressure")
         lan_rx_screen_delivery_queue_depth_max = max(lan_rx_screen_delivery_queue_depth_max, int_metric(line, "screenDeliveryQueueDepthMax"))
         lan_rx_screen_delivery_delay_max_ms = max(lan_rx_screen_delivery_delay_max_ms, float_metric(line, "screenDeliveryDelayMaxMs"))
+        decode_feed = metric(line, "decodeFeed")
+        if decode_feed is not None:
+            lan_rx_decode_feed_samples += 1
+        if decode_feed == strict_ios_decode_feed_mode:
+            lan_rx_decode_feed_strict_samples += 1
+        lan_rx_decode_attempted += int_metric(line, "decodeAttempted")
+        lan_rx_decode_accepted += int_metric(line, "decodeAccepted")
+        lan_rx_decode_dropped += int_metric(line, "decodeDropped")
+        lan_rx_decode_pending_max = max(lan_rx_decode_pending_max, int_metric(line, "decodePendingMax"))
+        lan_rx_decode_in_flight_max = max(lan_rx_decode_in_flight_max, int_metric(line, "decodeInFlightMax"))
+        lan_rx_decode_waiting_sync += int_metric(line, "decodeWaitingSyncSamples")
+        lan_rx_decode_resets += int_metric(line, "decodeResets")
 
 if ios_status_count == 0:
     fail("no iOS remote-desktop status samples inside final pass window")
@@ -848,11 +2860,14 @@ if metal_sample_ms <= 0:
     fail("Metal render telemetry did not report a positive aggregate sample window")
 if metal_frame_age_samples <= 0:
     fail("Metal render telemetry did not report frameAgeMs evidence inside final pass window")
+metal_input_fps = metal_input * 1000.0 / metal_sample_ms
+if metal_input_fps < min_fps:
+    fail(f"Metal aggregate inputFPS below {min_fps}: input={metal_input} sampleMs={metal_sample_ms} fps={metal_input_fps:.1f}")
 if lan_rx_sample_ms <= 0:
     fail("iOS LAN receive telemetry did not report a positive aggregate sample window")
 lan_rx_screen_fps = lan_rx_screen_frames * 1000.0 / lan_rx_sample_ms
-if lan_rx_screen_fps < min_fps:
-    fail(f"iOS LAN receive aggregate screenFPS below {min_fps}: frames={lan_rx_screen_frames} sampleMs={lan_rx_sample_ms} fps={lan_rx_screen_fps:.1f} maxGapMs={lan_rx_max_gap_ms:.1f}")
+if lan_rx_screen_fps < minimum_sampled_lan_fps:
+    fail(f"iOS LAN sampled receive screenFPS far below final pass marker: frames={lan_rx_screen_frames} sampleMs={lan_rx_sample_ms} fps={lan_rx_screen_fps:.1f} minimumSampledFPS={minimum_sampled_lan_fps:.1f} finalWindowRxFPS={reported_window_rx_fps:.1f} maxGapMs={lan_rx_max_gap_ms:.1f}")
 if lan_rx_screen_fps > max_transport_fps:
     fail(f"iOS LAN receive aggregate screenFPS exceeded strict target: fps={lan_rx_screen_fps:.1f} target={target_fps:.1f}")
 if lan_rx_sbc2_frames <= 0:
@@ -878,18 +2893,46 @@ if lan_rx_screen_delivery_delivered <= 0:
 if lan_rx_screen_delivery_attempted < lan_rx_screen_delivery_delivered:
     fail(f"iOS LAN screen delivery accepted more frames than attempted: attempted={lan_rx_screen_delivery_attempted} delivered={lan_rx_screen_delivery_delivered}")
 lan_rx_screen_delivery_fps = lan_rx_screen_delivery_delivered * 1000.0 / lan_rx_sample_ms
-if lan_rx_screen_delivery_fps < min_fps:
-    fail(f"iOS LAN screen delivery FPS below {min_fps}: delivered={lan_rx_screen_delivery_delivered} sampleMs={lan_rx_sample_ms} fps={lan_rx_screen_delivery_fps:.1f}")
+if lan_rx_screen_delivery_fps < minimum_sampled_lan_fps:
+    fail(f"iOS LAN sampled screen delivery FPS far below final pass marker: delivered={lan_rx_screen_delivery_delivered} sampleMs={lan_rx_sample_ms} fps={lan_rx_screen_delivery_fps:.1f} minimumSampledFPS={minimum_sampled_lan_fps:.1f} finalWindowFPS={reported_window_fps:.1f}")
 if lan_rx_screen_delivery_queue_depth_max > 1:
     fail(f"iOS LAN direct screen delivery queued frames instead of immediate Metal feed: screenDeliveryQueueDepthMax={lan_rx_screen_delivery_queue_depth_max}")
 if lan_rx_screen_delivery_delay_max_ms > 100.0:
     fail(f"iOS LAN screen delivery delay exceeded 100ms inside final pass window: screenDeliveryDelayMaxMs={lan_rx_screen_delivery_delay_max_ms:.1f}")
+if lan_rx_decode_feed_samples != lan_rx_count:
+    fail(f"iOS LAN decode-feed samples did not cover every telemetry line: decodeFeed={lan_rx_decode_feed_samples} lanRx={lan_rx_count}")
+if lan_rx_decode_feed_strict_samples != lan_rx_count:
+    fail(f"iOS LAN decode feed was not ordered VideoToolbox-to-Metal direct for every telemetry line: strictDecodeFeed={lan_rx_decode_feed_strict_samples} lanRx={lan_rx_count} expected={strict_ios_decode_feed_mode}")
+if lan_rx_decode_attempted <= 0:
+    fail("iOS LAN decode feed did not report attempted frames inside final pass window")
+if lan_rx_decode_attempted != lan_rx_decode_accepted:
+    fail(f"iOS LAN decode feed accepted frames did not match attempts: attempted={lan_rx_decode_attempted} accepted={lan_rx_decode_accepted}")
+if lan_rx_decode_dropped != 0:
+    fail(f"iOS LAN decode feed dropped frames inside final pass window: decodeDropped={lan_rx_decode_dropped}")
+if lan_rx_decode_pending_max > strict_ios_decode_pending_limit:
+    fail(f"iOS LAN decode pending queue exceeded strict bound inside final pass window: decodePendingMax={lan_rx_decode_pending_max} limit={strict_ios_decode_pending_limit}")
+if lan_rx_decode_in_flight_max > strict_ios_decode_in_flight_limit:
+    fail(f"iOS LAN decode in-flight count exceeded strict bound inside final pass window: decodeInFlightMax={lan_rx_decode_in_flight_max} limit={strict_ios_decode_in_flight_limit}")
+if lan_rx_decode_waiting_sync != 0:
+    fail(f"iOS LAN decode feed entered waiting-for-sync inside final pass window: decodeWaitingSyncSamples={lan_rx_decode_waiting_sync}")
+if lan_rx_decode_resets != 0:
+    fail(f"iOS LAN decode pipeline reset inside final pass window: decodeResets={lan_rx_decode_resets}")
 if lan_rx_raw_chunk_gap_max_ms > max_raw_chunk_gap_ms:
     fail(f"iOS LAN raw receive chunk gap exceeded 12-frame bounded receive budget inside final pass window: rawChunkGapMaxMs={lan_rx_raw_chunk_gap_max_ms:.1f} budgetMs={max_raw_chunk_gap_ms:.1f}")
+if lan_rx_main_hop_max_ms > 100.0:
+    fail(f"iOS LAN frame handling MainActor hop exceeded 100ms inside final pass window: maxMainHopMs={lan_rx_main_hop_max_ms:.1f}")
 if lan_rx_raw_chunk_main_hop_max_ms > 100.0:
     fail(f"iOS LAN raw receive MainActor handoff exceeded 100ms inside final pass window: rawChunkMainHopMaxMs={lan_rx_raw_chunk_main_hop_max_ms:.1f}")
 if lan_rx_complete_frames_per_drain_max > 4:
     fail(f"iOS LAN parser drain submitted too many complete screen frames for bounded 4-frame drain: completeFramesPerDrainMax={lan_rx_complete_frames_per_drain_max}")
+if lan_rx_parser_budget_samples != lan_rx_count:
+    fail(f"iOS LAN parser drain budget samples did not cover every telemetry line: parserBudgetSamples={lan_rx_parser_budget_samples} lanRx={lan_rx_count}")
+if lan_rx_parser_budget_ms_max > 6.0:
+    fail(f"iOS LAN parser drain budget exceeded strict 6ms bound: parserBudgetMsMax={lan_rx_parser_budget_ms_max:.1f}")
+if lan_rx_parser_drain_max_ms > lan_rx_parser_budget_ms_max:
+    fail(f"iOS LAN parser drain exceeded strict budget inside final pass window: parserDrainMaxMs={lan_rx_parser_drain_max_ms:.1f} parserBudgetMs={lan_rx_parser_budget_ms_max:.1f}")
+if lan_rx_parser_budget_hits != 0:
+    fail(f"iOS LAN parser drain hit the strict 6ms budget inside final pass window: parserBudgetHits={lan_rx_parser_budget_hits}")
 if metal_direct_bgra != metal_submitted:
     fail(f"Metal direct BGRA frames did not match submitted frames: directBGRA={metal_direct_bgra} submitted={metal_submitted}")
 metal_submitted_fps = metal_submitted * 1000.0 / metal_sample_ms
@@ -1012,8 +3055,11 @@ if encoder_readback_burst_limit_bytes != expected_encoder_burst_limit_bytes or e
     fail(f"Mac HEVC encoder DataRateLimits readback did not match strict budget: readbackBurstBytes={encoder_readback_burst_limit_bytes} readbackBurstWindowMs={encoder_readback_burst_window_ms}")
 
 host_window_start = start_time + dt.timedelta(seconds=1)
+minimum_source_observed_seconds = max(2.0, soak_seconds - 4.0)
+minimum_source_samples = 2
 sck_count = 0
 tx_count = 0
+source_count = 0
 sck_sample_ms = 0
 sck_encoded_frames = 0
 sck_captured_frames = 0
@@ -1055,20 +3101,47 @@ tx_max_sent_fps = 0.0
 tx_stale_queue_catch_up = 0
 tx_chunk_cap_bytes = 0
 tx_writer_clock_ok = 0
+tx_writer_clock_strict_ok = 0
 tx_send_scheduler_ok = 0
 tx_wire_batch_single_frames = 0
 tx_wire_batch_multi_frames = 0
 tx_wire_single_unbatched_frames = 0
+remote_realtime_activity_active = 0
 sck_cadence_timer_fires = 0
 sck_cadence_submitted = 0
 sck_cadence_catch_up_frames = 0
 sck_cadence_batch_max = 0
 min_capture_fps = None
 min_meaningful_fps = None
+source_render_fps_min = None
+source_render_gap_max_ms = 0.0
+source_last_render_age_max_ms = 0.0
+source_window_visible = 0
+source_window_occlusion_visible = 0
+source_frame_start = None
+source_frame_end = None
+source_time_start = None
+source_time_end = None
 for line in host_lines:
     timestamp = parse_iso_timestamp(line)
+    if timestamp is not None and timestamp <= pass_time and "mac-remote-realtime-activity active=1" in line:
+        if int_metric(line, "appNapDisabled") == 1:
+            remote_realtime_activity_active = 1
     if timestamp is None or timestamp < host_window_start or timestamp > pass_time:
         continue
+    if "smoke-capture-source active=1" in line:
+        source_count += 1
+        source_render_fps = float_metric(line, "renderFPS")
+        source_render_fps_min = source_render_fps if source_render_fps_min is None else min(source_render_fps_min, source_render_fps)
+        source_render_gap_max_ms = max(source_render_gap_max_ms, float_metric(line, "renderGapMaxMs"))
+        source_last_render_age_max_ms = max(source_last_render_age_max_ms, float_metric(line, "lastRenderAgeMs"))
+        source_window_visible = max(source_window_visible, int_metric(line, "windowVisible"))
+        source_window_occlusion_visible = max(source_window_occlusion_visible, int_metric(line, "windowOcclusionVisible"))
+        source_frame = int_metric(line, "frame")
+        source_frame_start = source_frame if source_frame_start is None else min(source_frame_start, source_frame)
+        source_frame_end = source_frame if source_frame_end is None else max(source_frame_end, source_frame)
+        source_time_start = timestamp if source_time_start is None else min(source_time_start, timestamp)
+        source_time_end = timestamp if source_time_end is None else max(source_time_end, timestamp)
     if "mac-sck-tx " in line and "codec=hevc" in line and "capturesAudio=false" in line:
         sck_count += 1
         capture_fps = float_metric(line, "captureFPS")
@@ -1153,6 +3226,9 @@ for line in host_lines:
         if metric(line, "writerClock") != "dispatch-source-userinteractive":
             fail(f"Mac remote tx did not use the strict DispatchSource writer clock: {line.strip()}")
         tx_writer_clock_ok += 1
+        if int_metric(line, "writerClockStrict") != 1:
+            fail(f"Mac remote tx did not prove strict DispatchSource timer mode: {line.strip()}")
+        tx_writer_clock_strict_ok += 1
         if metric(line, "sendScheduler") != "dispatch-clock-only":
             fail(f"Mac remote tx was not exclusively scheduled by the DispatchSource writer clock: {line.strip()}")
         tx_send_scheduler_ok += 1
@@ -1164,8 +3240,8 @@ for line in host_lines:
             fail(f"Mac remote harmful backpressure was nonzero: {line.strip()}")
         if line_queue_backlog != 0:
             fail(f"Mac remote queue backlog was nonzero: {line.strip()}")
-        if int_metric(line, "contentBacklogLimit") != 12:
-            fail(f"Mac remote contentBacklogLimit drifted from the strict 12-frame chunked contentProcessed pipeline: {line.strip()}")
+        if int_metric(line, "contentBacklogLimit") != sender_content_backlog_frame_limit:
+            fail(f"Mac remote contentBacklogLimit drifted from the strict byte-bounded chunked contentProcessed pipeline: {line.strip()}")
         if int_metric(line, "contentBacklogByteLimit") != 12 * 256 * 1024:
             fail(f"Mac remote contentBacklogByteLimit drifted from the bounded chunked contentProcessed pipeline: {line.strip()}")
         if int_metric(line, "maxFramesPerDrain") != sender_cadence_catch_up_limit:
@@ -1173,7 +3249,7 @@ for line in host_lines:
         if int_metric(line, "scheduleBudgetMax") > sender_cadence_catch_up_limit:
             fail(f"Mac remote scheduleBudgetMax exceeded bounded strict cadence recovery: {line.strip()}")
         if int_metric(line, "missedCadenceSlotsMax") > bounded_missed_cadence_slots_limit:
-            fail(f"Mac remote missed cadence slots exceeded strict zero-miss cadence window: {line.strip()}")
+            fail(f"Mac remote missed cadence slots exceeded strict zero-miss cadence budget: {line.strip()}")
         if metric(line, "waitingForSync") != "false":
             fail(f"Mac remote was waiting for sync: {line.strip()}")
 
@@ -1181,14 +3257,44 @@ if sck_count == 0:
     fail("no Mac HEVC SCK telemetry samples inside final pass window")
 if tx_count == 0:
     fail("no Mac remote frame tx telemetry samples inside final pass window")
+if source_count == 0:
+    fail("no Mac smoke source heartbeat samples inside final pass window")
 if sck_count < minimum_window_samples:
     fail(f"too few Mac HEVC SCK telemetry samples inside final pass window: count={sck_count} required={minimum_window_samples}")
 if tx_count < minimum_window_samples:
     fail(f"too few Mac remote frame tx telemetry samples inside final pass window: count={tx_count} required={minimum_window_samples}")
+if source_count < minimum_source_samples:
+    fail(f"too few Mac smoke source heartbeat samples inside final pass window: count={source_count} required={minimum_source_samples}")
+if source_frame_start is None or source_frame_end is None or source_frame_end <= source_frame_start:
+    fail(f"Mac smoke source frame counter did not progress inside final pass window: frames={source_frame_start}->{source_frame_end}")
+if source_time_start is None or source_time_end is None or source_time_end <= source_time_start:
+    fail(f"Mac smoke source heartbeat timestamps did not span the final pass window: start={source_time_start} end={source_time_end}")
+source_observed_seconds = (source_time_end - source_time_start).total_seconds()
+if source_observed_seconds + 0.25 < minimum_source_observed_seconds:
+    fail(
+        "Mac smoke source heartbeat coverage was too short inside final pass window: "
+        f"observedSeconds={source_observed_seconds:.2f} requiredSeconds={minimum_source_observed_seconds:.2f}"
+    )
+source_frame_delta = source_frame_end - source_frame_start
+source_render_progress_fps = source_frame_delta / max(source_observed_seconds, 0.001)
+if source_window_visible != 1 or source_window_occlusion_visible != 1:
+    fail(f"Mac smoke source was not visible in the final pass window: windowVisible={source_window_visible} windowOcclusionVisible={source_window_occlusion_visible}")
+if source_render_fps_min is None:
+    fail("Mac smoke source heartbeat did not expose renderFPS inside final pass window")
+if source_render_gap_max_ms > max_sck_source_frame_age_ms:
+    fail(f"Mac smoke source render gap exceeded live-source budget inside final pass window: renderGapMaxMs={source_render_gap_max_ms:.1f} budgetMs={max_sck_source_frame_age_ms:.1f}")
+if source_last_render_age_max_ms > max_sck_source_frame_age_ms:
+    fail(f"Mac smoke source last render age exceeded live-source budget inside final pass window: lastRenderAgeMs={source_last_render_age_max_ms:.1f} budgetMs={max_sck_source_frame_age_ms:.1f}")
+if source_frame_start is None or source_frame_end is None or source_frame_end <= source_frame_start:
+    fail(f"Mac smoke source frame counter did not advance inside final pass window: frame={source_frame_start}->{source_frame_end}")
 if tx_writer_clock_ok < tx_count:
     fail(f"Mac remote tx did not prove DispatchSource writer clock on every sample: ok={tx_writer_clock_ok} count={tx_count}")
+if tx_writer_clock_strict_ok < tx_count:
+    fail(f"Mac remote tx did not prove strict DispatchSource timer mode on every sample: ok={tx_writer_clock_strict_ok} count={tx_count}")
 if tx_send_scheduler_ok < tx_count:
     fail(f"Mac remote tx did not prove DispatchSource-only scheduling on every sample: ok={tx_send_scheduler_ok} count={tx_count}")
+if remote_realtime_activity_active != 1:
+    fail("Mac remote sender did not prove realtime activity/App Nap protection before final pass")
 if sck_sample_ms <= 0:
     fail("Mac HEVC SCK telemetry did not report a positive aggregate sample window")
 if tx_sample_ms <= 0:
@@ -1236,8 +3342,8 @@ if tx_max_chunks_per_frame != 1:
     fail(f"Mac remote tx emitted multi-chunk HEVC frames inside final pass window: maxChunksPerFrame={tx_max_chunks_per_frame}")
 if tx_queued_max > strict_mac_sender_queue_limit:
     fail(f"Mac remote queuedMax exceeded ordered SBC2 cadence buffer inside final pass window: queuedMax={tx_queued_max} limit={strict_mac_sender_queue_limit}")
-if tx_content_backlog_limit != 12:
-    fail(f"Mac remote contentBacklogLimit did not prove the strict 12-frame chunked contentProcessed pipeline: limit={tx_content_backlog_limit}")
+if tx_content_backlog_limit != sender_content_backlog_frame_limit:
+    fail(f"Mac remote contentBacklogLimit did not prove the strict byte-bounded chunked contentProcessed pipeline: limit={tx_content_backlog_limit}")
 if tx_content_backlog_byte_limit != 12 * 256 * 1024:
     fail(f"Mac remote contentBacklogByteLimit did not prove the bounded chunked contentProcessed pipeline: limit={tx_content_backlog_byte_limit}")
 if tx_max_frames_per_drain != sender_cadence_catch_up_limit:
@@ -1245,15 +3351,15 @@ if tx_max_frames_per_drain != sender_cadence_catch_up_limit:
 if tx_schedule_budget_max > sender_cadence_catch_up_limit:
     fail(f"Mac remote scheduleBudgetMax exceeded bounded strict cadence recovery: scheduleBudgetMax={tx_schedule_budget_max} limit={sender_cadence_catch_up_limit}")
 if tx_missed_cadence_slots_max > bounded_missed_cadence_slots_limit:
-    fail(f"Mac remote missed cadence slots exceeded strict zero-miss cadence window inside final pass window: missedCadenceSlotsMax={tx_missed_cadence_slots_max} limit={bounded_missed_cadence_slots_limit}")
-if tx_content_backlog_max > 12:
-    fail(f"Mac remote contentProcessed backlog exceeded the strict 12-frame limit inside final pass window: contentBacklogMax={tx_content_backlog_max}")
-if tx_content_backlog_max >= 12:
-    fail(f"Mac remote contentProcessed backlog hit the strict 12-frame ceiling inside final pass window: contentBacklogMax={tx_content_backlog_max}")
+    fail(f"Mac remote missed cadence slots exceeded strict zero-miss cadence budget inside final pass window: missedCadenceSlotsMax={tx_missed_cadence_slots_max} limit={bounded_missed_cadence_slots_limit}")
+if tx_content_backlog_max > sender_content_backlog_frame_limit:
+    fail(f"Mac remote contentProcessed backlog exceeded the strict frame limit inside final pass window: contentBacklogMax={tx_content_backlog_max} limit={sender_content_backlog_frame_limit}")
+if tx_content_backlog_max >= sender_content_backlog_frame_limit:
+    fail(f"Mac remote contentProcessed backlog hit the strict frame ceiling inside final pass window: contentBacklogMax={tx_content_backlog_max} limit={sender_content_backlog_frame_limit}")
 if tx_content_backlog_bytes_max >= 12 * 256 * 1024:
     fail(f"Mac remote contentProcessed byte backlog hit the bounded ceiling inside final pass window: contentBacklogBytesMax={tx_content_backlog_bytes_max}")
 if tx_content_backlog_full != 0:
-    fail(f"Mac remote contentProcessed backlog hit the strict 12-frame/3072KiB ceiling inside final pass window: contentBacklogFull={tx_content_backlog_full}")
+    fail(f"Mac remote contentProcessed backlog hit the strict frame/3072KiB ceiling inside final pass window: contentBacklogFull={tx_content_backlog_full} frameLimit={sender_content_backlog_frame_limit}")
 if tx_max_send_ms > 200.0:
     fail(f"Mac remote contentProcessed latency exceeded the 200ms budget inside final pass window: maxSendMs={tx_max_send_ms:.1f}")
 max_bounded_schedule_gap_ms = 50.0
@@ -1301,17 +3407,19 @@ print(
     "remote performance window validation passed: "
     f"iosStatus={ios_status_count} metal={metal_count} macSCK={sck_count} macTx={tx_count} "
     f"iosWindowFPS={reported_window_fps:.1f} iosWindowRxFPS={reported_window_rx_fps:.1f} "
-    f"metalDrawCallbackFPS={metal_draw_callback_fps:.1f} metalDisplayFPS={metal_displayed_fps:.1f} metalSubmittedFPS={metal_submitted_fps:.1f} "
+    f"metalInputFPS={metal_input_fps:.1f} metalDrawCallbackFPS={metal_draw_callback_fps:.1f} metalDisplayFPS={metal_displayed_fps:.1f} metalSubmittedFPS={metal_submitted_fps:.1f} "
     f"metalCoalesced={metal_coalesced_before_draw} metalCoalescedAllowed={max_allowed_metal_coalesced} metalRealtimeReplacement={metal_realtime_replacement_before_draw} metalManualDraw={metal_manual_draw} metalQueueCapacityMax={metal_queue_capacity_max} metalQueueDepthMax={metal_queue_depth_max} metalQueueBackpressure={metal_queue_backpressure} "
     f"metalFrameAgeMaxMs={metal_frame_age_max_ms:.1f} metalDisplayLinkPumpFPS={metal_display_link_pump_fps} "
-    f"lanRxMaxGapMs={lan_rx_max_gap_ms:.1f} lanMaxScreenFPS={lan_rx_max_screen_fps:.1f} "
+    f"lanRxMaxGapMs={lan_rx_max_gap_ms:.1f} lanSampledScreenFPS={lan_rx_screen_fps:.1f} lanMaxScreenFPS={lan_rx_max_screen_fps:.1f} "
     f"audioSamples={audio_status_samples} audioRecv={audio_recv_start}->{audio_recv_end} audioDecoded={audio_decoded_start}->{audio_decoded_end} audioPlayed={audio_played_start}->{audio_played_end} "
     f"lanSourceSamples={lan_rx_source_samples} lanSourceGapMaxMs={lan_rx_source_gap_max_ms:.1f} "
     f"lanSourceToReadMaxMs={lan_rx_source_to_read_max_ms:.1f} lanSourceToReadUnsyncedClockSamples={lan_rx_source_to_read_unsynced_clock_samples}/{lan_rx_count} "
     f"lanSBC2Frames={lan_rx_sbc2_frames} lanSBC2Chunks={lan_rx_sbc2_chunks} "
-    f"lanScreenDeliveryAttempted={lan_rx_screen_delivery_attempted} lanScreenDeliveryDelivered={lan_rx_screen_delivery_delivered} lanScreenDeliveryBackpressure={lan_rx_screen_delivery_backpressure} "
+    f"lanScreenDeliveryAttempted={lan_rx_screen_delivery_attempted} lanScreenDeliveryDelivered={lan_rx_screen_delivery_delivered} lanScreenDeliveryFPS={lan_rx_screen_delivery_fps:.1f} lanScreenDeliveryBackpressure={lan_rx_screen_delivery_backpressure} "
     f"lanRawChunks={lan_rx_raw_chunks} lanRawChunkGapMaxMs={lan_rx_raw_chunk_gap_max_ms:.1f} "
-    f"lanRawChunkMainHopMaxMs={lan_rx_raw_chunk_main_hop_max_ms:.1f} lanReadAheadSamples={lan_rx_read_ahead_samples} "
+    f"lanMaxMainHopMs={lan_rx_main_hop_max_ms:.1f} lanRawChunkMainHopMaxMs={lan_rx_raw_chunk_main_hop_max_ms:.1f} lanReadAheadSamples={lan_rx_read_ahead_samples} "
+    f"lanParserDrainMaxMs={lan_rx_parser_drain_max_ms:.1f} lanParserBudgetMsMax={lan_rx_parser_budget_ms_max:.1f} lanParserBudgetHits={lan_rx_parser_budget_hits} "
+    f"macSourceSamples={source_count} macSourceObservedSeconds={source_observed_seconds:.2f} macSourceRenderProgressFPS={source_render_progress_fps:.1f} macSourceRenderFPSMin={source_render_fps_min:.1f} macSourceRenderGapMaxMs={source_render_gap_max_ms:.1f} macSourceLastRenderAgeMaxMs={source_last_render_age_max_ms:.1f} macSourceFrames={source_frame_start}->{source_frame_end} "
     f"macCaptureFPS={sck_capture_fps:.1f} macMeaningfulFPS={sck_meaningful_fps:.1f} "
     f"macEncodedFPS={sck_encoded_fps:.1f} macSentFPS={tx_sent_fps:.1f} "
     f"macSourceFrameAgeMaxMs={sck_source_frame_age_max_ms:.1f} macSourceFrameRepeatMax={sck_source_frame_repeat_max} "
@@ -1369,6 +3477,182 @@ report_ios_launch_failure() {
   tail -n 80 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
 }
 
+record_ios_launch_pid_from_result() {
+  IOS_APP_PID="$(python3 - "$LAUNCH_RESULT_JSON" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (FileNotFoundError, json.JSONDecodeError):
+    raise SystemExit(0)
+
+process = payload.get("result", {}).get("process", {})
+pid = process.get("processIdentifier")
+if isinstance(pid, int) and pid > 0:
+    print(pid)
+PY
+)"
+  if [[ -n "$IOS_APP_PID" ]]; then
+    return 0
+  fi
+
+  rm -f "$IOS_PROCESS_LIST_JSON" "$IOS_PROCESS_LIST_LOG" "$IOS_PROCESS_LIST_STDERR"
+  if ! xcrun devicectl device info processes \
+    --device "$IOS_DEVICE_ID" \
+    --timeout 20 \
+    --json-output "$IOS_PROCESS_LIST_JSON" \
+    --columns '*' >"$IOS_PROCESS_LIST_LOG" 2>"$IOS_PROCESS_LIST_STDERR"; then
+    return 0
+  fi
+
+  IOS_APP_PID="$(python3 - "$IOS_PROCESS_LIST_JSON" "$IOS_SCHEME" <<'PY'
+import json
+import sys
+
+path, executable_name = sys.argv[1:]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (FileNotFoundError, json.JSONDecodeError):
+    raise SystemExit(0)
+
+expected_suffix = f"/{executable_name}.app/{executable_name}"
+for process in payload.get("result", {}).get("runningProcesses", []):
+    executable = process.get("executable")
+    pid = process.get("processIdentifier")
+    if not isinstance(executable, str) or not isinstance(pid, int) or pid <= 0:
+        continue
+    if executable.endswith(expected_suffix) or executable.endswith(f"/{executable_name}"):
+        print(pid)
+        raise SystemExit(0)
+PY
+)"
+  if [[ -n "$IOS_APP_PID" ]]; then
+    append_host_status "ios-remote-smoke launch-pid pid=$IOS_APP_PID source=device-process-list"
+  fi
+}
+
+validate_ios_launch_notice_identity_env() {
+  local validation_source
+  validation_source="$(python3 - "$LAUNCH_RESULT_JSON" "$IOS_ENV_JSON" <<'PY'
+import json
+import sys
+
+launch_path, expected_env_json = sys.argv[1:]
+required = [
+    "SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME",
+    "SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID",
+]
+
+try:
+    expected_env = json.loads(expected_env_json)
+except json.JSONDecodeError as exc:
+    print(f"Unable to parse intended iOS launch environment: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+source = "intended-env"
+launched_env = expected_env
+try:
+    with open(launch_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    candidate_env = (
+        payload.get("result", {})
+        .get("launchOptions", {})
+        .get("environmentVariables", {})
+    )
+    if isinstance(candidate_env, dict) and candidate_env:
+        launched_env = candidate_env
+        source = "devicectl-launch-json"
+except (FileNotFoundError, json.JSONDecodeError):
+    pass
+
+missing = []
+for key in required:
+    value = launched_env.get(key)
+    if not isinstance(value, str) or not value.strip():
+        missing.append(key)
+    expected_value = expected_env.get(key)
+    if isinstance(expected_value, str) and expected_value.strip() and value != expected_value:
+        missing.append(f"{key}:mismatch")
+
+if missing:
+    print(
+        "iOS launch missing required remote-control notice identity env: "
+        + ",".join(missing),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+print(source)
+PY
+)"
+  local status=$?
+  if (( status != 0 )); then
+    append_host_status "failed stage=ios-launch phase=notice-identity-env reason=missing-ios-launch-env"
+    return "$status"
+  fi
+  append_host_status "ios-launch notice-identity-env account=present nebula=present source=$validation_source"
+}
+
+terminate_ios_remote_smoke_app_for_notice_disconnect() {
+  if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -z "$IOS_APP_PID" ]]; then
+    record_ios_launch_pid_from_result
+  fi
+  if [[ -z "$IOS_APP_PID" ]]; then
+    append_host_status "failed stage=remote-control-notice phase=disconnect reason=missing-ios-app-pid"
+    echo "Unable to terminate iOS app for remote-control notice disconnect proof: missing launch PID." >&2
+    return 1
+  fi
+
+  if ! xcrun devicectl device process terminate --device "$IOS_DEVICE_ID" --pid "$IOS_APP_PID" >/dev/null 2>&1; then
+    append_host_status "failed stage=remote-control-notice phase=disconnect reason=ios-terminate-failed pid=$IOS_APP_PID"
+    echo "Failed to terminate iOS app pid=$IOS_APP_PID for remote-control notice disconnect proof." >&2
+    return 1
+  fi
+  append_host_status "ios-remote-smoke terminated pid=$IOS_APP_PID reason=remote-control-notice-disconnect-proof"
+  IOS_APP_PID=""
+
+  if [[ -n "$IOS_CONSOLE_PID" ]]; then
+    local console_wait_started_at
+    console_wait_started_at="$(date +%s)"
+    while kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; do
+      if (( "$(date +%s)" - console_wait_started_at >= 10 )); then
+        kill "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+        break
+      fi
+      sleep 0.5
+    done
+    wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+    IOS_CONSOLE_PID=""
+  fi
+
+  copy_ios_status
+}
+
+wait_for_remote_control_notice_lifecycle() {
+  if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" != "1" ]]; then
+    return 0
+  fi
+
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeShown .*transport=p2p' 20 "macOS remote-control notice shown"
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeApproved .*transport=p2p' 20 "macOS remote-control notice approved"
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeActive .*transport=p2p' 20 "macOS remote-control notice active"
+}
+
+wait_for_remote_control_notice_disconnected() {
+  if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" != "1" ]]; then
+    return 0
+  fi
+
+  terminate_ios_remote_smoke_app_for_notice_disconnect
+  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeDisconnected .*transport=p2p' 30 "macOS remote-control notice disconnect"
+}
+
 launch_ios_remote_smoke_app() {
   local started_at
   local attempt=1
@@ -1418,9 +3702,11 @@ launch_ios_remote_smoke_app() {
           report_ios_launch_failure "devicectl launch process exited with failure"
           return 1
         fi
+        record_ios_launch_pid_from_result
         return 0
       fi
       if (( "$(date +%s)" - attempt_started_at >= 8 )); then
+        record_ios_launch_pid_from_result
         return 0
       fi
       sleep 1
@@ -1428,12 +3714,21 @@ launch_ios_remote_smoke_app() {
   done
 }
 
+terminate_stale_smoke_scripts
+terminate_stale_macos_smoke_hosts
+reset_smoke_artifacts
+
 echo "==> Artifacts: $ARTIFACT_DIR"
 echo "==> Real device: $IOS_DEVICE_ID"
 echo "==> Build destination: $IOS_BUILD_DESTINATION"
 echo "==> Target: ${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}@${SMOKE_TARGET_FPS} minFps=${SMOKE_MIN_FPS}"
 echo "==> Expected render orientation: $SMOKE_EXPECT_RENDER_ORIENTATION"
 echo "==> Expected suite: $EXPECTED_TARGET_SUITE"
+
+require_remote_control_notice_identity_env
+
+echo "==> Checking macOS visible desktop preflight"
+detect_macos_loginwindow_occlusion
 
 xcrun devicectl list devices >"$DEVICE_INFO_TXT" 2>&1 || true
 
@@ -1444,28 +3739,79 @@ echo "==> Building macOS LAN host"
   CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   swift build --product LocalLanInteropHost
+  SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
+  CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
+  SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
+  swift build --product LocalLanSmokeSourceHost
 ) >"$ARTIFACT_DIR/macos-build.log"
 
-MAC_APP_BIN="$ROOT_DIR/.build/debug/LocalLanInteropHost"
-if [[ ! -x "$MAC_APP_BIN" ]]; then
-  echo "macOS LAN host executable not found: $MAC_APP_BIN" >&2
+if [[ ! -x "$MAC_DIRECT_BIN" ]]; then
+  echo "macOS LAN host executable not found: $MAC_DIRECT_BIN" >&2
+  exit 1
+fi
+if [[ ! -x "$MAC_SOURCE_DIRECT_BIN" ]]; then
+  echo "macOS smoke source helper executable not found: $MAC_SOURCE_DIRECT_BIN" >&2
   exit 1
 fi
 
+if [[ "$MAC_HOST_LAUNCH_MODE" == "open" ]]; then
+  prepare_macos_smoke_host_app_bundle
+fi
+
 echo "==> Starting macOS LAN host"
-SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 \
-SB_PQC_PREFERRED_SUITE="$HOST_PREFERRED_SUITE" \
-SKYBRIDGE_SMOKE_ROLE=mac-host \
-SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING="$SMOKE_AUTO_APPROVE_PAIRING" \
-SKYBRIDGE_SMOKE_STATUS_FILE="$HOST_STATUS" \
-SKYBRIDGE_SMOKE_PQC_REPORT_FILE="$HOST_PQC_REPORT" \
-SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
-SKYBRIDGE_SMOKE_REMOTE_ANIMATION=1 \
-"$MAC_APP_BIN" >"$HOST_STDOUT" 2>&1 &
-HOST_PID="$!"
+start_macos_smoke_host
 
 wait_for_file_pattern "$HOST_STATUS" 'ready discovery=_skybridge._tcp' 60 "macOS host ready"
+MAC_REMOTE_PORT="$(python3 - "$HOST_STATUS" <<'PY'
+import re
+import sys
+
+port = ""
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        match = re.search(r"\bready remote=_skybridge-remote\._tcp port=([1-9][0-9]{0,4})\b", line)
+        if match:
+            value = int(match.group(1))
+            if 0 < value <= 65535:
+                port = str(value)
+print(port)
+PY
+)"
+if [[ -z "$MAC_REMOTE_PORT" ]]; then
+  echo "macOS host did not report a concrete _skybridge-remote._tcp remote-control port." >&2
+  exit 1
+fi
+MAC_CONTROL_PORT="$(python3 - "$HOST_STATUS" <<'PY'
+import re
+import sys
+
+port = ""
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        match = re.search(r"\bready discovery=_skybridge\._tcp port=([1-9][0-9]{0,4})\b", line)
+        if match:
+            value = int(match.group(1))
+            if 0 < value <= 65535:
+                port = str(value)
+print(port)
+PY
+)"
+if [[ -z "$MAC_CONTROL_PORT" ]]; then
+  echo "macOS host did not report a concrete _skybridge._tcp control port." >&2
+  exit 1
+fi
+MAC_CONTROL_HOST="${SKYBRIDGE_SMOKE_MAC_CONTROL_HOST:-$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname)}"
+if [[ -z "$MAC_CONTROL_HOST" ]]; then
+  echo "macOS host LAN address could not be determined for real-device smoke." >&2
+  exit 1
+fi
+verify_mac_control_port_reachable "$MAC_CONTROL_HOST" "$MAC_CONTROL_PORT"
+verify_mac_remote_port_listening "$MAC_CONTROL_HOST" "$MAC_REMOTE_PORT"
+echo "==> Starting macOS smoke source helper"
+start_macos_smoke_source_host
 wait_for_file_pattern "$HOST_STATUS" 'smoke-capture-source active=1' 60 "macOS smoke capture source"
+detect_macos_loginwindow_occlusion
+wait_for_file_pattern "$HOST_STATUS" 'smoke-capture-source active=1 .*windowOcclusionVisible=1' 10 "macOS smoke capture source visible on the active desktop"
 verify_mac_smoke_capture_source_visible
 wait_for_file_pattern "$HOST_PQC_REPORT" '"deviceId"' 60 "macOS PQC report"
 
@@ -1496,7 +3842,7 @@ if [[ -z "$MAC_PQC_DEVICE_ID" || -z "$MAC_PQC_XWING_PUBLIC_KEY_BASE64" ]]; then
 fi
 
 echo "==> Building iOS app for real device"
-xcodebuild \
+SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
   -project "$IOS_PROJECT" \
   -scheme "$IOS_SCHEME" \
   -configuration Debug \
@@ -1507,6 +3853,15 @@ xcodebuild \
 IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/Debug-iphoneos/SkyBridgeCompass-iOS.app"
 if [[ ! -d "$IOS_APP_PATH" ]]; then
   echo "iOS app bundle not found: $IOS_APP_PATH" >&2
+  exit 1
+fi
+
+IOS_EMBEDDED_PROFILE="$IOS_APP_PATH/embedded.mobileprovision"
+if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+  "$IOS_EMBEDDED_PROFILE" \
+  "$IOS_DEBUG_ENTITLEMENTS"; then
+  echo "iOS app provisioning profile does not cover requested Debug entitlements; refusing a smoke run that would hide missing iPad device-name access." >&2
+  echo "profile=$IOS_EMBEDDED_PROFILE entitlements=$IOS_DEBUG_ENTITLEMENTS" >&2
   exit 1
 fi
 
@@ -1532,9 +3887,14 @@ if [[ "$PQC_TRUST_MODE" == "injected" ]]; then
 else
   echo "    trust mode: user app trust store (no injected KEM keys)"
 fi
+IOS_SMOKE_DEVICE_ID="${SKYBRIDGE_SMOKE_IOS_DEVICE_ID:-$IOS_DEVICE_ID}"
 IOS_ENV_JSON="$(
+  SKYBRIDGE_DEVICE_ID="$IOS_SMOKE_DEVICE_ID" \
   SKYBRIDGE_SMOKE_TARGET_DEVICE_ID="$MAC_PQC_DEVICE_ID" \
   SKYBRIDGE_SMOKE_TARGET_NAME="$MAC_TARGET_NAME" \
+  SKYBRIDGE_SMOKE_TARGET_HOST="$MAC_CONTROL_HOST" \
+  SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT="$MAC_CONTROL_PORT" \
+  SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT="$MAC_REMOTE_PORT" \
   SKYBRIDGE_SMOKE_TIMEOUT_SECONDS="$SMOKE_TIMEOUT_SECONDS" \
   SKYBRIDGE_SMOKE_REMOTE_DESKTOP_TIMEOUT_SECONDS="$SMOKE_REMOTE_TIMEOUT_SECONDS" \
   SKYBRIDGE_SMOKE_STATUS_BASENAME="$IOS_STATUS_NAME" \
@@ -1543,11 +3903,14 @@ IOS_ENV_JSON="$(
   SKYBRIDGE_SMOKE_SOAK_SECONDS="$SMOKE_SOAK_SECONDS" \
   SKYBRIDGE_SMOKE_VIDEO_WIDTH="$SMOKE_VIDEO_WIDTH" \
   SKYBRIDGE_SMOKE_VIDEO_HEIGHT="$SMOKE_VIDEO_HEIGHT" \
+  SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME="$IOS_PQC_REPORT_NAME" \
   SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION="$SMOKE_EXPECT_RENDER_ORIENTATION" \
   SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH="$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" \
   SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH="$SMOKE_FORCE_SIGNED_KEM_REFRESH" \
   SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING="$SMOKE_AUTO_APPROVE_PAIRING" \
   SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
+  SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-}" \
+  SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-}" \
   SB_PQC_PREFERRED_SUITE="$IOS_PREFERRED_SUITE" \
   SKYBRIDGE_PQC_PEER_DEVICE_ID="$IOS_PQC_PEER_DEVICE_ID" \
   SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64="$IOS_PQC_PEER_XWING_PUBLIC_KEY_BASE64" \
@@ -1558,8 +3921,12 @@ import json
 import os
 
 keys = [
+    "SKYBRIDGE_DEVICE_ID",
     "SKYBRIDGE_SMOKE_TARGET_DEVICE_ID",
     "SKYBRIDGE_SMOKE_TARGET_NAME",
+    "SKYBRIDGE_SMOKE_TARGET_HOST",
+    "SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT",
+    "SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT",
     "SKYBRIDGE_SMOKE_TIMEOUT_SECONDS",
     "SKYBRIDGE_SMOKE_REMOTE_DESKTOP_TIMEOUT_SECONDS",
     "SKYBRIDGE_SMOKE_STATUS_BASENAME",
@@ -1568,11 +3935,14 @@ keys = [
     "SKYBRIDGE_SMOKE_SOAK_SECONDS",
     "SKYBRIDGE_SMOKE_VIDEO_WIDTH",
     "SKYBRIDGE_SMOKE_VIDEO_HEIGHT",
+    "SKYBRIDGE_SMOKE_PQC_REPORT_BASENAME",
     "SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION",
     "SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH",
     "SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH",
     "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING",
     "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE",
+    "SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME",
+    "SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID",
     "SB_PQC_PREFERRED_SUITE",
     "SKYBRIDGE_PQC_PEER_DEVICE_ID",
     "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64",
@@ -1599,6 +3969,7 @@ PY
 )"
 
 launch_ios_remote_smoke_app
+validate_ios_launch_notice_identity_env
 
 echo "==> Waiting for P2P handshake"
 wait_for_file_pattern "$HOST_STATUS" "$HOST_HANDSHAKE_PATTERN" "$SMOKE_TIMEOUT_SECONDS" "macOS P2P handshake"
@@ -1615,11 +3986,19 @@ if [[ "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" == "1" ]]; then
   wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh smoke-evidence: .*source=signed_lan_kem_refresh .*signature=verified .*requestHash=bound .*strictXWingEstablished=1' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 smoke evidence"
 fi
 wait_for_ios_status_pattern "streamConfigSent .*preferred=hevc, formats=hevc, fps=${SMOKE_TARGET_FPS}.*perf=extreme" "$SMOKE_TIMEOUT_SECONDS" "strict HEVC-only stream configuration"
+wait_for_remote_control_notice_lifecycle
 wait_for_ios_status_pattern "success .*suite=${EXPECTED_TARGET_SUITE} .*handshakeOnly=1 .*remoteDesktop=1" "$SMOKE_TIMEOUT_SECONDS" "iOS P2P remote desktop success"
 wait_for_ios_status_pattern "remote-desktop-pass .*renderOrientation=${SMOKE_EXPECT_RENDER_ORIENTATION}" "$SMOKE_TIMEOUT_SECONDS" "P2P remote desktop pass window"
 copy_ios_status
 validate_remote_desktop_route_evidence
 validate_remote_desktop_performance_window
+if [[ "$RUN_MAC_ONLINE_IPAD_SMOKE" == "1" ]]; then
+  run_mac_online_ipad_button_smoke
+else
+  append_host_status "mac-online-ipad smoke=skipped reason=profile-separated-from-active-remote-control-session"
+  append_ios_status "mac-online-ipad smoke=skipped reason=profile-separated-from-active-remote-control-session"
+fi
+wait_for_remote_control_notice_disconnected
 append_host_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
 append_ios_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
 

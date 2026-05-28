@@ -98,7 +98,8 @@ struct WebRTCRealtimeAudioSenderCoordinator {
                 sendSecret: keys.sendKey,
                 receiveSecret: keys.receiveKey,
                 sessionId: mediaSessionId,
-                transcriptHash: keys.transcriptHash
+                transcriptHash: keys.transcriptHash,
+                localRole: keys.role == .initiator ? .initiator : .responder
             )
             let transportEventHandler: @Sendable (SkyBridgeRealtimeMediaTransportEvent) -> Void = { event in
                 CrossNetworkWebRTCDiagnostics.writeAudioTxTransportEvent(

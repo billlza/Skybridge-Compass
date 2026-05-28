@@ -49,6 +49,47 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         XCTAssertNil(conflict)
     }
 
+    func testUniqueCanonicalTrustedDeviceIdRejectsAmbiguousEndpointAlias() {
+        let endpointAlias = "host:fe80::812:27b6:c448:dad0"
+        TrustedDeviceStore.shared.mergeFromCloud([
+            TrustedDeviceStore.TrustedDevice(
+                id: "id:peer-a",
+                name: "Peer A",
+                platform: .macOS,
+                ipAddress: nil,
+                currentDeviceId: "id:peer-a",
+                knownDeviceIds: [endpointAlias]
+            ),
+            TrustedDeviceStore.TrustedDevice(
+                id: "id:peer-b",
+                name: "Peer B",
+                platform: .macOS,
+                ipAddress: nil,
+                currentDeviceId: "id:peer-b",
+                knownDeviceIds: [endpointAlias]
+            )
+        ])
+
+        XCTAssertNil(TrustedDeviceStore.shared.uniqueCanonicalTrustedDeviceId(for: endpointAlias))
+
+        TrustedDeviceStore.shared.clearAll()
+        TrustedDeviceStore.shared.mergeFromCloud([
+            TrustedDeviceStore.TrustedDevice(
+                id: "id:peer-a",
+                name: "Peer A",
+                platform: .macOS,
+                ipAddress: nil,
+                currentDeviceId: "id:peer-a",
+                knownDeviceIds: [endpointAlias]
+            )
+        ])
+
+        XCTAssertEqual(
+            TrustedDeviceStore.shared.uniqueCanonicalTrustedDeviceId(for: "host:fe80::812:27b6:c448:dad0%en0.56600"),
+            "id:peer-a"
+        )
+    }
+
     func testAuthenticatedQRCodeRebindBlocksIdentityConflictHealing() {
         XCTAssertTrue(
             CrossNetworkWebRTCManager.shouldAllowAuthenticatedQRRebind(for: .identityConflict)
@@ -163,11 +204,11 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
     }
 
     func testCurrentPathBindingMatchesKnownAliasesForConflictEvaluation() {
-        let stableId = canonical("E0715A9A-D0D3-47E6-B353-DE0A30293E1F")
-        let aliasId = "bonjour:Lza的MacBook Pro@local."
+        let stableId = canonical("11111111-2222-4333-8444-555555555555")
+        let aliasId = "bonjour:Fixture MacBook Pro@local."
         let device = DiscoveredDevice(
             id: aliasId,
-            name: "Lza的MacBook Pro",
+            name: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "15.0",
@@ -192,11 +233,11 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
     }
 
     func testCurrentPathTrustLookupMatchesAliasBackToStableDeviceId() {
-        let stableId = canonical("E0715A9A-D0D3-47E6-B353-DE0A30293E1F")
-        let aliasId = "bonjour:Lza的MacBook Pro@local."
+        let stableId = canonical("11111111-2222-4333-8444-555555555555")
+        let aliasId = "bonjour:Fixture MacBook Pro@local."
         let device = DiscoveredDevice(
             id: aliasId,
-            name: "Lza的MacBook Pro",
+            name: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "15.0",
@@ -221,18 +262,21 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
     }
 
     func testPersistentDeviceIdRejectsDisplayNamePayloads() {
-        XCTAssertNil(PeerIdentityAliasResolver.persistentDeviceId(from: "Lza的MacBook Pro"))
-        XCTAssertNil(PeerIdentityAliasResolver.persistentDeviceId(from: "id:lza的macbook pro"))
+        XCTAssertNil(PeerIdentityAliasResolver.persistentDeviceId(from: "Fixture MacBook Pro"))
+        XCTAssertNil(PeerIdentityAliasResolver.persistentDeviceId(from: "id:fixture macbook pro"))
+        XCTAssertNil(PeerIdentityAliasResolver.persistentDeviceId(from: "192.168.10.22"))
+        XCTAssertNil(PeerIdentityAliasResolver.persistentDeviceId(from: "id:192.168.10.22"))
+        XCTAssertNil(PeerIdentityAliasResolver.persistentDeviceId(from: "fe80::81d:bb45:8c18:6d6a%en0"))
         XCTAssertEqual(
-            PeerIdentityAliasResolver.persistentDeviceId(from: "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"),
-            "id:e0715a9a-d0d3-47e6-b353-de0a30293e1f"
+            PeerIdentityAliasResolver.persistentDeviceId(from: "11111111-2222-4333-8444-555555555555"),
+            "id:11111111-2222-4333-8444-555555555555"
         )
     }
 
     func testCanonicalTrustedDeviceIdFallsBackToUniqueTrustedNameForDiscoveryDevice() {
         TrustedDeviceStore.shared.upsertCurrentPathAuthority(
             deviceId: "device-mac-stable",
-            name: "Lza的MacBook Pro",
+            name: "Fixture MacBook Pro",
             platform: .macOS,
             protocolSigningAlgorithm: "Ed25519",
             protocolPublicKeyFingerprint: String(repeating: "d", count: 64)
@@ -240,7 +284,7 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
 
         let discoveryDevice = DiscoveredDevice(
             id: "host:fe80::81d:bb45:8c18:6d6a%en0",
-            name: "Lza的MacBook Pro",
+            name: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "15.0",
@@ -256,8 +300,8 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
     func testRecordAuthenticatedRemoteAuthorityUpdatesAliasMatchedTrustedRecord() {
         let stableId = "id:peer-mac-stable"
         let aliasDevice = DiscoveredDevice(
-            id: "bonjour:Lza的MacBook Pro@local.",
-            name: "Lza的MacBook Pro",
+            id: "bonjour:Fixture MacBook Pro@local.",
+            name: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "15.0",
@@ -287,8 +331,8 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
 
     func testRecordAuthenticatedRemoteAuthorityRejectsEphemeralOnlyNewRecord() {
         let aliasDevice = DiscoveredDevice(
-            id: "bonjour:Lza的MacBook Pro@local.",
-            name: "Lza的MacBook Pro",
+            id: "bonjour:Fixture MacBook Pro@local.",
+            name: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "15.0",
@@ -311,21 +355,21 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
     }
 
     func testUpsertCurrentPathAuthorityCoalescesRepeatedDeviceIdAuthority() {
-        let deviceId = "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
+        let deviceId = "11111111-2222-4333-8444-555555555555"
         let canonicalDeviceId = canonical(deviceId)
 
         TrustedDeviceStore.shared.upsertCurrentPathAuthority(
             deviceId: deviceId,
-            name: "Lza的MacBook Pro",
+            name: "Fixture MacBook Pro",
             platform: .macOS,
             protocolSigningAlgorithm: "ML-DSA-65",
             protocolPublicKeyFingerprint: String(repeating: "1", count: 64)
         )
         TrustedDeviceStore.shared.upsertCurrentPathAuthority(
             deviceId: deviceId,
-            name: "Lza的MacBook Pro",
+            name: "Fixture MacBook Pro",
             platform: .macOS,
-            protocolSigningAlgorithm: "ML-DSA-87",
+            protocolSigningAlgorithm: "ML-DSA-65",
             protocolPublicKeyFingerprint: String(repeating: "2", count: 64)
         )
 
@@ -339,14 +383,45 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             fingerprint: String(repeating: "2", count: 64)
         )
         XCTAssertEqual(trusted?.currentDeviceId, canonicalDeviceId)
-        XCTAssertEqual(trusted?.protocolSigningAlgorithm, "ML-DSA-87")
+        XCTAssertEqual(trusted?.protocolSigningAlgorithm, "ML-DSA-65")
+    }
+
+    func testApprovedProtocolIdentityBindingAddsDifferentAlgorithmAuthorityPin() {
+        let stableId = "11111111-2222-4333-8444-555555555555"
+        let canonicalStableId = canonical(stableId)
+        let edFingerprint = String(repeating: "3", count: 64)
+        let mlFingerprint = String(repeating: "4", count: 64)
+
+        TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: stableId,
+            name: "Fixture MacBook Pro",
+            platform: .macOS,
+            protocolSigningAlgorithm: "Ed25519",
+            protocolPublicKeyFingerprint: edFingerprint
+        )
+
+        XCTAssertTrue(
+            TrustedDeviceStore.shared.recordApprovedProtocolIdentityBinding(
+                peerId: "host:fe80::812:27b6:c448:dad0%en0",
+                deviceId: canonicalStableId,
+                aliases: ["bonjour:Fixture MacBook Pro@local."],
+                displayName: "Fixture MacBook Pro",
+                protocolSigningAlgorithm: "ML-DSA-65",
+                protocolPublicKeyFingerprint: mlFingerprint
+            )
+        )
+
+        let fingerprints = TrustedDeviceStore.shared.currentPathFingerprints(forAny: [canonicalStableId])
+        XCTAssertEqual(fingerprints, [edFingerprint, mlFingerprint])
+        XCTAssertNotNil(TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: edFingerprint))
+        XCTAssertNotNil(TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: mlFingerprint))
     }
 
     func testRecordAuthenticatedRemoteAuthorityCoalescesLegacyDuplicateAuthorities() {
-        let stableId = "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
+        let stableId = "11111111-2222-4333-8444-555555555555"
         let canonicalStableId = canonical(stableId)
-        let aliasId = "bonjour:Lza的MacBook Pro@local."
-        let deviceName = "Lza的MacBook Pro"
+        let aliasId = "bonjour:Fixture MacBook Pro@local."
+        let deviceName = "Fixture MacBook Pro"
         let oldFingerprint = String(repeating: "a", count: 64)
         let staleFingerprint = String(repeating: "b", count: 64)
         let healedFingerprint = String(repeating: "c", count: 64)
@@ -388,7 +463,7 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         let updated = TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
             for: aliasDevice,
             preferredCurrentDeviceId: stableId,
-            protocolSigningAlgorithm: "ML-DSA-87",
+            protocolSigningAlgorithm: "ML-DSA-65",
             protocolPublicKeyFingerprint: healedFingerprint
         )
 
@@ -398,29 +473,29 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         XCTAssertNil(TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: staleFingerprint))
         let healedRecord = TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: healedFingerprint)
         XCTAssertEqual(healedRecord?.currentDeviceId, canonicalStableId)
-        XCTAssertEqual(healedRecord?.protocolSigningAlgorithm, "ML-DSA-87")
+        XCTAssertEqual(healedRecord?.protocolSigningAlgorithm, "ML-DSA-65")
         XCTAssertEqual(TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: aliasDevice), canonicalStableId)
     }
 
     func testCanonicalTrustedDeviceIdIgnoresPollutedDisplayNameCurrentDeviceId() {
-        let stableId = "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
+        let stableId = "11111111-2222-4333-8444-555555555555"
         let canonicalStableId = canonical(stableId)
 
         TrustedDeviceStore.shared.mergeFromCloud([
             TrustedDeviceStore.TrustedDevice(
-                id: "id:lza的macbook pro",
-                name: "Lza的MacBook Pro",
+                id: "id:fixture macbook pro",
+                name: "Fixture MacBook Pro",
                 platform: .macOS,
                 ipAddress: "192.168.1.20",
-                currentDeviceId: "id:lza的macbook pro",
-                knownDeviceIds: ["bonjour:Lza的MacBook Pro@local.", stableId]
+                currentDeviceId: "id:fixture macbook pro",
+                knownDeviceIds: ["bonjour:Fixture MacBook Pro@local.", stableId]
             )
         ])
 
         let discoveryDevice = DiscoveredDevice(
-            id: "bonjour:Lza的MacBook Pro@local.",
-            name: "Lza的MacBook Pro",
-            bonjourServiceName: "Lza的MacBook Pro",
+            id: "bonjour:Fixture MacBook Pro@local.",
+            name: "Fixture MacBook Pro",
+            bonjourServiceName: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "26.4.1",
@@ -438,12 +513,12 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
     }
 
     func testReverificationRequiredRecordIsNotPresentedAsTrustedOrConnectable() {
-        let stableId = "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
+        let stableId = "11111111-2222-4333-8444-555555555555"
         let canonicalStableId = canonical(stableId)
         let aliasDevice = DiscoveredDevice(
-            id: "bonjour:Lza的MacBook Pro@local.",
-            name: "Lza的MacBook Pro",
-            bonjourServiceName: "Lza的MacBook Pro",
+            id: "bonjour:Fixture MacBook Pro@local.",
+            name: "Fixture MacBook Pro",
+            bonjourServiceName: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "26.4.1",
@@ -482,34 +557,34 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
     }
 
     func testRepairLegacyTrustedDeviceIdentityPromotesUniqueLiveStableId() async {
-        let stableId = "E0715A9A-D0D3-47E6-B353-DE0A30293E1F"
+        let stableId = "11111111-2222-4333-8444-555555555555"
         let canonicalStableId = canonical(stableId)
-        let pollutedId = "id:lza的macbook pro"
+        let pollutedId = "id:fixture macbook pro"
 
         TrustedDeviceStore.shared.mergeFromCloud([
             TrustedDeviceStore.TrustedDevice(
                 id: pollutedId,
-                name: "Lza的MacBook Pro",
+                name: "Fixture MacBook Pro",
                 platform: .macOS,
                 ipAddress: nil,
                 protocolSigningAlgorithm: "ML-DSA-65",
                 protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
                 currentDeviceId: pollutedId,
-                knownDeviceIds: ["bonjour:Lza的MacBook Pro@local.", "host:id:lza的macbook pro"]
+                knownDeviceIds: ["bonjour:Fixture MacBook Pro@local.", "host:id:fixture macbook pro"]
             )
         ])
 
         let requestedDevice = DiscoveredDevice(
             id: pollutedId,
-            name: "Lza的MacBook Pro",
+            name: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "26.4.1"
         )
         let liveDevice = DiscoveredDevice(
             id: canonicalStableId,
-            name: "Lza的MacBook Pro",
-            bonjourServiceName: "Lza的MacBook Pro",
+            name: "Fixture MacBook Pro",
+            bonjourServiceName: "Fixture MacBook Pro",
             modelName: "MacBook Pro",
             platform: .macOS,
             osVersion: "26.4.1",
@@ -539,14 +614,14 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         )
         XCTAssertEqual(
             TrustedDeviceStore.shared.trustedDevices.first?.connectableContext?.bonjourServiceName,
-            "Lza的MacBook Pro"
+            "Fixture MacBook Pro"
         )
     }
 
     func testKEMTrustStoreRebindCanonicalDeviceIdClearsLegacyAliases() async {
-        let stableId = "id:e0715a9a-d0d3-47e6-b353-de0a30293e1f"
-        let pollutedId = "id:lza的macbook pro"
-        let legacyHostAlias = "host:id:lza的macbook pro"
+        let stableId = "id:11111111-2222-4333-8444-555555555555"
+        let pollutedId = "id:fixture macbook pro"
+        let legacyHostAlias = "host:id:fixture macbook pro"
         let mlkemKey = Data(repeating: 0xAA, count: 1_184)
 
         await KEMTrustStore.shared.clearForTesting()

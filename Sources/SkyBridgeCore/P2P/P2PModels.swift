@@ -181,6 +181,34 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
+    private func recordRemoteControlSecurityIdentity(
+        from payload: AppMessage.PairingIdentityExchangePayload
+    ) {
+        let identity = RemoteControlSecurityIdentity(
+            accountDisplayName: payload.accountDisplayName,
+            nebulaId: payload.nebulaId,
+            deviceId: payload.deviceId,
+            deviceName: payload.deviceName
+        )
+        guard !identity.isEmpty else { return }
+
+        let aliases = classicTransferPeerLookupAliases(remoteIdentityPayload: payload)
+            + [
+                payload.deviceId,
+                payload.deviceName,
+                handshakePeer.deviceId,
+                handshakePeer.displayName,
+                handshakePeer.address,
+                device.persistentDeviceId,
+                device.deviceId,
+                device.name,
+                device.address,
+                classicTransferEndpointHostOrIP()
+            ].compactMap { $0 }
+        RemoteControlSecurityPeerIdentityStore.record(identity: identity, aliases: aliases)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
     func classicTransferCapabilities(
         remoteIdentityPayload: AppMessage.PairingIdentityExchangePayload? = nil
     ) -> [String] {
@@ -373,13 +401,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             let peerKeys = [device.deviceId, handshakePeer.deviceId, device.persistentDeviceId].compactMap { $0 }
             await ClassicTransferSessionRegistry.shared.upsert(connection: self, peerKeys: peerKeys)
             await publishAuthenticatedPresence(keys: keys)
-            do {
-                try await sendPairingIdentityExchange(force: true)
-            } catch {
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ post-auth pairingIdentityExchange send failed: \(error.localizedDescription, privacy: .public)"
-                )
-            }
+            schedulePostAuthPairingIdentityExchange()
             startMetricsIfNeeded()
         } catch {
             soaPairKeyLock.withLock { $0 = nil }
@@ -848,8 +870,31 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
+    static func shouldAdvertiseSOAForCurrentPath(
+        capabilities: [String],
+        handshakePeerDeviceId: String,
+        connectionDeviceId: String,
+        persistentDeviceId: String?
+    ) -> Bool {
+        let normalizedCapabilities = Set(capabilities.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        })
+        if normalizedCapabilities.contains("hs_soa") {
+            return true
+        }
+
+        return [handshakePeerDeviceId, connectionDeviceId, persistentDeviceId].compactMap { $0 }.contains { candidate in
+            Self.strongSOARemoteIdentity(candidate) != nil
+        }
+    }
+
     private func shouldUseSOA() -> Bool {
-        device.capabilities.contains("hs_soa")
+        Self.shouldAdvertiseSOAForCurrentPath(
+            capabilities: device.capabilities,
+            handshakePeerDeviceId: handshakePeer.deviceId,
+            connectionDeviceId: device.deviceId,
+            persistentDeviceId: device.persistentDeviceId
+        )
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -1200,6 +1245,36 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
+    private func schedulePostAuthPairingIdentityExchange() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.sendPostAuthPairingIdentityExchangeWithTimeout()
+            } catch {
+                SkyBridgeLogger.p2p.info(
+                    "ℹ️ optional post-auth pairingIdentityExchange deferred: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func sendPostAuthPairingIdentityExchangeWithTimeout(timeoutSeconds: TimeInterval = 2) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { [weak self] in
+                guard let self else { throw P2PConnectionError.disconnected }
+                try await self.sendPairingIdentityExchange(force: true)
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(timeoutSeconds))
+                throw P2PConnectionError.postAuthPairingIdentityExchangeTimeout
+            }
+            defer { group.cancelAll() }
+            _ = try await group.next()
+        }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
     private func sendPairingIdentityExchange(force: Bool = false) async throws {
         let now = Date()
         if !force {
@@ -1252,6 +1327,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return nil
             #endif
         }()
+        let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
 
         let message = AppMessage.pairingIdentityExchange(.init(
             deviceId: localDeviceId,
@@ -1262,6 +1338,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             platform: localPlatform,
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             chip: nil,
+            accountDisplayName: localIdentity?.accountDisplayName,
+            nebulaId: localIdentity?.nebulaId,
             capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control", ClassicTransferCapability.classicResume],
             fileTransferPort: ServiceEndpointRegistry.shared.snapshot().fileTransferPort,
             remoteControlPort: ServiceEndpointRegistry.shared.snapshot().remoteControlPort
@@ -2149,6 +2227,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             )
             return
         }
+        recordRemoteControlSecurityIdentity(from: payload)
         let shouldForceIdentityReply = latestRemotePairingIdentityPayloadLock.withLock { current -> Bool in
             let previousDeviceId = normalizedNonEmptyString(current?.deviceId)
             current = payload
@@ -2271,7 +2350,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         appendKnownDeviceId(device.persistentDeviceId)
 
         let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
-            deviceId: handshakePeer.deviceId,
+            deviceId: declaredDeviceId ?? handshakePeer.deviceId,
             displayName: displayName,
             preferredCurrentDeviceId: declaredDeviceId,
             knownDeviceIds: knownDeviceIds,
@@ -2544,6 +2623,7 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
     case invalidFrameLength(Int)
     case bootstrapKEMKeyTimeout
     case bootstrapControlOnly
+    case postAuthPairingIdentityExchangeTimeout
 
     public var errorDescription: String? {
         switch self {
@@ -2559,6 +2639,8 @@ public enum P2PConnectionError: Error, LocalizedError, Sendable {
             return "等待对端 KEM 公钥超时（请确认对端已批准配对/信任并重试）"
         case .bootstrapControlOnly:
             return "引导恢复期间仅允许 pairingIdentityExchange 控制消息"
+        case .postAuthPairingIdentityExchangeTimeout:
+            return "post-auth pairingIdentityExchange 超时"
         }
     }
 }

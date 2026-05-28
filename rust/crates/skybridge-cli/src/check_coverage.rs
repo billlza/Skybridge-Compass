@@ -163,6 +163,12 @@ mod tests {
             report
                 .checks
                 .iter()
+                .any(|entry| entry.id == "connectivity_matrix_gate" && entry.covered)
+        );
+        assert!(
+            report
+                .checks
+                .iter()
                 .any(|entry| entry.id == "coverage_threshold_gate" && entry.covered)
         );
         Ok(())

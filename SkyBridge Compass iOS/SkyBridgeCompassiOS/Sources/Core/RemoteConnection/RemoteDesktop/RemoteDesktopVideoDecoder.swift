@@ -15,6 +15,58 @@ private func RemoteDesktopReleasePixelBufferBytes(
     Unmanaged<NSData>.fromOpaque(releaseRefCon).release()
 }
 
+@available(iOS 17.0, *)
+final class VideoDecodeResultHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<DecodeOutput?, Error>?
+    private var continuations: [CheckedContinuation<DecodeOutput?, Error>] = []
+
+    func complete(_ result: Result<DecodeOutput?, Error>) {
+        let waiters: [CheckedContinuation<DecodeOutput?, Error>]
+        lock.lock()
+        guard self.result == nil else {
+            lock.unlock()
+            return
+        }
+        self.result = result
+        waiters = continuations
+        continuations.removeAll(keepingCapacity: false)
+        lock.unlock()
+
+        for continuation in waiters {
+            continuation.resume(with: result)
+        }
+    }
+
+    func wait() async throws -> DecodeOutput? {
+        try await withCheckedThrowingContinuation { continuation in
+            let completed: Result<DecodeOutput?, Error>?
+            lock.lock()
+            completed = result
+            if completed == nil {
+                continuations.append(continuation)
+            }
+            lock.unlock()
+
+            if let completed {
+                continuation.resume(with: completed)
+            }
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+enum VideoDecodeSubmittedOutput: Sendable {
+    case completed(DecodeOutput?)
+    case pending(VideoDecodeResultHandle)
+}
+
+@available(iOS 17.0, *)
+struct VideoDecodeSubmission: Sendable {
+    let output: VideoDecodeSubmittedOutput
+    let failureReason: String?
+}
+
 // MARK: - Video Decoder
 
 /// 视频解码器
@@ -46,19 +98,39 @@ actor VideoDecoder {
 
     /// 解码 H.264/HEVC 帧
     func decode(screenData: ScreenData) async throws -> DecodeOutput? {
+        let submission = try await submit(screenData: screenData)
+        switch submission.output {
+        case .completed(let output):
+            return output
+        case .pending(let handle):
+            return try await handle.wait()
+        }
+    }
+
+    /// Submit a frame to the decoder in actor order without waiting for an
+    /// asynchronous VideoToolbox callback. Callers must await the returned
+    /// handle separately so the next access unit can enter the VT session in
+    /// wire order while prior callbacks are still in flight.
+    func submit(screenData: ScreenData) async throws -> VideoDecodeSubmission {
         lastDecodeFailureReason = nil
         let format = (screenData.format ?? "").lowercased()
         let payload = screenData.imageData
 
         if format.isEmpty {
-            return decodeStaticImage(payload)
+            return VideoDecodeSubmission(
+                output: .completed(decodeStaticImage(payload)),
+                failureReason: lastDecodeFailureReason
+            )
         }
 
         switch format {
         case "jpeg", "jpg":
-            return decodeJPEG(payload)
+            return VideoDecodeSubmission(
+                output: .completed(decodeJPEG(payload)),
+                failureReason: lastDecodeFailureReason
+            )
         case "h264":
-            return try await decodeVideoFrame(
+            return try submitVideoFrame(
                 payload,
                 codec: .h264,
                 width: screenData.width,
@@ -66,7 +138,7 @@ actor VideoDecoder {
                 isSyncFrame: screenData.isSyncFrame
             )
         case "hevc":
-            return try await decodeVideoFrame(
+            return try submitVideoFrame(
                 payload,
                 codec: .hevc,
                 width: screenData.width,
@@ -74,9 +146,15 @@ actor VideoDecoder {
                 isSyncFrame: screenData.isSyncFrame
             )
         case "bgra":
-            return decodeBGRA(payload, width: screenData.width, height: screenData.height)
+            return VideoDecodeSubmission(
+                output: .completed(decodeBGRA(payload, width: screenData.width, height: screenData.height)),
+                failureReason: lastDecodeFailureReason
+            )
         default:
-            return decodeStaticImage(payload)
+            return VideoDecodeSubmission(
+                output: .completed(decodeStaticImage(payload)),
+                failureReason: lastDecodeFailureReason
+            )
         }
     }
 
@@ -166,6 +244,28 @@ actor VideoDecoder {
         height: Int,
         isSyncFrame: Bool?
     ) async throws -> DecodeOutput? {
+        let submission = try submitVideoFrame(
+            data,
+            codec: codec,
+            width: width,
+            height: height,
+            isSyncFrame: isSyncFrame
+        )
+        switch submission.output {
+        case .completed(let output):
+            return output
+        case .pending(let handle):
+            return try await handle.wait()
+        }
+    }
+
+    private func submitVideoFrame(
+        _ data: Data,
+        codec: Codec,
+        width: Int,
+        height: Int,
+        isSyncFrame: Bool?
+    ) throws -> VideoDecodeSubmission {
         let dimensions = CGSize(width: width, height: height)
         let streamChanged = activeCodec != codec || activeVideoDimensions != dimensions
         if streamChanged {
@@ -181,6 +281,7 @@ actor VideoDecoder {
         let requiresReset = updateParameterSetsIfPresent(from: data, codec: codec, nalus: nalus)
         if requiresReset {
             resetDecoderState(keepLastFrame: true)
+            waitingForSyncFrame = true
         }
 
         let containsSyncFrame = containsSyncFrame(in: nalus, codec: codec)
@@ -190,7 +291,10 @@ actor VideoDecoder {
                 dataSize: data.count,
                 reason: "waiting-for-sync-frame \(accessUnitSummary)"
             )
-            return nil
+            return VideoDecodeSubmission(
+                output: .completed(nil),
+                failureReason: lastDecodeFailureReason
+            )
         }
 
         if formatDescription == nil {
@@ -203,13 +307,16 @@ actor VideoDecoder {
                     dataSize: data.count,
                     reason: "missing-parameter-sets"
                 )
-                return nil
+                return VideoDecodeSubmission(
+                    output: .completed(nil),
+                    failureReason: lastDecodeFailureReason
+                )
             }
-            return nil
+            return VideoDecodeSubmission(output: .completed(nil), failureReason: lastDecodeFailureReason)
         }
 
         guard let sampleData = makeDecoderSampleData(from: data, codec: codec) else {
-            return nil
+            return VideoDecodeSubmission(output: .completed(nil), failureReason: lastDecodeFailureReason)
         }
 
         let sampleBuffer = try makeSampleBuffer(
@@ -226,19 +333,17 @@ actor VideoDecoder {
             advertisedSyncFrame: isSyncFrame,
             verifiedSyncFrame: containsSyncFrame
         )
-        guard let pixelBufferFrame = try await decodeToPixelBufferFrame(
+        let handle = try submitPixelBufferDecode(
             sampleBuffer,
             codec: codec,
             width: width,
             height: height,
             accessUnitSummary: accessUnitSummary
-        ) else {
-            return nil
-        }
+        )
 
         activeVideoDimensions = dimensions
         waitingForSyncFrame = false
-        return .pixelBuffer(pixelBufferFrame)
+        return VideoDecodeSubmission(output: .pending(handle), failureReason: lastDecodeFailureReason)
     }
 
     private func resetDecoderState(keepLastFrame: Bool) {
@@ -484,55 +589,83 @@ actor VideoDecoder {
         height: Int,
         accessUnitSummary: String
     ) async throws -> DecodedPixelBufferFrame? {
+        let output = try await submitPixelBufferDecode(
+            sampleBuffer,
+            codec: codec,
+            width: width,
+            height: height,
+            accessUnitSummary: accessUnitSummary
+        ).wait()
+        guard case .pixelBuffer(let frame) = output else { return nil }
+        return frame
+    }
+
+    private func submitPixelBufferDecode(
+        _ sampleBuffer: CMSampleBuffer,
+        codec: Codec,
+        width: Int,
+        height: Int,
+        accessUnitSummary: String
+    ) throws -> VideoDecodeResultHandle {
         guard let formatDescription else {
-            return nil
+            let handle = VideoDecodeResultHandle()
+            handle.complete(.success(nil))
+            return handle
         }
         try ensureDecompressionSession(codec: codec, formatDescription: formatDescription)
         guard let decompressionSession else {
-            return nil
+            let handle = VideoDecodeResultHandle()
+            handle.complete(.success(nil))
+            return handle
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            var decodeInfoFlags = VTDecodeInfoFlags()
-            let status = VTDecompressionSessionDecodeFrame(
-                decompressionSession,
-                sampleBuffer: sampleBuffer,
-                flags: [._EnableAsynchronousDecompression],
-                infoFlagsOut: &decodeInfoFlags
-            ) { status, _, imageBuffer, presentationTimeStamp, _ in
-                guard status == noErr else {
-                    continuation.resume(
-                        throwing: RemoteDesktopError.decodingFailed(
+        let handle = VideoDecodeResultHandle()
+        var decodeInfoFlags = VTDecodeInfoFlags()
+        let status = VTDecompressionSessionDecodeFrame(
+            decompressionSession,
+            sampleBuffer: sampleBuffer,
+            flags: [._EnableAsynchronousDecompression],
+            infoFlagsOut: &decodeInfoFlags
+        ) { status, _, imageBuffer, presentationTimeStamp, _ in
+            guard status == noErr else {
+                handle.complete(
+                    .failure(
+                        RemoteDesktopError.decodingFailed(
                             "VideoToolbox callback status=\(status) \(accessUnitSummary)"
                         )
                     )
-                    return
-                }
-                guard let imageBuffer else {
-                    continuation.resume(
-                        throwing: RemoteDesktopError.decodingFailed("callback-no-image")
-                    )
-                    return
-                }
-                let pixelBuffer = imageBuffer as CVPixelBuffer
-                continuation.resume(
-                    returning: DecodedPixelBufferFrame(
+                )
+                return
+            }
+            guard let imageBuffer else {
+                handle.complete(.failure(RemoteDesktopError.decodingFailed("callback-no-image")))
+                return
+            }
+            let pixelBuffer = imageBuffer as CVPixelBuffer
+            handle.complete(
+                .success(
+                    .pixelBuffer(
+                        DecodedPixelBufferFrame(
                         pixelBuffer: pixelBuffer,
                         width: width,
                         height: height,
                         presentationTimeStamp: presentationTimeStamp
+                        )
                     )
                 )
-            }
+            )
+        }
 
-            if status != noErr {
-                continuation.resume(
-                    throwing: RemoteDesktopError.decodingFailed(
+        if status != noErr {
+            handle.complete(
+                .failure(
+                    RemoteDesktopError.decodingFailed(
                         "VideoToolbox decode failed (status=\(status))"
                     )
                 )
-            }
+            )
         }
+        return handle
     }
 
     private func makeSampleBuffer(
@@ -957,6 +1090,7 @@ actor VideoDecoder {
     func resetPreservingLastFrame() {
         resetDecoderState(keepLastFrame: true)
         waitingForSyncFrame = true
+        clearVideoParameterSets()
     }
 
     func consumeLastFailureReason() -> String? {
@@ -972,4 +1106,3 @@ actor VideoDecoder {
         SkyBridgeLogger.shared.warning("⚠️ 视频解码失败: codec=\(String(describing: codec)) bytes=\(dataSize) reason=\(reason)")
     }
 }
-

@@ -60,6 +60,7 @@ public final class NebulaPublicClientOAuth: BaseManager {
         public let name: String?
         public let email: String?
         public let picture: String?
+        public let nebulaId: String?
 
         enum CodingKeys: String, CodingKey {
             case subject = "sub"
@@ -67,6 +68,47 @@ public final class NebulaPublicClientOAuth: BaseManager {
             case name
             case email
             case picture
+            case nebulaId = "nebula_id"
+            case nebulaIdCamel = "nebulaId"
+        }
+
+        public init(
+            subject: String,
+            preferredUsername: String? = nil,
+            name: String? = nil,
+            email: String? = nil,
+            picture: String? = nil,
+            nebulaId: String? = nil
+        ) {
+            self.subject = subject
+            self.preferredUsername = preferredUsername
+            self.name = name
+            self.email = email
+            self.picture = picture
+            self.nebulaId = NebulaIdentityContract.normalizedNebulaId(nebulaId)
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            subject = try container.decode(String.self, forKey: .subject)
+            preferredUsername = try container.decodeIfPresent(String.self, forKey: .preferredUsername)
+            name = try container.decodeIfPresent(String.self, forKey: .name)
+            email = try container.decodeIfPresent(String.self, forKey: .email)
+            picture = try container.decodeIfPresent(String.self, forKey: .picture)
+            nebulaId = NebulaIdentityContract.normalizedNebulaId(
+                try container.decodeIfPresent(String.self, forKey: .nebulaId)
+                    ?? container.decodeIfPresent(String.self, forKey: .nebulaIdCamel)
+            )
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(subject, forKey: .subject)
+            try container.encodeIfPresent(preferredUsername, forKey: .preferredUsername)
+            try container.encodeIfPresent(name, forKey: .name)
+            try container.encodeIfPresent(email, forKey: .email)
+            try container.encodeIfPresent(picture, forKey: .picture)
+            try container.encodeIfPresent(nebulaId, forKey: .nebulaId)
         }
     }
 

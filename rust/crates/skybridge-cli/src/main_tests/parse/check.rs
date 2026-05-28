@@ -51,6 +51,31 @@ fn check_subcommands_parse_with_json_flags() {
         Cli::try_parse_from([
             "skybridge",
             "check",
+            "connectivity",
+            "--artifact-dir",
+            "/tmp/connectivity",
+            "--json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "check",
+            "remote-control-notice",
+            "--log-file",
+            "/tmp/remote-control-notice.log",
+            "--transport",
+            "webrtc",
+            "--require-panel",
+            "--json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "check",
             "coverage",
             "--kind",
             "operator-check-surface",

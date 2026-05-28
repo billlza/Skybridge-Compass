@@ -12,7 +12,6 @@ enum ClassicTransferPeerResolutionBranch: String, Sendable, Equatable {
     case declaredSenderDeviceId = "declared_sender_device_id"
     case aliasOrCanonicalDeviceId = "alias_or_canonical_device_id"
     case endpointHostOrIP = "endpoint_host_or_ip"
-    case singleAuthenticatedFallback = "single_authenticated_fallback"
 }
 
 struct ClassicTransferPeerResolutionOutcome: Sendable, Equatable {
@@ -87,18 +86,6 @@ enum FileTransferClassicPeerResolutionPolicy {
             )
         }
 
-        let hasExactDeclared = !(exactDeclared?.isEmpty ?? true)
-        let hasPeerHints = hasExactDeclared || !declaredCandidates.isEmpty || !endpointCandidates.isEmpty
-        if !hasPeerHints, authenticatedPeers.count == 1, let only = authenticatedPeers.first {
-            return ClassicTransferPeerResolutionOutcome(
-                matchDeviceId: only.matchDeviceId,
-                resolvedPeerDeviceId: only.resolvedPeerDeviceId,
-                matchedBy: .singleAuthenticatedFallback,
-                declaredCandidates: declaredCandidates,
-                endpointCandidates: endpointCandidates
-            )
-        }
-
         return nil
     }
 
@@ -136,13 +123,6 @@ enum FileTransferClassicPeerResolutionPolicy {
         requestedCandidates: [String],
         activeConnectionDeviceIDs: [String]
     ) -> String? {
-        guard requestedCandidates.isEmpty else { return nil }
-        let normalizedActive = normalizedTransferSecurityCandidates(activeConnectionDeviceIDs)
-        guard normalizedActive.count == 1,
-              let only = normalizedActive.first else {
-            return nil
-        }
-
-        return only
+        nil
     }
 }

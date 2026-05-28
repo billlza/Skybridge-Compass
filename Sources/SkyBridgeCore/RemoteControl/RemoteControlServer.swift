@@ -4,13 +4,34 @@ import OSLog
 
 /// 远程桌面/控制入站服务（iPhone → Mac）
 ///
-/// - 监听：TCP 5901（避免与系统 VNC 5900 冲突）
+/// - 监听：默认由系统分配 TCP 端口，并通过 Bonjour/TXT 发布实际端口
 /// - 广播：Bonjour `_skybridge-remote._tcp`
 /// - 协议：复用 `RemoteControlManager` 的长度前缀帧封装与 ScreenData/RemoteMouseEvent/RemoteKeyboardEvent
 @MainActor
 public final class RemoteControlServer: ObservableObject {
     private final class StartState: @unchecked Sendable {
         var finished = false
+    }
+
+    private final class IncomingConnectionLifecycle: @unchecked Sendable {
+        private let lock = NSLock()
+        var didHandOffToManager = false
+
+        func finishReadyInspection() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didHandOffToManager else { return false }
+            didHandOffToManager = true
+            return true
+        }
+    }
+
+    private enum ListenerHealthState {
+        case stopped
+        case starting
+        case ready
+        case failed
+        case cancelled
     }
 
     private let log = Logger(subsystem: "com.skybridge.compass", category: "RemoteControlServer")
@@ -23,22 +44,50 @@ public final class RemoteControlServer: ObservableObject {
     
     private let serviceType = "_skybridge-remote._tcp"
     private let serviceDomain = "local."
+    private nonisolated static let remoteRoutePreflightProbePayload = Data(
+        "SKYBRIDGE_REMOTE_ROUTE_PROBE_V1\n".utf8
+    )
     private var netService: NetService?
     public private(set) var activePort: UInt16?
     public private(set) var isBonjourPublished = false
+    private var listenerHealthState: ListenerHealthState = .stopped
+    private var listenerGeneration: UInt64 = 0
+    private var startTask: Task<Void, Error>?
     
-    public init(manager: RemoteControlManager, port: UInt16 = 5901) {
+    public init(manager: RemoteControlManager, port: UInt16 = 0) {
         self.manager = manager
         self.preferredPort = port
     }
     
     public func start() async throws {
+        if let startTask {
+            try await startTask.value
+            return
+        }
+
         guard listener == nil else { return }
+        let task = Task { @MainActor in
+            try await self.startFresh()
+        }
+        startTask = task
+        do {
+            try await task.value
+            startTask = nil
+        } catch {
+            startTask = nil
+            throw error
+        }
+    }
+
+    private func startFresh() async throws {
+        guard listener == nil else { return }
+        listenerHealthState = .starting
+        listenerGeneration &+= 1
+        let generation = listenerGeneration
         
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         parameters.includePeerToPeer = false
-        parameters.serviceClass = .interactiveVideo
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.noDelay = true
             tcp.enableKeepalive = true
@@ -47,23 +96,58 @@ public final class RemoteControlServer: ObservableObject {
             tcp.keepaliveCount = 4
         }
 
-        let (boundListener, boundPort) = try await makeStartedListener(parameters: parameters, preferredPort: preferredPort)
+        let (boundListener, boundPort) = try await makeStartedListener(
+            parameters: parameters,
+            preferredPort: preferredPort,
+            generation: generation
+        )
+        guard listenerGeneration == generation else {
+            boundListener.cancel()
+            throw POSIXError(.ECANCELED)
+        }
         listener = boundListener
         activePort = boundPort
         ServiceEndpointRegistry.shared.setRemoteControlPort(boundPort)
         if #available(macOS 14.0, *) {
             let identitySnapshot = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+            guard listenerGeneration == generation else {
+                boundListener.cancel()
+                throw POSIXError(.ECANCELED)
+            }
             configureBonjour(on: boundListener, port: boundPort, identitySnapshot: identitySnapshot)
         } else {
             configureBonjour(on: boundListener, port: boundPort, identitySnapshot: nil)
         }
     }
+
+    public func ensureHealthy() async throws {
+        let registryPort = ServiceEndpointRegistry.shared.snapshot().remoteControlPort
+        let needsRestart = listener == nil
+            || activePort == nil
+            || listenerHealthState == .failed
+            || listenerHealthState == .cancelled
+            || registryPort == nil
+            || registryPort != activePort
+            || !isBonjourPublished
+
+        guard needsRestart else { return }
+
+        log.warning(
+            "⚠️ RemoteControl listener unhealthy, restarting: state=\(String(describing: self.listenerHealthState), privacy: .public) activePort=\(self.activePort.map(String.init) ?? "-", privacy: .public) registryPort=\(registryPort.map(String.init) ?? "-", privacy: .public) bonjour=\(self.isBonjourPublished, privacy: .public)"
+        )
+        stop()
+        try await start()
+    }
     
     public func stop() {
+        startTask?.cancel()
+        startTask = nil
+        listenerGeneration &+= 1
         listener?.cancel()
         listener = nil
         activePort = nil
         isBonjourPublished = false
+        listenerHealthState = .stopped
         ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
         netService?.stop()
         netService = nil
@@ -156,30 +240,45 @@ public final class RemoteControlServer: ObservableObject {
 
     private func makeStartedListener(
         parameters: NWParameters,
-        preferredPort: UInt16
+        preferredPort: UInt16,
+        generation: UInt64
     ) async throws -> (NWListener, UInt16) {
+        guard preferredPort > 0 else {
+            let listener = try NWListener(using: parameters)
+            let port = try await start(listener: listener, generation: generation)
+            return (listener, port)
+        }
+
         do {
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port.validated(preferredPort))
-            let port = try await start(listener: listener)
+            let port = try await start(listener: listener, generation: generation)
             return (listener, port)
         } catch {
             guard isAddressInUse(error) else { throw error }
             log.warning("⚠️ RemoteControl preferred port \(preferredPort) busy, falling back to dynamic port")
             let listener = try NWListener(using: parameters)
-            let port = try await start(listener: listener)
+            let port = try await start(listener: listener, generation: generation)
             return (listener, port)
         }
     }
 
-    private func start(listener: NWListener) async throws -> UInt16 {
+    private func start(listener: NWListener, generation: UInt64) async throws -> UInt16 {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
             let startState = StartState()
 
             listener.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
                 Task { @MainActor in
+                    guard self.listenerGeneration == generation else {
+                        if !startState.finished {
+                            startState.finished = true
+                            continuation.resume(throwing: POSIXError(.ECANCELED))
+                        }
+                        return
+                    }
                     switch state {
                     case .ready:
+                        self.listenerHealthState = .ready
                         let boundPort = listener.port?.rawValue ?? 0
                         self.activePort = boundPort
                         ServiceEndpointRegistry.shared.setRemoteControlPort(boundPort)
@@ -189,12 +288,20 @@ public final class RemoteControlServer: ObservableObject {
                             continuation.resume(returning: boundPort)
                         }
                     case .failed(let error):
+                        self.listenerHealthState = .failed
+                        self.activePort = nil
+                        self.isBonjourPublished = false
+                        ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
                         self.log.error("❌ RemoteControlServer failed: \(String(describing: error))")
                         if !startState.finished {
                             startState.finished = true
                             continuation.resume(throwing: error)
                         }
                     case .cancelled:
+                        self.listenerHealthState = .cancelled
+                        self.activePort = nil
+                        self.isBonjourPublished = false
+                        ServiceEndpointRegistry.shared.setRemoteControlPort(nil)
                         self.log.info("⏹️ RemoteControlServer cancelled")
                         if !startState.finished {
                             startState.finished = true
@@ -206,10 +313,9 @@ public final class RemoteControlServer: ObservableObject {
                 }
             }
 
+            let connectionQueue = queue
             listener.newConnectionHandler = { [weak self] connection in
-                Task { @MainActor in
-                    self?.handleIncoming(connection)
-                }
+                self?.handleIncoming(connection, on: connectionQueue)
             }
 
             listener.start(queue: queue)
@@ -288,50 +394,190 @@ public final class RemoteControlServer: ObservableObject {
         }
     }
     
-    private func handleIncoming(_ connection: NWConnection) {
-        final class IncomingConnectionLifecycle: @unchecked Sendable {
-            var didHandOffToManager = false
-        }
-
-        let deviceId = resolveInboundPeerIdentifier(for: connection.endpoint)
+    private nonisolated func handleIncoming(_ connection: NWConnection, on connectionQueue: DispatchQueue) {
         let lifecycle = IncomingConnectionLifecycle()
+        let endpointDescription = String(describing: connection.endpoint)
+        RemoteControlSmokeStatusWriter.append("mac-remote-inbound accepted endpoint=\(endpointDescription)")
 
         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
-            print("🧪 mac remote server incoming endpoint=\(String(describing: connection.endpoint)) deviceId=\(deviceId)")
+            print("🧪 mac remote server incoming endpoint=\(endpointDescription)")
         }
 
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            Task { @MainActor in
-                let rendered: String
-                switch state {
-                case .setup:
-                    rendered = "setup"
-                case .waiting(let error):
-                    rendered = "waiting \(error)"
-                case .preparing:
-                    rendered = "preparing"
-                case .ready:
-                    rendered = "ready"
-                case .failed(let error):
-                    rendered = "failed \(error)"
-                case .cancelled:
-                    rendered = "cancelled"
-                @unknown default:
-                    rendered = "unknown"
-                }
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let connection else { return }
+            let rendered = Self.renderConnectionState(state)
+
+            if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+                print("🧪 mac remote server state endpoint=\(endpointDescription) state=\(rendered)")
+            }
+            RemoteControlSmokeStatusWriter.append(
+                "mac-remote-inbound state=\(rendered.replacingOccurrences(of: " ", with: "_")) endpoint=\(endpointDescription)"
+            )
+
+            if case .ready = state {
+                self?.inspectReadyConnectionBeforeHandoff(
+                    connection,
+                    endpointDescription: endpointDescription,
+                    lifecycle: lifecycle,
+                    on: connectionQueue
+                )
+            }
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let deviceId = self.resolveInboundPeerIdentifier(for: connection.endpoint)
                 self.log.info("🔐 RemoteControlServer connection state: peer=\(deviceId, privacy: .public) state=\(rendered, privacy: .public)")
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
                     print("🧪 mac remote server state peer=\(deviceId) state=\(rendered)")
                 }
-
-                guard case .ready = state, lifecycle.didHandOffToManager == false else { return }
-                lifecycle.didHandOffToManager = true
-                self.log.info("🔐 RemoteControlServer handing ready connection to manager: peer=\(deviceId, privacy: .public)")
-                await self.manager.allowRemoteControl(from: deviceId, connection: connection)
             }
         }
         
-        connection.start(queue: queue)
+        connection.start(queue: connectionQueue)
+    }
+
+    private nonisolated func inspectReadyConnectionBeforeHandoff(
+        _ connection: NWConnection,
+        endpointDescription: String,
+        lifecycle: IncomingConnectionLifecycle,
+        on connectionQueue: DispatchQueue
+    ) {
+        let probePayload = Self.remoteRoutePreflightProbePayload
+        RemoteControlSmokeStatusWriter.append(
+            "mac-remote-inbound initial-inspect-start endpoint=\(endpointDescription)"
+        )
+        let idleDeadline = DispatchWorkItem { [weak connection] in
+            guard lifecycle.finishReadyInspection() else { return }
+            RemoteControlSmokeStatusWriter.append(
+                "mac-remote-inbound idle-timeout endpoint=\(endpointDescription)"
+            )
+            connection?.cancel()
+        }
+        connectionQueue.asyncAfter(deadline: .now() + .seconds(8), execute: idleDeadline)
+
+        receiveInitialConnectionBytes(
+            from: connection,
+            endpointDescription: endpointDescription,
+            buffered: Data(),
+            probePayload: probePayload,
+            lifecycle: lifecycle,
+            on: connectionQueue
+        )
+    }
+
+    private nonisolated func receiveInitialConnectionBytes(
+        from connection: NWConnection,
+        endpointDescription: String,
+        buffered: Data,
+        probePayload: Data,
+        lifecycle: IncomingConnectionLifecycle,
+        on connectionQueue: DispatchQueue
+    ) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self, weak connection] data, _, isComplete, error in
+            guard let self, let connection else { return }
+            var initialData = buffered
+            if let data, !data.isEmpty {
+                initialData.append(data)
+            }
+            RemoteControlSmokeStatusWriter.append(
+                "mac-remote-inbound initial-read endpoint=\(endpointDescription) chunk=\(data?.count ?? 0) buffered=\(initialData.count) complete=\(isComplete)"
+            )
+
+            if let error {
+                guard lifecycle.finishReadyInspection() else { return }
+                RemoteControlSmokeStatusWriter.append(
+                    "mac-remote-inbound initial-read-failed endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                )
+                connection.cancel()
+                return
+            }
+
+            if !initialData.isEmpty {
+                if Self.isPrefix(initialData, of: probePayload), initialData.count < probePayload.count {
+                    self.receiveInitialConnectionBytes(
+                        from: connection,
+                        endpointDescription: endpointDescription,
+                        buffered: initialData,
+                        probePayload: probePayload,
+                        lifecycle: lifecycle,
+                        on: connectionQueue
+                    )
+                    return
+                }
+
+                guard lifecycle.finishReadyInspection() else { return }
+                if initialData == probePayload {
+                    RemoteControlSmokeStatusWriter.append(
+                        "mac-remote-inbound probe=remote-route-preflight bytes=\(initialData.count) endpoint=\(endpointDescription)"
+                    )
+                    connection.cancel()
+                    return
+                }
+
+                let handoffConnection = connection
+                let handoffData = initialData
+                RemoteControlSmokeStatusWriter.append(
+                    "mac-remote-inbound handoff-scheduled bytes=\(handoffData.count) endpoint=\(endpointDescription)"
+                )
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let deviceId = self.resolveInboundPeerIdentifier(for: handoffConnection.endpoint)
+                    RemoteControlSmokeStatusWriter.append(
+                        "mac-remote-inbound handoff-manager peer=\(deviceId) bytes=\(handoffData.count) endpoint=\(endpointDescription)"
+                    )
+                    self.log.info(
+                        "🔐 RemoteControlServer handing ready connection to manager: peer=\(deviceId, privacy: .public) initialBytes=\(handoffData.count, privacy: .public)"
+                    )
+                    await self.manager.allowRemoteControl(
+                        from: deviceId,
+                        connection: handoffConnection,
+                        initialData: handoffData
+                    )
+                }
+                return
+            }
+
+            if isComplete {
+                guard lifecycle.finishReadyInspection() else { return }
+                RemoteControlSmokeStatusWriter.append(
+                    "mac-remote-inbound closed-before-handshake endpoint=\(endpointDescription)"
+                )
+                connection.cancel()
+                return
+            }
+
+            self.receiveInitialConnectionBytes(
+                from: connection,
+                endpointDescription: endpointDescription,
+                buffered: initialData,
+                probePayload: probePayload,
+                lifecycle: lifecycle,
+                on: connectionQueue
+            )
+        }
+    }
+
+    private nonisolated static func isPrefix(_ data: Data, of probePayload: Data) -> Bool {
+        guard data.count <= probePayload.count else { return false }
+        return probePayload.prefix(data.count).elementsEqual(data)
+    }
+
+    private nonisolated static func renderConnectionState(_ state: NWConnection.State) -> String {
+        switch state {
+        case .setup:
+            return "setup"
+        case .waiting(let error):
+            return "waiting \(error)"
+        case .preparing:
+            return "preparing"
+        case .ready:
+            return "ready"
+        case .failed(let error):
+            return "failed \(error)"
+        case .cancelled:
+            return "cancelled"
+        @unknown default:
+            return "unknown"
+        }
     }
 }

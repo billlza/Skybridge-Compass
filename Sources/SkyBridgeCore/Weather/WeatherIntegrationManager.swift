@@ -124,6 +124,9 @@ public final class WeatherIntegrationManager: ObservableObject {
  /// 停止天气系统
     public func stop() {
         stopAutoRefresh()
+        locationManager.stop()
+        isLoading = false
+        isInitialized = false
         logger.info("⏹️ 天气系统已停止")
     }
     
@@ -179,4 +182,3 @@ public final class WeatherIntegrationManager: ObservableObject {
         refreshTimer = nil
     }
 }
-

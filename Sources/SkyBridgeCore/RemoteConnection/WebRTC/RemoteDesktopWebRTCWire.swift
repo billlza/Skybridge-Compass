@@ -59,4 +59,23 @@ struct ScreenDataWire: Codable {
     let timestamp: TimeInterval
     let format: String?
     let isSyncFrame: Bool?
+    let sequenceNumber: UInt64?
+
+    init(
+        width: Int,
+        height: Int,
+        imageData: Data,
+        timestamp: TimeInterval,
+        format: String?,
+        isSyncFrame: Bool?,
+        sequenceNumber: UInt64? = nil
+    ) {
+        self.width = width
+        self.height = height
+        self.imageData = imageData
+        self.timestamp = timestamp
+        self.format = format
+        self.isSyncFrame = isSyncFrame
+        self.sequenceNumber = sequenceNumber
+    }
 }

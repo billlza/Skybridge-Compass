@@ -2,11 +2,16 @@ import Foundation
 import CoreGraphics
 import Security
 import SkyBridgeCore
+import SkyBridgeSmokeSupport
 
 @available(macOS 14.0, *)
 @MainActor
 @main
 struct LocalWebRTCSmokeHost {
+    private static let xwingSuiteWireID: UInt16 = 0x0001
+    private static let mlkem768SuiteWireID: UInt16 = 0x0101
+    private static let mlkem768FSSuiteWireID: UInt16 = 0x0102
+
     static func main() async {
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
@@ -19,6 +24,7 @@ struct LocalWebRTCSmokeHost {
             await SelfIdentityProvider.shared.loadOrCreate()
             reporter.append("self-identity-ready")
             try await exportLocalPQCIdentityIfRequested(reporter: reporter)
+            try await preseedPeerKEMTrustIfRequested(reporter: reporter)
         } catch {
             reporter.append("failed stage=auth error=\(sanitize(error.localizedDescription))")
             exit(EXIT_FAILURE)
@@ -107,6 +113,8 @@ struct LocalWebRTCSmokeHost {
 
             if reportedSuccess {
                 if let successAt, Date().timeIntervalSince(successAt) >= holdAfterSuccessSeconds {
+                    await manager.disconnect()
+                    reporter.append("disconnected stage=success")
                     exit(EXIT_SUCCESS)
                 }
             }
@@ -150,6 +158,12 @@ struct LocalWebRTCSmokeHost {
             return nil
         }
         return URL(fileURLWithPath: raw)
+    }
+
+    private static func environmentValue(_ name: String) -> String? {
+        guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func smokeFileURL() -> URL? {
@@ -228,6 +242,25 @@ struct LocalWebRTCSmokeHost {
         reporter.append("auth-bind-tenant-start")
         await TenantAccessController.shared.bindAuthentication(session: session)
         reporter.append("auth-bind-tenant-done")
+        configureRemoteControlNoticeIdentity(session: session, reporter: reporter)
+    }
+
+    private static func configureRemoteControlNoticeIdentity(
+        session: AuthSession,
+        reporter: SmokeStatusReporter
+    ) {
+        let displayName = session.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let account = displayName.isEmpty ? session.userIdentifier : displayName
+        RemoteControlSecurityNoticeCenter.shared.setLocalIdentityProvider {
+            RemoteControlSecurityIdentity(
+                accountDisplayName: account,
+                nebulaId: session.nebulaId,
+                deviceId: nil,
+                deviceName: Host.current().localizedName
+            )
+        }
+        _ = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
+        reporter.append("remote-control-notice-identity account=\(sanitize(account)) nebula=\(sanitize(session.nebulaId ?? "missing"))")
     }
 
     private static func currentAuthSession(reporter: SmokeStatusReporter) async throws -> AuthSession {
@@ -735,6 +768,66 @@ struct LocalWebRTCSmokeHost {
         )
     }
 
+    private static func preseedPeerKEMTrustIfRequested(
+        reporter: SmokeStatusReporter
+    ) async throws {
+        guard let peerDeviceID = environmentValue("SKYBRIDGE_PQC_PEER_DEVICE_ID") else {
+            return
+        }
+
+        var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
+        if let xwing = try decodeBase64Key("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64") {
+            keysBySuite[xwingSuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: xwingSuiteWireID,
+                publicKey: xwing
+            )
+        }
+        if let mlkem768 = try decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64") {
+            keysBySuite[mlkem768SuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: mlkem768SuiteWireID,
+                publicKey: mlkem768
+            )
+            if environmentValue("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64") == nil {
+                keysBySuite[mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
+                    suiteWireId: mlkem768FSSuiteWireID,
+                    publicKey: mlkem768
+                )
+            }
+        }
+        if let mlkem768fs = try decodeBase64Key("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64") {
+            keysBySuite[mlkem768FSSuiteWireID] = KEMPublicKeyInfo(
+                suiteWireId: mlkem768FSSuiteWireID,
+                publicKey: mlkem768fs
+            )
+        }
+
+        let keys = keysBySuite.keys.sorted().compactMap { keysBySuite[$0] }
+        guard !keys.isEmpty else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 913,
+                userInfo: [NSLocalizedDescriptionKey: "PQC peer preseed requested but no valid peer KEM public keys were supplied"]
+            )
+        }
+
+        await PeerKEMBootstrapStore.shared.clear(deviceIds: [peerDeviceID])
+        await PeerKEMBootstrapStore.shared.upsert(deviceIds: [peerDeviceID], kemPublicKeys: keys)
+        let suites = keys.map { String(format: "0x%04x", $0.suiteWireId) }.joined(separator: ",")
+        reporter.append("pqc-preseed device=\(sanitize(peerDeviceID)) suites=\(suites)")
+    }
+
+    private static func decodeBase64Key(_ name: String) throws -> Data? {
+        guard let raw = environmentValue(name) else { return nil }
+        guard let data = Data(base64Encoded: raw, options: [.ignoreUnknownCharacters]), !data.isEmpty else {
+            throw NSError(
+                domain: "LocalWebRTCSmokeHost",
+                code: 914,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid base64 KEM public key in \(name)"]
+            )
+        }
+        return data
+    }
+
     private static func writeText(_ text: String, to url: URL) throws {
         guard let data = text.appending("\n").data(using: .utf8) else { return }
         try writePrivateData(data, to: url)
@@ -786,21 +879,21 @@ private struct SmokeStatusReporter {
 
     func reset() {
         guard let statusURL else { return }
-        try? writePrivateData(Data(), to: statusURL)
+        try? SmokeStatusFileAppender.reset(
+            at: statusURL,
+            protection: .completeUntilFirstUserAuthentication
+        )
     }
 
     func append(_ line: String) {
         guard let statusURL else { return }
         let sanitizedLine = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
         if let data = sanitizedLine.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: statusURL.path),
-               let handle = try? FileHandle(forWritingTo: statusURL) {
-                defer { try? handle.close() }
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-            } else {
-                try? writePrivateData(data, to: statusURL)
-            }
+            try? SmokeStatusFileAppender.append(
+                data,
+                to: statusURL,
+                protection: .completeUntilFirstUserAuthentication
+            )
         }
     }
 }

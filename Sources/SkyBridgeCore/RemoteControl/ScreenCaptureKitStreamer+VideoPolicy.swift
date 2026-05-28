@@ -186,6 +186,13 @@ extension ScreenCaptureKitStreamer {
         CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
     }
 
+    static func screenCaptureMinimumFrameInterval(forConfiguredFPS fps: Int) -> CMTime {
+        guard fps >= 55 else {
+            return encodeFrameDuration(forConfiguredFPS: fps)
+        }
+        return CMTime(value: 1, timescale: CMTimeScale(min(120, max(fps, fps * 2))))
+    }
+
     static func captureQueueDepth(
         lowLatencyEnabled: Bool,
         targetFPS: Int,
@@ -260,8 +267,7 @@ extension ScreenCaptureKitStreamer {
     }
 
     static func cadenceTimerIntervalNanoseconds(forConfiguredFPS fps: Int) -> UInt64 {
-        let frameInterval = frameIntervalNanoseconds(forConfiguredFPS: fps)
-        return fps >= 55 ? max(1, frameInterval / 2) : frameInterval
+        frameIntervalNanoseconds(forConfiguredFPS: fps)
     }
 
     static func cadenceCatchUpFrameLimit(forConfiguredFPS fps: Int) -> Int {

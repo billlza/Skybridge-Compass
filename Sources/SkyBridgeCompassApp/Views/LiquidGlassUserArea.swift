@@ -346,25 +346,10 @@ struct LiquidGlassUserArea: View {
         checkingForUpdates = true
         SkyBridgeLogger.ui.debugOnly("🔄 [LiquidGlassUserArea] 开始检查更新...")
         
- // 模拟网络请求
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-            await MainActor.run {
-                checkingForUpdates = false
- // 这里应该显示更新结果
-                showUpdateAlert()
-            }
+        Task { @MainActor in
+            await SkyBridgeAppUpdateController.checkAndPresent()
+            checkingForUpdates = false
         }
-    }
-    
- /// 显示更新提示
-    private func showUpdateAlert() {
-        let alert = NSAlert()
-        alert.messageText = "已是最新版本"
-        alert.informativeText = "SkyBridge Compass Pro 1.0.0 (Build 2025.10.31)\n您正在使用最新版本。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "好的")
-        alert.runModal()
     }
     
  /// 显示系统信息
@@ -402,9 +387,9 @@ struct LiquidGlassUserArea: View {
         芯片型号: \(model)
         系统版本: \(osVersion)
         物理内存: \(physicalMemory) GB
-        应用版本: 1.0.0 (Build 2025.10.31)
+        应用版本: \(SkyBridgeAppVersionInfo.displayVersion())
         Metal 版本: Metal 4
-        Swift 版本: 6.2
+        Swift 版本: 6.3
         """
     }
     
@@ -467,7 +452,7 @@ struct AboutWindow: View {
                         .font(.title)
                         .fontWeight(.bold)
                     
-                    Text("版本 1.0.0 (Build 2025.10.31)")
+                    Text("版本 \(SkyBridgeAppVersionInfo.displayVersion())")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }

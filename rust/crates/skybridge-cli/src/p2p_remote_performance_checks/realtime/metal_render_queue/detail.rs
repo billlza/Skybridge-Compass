@@ -6,7 +6,7 @@ pub(super) fn format_metal_render_queue_detail(
     verdict: &MetalRenderQueueVerdict,
 ) -> String {
     format!(
-        "finalWindow={} queueDrop={} queueBackpressure={} queueCapacityMax={:?} queueDepthMax={:?} maxAllowedQueueDepth={} coalescedBeforeDraw={} maxAllowedCoalesced={} realtimeReplacementBeforeDraw={} replacementReasonSamples={} replacementBadReasons={} replacementStructured={} manualDraw={} telemetrySamples={} minTelemetrySamples={} frameAgeSamples={} frameAgeMaxMs={:?} drawCallbackFPSGate={:?} drawCallbackFPSMin={:?} drawCallbackFPSMax={:?} maxAllowedDrawCallbackFPS={:.1} displayFPSGate={:?} displayFPSMin={:?} displayFPSMax={:?} submittedFPSMax={:?} maxAllowedVideoFPS={:.1} displayLinkTargetFPSMin={:?} displayLinkPumpFPSMin={:?} strictHighRateCadence={} drawableSkip={} inflightSkip={} failureSkip={} ciFallback={} directBGRAMismatch={}",
+        "finalWindow={} queueDrop={} queueBackpressure={} queueCapacityMax={:?} queueDepthMax={:?} maxAllowedQueueDepth={} coalescedBeforeDraw={} maxAllowedCoalesced={} realtimeReplacementBeforeDraw={} replacementReasonSamples={} replacementBadReasons={} replacementStructured={} manualDraw={} telemetrySamples={} minTelemetrySamples={} frameAgeSamples={} frameAgeMaxMs={:?} inputFPSGate={:?} inputFPSMin={:?} inputFPSMax={:?} drawCallbackFPSGate={:?} drawCallbackFPSMin={:?} drawCallbackFPSMax={:?} maxAllowedDrawCallbackFPS={:.1} displayFPSGate={:?} displayFPSMin={:?} displayFPSMax={:?} submittedFPSMax={:?} maxAllowedVideoFPS={:.1} minAllowedSampleFPS={:.1} displayLinkTargetFPSMin={:?} displayLinkPumpFPSMin={:?} strictHighRateCadence={} drawableSkip={} inflightSkip={} failureSkip={} ciFallback={} directBGRAMismatch={}",
         selected.uses_final_window,
         selected.queue_drop_total,
         selected.queue_backpressure_total,
@@ -24,6 +24,9 @@ pub(super) fn format_metal_render_queue_detail(
         verdict.min_telemetry_samples,
         selected.frame_age_samples,
         selected.frame_age_max_ms,
+        selected.input_fps_gate,
+        selected.input_fps_min,
+        selected.input_fps_max,
         selected.draw_callback_fps_gate,
         selected.draw_callback_fps_min,
         selected.draw_callback_fps_max,
@@ -33,6 +36,7 @@ pub(super) fn format_metal_render_queue_detail(
         selected.display_fps_max,
         selected.submitted_fps_max,
         verdict.max_allowed_video_fps,
+        verdict.min_allowed_sample_fps,
         selected.target_fps_min,
         selected.pump_fps_min,
         selected.strict_high_rate_cadence_seen,

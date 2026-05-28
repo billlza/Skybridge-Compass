@@ -33,6 +33,14 @@ pub(super) struct MacTxSelectedEvidence {
     pub(super) stale_queue_catch_up_total: u64,
     pub(super) queue_backlog_max: Option<u64>,
     pub(super) queue_age_max_ms: Option<f64>,
+    pub(super) schedule_gap_max_ms: Option<f64>,
+    pub(super) schedule_jitter_max_ms: Option<f64>,
+    pub(super) completion_gap_max_ms: Option<f64>,
+    pub(super) content_callback_gap_max_ms: Option<f64>,
+    pub(super) content_actor_hop_max_ms: Option<f64>,
+    pub(super) encoded_to_submit_max_ms: Option<f64>,
+    pub(super) submit_gap_max_ms: Option<f64>,
+    pub(super) clock_fire_to_drain_max_ms: Option<f64>,
     pub(super) writer_clock_samples: u64,
     pub(super) send_scheduler_samples: u64,
 }
@@ -192,6 +200,46 @@ impl MacTxSelectedEvidence {
         } else {
             evidence.queue_age_max_ms
         };
+        let schedule_gap_max_ms = if uses_final_window {
+            evidence.mac_final_window_schedule_gap_max_ms
+        } else {
+            evidence.mac_schedule_gap_max_ms
+        };
+        let schedule_jitter_max_ms = if uses_final_window {
+            evidence.mac_final_window_schedule_jitter_max_ms
+        } else {
+            evidence.mac_schedule_jitter_max_ms
+        };
+        let completion_gap_max_ms = if uses_final_window {
+            evidence.mac_final_window_completion_gap_max_ms
+        } else {
+            evidence.mac_completion_gap_max_ms
+        };
+        let content_callback_gap_max_ms = if uses_final_window {
+            evidence.mac_final_window_content_callback_gap_max_ms
+        } else {
+            evidence.mac_content_callback_gap_max_ms
+        };
+        let content_actor_hop_max_ms = if uses_final_window {
+            evidence.mac_final_window_content_actor_hop_max_ms
+        } else {
+            evidence.mac_content_actor_hop_max_ms
+        };
+        let encoded_to_submit_max_ms = if uses_final_window {
+            evidence.mac_final_window_encoded_to_submit_max_ms
+        } else {
+            evidence.mac_encoded_to_submit_max_ms
+        };
+        let submit_gap_max_ms = if uses_final_window {
+            evidence.mac_final_window_submit_gap_max_ms
+        } else {
+            evidence.mac_submit_gap_max_ms
+        };
+        let clock_fire_to_drain_max_ms = if uses_final_window {
+            evidence.mac_final_window_clock_fire_to_drain_max_ms
+        } else {
+            evidence.mac_clock_fire_to_drain_max_ms
+        };
         let writer_clock_samples = if uses_final_window {
             evidence.mac_final_window_writer_clock_dispatch_samples
         } else {
@@ -235,6 +283,14 @@ impl MacTxSelectedEvidence {
             stale_queue_catch_up_total,
             queue_backlog_max,
             queue_age_max_ms,
+            schedule_gap_max_ms,
+            schedule_jitter_max_ms,
+            completion_gap_max_ms,
+            content_callback_gap_max_ms,
+            content_actor_hop_max_ms,
+            encoded_to_submit_max_ms,
+            submit_gap_max_ms,
+            clock_fire_to_drain_max_ms,
             writer_clock_samples,
             send_scheduler_samples,
         }

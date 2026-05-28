@@ -3,6 +3,7 @@ import Foundation
 /// 文件传输错误
 public enum FileTransferError: Error, LocalizedError {
   case invalidHeader
+  case inboundInvalidInitialHeader
   case integrityCheckFailed
   case transferCancelled
   case connectionClosed
@@ -19,6 +20,8 @@ public enum FileTransferError: Error, LocalizedError {
     switch self {
     case .invalidHeader:
       return "无效的协议头部"
+    case .inboundInvalidInitialHeader:
+      return "入站文件传输初始协议头无效"
     case .integrityCheckFailed:
       return "文件完整性检查失败"
     case .transferCancelled:

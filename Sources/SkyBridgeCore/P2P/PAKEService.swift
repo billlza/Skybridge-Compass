@@ -78,10 +78,8 @@ public struct PAKEMessageA: Codable, Sendable, TranscriptEncodable {
         self.nonce = nonce ?? Self.generateNonce()
     }
 
- /// Generate cryptographically secure random nonce
- /// 19.1: Type C force unwrap handling (Requirements 9.1, 9.2)
- /// - DEBUG: assertionFailure() to alert developer
- /// - RELEASE: emit SecurityEvent and return fallback nonce
+ /// Generate cryptographically secure random nonce.
+ /// Randomness failure is unrecoverable for PAKE, so this path fails closed.
     private static func generateNonce() -> Data {
         var nonce = Data(count: P2PConstants.nonceSize)
         let status = nonce.withUnsafeMutableBytes { buffer -> OSStatus in
@@ -92,13 +90,6 @@ public struct PAKEMessageA: Codable, Sendable, TranscriptEncodable {
         }
 
         if status != errSecSuccess {
- // Type C: Development assertion - should never fail in normal operation
-            #if DEBUG
-            assertionFailure("SecRandomCopyBytes failed with status \(status) - this indicates a serious system issue")
-            #endif
-
-// RELEASE: Emit security event and return a sentinel nonce.
-// We do NOT silently downgrade to a predictable "fake-random" nonce for PAKE.
             SecurityEventEmitter.emitDetached(SecurityEvent(
                 type: .cryptoProviderSelected,  // Reuse existing type for crypto-related events
                 severity: .critical,
@@ -106,10 +97,10 @@ public struct PAKEMessageA: Codable, Sendable, TranscriptEncodable {
                 context: [
                     "status": String(status),
                     "component": "PAKEService",
-                    "fallback": "zero-nonce"
+                    "action": "fail_closed"
                 ]
             ))
-            return Data(repeating: 0, count: P2PConstants.nonceSize)
+            fatalError("SecRandomCopyBytes failed in PAKEMessageA.generateNonce with status \(status)")
         }
 
         return nonce
@@ -163,10 +154,8 @@ public struct PAKEMessageB: Codable, Sendable, TranscriptEncodable {
         self.nonce = nonce ?? Self.generateNonce()
     }
 
- /// Generate cryptographically secure random nonce
- /// 19.1: Type C force unwrap handling (Requirements 9.1, 9.2)
- /// - DEBUG: assertionFailure() to alert developer
- /// - RELEASE: emit SecurityEvent and return fallback nonce
+ /// Generate cryptographically secure random nonce.
+ /// Randomness failure is unrecoverable for PAKE, so this path fails closed.
     private static func generateNonce() -> Data {
         var nonce = Data(count: P2PConstants.nonceSize)
         let status = nonce.withUnsafeMutableBytes { buffer -> OSStatus in
@@ -177,13 +166,6 @@ public struct PAKEMessageB: Codable, Sendable, TranscriptEncodable {
         }
 
         if status != errSecSuccess {
- // Type C: Development assertion - should never fail in normal operation
-            #if DEBUG
-            assertionFailure("SecRandomCopyBytes failed with status \(status) - this indicates a serious system issue")
-            #endif
-
-// RELEASE: Emit security event and return a sentinel nonce.
-// We do NOT silently downgrade to a predictable "fake-random" nonce for PAKE.
             SecurityEventEmitter.emitDetached(SecurityEvent(
                 type: .cryptoProviderSelected,
                 severity: .critical,
@@ -191,10 +173,10 @@ public struct PAKEMessageB: Codable, Sendable, TranscriptEncodable {
                 context: [
                     "status": String(status),
                     "component": "PAKEService",
-                    "fallback": "zero-nonce"
+                    "action": "fail_closed"
                 ]
             ))
-            return Data(repeating: 0, count: P2PConstants.nonceSize)
+            fatalError("SecRandomCopyBytes failed in PAKEMessageB.generateNonce with status \(status)")
         }
 
         return nonce

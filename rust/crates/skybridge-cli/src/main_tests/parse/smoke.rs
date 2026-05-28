@@ -91,6 +91,28 @@ fn smoke_subcommands_parse_with_json_flags() {
         Cli::try_parse_from([
             "skybridge",
             "smoke",
+            "local-webrtc-security-notice",
+            "--min-fps",
+            "30",
+            "--dry-run",
+            "--json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "smoke",
+            "local-macos-security-notice-panel",
+            "--dry-run",
+            "--json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "smoke",
             "local-p2p",
             "--scenario",
             "compat-pure-pqc",
@@ -135,6 +157,20 @@ fn smoke_subcommands_parse_with_json_flags() {
         Cli::try_parse_from([
             "skybridge",
             "smoke",
+            "real-device-p2p-security-notice",
+            "--real-device-id",
+            "00008132-0006452C1138801C",
+            "--min-fps",
+            "30",
+            "--dry-run",
+            "--json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "smoke",
             "all",
             "--skip-real-device",
             "--dry-run",
@@ -147,6 +183,8 @@ fn smoke_subcommands_parse_with_json_flags() {
         "ios-config",
         "local-p2p",
         "local-webrtc",
+        "local-webrtc-security-notice",
+        "real-device-p2p-security-notice",
         "benchmarks",
     ] {
         assert!(

@@ -419,7 +419,7 @@ public final class DeviceDiscoveryService: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] enabled in
                 guard let self = self else { return }
-                self.optimizedManager?.enableCompatibilityMode = enabled
+                self.applyOptimizedDiscoverySettings(restartIfNeeded: true)
                 self.logger.info("兼容模式开关已同步: \(enabled)")
             }
             .store(in: &cancellables)
@@ -429,21 +429,57 @@ public final class DeviceDiscoveryService: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] enabled in
                 guard let self = self else { return }
-                self.optimizedManager?.enableCompanionLink = enabled
+                self.applyOptimizedDiscoverySettings(restartIfNeeded: true)
                 self.logger.info("Companion Link开关已同步: \(enabled)")
             }
             .store(in: &cancellables)
 
+        self.settingsManager.$enableIPv6Support
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] enabled in
+                guard let self = self else { return }
+                self.applyOptimizedDiscoverySettings(restartIfNeeded: false)
+                self.logger.info("IPv6发现/连接开关已同步: \(enabled)")
+            }
+            .store(in: &cancellables)
+
+        self.settingsManager.$useNewDiscoveryAlgorithm
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] enabled in
+                guard let self = self else { return }
+                self.applyOptimizedDiscoverySettings(restartIfNeeded: true)
+                self.logger.info("新发现算法开关已同步: \(enabled)")
+            }
+            .store(in: &cancellables)
+
  // 🔧 修复：初始化时同步当前值，避免首次扫描使用默认 false
-        manager.enableCompatibilityMode = self.settingsManager.enableCompatibilityMode
-        manager.enableCompanionLink = self.settingsManager.enableCompanionLink
-        logger.info("初始开关状态已同步 - 兼容模式: \(self.settingsManager.enableCompatibilityMode), Companion Link: \(self.settingsManager.enableCompanionLink)")
+        applyOptimizedDiscoverySettings(restartIfNeeded: false)
+        logger.info("初始开关状态已同步 - 兼容模式: \(self.settingsManager.enableCompatibilityMode), Companion Link: \(self.settingsManager.enableCompanionLink), IPv6: \(self.settingsManager.enableIPv6Support), 新发现算法: \(self.settingsManager.useNewDiscoveryAlgorithm)")
 
  // 为优化管理器注入外部候选指纹提供者（SSDP/ARP/HTTP）。
         manager.setFingerprintProvider { [weak self] device in
             guard let self = self else { return nil }
             return await self.makeFingerprint(for: device)
         }
+    }
+
+    public func applyRuntimeDiscoverySettings(restartIfNeeded: Bool = true) {
+        applyOptimizedDiscoverySettings(restartIfNeeded: restartIfNeeded)
+    }
+
+    private func applyOptimizedDiscoverySettings(restartIfNeeded: Bool) {
+        optimizedManager?.applyRuntimeSettings(
+            compatibilityMode: settingsManager.enableCompatibilityMode,
+            companionLink: settingsManager.enableCompanionLink,
+            ipv6Support: settingsManager.enableIPv6Support,
+            useNewDiscoveryAlgorithm: settingsManager.useNewDiscoveryAlgorithm,
+            enableBonjourDiscovery: settingsManager.enableBonjourDiscovery,
+            enableMDNSResolution: settingsManager.enableMDNSResolution,
+            scanCustomPorts: settingsManager.scanCustomPorts,
+            customServiceTypes: settingsManager.customServiceTypes,
+            discoveryTimeout: settingsManager.discoveryTimeout,
+            restartIfNeeded: restartIfNeeded
+        )
     }
 
  /// 融合蓝牙RSSI并应用强度平滑，输出带有真实强度分值的设备列表

@@ -199,6 +199,12 @@ cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 - `.github/workflows/skybridge-cli-packaging.yml`
 - `.github/workflows/skybridge-cli-release.yml`
 
+Mac App 的“检查更新”使用 GitHub Releases 上的 `macos-stable.json`
+manifest。Manifest 必须带 Ed25519 签名，并由 App 内置的
+`SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS` 公钥验证；未签名或不受信任的
+manifest 会 fail closed，不会把 HTTPS 托管内容直接当作可信版本元数据。
+发布和密钥轮换流程见 `Docs/ops/macos-update-management.md`。
+
 ## 论文与 PDF 源码位置
 
 - 主论文 LaTeX：`Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex`
@@ -385,7 +391,7 @@ SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
 
 当前发布约束：
 
-- 发布 DMG 只接受 Xcode workspace Release 的 `SkyBridgeCompassApp` executable 产物（`xcode_release` provenance），最终 `.app` 由 `package_app.sh` 组装；禁止把 `SkyBridgeCompassMac.app` native app bundle 当作发布 runtime。
+- 发布 DMG 只接受明确 Release provenance 的 `SkyBridgeCompassApp` executable 产物（默认 `swiftpm_release`；在 Xcode Package destination 无歧义时也接受 `xcode_release`），最终 `.app` 由 `package_app.sh` 组装；禁止把 `SkyBridgeCompassMac.app` native app bundle 当作发布 runtime。
 - `package_app.sh` 在 `release_dmg` 上下文下会校验构建来源，禁止隐式 fallback。
 - `build_dmg.sh --use-existing-app` 也会校验现有 `.app` 的构建来源，非 Release provenance 会直接失败。
 - 正式发布必须使用 `Developer ID Application` 证书签名；`ad-hoc` 仅适合本地调试，不适合稳定复用 macOS TCC 授权。
@@ -395,6 +401,7 @@ SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
 - 主应用 profile 可通过 `SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH` 指定，Widget Extension profile 可通过 `SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH` 指定。
 - 若要完全跳过 profile 自检，可显式设置 `SKYBRIDGE_ENSURE_DEVELOPER_ID_PROFILES=0`；正式发布不建议这样做。
 - 若要执行本地 notarization，需要提供 `notarytool` 凭据（例如 `NOTARYTOOL_KEY` / `NOTARYTOOL_KEY_ID` / `NOTARYTOOL_ISSUER` 或 keychain profile）。
+- 发布 readiness 必须提供 Mac/iOS 连通性矩阵 artifact，由 `skybridge check connectivity` 验证 Mac→iOS 的 XWing/XWing、XWing/PQC、PQC/XWing、PQC/Classic、Classic/PQC 路径，避免只凭性能 artifact 放过入站握手失败。
 
 推荐的最终校验命令：
 
@@ -402,11 +409,12 @@ SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
 SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 \
 ./Scripts/check_macos_release_readiness.sh \
   --require-notarization \
+  --connectivity-artifact-dir "Artifacts/<real-device-connectivity-matrix>" \
   --p2p-remote-artifact-dir "Artifacts/<real-device-p2p-remote-smoke>" \
   --file-transfer-artifact-dir "Artifacts/<real-device-file-transfer-smoke>"
 ```
 
-该发布门禁会运行 Rust CLI 的 memory/performance/coverage 检查；coverage
+该发布门禁会运行 Rust CLI 的 memory/connectivity/performance/coverage 检查；coverage
 为 operator check-surface 覆盖率，默认阈值 88%，不是 Rust 行/分支覆盖率。
 
 脚本自检：

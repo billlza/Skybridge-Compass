@@ -328,6 +328,7 @@
 "status.idle" = "待機中";
 "status.enabled" = "有効";
 "status.disabled" = "無効";
+"status.unavailable" = "利用不可";
 "status.optimized" = "最適化";
 "status.needsAdjust" = "調整が必要";
 "status.load.high" = "高負荷";
@@ -545,6 +546,7 @@
 "settings.remote.network.title" = "ネットワーク最適化";
 "settings.remote.network.enableBandwidthAdaptive" = "帯域幅の自動適応を有効化";
 "settings.remote.network.enableUDP" = "UDP転送を有効化";
+"settings.remote.network.enableEncryption" = "ネットワーク暗号化を有効化";
 "settings.remote.network.enableCompression" = "データ圧縮を有効化";
 "settings.remote.network.bandwidthLimit" = "帯域幅制限（Mbps）:";
 "settings.remote.network.bufferSize" = "バッファサイズ:";
@@ -555,6 +557,7 @@
 "settings.systemMonitor.config.enableHistory" = "履歴を有効化";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "性能アラートを有効化";
 "settings.systemMonitor.config.retentionDays" = "データ保持（日数):";
+"settings.systemMonitor.config.maxHistoryPoints" = "最大履歴ポイント:";
 "settings.systemMonitor.display.title" = "表示オプション";
 "settings.systemMonitor.display.cpu" = "CPU使用率を表示";
 "settings.systemMonitor.display.memory" = "メモリ使用率を表示";
@@ -569,7 +572,9 @@
 "settings.systemMonitor.alerts.cpuThreshold" = "CPUアラート閾値:";
 "settings.systemMonitor.alerts.memoryThreshold" = "メモリアラート閾値:";
 "settings.systemMonitor.alerts.diskThreshold" = "ディスクアラート閾値:";
+"settings.systemMonitor.alerts.enableTemperatureMonitoring" = "温度監視を有効化";
 "settings.systemMonitor.alerts.temperatureThreshold" = "温度アラート閾値:";
+"settings.systemMonitor.alerts.enableFanSpeedMonitoring" = "ファン回転数監視を有効化";
 "settings.systemMonitor.alerts.fanSpeedThreshold" = "ファン回転数アラート閾値:";
 "settings.systemMonitor.alerts.thermalThrottling" = "サーマルスロットリング警報を有効化";
 "settings.systemMonitor.alerts.enableSound" = "サウンドアラートを有効化";
@@ -674,6 +679,16 @@
 "about.title" = "SkyBridge Compass Pro について";
 "about.checkingUpdates" = "更新を確認中...";
 "about.checkUpdates" = "更新を確認";
+"update.available.title" = "新しいバージョンがあります";
+"update.available.message" = "SkyBridge Compass Pro %@ (Build %@) を利用できます。macOS %@ 以降が必要です。更新パッケージは Developer ID 署名済みで公証済みの DMG で、ダウンロード後に macOS Gatekeeper が検証します。";
+"update.latest.title" = "最新バージョンです";
+"update.latest.message" = "SkyBridge Compass Pro %@ は現在の安定版です。";
+"update.unsupported.title" = "新しいバージョンがありますが、この Mac では利用できません";
+"update.unsupported.message" = "バージョン %@ には macOS %@ 以降が必要です。現在の macOS は %@ です。";
+"update.failed.title" = "更新確認に失敗しました";
+"update.failed.message" = "更新確認を完了できませんでした: %@";
+"update.download" = "更新をダウンロード";
+"update.later" = "あとで";
 "about.systemInfo" = "システム情報";
 "about.diagnostics" = "診断ツール";
 "about.feedback" = "フィードバックを送信";
@@ -997,3 +1012,23 @@
 "monitor.network.quality" = "ネットワーク品質";
 "qrcode.generateFailed" = "QRコードの生成に失敗";
 "qrcode.regenerate" = "再生成";
+
+/* Remote Control Security Notice */
+"remoteControl.securityNotice.windowTitle" = "リモート制御セキュリティ通知";
+"remoteControl.securityNotice.appName" = "SkyBridge Compass";
+"remoteControl.securityNotice.pendingTitle" = "%@ がリモート制御の承認を求めています";
+"remoteControl.securityNotice.activeTitle" = "%@ はリモート制御されています";
+"remoteControl.securityNotice.subtitle" = "受信 %@ リモート制御は量子安全/PQC 暗号で保護されています。";
+"remoteControl.securityNotice.transport.p2p" = "P2P";
+"remoteControl.securityNotice.transport.webrtc" = "WebRTC";
+"remoteControl.securityNotice.remoteIP" = "IP";
+"remoteControl.securityNotice.transport" = "転送";
+"remoteControl.securityNotice.account" = "アカウント";
+"remoteControl.securityNotice.nebulaID" = "Nebula ID";
+"remoteControl.securityNotice.device" = "デバイス";
+"remoteControl.securityNotice.pqc" = "PQC スイート";
+"remoteControl.securityNotice.approve" = "承認";
+"remoteControl.securityNotice.reject" = "拒否";
+"remoteControl.securityNotice.disconnect" = "切断";
+"remoteControl.securityNotice.close" = "閉じる";
+"remoteControl.securityNotice.valueUnavailable" = "未提供";

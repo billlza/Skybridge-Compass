@@ -119,7 +119,55 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
     }
 
+    public var enableBonjourDiscovery: Bool = true
+    public var enableMDNSResolution: Bool = true
+    public var scanCustomPorts: Bool = false
+    public var customServiceTypes: [String] = []
+    public var discoveryTimeout: Int = 30
+
+    public func applyRuntimeSettings(
+        compatibilityMode: Bool,
+        companionLink: Bool,
+        ipv6Support: Bool,
+        useNewDiscoveryAlgorithm: Bool,
+        enableBonjourDiscovery: Bool = true,
+        enableMDNSResolution: Bool = true,
+        scanCustomPorts: Bool = false,
+        customServiceTypes: [String] = [],
+        discoveryTimeout: Int = 30,
+        restartIfNeeded: Bool = true
+    ) {
+        let normalizedCustomServiceTypes = Self.normalizedCustomServiceTypes(customServiceTypes)
+        let normalizedDiscoveryTimeout = max(1, discoveryTimeout)
+        let serviceTypesWillChange =
+            self.enableCompatibilityMode != compatibilityMode ||
+            self.enableCompanionLink != companionLink ||
+            self.useNewDiscoveryAlgorithm != useNewDiscoveryAlgorithm ||
+            self.enableBonjourDiscovery != enableBonjourDiscovery ||
+            self.enableMDNSResolution != enableMDNSResolution ||
+            self.scanCustomPorts != scanCustomPorts ||
+            self.customServiceTypes != normalizedCustomServiceTypes
+        let wasScanning = isScanning
+
+        self.enableCompatibilityMode = compatibilityMode
+        self.enableCompanionLink = companionLink
+        self.enableIPv6Support = ipv6Support
+        self.useNewDiscoveryAlgorithm = useNewDiscoveryAlgorithm
+        self.enableBonjourDiscovery = enableBonjourDiscovery
+        self.enableMDNSResolution = enableMDNSResolution
+        self.scanCustomPorts = scanCustomPorts
+        self.customServiceTypes = normalizedCustomServiceTypes
+        self.discoveryTimeout = normalizedDiscoveryTimeout
+
+        guard restartIfNeeded, wasScanning, serviceTypesWillChange else { return }
+        logger.info("🔄 发现运行时设置改变，重建 Bonjour 浏览器集合")
+        stopScanning()
+        startScanning()
+    }
+
     private func effectiveServiceTypes() -> [String] {
+        guard enableBonjourDiscovery else { return [] }
+
  // 1. 基础核心服务
         var types = coreServiceTypes
 
@@ -133,7 +181,23 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             types.append(contentsOf: extendedServiceTypes)
         }
 
-        return types
+        if scanCustomPorts {
+            types.append(contentsOf: customServiceTypes)
+        }
+
+        return Array(Set(types)).sorted()
+    }
+
+    private static func normalizedCustomServiceTypes(_ rawValues: [String]) -> [String] {
+        let normalized = rawValues.compactMap { rawValue -> String? in
+            let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard value.hasPrefix("_"),
+                  value.contains("._tcp") || value.contains("._udp") else {
+                return nil
+            }
+            return value
+        }
+        return Array(Set(normalized)).sorted()
     }
     private let serviceDomain = "local."
 
@@ -466,6 +530,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
     private func resolvedConnectableServiceType(for device: DiscoveredDevice) -> String? {
+        guard enableMDNSResolution else { return nil }
+
         if device.services.contains("_skybridge-remote._tcp") { return "_skybridge-remote._tcp" }
         if device.services.contains("_skybridge._tcp") { return "_skybridge._tcp" }
         if device.services.contains("_skybridge._udp") { return "_skybridge._udp" }
@@ -655,10 +721,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
  /// 并发启动所有浏览器
     private func startBrowsersConcurrently() async {
+        guard enableBonjourDiscovery else {
+            logger.info("📡 Bonjour 发现已关闭，跳过浏览器启动")
+            return
+        }
+
  // 在兼容模式下，先动态扫描服务目录，再合并到有效服务类型集合
         var types = effectiveServiceTypes()
-        if enableCompatibilityMode {
-            let dynamicTypes = await discoverServiceTypesDynamic(timeoutSeconds: 3.0)
+        if enableMDNSResolution && (enableCompatibilityMode || useNewDiscoveryAlgorithm) {
+            let dynamicTimeout = min(max(Double(discoveryTimeout), 1.0), 10.0)
+            let dynamicTypes = await discoverServiceTypesDynamic(timeoutSeconds: dynamicTimeout)
             let merged = Set(types).union(dynamicTypes)
  // 过滤自身目录类型与异常条目
             types = merged.filter { t in
@@ -825,6 +897,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         uniqueIdentifier: preserveExistingNetworkIdentity
                             ? existingDevice.uniqueIdentifier
                             : (sanitized.uniqueIdentifier ?? existingDevice.uniqueIdentifier),
+                        routeIdentifiers: preserveExistingNetworkIdentity
+                            ? existingDevice.routeIdentifiers
+                            : DiscoveredDevice.mergedRouteIdentifiers(sanitized.routeIdentifiers, existingDevice.routeIdentifiers),
                         signalStrength: sanitized.signalStrength ?? existingDevice.signalStrength,
                         source: preserveExistingNetworkIdentity ? existingDevice.source : sanitized.source,
                         isLocalDevice: false, // 强制非本机
@@ -945,6 +1020,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     merged._updateDisplayNameIfAllowed(betterName)
                     merged.services = Array(Set(device.services + merged.services))
                     merged.portMap = device.portMap.merging(merged.portMap) { new, _ in new }
+                    merged.mergeRouteIdentifiers(device.routeIdentifiers)
 
  // 合并强身份字段（优先非空）
                     merged.deviceId = device.deviceId ?? merged.deviceId
@@ -1187,6 +1263,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 ipv4: nil,
                 ipv6: nil
             ),
+            routeIdentifiers: [bonjourID].compactMap { $0 },
             signalStrength: nil,
             isLocalDevice: false, // 非SkyBridge服务默认非本机，后续由resolveIsLocal统一判定
             deviceId: strong.deviceId,
@@ -1228,6 +1305,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     ipv4: ipv4,
                     ipv6: ipv6
                 ),
+                routeIdentifiers: [bonjourID].compactMap { $0 },
                 signalStrength: await self.measureLinkQuality(host: ipv4 ?? ipv6, port: port),
                 isLocalDevice: false, // 后续由 resolveIsLocal 统一判定
                 deviceId: strong.deviceId,
@@ -1255,6 +1333,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         from result: NWBrowser.Result,
         serviceType: String
     ) async -> (ipv4: String?, ipv6: String?, port: Int) {
+        guard enableMDNSResolution else {
+            return (nil, nil, 0)
+        }
+
         var port: Int = 0
 
         if case .service(_, _, let servicePort, _) = result.endpoint {
@@ -1477,6 +1559,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         ipv4: ipv4 ?? existingDevice.ipv4,
                         ipv6: ipv6 ?? existingDevice.ipv6
                     ) ?? existingDevice.uniqueIdentifier,
+                    routeIdentifiers: DiscoveredDevice.mergedRouteIdentifiers(
+                        existingDevice.routeIdentifiers,
+                        [bonjourID].compactMap { $0 }
+                    ),
                     signalStrength: existingDevice.signalStrength,
                     source: existingDevice.source,
                     isLocalDevice: existingDevice.isLocalDevice,
@@ -1493,8 +1579,22 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private func extractStrongIdentityQuick(from result: NWBrowser.Result) -> (deviceId: String?, pubKeyFP: String?) {
         if case .bonjour(let txtRecord) = result.metadata {
             let dict = BonjourTXTParser.parse(txtRecord)
-            let devId = Self.sanitizeStableDeviceId(dict["deviceId"] ?? dict["id"] ?? dict["deviceID"] ?? dict["device_id"])
-            let fp = Self.sanitizePubKeyFingerprint(dict["pubKeyFP"] ?? dict["pubKeyFp"] ?? dict["pubkeyfp"])
+            let devId = Self.sanitizeStableDeviceId(
+                dict["deviceId"]
+                    ?? dict["id"]
+                    ?? dict["deviceID"]
+                    ?? dict["device_id"]
+                    ?? dict["uuid"]
+                    ?? dict["uniqueId"]
+                    ?? dict["unique_id"]
+            )
+            let fp = Self.sanitizePubKeyFingerprint(
+                dict["pubKeyFP"]
+                    ?? dict["pubKeyFp"]
+                    ?? dict["pubkeyfp"]
+                    ?? dict["pub_key_fp"]
+                    ?? dict["identityFingerprint"]
+            )
             return (devId, fp)
         }
         return (nil, nil)
@@ -1626,12 +1726,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             do {
                 let serviceType = "_skybridge._tcp"
                 // Strong identity TXT (deviceId/pubKeyFP) enables stable binding on peers.
-                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+                let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)
                 var txt = NWTXTRecord()
                 txt["platform"] = "macos"
                 txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
                 txt["name"] = Self.resolveDeviceName()
-                if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
+                if !snap.deviceId.isEmpty {
+                    txt["deviceId"] = snap.deviceId
+                    txt["uniqueId"] = snap.deviceId
+                }
                 if !snap.pubKeyFP.isEmpty {
                     txt["pubKeyFP"] = snap.pubKeyFP
                     txt["identityFingerprint"] = snap.pubKeyFP
@@ -1640,6 +1743,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
                 if !model.isEmpty { txt["modelName"] = model }
                 txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
+                txt["hs_soa"] = "1"
                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
                 if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
                     let port = String(transferPort)
@@ -1686,12 +1790,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
 
             // Strong identity TXT: allow peers to bind by stable deviceId (no name collision issues).
-            let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+            let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)
             var txt = NWTXTRecord()
             txt["platform"] = "macos"
             txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
             txt["name"] = Self.resolveDeviceName()
-            if !snap.deviceId.isEmpty { txt["deviceId"] = snap.deviceId }
+            if !snap.deviceId.isEmpty {
+                txt["deviceId"] = snap.deviceId
+                txt["uniqueId"] = snap.deviceId
+            }
             if !snap.pubKeyFP.isEmpty {
                 txt["pubKeyFP"] = snap.pubKeyFP
                 txt["identityFingerprint"] = snap.pubKeyFP
@@ -1699,6 +1806,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             let model = await SelfIdentityProvider.shared.getRegistrationDeviceInfo().hardwareModel
             if !model.isEmpty { txt["modelName"] = model }
             txt["capabilities"] = "file,file_transfer,rdview,rdcontrol,remote_control,remote_desktop,clipboard"
+            txt["hs_soa"] = "1"
             let endpoints = ServiceEndpointRegistry.shared.snapshot()
             if let transferPort = endpoints.fileTransferPort, transferPort > 0 {
                 let port = String(transferPort)
@@ -2026,7 +2134,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
             do {
                 let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
-                    deviceId: peer.deviceId,
+                    deviceId: payload.deviceId,
                     displayName: displayName,
                     preferredCurrentDeviceId: payload.deviceId,
                     knownDeviceIds: knownDeviceIds,
@@ -2640,6 +2748,26 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         )
 
         do {
+            let trustProvider: (any HandshakeTrustProvider)?
+            let messageAFingerprint = try? messageA
+                .decodedIdentityPublicKeys()
+                .authoritativeProtocolFingerprint()
+                .lowercased()
+            if let messageAFingerprint,
+               await PeerProtocolIdentityBootstrapStore.shared.containsTrustedFingerprint(messageAFingerprint),
+               let bootstrapProvider = BootstrapProtocolIdentityTrustProvider(
+                    protocolIdentityFingerprint: messageAFingerprint
+               ) {
+                trustProvider = bootstrapProvider
+                RemoteControlSmokeStatusWriter.append(
+                    "mac-control-inbound handshake-bootstrap-pin matched fingerprint=\(messageAFingerprint) endpoint=\(endpointDescriptionForPresence)"
+                )
+            } else {
+                trustProvider = nil
+                RemoteControlSmokeStatusWriter.append(
+                    "mac-control-inbound handshake-bootstrap-pin missing endpoint=\(endpointDescriptionForPresence)"
+                )
+            }
             let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
             driver = try HandshakeDriver(
                 transport: transport,
@@ -2650,6 +2778,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 offeredSuites: offeredSuites,
                                 policy: effectivePolicy,
                                 cryptoPolicy: cryptoPolicy,
+                                trustProvider: trustProvider,
                                 localSOAPeerId: localSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
             )
@@ -2725,6 +2854,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             let localPlatform = "macOS"
                             let localOS = ProcessInfo.processInfo.operatingSystemVersionString
                             let endpoints = ServiceEndpointRegistry.shared.snapshot()
+                            let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
                             let msg = AppMessage.heartbeat(.init(
                                 sentAt: Date(),
                                 deviceId: localIdForHeartbeat,
@@ -2733,6 +2863,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 platform: localPlatform,
                                 osVersion: localOS,
                                 chip: nil,
+                                accountDisplayName: localIdentity?.accountDisplayName,
+                                nebulaId: localIdentity?.nebulaId,
                                 capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
                                 fileTransferPort: endpoints.fileTransferPort,
                                 remoteControlPort: endpoints.remoteControlPort
@@ -2938,7 +3070,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         if let localHostname = Host.current().localizedName {
             let deviceNameLower = device.name.lowercased()
             let hostnameLower = localHostname.lowercased()
- // 检查设备名是否包含本机主机名（如 "Lza的MacBook Pro" 包含 "lza的macbook pro"）
+ // 检查设备名是否包含本机主机名（如 "Alex的MacBook Pro" 包含 "alex的macbook pro"）
             if deviceNameLower == hostnameLower ||
                deviceNameLower.contains(hostnameLower) ||
                hostnameLower.contains(deviceNameLower) {

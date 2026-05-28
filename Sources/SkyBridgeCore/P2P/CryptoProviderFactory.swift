@@ -185,7 +185,7 @@ public enum CryptoProviderFactory {
             return .xwing
         }
 
-        if UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid") {
+        if UserDefaults.standard.bool(forKey: SettingsStorageKeys.preferXWingHybrid) {
             return .xwing
         }
 
@@ -222,6 +222,9 @@ public enum CryptoProviderFactory {
 
             switch (peerSupportsXWing, peerSupportsMLKEM) {
             case (true, false):
+                guard isAppleXWingAvailable() else {
+                    return UnavailablePQCProvider()
+                }
                 return AppleXWingCryptoProvider()
             case (false, true):
                 return ApplePQCCryptoProvider()

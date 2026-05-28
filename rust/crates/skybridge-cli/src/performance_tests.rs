@@ -12,8 +12,9 @@ use crate::file_transfer_performance::{
 };
 use crate::p2p_remote_performance::*;
 use crate::performance_budgets::{
-    P2P_REMOTE_MIN_METAL_TELEMETRY_SAMPLES, P2P_REMOTE_STRICT_IOS_READ_AHEAD_MODE,
-    P2P_REMOTE_STRICT_IOS_SCREEN_DELIVERY_MODE, P2P_REMOTE_STRICT_MIN_PASS_WINDOW_SECONDS,
+    P2P_REMOTE_MIN_METAL_TELEMETRY_SAMPLES, P2P_REMOTE_STRICT_IOS_DECODE_FEED_MODE,
+    P2P_REMOTE_STRICT_IOS_READ_AHEAD_MODE, P2P_REMOTE_STRICT_IOS_SCREEN_DELIVERY_MODE,
+    P2P_REMOTE_STRICT_MIN_PASS_WINDOW_SECONDS,
 };
 use crate::performance_check_names::required_webrtc_performance_check_names;
 use crate::performance_commands::build_performance_check_report;

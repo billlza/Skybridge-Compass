@@ -2,9 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/Scripts/signing_entitlements_helpers.sh"
+source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_file_smoke_$(date +%Y%m%d_%H%M%S)}"
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
+IOS_DEBUG_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements"
 IOS_BUNDLE_ID="com.skybridge.compass.ios"
 SMOKE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_TIMEOUT_SECONDS:-180}"
 HOST_STARTUP_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_HOST_STARTUP_TIMEOUT_SECONDS:-45}"
@@ -190,7 +193,6 @@ IOS_DEVICE_ID="${SKYBRIDGE_REAL_DEVICE_ID:-$(pick_real_device_id)}"
 MAC_TARGET_NAME="${SKYBRIDGE_SMOKE_MAC_TARGET_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname)}"
 HOST_STATUS="$ARTIFACT_DIR/mac.status.log"
 HOST_PQC_REPORT="$ARTIFACT_DIR/mac.pqc.json"
-HOST_QR_CONNECT_LINK="$ARTIFACT_DIR/mac.connect-link.txt"
 HOST_STDOUT="$ARTIFACT_DIR/mac.stdout.log"
 HOST_STDERR="$ARTIFACT_DIR/mac.stderr.log"
 IOS_STATUS_NAME="ios-real-device-${RUN_ID}.status.log"
@@ -670,9 +672,7 @@ else
     echo "==> Verifying signed macOS app host against release DMG"
     readiness_args=(
       --app-path "$MAC_APP_BUNDLE"
-      --skip-launch-smoke
-      --skip-memory-check
-      --skip-performance-gates
+      --package-integrity-only
     )
     if [[ "$ALLOW_UNNOTARIZED_DMG_FOR_LAB" != "1" ]]; then
       readiness_args+=(--require-notarization)
@@ -807,7 +807,7 @@ case "$(printf '%s' "$HOST_PREFERRED_SUITE" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 echo "==> Building iOS app for real device"
-xcodebuild \
+SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
   -project "$IOS_PROJECT" \
   -scheme "$IOS_SCHEME" \
   -configuration Debug \
@@ -818,6 +818,15 @@ xcodebuild \
 IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/Debug-iphoneos/SkyBridgeCompass-iOS.app"
 if [[ ! -d "$IOS_APP_PATH" ]]; then
   echo "iOS app bundle not found: $IOS_APP_PATH" >&2
+  exit 1
+fi
+
+IOS_EMBEDDED_PROFILE="$IOS_APP_PATH/embedded.mobileprovision"
+if ! skybridge_profile_supports_requested_profile_backed_entitlements \
+  "$IOS_EMBEDDED_PROFILE" \
+  "$IOS_DEBUG_ENTITLEMENTS"; then
+  echo "iOS app provisioning profile does not cover requested Debug entitlements; refusing a smoke run that would hide missing iPad device-name access." >&2
+  echo "profile=$IOS_EMBEDDED_PROFILE entitlements=$IOS_DEBUG_ENTITLEMENTS" >&2
   exit 1
 fi
 

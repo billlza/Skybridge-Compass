@@ -82,8 +82,18 @@ extension CrossNetworkConnectionManager {
         }
     }
 
-    func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
-        try WebRTCControlChannelCodec.encryptAppPayload(plaintext, with: keys)
+    func encryptAppPayload(
+        _ plaintext: Data,
+        with keys: SessionKeys,
+        sessionID: String,
+        packetType: WebRTCAppSecurePacketType
+    ) throws -> Data {
+        try sealWebRTCSecurePayload(
+            plaintext,
+            with: keys,
+            sessionID: sessionID,
+            packetType: packetType
+        )
     }
 
     func sendFramed(_ payload: Data, over session: WebRTCSession) async throws {
@@ -92,13 +102,22 @@ extension CrossNetworkConnectionManager {
 
     private func sendFileTransferMessage(sessionID: String, session: WebRTCSession, keys: SessionKeys, message: CrossNetworkFileTransferMessage) async throws {
         let plain = try JSONEncoder().encode(message)
-        let enc = try encryptAppPayload(plain, with: keys)
+        let enc = try encryptAppPayload(
+            plain,
+            with: keys,
+            sessionID: sessionID,
+            packetType: .fileTransfer
+        )
         let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-file")
         try await sendFramed(padded, over: session)
     }
 
     /// Send a local file to the currently connected iOS peer over WebRTC DataChannel (zero-config cross-network).
     public func sendFileToConnectedPeer(_ url: URL) async throws {
+        guard RemoteDesktopSettingsManager.shared.settings.interactionSettings.enableFileTransfer else {
+            throw WebRTCFileTransferWaitError.failed("远程桌面文件传输已在设置中关闭")
+        }
+
         guard case .connected = connectionStatus,
               let conn = currentConnection,
               case .webrtc(let session) = conn.transport

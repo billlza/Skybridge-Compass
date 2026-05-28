@@ -11,14 +11,18 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         let key257 = KEMPublicKeyInfo(suiteWireId: 257, publicKey: Data(repeating: 0xA1, count: 1_184))
         let key258 = KEMPublicKeyInfo(suiteWireId: 258, publicKey: Data(repeating: 0xA2, count: 1_184))
 
+        let rawId = UUID().uuidString.lowercased()
+        let canonicalId = "id:\(rawId)"
         await store.upsert(
-            deviceIds: ["declared-device-id", "name:iPhone", "bonjour:iPhone@local"],
+            deviceIds: [canonicalId, rawId, "host:192.168.10.22"],
             kemPublicKeys: [key257, key258]
         )
 
-        let merged = await store.mergedKEMPublicKeys(forCandidates: ["name:iPhone"])
+        let merged = await store.mergedKEMPublicKeys(forCandidates: [rawId])
+        let endpointOnly = await store.mergedKEMPublicKeys(forCandidates: ["host:192.168.10.22"])
         XCTAssertEqual(merged[257], key257.publicKey)
         XCTAssertEqual(merged[258], key258.publicKey)
+        XCTAssertTrue(endpointOnly.isEmpty)
         await store.clearForTesting()
     }
 
@@ -200,18 +204,24 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
 
         let byCanonical = await store.mergedKEMPublicKeys(forCandidates: [canonicalId])
         let byAlias = await store.mergedKEMPublicKeys(forCandidates: [endpointAlias])
+        let endpointOnlyEvidence = await store.signedRefreshEvidence(forCandidates: [endpointAlias])
         let generation = await store.maximumKEMGeneration(forCandidates: [canonicalId, endpointAlias])
         let evidence = await store.signedRefreshEvidence(forCandidates: [canonicalId, endpointAlias])
 
         XCTAssertEqual(byCanonical[CryptoSuite.xwingMLDSA.wireId], signedKey)
-        XCTAssertEqual(byAlias[CryptoSuite.xwingMLDSA.wireId], signedKey)
+        XCTAssertNil(byAlias[CryptoSuite.xwingMLDSA.wireId])
+        XCTAssertNil(endpointOnlyEvidence)
         XCTAssertEqual(generation, 41)
+        XCTAssertEqual(evidence?.deviceId, canonicalId)
         XCTAssertEqual(evidence?.source, "signed_lan_kem_refresh")
         XCTAssertEqual(evidence?.suiteWireIds, [CryptoSuite.xwingMLDSA.wireId])
         XCTAssertEqual(evidence?.keyId, "skr1-test-41")
         XCTAssertEqual(evidence?.protocolIdentityFingerprint, exchange.payload.protocolIdentityFingerprint)
         XCTAssertEqual(evidence?.signingFingerprint, exchange.payload.protocolIdentityFingerprint)
         XCTAssertEqual(evidence?.payloadHashHex, Self.sha256Hex(exchange.payload.signaturePreimage))
+
+        let aliasFirstEvidence = await store.signedRefreshEvidence(forCandidates: [endpointAlias, canonicalId])
+        XCTAssertEqual(aliasFirstEvidence?.deviceId, canonicalId)
 
         await store.upsert(
             deviceIds: [canonicalId],

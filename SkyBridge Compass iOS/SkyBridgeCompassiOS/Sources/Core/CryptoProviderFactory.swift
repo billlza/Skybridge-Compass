@@ -180,6 +180,9 @@ public enum CryptoProviderFactory {
 
             switch (peerSupportsXWing, peerSupportsMLKEM) {
             case (true, false):
+                guard isAppleXWingAvailable() else {
+                    return UnavailablePQCProvider()
+                }
                 return AppleXWingCryptoProvider()
             case (false, true):
                 return ApplePQCCryptoProvider()

@@ -432,7 +432,7 @@ struct CrossNetworkConnectionView: View {
         defer { connectingCloudDeviceId = nil }
 
         if let liveDevice = unifiedDeviceManager.resolvedOnlineDevice(for: device),
-           liveDevice.connectionStatus != .offline || liveDevice.isConnectable {
+           unifiedDeviceManager.hasResolvedConnectableControlRoute(for: liveDevice) {
             do {
                 try await OnlineDeviceConnectionCoordinator.connect(to: liveDevice)
                 deviceChainViewModel.errorMessage = nil

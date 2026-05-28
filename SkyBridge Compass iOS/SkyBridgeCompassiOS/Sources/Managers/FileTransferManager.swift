@@ -1829,12 +1829,6 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.secureSessionRequired
         }
 
-        if resolution.matchedBy == .singleAuthenticatedFallback {
-            SkyBridgeLogger.shared.warning(
-                "⚠️ 文件传输安全会话回退到唯一已认证连接: transferId=\(peerContext.transferId) declaredSenderId=\(peerContext.declaredSenderDeviceId ?? "-") endpointHostOrIP=\(peerContext.endpointHostOrIP ?? "-") aliasCandidates=\(resolution.declaredCandidates.joined(separator: ",")) authenticatedConnections=\(authenticatedPeers.count) matchedFallbackBranch=\(resolution.matchedBy.rawValue)"
-            )
-        }
-
         let transferKey = try connectionManager.deriveClassicFileTransferKey(
             transferId: peerContext.transferId,
             deviceId: resolution.matchDeviceId

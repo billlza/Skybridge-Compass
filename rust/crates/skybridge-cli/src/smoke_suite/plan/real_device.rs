@@ -3,11 +3,20 @@ use std::path::Path;
 use crate::webrtc_media_dimensions::VideoDimensions;
 
 use super::SmokeSuiteStepSpec;
+use super::standard::push_remote_control_notice_check_step;
 
 const DEFAULT_REAL_DEVICE_VIDEO_SIZE: VideoDimensions = VideoDimensions {
     width: 2056,
     height: 1329,
 };
+
+struct RealDeviceP2pRemoteStepOptions<'a> {
+    real_device_id: Option<&'a str>,
+    min_fps: f64,
+    timeout_seconds: Option<u64>,
+    soak_seconds: u64,
+    video_size: VideoDimensions,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_real_device_smoke_steps(
@@ -128,34 +137,62 @@ pub(super) fn push_real_device_p2p_remote_smoke_steps(
         push_real_device_p2p_remote_smoke_step(
             root,
             steps,
-            real_device_id,
-            min_fps,
-            timeout_seconds,
-            soak_seconds,
-            size.width,
-            size.height,
+            &RealDeviceP2pRemoteStepOptions {
+                real_device_id,
+                min_fps,
+                timeout_seconds,
+                soak_seconds,
+                video_size: size,
+            },
         );
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_real_device_p2p_remote_smoke_step(
+pub(super) fn push_real_device_p2p_security_notice_smoke_steps(
     root: &Path,
     steps: &mut Vec<SmokeSuiteStepSpec>,
     real_device_id: Option<&str>,
     min_fps: f64,
     timeout_seconds: Option<u64>,
     soak_seconds: u64,
-    video_width: u32,
-    video_height: u32,
+    video_sizes: &[VideoDimensions],
+) {
+    let artifact_dir = root
+        .join("Artifacts")
+        .join("real_device_p2p_security_notice");
+    for size in real_device_video_sizes(video_sizes) {
+        push_real_device_p2p_remote_security_notice_smoke_step(
+            root,
+            steps,
+            &artifact_dir,
+            &RealDeviceP2pRemoteStepOptions {
+                real_device_id,
+                min_fps,
+                timeout_seconds,
+                soak_seconds,
+                video_size: size,
+            },
+        );
+    }
+    push_remote_control_notice_check_step(root, steps, &artifact_dir, "p2p", false);
+}
+
+fn push_real_device_p2p_remote_smoke_step(
+    root: &Path,
+    steps: &mut Vec<SmokeSuiteStepSpec>,
+    options: &RealDeviceP2pRemoteStepOptions<'_>,
 ) {
     let mut env = Vec::new();
-    push_media_env(&mut env, min_fps, 60.0);
+    push_media_env(&mut env, options.min_fps, 60.0);
     push_env(&mut env, "SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB", "1");
     push_env(&mut env, "SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW", "1");
     push_env(&mut env, "SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY", "0");
     push_env(&mut env, "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE", "X-Wing");
-    push_video_size(&mut env, video_width, video_height);
+    push_video_size(
+        &mut env,
+        options.video_size.width,
+        options.video_size.height,
+    );
     push_env(
         &mut env,
         "SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION",
@@ -163,12 +200,85 @@ fn push_real_device_p2p_remote_smoke_step(
     );
     push_env(&mut env, "SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH", "1");
     push_env(&mut env, "SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH", "1");
-    push_optional_timeout(&mut env, timeout_seconds);
-    push_optional_soak(&mut env, soak_seconds);
-    push_optional_device_id(&mut env, real_device_id);
+    push_optional_timeout(&mut env, options.timeout_seconds);
+    push_optional_soak(&mut env, options.soak_seconds);
+    push_optional_device_id(&mut env, options.real_device_id);
     steps.push(SmokeSuiteStepSpec {
         name: "real_device_p2p_remote_smoke",
         description: "Real iPad same-Wi-Fi P2P remote desktop smoke with no fallback",
+        program: "bash".to_owned(),
+        args: vec!["Scripts/run_real_device_p2p_remote_smoke.sh".to_owned()],
+        env,
+        cwd: root.to_path_buf(),
+    });
+}
+
+fn push_real_device_p2p_remote_security_notice_smoke_step(
+    root: &Path,
+    steps: &mut Vec<SmokeSuiteStepSpec>,
+    artifact_dir: &Path,
+    options: &RealDeviceP2pRemoteStepOptions<'_>,
+) {
+    let mut env = Vec::new();
+    push_media_env(&mut env, options.min_fps, 60.0);
+    push_env(
+        &mut env,
+        "SKYBRIDGE_SMOKE_ARTIFACT_DIR",
+        artifact_dir.display(),
+    );
+    push_env(&mut env, "SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB", "1");
+    push_env(&mut env, "SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW", "1");
+    push_env(
+        &mut env,
+        "SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE",
+        "1",
+    );
+    push_env(
+        &mut env,
+        "SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE",
+        "1",
+    );
+    push_env(&mut env, "SKYBRIDGE_SMOKE_RUN_MAC_ONLINE_IPAD", "0");
+    push_env(
+        &mut env,
+        "SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME",
+        "Mac Smoke Operator",
+    );
+    push_env(
+        &mut env,
+        "SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID",
+        "mac-smoke-nebula",
+    );
+    push_env(
+        &mut env,
+        "SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME",
+        "iPad Smoke Operator",
+    );
+    push_env(
+        &mut env,
+        "SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID",
+        "ipad-smoke-nebula",
+    );
+    push_env(&mut env, "SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY", "0");
+    push_env(&mut env, "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE", "X-Wing");
+    push_video_size(
+        &mut env,
+        options.video_size.width,
+        options.video_size.height,
+    );
+    push_env(
+        &mut env,
+        "SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION",
+        "upright",
+    );
+    push_env(&mut env, "SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH", "1");
+    push_env(&mut env, "SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH", "1");
+    push_optional_timeout(&mut env, options.timeout_seconds);
+    push_optional_soak(&mut env, options.soak_seconds);
+    push_optional_device_id(&mut env, options.real_device_id);
+    steps.push(SmokeSuiteStepSpec {
+        name: "real_device_p2p_security_notice_smoke",
+        description: "Real iPad P2P remote desktop smoke with security notice evidence",
         program: "bash".to_owned(),
         args: vec!["Scripts/run_real_device_p2p_remote_smoke.sh".to_owned()],
         env,

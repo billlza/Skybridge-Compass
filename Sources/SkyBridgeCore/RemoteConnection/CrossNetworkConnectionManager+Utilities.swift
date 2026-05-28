@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Network
 
 @MainActor
 extension CrossNetworkConnectionManager {
@@ -53,6 +54,39 @@ extension CrossNetworkConnectionManager {
 
     nonisolated static func crossNetworkPresencePeerID(sessionID: String) -> String {
         "cross-network:\(sessionID)"
+    }
+
+    nonisolated static func crossNetworkPresencePeerID(sessionID: String, deviceId: String?) -> String {
+        stableCrossNetworkPresencePeerID(deviceId: deviceId) ?? crossNetworkPresencePeerID(sessionID: sessionID)
+    }
+
+    nonisolated static func stableCrossNetworkPresencePeerID(deviceId: String?) -> String? {
+        guard var value = deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        if value.lowercased().hasPrefix("id:") {
+            value = String(value.dropFirst("id:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let normalized = value.lowercased()
+        guard normalized.count >= 8,
+              !normalized.hasPrefix("cross-network:"),
+              !normalized.hasPrefix("webrtc-"),
+              !normalized.hasPrefix("recent:"),
+              !normalized.hasPrefix("bonjour:"),
+              !normalized.hasPrefix("peer:"),
+              !normalized.hasPrefix("host:"),
+              !normalized.hasPrefix("ip:"),
+              !normalized.hasPrefix("mac:"),
+              !normalized.contains("@"),
+              !normalized.contains("/") else {
+            return nil
+        }
+        if IPv4Address(normalized) != nil || IPv6Address(normalized) != nil {
+            return nil
+        }
+        return "id:\(normalized)"
     }
 
     nonisolated static func deriveTenantIdentifier(accessToken: String?) -> String {

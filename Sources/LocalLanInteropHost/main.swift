@@ -1,8 +1,9 @@
 import Foundation
 import Darwin
 import AppKit
-import QuartzCore
+import CryptoKit
 import SkyBridgeCore
+import SkyBridgeSmokeSupport
 
 @MainActor
 private final class LocalLanInteropHostCoordinator {
@@ -11,7 +12,6 @@ private final class LocalLanInteropHostCoordinator {
     private let remoteControlManager = RemoteControlManager()
     private lazy var reporter = SmokeStatusReporter(statusURL: self.statusURL())
     private var monitorTask: Task<Void, Never>?
-    private var smokeCaptureSource: SmokeCaptureAnimationSource?
 
     private lazy var fileTransferListener = FileTransferListenerService(manager: fileTransferManager)
     private lazy var remoteControlServer = RemoteControlServer(manager: remoteControlManager)
@@ -44,6 +44,7 @@ private final class LocalLanInteropHostCoordinator {
         }
         let protocolDeviceId = await SelfIdentityProvider.shared.protocolIdentityDeviceId(allowCreate: true)
         reporter.append("identity ready device=\(sanitize(protocolDeviceId))")
+        configureRemoteControlNoticeIdentity(protocolDeviceId: protocolDeviceId)
         guard await discoveryManager.waitUntilInitialized(timeout: 5.0) else {
             throw HostStartupError.initializationTimedOut("DeviceDiscoveryManager")
         }
@@ -56,34 +57,86 @@ private final class LocalLanInteropHostCoordinator {
         fileTransferManager.setReceiveBaseDirectory(inboundDirectory)
 
         try await fileTransferManager.start()
-        try await discoveryManager.start()
         try await fileTransferListener.start()
         try await remoteControlServer.start()
+        let remoteControlPort = try remoteControlListenerPort()
+        try await discoveryManager.start()
         try await exportLocalPQCIdentityIfRequested(reporter: reporter)
-        startSmokeCaptureSourceIfRequested()
+        let controlPort = try await waitForControlAdvertisementPort()
 
         let settingsPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.SkyBridge.Compass/settings.json")
 
         emit("LocalLanInteropHost ready.")
-        emit("Discovery/control: _skybridge._tcp on 9527")
+        emit("Discovery/control: _skybridge._tcp on \(controlPort)")
         emit("File transfer: \(fileTransferListener.activePort ?? 8080)")
-        emit("Remote desktop: \(remoteControlServer.activePort ?? 5901)")
+        emit("Remote desktop: \(remoteControlPort)")
         emit("Inbound files: \(inboundDirectory.path)")
         emit("Settings reference: \(settingsPath.path)")
         emit("Keep this process running while Azure relay and Windows client are active.")
 
-        reporter.append("ready discovery=_skybridge._tcp port=9527")
+        reporter.append("ready remote=_skybridge-remote._tcp port=\(remoteControlPort)")
+        reporter.append("ready discovery=_skybridge._tcp port=\(controlPort)")
         monitorPresence()
     }
 
-    private func startSmokeCaptureSourceIfRequested() {
-        guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REMOTE_ANIMATION"] == "1" else {
+    private func configureRemoteControlNoticeIdentity(protocolDeviceId: String) {
+        let environment = ProcessInfo.processInfo.environment
+        let account = environment["SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+        let nebulaId = environment["SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+
+        guard account != nil || nebulaId != nil else {
+            if environment["SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE"] == "1" {
+                reporter.append(
+                    "failed stage=remote-control-notice phase=identity reason=missing-smoke-identity-env"
+                )
+            }
+            RemoteControlSecurityNoticeCenter.shared.setLocalIdentityProvider(nil)
             return
         }
-        let source = SmokeCaptureAnimationSource(reporter: reporter)
-        source.start()
-        smokeCaptureSource = source
+
+        let deviceName = Host.current().localizedName
+        RemoteControlSecurityNoticeCenter.shared.setLocalIdentityProvider {
+            RemoteControlSecurityIdentity(
+                accountDisplayName: account,
+                nebulaId: nebulaId,
+                deviceId: protocolDeviceId,
+                deviceName: deviceName
+            )
+        }
+        _ = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
+        reporter.append(
+            """
+            remote-control-notice-identity account=\(sanitize(account ?? "missing")) \
+            nebula=\(sanitize(nebulaId ?? "missing")) device=\(sanitize(protocolDeviceId))
+            """
+        )
+    }
+
+    private func waitForControlAdvertisementPort(timeout: TimeInterval = 20.0) async throws -> UInt16 {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let snapshot = await ServiceAdvertiserCenter.shared.advertisementSnapshot(for: "_skybridge._tcp")
+            if snapshot.isConnectable, let port = snapshot.port, port > 0 {
+                return port
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        } while Date() < deadline
+
+        reporter.append("failed stage=mac-host phase=advertise_control reason=control_port_unavailable")
+        throw HostStartupError.advertisementPortUnavailable("_skybridge._tcp")
+    }
+
+    private func remoteControlListenerPort() throws -> UInt16 {
+        guard let port = remoteControlServer.activePort, port > 0 else {
+            reporter.append("failed stage=mac-host phase=remote_control_listener reason=remote_port_unavailable")
+            throw HostStartupError.advertisementPortUnavailable("_skybridge-remote._tcp")
+        }
+        return port
     }
 
     private func emit(_ line: String) {
@@ -159,7 +212,7 @@ private final class LocalLanInteropHostCoordinator {
                                         "success peer=\(sanitize(newestConnection.id)) suite=X-Wing bootstrapRekey=1 fileTransfer=1"
                                     )
                                 } catch {
-                                    reporter.append("failed stage=file-transfer error=\(sanitize(error.localizedDescription))")
+                                    reporter.append(fileTransferFailureLine(for: error))
                                 }
                             } else {
                                 reporter.append(
@@ -179,7 +232,7 @@ private final class LocalLanInteropHostCoordinator {
                                     "success peer=\(sanitize(newestConnection.id)) suite=\(sanitize(newestConnection.suite)) handshakeOnly=1 fileTransfer=1"
                                 )
                             } catch {
-                                reporter.append("failed stage=file-transfer error=\(sanitize(error.localizedDescription))")
+                                reporter.append(fileTransferFailureLine(for: error))
                             }
                         } else {
                             reporter.append(
@@ -246,6 +299,149 @@ private final class LocalLanInteropHostCoordinator {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
 
+    private func sanitizePhase(_ value: String) -> String {
+        let sanitized = value.lowercased().map { character -> Character in
+            if character.isLetter || character.isNumber || character == "-" || character == "_" || character == "." {
+                return character
+            }
+            return "_"
+        }
+        let phase = String(sanitized).trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return phase.isEmpty ? "unknown" : phase
+    }
+
+    private func fileTransferFailureLine(for error: Error) -> String {
+        let phase = fileTransferFailurePhase(for: error)
+        let category = fileTransferFailureCategory(for: error, phase: phase)
+        return "failed stage=file-transfer phase=\(sanitizePhase(phase)) category=\(sanitizePhase(category)) error=\(sanitize(error.localizedDescription))"
+    }
+
+    private func fileTransferFailureCategory(for error: Error, phase: String) -> String {
+        let normalizedPhase = phase.lowercased()
+        if error is P2PDiscoveryError {
+            return "discovery"
+        }
+        if let transferError = error as? FileTransferError {
+            switch transferError {
+            case .secureSessionRequired, .securityThreatDetected, .receiverNotConfirmed, .receiverRejected:
+                return "auth_policy"
+            case .invalidHeader,
+                 .inboundInvalidInitialHeader,
+                 .integrityCheckFailed,
+                 .transferCancelled,
+                 .connectionClosed,
+                 .inboundConnectionClosedBeforeMetadata,
+                 .fileNotFound,
+                 .timeout,
+                 .receiptWaitFailed:
+                return "payload_framing"
+            }
+        }
+        let nsError = error as NSError
+        if nsError.domain == "SkyBridge.Smoke" {
+            switch nsError.code {
+            case 2010, 2011, 2012, 2013:
+                return "discovery"
+            default:
+                return "payload_framing"
+            }
+        }
+        if normalizedPhase.contains("secure_channel")
+            || normalizedPhase.contains("encryption")
+            || normalizedPhase.contains("decrypt") {
+            return "secure_channel"
+        }
+        if normalizedPhase.contains("secure_session")
+            || normalizedPhase.contains("security")
+            || normalizedPhase.contains("receiver_rejected")
+            || normalizedPhase.contains("receiver_not_confirmed") {
+            return "auth_policy"
+        }
+        if normalizedPhase.contains("connect")
+            || normalizedPhase.contains("handshake") {
+            return "handshake"
+        }
+        if normalizedPhase.contains("discovery")
+            || normalizedPhase.contains("route") {
+            return "discovery"
+        }
+        return "payload_framing"
+    }
+
+    private func fileTransferFailurePhase(for error: Error) -> String {
+        if let discoveryError = error as? P2PDiscoveryError {
+            switch discoveryError {
+            case .noConnectableEndpoint:
+                return "mac_smoke_reconnect_control_endpoint_missing"
+            case .deviceNotConnected:
+                return "mac_smoke_reconnect_device_not_connected"
+            case .connectionCancelled:
+                return "mac_smoke_reconnect_connection_cancelled"
+            case .timeout:
+                return "mac_smoke_reconnect_control_timeout"
+            case .scanningFailed:
+                return "mac_smoke_reconnect_scanning_failed"
+            case .strictPQCTrustPreflightFailed:
+                return "mac_smoke_reconnect_strict_pqc_trust_preflight_failed"
+            }
+        }
+
+        if let transferError = error as? FileTransferError {
+            switch transferError {
+            case .invalidHeader:
+                return "mac_file_transfer_invalid_header"
+            case .inboundInvalidInitialHeader:
+                return "mac_file_transfer_initial_header_rejected"
+            case .integrityCheckFailed:
+                return "mac_file_transfer_integrity_check_failed"
+            case .transferCancelled:
+                return "mac_file_transfer_cancelled"
+            case .connectionClosed:
+                return "mac_file_transfer_connection_closed"
+            case .inboundConnectionClosedBeforeMetadata:
+                return "mac_file_transfer_inbound_pre_metadata_closed"
+            case .fileNotFound:
+                return "mac_file_transfer_file_not_found"
+            case .timeout:
+                return "mac_file_transfer_timeout"
+            case .receiptWaitFailed(let stage, _):
+                return "mac_file_transfer_receipt_\(stage.rawValue)"
+            case .receiverNotConfirmed:
+                return "mac_file_transfer_receiver_not_confirmed"
+            case .receiverRejected:
+                return "mac_file_transfer_receiver_rejected"
+            case .secureSessionRequired:
+                return "mac_file_transfer_secure_session_required"
+            case .securityThreatDetected:
+                return "mac_file_transfer_security_threat_detected"
+            }
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == "SkyBridge.Smoke" {
+            switch nsError.code {
+            case 2000:
+                return "mac_smoke_wait_completed_transfer_timeout"
+            case 2001:
+                return "mac_smoke_inbound_file_missing"
+            case 2002:
+                return "mac_smoke_payload_validation_failed"
+            case 2010:
+                return "mac_smoke_reconnect_discovery_timeout"
+            case 2011:
+                return "mac_smoke_stale_inbound_presence_route"
+            case 2012:
+                return "mac_smoke_reconnect_stable_identity_missing"
+            case 2013:
+                return "mac_smoke_reconnect_transfer_route_timeout"
+            default:
+                return "mac_smoke_error_code_\(nsError.code)"
+            }
+        }
+
+        return "mac_smoke_unclassified_\(sanitizePhase(nsError.domain))_\(nsError.code)"
+    }
+
     private func performBidirectionalFileTransferSmoke(
         reporter: SmokeStatusReporter
     ) async throws {
@@ -265,7 +461,14 @@ private final class LocalLanInteropHostCoordinator {
                 userInfo: [NSLocalizedDescriptionKey: "mac smoke 未找到接收到的文件 \(inboundName)"]
             )
         }
-        reporter.append("file-transfer inbound-complete name=\(sanitize(inboundName))")
+        let inboundURL = URL(fileURLWithPath: inboundPath)
+        try validateSmokePayload(
+            at: inboundURL,
+            expectedRole: "ios",
+            fileName: inboundName
+        )
+        let inboundHash = try Self.sha256Hex(url: inboundURL)
+        reporter.append("file-transfer inbound-complete name=\(sanitize(inboundName)) sha256=\(inboundHash)")
 
         let outboundURL = try makeSmokeTransferFile(
             fileName: outboundName,
@@ -275,6 +478,7 @@ private final class LocalLanInteropHostCoordinator {
             sentAt=\(ISO8601DateFormatter().string(from: Date()))
             """
         )
+        let outboundHash = try Self.sha256Hex(url: outboundURL)
         reporter.append("file-transfer outbound-start name=\(sanitize(outboundName))")
         let targetDeviceId = Self.stableBonjourTargetDeviceId(inboundTransfer.deviceId)
         guard let route = await BonjourFileTransferRouteResolver().resolve(
@@ -301,7 +505,7 @@ private final class LocalLanInteropHostCoordinator {
             ipAddress: route.host,
             port: route.port
         )
-        reporter.append("file-transfer outbound-complete name=\(sanitize(outboundName))")
+        reporter.append("file-transfer outbound-complete name=\(sanitize(outboundName)) sha256=\(outboundHash)")
     }
 
     private static func stableBonjourTargetDeviceId(_ raw: String) -> String? {
@@ -326,6 +530,25 @@ private final class LocalLanInteropHostCoordinator {
         let url = baseDirectory.appendingPathComponent(fileName, isDirectory: false)
         try Data(contents.utf8).write(to: url, options: .atomic)
         return url
+    }
+
+    private func validateSmokePayload(at url: URL, expectedRole: String, fileName: String) throws {
+        let payload = try String(contentsOf: url, encoding: .utf8)
+        guard payload.contains("role=\(expectedRole)"),
+              payload.contains("run=\(fileTransferRunID)") else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 2002,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "mac smoke 收到的文件不是当前真实 run: \(fileName)"
+                ]
+            )
+        }
+    }
+
+    private nonisolated static func sha256Hex(url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func waitForCompletedTransfer(
@@ -563,216 +786,27 @@ private final class BonjourFileTransferRouteResolver: NSObject, @preconcurrency 
 }
 
 @MainActor
-private final class SmokeCaptureAnimationSource {
-    private let reporter: SmokeStatusReporter
-    private var size = NSSize(width: 640, height: 360)
-    private var window: NSWindow?
-    private var animationView: SmokeCaptureAnimationView?
-    private var timer: DispatchSourceTimer?
-    private var frameIndex: UInt64 = 0
-    private var displayID: CGDirectDisplayID = 0
-
-    init(reporter: SmokeStatusReporter) {
-        self.reporter = reporter
-    }
-
-    func start() {
-        guard window == nil else { return }
-
-        let application = NSApplication.shared
-        application.setActivationPolicy(.accessory)
-        application.finishLaunching()
-
-        let mainDisplayID = CGMainDisplayID()
-        let targetScreen = Self.screen(for: mainDisplayID) ?? NSScreen.main
-        displayID = targetScreen.flatMap(Self.displayID(for:)) ?? mainDisplayID
-        let visibleFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-        size = Self.captureWindowSize(for: visibleFrame)
-        let view = SmokeCaptureAnimationView(frame: NSRect(origin: .zero, size: size))
-        let window = NSPanel(
-            contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "SkyBridge Remote Smoke Source"
-        window.isReleasedWhenClosed = false
-        window.isFloatingPanel = true
-        window.hidesOnDeactivate = false
-        window.canHide = false
-        window.backgroundColor = .black
-        window.isOpaque = true
-        window.hasShadow = false
-        window.level = .floating
-        window.ignoresMouseEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        window.contentView = view
-        placeWindow(window, visibleFrame: visibleFrame)
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
-        application.activate(ignoringOtherApps: true)
-        window.displayIfNeeded()
-        application.updateWindows()
-
-        self.window = window
-        self.animationView = view
-
-        reportSourceStatus(frame: 0)
-
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .milliseconds(1))
-        timer.setEventHandler { [weak self] in
-            Task { @MainActor in
-                self?.tick()
-            }
-        }
-        timer.resume()
-        self.timer = timer
-    }
-
-    private static func captureWindowSize(for visibleFrame: NSRect) -> NSSize {
-        let width = max(640, floor(visibleFrame.width - 64))
-        let height = max(360, floor(visibleFrame.height - 64))
-        return NSSize(width: width, height: height)
-    }
-
-    private static func screen(for displayID: CGDirectDisplayID) -> NSScreen? {
-        NSScreen.screens.first { screen in
-            self.displayID(for: screen) == displayID
-        }
-    }
-
-    private static func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
-        let key = NSDeviceDescriptionKey("NSScreenNumber")
-        guard let number = screen.deviceDescription[key] as? NSNumber else { return nil }
-        return CGDirectDisplayID(number.uint32Value)
-    }
-
-    private func placeWindow(_ window: NSWindow, visibleFrame: NSRect) {
-        let origin = NSPoint(
-            x: visibleFrame.minX + max(32, floor((visibleFrame.width - size.width) / 2)),
-            y: visibleFrame.minY + max(32, floor((visibleFrame.height - size.height) / 2))
-        )
-        window.setFrame(NSRect(origin: origin, size: size), display: true)
-    }
-
-    private func tick() {
-        frameIndex &+= 1
-        animationView?.render(frame: frameIndex)
-        window?.displayIfNeeded()
-        if frameIndex % 120 == 0 {
-            reportSourceStatus(frame: frameIndex)
-        }
-    }
-
-    private func reportSourceStatus(frame: UInt64) {
-        let window = self.window
-        let windowFrame = window?.frame ?? .zero
-        let windowNumber = window?.windowNumber ?? 0
-        let visible = window?.isVisible == true ? 1 : 0
-        let occlusionVisible = window?.occlusionState.contains(.visible) == true ? 1 : 0
-        let level = Int(window?.level.rawValue ?? 0)
-        reporter.append(
-            "smoke-capture-source active=1 fps=120 targetCaptureFPS=60 frame=\(frame) displayID=\(displayID) windowID=\(windowNumber) window=\(Int(size.width))x\(Int(size.height)) windowVisible=\(visible) windowOcclusionVisible=\(occlusionVisible) windowLevel=\(level) windowFrame=\(Int(windowFrame.origin.x)),\(Int(windowFrame.origin.y)),\(Int(windowFrame.size.width)),\(Int(windowFrame.size.height))"
-        )
-    }
-}
-
-@MainActor
-private final class SmokeCaptureAnimationView: NSView {
-    private var currentFrame: UInt64 = 0
-    private let backgroundLayer = CALayer()
-    private let accentLayer = CALayer()
-    private let labelLayer = CATextLayer()
-
-    override var isFlipped: Bool { true }
-    override var isOpaque: Bool { true }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        configureLayers()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        configureLayers()
-    }
-
-    override func layout() {
-        super.layout()
-        render(frame: currentFrame)
-    }
-
-    func render(frame: UInt64) {
-        currentFrame = frame
-        let width = max(bounds.width, 1)
-        let height = max(bounds.height, 1)
-        let phase = Double(frame % 240) / 240.0
-        let stripeWidth = max(24, width * 0.08)
-        let stripeX = CGFloat(phase) * max(1, width - stripeWidth)
-
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        backgroundLayer.frame = bounds
-        backgroundLayer.backgroundColor = NSColor(
-            calibratedRed: 0.05 + 0.85 * phase,
-            green: 0.20 + 0.60 * (1.0 - phase),
-            blue: 0.35 + 0.40 * abs(0.5 - phase),
-            alpha: 1.0
-        ).cgColor
-        accentLayer.frame = CGRect(x: stripeX, y: 0, width: stripeWidth, height: height)
-        accentLayer.backgroundColor = NSColor(
-            calibratedRed: 0.95 - 0.65 * phase,
-            green: 0.15 + 0.70 * phase,
-            blue: 0.85 - 0.30 * abs(0.5 - phase),
-            alpha: 1.0
-        ).cgColor
-        labelLayer.frame = CGRect(x: width * 0.08, y: height * 0.38, width: width * 0.84, height: height * 0.18)
-        labelLayer.string = NSAttributedString(
-            string: "SKYBRIDGE REMOTE SMOKE \(frame)",
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: max(36, min(width, height) * 0.08), weight: .bold),
-                .foregroundColor: NSColor.white
-            ]
-        )
-        CATransaction.commit()
-        CATransaction.flush()
-    }
-
-    private func configureLayers() {
-        wantsLayer = true
-        let rootLayer = CALayer()
-        rootLayer.backgroundColor = NSColor.black.cgColor
-        rootLayer.needsDisplayOnBoundsChange = true
-        layer = rootLayer
-
-        backgroundLayer.needsDisplayOnBoundsChange = true
-        accentLayer.needsDisplayOnBoundsChange = true
-        labelLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-        labelLayer.alignmentMode = .left
-        labelLayer.truncationMode = .end
-        labelLayer.isWrapped = false
-
-        rootLayer.addSublayer(backgroundLayer)
-        rootLayer.addSublayer(accentLayer)
-        rootLayer.addSublayer(labelLayer)
-    }
+private enum LocalLanInteropHostLifetime {
+    static var coordinator: LocalLanInteropHostCoordinator?
 }
 
 private enum HostStartupError: LocalizedError {
     case initializationTimedOut(String)
+    case advertisementPortUnavailable(String)
 
     var errorDescription: String? {
         switch self {
         case .initializationTimedOut(let component):
             return "\(component) did not finish initialization before the host timeout."
+        case .advertisementPortUnavailable(let serviceType):
+            return "\(serviceType) did not publish a connectable listener port before the host timeout."
         }
     }
 }
 
 @main
 struct LocalLanInteropHostMain {
-    static func main() async {
+    static func main() {
         setenv("SKYBRIDGE_SMOKE_ROLE", "mac-host", 1)
         let enableCompatibilityBootstrap =
             ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ENABLE_COMPATIBILITY_MODE"] == "1"
@@ -782,18 +816,19 @@ struct LocalLanInteropHostMain {
             smokeDefaults["Settings.EnableCompatibilityMode"] = true
             UserDefaults.standard.setVolatileDomain(smokeDefaults, forName: UserDefaults.argumentDomain)
         }
-        let coordinator = await MainActor.run { LocalLanInteropHostCoordinator() }
 
-        do {
-            try await coordinator.start()
-        } catch {
-            fputs("LocalLanInteropHost failed: \(error.localizedDescription)\n", stderr)
-            Foundation.exit(1)
+        Task { @MainActor in
+            let coordinator = LocalLanInteropHostCoordinator()
+            LocalLanInteropHostLifetime.coordinator = coordinator
+            do {
+                try await coordinator.start()
+            } catch {
+                fputs("LocalLanInteropHost failed: \(error.localizedDescription)\n", stderr)
+                Foundation.exit(1)
+            }
         }
 
-        while true {
-            try? await Task.sleep(nanoseconds: 86_400_000_000_000)
-        }
+        NSApplication.shared.run()
     }
 }
 
@@ -812,21 +847,21 @@ private struct SmokeStatusReporter {
 
     func reset() {
         guard let statusURL else { return }
-        try? writeProtectedData(Data(), to: statusURL)
+        try? SmokeStatusFileAppender.reset(
+            at: statusURL,
+            protection: .completeUntilFirstUserAuthentication
+        )
     }
 
     func append(_ line: String) {
         guard let statusURL else { return }
         let formatted = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
         guard let data = formatted.data(using: .utf8) else { return }
-        if FileManager.default.fileExists(atPath: statusURL.path),
-           let handle = try? FileHandle(forWritingTo: statusURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? writeProtectedData(data, to: statusURL)
-        }
+        try? SmokeStatusFileAppender.append(
+            data,
+            to: statusURL,
+            protection: .completeUntilFirstUserAuthentication
+        )
     }
 }
 

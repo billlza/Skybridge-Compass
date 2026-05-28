@@ -43,7 +43,7 @@ public final class CloudDeviceListViewModel: ObservableObject {
     public func connectToDeviceAsync(_ device: iCloudDevice) async {
         do {
             guard let liveDevice = UnifiedOnlineDeviceManager.shared.resolvedOnlineDevice(for: device),
-                  liveDevice.connectionStatus != .offline || liveDevice.isConnectable else {
+                  UnifiedOnlineDeviceManager.shared.hasResolvedConnectableControlRoute(for: liveDevice) else {
                 errorMessage = "没有发现这台设备的本地 P2P/Bonjour 端点，iCloud 自动连接暂不可用。请确认 iPad 与 Mac 在同一局域网、SkyBridge 在前台，并刷新设备。"
                 return
             }
@@ -61,7 +61,10 @@ public final class CloudDeviceListViewModel: ObservableObject {
  // MARK: - Compatibility Properties
     
     public var authorizedDevices: [iCloudDevice] {
-        devices
+        CloudDevicePresentationPolicy.visibleICloudDevices(
+            from: devices,
+            currentDeviceId: currentDeviceId
+        )
     }
     
     public var accountStatusDescription: String {

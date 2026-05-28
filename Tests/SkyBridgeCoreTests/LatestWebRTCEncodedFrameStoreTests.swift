@@ -77,7 +77,8 @@ final class LatestWebRTCEncodedFrameStoreTests: XCTestCase {
             imageData: Data([byte]),
             timestamp: timestamp,
             format: "h264",
-            isSyncFrame: isSyncFrame
+            isSyncFrame: isSyncFrame,
+            sequenceNumber: UInt64(byte)
         )
     }
 }

@@ -373,12 +373,12 @@ public final class SSHSession: ObservableObject {
         guard !reconnecting else { return }
         reconnecting = true
         let net = RemoteDesktopSettingsManager.shared.settings.networkSettings
-        var delayMs = net.reconnectBackoffInitialMs
-        let maxMs = net.reconnectBackoffMaxMs
-        let multiplier = net.reconnectBackoffMultiplier
+        var delayMs = net.boundedReconnectBackoffInitialMilliseconds
+        let maxMs = net.boundedReconnectBackoffMaxMilliseconds
+        let multiplier = net.boundedReconnectBackoffMultiplier
         Task { @MainActor [weak self] in
             var attempts = 0
-            while attempts < net.maxReconnectAttempts {
+            while attempts < net.boundedMaxReconnectAttempts {
                 do {
                     guard let self else { return }
                     try await self.connect(password: self.password)

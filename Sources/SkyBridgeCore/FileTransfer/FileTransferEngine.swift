@@ -3,7 +3,6 @@ import Network
 import Compression
 import CryptoKit
 import Combine
-import IOKit.pwr_mgt
 import OSLog
 // 导入 ConnectionStatus（符合 Swift 6.2.1 的 Sendable 要求）
 // ConnectionStatus 已在 ConnectionStatus.swift 中定义，符合 Sendable 协议
@@ -60,6 +59,11 @@ public class FileTransferEngine: ObservableObject {
     
  // 错误处理和重试 - 利用Swift 6.2.1的并发改进
     private let retryManager = RetryManager(policy: .default)
+    private var automaticRetryEnabled: Bool
+    private var keepTransferHistory: Bool = true
+    private var keepSystemAwakeDuringTransfer: Bool = false
+    private var encryptionAlgorithm: FileTransferEncryptionAlgorithm = .aes256GCM
+    private let powerAssertion = FileTransferPowerAssertionController()
     
  // 传输速度限制 - 利用macOS 26.x的网络改进
     @Published public var maxTransferSpeed: Double? // 字节/秒，nil表示无限制
@@ -83,6 +87,10 @@ public class FileTransferEngine: ObservableObject {
     public init(configuration: TransferConfiguration = .default, settingsManager: SettingsManager? = nil) {
  // 如果提供了设置管理器，则使用其配置创建传输配置
         if let settings = settingsManager {
+            self.automaticRetryEnabled = settings.autoRetryFailedTransfers
+            self.keepTransferHistory = settings.keepTransferHistory
+            self.keepSystemAwakeDuringTransfer = settings.keepSystemAwakeDuringTransfer
+            self.encryptionAlgorithm = settings.encryptionAlgorithm
             self.configuration = TransferConfiguration(
                 maxConcurrentTransfers: settings.maxConcurrentConnections,
                 chunkSize: 1024 * 1024, // 1MB 固定块大小
@@ -94,6 +102,7 @@ public class FileTransferEngine: ObservableObject {
             )
         } else {
             self.configuration = configuration
+            self.automaticRetryEnabled = configuration.resumeEnabled
         }
         
         self.networkManager = P2PNetworkManager.shared
@@ -245,8 +254,21 @@ public class FileTransferEngine: ObservableObject {
         logger.debugOnly("🔐 更新加密设置: \(enabled ? "启用" : "禁用")")
     }
     
+    func applyRuntimeSettings(
+        autoRetryFailedTransfers: Bool,
+        keepTransferHistory: Bool,
+        keepSystemAwakeDuringTransfer: Bool,
+        encryptionAlgorithm: FileTransferEncryptionAlgorithm
+    ) {
+        updateAutoRetrySettings(autoRetryFailedTransfers)
+        updateHistorySettings(keepTransferHistory)
+        updateSystemAwakeSettings(keepSystemAwakeDuringTransfer)
+        updateEncryptionAlgorithm(encryptionAlgorithm)
+    }
+
     private func updateAutoRetrySettings(_ enabled: Bool) {
  // 更新自动重试设置
+        automaticRetryEnabled = enabled
         logger.debugOnly("🔄 更新自动重试设置: \(enabled ? "启用" : "禁用")")
         
         if enabled {
@@ -255,23 +277,21 @@ public class FileTransferEngine: ObservableObject {
     }
     
     private func updateHistorySettings(_ keepHistory: Bool) {
+        keepTransferHistory = keepHistory
         if !keepHistory {
             transferHistory.removeAll()
-            saveTransferHistory()
+            try? Self.transferHistoryStore.remove()
         }
     }
     
     private func updateSystemAwakeSettings(_ keepAwake: Bool) {
-        if keepAwake && !activeTransfers.isEmpty {
-            enableSystemAwake()
-        } else {
-            disableSystemAwake()
-        }
+        keepSystemAwakeDuringTransfer = keepAwake
+        updateSystemAwakeAssertion()
     }
     
-    private func updateEncryptionAlgorithm(_ algorithm: String) {
- // 更新加密算法
-        logger.debugOnly("🔐 更新加密算法: \(algorithm)")
+    private func updateEncryptionAlgorithm(_ algorithm: FileTransferEncryptionAlgorithm) {
+        encryptionAlgorithm = algorithm
+        logger.debugOnly("🔐 文件传输加密算法: \(algorithm.displayName)")
     }
     
  // MARK: - 系统唤醒管理
@@ -279,30 +299,11 @@ public class FileTransferEngine: ObservableObject {
  // 断言ID由注册表辅助管理，避免在非隔离上下文访问实例属性
     
  /// 启用系统保持唤醒
-    private func enableSystemAwake() {
-        var assertionId = IOPMAssertionID(kIOPMNullAssertionID)
-        let result = IOPMAssertionCreateWithName(
-            kIOPMAssertionTypeNoIdleSleep as CFString,
-            IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            "SkyBridge文件传输" as CFString,
-            &assertionId
+    private func updateSystemAwakeAssertion() {
+        powerAssertion.update(
+            shouldKeepAwake: keepSystemAwakeDuringTransfer,
+            hasActiveTransfers: !activeTransfers.isEmpty
         )
-        if result == kIOReturnSuccess {
-            AwakeRegistry.register(self, assertionId: assertionId)
-            logger.debugOnly("💡 系统保持唤醒已启用")
-        } else {
-            logger.error("❌ 启用系统保持唤醒失败: \(result)")
-        }
-    }
-    
- /// 禁用系统保持唤醒
-    private func disableSystemAwake() {
-        let result = AwakeRegistry.unregister(self)
-        if result == kIOReturnSuccess {
-            logger.debugOnly("💡 系统保持唤醒已禁用")
-        } else if result != kIOReturnSuccess {
-            logger.error("❌ 禁用系统保持唤醒失败: \(result)")
-        }
     }
     
  // MARK: - 视频传输配置
@@ -347,7 +348,7 @@ public class FileTransferEngine: ObservableObject {
             throw FileTransferEngineError.connectionLost
         }
  // 使用重试管理器执行传输 - 利用Swift 6.2.1的并发改进
-        return try await retryManager.executeWithRetry(operationId: "sendFile-\(fileURL.lastPathComponent)") { [self] in
+        let sendOperation: @Sendable () async throws -> String = { [self] in
  // 检查文件是否存在
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw FileTransferEngineError.fileNotFound
@@ -386,7 +387,7 @@ public class FileTransferEngine: ObservableObject {
         
  // 添加到活跃传输
         await MainActor.run {
-                self.activeTransfers[transferId] = session
+                self.registerActiveTransfer(session, transferId: transferId)
         }
         
         do {
@@ -424,7 +425,7 @@ public class FileTransferEngine: ObservableObject {
                 await MainActor.run { [self] in
                 session.state = .completed
                     self.addToHistory(session)
-                    self.activeTransfers.removeValue(forKey: transferId)
+                    self.removeActiveTransfer(transferId)
                     self.speedLimiter = nil
             }
             
@@ -438,7 +439,7 @@ public class FileTransferEngine: ObservableObject {
                 session.error = error
                 session.state = .failed
                     self.addToHistory(session)
-                    self.activeTransfers.removeValue(forKey: transferId)
+                    self.removeActiveTransfer(transferId)
                     self.speedLimiter = nil
             }
                 
@@ -452,13 +453,22 @@ public class FileTransferEngine: ObservableObject {
                     session.error = error
                     session.state = .failed
                     self.addToHistory(session)
-                    self.activeTransfers.removeValue(forKey: transferId)
+                    self.removeActiveTransfer(transferId)
                     self.speedLimiter = nil
                 }
  // 将非FileTransferEngineError错误包装为networkError
                 throw FileTransferEngineError.networkError(underlying: error)
             }
         }
+
+        if automaticRetryEnabled {
+            return try await retryManager.executeWithRetry(
+                operationId: "sendFile-\(fileURL.lastPathComponent)",
+                operation: sendOperation
+            )
+        }
+
+        return try await sendOperation()
     }
     
  /// 格式化速度显示
@@ -515,7 +525,7 @@ public class FileTransferEngine: ObservableObject {
         
  // 添加到活跃传输
         await MainActor.run {
-            activeTransfers[metadata.transferId] = session
+            registerActiveTransfer(session, transferId: metadata.transferId)
         }
         
         do {
@@ -534,7 +544,7 @@ public class FileTransferEngine: ObservableObject {
                         session.error = FileTransferEngineError.securityThreatDetected(threatName: scanResult.threatName ?? "未知威胁")
                         session.state = .failed
                         addToHistory(session)
-                        activeTransfers.removeValue(forKey: metadata.transferId)
+                        removeActiveTransfer(metadata.transferId)
                     }
                     throw FileTransferEngineError.securityThreatDetected(threatName: scanResult.threatName ?? "未知威胁")
                 }
@@ -545,7 +555,7 @@ public class FileTransferEngine: ObservableObject {
             await MainActor.run {
                 session.state = .completed
                 addToHistory(session)
-                activeTransfers.removeValue(forKey: metadata.transferId)
+                removeActiveTransfer(metadata.transferId)
             }
             
             return metadata.transferId
@@ -556,7 +566,7 @@ public class FileTransferEngine: ObservableObject {
                 session.error = error
                 session.state = .failed
                 addToHistory(session)
-                activeTransfers.removeValue(forKey: metadata.transferId)
+                removeActiveTransfer(metadata.transferId)
             }
             throw error
         }
@@ -580,9 +590,10 @@ public class FileTransferEngine: ObservableObject {
         ])
         let checksum = try await calculateFileChecksum(session.localURL)
         let signerPeerId = securityManager.getDeviceId()
-        let signature = try await pqCrypto.sign(Data(checksum.utf8), for: signerPeerId)
-        let enablePQCFlag = await MainActor.run { SettingsManager.shared.enablePQC }
-        let pqcAlgo = await MainActor.run { SettingsManager.shared.pqcSignatureAlgorithm }
+        let pqcAlgo = await MainActor.run {
+            SettingsManager.normalizedPQCSignatureAlgorithm(SettingsManager.shared.pqcSignatureAlgorithm)
+        }
+        let signature = try await pqCrypto.signPQCRequired(Data(checksum.utf8), for: signerPeerId)
         let metadata = FileTransferMetadata(
             transferId: session.id,
             fileName: session.localURL.lastPathComponent,
@@ -594,7 +605,7 @@ public class FileTransferEngine: ObservableObject {
             encryptionEnabled: session.configuration.encryptionEnabled,
             chunkSize: configuration.chunkSize,
             fileSignature: signature,
-            signatureAlgorithm: enablePQCFlag ? pqcAlgo : "P256",
+            signatureAlgorithm: pqcAlgo,
             signerPeerId: signerPeerId
         )
         
@@ -649,26 +660,41 @@ public class FileTransferEngine: ObservableObject {
         guard receivedChecksum == metadata.checksum else {
             throw FileTransferEngineError.checksumMismatch
         }
- // 校验整文件签名（如有），并发布事件用于调试对比
-        if let sig = metadata.fileSignature, let signerId = metadata.signerPeerId {
-            do {
-                let ok = try await pqCrypto.verify(Data(receivedChecksum.utf8), signature: sig, for: signerId)
-                NotificationCenter.default.post(name: Notification.Name("fileSignatureVerified"), object: nil, userInfo: [
-                    "transferId": session.id,
-                    "signerId": signerId,
-                    "ok": ok
-                ])
-                if !ok { throw FileTransferEngineError.checksumMismatch }
-            } catch {
-                NotificationCenter.default.post(name: Notification.Name("fileSignatureVerified"), object: nil, userInfo: [
-                    "transferId": session.id,
-                    "signerId": signerId,
-                    "ok": false,
-                    "error": String(describing: error)
-                ])
- // 若验签失败或缺少公钥，返回一致性错误以避免错误数据落盘
-                throw FileTransferEngineError.checksumMismatch
-            }
+ // 校验整文件签名；strict PQC 下缺签名、缺 signer 或算法不明都必须失败关闭。
+        guard let sig = metadata.fileSignature,
+              let signerId = metadata.signerPeerId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !signerId.isEmpty else {
+            NotificationCenter.default.post(name: Notification.Name("fileSignatureVerified"), object: nil, userInfo: [
+                "transferId": session.id,
+                "ok": false,
+                "error": "missing_strict_pqc_signature"
+            ])
+            throw FileTransferEngineError.checksumMismatch
+        }
+
+        do {
+            let ok = try await pqCrypto.verifyPQCRequired(
+                Data(receivedChecksum.utf8),
+                signature: sig,
+                for: signerId,
+                algorithm: metadata.signatureAlgorithm
+            )
+            NotificationCenter.default.post(name: Notification.Name("fileSignatureVerified"), object: nil, userInfo: [
+                "transferId": session.id,
+                "signerId": signerId,
+                "algorithm": metadata.signatureAlgorithm ?? "",
+                "ok": ok
+            ])
+            if !ok { throw FileTransferEngineError.checksumMismatch }
+        } catch {
+            NotificationCenter.default.post(name: Notification.Name("fileSignatureVerified"), object: nil, userInfo: [
+                "transferId": session.id,
+                "signerId": signerId,
+                "algorithm": metadata.signatureAlgorithm ?? "",
+                "ok": false,
+                "error": String(describing: error)
+            ])
+            throw FileTransferEngineError.checksumMismatch
         }
  // 可选：Merkle 根校验
         if let merkleRoot = metadata.merkleRoot {
@@ -1726,6 +1752,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 添加到历史记录
     private func addToHistory(_ session: FileTransferSession) {
+        guard keepTransferHistory else { return }
         let record = FileTransferRecord(
             id: session.id,
             fileName: session.fileName,
@@ -1742,6 +1769,16 @@ public class FileTransferEngine: ObservableObject {
             ]
         )
         transferHistory.append(record)
+    }
+
+    private func registerActiveTransfer(_ session: FileTransferSession, transferId: String) {
+        activeTransfers[transferId] = session
+        updateSystemAwakeAssertion()
+    }
+
+    private func removeActiveTransfer(_ transferId: String) {
+        activeTransfers.removeValue(forKey: transferId)
+        updateSystemAwakeAssertion()
     }
     
  /// 加载传输历史记录
@@ -1800,7 +1837,7 @@ public class FileTransferEngine: ObservableObject {
     public func cancelTransfer(_ transferId: String) {
         if let session = activeTransfers[transferId] {
             session.state = .cancelled
-            activeTransfers.removeValue(forKey: transferId)
+            removeActiveTransfer(transferId)
             
  // 添加到历史记录
             addToHistory(session)
@@ -1822,17 +1859,13 @@ public class FileTransferEngine: ObservableObject {
     }
     
     deinit {
-        let key = ObjectIdentifier(self)
-        Task { @MainActor in
-            _ = AwakeRegistry.release(for: key)
-        }
         Logger(subsystem: "com.skybridge.filetransfer", category: "Engine").debugOnly("🧹 FileTransferEngine 已清理所有资源（deinit）")
     }
     
  /// 清理资源
     public func cleanup() {
  // 取消所有活跃传输
-        for transferId in activeTransfers.keys {
+        for transferId in Array(activeTransfers.keys) {
             cancelTransfer(transferId)
         }
         
@@ -1843,8 +1876,7 @@ public class FileTransferEngine: ObservableObject {
  // 取消所有操作
         transferQueue.cancelAllOperations()
         
- // 禁用系统保持唤醒
-        disableSystemAwake()
+        powerAssertion.release()
 
  // 清理流式临时文件
         for (_, info) in streamingEncryptedFiles {
@@ -1852,30 +1884,6 @@ public class FileTransferEngine: ObservableObject {
         }
         streamingEncryptedFiles.removeAll()
         isCleanedUp = true
-    }
-}
-
-// 断言注册表：映射实例标识符到 IOPMAssertionID，支持非隔离释放
-@MainActor private enum AwakeRegistry {
-    private static var lock = NSLock()
-    private static var map: [ObjectIdentifier: IOPMAssertionID] = [:]
-    
-    static func register(_ engine: FileTransferEngine, assertionId: IOPMAssertionID) {
-        lock.lock(); defer { lock.unlock() }
-        map[ObjectIdentifier(engine)] = assertionId
-    }
-    
-    static func unregister(_ engine: FileTransferEngine) -> IOReturn {
-        lock.lock(); defer { lock.unlock() }
-        let key = ObjectIdentifier(engine)
-        guard let id = map.removeValue(forKey: key) else { return kIOReturnSuccess }
-        return IOPMAssertionRelease(id)
-    }
-    
-    static func release(for key: ObjectIdentifier) -> IOReturn {
-        lock.lock(); defer { lock.unlock() }
-        guard let id = map.removeValue(forKey: key) else { return kIOReturnSuccess }
-        return IOPMAssertionRelease(id)
     }
 }
 

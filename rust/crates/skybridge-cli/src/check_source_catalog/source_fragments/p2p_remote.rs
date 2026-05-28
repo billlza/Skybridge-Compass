@@ -108,6 +108,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../p2p_remote_performance_evidence/log_order.rs"),
     ),
     (
+        "p2p_remote_performance_evidence/mac_ipad_online.rs",
+        include_str!("../../p2p_remote_performance_evidence/mac_ipad_online.rs"),
+    ),
+    (
         "p2p_remote_performance_evidence/mac_tx.rs",
         include_str!("../../p2p_remote_performance_evidence/mac_tx.rs"),
     ),

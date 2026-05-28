@@ -472,7 +472,7 @@ private struct QuantumStarLayer: View {
             }
             
             VStack(alignment: .leading, spacing: 6) {
-                Text(UIDevice.current.name)
+                Text(AppleMobileDeviceIdentity.currentSnapshot().deviceName)
                     .font(.headline)
                     .foregroundColor(.white)
                     .lineLimit(1)

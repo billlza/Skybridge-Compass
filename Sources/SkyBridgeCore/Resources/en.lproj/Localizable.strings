@@ -351,6 +351,7 @@
 "status.idle" = "Idle";
 "status.enabled" = "Enabled";
 "status.disabled" = "Disabled";
+"status.unavailable" = "Unavailable";
 "status.optimized" = "Optimized";
 "status.needsAdjust" = "Needs Adjustment";
 "status.load.high" = "High Load";
@@ -574,6 +575,7 @@
 "settings.remote.network.title" = "Network Optimization";
 "settings.remote.network.enableBandwidthAdaptive" = "Enable bandwidth adaptive";
 "settings.remote.network.enableUDP" = "Enable UDP transport";
+"settings.remote.network.enableEncryption" = "Enable network encryption";
 "settings.remote.network.enableCompression" = "Enable data compression";
 "settings.remote.network.bandwidthLimit" = "Bandwidth limit (Mbps):";
 "settings.remote.network.bufferSize" = "Buffer size:";
@@ -584,6 +586,7 @@
 "settings.systemMonitor.config.enableHistory" = "Enable history";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "Enable performance alerts";
 "settings.systemMonitor.config.retentionDays" = "Data retention (days):";
+"settings.systemMonitor.config.maxHistoryPoints" = "Maximum history points:";
 "settings.systemMonitor.display.title" = "Display Options";
 "settings.systemMonitor.display.cpu" = "Show CPU usage";
 "settings.systemMonitor.display.memory" = "Show memory usage";
@@ -598,7 +601,9 @@
 "settings.systemMonitor.alerts.cpuThreshold" = "CPU alert threshold:";
 "settings.systemMonitor.alerts.memoryThreshold" = "Memory alert threshold:";
 "settings.systemMonitor.alerts.diskThreshold" = "Disk alert threshold:";
+"settings.systemMonitor.alerts.enableTemperatureMonitoring" = "Enable temperature monitoring";
 "settings.systemMonitor.alerts.temperatureThreshold" = "Temperature alert threshold:";
+"settings.systemMonitor.alerts.enableFanSpeedMonitoring" = "Enable fan speed monitoring";
 "settings.systemMonitor.alerts.fanSpeedThreshold" = "Fan speed alert threshold:";
 "settings.systemMonitor.alerts.thermalThrottling" = "Enable thermal throttling alerts";
 "settings.systemMonitor.alerts.enableSound" = "Enable sound alerts";
@@ -703,6 +708,16 @@
 "about.title" = "About SkyBridge Compass Pro";
 "about.checkingUpdates" = "Checking for updates...";
 "about.checkUpdates" = "Check for Updates";
+"update.available.title" = "A new version is available";
+"update.available.message" = "SkyBridge Compass Pro %@ (Build %@) is available and requires macOS %@ or later. The update package is a Developer ID-signed and notarized DMG; macOS Gatekeeper will verify it after download.";
+"update.latest.title" = "You are up to date";
+"update.latest.message" = "SkyBridge Compass Pro %@ is the current stable version.";
+"update.unsupported.title" = "A new version is available, but this Mac is unsupported";
+"update.unsupported.message" = "Version %@ requires macOS %@ or later. This Mac is running macOS %@.";
+"update.failed.title" = "Update Check Failed";
+"update.failed.message" = "The update check could not be completed: %@";
+"update.download" = "Download Update";
+"update.later" = "Later";
 "about.systemInfo" = "System Info";
 "about.diagnostics" = "Diagnostics";
 "about.feedback" = "Send Feedback";
@@ -1122,3 +1137,23 @@
 "common.yes" = "Yes";
 "common.no" = "No";
 "common.done" = "Done";
+
+/* Remote Control Security Notice */
+"remoteControl.securityNotice.windowTitle" = "Remote Control Security Notice";
+"remoteControl.securityNotice.appName" = "SkyBridge Compass";
+"remoteControl.securityNotice.pendingTitle" = "%@ is requesting approval for remote control";
+"remoteControl.securityNotice.activeTitle" = "%@ is being remotely controlled";
+"remoteControl.securityNotice.subtitle" = "Inbound %@ remote control is protected by quantum-safe/PQC encryption.";
+"remoteControl.securityNotice.transport.p2p" = "P2P";
+"remoteControl.securityNotice.transport.webrtc" = "WebRTC";
+"remoteControl.securityNotice.remoteIP" = "IP";
+"remoteControl.securityNotice.transport" = "Transport";
+"remoteControl.securityNotice.account" = "Account";
+"remoteControl.securityNotice.nebulaID" = "Nebula ID";
+"remoteControl.securityNotice.device" = "Device";
+"remoteControl.securityNotice.pqc" = "PQC Suite";
+"remoteControl.securityNotice.approve" = "Approve";
+"remoteControl.securityNotice.reject" = "Reject";
+"remoteControl.securityNotice.disconnect" = "Disconnect";
+"remoteControl.securityNotice.close" = "Close";
+"remoteControl.securityNotice.valueUnavailable" = "Not supplied";

@@ -528,7 +528,7 @@ public actor ServiceAdvertiserCenter {
         LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &record)
 
         if #available(macOS 14.0, *) {
-            let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+            let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)
             if !snap.deviceId.isEmpty {
                 record["deviceId"] = snap.deviceId
                 record["uniqueId"] = snap.deviceId

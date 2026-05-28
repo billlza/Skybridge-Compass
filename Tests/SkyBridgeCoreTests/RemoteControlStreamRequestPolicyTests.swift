@@ -120,6 +120,66 @@ final class RemoteControlStreamRequestPolicyTests: XCTestCase {
         )
     }
 
+    func testVideoRefreshWithoutEndpointPreservesRealtimeAudioEndpoint() {
+        let endpoint = SkyBridgeMediaEndpoint(host: "127.0.0.1", port: 55_560)
+        let previous = streamConfiguration(
+            width: 2056,
+            height: 1328,
+            mediaAudioEndpoint: endpoint,
+            streamRefreshToken: 10
+        )
+        let refresh = streamConfiguration(
+            width: 2056,
+            height: 1328,
+            audioRedirectionEnabled: true,
+            mediaAudioEndpoint: nil,
+            mediaSessionId: nil,
+            streamRefreshToken: 11
+        )
+
+        let effective = RemoteControlStreamRequestPolicy
+            .streamConfigurationByPreservingAudioEndpointForVideoRefresh(
+                refresh,
+                previous: previous
+            )
+
+        XCTAssertEqual(effective.mediaAudioEndpoint, endpoint)
+        XCTAssertEqual(effective.mediaSessionId, previous.mediaSessionId)
+        XCTAssertFalse(
+            RemoteControlStreamRequestPolicy.shouldRestartCapture(
+                previous: previous,
+                current: effective
+            )
+        )
+    }
+
+    func testVideoRefreshDoesNotPreserveAudioEndpointWhenAudioSemanticsChange() {
+        let endpoint = SkyBridgeMediaEndpoint(host: "127.0.0.1", port: 55_560)
+        let previous = streamConfiguration(
+            width: 2056,
+            height: 1328,
+            mediaAudioEndpoint: endpoint,
+            streamRefreshToken: 10
+        )
+        let refresh = streamConfiguration(
+            width: 2056,
+            height: 1328,
+            audioRedirectionEnabled: true,
+            audioMode: SkyBridgeMediaAudioMode.lowLatency.rawValue,
+            mediaAudioEndpoint: nil,
+            mediaSessionId: nil,
+            streamRefreshToken: 11
+        )
+
+        let effective = RemoteControlStreamRequestPolicy
+            .streamConfigurationByPreservingAudioEndpointForVideoRefresh(
+                refresh,
+                previous: previous
+            )
+
+        XCTAssertNil(effective.mediaAudioEndpoint)
+    }
+
     private func streamConfiguration(
         width: Int? = nil,
         height: Int? = nil,
@@ -128,10 +188,14 @@ final class RemoteControlStreamRequestPolicyTests: XCTestCase {
         targetFrameRate: Int = 60,
         keyFrameInterval: Int = 60,
         performanceValidationMode: String? = nil,
+        audioRedirectionEnabled: Bool? = nil,
+        audioMode: String? = nil,
         mediaAudioEndpoint: SkyBridgeMediaEndpoint? = nil,
+        mediaSessionId: String? = "media-session",
         streamRefreshToken: UInt64? = nil
     ) -> RemoteDesktopStreamConfiguration {
-        RemoteDesktopStreamConfiguration(
+        let requestsAudio = audioRedirectionEnabled ?? (mediaAudioEndpoint != nil)
+        return RemoteDesktopStreamConfiguration(
             width: width,
             height: height,
             preferredCodec: preferredCodec,
@@ -144,10 +208,10 @@ final class RemoteControlStreamRequestPolicyTests: XCTestCase {
             enableAppleSiliconOptimization: true,
             clipboardSyncEnabled: true,
             separateCursorChannelEnabled: true,
-            audioRedirectionEnabled: mediaAudioEndpoint != nil,
-            audioTransport: mediaAudioEndpoint == nil ? nil : SkyBridgeRealtimeMediaConstants.audioTransportPQCv1,
-            audioMode: mediaAudioEndpoint == nil ? nil : SkyBridgeMediaAudioMode.highFidelity.rawValue,
-            mediaSessionId: mediaAudioEndpoint == nil ? nil : "media-session",
+            audioRedirectionEnabled: requestsAudio,
+            audioTransport: requestsAudio ? SkyBridgeRealtimeMediaConstants.audioTransportPQCv1 : nil,
+            audioMode: requestsAudio ? (audioMode ?? SkyBridgeMediaAudioMode.highFidelity.rawValue) : nil,
+            mediaSessionId: requestsAudio ? mediaSessionId : nil,
             mediaAudioEndpoint: mediaAudioEndpoint,
             performanceValidationMode: performanceValidationMode,
             streamRefreshToken: streamRefreshToken
