@@ -201,8 +201,9 @@ public final class CloudKitService: CloudDeviceService {
     }
 
     private func updateRecordFields(_ record: CKRecord) async {
+        let localPresentation = LocalDevicePresentation.current()
         record["deviceId"] = currentDeviceId
-        record["deviceName"] = Host.current().localizedName ?? "Unknown Device"
+        record["deviceName"] = localPresentation.deviceName ?? localPresentation.modelName ?? "Unknown Device"
         record["deviceModel"] = getDeviceModel()
  // 写入真实公钥指纹（若可用）
         let selfId = await SelfIdentityProvider.shared.snapshot()

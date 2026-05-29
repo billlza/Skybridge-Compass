@@ -400,15 +400,16 @@ extension BonjourTXTRecordBuilder {
         capabilities: SBDeviceCapabilities,
         protocolVersion: SBProtocolVersion = .current
     ) -> BonjourTXTRecordBuilder {
-        BonjourTXTRecordBuilder(
+        let localPresentation = LocalDevicePresentation.current()
+        return BonjourTXTRecordBuilder(
             deviceId: deviceId,
             pubKeyFP: pubKeyFP,
             uniqueId: uniqueId,
             platform: SBPlatformType.current.rawValue,
             version: protocolVersion.versionString,
-            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            osVersion: localPresentation.osVersion,
             capabilities: capabilities.asStringArray,
-            name: Host.current().localizedName
+            name: localPresentation.deviceName ?? localPresentation.modelName
         )
     }
 }

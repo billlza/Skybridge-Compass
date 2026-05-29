@@ -67,6 +67,34 @@ final class BonjourTXTParsingTests: XCTestCase {
         XCTAssertFalse(exposedFields.contains { $0.localizedCaseInsensitiveContains("publicKey") })
     }
 
+    func testDisplayNameRejectsIdentifierLikeTXTNameAndUsesModelBeforeHostname() {
+        let extracted = BonjourTXTParser.extractDeviceInfo(from: [
+            "deviceId": "550E8400-E29B-41D4-A716-446655440099",
+            "name": "id:550E8400-E29B-41D4-A716-446655440099",
+            "hostname": "192.168.0.103",
+            "model": "iPad Pro 11-inch (M4)",
+            "platform": "iPadOS"
+        ])
+
+        XCTAssertNil(extracted.name)
+        XCTAssertNil(extracted.hostname)
+        XCTAssertEqual(extracted.displayName, "iPad Pro 11-inch (M4)")
+    }
+
+    func testLocalDevicePresentationRejectsRouteIdentifiersAsDisplayNames() {
+        XCTAssertNil(LocalDevicePresentation.sanitizedDisplayNameCandidate("host:192.168.0.103"))
+        XCTAssertNil(LocalDevicePresentation.sanitizedDisplayNameCandidate("peer:550E8400-E29B-41D4-A716-446655440099"))
+        XCTAssertNil(LocalDevicePresentation.sanitizedDisplayNameCandidate("550E8400-E29B-41D4-A716-446655440099"))
+        XCTAssertEqual(
+            LocalDevicePresentation.displayDeviceName(
+                rawDeviceName: "iPad",
+                modelName: "iPad Pro 11-inch (M4)",
+                platformName: "iPadOS"
+            ),
+            "iPad Pro 11-inch (M4)"
+        )
+    }
+
     func testParseNWTXTRecordFallsBackToDirectKnownKeys() {
         var record = NWTXTRecord()
         record["deviceId"] = "07CB9A6E-7492-4680-9DD7-F37DC8568891"

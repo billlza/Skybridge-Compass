@@ -1,7 +1,4 @@
 import Foundation
-#if os(iOS)
-import UIKit
-#endif
 
 struct CrossNetworkWebRTCLocalDeviceDescriptor: Sendable, Equatable {
     let deviceName: String?
@@ -12,42 +9,13 @@ struct CrossNetworkWebRTCLocalDeviceDescriptor: Sendable, Equatable {
     static func current(
         osVersion: String = ProcessInfo.processInfo.operatingSystemVersionString
     ) -> CrossNetworkWebRTCLocalDeviceDescriptor {
-        CrossNetworkWebRTCLocalDeviceDescriptor(
-            deviceName: currentDeviceName(),
-            modelName: currentModelName(),
-            platform: currentPlatform(),
-            osVersion: osVersion
+        let snapshot = LocalDevicePresentation.current(osVersion: osVersion)
+        return CrossNetworkWebRTCLocalDeviceDescriptor(
+            deviceName: snapshot.deviceName,
+            modelName: snapshot.modelName,
+            platform: snapshot.platformName,
+            osVersion: snapshot.osVersion
         )
-    }
-
-    private static func currentDeviceName() -> String? {
-        #if os(macOS)
-        return Host.current().localizedName
-        #elseif os(iOS)
-        return UIDevice.current.name
-        #else
-        return nil
-        #endif
-    }
-
-    private static func currentModelName() -> String? {
-        #if os(macOS)
-        return "Mac"
-        #elseif os(iOS)
-        return UIDevice.current.model
-        #else
-        return nil
-        #endif
-    }
-
-    private static func currentPlatform() -> String {
-        #if os(macOS)
-        return "macOS"
-        #elseif os(iOS)
-        return "iOS"
-        #else
-        return "unknown"
-        #endif
     }
 }
 

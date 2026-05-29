@@ -874,6 +874,114 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     }
 
     @MainActor
+    func testMergedIPadRowsPreferHumanDisplayNameOverGenericAndRouteIdentifiers() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableDeviceId = "550E8400-E29B-41D4-A716-446655440088"
+        let cloud = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        let genericBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "bonjour:iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        let hostAlias = makeDevice(
+            name: "host:192.168.0.103",
+            uniqueIdentifier: "host:192.168.0.103",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            sources: [.skybridgeP2P],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        manager.replaceDevicesForTesting([genericBonjour, hostAlias, cloud])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        let resolved = try XCTUnwrap(manager.onlineDevices.first)
+        XCTAssertEqual(resolved.name, "Ziang的iPad")
+        XCTAssertEqual(resolved.ipv4, "192.168.0.103")
+        XCTAssertTrue(manager.hasResolvedConnectableControlRoute(for: resolved))
+    }
+
+    @MainActor
+    func testGenericIPadRowsPreferModelNameWhenNoHumanNameExists() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableDeviceId = "550E8400-E29B-41D4-A716-446655440089"
+        let stable = makeDevice(
+            name: "id:\(stableDeviceId)",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        let genericBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: "bonjour:iPad@local.",
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: ["bonjour:iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+        manager.replaceDevicesForTesting([stable, genericBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.name, "iPad Pro 11-inch (M4)")
+    }
+
+    @MainActor
     func testLegacyCloudSerialStableIDCoalescesWithBonjourStableIDWhenNamesDiffer() throws {
         let manager = UnifiedOnlineDeviceManager.shared
         let stableDeviceId = "ipad-stable-device-id"

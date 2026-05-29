@@ -521,10 +521,11 @@ public actor ServiceAdvertiserCenter {
     }
 
     private func makeDefaultTXTRecord() async -> NWTXTRecord {
+        let localPresentation = LocalDevicePresentation.current()
         var record = NWTXTRecord()
         record["platform"] = "macos"
-        record["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
-        record["name"] = Host.current().localizedName ?? "Mac"
+        record["osVersion"] = localPresentation.osVersion
+        record["name"] = localPresentation.deviceName ?? localPresentation.modelName ?? "Mac"
         LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &record)
 
         if #available(macOS 14.0, *) {

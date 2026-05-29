@@ -1491,6 +1491,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         if Self.isCloudHeartbeatOnly(merged) {
             merged.isConnectable = false
         }
+        merged.name = Self.bestDisplayName(for: [merged])
 
         return merged
     }
@@ -1504,10 +1505,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         guard !candidate.isEmpty else { return false }
         guard !existing.isEmpty else { return true }
 
-        let existingIsEndpoint = isEndpointLikeDisplayName(existing)
-        let candidateIsEndpoint = isEndpointLikeDisplayName(candidate)
-        if existingIsEndpoint != candidateIsEndpoint {
-            return existingIsEndpoint && !candidateIsEndpoint
+        let existingScore = displayNameQualityScore(existing)
+        let candidateScore = displayNameQualityScore(candidate)
+        if existingScore != candidateScore {
+            return candidateScore > existingScore
         }
 
         let existingGenericFamily = appleGenericDisplayNameFamily(existing)
@@ -1524,6 +1525,49 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
         return candidate.count > existing.count
+    }
+
+    private nonisolated static func bestDisplayName(for devices: [OnlineDevice]) -> String {
+        let best = devices
+            .flatMap { device -> [String] in
+                [device.name, device.modelName, device.platformName].compactMap { $0 }
+            }
+            .reduce(nil as String?) { best, candidate in
+                guard let best else { return candidate }
+                return shouldReplaceDisplayName(existing: best, candidate: candidate) ? candidate : best
+            }
+        let trimmed = best?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? (devices.first?.name ?? "Unknown Device") : trimmed
+    }
+
+    private nonisolated static func displayNameQualityScore(_ raw: String) -> Int {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        if LocalDevicePresentation.isIdentifierLikeDisplayName(trimmed) || isEndpointLikeDisplayName(trimmed) {
+            return 10
+        }
+        let normalized = normalizedDedupeName(trimmed)
+        if normalized == "unknown" || normalized == "unknowndevice" || normalized == "p2ppeer" || normalized == "未知设备" {
+            return 20
+        }
+        if appleGenericDisplayNameFamily(trimmed) != nil {
+            return 40
+        }
+        if let family = appleDeviceFamilyToken(trimmed) {
+            let normalized = normalizedDedupeName(trimmed)
+            let isAppleModelName = normalized.hasPrefix("ipad")
+                || normalized.hasPrefix("iphone")
+                || normalized.hasPrefix("macbook")
+                || normalized.hasPrefix("macmini")
+                || normalized.hasPrefix("macstudio")
+                || normalized.hasPrefix("macpro")
+                || normalized.hasPrefix("imac")
+            if isAppleModelName {
+                return family == "mac" ? 75 : 70
+            }
+            return 90
+        }
+        return 100
     }
 
     private nonisolated static func isEndpointLikeDisplayName(_ raw: String) -> Bool {
@@ -2117,6 +2161,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
         let coalesced = coalesceEquivalentPhysicalDevices(normalDevices + collapsedRecentDevices)
         uniqueDevices = coalesced.devices
+        uniqueDevices = Self.filterShadowedAppleMobileLinkLocalRoutes(uniqueDevices)
 
         // Rewrite aliases for coalesced devices back to the winning row. This keeps stale
         // persisted identities from resurfacing as separate "recent" rows on the next refresh.
@@ -2459,6 +2504,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         let rhsFamily = appleDeviceFamilyToken(preferredValues: [rhs.modelName, rhs.name, rhs.platformName])
         guard let family = lhsFamily, family == rhsFamily else { return false }
 
+        if hasDirectSkyBridgeControlRoute(lhs),
+           hasExplicitOnlyNonConnectableAddress(rhs) {
+            return true
+        }
+
         return namesRepresentSameDevice(lhs.name, rhs.name)
             || appleMobileNamesShareFamilyAlias(lhs.name, rhs.name, family: family)
     }
@@ -2513,6 +2563,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             merged.lastCryptoSuite = newestCryptoSource.lastCryptoSuite ?? merged.lastCryptoSuite
             merged.guardStatus = newestCryptoSource.guardStatus ?? merged.guardStatus
         }
+        merged.name = Self.bestDisplayName(for: group + [merged])
 
         return merged
     }
@@ -2673,6 +2724,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
         if lhs.lastSeen != rhs.lastSeen {
             return lhs.lastSeen > rhs.lastSeen
+        }
+        let lhsNameScore = Self.displayNameQualityScore(lhs.name)
+        let rhsNameScore = Self.displayNameQualityScore(rhs.name)
+        if lhsNameScore != rhsNameScore {
+            return lhsNameScore > rhsNameScore
         }
         return lhs.name.count >= rhs.name.count
     }
@@ -3757,7 +3813,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
  /// 识别本机设备
     private func identifyLocalDevice() {
-        let hostname = Host.current().localizedName ?? "Mac"
+        let localPresentation = LocalDevicePresentation.current()
+        let hostname = localPresentation.deviceName ?? localPresentation.modelName ?? "Mac"
         let identifier = "local:\(hostname)"
 
         let local = OnlineDevice(
@@ -3766,6 +3823,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             deviceType: .computer,
             ipv4: nil,
             ipv6: nil,
+            platformName: localPresentation.platformName,
+            osVersion: localPresentation.osVersion,
+            modelName: localPresentation.modelName,
             macAddress: nil,
             serialNumber: nil,
             connectionTypes: [],

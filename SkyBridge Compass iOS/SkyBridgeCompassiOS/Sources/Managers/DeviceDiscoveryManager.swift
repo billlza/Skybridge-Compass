@@ -1065,8 +1065,17 @@ public class DeviceDiscoveryManager: ObservableObject {
             "hwmodel"
         ) ?? detectModelFromName(displayBonjourName, platform: platform)
 
-        // 显示名称：优先 TXT 的 name，其次 Bonjour name
-        let displayName = txtValue(txtRecord, "name") ?? displayBonjourName
+        // 显示名称：优先可信 TXT name，其次可信 Bonjour name，再回落到型号。
+        let txtDisplayName = BonjourServiceIdentitySanitizer.sanitizedDisplayNameCandidate(
+            txtValue(txtRecord, "name")
+        )
+        let bonjourDisplayName = BonjourServiceIdentitySanitizer.sanitizedDisplayNameCandidate(displayBonjourName)
+        let displayName = txtDisplayName
+            ?? AppleMobileDeviceIdentity.displayDeviceName(
+                rawDeviceName: bonjourDisplayName,
+                platform: platform,
+                modelName: modelName
+            )
         
         // 提取 Bonjour service 信息 / IP 地址
         let ipAddress = extractIPAddress(from: endpoint, txtRecord: txtRecord)
@@ -1278,8 +1287,8 @@ public class DeviceDiscoveryManager: ObservableObject {
     private func merge(existing: DiscoveredDevice, update: DiscoveredDevice) -> DiscoveredDevice {
         var merged = existing
 
-        // name：优先保留“非 Unknown/非空”的更友好字段
-        if merged.name.isEmpty || merged.name == "Unknown Device" || merged.name == "未知设备" {
+        // name：只接受可展示的人类可读名称/型号，不让 UUID、IP、peer/host 路由覆盖。
+        if shouldReplaceDisplayName(existing: merged.name, candidate: update.name) {
             merged.name = update.name
         }
 
@@ -1333,6 +1342,35 @@ public class DeviceDiscoveryManager: ObservableObject {
         merged.lastSeen = Date()
 
         return merged
+    }
+
+    private func shouldReplaceDisplayName(existing: String, candidate: String) -> Bool {
+        let existingScore = displayNameQualityScore(existing)
+        let candidateScore = displayNameQualityScore(candidate)
+        if candidateScore != existingScore {
+            return candidateScore > existingScore
+        }
+        return candidate.count > existing.count
+    }
+
+    private func displayNameQualityScore(_ raw: String) -> Int {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        if BonjourServiceIdentitySanitizer.isIdentifierLikeDisplayName(trimmed) { return 10 }
+        let normalized = normalizedDiscoveryName(trimmed)
+        if normalized == "unknowndevice" || normalized == "unknown" || normalized == "未知设备" {
+            return 20
+        }
+        if normalized == "ipad" || normalized == "iphone" {
+            return 40
+        }
+        if normalized.hasPrefix("ipad") || normalized.hasPrefix("iphone") || normalized.contains("mac") {
+            return 70
+        }
+        if normalized.contains("ipad") || normalized.contains("iphone") {
+            return 90
+        }
+        return 100
     }
 
     private func aliasPriority(for device: DiscoveredDevice) -> Int {

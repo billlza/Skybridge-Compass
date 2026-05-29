@@ -867,7 +867,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
                 if let index = mergeIndex, discoveredDevices.indices.contains(index) {
                     let existingDevice = discoveredDevices[index]
-                    let betterName = sanitized.name.count > existingDevice.name.count ? sanitized.name : existingDevice.name
+                    let betterName = Self.preferredDisplayName(
+                        existing: existingDevice.name,
+                        candidate: sanitized.name
+                    )
                     let mergedConnectionTypes = sanitized.connectionTypes.union(existingDevice.connectionTypes)
                     let sanitizedIsUSBPresence =
                         sanitized.source == .skybridgeUSB
@@ -1016,7 +1019,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 绝不覆盖 name/model/services/deviceId/pubKeyFP/source
                 } else if strongMatch {
  // 强匹配时才允许更新展示/服务字段
-                    let betterName = device.name.count > merged.name.count ? device.name : merged.name
+                    let betterName = Self.preferredDisplayName(
+                        existing: merged.name,
+                        candidate: device.name
+                    )
                     merged._updateDisplayNameIfAllowed(betterName)
                     merged.services = Array(Set(device.services + merged.services))
                     merged.portMap = device.portMap.merging(merged.portMap) { new, _ in new }
@@ -1228,7 +1234,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
  // 快速提取基本信息（不阻塞）
         let metadata = extractBonjourDeviceInfo(from: result)
-        let deviceName = metadata?.displayName ?? extractDeviceNameQuick(from: result)
+        let deviceName = resolvedDisplayName(
+            metadata: metadata,
+            endpointFallback: extractDeviceNameQuick(from: result)
+        )
         let strong = extractStrongIdentityQuick(from: result)
         let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
         let deviceId = UUID()
@@ -1326,6 +1335,49 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                       .replacingOccurrences(of: ".local", with: "")
         }
         return "未知设备"
+    }
+
+    private func resolvedDisplayName(
+        metadata: BonjourDeviceInfo?,
+        endpointFallback: String
+    ) -> String {
+        let rawName = metadata?.displayName
+            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(endpointFallback)
+        return LocalDevicePresentation.displayDeviceName(
+            rawDeviceName: rawName,
+            modelName: metadata?.model,
+            platformName: metadata?.platform ?? ""
+        ) ?? "未知设备"
+    }
+
+    private static func preferredDisplayName(existing: String, candidate: String) -> String {
+        let existingScore = displayNameQualityScore(existing)
+        let candidateScore = displayNameQualityScore(candidate)
+        if candidateScore != existingScore {
+            return candidateScore > existingScore ? candidate : existing
+        }
+        return candidate.count > existing.count ? candidate : existing
+    }
+
+    private static func displayNameQualityScore(_ raw: String) -> Int {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        if LocalDevicePresentation.isIdentifierLikeDisplayName(trimmed) { return 10 }
+        let normalized = trimmed.lowercased().replacingOccurrences(of: " ", with: "")
+        switch normalized {
+        case "未知设备", "unknown", "unknowndevice":
+            return 20
+        case "ipad", "iphone":
+            return 40
+        default:
+            if normalized.hasPrefix("ipad") || normalized.hasPrefix("iphone") || normalized.contains("mac") {
+                return 70
+            }
+            if normalized.contains("ipad") || normalized.contains("iphone") {
+                return 90
+            }
+            return 100
+        }
     }
 
  /// 异步提取网络信息（使用NWConnection而非同步DNS）
@@ -1507,7 +1559,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
  // 更新现有设备信息（不添加新设备）
         let metadata = extractBonjourDeviceInfo(from: result)
-        let deviceName = metadata?.displayName ?? extractDeviceNameQuick(from: result)
+        let deviceName = resolvedDisplayName(
+            metadata: metadata,
+            endpointFallback: extractDeviceNameQuick(from: result)
+        )
         let strong = extractStrongIdentityQuick(from: result)
         let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
         let (ipv4, ipv6, port) = await extractNetworkInfoAsync(
@@ -1541,7 +1596,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
                 let updatedDevice = DiscoveredDevice(
                     id: existingDevice.id,
-                    name: deviceName.count > existingDevice.name.count ? deviceName : existingDevice.name,
+                    name: Self.preferredDisplayName(existing: existingDevice.name, candidate: deviceName),
                     ipv4: ipv4 ?? existingDevice.ipv4,
                     ipv6: ipv6 ?? existingDevice.ipv6,
                     platformName: metadata?.platform ?? existingDevice.platformName,
@@ -2096,13 +2151,28 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
         }
 
-        func displayNameFromPeerId(_ peerId: String) -> String {
+        func displayNameFromPeerId(_ peerId: String) -> String? {
             // Format: bonjour:<name>@local.
             if peerId.hasPrefix("bonjour:") {
                 let rest = peerId.dropFirst("bonjour:".count)
-                return rest.split(separator: "@", maxSplits: 1).first.map(String.init) ?? peerId
+                return LocalDevicePresentation.sanitizedDisplayNameCandidate(
+                    rest.split(separator: "@", maxSplits: 1).first.map(String.init)
+                )
             }
-            return peerId
+            return LocalDevicePresentation.sanitizedDisplayNameCandidate(peerId)
+        }
+
+        func resolvedDisplayName(
+            raw: String?,
+            model: String?,
+            platform: String?,
+            fallbackPeerId: String
+        ) -> String {
+            LocalDevicePresentation.displayDeviceName(
+                rawDeviceName: raw ?? displayNameFromPeerId(fallbackPeerId),
+                modelName: model,
+                platformName: platform ?? ""
+            ) ?? "P2P Peer"
         }
 
         func persistAuthenticatedRemoteAuthority(
@@ -2185,7 +2255,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
             let suite = keys.negotiatedSuite
             let kind = cryptoKind(for: suite)
-            let fallbackName = displayNameFromPeerId(peerIdForPresence)
+            let fallbackName = resolvedDisplayName(
+                raw: nil,
+                model: nil,
+                platform: nil,
+                fallbackPeerId: peerIdForPresence
+            )
             let extracted = extractIPFromPeerId(peerIdForPresence)
 
             Task { @MainActor in
@@ -2379,9 +2454,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                 }
                                 let endpoint = stableEndpointLabel(for: connection.endpoint)
                                 let displayName: String = {
-                                    if let dn = payload.deviceName, !dn.isEmpty { return dn }
-                                    if case .service(let name, _, _, _) = connection.endpoint { return name }
-                                    return peer.deviceId
+                                    resolvedDisplayName(
+                                        raw: payload.deviceName,
+                                        model: payload.modelName,
+                                        platform: payload.platform,
+                                        fallbackPeerId: peer.deviceId
+                                    )
                                 }()
 
                                 declaredDeviceIdForVerification = payload.deviceId
@@ -2603,18 +2681,15 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                                     logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
                                     break
                                 }
-                                let localName = Host.current().localizedName
-                                let localPlatform = "macOS"
-                                let localOS = ProcessInfo.processInfo.operatingSystemVersionString
-                                let localModel = "Mac"
+                                let localPresentation = LocalDevicePresentation.current()
                                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
                                 let reply = AppMessage.pairingIdentityExchange(.init(
                                     deviceId: localId,
                                     kemPublicKeys: kemKeys,
-                                    deviceName: localName,
-                                    modelName: localModel,
-                                    platform: localPlatform,
-                                    osVersion: localOS,
+                                    deviceName: localPresentation.deviceName,
+                                    modelName: localPresentation.modelName,
+                                    platform: localPresentation.platformName,
+                                    osVersion: localPresentation.osVersion,
                                     chip: nil,
                                     capabilities: ["clipboard_sync", "file_transfer", "remote_desktop", "remote_control"],
                                     fileTransferPort: endpoints.fileTransferPort,
@@ -2850,18 +2925,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         
                         do {
                             // Build and encrypt heartbeat (best-effort).
-                            let localName = Host.current().localizedName
-                            let localPlatform = "macOS"
-                            let localOS = ProcessInfo.processInfo.operatingSystemVersionString
+                            let localPresentation = LocalDevicePresentation.current()
                             let endpoints = ServiceEndpointRegistry.shared.snapshot()
                             let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
                             let msg = AppMessage.heartbeat(.init(
                                 sentAt: Date(),
                                 deviceId: localIdForHeartbeat,
-                                deviceName: localName,
-                                modelName: "Mac",
-                                platform: localPlatform,
-                                osVersion: localOS,
+                                deviceName: localPresentation.deviceName,
+                                modelName: localPresentation.modelName,
+                                platform: localPresentation.platformName,
+                                osVersion: localPresentation.osVersion,
                                 chip: nil,
                                 accountDisplayName: localIdentity?.accountDisplayName,
                                 nebulaId: localIdentity?.nebulaId,

@@ -2756,18 +2756,27 @@ public class P2PDiscoveryService: BaseManager {
             ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
         }
 
-        func displayNameFromPeerId(_ peerId: String) -> String {
+        func displayNameFromPeerId(_ peerId: String) -> String? {
             if peerId.hasPrefix("bonjour:") {
                 let rest = peerId.dropFirst("bonjour:".count)
-                return rest.split(separator: "@", maxSplits: 1).first.map(String.init) ?? peerId
+                return LocalDevicePresentation.sanitizedDisplayNameCandidate(
+                    rest.split(separator: "@", maxSplits: 1).first.map(String.init)
+                )
             }
-            if peerId.hasPrefix("id:") {
-                return String(peerId.dropFirst("id:".count))
-            }
-            if peerId.hasPrefix("peer:") {
-                return String(peerId.dropFirst("peer:".count))
-            }
-            return peerId
+            return LocalDevicePresentation.sanitizedDisplayNameCandidate(peerId)
+        }
+
+        func resolvedDisplayName(
+            raw: String?,
+            model: String?,
+            platform: String?,
+            fallbackPeerId: String
+        ) -> String {
+            LocalDevicePresentation.displayDeviceName(
+                rawDeviceName: raw ?? displayNameFromPeerId(fallbackPeerId),
+                modelName: model,
+                platformName: platform ?? ""
+            ) ?? "P2P Peer"
         }
 
         func persistAuthenticatedRemoteAuthority(
@@ -2851,11 +2860,17 @@ public class P2PDiscoveryService: BaseManager {
             }
 
             return await MainActor.run {
-                let resolved = Self.resolveInboundPresenceRoute(
+                var resolved = Self.resolveInboundPresenceRoute(
                     peerId: peerId,
                     endpointLabel: endpointDescriptionForPresence,
                     discoveredDevices: self.discoveredDevices,
                     unifiedDevices: UnifiedOnlineDeviceManager.shared.onlineDevices
+                )
+                resolved.name = resolvedDisplayName(
+                    raw: resolved.name,
+                    model: nil,
+                    platform: nil,
+                    fallbackPeerId: peerId
                 )
 
                 guard let displayAddress = resolved.displayAddress?
@@ -2952,14 +2967,14 @@ public class P2PDiscoveryService: BaseManager {
                 accountDisplayName: payload.accountDisplayName,
                 nebulaId: payload.nebulaId,
                 deviceId: payload.deviceId,
-                deviceName: payload.deviceName
+                deviceName: LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
             )
             guard !identity.isEmpty else { return }
             RemoteControlSecurityPeerIdentityStore.record(
                 identity: identity,
                 aliases: [
                     payload.deviceId,
-                    payload.deviceName,
+                    LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName),
                     peer.deviceId,
                     peerIdForPresence,
                     endpointHostOrIPForClassicTransfer,
@@ -2975,14 +2990,14 @@ public class P2PDiscoveryService: BaseManager {
                 accountDisplayName: payload.accountDisplayName,
                 nebulaId: payload.nebulaId,
                 deviceId: payload.deviceId,
-                deviceName: payload.deviceName
+                deviceName: LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
             )
             guard !identity.isEmpty else { return }
             RemoteControlSecurityPeerIdentityStore.record(
                 identity: identity,
                 aliases: [
                     payload.deviceId,
-                    payload.deviceName,
+                    LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName),
                     peer.deviceId,
                     peerIdForPresence,
                     endpointHostOrIPForClassicTransfer,
@@ -3027,14 +3042,15 @@ public class P2PDiscoveryService: BaseManager {
 
             let endpoints = ServiceEndpointRegistry.shared.snapshot()
             let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
+            let localPresentation = LocalDevicePresentation.current()
             let message = AppMessage.pairingIdentityExchange(.init(
                 deviceId: localId,
                 kemPublicKeys: kemKeys,
                 protocolIdentityPublicKeys: await Self.localProtocolIdentityPublicKeysForPairing(),
-                deviceName: Host.current().localizedName,
-                modelName: "Mac",
-                platform: "macOS",
-                osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                deviceName: localPresentation.deviceName,
+                modelName: localPresentation.modelName,
+                platform: localPresentation.platformName,
+                osVersion: localPresentation.osVersion,
                 chip: nil,
                 accountDisplayName: localIdentity?.accountDisplayName,
                 nebulaId: localIdentity?.nebulaId,
@@ -3151,10 +3167,15 @@ public class P2PDiscoveryService: BaseManager {
                             PairingTrustApprovalService.shared.showProtocolIdentityBindingCode(
                                 peerEndpoint: endpointDescriptionForPresence,
                                 declaredDeviceId: binding.deviceId,
-                                displayName: binding.deviceName ?? displayNameFromPeerId(peer.deviceId),
-                                model: "Mac",
-                                platform: "macOS",
-                                osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                                displayName: resolvedDisplayName(
+                                    raw: binding.deviceName,
+                                    model: nil,
+                                    platform: nil,
+                                    fallbackPeerId: peer.deviceId
+                                ),
+                                model: nil,
+                                platform: nil,
+                                osVersion: nil,
                                 verificationCode: code,
                                 protocolIdentityFingerprint: binding.protocolIdentityFingerprint
                             )
@@ -3219,8 +3240,12 @@ public class P2PDiscoveryService: BaseManager {
                                 await refreshInboundControlSessionAliases()
                                 latestPeerCapabilities = normalizedIdentityCapabilities(from: payload)
                                 latestPeerFileTransferPort = payload.fileTransferPort
-                                let displayName = payload.deviceName
-                                    ?? displayNameFromPeerId(peer.deviceId)
+                                let displayName = resolvedDisplayName(
+                                    raw: payload.deviceName,
+                                    model: payload.modelName,
+                                    platform: payload.platform,
+                                    fallbackPeerId: peer.deviceId
+                                )
 
                                 await MainActor.run {
                                     PairingTrustApprovalService.shared.updateVerificationCode(
@@ -3306,9 +3331,12 @@ public class P2PDiscoveryService: BaseManager {
                                 try await sendFramed(outPadded)
 
                             case .peerDisconnecting(let payload):
-                                let disconnectDisplayName =
-                                    payload.deviceName
-                                    ?? displayNameFromPeerId(peer.deviceId)
+                                let disconnectDisplayName = resolvedDisplayName(
+                                    raw: payload.deviceName,
+                                    model: nil,
+                                    platform: nil,
+                                    fallbackPeerId: peer.deviceId
+                                )
                                 let trimmedDisconnectPeerId =
                                     payload.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
                                 let disconnectPeerId =

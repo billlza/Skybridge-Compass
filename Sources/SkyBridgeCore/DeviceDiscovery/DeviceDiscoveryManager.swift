@@ -922,7 +922,7 @@ public class DeviceDiscoveryManager: BaseManager {
                 accountDisplayName: payload.accountDisplayName,
                 nebulaId: payload.nebulaId,
                 deviceId: payload.deviceId,
-                deviceName: payload.deviceName
+                deviceName: LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
             )
             guard !identity.isEmpty else { return }
 
@@ -930,7 +930,7 @@ public class DeviceDiscoveryManager: BaseManager {
                 identity: identity,
                 aliases: [
                     payload.deviceId,
-                    payload.deviceName,
+                    LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName),
                     peerDeviceId,
                     peer.deviceId,
                     presencePeerId,
@@ -1281,35 +1281,16 @@ public class DeviceDiscoveryManager: BaseManager {
                                     logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
                                     break
                                 }
-                                let localPlatform: String = {
-#if os(macOS)
-                                    return "macOS"
-#elseif os(iOS)
-                                    return "iOS"
-#else
-                                    return "unknown"
-#endif
-                                }()
-                                let localOS = ProcessInfo.processInfo.operatingSystemVersionString
-                                let localName = Host.current().localizedName
+                                let localPresentation = LocalDevicePresentation.current()
                                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
                                 let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
-                                let localModel: String? = {
-#if os(macOS)
-                                    return "Mac"
-#elseif os(iOS)
-                                    return UIDevice.current.model
-#else
-                                    return nil
-#endif
-                                }()
                                 let reply = AppMessage.pairingIdentityExchange(.init(
                                     deviceId: localId,
                                     kemPublicKeys: kemKeys,
-                                    deviceName: localName,
-                                    modelName: localModel,
-                                    platform: localPlatform,
-                                    osVersion: localOS,
+                                    deviceName: localPresentation.deviceName,
+                                    modelName: localPresentation.modelName,
+                                    platform: localPresentation.platformName,
+                                    osVersion: localPresentation.osVersion,
                                     chip: nil,
                                     accountDisplayName: localIdentity?.accountDisplayName,
                                     nebulaId: localIdentity?.nebulaId,

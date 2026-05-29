@@ -166,7 +166,9 @@ enum AppleMobileDeviceIdentity {
         modelName: String
     ) -> String {
         let trimmedRawName = rawDeviceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedRawName.isEmpty && !isGenericSystemDeviceName(trimmedRawName, platform: platform) {
+        if !trimmedRawName.isEmpty,
+           !isGenericSystemDeviceName(trimmedRawName, platform: platform),
+           !BonjourServiceIdentitySanitizer.isIdentifierLikeDisplayName(trimmedRawName) {
             return trimmedRawName
         }
 
@@ -273,6 +275,8 @@ enum BonjourServiceIdentitySanitizer {
               !lowercased.hasPrefix("host:"),
               !lowercased.hasPrefix("peer:"),
               !lowercased.hasPrefix("recent:"),
+              !lowercased.hasPrefix("ip:"),
+              !lowercased.hasPrefix("fp:"),
               !lowercased.hasPrefix("mac:") else {
             return nil
         }
@@ -280,6 +284,41 @@ enum BonjourServiceIdentitySanitizer {
         guard !isLiteralIPAddress(value) else { return nil }
         guard !value.contains("/") else { return nil }
         return value.isEmpty ? nil : value
+    }
+
+    static func sanitizedDisplayNameCandidate(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty,
+              !isIdentifierLikeDisplayName(value) else {
+            return nil
+        }
+        return value
+    }
+
+    static func isIdentifierLikeDisplayName(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        let lowercased = value.lowercased()
+        if lowercased.hasPrefix("id:")
+            || lowercased.hasPrefix("fp:")
+            || lowercased.hasPrefix("peer:")
+            || lowercased.hasPrefix("host:")
+            || lowercased.hasPrefix("ip:")
+            || lowercased.hasPrefix("serial:")
+            || lowercased.hasPrefix("mac:")
+            || lowercased.hasPrefix("bonjour:")
+            || lowercased.hasPrefix("recent:")
+            || lowercased.hasPrefix("cross-network:")
+            || lowercased.hasPrefix("webrtc-") {
+            return true
+        }
+        if UUID(uuidString: value.uppercased()) != nil {
+            return true
+        }
+        if value.range(of: "^[0-9A-Fa-f]{24,128}$", options: .regularExpression) != nil {
+            return true
+        }
+        return isLiteralIPAddress(value)
     }
 
     private static func isLiteralIPAddress(_ raw: String) -> Bool {

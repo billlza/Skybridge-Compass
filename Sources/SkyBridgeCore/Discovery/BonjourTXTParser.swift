@@ -52,7 +52,7 @@ public struct BonjourDeviceInfo: Sendable, Equatable {
 
  /// 获取最佳可用的显示名称
     public var displayName: String? {
-        name ?? hostname ?? model
+        name ?? model ?? hostname
     }
 }
 
@@ -265,19 +265,28 @@ public enum BonjourTXTParser: Sendable {
             dict["remoteVideoFormats"] ?? dict["remote_video_formats"] ?? dict["remoteformats"]
         )
 
+        let platform = dict["platform"] ?? dict["os"]
+        let model = sanitizedDisplayName(dict["model"] ?? dict["modelName"])
+        let hostname = sanitizedDisplayName(dict["hostname"] ?? dict["host"])
+        let name = sanitizedDisplayName(dict["name"] ?? dict["device"] ?? dict["fn"])
+
         return BonjourDeviceInfo(
             deviceId: deviceId,
-            hostname: dict["hostname"] ?? dict["host"],
-            model: dict["model"] ?? dict["modelName"],
+            hostname: hostname,
+            model: model,
             chip: dict["chip"] ?? dict["soc"] ?? dict["cpu"],
             type: dict["type"] ?? dict["deviceType"],
             version: dict["version"] ?? dict["ver"],
             osVersion: dict["osVersion"] ?? dict["os_version"] ?? dict["osver"] ?? dict["osVer"] ?? dict["osv"],
             manufacturer: dict["manufacturer"] ?? dict["brand"],
-            platform: dict["platform"] ?? dict["os"],
-            name: dict["name"] ?? dict["device"] ?? dict["fn"],
+            platform: platform,
+            name: name,
             remoteVideoFormats: remoteVideoFormats
         )
+    }
+
+    private static func sanitizedDisplayName(_ raw: String?) -> String? {
+        LocalDevicePresentation.sanitizedDisplayNameCandidate(raw)
     }
 
     private static func parseRemoteVideoFormats(_ raw: String?) -> [String] {

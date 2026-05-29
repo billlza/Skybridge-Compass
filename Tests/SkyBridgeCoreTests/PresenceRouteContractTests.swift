@@ -172,4 +172,18 @@ final class PresenceRouteContractTests: XCTestCase {
         XCTAssertEqual(resolved.displayAddress, "10.0.0.42")
         XCTAssertEqual(resolved.transferPort, -1)
     }
+
+    func testResolveInboundPresenceRouteDoesNotUseIdentifierAsFallbackName() {
+        let peerId = "id:\(UUID().uuidString.lowercased())"
+        let resolved = P2PDiscoveryService.resolveInboundPresenceRoute(
+            peerId: peerId,
+            endpointLabel: "peer:10.0.0.42",
+            discoveredDevices: [],
+            unifiedDevices: []
+        )
+
+        XCTAssertEqual(resolved.name, "P2P Peer")
+        XCTAssertEqual(resolved.displayAddress, "10.0.0.42")
+        XCTAssertEqual(resolved.transferPort, -1)
+    }
 }

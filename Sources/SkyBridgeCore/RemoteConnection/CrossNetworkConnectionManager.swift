@@ -1599,15 +1599,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                     userInfo: [NSLocalizedDescriptionKey: "本机没有可用于二维码 OOB 引导的 PQC KEM 公钥"]
                 )
             }
+            let localPresentation = LocalDevicePresentation.current()
             let qrData = DynamicQRCodeData(
                 version: 7,
                 sessionID: sessionID,
                 qrBootstrapToken: sessionLease.qrBootstrapToken,
                 signalingServerOrigin: sessionLease.signalingServerOrigin,
                 deviceID: localBinding.deviceId,
-                deviceName: Host.current().localizedName ?? "Mac",
+                deviceName: localPresentation.deviceName ?? localPresentation.modelName ?? "Mac",
                 deviceType: P2PDeviceType.macOS.rawValue,
-                osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                osVersion: localPresentation.osVersion,
                 capabilities: ["cross-network", "p2p"],
                 protocolSigningAlgorithm: localBinding.protocolSigningAlgorithm,
                 protocolPublicKeyBytes: localBinding.protocolPublicKeyBytes,
@@ -1872,9 +1873,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
         do {
             let admissionLease = try await requestAdmissionLease(for: localBinding)
+            let localPresentation = LocalDevicePresentation.current()
             let lease = try await signalServer.registerConnectionCode(
                 admissionToken: admissionLease.token,
-                deviceName: Host.current().localizedName ?? "Mac",
+                deviceName: localPresentation.deviceName ?? localPresentation.modelName ?? "Mac",
                 validDuration: requestedLeaseMode.validDuration
             )
             let code = lease.code

@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(UIKit)
-import UIKit
-#endif
 
 // MARK: - 设备类型枚举
 public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
@@ -97,24 +94,15 @@ public struct P2PDeviceInfo: Codable, Identifiable, Sendable {
     }
     
     private static func getDeviceName() -> String {
-        #if os(macOS)
-        return Host.current().localizedName ?? "Mac"
-        #elseif os(iOS)
-        return UIDevice.current.name
-        #else
-        return "Unknown Device"
-        #endif
+        let snapshot = LocalDevicePresentation.current()
+        return snapshot.deviceName ?? snapshot.modelName ?? "Unknown Device"
     }
     
     private static func getCurrentDeviceType() -> P2PDeviceType {
         #if os(macOS)
         return .macOS
         #elseif os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            return .iPadOS
-        } else {
-            return .iOS
-        }
+        return LocalDevicePresentation.current().platformName == "iPadOS" ? .iPadOS : .iOS
         #else
         return .macOS
         #endif

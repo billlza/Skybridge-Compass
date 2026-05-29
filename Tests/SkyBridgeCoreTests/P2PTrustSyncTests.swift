@@ -338,6 +338,25 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertEqual(created?.lifecycleStateMetadata, .active)
     }
 
+    func testRecordAuthenticatedRemoteAuthorityDoesNotPersistIdentifierAsDisplayName() throws {
+        let stableId = "id:\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "a", count: 64)
+
+        let created = TrustSyncService.resolvedAuthenticatedRemoteAuthorityRecord(
+            existingRecords: [],
+            deviceId: "peer:fe80::1%en0",
+            displayName: stableId,
+            preferredCurrentDeviceId: stableId,
+            knownDeviceIds: [stableId, "peer:fe80::1%en0"],
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: fingerprint
+        )
+
+        XCTAssertNotNil(created)
+        XCTAssertEqual(created?.deviceId, stableId)
+        XCTAssertNil(created?.deviceName)
+    }
+
     @MainActor
     func testEvaluateCurrentPathBindingMatchesKnownAliasesBeforeDeclaringConflict() async throws {
         let service = TrustSyncService.shared

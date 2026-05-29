@@ -795,7 +795,7 @@ public final class TrustSyncService: ObservableObject {
             .lowercased()
         guard !normalizedFingerprint.isEmpty else { return nil }
 
-        let normalizedDisplayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDisplayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(displayName)
         let stableCurrentDeviceId = PeerTrustLookup.persistentDeviceId(from: preferredCurrentDeviceId)
             ?? preferredCurrentDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -909,7 +909,7 @@ public final class TrustSyncService: ObservableObject {
                 source: pinSource
             ),
             signature: Data(),
-            deviceName: normalizedDisplayName ?? stableCurrentDeviceId,
+            deviceName: normalizedDisplayName,
             currentDeviceId: stableCurrentDeviceId,
             knownDeviceIds: mergeKnownDeviceIds(existing: []),
             lifecycleState: .active

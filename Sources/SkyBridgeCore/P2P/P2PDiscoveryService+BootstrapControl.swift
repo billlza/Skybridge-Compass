@@ -394,13 +394,14 @@ extension P2PDiscoveryService {
         }
 
         let now = Date()
+        let localPresentation = LocalDevicePresentation.current()
         let unsigned = AppMessage.SignedProtocolIdentityBindingPayload(
             deviceId: localId,
             aliases: PeerTrustLookup.lookupCandidates(for: localId),
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
             protocolIdentityPublicKey: selectedIdentity.publicKey,
             protocolIdentityFingerprint: selectedIdentity.fingerprint,
-            deviceName: Host.current().localizedName,
+            deviceName: localPresentation.deviceName,
             sentAt: now,
             expiresAt: now.addingTimeInterval(300),
             requestNonce: request.nonce,

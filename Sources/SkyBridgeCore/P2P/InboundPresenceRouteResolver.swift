@@ -35,7 +35,7 @@ enum P2PPeerHostTokenNormalizer {
 @available(macOS 14.0, iOS 17.0, *)
 extension P2PDiscoveryService {
     struct InboundPresenceResolution: Sendable, Equatable {
-        let name: String
+        var name: String
         let displayAddress: String?
         let transferPort: Int
     }
@@ -65,21 +65,14 @@ private enum InboundPresenceRouteResolver {
         discoveredDevices: [DiscoveredDevice],
         unifiedDevices: [OnlineDevice]
     ) -> Resolution {
-        func displayName(from identifier: String) -> String {
+        func displayName(from identifier: String) -> String? {
             if identifier.hasPrefix("bonjour:") {
                 let rest = identifier.dropFirst("bonjour:".count)
-                return rest.split(separator: "@", maxSplits: 1).first.map(String.init) ?? identifier
+                return LocalDevicePresentation.sanitizedDisplayNameCandidate(
+                    rest.split(separator: "@", maxSplits: 1).first.map(String.init)
+                )
             }
-            if identifier.hasPrefix("id:") {
-                return String(identifier.dropFirst("id:".count))
-            }
-            if identifier.hasPrefix("peer:") {
-                return String(identifier.dropFirst("peer:".count))
-            }
-            if identifier.hasPrefix("host:") {
-                return String(identifier.dropFirst("host:".count))
-            }
-            return identifier
+            return LocalDevicePresentation.sanitizedDisplayNameCandidate(identifier)
         }
 
         func parseBonjourName(from identifier: String) -> String? {
@@ -156,7 +149,7 @@ private enum InboundPresenceRouteResolver {
             ?? endpointExtractedIP.ipv6
             ?? peerExtractedIP.ipv4
             ?? peerExtractedIP.ipv6
-        let fallbackName = bonjourName ?? displayName(from: peerId)
+        let fallbackName = bonjourName.flatMap(displayName(from:)) ?? displayName(from: peerId)
 
         func normalizedAddressToken(_ raw: String?) -> String? {
             guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -452,7 +445,7 @@ private enum InboundPresenceRouteResolver {
         }
 
         return Resolution(
-            name: fallbackName.isEmpty ? "P2P Peer" : fallbackName,
+            name: fallbackName ?? "P2P Peer",
             displayAddress: fallbackAddress,
             transferPort: -1
         )

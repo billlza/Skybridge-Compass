@@ -188,16 +188,16 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             accountDisplayName: payload.accountDisplayName,
             nebulaId: payload.nebulaId,
             deviceId: payload.deviceId,
-            deviceName: payload.deviceName
+            deviceName: LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
         )
         guard !identity.isEmpty else { return }
 
         let aliases = classicTransferPeerLookupAliases(remoteIdentityPayload: payload)
             + [
                 payload.deviceId,
-                payload.deviceName,
+                LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName),
                 handshakePeer.deviceId,
-                handshakePeer.displayName,
+                LocalDevicePresentation.sanitizedDisplayNameCandidate(handshakePeer.displayName),
                 handshakePeer.address,
                 device.persistentDeviceId,
                 device.deviceId,
@@ -1302,41 +1302,17 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return
         }
         let protocolIdentityPublicKeys = await localProtocolIdentityPublicKeysForPairing()
-        let localDeviceName: String? = {
-            #if os(macOS)
-            return Host.current().localizedName
-            #else
-            return nil
-            #endif
-        }()
-        let localPlatform: String? = {
-            #if os(macOS)
-            return "macOS"
-            #elseif os(iOS)
-            return "iOS"
-            #else
-            return nil
-            #endif
-        }()
-        let localModel: String? = {
-            #if os(macOS)
-            return "Mac"
-            #elseif os(iOS)
-            return "iPhone"
-            #else
-            return nil
-            #endif
-        }()
+        let localPresentation = LocalDevicePresentation.current()
         let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
 
         let message = AppMessage.pairingIdentityExchange(.init(
             deviceId: localDeviceId,
             kemPublicKeys: kemKeys,
             protocolIdentityPublicKeys: protocolIdentityPublicKeys,
-            deviceName: localDeviceName,
-            modelName: localModel,
-            platform: localPlatform,
-            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            deviceName: localPresentation.deviceName,
+            modelName: localPresentation.modelName,
+            platform: localPresentation.platformName,
+            osVersion: localPresentation.osVersion,
             chip: nil,
             accountDisplayName: localIdentity?.accountDisplayName,
             nebulaId: localIdentity?.nebulaId,
@@ -2124,7 +2100,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             suite: suite.rawValue
         ) ?? suite.rawValue
         let declaredPeerId = normalizedNonEmptyString(remoteIdentityPayload?.deviceId)
-        let remoteDisplayName = normalizedNonEmptyString(remoteIdentityPayload?.deviceName)
+        let remoteDisplayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(remoteIdentityPayload?.deviceName)
         let advertisedTransferPort = remoteIdentityPayload?.fileTransferPort.flatMap { port -> Int? in
             let value = Int(port)
             return (1...65535).contains(value) ? value : nil
@@ -2330,10 +2306,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
 
         let declaredDeviceId = normalizedNonEmptyString(payload.deviceId)
-        let displayName = normalizedNonEmptyString(payload.deviceName)
-            ?? normalizedNonEmptyString(device.name)
-            ?? normalizedNonEmptyString(handshakePeer.displayName)
-            ?? handshakePeer.deviceId
+        let displayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
+            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(device.name)
+            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(handshakePeer.displayName)
 
         var knownDeviceIds: [String] = []
         var seenKnownDeviceIds = Set<String>()
@@ -2462,9 +2437,8 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let peerDeviceId = handshakePeer.deviceId
         let rawDeviceId = normalizedNonEmptyString(device.deviceId)
         let persistentDeviceId = normalizedNonEmptyString(device.persistentDeviceId)
-        let displayName = normalizedNonEmptyString(payload.deviceName)
-            ?? normalizedNonEmptyString(device.name)
-            ?? peerDeviceId
+        let displayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
+            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(device.name)
 
         let platform = normalizedNonEmptyString(payload.platform) ?? ""
         let osVersion = normalizedNonEmptyString(payload.osVersion) ?? ""
@@ -2563,7 +2537,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     @MainActor
     private func upsertTrustRecordForBootstrap(
         deviceId: String,
-        displayName: String,
+        displayName: String?,
         incomingKEMKeys: [KEMPublicKeyInfo],
         capabilities: [String],
         currentDeviceId: String?,
@@ -2576,7 +2550,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             incoming: capabilities
         )
         let mergedKEM = mergedKEMPublicKeys(existing: existing?.kemPublicKeys, incoming: incomingKEMKeys)
-        let resolvedDisplayName = normalizedNonEmptyString(displayName)
+        let resolvedDisplayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(displayName)
             ?? existing?.deviceName
         let mergedKnownDeviceIds = mergedKnownDeviceIds(
             existing: existing?.knownDeviceIdsMetadata,

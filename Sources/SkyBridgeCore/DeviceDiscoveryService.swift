@@ -219,8 +219,8 @@ public final class DeviceDiscoveryService: ObservableObject {
  // 更新信号强度
         let mergedStrength = newDevice.signalStrength ?? existing.signalStrength
 
- // 使用更详细的名称
-        let mergedName = newDevice.name.count > existing.name.count ? newDevice.name : existing.name
+ // 使用更可信的展示名，不让 IP/UUID/peer 路由凭长度覆盖真实设备名。
+        let mergedName = Self.preferredDisplayName(existing: existing.name, candidate: newDevice.name)
 
  // 创建新的合并设备对象
         let merged = DiscoveredDevice(
@@ -238,6 +238,39 @@ public final class DeviceDiscoveryService: ObservableObject {
 
         discoveredDevices[existingIndex] = merged
         logger.debug("🔄 合并设备信息: \(merged.name) (IP: \(mergedIPv4 ?? "无"), 服务: \(mergedServices.count)个)")
+    }
+
+    private nonisolated static func preferredDisplayName(existing: String, candidate: String) -> String {
+        let existingScore = displayNameQualityScore(existing)
+        let candidateScore = displayNameQualityScore(candidate)
+        if candidateScore != existingScore {
+            return candidateScore > existingScore ? candidate : existing
+        }
+        return candidate.count > existing.count ? candidate : existing
+    }
+
+    private nonisolated static func displayNameQualityScore(_ raw: String) -> Int {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        if LocalDevicePresentation.isIdentifierLikeDisplayName(trimmed) { return 10 }
+        let normalized = trimmed
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
+        if normalized == "unknown" || normalized == "unknowndevice" || normalized == "未知设备" {
+            return 20
+        }
+        if normalized == "ipad" || normalized == "iphone" {
+            return 40
+        }
+        if normalized.hasPrefix("ipad") || normalized.hasPrefix("iphone") || normalized.contains("mac") {
+            return 70
+        }
+        if normalized.contains("ipad") || normalized.contains("iphone") {
+            return 90
+        }
+        return 100
     }
 
  /// 网络活跃度等级

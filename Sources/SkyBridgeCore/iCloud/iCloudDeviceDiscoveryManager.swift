@@ -242,9 +242,10 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
 
  /// 设置当前设备信息
     private func setupCurrentDevice() {
+        let localPresentation = LocalDevicePresentation.current()
         let device = iCloudDevice(
             id: getDeviceIdentifier(),
-            name: Host.current().localizedName ?? "Mac",
+            name: localPresentation.deviceName ?? localPresentation.modelName ?? "Mac",
             model: getDeviceModel(),
             osVersion: getOSVersion(),
             appVersion: getAppVersion(),
