@@ -1009,17 +1009,12 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
         let iconSource = try sourceSlice(
             from: "private static func applyAppIconIfAvailable() -> Bool",
-            to: "// Fallback for non-bundled/debug launches",
+            to: "func resolveIconURL(named baseName: String) -> URL?",
             in: appSource
         )
         let appIconFallbackSource = try sourceSlice(
             from: "let chosenURL = resolveIconURL",
             to: "guard let icon = NSImage(contentsOf: url) else",
-            in: appSource
-        )
-        let packagedIconSource = try sourceSlice(
-            from: "private static func resolvePackagedIconURL() -> URL?",
-            to: "// MARK: - 根容器视图",
             in: appSource
         )
         let notificationSource = try sourceSlice(
@@ -1049,25 +1044,38 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(appSource.contains("private static func packagedContentsURL() -> URL?"))
         XCTAssertFalse(iconSource.contains("Bundle.main.bundleURL"))
         XCTAssertFalse(iconSource.contains("Bundle.main.url(forResource"))
-        XCTAssertLessThan(
-            try XCTUnwrap(packagedIconSource.range(of: "(\"AppIcon\", \"icns\")")?.lowerBound),
-            try XCTUnwrap(packagedIconSource.range(of: "(\"AppIconDock\", \"icns\")")?.lowerBound),
-            "Runtime app icon resolution must prefer the canonical LaunchServices AppIcon over AppIconDock so startup and post-launch icons cannot diverge."
+        XCTAssertFalse(
+            iconSource.contains("NSApplication.shared.applicationIconImage ="),
+            "Packaged app startup must not overwrite the LaunchServices/Icon Composer app icon with a raw PNG or ICNS."
         )
-        XCTAssertLessThan(
-            try XCTUnwrap(appIconFallbackSource.range(of: "resolveIconURL(named: \"AppIcon\")")?.lowerBound),
-            try XCTUnwrap(appIconFallbackSource.range(of: "resolveIconURL(named: \"AppIconDock\")")?.lowerBound),
-            "Debug fallback icon resolution must also prefer AppIcon before AppIconDock."
+        XCTAssertFalse(
+            appSource.contains("resolvePackagedIconURL"),
+            "Packaged app icon resolution must stay under LaunchServices/Icon Composer ownership."
+        )
+        XCTAssertTrue(
+            iconSource.contains("if isRunningFromPackagedApp"),
+            "Packaged app startup should return after confirming LaunchServices owns the app icon."
+        )
+        XCTAssertTrue(
+            appIconFallbackSource.contains("resolveIconURL(named: \"AppIcon\")")
+        )
+        XCTAssertFalse(
+            appIconFallbackSource.contains("resolveIconURL(named: \"AppIconDock\")"),
+            "Debug fallback should not silently switch to the alternate Dock icon resource."
         )
         XCTAssertTrue(appInfoPlist.contains("<key>CFBundleIconName</key>"))
         XCTAssertTrue(appInfoPlist.contains("<string>AppIcon</string>"))
         XCTAssertTrue(xcodeInfoPlist.contains("<key>CFBundleIconName</key>"))
         XCTAssertTrue(xcodeInfoPlist.contains("<string>AppIcon</string>"))
-        XCTAssertTrue(brandIconLoaderSource.contains("packagedResourceIconURLs()"))
+        XCTAssertTrue(brandIconLoaderSource.contains("NSApplication.shared.applicationIconImage"))
         XCTAssertTrue(brandIconLoaderSource.contains("return nil"))
         XCTAssertFalse(
             brandIconLoaderSource.contains("image(forResource"),
             "Brand icon startup must not use AppKit Bundle image lookup because it can synchronously initialize the main CoreUI catalog before the root device view renders."
+        )
+        XCTAssertFalse(
+            brandIconLoaderSource.contains("packagedResourceIconURLs"),
+            "Packaged brand icon loading must not bypass Icon Composer by reading raw PNG resources."
         )
         XCTAssertFalse(
             brandIconLoaderSource.contains("Bundle.main"),

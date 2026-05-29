@@ -677,39 +677,37 @@ struct SkyBridgeCompassApp: App {
         SkyBridgeLogger.ui.debugOnly("✅ 菜单栏通知处理器已设置")
     }
 
- /// 应用应用图标（如果可用）
+    /// Keep the packaged app icon under LaunchServices/Icon Composer ownership.
+    /// Manually assigning `applicationIconImage` from raw PNG/ICNS resources drops
+    /// the modern AppIcon.icon composition and makes the Dock icon regress after launch.
     @MainActor
     private static func applyAppIconIfAvailable() -> Bool {
-        if let url = resolvePackagedIconURL(),
-            let icon = NSImage(contentsOf: url) {
-            NSApplication.shared.applicationIconImage = icon
-            SkyBridgeLogger.ui.debugOnly("✅ 使用 packaged resource 应用图标，避免 Bundle.main 启动期资源解析: \(url.lastPathComponent)")
+        if isRunningFromPackagedApp {
+            SkyBridgeLogger.ui.debugOnly("✅ 使用系统解析的 packaged AppIcon，避免运行态覆盖 Icon Composer 图标")
             return true
         }
 
- // Fallback for non-bundled/debug launches where the process has no packaged
- // app icon for LaunchServices to resolve.
+        // Fallback for non-bundled/debug launches where the process has no
+        // packaged app icon for LaunchServices to resolve.
         func resolveIconURL(named baseName: String) -> URL? {
-            let moduleICNS = Bundle.module.url(forResource: baseName, withExtension: "icns")
-            let mainICNS = Bundle.main.url(forResource: baseName, withExtension: "icns")
             let modulePNG = Bundle.module.url(forResource: baseName, withExtension: "png")
             let mainPNG = Bundle.main.url(forResource: baseName, withExtension: "png")
-            return moduleICNS ?? mainICNS ?? modulePNG ?? mainPNG
+            let moduleICNS = Bundle.module.url(forResource: baseName, withExtension: "icns")
+            let mainICNS = Bundle.main.url(forResource: baseName, withExtension: "icns")
+            return modulePNG ?? mainPNG ?? moduleICNS ?? mainICNS
         }
 
-        let chosenURL = resolveIconURL(named: "AppIcon") ?? resolveIconURL(named: "AppIconDock")
+        let chosenURL = resolveIconURL(named: "AppIcon")
         guard let url = chosenURL else {
-            SkyBridgeLogger.ui.debugOnly("⚠️ 未找到 AppIcon/AppIconDock 图标资源（module/main 均为空）")
+            SkyBridgeLogger.ui.debugOnly("⚠️ 未找到 AppIcon 图标资源（module/main 均为空）")
             return false
         }
         guard let icon = NSImage(contentsOf: url) else {
             SkyBridgeLogger.ui.error("⚠️ 无法加载图标文件: \(url.path, privacy: .private)")
             return false
         }
-        DispatchQueue.main.async {
-            NSApplication.shared.applicationIconImage = icon
-            SkyBridgeLogger.ui.debugOnly("✅ 应用图标已设置: \(url.path.hasSuffix(".png") ? "PNG" : "ICNS") @ \(url.path)")
-        }
+        NSApplication.shared.applicationIconImage = icon
+        SkyBridgeLogger.ui.debugOnly("✅ 非打包启动图标已设置: \(url.path.hasSuffix(".png") ? "PNG" : "ICNS") @ \(url.path)")
         return true
     }
 
@@ -752,23 +750,6 @@ struct SkyBridgeCompassApp: App {
         return identifier
     }
 
-    private static func resolvePackagedIconURL() -> URL? {
-        guard let resourcesURL = packagedResourcesURL() else { return nil }
-        let candidates = [
-            ("AppIcon", "icns"),
-            ("AppIcon", "png"),
-            ("AppIconDock", "icns"),
-            ("AppIconDock", "png")
-        ]
-        let fileManager = FileManager.default
-        for (name, ext) in candidates {
-            let url = resourcesURL.appendingPathComponent("\(name).\(ext)", isDirectory: false)
-            if fileManager.fileExists(atPath: url.path) {
-                return url
-            }
-        }
-        return nil
-    }
 }
 
 // MARK: - 根容器视图

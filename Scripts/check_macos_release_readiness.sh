@@ -888,6 +888,82 @@ validate_icon_resources_match() {
   fi
 }
 
+validate_packaged_app_does_not_override_icon_composer() {
+  local app_source="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift"
+  local icon_loader_source="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/SVGEmbeddedImageView.swift"
+  local icon_function
+  local brand_loader
+
+  [[ -f "${app_source}" ]] || {
+    echo "missing app source for runtime icon ownership validation: ${app_source}" >&2
+    return 1
+  }
+  [[ -f "${icon_loader_source}" ]] || {
+    echo "missing brand icon source for runtime icon ownership validation: ${icon_loader_source}" >&2
+    return 1
+  }
+
+  icon_function="$(
+    python3 - "${app_source}" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start_marker = "private static func applyAppIconIfAvailable() -> Bool"
+end_marker = "func resolveIconURL(named baseName: String) -> URL?"
+start = source.find(start_marker)
+end = source.find(end_marker, start)
+if start == -1 or end == -1:
+    raise SystemExit(2)
+print(source[start:end])
+PY
+  )" || {
+    echo "could not locate applyAppIconIfAvailable packaged icon path" >&2
+    return 1
+  }
+
+  if [[ "${icon_function}" != *"if isRunningFromPackagedApp"* ]]; then
+    echo "packaged app icon must return before debug raw-icon fallback; LaunchServices/Icon Composer must own it" >&2
+    return 1
+  fi
+  if [[ "${icon_function}" == *"NSApplication.shared.applicationIconImage ="* ]]; then
+    echo "packaged app startup must not overwrite applicationIconImage from raw PNG/ICNS resources" >&2
+    return 1
+  fi
+  if grep -q "resolvePackagedIconURL" "${app_source}"; then
+    echo "packaged app must not resolve raw AppIcon PNG/ICNS for the Dock icon" >&2
+    return 1
+  fi
+
+  brand_loader="$(
+    python3 - "${icon_loader_source}" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start_marker = "private enum BrandIconAssetLoader"
+end_marker = "private extension View"
+start = source.find(start_marker)
+end = source.find(end_marker, start)
+if start == -1 or end == -1:
+    raise SystemExit(2)
+print(source[start:end])
+PY
+  )" || {
+    echo "could not locate BrandIconAssetLoader" >&2
+    return 1
+  }
+
+  if [[ "${brand_loader}" != *"NSApplication.shared.applicationIconImage"* ]]; then
+    echo "packaged brand icon must reuse the system app icon instead of raw PNG resources" >&2
+    return 1
+  fi
+  if [[ "${brand_loader}" == *"packagedResourceIconURLs"* ]]; then
+    echo "packaged brand icon must not bypass Icon Composer by reading raw PNG resources" >&2
+    return 1
+  fi
+}
+
 validate_modern_app_icon_contract() {
   local info_plist="$1"
   local resources_dir="$2"
@@ -919,6 +995,7 @@ validate_modern_app_icon_contract() {
   validate_icns_contains_full_size_reps "${resources_dir}/AppIconDock.icns" "AppIconDock.icns" || return 1
   validate_icon_resources_match "${resources_dir}/AppIcon.icns" "${resources_dir}/AppIconDock.icns" "icns" || return 1
   validate_icon_resources_match "${resources_dir}/AppIcon.png" "${resources_dir}/AppIconDock.png" "png" || return 1
+  validate_packaged_app_does_not_override_icon_composer || return 1
 
   if [[ ! -f "${source_resources_dir}/AppIcon.png" || ! -f "${source_resources_dir}/AppIcon.icon/Assets/Image.png" ]]; then
     echo "source resources are missing AppIcon.png or AppIcon.icon/Assets/Image.png; Icon Composer source cannot be proven canonical" >&2
@@ -932,8 +1009,8 @@ validate_modern_app_icon_contract() {
     return 1
   fi
 
-  if [[ -e "${resources_dir}/icon.json" || -e "${resources_dir}/Image.png" ]]; then
-    echo "app bundle still contains flattened Icon Composer resources (icon.json/Image.png); release icon source is ambiguous" >&2
+  if [[ -e "${resources_dir}/icon.json" || -e "${resources_dir}/Image.png" || -e "${resources_dir}/AppIcon.icon" || -e "${resources_dir}/Assets.xcassets" ]]; then
+    echo "app bundle still contains Icon Composer/asset catalog source resources; release icon source is ambiguous" >&2
     return 1
   fi
 }

@@ -373,6 +373,80 @@ verify_iconcomposer_source_matches_canonical_icon() {
     verify_file_matches_source_icon "$iconcomposer_png" "$canonical_png" "AppIcon.icon/Assets/Image.png"
 }
 
+verify_packaged_app_does_not_override_icon_composer() {
+    local app_source="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift"
+    local icon_loader_source="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SVGEmbeddedImageView.swift"
+    local icon_function=""
+    local brand_loader=""
+
+    [[ -f "$app_source" ]] || {
+        log_error "缺少应用入口源码，无法校验运行态图标 ownership：$app_source"
+        exit 1
+    }
+    [[ -f "$icon_loader_source" ]] || {
+        log_error "缺少品牌图标源码，无法校验运行态图标 ownership：$icon_loader_source"
+        exit 1
+    }
+
+    icon_function="$(python3 - "$app_source" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start_marker = "private static func applyAppIconIfAvailable() -> Bool"
+end_marker = "func resolveIconURL(named baseName: String) -> URL?"
+start = source.find(start_marker)
+end = source.find(end_marker, start)
+if start == -1 or end == -1:
+    raise SystemExit(2)
+print(source[start:end])
+PY
+)" || {
+        log_error "无法定位 applyAppIconIfAvailable packaged 图标路径"
+        exit 1
+    }
+
+    if [[ "$icon_function" != *"if isRunningFromPackagedApp"* ]]; then
+        log_error "packaged app 图标必须由 LaunchServices/Icon Composer 接管，缺少 isRunningFromPackagedApp 早返回"
+        exit 1
+    fi
+    if [[ "$icon_function" == *"NSApplication.shared.applicationIconImage ="* ]]; then
+        log_error "packaged app 启动路径禁止手动覆盖 applicationIconImage；这会导致启动后图标回退"
+        exit 1
+    fi
+    if grep -q "resolvePackagedIconURL" "$app_source"; then
+        log_error "packaged app 禁止从 raw AppIcon PNG/ICNS 解析 Dock 图标；请使用 LaunchServices/Icon Composer"
+        exit 1
+    fi
+
+    brand_loader="$(python3 - "$icon_loader_source" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start_marker = "private enum BrandIconAssetLoader"
+end_marker = "private extension View"
+start = source.find(start_marker)
+end = source.find(end_marker, start)
+if start == -1 or end == -1:
+    raise SystemExit(2)
+print(source[start:end])
+PY
+)" || {
+        log_error "无法定位 BrandIconAssetLoader"
+        exit 1
+    }
+
+    if [[ "$brand_loader" != *"NSApplication.shared.applicationIconImage"* ]]; then
+        log_error "packaged 品牌图标必须复用系统 app icon，避免启动页与 Dock 图标分叉"
+        exit 1
+    fi
+    if [[ "$brand_loader" == *"packagedResourceIconURLs"* ]]; then
+        log_error "packaged 品牌图标禁止读取 raw PNG 资源；这会绕过 Icon Composer"
+        exit 1
+    fi
+}
+
 verify_app_icon_contract() {
     local app_bundle="$1"
     local info_plist="$app_bundle/Contents/Info.plist"
@@ -406,13 +480,14 @@ verify_app_icon_contract() {
     verify_icns_has_full_size_reps "$resources_dir/AppIconDock.icns" "AppIconDock.icns"
     verify_icon_resources_match "$resources_dir/AppIcon.icns" "$resources_dir/AppIconDock.icns" "icns"
     verify_icon_resources_match "$resources_dir/AppIcon.png" "$resources_dir/AppIconDock.png" "png"
+    verify_packaged_app_does_not_override_icon_composer
 
-    if [[ -e "$resources_dir/icon.json" || -e "$resources_dir/Image.png" ]]; then
-        log_error "App Bundle 根资源目录包含扁平 Icon Composer 源文件，图标来源不明确"
+    if [[ -e "$resources_dir/icon.json" || -e "$resources_dir/Image.png" || -e "$resources_dir/AppIcon.icon" || -e "$resources_dir/Assets.xcassets" ]]; then
+        log_error "App Bundle 包含 Icon Composer/asset catalog 源文件，图标来源不明确"
         exit 1
     fi
 
-    log_info "App 图标 contract 校验通过：LaunchServices 与运行态 Dock 均使用 full-size 蓝底图标"
+    log_info "App 图标 contract 校验通过：LaunchServices/Icon Composer 持有 packaged app 图标，运行态不会覆盖"
 }
 
 verify_app_embedded_privacy_info_plist() {

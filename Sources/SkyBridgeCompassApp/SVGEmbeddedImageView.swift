@@ -97,13 +97,11 @@ struct BrandAppIconView: View {
 @MainActor
 private enum BrandIconAssetLoader {
     static func load() -> NSImage? {
-        if let packagedIconURLs = packagedResourceIconURLs() {
-            for url in packagedIconURLs {
-                if let image = NSImage(contentsOf: url) {
-                    return image
-                }
-            }
-            return nil
+        if isRunningFromPackagedApp,
+           let appIcon = NSApplication.shared.applicationIconImage.copy() as? NSImage,
+           appIcon.size.width > 0,
+           appIcon.size.height > 0 {
+            return appIcon
         }
 
         for bundle in [Bundle.module] {
@@ -125,25 +123,9 @@ private enum BrandIconAssetLoader {
         ("app_icon", "png")
     ]
 
-    private static func packagedResourceIconURLs() -> [URL]? {
-        guard let resourcesURL = packagedResourcesURL() else { return nil }
-        return iconCandidates.map { candidate in
-            resourcesURL
-                .appendingPathComponent(candidate.name, isDirectory: false)
-                .appendingPathExtension(candidate.extensionName)
-        }
-    }
-
-    private static func packagedResourcesURL() -> URL? {
+    private static var isRunningFromPackagedApp: Bool {
         let executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
-        guard let contentsURL = packagedContentsURL(containing: executableURL) else { return nil }
-        let resourcesURL = contentsURL.appendingPathComponent("Resources", isDirectory: true)
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: resourcesURL.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            return nil
-        }
-        return resourcesURL
+        return packagedContentsURL(containing: executableURL) != nil
     }
 
     private static func packagedContentsURL(containing executableURL: URL) -> URL? {

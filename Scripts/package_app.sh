@@ -536,6 +536,11 @@ function copy_source_app_resources_to_main_bundle() {
   log "拷贝源资源目录 Resources 到 .app/Contents/Resources/"
   for entry in "${source_resources_dir}"/*(N); do
     resource_name="$(basename "${entry}")"
+    case "${resource_name}" in
+      AppIcon.icon|Assets.xcassets)
+        continue
+        ;;
+    esac
     rm -rf "${app_resources_dir}/${resource_name}"
     ditto "${entry}" "${app_resources_dir}/${resource_name}"
     copied_count=$((copied_count + 1))
@@ -550,14 +555,17 @@ function copy_source_app_resources_to_main_bundle() {
     AppIcon.icns \
     AppIconDock.icns \
     AppIcon.png \
-    AppIconDock.png \
-    AppIcon.icon/icon.json \
-    AppIcon.icon/Assets/Image.png; do
+    AppIconDock.png; do
     if [[ ! -f "${app_resources_dir}/${required_icon_resource}" ]]; then
       echo "错误：app 包缺少必需图标资源：${required_icon_resource}" >&2
       exit 1
     fi
   done
+
+  if [[ -e "${app_resources_dir}/AppIcon.icon" || -e "${app_resources_dir}/Assets.xcassets" ]]; then
+    echo "错误：最终 app 包不应包含 Icon Composer/asset catalog 源目录；只允许包含编译后的 Assets.car。" >&2
+    exit 1
+  fi
 }
 
 function resolve_widget_provisionprofile() {
