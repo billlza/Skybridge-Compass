@@ -982,6 +982,52 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     }
 
     @MainActor
+    func testGenericIPadRowsDoNotUsePlatformAsDisplayNameWhenModelIsMissing() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let stableDeviceId = "550E8400-E29B-41D4-A716-446655440090"
+        let bonjourRoute = "bonjour:iPad@local."
+        let stable = makeDevice(
+            name: "id:550E8400-E29B-41D4-A716-446655440090",
+            uniqueIdentifier: "id:\(stableDeviceId)",
+            ipv4: nil,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: false,
+            connectionTypes: [],
+            services: [],
+            portMap: [:],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeCloud],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: nil
+        )
+        let genericBonjour = makeDevice(
+            name: "iPad",
+            uniqueIdentifier: bonjourRoute,
+            ipv4: "192.168.0.103",
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 11550],
+            routeIdentifiers: [bonjourRoute],
+            sources: [.skybridgeBonjour],
+            platformName: "iPadOS",
+            osVersion: "26.5",
+            modelName: nil
+        )
+        manager.replaceDevicesForTesting([stable, genericBonjour])
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(manager.onlineDevices.count, 1)
+        XCTAssertEqual(manager.onlineDevices.first?.name, "iPad")
+    }
+
+    @MainActor
     func testLegacyCloudSerialStableIDCoalescesWithBonjourStableIDWhenNamesDiffer() throws {
         let manager = UnifiedOnlineDeviceManager.shared
         let stableDeviceId = "ipad-stable-device-id"

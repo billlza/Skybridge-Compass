@@ -1530,14 +1530,31 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     private nonisolated static func bestDisplayName(for devices: [OnlineDevice]) -> String {
         let best = devices
             .flatMap { device -> [String] in
-                [device.name, device.modelName, device.platformName].compactMap { $0 }
+                [device.name, device.modelName].compactMap {
+                    LocalDevicePresentation.sanitizedDisplayNameCandidate($0)
+                }
             }
             .reduce(nil as String?) { best, candidate in
                 guard let best else { return candidate }
                 return shouldReplaceDisplayName(existing: best, candidate: candidate) ? candidate : best
             }
         let trimmed = best?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? (devices.first?.name ?? "Unknown Device") : trimmed
+        if !trimmed.isEmpty, displayNameQualityScore(trimmed) > 20 {
+            return trimmed
+        }
+        let family = appleDeviceFamilyToken(
+            preferredValues: devices.flatMap { [$0.modelName, $0.name, $0.platformName] }
+        )
+        switch family {
+        case "ipad":
+            return "iPad"
+        case "iphone":
+            return "iPhone"
+        case "mac":
+            return "Mac"
+        default:
+            return trimmed.isEmpty ? "Unknown Device" : trimmed
+        }
     }
 
     private nonisolated static func displayNameQualityScore(_ raw: String) -> Int {
