@@ -185,6 +185,31 @@ CFBundleIconFile = AppIcon
 CFBundleIconName = AppIcon
 ```
 
+For the packaged macOS app, the correct runtime icon path is:
+
+```text
+Sources/SkyBridgeCompassApp/Resources/AppIcon.icon
+  -> actool
+  -> SkyBridge Compass Pro.app/Contents/Resources/Assets.car
+  -> CFBundleIconName = AppIcon
+  -> LaunchServices / NSApplication.shared.applicationIconImage
+```
+
+`Sources/SkyBridgeCompassApp/Resources/AppIcon.icon` and
+`Sources/SkyBridgeCompassApp/Resources/Assets.xcassets` are source inputs only.
+They must stay in source control, but they must not be copied into
+`SkyBridge Compass Pro.app/Contents/Resources/`. The final app bundle should
+contain the compiled `Assets.car` plus the required `AppIcon.*` compatibility
+resources; it must not contain flattened Icon Composer source files such as
+`icon.json` or `Image.png`.
+
+Do not set `NSApplication.shared.applicationIconImage` from bundled
+`AppIcon.png`, `AppIcon.icns`, `AppIconDock.png`, or `AppIconDock.icns` in the
+packaged app startup path. Those files are source/compatibility resources, not
+the owner of the launched app icon. The runtime icon should come back through
+LaunchServices as `NSApplication.shared.applicationIconImage` after
+`CFBundleIconName = AppIcon` has resolved the compiled Icon Composer asset.
+
 Do not recover icons from `/Applications`, Finder cache, screenshots, temporary
 DMG staging folders, or old `dist` bundles.
 

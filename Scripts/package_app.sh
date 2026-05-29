@@ -538,6 +538,8 @@ function copy_source_app_resources_to_main_bundle() {
     resource_name="$(basename "${entry}")"
     case "${resource_name}" in
       AppIcon.icon|Assets.xcassets)
+        # These are actool inputs. The final app must contain compiled Assets.car,
+        # not Icon Composer or asset catalog source directories.
         continue
         ;;
     esac
