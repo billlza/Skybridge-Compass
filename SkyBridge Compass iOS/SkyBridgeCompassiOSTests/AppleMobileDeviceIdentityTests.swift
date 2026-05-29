@@ -2,16 +2,15 @@ import XCTest
 @testable import SkyBridgeCompass_iOS
 
 final class AppleMobileDeviceIdentityTests: XCTestCase {
-    func testAppEntitlementsDeclareUserAssignedDeviceNameAccess() throws {
+    func testDefaultAppEntitlementsDoNotRequestUserAssignedDeviceNameAccess() throws {
         for fileName in [
             "SkyBridgeCompass-iOSDebug.entitlements",
             "SkyBridgeCompass-iOSRelease.entitlements"
         ] {
             let entitlements = try loadEntitlements(named: fileName)
-            XCTAssertEqual(
-                entitlements["com.apple.developer.device-information.user-assigned-device-name"] as? Bool,
-                true,
-                "\(fileName) must request Apple's user-assigned device-name entitlement so UIDevice.name can advertise the real iPad name instead of the generic family name."
+            XCTAssertNil(
+                entitlements["com.apple.developer.device-information.user-assigned-device-name"],
+                "\(fileName) must not request Apple's restricted user-assigned device-name entitlement by default; ordinary development profiles cannot sign it."
             )
         }
     }
@@ -44,6 +43,26 @@ final class AppleMobileDeviceIdentityTests: XCTestCase {
 
         XCTAssertEqual(presentation.modelName, "iPad99,9")
         XCTAssertEqual(presentation.chip, "Apple SoC")
+    }
+
+    func testGenericIPadDeviceNameFallsBackToModelPresentation() {
+        let displayName = AppleMobileDeviceIdentity.displayDeviceName(
+            rawDeviceName: "iPad",
+            platform: .iPadOS,
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+
+        XCTAssertEqual(displayName, "iPad Pro 11-inch (M4)")
+    }
+
+    func testPersonalizedDeviceNameIsPreservedWhenAvailable() {
+        let displayName = AppleMobileDeviceIdentity.displayDeviceName(
+            rawDeviceName: "Bill's iPad",
+            platform: .iPadOS,
+            modelName: "iPad Pro 11-inch (M4)"
+        )
+
+        XCTAssertEqual(displayName, "Bill's iPad")
     }
 
     private func loadEntitlements(named fileName: String) throws -> [String: Any] {

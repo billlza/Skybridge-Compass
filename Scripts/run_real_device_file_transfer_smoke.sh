@@ -825,7 +825,7 @@ IOS_EMBEDDED_PROFILE="$IOS_APP_PATH/embedded.mobileprovision"
 if ! skybridge_profile_supports_requested_profile_backed_entitlements \
   "$IOS_EMBEDDED_PROFILE" \
   "$IOS_DEBUG_ENTITLEMENTS"; then
-  echo "iOS app provisioning profile does not cover requested Debug entitlements; refusing a smoke run that would hide missing iPad device-name access." >&2
+  echo "iOS app provisioning profile does not cover requested Debug entitlements; refusing a smoke run that would hide a signing mismatch." >&2
   echo "profile=$IOS_EMBEDDED_PROFILE entitlements=$IOS_DEBUG_ENTITLEMENTS" >&2
   exit 1
 fi

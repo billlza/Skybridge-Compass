@@ -98,10 +98,15 @@ enum AppleMobileDeviceIdentity {
         let platform = values.userInterfaceIdiom == .pad ? DevicePlatform.iPadOS : .iOS
         let modelIdentifier = currentModelIdentifier()
         let presentation = presentation(forModelIdentifier: modelIdentifier, platform: platform)
+        let deviceName = displayDeviceName(
+            rawDeviceName: values.deviceName,
+            platform: platform,
+            modelName: presentation.modelName
+        )
         return Snapshot(
             stableDeviceId: ProtocolDeviceIdentity.stableDeviceId(),
             vendorDeviceId: values.vendorDeviceId,
-            deviceName: values.deviceName,
+            deviceName: deviceName,
             platform: platform,
             platformName: platform.displayName,
             osVersion: values.systemVersion,
@@ -153,6 +158,24 @@ enum AppleMobileDeviceIdentity {
                 chip: fallbackChipName(for: platform)
             )
         }
+    }
+
+    static func displayDeviceName(
+        rawDeviceName: String?,
+        platform: DevicePlatform,
+        modelName: String
+    ) -> String {
+        let trimmedRawName = rawDeviceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedRawName.isEmpty && !isGenericSystemDeviceName(trimmedRawName, platform: platform) {
+            return trimmedRawName
+        }
+
+        let trimmedModelName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedModelName.isEmpty {
+            return trimmedModelName
+        }
+
+        return fallbackModelName(for: platform)
     }
 
     private static func currentModelIdentifier() -> String {
@@ -212,6 +235,18 @@ enum AppleMobileDeviceIdentity {
             return "Apple SoC"
         default:
             return "Apple Silicon"
+        }
+    }
+
+    private static func isGenericSystemDeviceName(_ name: String, platform: DevicePlatform) -> Bool {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch platform {
+        case .iPadOS:
+            return normalized == "ipad"
+        case .iOS:
+            return normalized == "iphone" || normalized == "ipod touch"
+        default:
+            return normalized == "ios device" || normalized == "apple device"
         }
     }
 }
