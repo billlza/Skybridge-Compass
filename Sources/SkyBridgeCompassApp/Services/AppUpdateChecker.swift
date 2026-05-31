@@ -111,6 +111,12 @@ struct SkyBridgeAppUpdateChecker: Sendable {
     }
 
     func check() async -> SkyBridgeAppUpdateCheckOutcome {
+        await Task.detached(priority: .utility) {
+            await self.performCheck()
+        }.value
+    }
+
+    private func performCheck() async -> SkyBridgeAppUpdateCheckOutcome {
         do {
             let data = try await fetcher.loadManifestData(from: manifestURL)
             let manifest = try SkyBridgeAppUpdateEvaluator.decodeManifest(from: data)
@@ -185,15 +191,48 @@ struct SkyBridgeAppUpdateChecker: Sendable {
 @available(macOS 14.0, *)
 @MainActor
 enum SkyBridgeAppUpdateController {
+    private enum PresentationMode {
+        case manual
+        case automatic
+    }
+
     private static var isChecking = false
 
     static func checkAndPresent() async {
+        await checkAndPresent(mode: .manual)
+    }
+
+    static func scheduleAutomaticCheckAfterLaunch() {
+        Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+            await checkAndPresentAvailableUpdateIfDue()
+        }
+    }
+
+    private static func checkAndPresentAvailableUpdateIfDue() async {
+        let shouldCheck = await Task.detached(priority: .utility) {
+            SkyBridgeAppUpdateAutomaticCheckPolicy().claimDueCheck()
+        }.value
+        guard shouldCheck else { return }
+        await checkAndPresent(mode: .automatic)
+    }
+
+    private static func checkAndPresent(mode: PresentationMode) async {
         guard !isChecking else { return }
         isChecking = true
         defer { isChecking = false }
 
         let outcome = await SkyBridgeAppUpdateChecker().check()
-        SkyBridgeAppUpdatePresenter.present(outcome)
+        switch mode {
+        case .manual:
+            SkyBridgeAppUpdatePresenter.present(outcome)
+        case .automatic:
+            SkyBridgeAppUpdatePresenter.presentAutomaticUpdateIfNeeded(outcome)
+        }
     }
 }
 
@@ -213,6 +252,20 @@ enum SkyBridgeAppUpdatePresenter {
             alert.addButton(withTitle: localized("action.ok"))
             alert.runModal()
         }
+    }
+
+    static func presentAutomaticUpdateIfNeeded(_ outcome: SkyBridgeAppUpdateCheckOutcome) {
+        guard case .success(let decision) = outcome else { return }
+        switch decision.state {
+        case .updateAvailable, .unsupportedSystemVersion:
+            break
+        case .upToDate:
+            return
+        }
+        let didClaimPresentation = SkyBridgeAppUpdateAutomaticCheckPolicy()
+            .claimPresentation(for: decision.manifest.sequence)
+        guard didClaimPresentation else { return }
+        present(decision)
     }
 
     private static func present(_ decision: SkyBridgeAppUpdateDecision) {
@@ -269,5 +322,52 @@ enum SkyBridgeAppUpdatePresenter {
 
     private static func format(_ key: String, _ arguments: CVarArg...) -> String {
         String(format: localized(key), locale: LocalizationManager.shared.locale, arguments: arguments)
+    }
+}
+
+@available(macOS 14.0, *)
+private struct SkyBridgeAppUpdateAutomaticCheckPolicy: @unchecked Sendable {
+    private static let lastCheckAtKey = "SkyBridgeAppUpdateLastAutomaticCheckAt"
+    private static let lastPresentedSequenceKey = "SkyBridgeAppUpdateLastAutomaticPresentedSequence"
+    private static let minimumAutomaticCheckInterval: TimeInterval = 6 * 60 * 60
+
+    private let defaults: UserDefaults
+    private let now: @Sendable () -> Date
+
+    init(
+        defaults: UserDefaults = .standard,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        self.defaults = defaults
+        self.now = now
+    }
+
+    func claimDueCheck() -> Bool {
+        let current = now()
+        if let lastCheckAt = defaults.object(forKey: Self.lastCheckAtKey) as? Date,
+           current.timeIntervalSince(lastCheckAt) < Self.minimumAutomaticCheckInterval {
+            return false
+        }
+        if let lastCheckInterval = defaults.object(forKey: Self.lastCheckAtKey) as? TimeInterval,
+           current.timeIntervalSince(Date(timeIntervalSince1970: lastCheckInterval)) < Self.minimumAutomaticCheckInterval {
+            return false
+        }
+        defaults.set(current, forKey: Self.lastCheckAtKey)
+        return true
+    }
+
+    func claimPresentation(for sequence: Int64) -> Bool {
+        guard sequence > 0 else { return false }
+        let lastPresented: Int64
+        if let number = defaults.object(forKey: Self.lastPresentedSequenceKey) as? NSNumber {
+            lastPresented = number.int64Value
+        } else if let intValue = defaults.object(forKey: Self.lastPresentedSequenceKey) as? Int {
+            lastPresented = Int64(intValue)
+        } else {
+            lastPresented = 0
+        }
+        guard sequence > lastPresented else { return false }
+        defaults.set(sequence, forKey: Self.lastPresentedSequenceKey)
+        return true
     }
 }

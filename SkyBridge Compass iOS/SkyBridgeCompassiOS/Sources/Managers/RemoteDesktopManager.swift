@@ -23,6 +23,152 @@ import SkyBridgeRealtimeMedia
 import UIKit
 #endif
 
+@available(iOS 17.0, *)
+private struct LANSecureReceiveContext: @unchecked Sendable {
+    let connectionID: ObjectIdentifier
+    let generation: UInt64
+    let keys: SessionKeys
+    let pipeline: LANRemoteSecureReceivePipeline
+}
+
+@available(iOS 17.0, *)
+private struct LANSecureReceiveLoopContext: @unchecked Sendable {
+    let receiveContext: LANSecureReceiveContext
+    let scheduler: LANSecureReceiveScheduler
+}
+
+@available(iOS 17.0, *)
+private final class LANSecureReceiveScheduler: @unchecked Sendable {
+    typealias Completion = @Sendable (
+        Result<LANRemoteSecureReceiveResult, Error>,
+        ObjectIdentifier,
+        UInt64
+    ) async -> Void
+
+    private let lock = NSLock()
+    private var tailTask: Task<Void, Never>?
+    private var epoch: UInt64 = 0
+
+    func cancel() {
+        lock.lock()
+        epoch &+= 1
+        let task = tailTask
+        tailTask = nil
+        lock.unlock()
+        task?.cancel()
+    }
+
+    func scheduleChunk(
+        _ chunk: Data,
+        receivedAt: Date,
+        context: LANSecureReceiveContext,
+        maxCompleteScreenFrames: Int,
+        maxDrainBudgetMs: Double,
+        completion: @escaping Completion
+    ) {
+        let scheduledEpoch = currentEpoch()
+        let parseTaskScheduledAt = Date()
+        enqueue(
+            context: context,
+            expectedEpoch: scheduledEpoch,
+            maxCompleteScreenFrames: maxCompleteScreenFrames,
+            maxDrainBudgetMs: maxDrainBudgetMs,
+            completion: completion
+        ) {
+            let parseTaskStartedAt = Date()
+            return try await context.pipeline.appendAndDrain(
+                chunk: chunk,
+                receivedAt: receivedAt,
+                keys: context.keys,
+                maxCompleteScreenFrames: maxCompleteScreenFrames,
+                maxDrainBudgetMs: maxDrainBudgetMs,
+                parseTaskScheduledAt: parseTaskScheduledAt,
+                parseTaskStartedAt: parseTaskStartedAt
+            )
+        }
+    }
+
+    private func scheduleDrain(
+        context: LANSecureReceiveContext,
+        expectedEpoch: UInt64,
+        maxCompleteScreenFrames: Int,
+        maxDrainBudgetMs: Double,
+        completion: @escaping Completion
+    ) {
+        enqueue(
+            context: context,
+            expectedEpoch: expectedEpoch,
+            maxCompleteScreenFrames: maxCompleteScreenFrames,
+            maxDrainBudgetMs: maxDrainBudgetMs,
+            completion: completion
+        ) {
+            try await context.pipeline.drain(
+                keys: context.keys,
+                maxCompleteScreenFrames: maxCompleteScreenFrames,
+                maxDrainBudgetMs: maxDrainBudgetMs
+            )
+        }
+    }
+
+    private func enqueue(
+        context: LANSecureReceiveContext,
+        expectedEpoch: UInt64,
+        maxCompleteScreenFrames: Int,
+        maxDrainBudgetMs: Double,
+        completion: @escaping Completion,
+        work: @escaping @Sendable () async throws -> LANRemoteSecureReceiveResult
+    ) {
+        lock.lock()
+        guard epoch == expectedEpoch else {
+            lock.unlock()
+            return
+        }
+        let previous = tailTask
+        let task = Task.detached(priority: .high) { [weak self, previous] in
+            await previous?.value
+            guard !Task.isCancelled,
+                  self?.isCurrentEpoch(expectedEpoch) == true else { return }
+
+            do {
+                let result = try await work()
+                guard !Task.isCancelled,
+                      self?.isCurrentEpoch(expectedEpoch) == true else { return }
+                await completion(.success(result), context.connectionID, context.generation)
+                guard !Task.isCancelled,
+                      self?.isCurrentEpoch(expectedEpoch) == true else { return }
+                if result.hasCompletePayloadPending {
+                    self?.scheduleDrain(
+                        context: context,
+                        expectedEpoch: expectedEpoch,
+                        maxCompleteScreenFrames: maxCompleteScreenFrames,
+                        maxDrainBudgetMs: maxDrainBudgetMs,
+                        completion: completion
+                    )
+                }
+            } catch {
+                guard self?.isCurrentEpoch(expectedEpoch) == true else { return }
+                await completion(.failure(error), context.connectionID, context.generation)
+            }
+        }
+        tailTask = task
+        lock.unlock()
+    }
+
+    private func currentEpoch() -> UInt64 {
+        lock.lock()
+        let value = epoch
+        lock.unlock()
+        return value
+    }
+
+    private func isCurrentEpoch(_ expectedEpoch: UInt64) -> Bool {
+        lock.lock()
+        let isCurrent = epoch == expectedEpoch
+        lock.unlock()
+        return isCurrent
+    }
+}
+
 // MARK: - RemoteDesktopManager
 
 /// 远程桌面管理器 - iOS 作为查看器/控制端
@@ -113,7 +259,7 @@ public class RemoteDesktopManager: ObservableObject {
     private lazy var lanSecureReceivePipeline = LANRemoteSecureReceivePipeline(
         maxWireMessageBytes: maxLANWireMessageBytes
     )
-    private var lanSecureReceiveChain: Task<Void, Never>?
+    private let lanSecureReceiveScheduler = LANSecureReceiveScheduler()
     private var lanSecureReceiveApplyChain: Task<Void, Never>?
     private var lanSecureReceiveGeneration: UInt64 = 0
     private var lanSecureSendCounter: UInt64 = 0
@@ -426,8 +572,7 @@ public class RemoteDesktopManager: ObservableObject {
     private func resetLANSecureReceivePipelineState(keepingCapacity: Bool = true) {
         lanSecureReceiveGeneration &+= 1
         lanSecureReceivePipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: maxLANWireMessageBytes)
-        lanSecureReceiveChain?.cancel()
-        lanSecureReceiveChain = nil
+        lanSecureReceiveScheduler.cancel()
         lanSecureReceiveApplyChain?.cancel()
         lanSecureReceiveApplyChain = nil
         resetMetalFeedDeliveryState(keepingCapacity: keepingCapacity)
@@ -3731,15 +3876,79 @@ public class RemoteDesktopManager: ObservableObject {
         } else {
             SkyBridgeLogger.shared.debug("ℹ️ LAN secure session 已存在，保留接收管线状态并启动接收循环")
         }
-        receiveNextLANChunk(from: connection)
+        receiveNextLANChunk(from: connection, secureContext: makeLANSecureReceiveContextIfAvailable(for: connection))
     }
 
-    private nonisolated func receiveNextLANChunk(from connection: NWConnection) {
+    private func makeLANSecureReceiveContextIfAvailable(for connection: NWConnection) -> LANSecureReceiveLoopContext? {
+        guard isCurrentLANConnection(connection),
+              let keys = lanSessionKeys,
+              !shouldContinueLANBootstrapFramingHandoff else {
+            return nil
+        }
+        return LANSecureReceiveLoopContext(
+            receiveContext: LANSecureReceiveContext(
+                connectionID: ObjectIdentifier(connection),
+                generation: lanSecureReceiveGeneration,
+                keys: keys,
+                pipeline: lanSecureReceivePipeline
+            ),
+            scheduler: lanSecureReceiveScheduler
+        )
+    }
+
+    private nonisolated func receiveNextLANChunk(
+        from connection: NWConnection,
+        secureContext: LANSecureReceiveLoopContext? = nil
+    ) {
         connection.receive(
             minimumIncompleteLength: 1,
             maximumLength: RemoteDesktopManagerRuntimeLimits.lanReceiveChunkMaxBytes
         ) { [weak self] data, _, isComplete, error in
             let receivedAt = Date()
+            if let secureContext {
+                let receiveContext = secureContext.receiveContext
+                let shouldContinueReceiving = error == nil && !isComplete
+
+                if let error {
+                    Task { @MainActor [weak self] in
+                        guard let self, self.isCurrentLANConnectionID(receiveContext.connectionID) else { return }
+                        await self.handleTransportFailure(error.localizedDescription)
+                    }
+                    return
+                }
+
+                if let chunk = data, !chunk.isEmpty {
+                    secureContext.scheduler.scheduleChunk(
+                        chunk,
+                        receivedAt: receivedAt,
+                        context: receiveContext,
+                        maxCompleteScreenFrames: RemoteDesktopManagerRuntimeLimits.maxLANScreenFramesPerParserDrain,
+                        maxDrainBudgetMs: RemoteDesktopManagerRuntimeLimits.maxLANParserDrainBudgetMs,
+                        completion: { [weak self] result, connectionID, generation in
+                            await self?.handleScheduledSecureLANReceiveResult(
+                                result,
+                                connectionID: connectionID,
+                                generation: generation
+                            )
+                        }
+                    )
+                }
+
+                if shouldContinueReceiving {
+                    self?.receiveNextLANChunk(from: connection, secureContext: secureContext)
+                }
+
+                if isComplete {
+                    Task { @MainActor [weak self] in
+                        guard let self, self.isCurrentLANConnectionID(receiveContext.connectionID) else { return }
+                        await self.handleTransportFailure(
+                            RemoteDesktopError.disconnected.errorDescription ?? "连接已断开"
+                        )
+                    }
+                }
+                return
+            }
+
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.isCurrentLANConnection(connection) else { return }
@@ -3779,7 +3988,10 @@ public class RemoteDesktopManager: ObservableObject {
 
                 if shouldContinueReceiving,
                    self.isCurrentLANConnection(connection) {
-                    self.receiveNextLANChunk(from: connection)
+                    self.receiveNextLANChunk(
+                        from: connection,
+                        secureContext: self.makeLANSecureReceiveContextIfAvailable(for: connection)
+                    )
                 }
             }
         }
@@ -3792,85 +4004,48 @@ public class RemoteDesktopManager: ObservableObject {
         keys: SessionKeys
     ) {
         let connectionID = ObjectIdentifier(connection)
-        let pipeline = lanSecureReceivePipeline
         let generation = lanSecureReceiveGeneration
-        let previousParse = lanSecureReceiveChain
-        let parseTaskScheduledAt = Date()
-        let task = Task.detached(priority: .high) { [weak self, previousParse, pipeline, chunk, receivedAt, keys, connectionID, generation, parseTaskScheduledAt] in
-            await previousParse?.value
-            guard !Task.isCancelled else { return }
-            do {
-                let parseTaskStartedAt = Date()
-                let result = try await pipeline.appendAndDrain(
-                    chunk: chunk,
-                    receivedAt: receivedAt,
-                    keys: keys,
-                    maxCompleteScreenFrames: RemoteDesktopManagerRuntimeLimits.maxLANScreenFramesPerParserDrain,
-                    maxDrainBudgetMs: RemoteDesktopManagerRuntimeLimits.maxLANParserDrainBudgetMs,
-                    parseTaskScheduledAt: parseTaskScheduledAt,
-                    parseTaskStartedAt: parseTaskStartedAt
-                )
-                await self?.scheduleSecureLANReceiveApply(
+        let context = LANSecureReceiveContext(
+            connectionID: connectionID,
+            generation: generation,
+            keys: keys,
+            pipeline: lanSecureReceivePipeline
+        )
+        lanSecureReceiveScheduler.scheduleChunk(
+            chunk,
+            receivedAt: receivedAt,
+            context: context,
+            maxCompleteScreenFrames: RemoteDesktopManagerRuntimeLimits.maxLANScreenFramesPerParserDrain,
+            maxDrainBudgetMs: RemoteDesktopManagerRuntimeLimits.maxLANParserDrainBudgetMs,
+            completion: { [weak self] result, connectionID, generation in
+                await self?.handleScheduledSecureLANReceiveResult(
                     result,
                     connectionID: connectionID,
                     generation: generation
                 )
-                if result.hasCompletePayloadPending {
-                    await self?.scheduleSecureLANReceiveDrain(
-                        connectionID: connectionID,
-                        keys: keys,
-                        generation: generation
-                    )
-                }
-            } catch {
-                await self?.handleSecureLANReceiveFailure(
-                    error,
-                    connectionID: connectionID,
-                    generation: generation
-                )
             }
-        }
-        lanSecureReceiveChain = task
+        )
     }
 
-    private func scheduleSecureLANReceiveDrain(
+    private func handleScheduledSecureLANReceiveResult(
+        _ result: Result<LANRemoteSecureReceiveResult, Error>,
         connectionID: ObjectIdentifier,
-        keys: SessionKeys,
         generation: UInt64
-    ) {
-        guard generation == lanSecureReceiveGeneration else { return }
-        let pipeline = lanSecureReceivePipeline
-        let previousParse = lanSecureReceiveChain
-        let task = Task.detached(priority: .high) { [weak self, previousParse, pipeline, keys, connectionID, generation] in
-            await previousParse?.value
-            guard !Task.isCancelled else { return }
-            do {
-                let result = try await pipeline.drain(
-                    keys: keys,
-                    maxCompleteScreenFrames: RemoteDesktopManagerRuntimeLimits.maxLANScreenFramesPerParserDrain,
-                    maxDrainBudgetMs: RemoteDesktopManagerRuntimeLimits.maxLANParserDrainBudgetMs
-                )
-                await self?.scheduleSecureLANReceiveApply(
-                    result,
-                    connectionID: connectionID,
-                    generation: generation
-                )
-                if result.hasCompletePayloadPending {
-                    await self?.scheduleSecureLANReceiveDrain(
-                        connectionID: connectionID,
-                        keys: keys,
-                        generation: generation
-                    )
-                }
-            } catch {
-                await self?.handleSecureLANReceiveFailure(
-                    error,
-                    connectionID: connectionID,
-                    generation: generation
-                )
-            }
+    ) async {
+        switch result {
+        case .success(let receiveResult):
+            scheduleSecureLANReceiveApply(
+                receiveResult,
+                connectionID: connectionID,
+                generation: generation
+            )
+        case .failure(let error):
+            await handleSecureLANReceiveFailure(
+                error,
+                connectionID: connectionID,
+                generation: generation
+            )
         }
-        lanSecureReceiveChain = task
     }
 
     private func scheduleSecureLANReceiveApply(
@@ -6087,10 +6262,14 @@ public class RemoteDesktopManager: ObservableObject {
                 return false
             }
             if sourceFrame.isIndependentlyDecodableFrame {
+                guard let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) else {
+                    SkyBridgeLogger.shared.error("❌ 解码器输出缺少图像缓冲，已丢弃该 sampleBuffer 帧")
+                    return false
+                }
                 updateLastGoodFrozenFrame(
                     makeCGImage(
                         from: DecodedPixelBufferFrame(
-                            pixelBuffer: CMSampleBufferGetImageBuffer(frame.sampleBuffer)!,
+                            pixelBuffer: pixelBuffer,
                             width: frame.width,
                             height: frame.height,
                             presentationTimeStamp: frame.presentationTimeStamp

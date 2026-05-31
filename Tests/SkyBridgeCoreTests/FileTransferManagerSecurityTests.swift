@@ -475,6 +475,46 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         )
     }
 
+    func testHotPathSourceDoesNotHideMainThreadOrCompressionFailures() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let iosModelsSource = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Models.swift"),
+            encoding: .utf8
+        )
+        let localPresentationSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/Utilities/LocalDevicePresentation.swift"),
+            encoding: .utf8
+        )
+        let managerSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift"),
+            encoding: .utf8
+        )
+        let engineSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/FileTransfer/FileTransferEngine.swift"),
+            encoding: .utf8
+        )
+        let remoteDesktopManagerSource = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"),
+            encoding: .utf8
+        )
+        let remoteControlManagerSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(iosModelsSource.contains("DispatchQueue.main.sync"))
+        XCTAssertFalse(localPresentationSource.contains("DispatchQueue.main.sync"))
+        XCTAssertFalse(managerSource.contains("(try? compressData(chunkData)) ?? chunkData"))
+        XCTAssertTrue(engineSource.contains("compressDataIfBeneficial"))
+        XCTAssertTrue(engineSource.contains("isEncrypted: isEncrypted"))
+        XCTAssertFalse(remoteDesktopManagerSource.contains("CMSampleBufferGetImageBuffer(frame.sampleBuffer)!"))
+        XCTAssertTrue(remoteControlManagerSource.contains("failStrictMediaCapture"))
+        XCTAssertTrue(remoteControlManagerSource.contains("strict-media-failed"))
+    }
+
     private static func mockSessionKeys(sessionId: String) -> SessionKeys {
         SessionKeys(
             sendKey: Data(repeating: 0x11, count: 32),

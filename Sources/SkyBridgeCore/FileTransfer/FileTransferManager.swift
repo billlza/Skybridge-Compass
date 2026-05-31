@@ -2106,7 +2106,7 @@ public class FileTransferManager: BaseManager {
             // 可选：压缩（通过 metadata.compression 协商；发送端以当前 compressionEnabled 决定）
             let payload: Data
             if compressionEnabled {
-                payload = (try? compressData(chunkData)) ?? chunkData
+                payload = try compressData(chunkData)
             } else {
                 payload = chunkData
             }

@@ -403,6 +403,36 @@ public final class RemoteControlManager: BaseManager {
         )
     }
 
+    private func failStrictMediaCapture(
+        for peer: PeerConnection,
+        reason: String,
+        component: String
+    ) async {
+        let sanitizedReason = Self.sanitizeTelemetryToken(reason)
+        logger.error(
+            """
+            ⛔️ 严格媒体策略触发 fail-close: peer=\(peer.id, privacy: .public) \
+            component=\(component, privacy: .public) reason=\(reason, privacy: .public)
+            """
+        )
+        RemoteControlSmokeStatusWriter.append(
+            "strict-media-failed session=\(peer.id) component=\(component) reason=\(sanitizedReason)"
+        )
+
+        screenCaptureWatchdogTask?.cancel()
+        screenCaptureWatchdogTask = nil
+        screenCaptureRestartInProgress = false
+        captureStreamer?.stop()
+        captureStreamer = nil
+        realtimeAudioCaptureStreamer?.stop()
+        realtimeAudioCaptureStreamer = nil
+        realtimeAudioCaptureStrictMediaFallbacks = nil
+        screenSharingActive = false
+        endRealtimeStreamingActivity(reason: "strict-media-\(component)-\(sanitizedReason)")
+
+        await handleConnectionClosed(peer: peer, error: RemoteControlError.screenCaptureFailed)
+    }
+
     private func resolvedPreferredRenderingMode() -> RenderingMode {
         switch preferredRenderingMode {
         case .stable:
@@ -1138,9 +1168,7 @@ public final class RemoteControlManager: BaseManager {
                 guard let self, let peer else { return }
                 if strictMediaFallbacks,
                    reason.hasPrefix("strict-") || self.captureEncodeStatus(from: reason) != nil {
-                    self.logger.error(
-                        "⛔️ 严格媒体策略禁止远控采集/编码降级或静默重启: peer=\(peer.id, privacy: .public) reason=\(reason, privacy: .public)"
-                    )
+                    await self.failStrictMediaCapture(for: peer, reason: reason, component: "video")
                     return
                 }
                 if !strictMediaFallbacks {
@@ -1220,9 +1248,7 @@ public final class RemoteControlManager: BaseManager {
                     Task { @MainActor [weak self, weak peer] in
                         guard let self, let peer else { return }
                         if strictMediaFallbacks {
-                            self.logger.error(
-                                "⛔️ 严格媒体策略禁止 P2P realtime 音频采集降级或静默重启: peer=\(peer.id, privacy: .public) reason=\(reason, privacy: .public)"
-                            )
+                            await self.failStrictMediaCapture(for: peer, reason: reason, component: "audio")
                             return
                         }
                         await self.restartScreenSharingIfNeeded(for: peer.id, reason: "p2p-realtime-audio-\(reason)")
@@ -3281,6 +3307,25 @@ public final class RemoteControlManager: BaseManager {
  /// 读取一块原始数据，交由上层做粘包处理
     private func receiveChunk(from connection: NWConnection) async throws -> Data {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+            final class EmptyReadLimiter: @unchecked Sendable {
+                private let lock = NSLock()
+                private var count = 0
+                private let limit: Int
+
+                init(limit: Int) {
+                    self.limit = limit
+                }
+
+                func recordAndShouldFail() -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    count += 1
+                    return count > limit
+                }
+            }
+
+            let emptyReadLimiter = EmptyReadLimiter(limit: 8)
+
             @Sendable func receiveNextChunk() {
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
                     if let error {
@@ -3291,6 +3336,12 @@ public final class RemoteControlManager: BaseManager {
  // 仅在 Network 明确报告 EOF 时才视为连接关闭，避免把建立期的空回调误判为断链。
                         cont.resume(returning: Data())
                     } else {
+                        guard !emptyReadLimiter.recordAndShouldFail() else {
+                            cont.resume(
+                                throwing: RemoteControlError.handshakeInitializationFailed("remote-control receive returned repeated empty reads")
+                            )
+                            return
+                        }
                         self.logger.debug("ℹ️ RemoteControl receive returned no payload before completion; awaiting next chunk")
                         receiveNextChunk()
                     }

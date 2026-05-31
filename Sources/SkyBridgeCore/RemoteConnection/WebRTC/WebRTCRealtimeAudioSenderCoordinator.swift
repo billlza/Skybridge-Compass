@@ -5,7 +5,6 @@ import SkyBridgeProtocolCore
 import SkyBridgeRealtimeMedia
 
 @available(macOS 14.0, *)
-@MainActor
 struct WebRTCRealtimeAudioSenderCoordinator {
     struct StartedSender {
         let sender: RemoteRealtimeMediaAudioSender
@@ -13,17 +12,17 @@ struct WebRTCRealtimeAudioSenderCoordinator {
     }
 
     struct Dependencies {
-        var reusableAdmissionLease: @MainActor (_ sessionID: String) -> SignalServerClient.MediaAdmissionLease?
-        var sessionToken: @MainActor (_ sessionID: String) -> String?
-        var sessionRoleName: @MainActor (_ sessionID: String) -> String?
-        var storeAdmissionLease: @MainActor (_ lease: SignalServerClient.MediaAdmissionLease?, _ sessionID: String) -> Void
-        var requestMediaRelayLease: @MainActor (_ token: String) async throws -> SignalServerClient.MediaRelayLease
-        var refreshMediaAdmissionLease: @MainActor (
+        var reusableAdmissionLease: @MainActor @Sendable (_ sessionID: String) -> SignalServerClient.MediaAdmissionLease?
+        var sessionToken: @MainActor @Sendable (_ sessionID: String) -> String?
+        var sessionRoleName: @MainActor @Sendable (_ sessionID: String) -> String?
+        var storeAdmissionLease: @MainActor @Sendable (_ lease: SignalServerClient.MediaAdmissionLease?, _ sessionID: String) -> Void
+        var requestMediaRelayLease: @Sendable (_ token: String) async throws -> SignalServerClient.MediaRelayLease
+        var refreshMediaAdmissionLease: @Sendable (
             _ sessionID: String,
             _ sessionToken: String,
             _ roleName: String
         ) async throws -> SignalServerClient.MediaAdmissionLease
-        var appendSessionDiagnostic: @MainActor (_ line: String, _ sessionID: String) -> Void
+        var appendSessionDiagnostic: @MainActor @Sendable (_ line: String, _ sessionID: String) -> Void
     }
 
     private let logger: Logger
@@ -59,7 +58,7 @@ struct WebRTCRealtimeAudioSenderCoordinator {
             logger.warning(
                 "⚠️ WebRTC PQC media audio sender unavailable: session=\(sessionID, privacy: .public) reason=missingViewerEndpoint mediaSession=\(config.mediaSessionId ?? "-", privacy: .public)"
             )
-            dependencies.appendSessionDiagnostic(
+            await dependencies.appendSessionDiagnostic(
                 "audioTxUnavailable session=\(sessionID) reason=missingViewerEndpoint mediaSession=\(config.mediaSessionId ?? "-")",
                 sessionID
             )
@@ -75,7 +74,7 @@ struct WebRTCRealtimeAudioSenderCoordinator {
             mode=\(config.requestedMediaAudioMode.rawValue, privacy: .public)
             """
         )
-        dependencies.appendSessionDiagnostic(
+        await dependencies.appendSessionDiagnostic(
             """
             audioTxEndpointReady session=\(sessionID) \
             leaseSource=viewerReceiverSignal endpoint=\(viewerAudioEndpoint.host):\(viewerAudioEndpoint.port) \
@@ -129,7 +128,7 @@ struct WebRTCRealtimeAudioSenderCoordinator {
                 continuitySeq=\(continuityState?.nextSequence ?? 0, privacy: .public)
                 """
             )
-            dependencies.appendSessionDiagnostic(
+            await dependencies.appendSessionDiagnostic(
                 "audioTxStart session=\(sessionID) relay=\(endpoint.host):\(endpoint.port) leaseSource=localRoleLease mode=\(config.requestedMediaAudioMode.rawValue) continuitySeq=\(continuityState.map { String($0.nextSequence) } ?? "-")",
                 sessionID
             )
@@ -138,7 +137,7 @@ struct WebRTCRealtimeAudioSenderCoordinator {
             logger.warning(
                 "⚠️ WebRTC PQC media relay 不可用，保持视频优先并禁用旧音频回退: session=\(sessionID, privacy: .public) reason=\(CrossNetworkConnectionManager.mediaAdmissionFailureReason(for: error), privacy: .public) err=\(error.localizedDescription, privacy: .public)"
             )
-            dependencies.appendSessionDiagnostic(
+            await dependencies.appendSessionDiagnostic(
                 "audioTxUnavailable session=\(sessionID) reason=\(CrossNetworkConnectionManager.mediaAdmissionFailureReason(for: error)) error=\(error.localizedDescription)",
                 sessionID
             )
@@ -148,7 +147,7 @@ struct WebRTCRealtimeAudioSenderCoordinator {
 
     func requestSenderEndpoint(sessionID: String) async throws -> SkyBridgeMediaEndpoint {
         let initialLease: SignalServerClient.MediaAdmissionLease?
-        if let reusable = dependencies.reusableAdmissionLease(sessionID) {
+        if let reusable = await dependencies.reusableAdmissionLease(sessionID) {
             initialLease = reusable
         } else {
             initialLease = try await refreshAdmissionLease(sessionID: sessionID)
@@ -164,7 +163,7 @@ struct WebRTCRealtimeAudioSenderCoordinator {
         do {
             let relayLease = try await dependencies.requestMediaRelayLease(initialLease.token)
             let endpoint = CrossNetworkConnectionManager.mediaRelayEndpoint(from: relayLease)
-            dependencies.appendSessionDiagnostic(
+            await dependencies.appendSessionDiagnostic(
                 "audioTxEndpointReady session=\(sessionID) leaseSource=localRoleLease role=\(relayLease.role) endpoint=\(endpoint.host):\(endpoint.port) token=\(endpoint.relayToken == nil ? "missing" : "present")",
                 sessionID
             )
@@ -176,7 +175,7 @@ struct WebRTCRealtimeAudioSenderCoordinator {
             }
             let relayLease = try await dependencies.requestMediaRelayLease(refreshed.token)
             let endpoint = CrossNetworkConnectionManager.mediaRelayEndpoint(from: relayLease)
-            dependencies.appendSessionDiagnostic(
+            await dependencies.appendSessionDiagnostic(
                 "audioTxEndpointReady session=\(sessionID) leaseSource=localRoleLeaseRefreshed role=\(relayLease.role) endpoint=\(endpoint.host):\(endpoint.port) token=\(endpoint.relayToken == nil ? "missing" : "present")",
                 sessionID
             )
@@ -185,17 +184,17 @@ struct WebRTCRealtimeAudioSenderCoordinator {
     }
 
     func refreshAdmissionLease(sessionID: String) async throws -> SignalServerClient.MediaAdmissionLease? {
-        guard let sessionToken = dependencies.sessionToken(sessionID)?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let sessionToken = await dependencies.sessionToken(sessionID)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !sessionToken.isEmpty else {
             logger.warning("⚠️ WebRTC PQC media admission refresh skipped: session=\(sessionID, privacy: .public) reason=missingSessionToken")
             return nil
         }
-        guard let roleName = dependencies.sessionRoleName(sessionID) else {
+        guard let roleName = await dependencies.sessionRoleName(sessionID) else {
             logger.warning("⚠️ WebRTC PQC media admission refresh skipped: session=\(sessionID, privacy: .public) reason=missingRole")
             return nil
         }
         let lease = try await dependencies.refreshMediaAdmissionLease(sessionID, sessionToken, roleName)
-        dependencies.storeAdmissionLease(lease, sessionID)
+        await dependencies.storeAdmissionLease(lease, sessionID)
         logger.info(
             "🎧 WebRTC PQC media admission refresh ready: session=\(sessionID, privacy: .public) role=\(roleName, privacy: .public) ttlMs=\(Int((lease.expiresIn * 1000).rounded()), privacy: .public)"
         )

@@ -1575,9 +1575,10 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(iosRemoteDesktopSource.contains("let shouldDrainAgain = needsLANReceiveBufferDrain || hasCompleteLANFramedPayloadPending()"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("await self?.processLANReceiveBuffer(from: connection)"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("let shouldContinueReceiving = error == nil && !isComplete"))
-        XCTAssertTrue(iosRemoteDesktopSource.contains("self.receiveNextLANChunk(from: connection)"))
-        XCTAssertTrue(iosRemoteDesktopSource.contains("let previousParse = lanSecureReceiveChain"))
-        XCTAssertTrue(iosRemoteDesktopSource.contains("await previousParse?.value"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("self?.receiveNextLANChunk(from: connection, secureContext: secureContext)"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("private final class LANSecureReceiveScheduler"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("lanSecureReceiveScheduler.scheduleChunk("))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("await previous?.value"))
         XCTAssertFalse(iosRemoteDesktopSource.contains("if error == nil, !isComplete {\n                self?.receiveNextLANChunk(from: connection)\n            }"))
         XCTAssertTrue(iosRemoteDesktopSource.contains("private func hasCompleteLANFramedPayloadPending() -> Bool"))
     }

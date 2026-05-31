@@ -653,6 +653,12 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         XCTAssertTrue(helper.contains("requestSenderEndpoint(sessionID: sessionID)"))
         XCTAssertTrue(helper.contains("leaseSource=localRoleLease"))
         XCTAssertTrue(helper.contains("relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy"))
+        XCTAssertFalse(
+            realtimeAudioCoordinatorSource.contains("@MainActor\nstruct WebRTCRealtimeAudioSenderCoordinator"),
+            "Realtime audio relay admission, endpoint leasing, and sender startup must not be isolated to the UI actor."
+        )
+        XCTAssertTrue(realtimeAudioCoordinatorSource.contains("requestMediaRelayLease: @Sendable"))
+        XCTAssertTrue(realtimeAudioCoordinatorSource.contains("refreshMediaAdmissionLease: @Sendable"))
         XCTAssertTrue(source.contains("failFastMediaFallbacks ? .requireAcknowledgement : .optimisticAfterSend"))
         XCTAssertTrue(source.contains("minimumRemainingTime: realtimeAudioRelayRenewalMargin"))
         XCTAssertTrue(source.contains("kind = \"audioTxRelayBindAccepted\""))

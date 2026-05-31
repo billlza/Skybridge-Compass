@@ -203,9 +203,7 @@ public enum LocalDevicePresentation {
                 UIDevice.current.userInterfaceIdiom
             }
         }
-        return DispatchQueue.main.sync {
-            UIDevice.current.userInterfaceIdiom
-        }
+        return currentModelIdentifier().hasPrefix("iPad") ? .pad : .phone
     }
 
     private static func currentUIKitDeviceName() -> String {
@@ -214,9 +212,7 @@ public enum LocalDevicePresentation {
                 UIDevice.current.name
             }
         }
-        return DispatchQueue.main.sync {
-            UIDevice.current.name
-        }
+        return currentModelIdentifier().hasPrefix("iPad") ? "iPad" : "iPhone"
     }
 
     private static func currentUIKitModelName() -> String {
@@ -225,9 +221,7 @@ public enum LocalDevicePresentation {
                 UIDevice.current.model
             }
         }
-        return DispatchQueue.main.sync {
-            UIDevice.current.model
-        }
+        return currentModelIdentifier().hasPrefix("iPad") ? "iPad" : "iPhone"
     }
 
     #endif

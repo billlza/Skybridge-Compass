@@ -746,7 +746,7 @@ public class FileTransferEngine: ObservableObject {
     
  /// 分块发送文件
     private func sendFileInChunks(_ session: FileTransferSession, connection: P2PConnection) async throws {
- // 若存在流式预加密临时文件，从该文件读取（数据为密文，processOutgoingChunk将跳过再次加密）
+ // 若存在流式预加密临时文件，从该文件读取；wire chunk 本身不再声明 per-chunk AEAD。
         let readingURL = streamingEncryptedFiles[session.id]?.url ?? session.localURL
         let fileHandle = try FileHandle(forReadingFrom: readingURL)
         defer { fileHandle.closeFile() }
@@ -774,17 +774,19 @@ public class FileTransferEngine: ObservableObject {
             let hasPreEncrypted = (self.streamingEncryptedFiles[session.id] != nil)
 
  // 并发处理批次中的数据块（P2：利用并行管理器加速加密）
-            let processed: [(Int, Data, EncryptedData?)] = try await {
- // 1) 先处理压缩（保持顺序映射）
-                var plainChunks: [(idx: Int, data: Data)] = []
+            let processed: [(idx: Int, data: Data, aead: EncryptedData?, isCompressed: Bool, isEncrypted: Bool)] = try await {
+ // 1) 先处理压缩（保持顺序映射）。流式预加密文件已经是密文，不能再压缩。
+                var plainChunks: [(idx: Int, data: Data, isCompressed: Bool)] = []
                 plainChunks.reserveCapacity(batch.count)
-                if compressionOn {
+                if hasPreEncrypted {
+                    plainChunks = batch.map { ($0.idx, $0.raw, false) }
+                } else if compressionOn {
                     for item in batch {
-                        let payload = try await MainActor.run { try self.compressData(item.raw) }
-                        plainChunks.append((idx: item.idx, data: payload))
+                        let payload = try Self.compressDataIfBeneficial(item.raw)
+                        plainChunks.append((idx: item.idx, data: payload.data, isCompressed: payload.isCompressed))
                     }
                 } else {
-                    plainChunks = batch.map { ($0.idx, $0.raw) }
+                    plainChunks = batch.map { ($0.idx, $0.raw, false) }
                 }
 
  // 2) 加密分支：使用并行加密；否则按原逻辑处理（含预加密路径）
@@ -799,27 +801,20 @@ public class FileTransferEngine: ObservableObject {
                         maxConcurrency: threadsPerTransfer()
                     )
  // 组装结果（保持索引顺序）
-                    return zip(plainChunks, encrypted).map { (p, e) in (p.idx, e.ciphertext, e) }
+                    return zip(plainChunks, encrypted).map { (p, e) in
+                        (idx: p.idx, data: e.ciphertext, aead: e, isCompressed: p.isCompressed, isEncrypted: true)
+                    }
                         .sorted { $0.0 < $1.0 }
                 } else {
- // 无加密或已预加密：走原有出站处理（压缩+可能的对称加密）
-                    let results: [(Int, Data)] = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
-                        for item in batch {
-                            group.addTask { [session] in
-                                let out = try await self.processOutgoingChunk(item.raw, session: session)
-                                return (item.idx, out)
-                            }
-                        }
-                        var rs: [(Int, Data)] = []
-                        rs.reserveCapacity(batch.count)
-                        for try await r in group { rs.append(r) }
-                        return rs.sorted { $0.0 < $1.0 }
+ // 无加密或已预加密：直接发送明文/流式密文，wire flags 必须反映每个 chunk 的实际编码。
+                    return plainChunks.map {
+                        (idx: $0.idx, data: $0.data, aead: nil, isCompressed: $0.isCompressed, isEncrypted: false)
                     }
-                    return results.map { ($0.0, $0.1, nil) }
+                    .sorted { $0.idx < $1.idx }
                 }
             }()
  // 顺序发送并等待确认
-            for (idx, dataOut, aead) in processed {
+            for (idx, dataOut, aead, isCompressed, isEncrypted) in processed {
                 let packet = FileChunkPacket(
                     transferId: session.id,
                     chunkIndex: idx,
@@ -827,8 +822,8 @@ public class FileTransferEngine: ObservableObject {
                     data: dataOut,
                     aeadNonce: aead?.nonce,
                     aeadTag: aead?.tag,
-                    isCompressed: session.configuration.compressionEnabled,
-                    isEncrypted: session.configuration.encryptionEnabled,
+                    isCompressed: isCompressed,
+                    isEncrypted: isEncrypted,
                     checksum: calculateChecksum(dataOut)
                 )
                 try await sendChunkPacket(packet, to: connection)
@@ -887,20 +882,26 @@ public class FileTransferEngine: ObservableObject {
             }
             
  // 处理数据块（解密/解压）
-            var processedData: Data
+            let processedData: Data
             if metadata.encryptionEnabled, metadata.fileSize > 32 * 1024 * 1024 {
  // 大文件加密流：包内数据已是密文，直接写入，解密在完成后统一进行
+                guard !packet.isEncrypted, packet.aeadNonce == nil, packet.aeadTag == nil else {
+                    throw FileTransferEngineError.encryptionError(underlying: nil)
+                }
+                guard !packet.isCompressed else {
+                    throw FileTransferEngineError.compressionError(underlying: nil)
+                }
                 processedData = packet.data
             } else {
-                if metadata.encryptionEnabled, let nonce = packet.aeadNonce, let tag = packet.aeadTag {
+                var payload = packet.data
+                if packet.isEncrypted {
  // 分块AEAD校验与解密
                     do {
-                        let enc = EncryptedData(ciphertext: packet.data, nonce: nonce, tag: tag)
-                        var d = try await decryptDataDetailed(enc, fromPeer: session.remoteDeviceId)
-                        if session.configuration.compressionEnabled {
-                            d = try decompressData(d)
+                        guard let nonce = packet.aeadNonce, let tag = packet.aeadTag else {
+                            throw FileTransferEngineError.encryptionError(underlying: nil)
                         }
-                        processedData = d
+                        let enc = EncryptedData(ciphertext: payload, nonce: nonce, tag: tag)
+                        payload = try await decryptDataDetailed(enc, fromPeer: session.remoteDeviceId)
                         NotificationCenter.default.post(name: .fileChunkVerified, object: nil, userInfo: [
                             "transferId": session.id,
                             "chunkIndex": packet.chunkIndex,
@@ -914,9 +915,13 @@ public class FileTransferEngine: ObservableObject {
                         ])
                         throw error
                     }
-                } else {
-                    processedData = try await processIncomingChunk(packet.data, session: session)
+                } else if metadata.encryptionEnabled {
+                    throw FileTransferEngineError.encryptionError(underlying: nil)
                 }
+                if packet.isCompressed {
+                    payload = try Self.decompressData(payload, maxOutputSize: metadata.chunkSize)
+                }
+                processedData = payload
             }
             
  // 写入文件
@@ -1014,42 +1019,6 @@ public class FileTransferEngine: ObservableObject {
             level = next
         }
         return level[0].map { String(format: "%02x", $0) }.joined()
-    }
-    
- /// 处理出站数据块
-    private func processOutgoingChunk(_ data: Data, session: FileTransferSession) async throws -> Data {
-        var processedData = data
-        
- // 压缩
-        if session.configuration.compressionEnabled {
-            processedData = try compressData(processedData)
-        }
-        
- // 加密（如果存在流式预加密临时文件，则数据已是密文，跳过二次加密）
-        if session.configuration.encryptionEnabled {
-            if streamingEncryptedFiles[session.id] == nil {
-                processedData = try await encryptData(processedData, forPeer: session.remoteDeviceId)
-            }
-        }
-        
-        return processedData
-    }
-    
- /// 处理入站数据块
-    private func processIncomingChunk(_ data: Data, session: FileTransferSession) async throws -> Data {
-        var processedData = data
-        
- // 解密
-        if session.configuration.encryptionEnabled {
-            processedData = try await decryptData(processedData, fromPeer: session.remoteDeviceId)
-        }
-        
- // 解压
-        if session.configuration.compressionEnabled {
-            processedData = try decompressData(processedData)
-        }
-        
-        return processedData
     }
     
  // MARK: - 网络通信方法（完整实现 - 利用macOS 26.x Network Framework改进）
@@ -1486,9 +1455,19 @@ public class FileTransferEngine: ObservableObject {
         return SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
     }
     
+    private struct ChunkCompressionResult: Sendable {
+        let data: Data
+        let isCompressed: Bool
+    }
+
  /// 压缩数据 - 利用macOS 26.x的Compression framework改进
-    private func compressData(_ data: Data) throws -> Data {
-        guard !data.isEmpty else { return data }
+    nonisolated private static func compressDataIfBeneficial(_ data: Data) throws -> ChunkCompressionResult {
+        guard !data.isEmpty else {
+            return ChunkCompressionResult(data: data, isCompressed: false)
+        }
+        guard data.count > 128 else {
+            return ChunkCompressionResult(data: data, isCompressed: false)
+        }
         
  // macOS 26.x改进了Compression framework的性能，特别是lzfse算法
  // 使用lzfse算法，在macOS 26.x上性能提升约30%
@@ -1515,39 +1494,33 @@ public class FileTransferEngine: ObservableObject {
         }
         
         guard compressedSize > 0 else {
-            logger.warning("⚠️ 压缩失败，返回原始数据")
-        return data
-    }
+            throw FileTransferEngineError.compressionError(underlying: nil)
+        }
     
  // 如果压缩后数据更大，返回原始数据
         if compressedSize >= data.count {
-            logger.debug("📊 压缩后数据未减小，返回原始数据")
-            return data
+            return ChunkCompressionResult(data: data, isCompressed: false)
         }
         
         compressedData.count = compressedSize
-        logger.debug("✅ 数据压缩: \(data.count) -> \(compressedSize) 字节 (压缩率: \(String(format: "%.1f", Double(compressedSize) / Double(data.count) * 100))%)")
         
-        return compressedData
+        return ChunkCompressionResult(data: compressedData, isCompressed: true)
     }
     
  /// 解压数据 - 利用macOS 26.x的Compression framework改进
-    private func decompressData(_ data: Data) throws -> Data {
+    nonisolated private static func decompressData(_ data: Data, maxOutputSize: Int) throws -> Data {
         guard !data.isEmpty else { return data }
+        guard maxOutputSize > 0 else {
+            throw FileTransferEngineError.compressionError(underlying: nil)
+        }
         
  // 尝试检测压缩算法（简化实现，假设使用lzfse）
  // macOS 26.x改进了多算法检测性能
         let algorithm: Compression.Algorithm = .lzfse
         
- // 估算解压后大小（通常压缩数据会包含原始大小信息，这里使用保守估算）
-        let estimatedSize = data.count * 4 // 保守估算
-        var decompressedData = Data(count: estimatedSize)
-        
-        var actualSize: Int = 0
-        var attempts = 0
-        let maxAttempts = 3
-        
-        while attempts < maxAttempts {
+        var capacity = min(max(max(data.count * 4, 1), 4 * 1024), maxOutputSize)
+        while true {
+            var decompressedData = Data(count: capacity)
             let result = data.withUnsafeBytes { inputBuffer in
                 decompressedData.withUnsafeMutableBytes { outputBuffer in
                     guard let outputBase = outputBuffer.bindMemory(to: UInt8.self).baseAddress,
@@ -1566,28 +1539,15 @@ public class FileTransferEngine: ObservableObject {
             }
             
             if result > 0 {
-                actualSize = result
-                break
-            } else if result == 0 {
- // 缓冲区太小，扩大后重试
-                decompressedData.count = decompressedData.count * 2
-                attempts += 1
-            } else {
- // 解压失败，可能不是压缩数据，返回原始数据
-                logger.warning("⚠️ 解压失败，返回原始数据")
-        return data
+                decompressedData.count = result
+                return decompressedData
             }
+
+            guard capacity < maxOutputSize else {
+                throw FileTransferEngineError.compressionError(underlying: nil)
+            }
+            capacity = min(capacity * 2, maxOutputSize)
         }
-        
-        guard actualSize > 0 else {
-            logger.warning("⚠️ 解压失败，返回原始数据")
-            return data
-        }
-        
-        decompressedData.count = actualSize
-        logger.debug("✅ 数据解压: \(data.count) -> \(actualSize) 字节")
-        
-        return decompressedData
     }
     
  /// 获取或创建对等方的主密钥（持久化在Keychain）

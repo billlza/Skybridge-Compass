@@ -153,6 +153,7 @@ struct SkyBridgeCompassApp: App {
 
  // 开始协调启动流程
                     await startupCoordinator.startCoordinatedLaunch()
+                    SkyBridgeAppUpdateController.scheduleAutomaticCheckAfterLaunch()
                 }
             }
         }

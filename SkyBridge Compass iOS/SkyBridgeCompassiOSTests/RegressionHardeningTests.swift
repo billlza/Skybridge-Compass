@@ -1548,7 +1548,7 @@ final class RegressionHardeningTests: XCTestCase {
     let runtimeModelsSource = try remoteDesktopRuntimeModelsSource()
     let runtimeSources = source + "\n" + runtimeModelsSource
     let receiveChunk = try sourceSlice(
-      from: "private nonisolated func receiveNextLANChunk(from connection: NWConnection)",
+      from: "private nonisolated func receiveNextLANChunk(",
       to: "private func processLANReceiveBuffer(from connection: NWConnection) async",
       in: source
     )
@@ -1575,7 +1575,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       source.contains("private lazy var lanSecureReceivePipeline = LANRemoteSecureReceivePipeline(")
     )
-    XCTAssertTrue(source.contains("private var lanSecureReceiveChain: Task<Void, Never>?"))
+    XCTAssertTrue(source.contains("private let lanSecureReceiveScheduler = LANSecureReceiveScheduler()"))
     XCTAssertTrue(source.contains("private var lanSecureReceiveApplyChain: Task<Void, Never>?"))
     XCTAssertTrue(source.contains("private var lanSecureReceiveGeneration: UInt64 = 0"))
     XCTAssertTrue(source.contains("lanReceiveBufferNewestArrivalAt = nil"))
@@ -1586,15 +1586,17 @@ final class RegressionHardeningTests: XCTestCase {
       source.contains(
         "lanSecureReceivePipeline = LANRemoteSecureReceivePipeline(maxWireMessageBytes: maxLANWireMessageBytes)"
       ))
-    XCTAssertTrue(source.contains("lanSecureReceiveChain?.cancel()"))
-    XCTAssertTrue(source.contains("lanSecureReceiveChain = nil"))
+    XCTAssertTrue(source.contains("lanSecureReceiveScheduler.cancel()"))
     XCTAssertTrue(source.contains("lanSecureReceiveApplyChain?.cancel()"))
     XCTAssertTrue(source.contains("lanSecureReceiveApplyChain = nil"))
     XCTAssertTrue(
       receiveChunk.contains(
         "maximumLength: RemoteDesktopManagerRuntimeLimits.lanReceiveChunkMaxBytes"))
     XCTAssertTrue(receiveChunk.contains("private nonisolated func receiveNextLANChunk"))
-    XCTAssertTrue(receiveChunk.contains("self.receiveNextLANChunk(from: connection)"))
+    XCTAssertTrue(
+      receiveChunk.contains("self?.receiveNextLANChunk(from: connection, secureContext: secureContext)"))
+    XCTAssertTrue(
+      receiveChunk.contains("secureContext: self.makeLANSecureReceiveContextIfAvailable(for: connection)"))
     XCTAssertTrue(receiveChunk.contains("!self.shouldContinueLANBootstrapFramingHandoff"))
     XCTAssertTrue(receiveChunk.contains("self.processSecureLANReceiveChunk("))
     XCTAssertTrue(receiveChunk.contains("self.lanReceiveBufferNewestArrivalAt = receivedAt"))
@@ -1617,19 +1619,24 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(source.contains("private var isMetalFeedDeliverySteadyState: Bool"))
     XCTAssertFalse(source.contains("PendingMetalFeedFrame"))
     let rearmIndex = try XCTUnwrap(
-      receiveChunk.range(of: "self.receiveNextLANChunk(from: connection)")?.lowerBound)
+      receiveChunk.range(of: "self?.receiveNextLANChunk(from: connection, secureContext: secureContext)")?
+        .lowerBound)
     let secureRegistrationIndex = try XCTUnwrap(
-      receiveChunk.range(of: "self.processSecureLANReceiveChunk(")?.lowerBound)
+      receiveChunk.range(of: "secureContext.scheduler.scheduleChunk(")?.lowerBound)
     let bufferedAppendIndex = try XCTUnwrap(
       receiveChunk.range(of: "self.lanReceiveBuffer.append(chunk)")?.lowerBound)
+    let bootstrapRearmIndex = try XCTUnwrap(
+      receiveChunk.range(
+        of: "secureContext: self.makeLANSecureReceiveContextIfAvailable(for: connection)")?
+        .lowerBound)
     XCTAssertLessThan(
       secureRegistrationIndex,
       rearmIndex,
-      "LAN secure receive must register raw bytes in the ordered parser chain before re-arming NWConnection; otherwise later callbacks can overtake earlier screen chunks and corrupt AES-GCM frame boundaries."
+      "LAN secure receive must enqueue raw bytes on the ordered off-main scheduler before re-arming NWConnection; otherwise later callbacks can overtake earlier screen chunks and corrupt AES-GCM frame boundaries."
     )
     XCTAssertLessThan(
       bufferedAppendIndex,
-      rearmIndex,
+      bootstrapRearmIndex,
       "LAN bootstrap receive must append raw bytes before re-arming NWConnection so handoff into the secure parser preserves TCP byte order."
     )
     XCTAssertTrue(processBody.contains("while isCurrentLANConnection(connection)"))
@@ -1696,18 +1703,18 @@ final class RegressionHardeningTests: XCTestCase {
       in: pipelineSource
     )
     let receiveChunk = try sourceSlice(
-      from: "private nonisolated func receiveNextLANChunk(from connection: NWConnection)",
+      from: "private nonisolated func receiveNextLANChunk(",
       to: "private func processSecureLANReceiveChunk(",
       in: source
     )
     let secureEntry = try sourceSlice(
       from: "private func processSecureLANReceiveChunk(",
-      to: "private func scheduleSecureLANReceiveDrain(",
+      to: "private func handleScheduledSecureLANReceiveResult(",
       in: source
     )
-    let secureDrainBody = try sourceSlice(
-      from: "private func scheduleSecureLANReceiveDrain(",
-      to: "private func scheduleSecureLANReceiveApply(",
+    let schedulerBody = try sourceSlice(
+      from: "private final class LANSecureReceiveScheduler",
+      to: "// MARK: - RemoteDesktopManager",
       in: source
     )
     let nextFramedPayloadBody = try sourceSlice(
@@ -1755,42 +1762,44 @@ final class RegressionHardeningTests: XCTestCase {
       secureEntry.contains("@MainActor"),
       "Secure LAN frame decryption and screen-wire decode must be delegated to the off-main actor, not a MainActor task."
     )
-    XCTAssertTrue(secureEntry.contains("Task.detached(priority: .high)"))
+    XCTAssertTrue(schedulerBody.contains("Task.detached(priority: .high)"))
     XCTAssertTrue(
-      secureEntry.contains("await previousParse?.value"),
+      schedulerBody.contains("await previous?.value"),
       "Secure LAN parser must preserve TCP chunk order before appending to the sbc2/length-frame reassembler."
     )
     XCTAssertFalse(
-      secureEntry.contains("await previousTask?.value"),
+      schedulerBody.contains("await previousTask?.value"),
       "Secure LAN parser must not wait for the previous MainActor apply before parsing the next 256KB sbc2 chunk."
     )
-    XCTAssertTrue(secureEntry.contains("lanSecureReceiveChain = task"))
+    XCTAssertTrue(secureEntry.contains("lanSecureReceiveScheduler.scheduleChunk("))
+    XCTAssertFalse(source.contains("lanSecureReceiveChain"))
     XCTAssertTrue(source.contains("private func scheduleSecureLANReceiveApply("))
     XCTAssertTrue(source.contains("await previousApply?.value"))
     let pendingDrainIndex = try XCTUnwrap(
-      secureEntry.range(of: "if result.hasCompletePayloadPending")?.lowerBound
+      schedulerBody.range(of: "if result.hasCompletePayloadPending")?.lowerBound
     )
     let applyScheduleIndex = try XCTUnwrap(
-      secureEntry.range(of: "await self?.scheduleSecureLANReceiveApply")?.lowerBound
+      schedulerBody.range(of: "await completion(.success(result)")?.lowerBound
     )
     XCTAssertLessThan(
       applyScheduleIndex,
       pendingDrainIndex,
       "Secure LAN parser must register the current apply before scheduling the next pending drain so drained follow-up events cannot overtake earlier audio/screen events."
     )
-    XCTAssertTrue(secureDrainBody.contains("Task.detached(priority: .high)"))
-    XCTAssertTrue(secureDrainBody.contains("pipeline.drain("))
+    XCTAssertTrue(schedulerBody.contains("private func scheduleDrain("))
+    XCTAssertTrue(schedulerBody.contains("context.pipeline.drain("))
     XCTAssertTrue(secureEntry.contains("let generation = lanSecureReceiveGeneration"))
     XCTAssertTrue(secureEntry.contains("connectionID: connectionID"))
     XCTAssertTrue(secureEntry.contains("generation: generation"))
-    XCTAssertTrue(secureDrainBody.contains("generation: UInt64"))
-    XCTAssertTrue(secureDrainBody.contains("guard generation == lanSecureReceiveGeneration else { return }"))
-    XCTAssertTrue(secureDrainBody.contains("connectionID: connectionID"))
-    XCTAssertTrue(secureDrainBody.contains("generation: generation"))
+    XCTAssertTrue(schedulerBody.contains("context.connectionID"))
+    XCTAssertTrue(schedulerBody.contains("context.generation"))
+    XCTAssertTrue(schedulerBody.contains("private var epoch: UInt64 = 0"))
+    XCTAssertTrue(schedulerBody.contains("epoch &+= 1"))
+    XCTAssertTrue(schedulerBody.contains("isCurrentEpoch(expectedEpoch)"))
     XCTAssertTrue(
-      secureDrainBody.contains("let previousParse = lanSecureReceiveChain")
-        && secureDrainBody.contains("await previousParse?.value"),
-      "A pending secure drain must remain on the same parse chain so length-framed screen bytes cannot be drained ahead of earlier append tasks."
+      schedulerBody.contains("let previous = tailTask")
+        && schedulerBody.contains("await previous?.value"),
+      "A pending secure drain must remain on the same parser scheduler so length-framed screen bytes cannot be drained ahead of earlier append tasks."
     )
     let secureApplyBody = try sourceSlice(
       from: "private func applySecureLANReceiveResult(",
@@ -1801,7 +1810,7 @@ final class RegressionHardeningTests: XCTestCase {
       secureApplyBody.contains("scheduleSecureLANReceiveDrain"),
       "Pending secure drains must not wait for the MainActor apply chain to start."
     )
-    XCTAssertTrue(secureEntry.contains("pipeline.appendAndDrain("))
+    XCTAssertTrue(schedulerBody.contains("context.pipeline.appendAndDrain("))
     XCTAssertTrue(actorBody.contains("LAN secure decrypt failed bytes="))
     let secureFailureBody = try sourceSlice(
       from: "private func handleSecureLANReceiveFailure(",

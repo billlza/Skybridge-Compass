@@ -12,6 +12,82 @@ import OSLog
 import SkyBridgeCore
 import Combine
 
+private struct WeatherRequestLocation: Sendable {
+    let latitude: Double
+    let longitude: Double
+}
+
+private struct WeatherRequestWorker: @unchecked Sendable {
+    let urlSession: URLSession
+    let apiKey: String
+
+    func performWeatherRequest(location: WeatherRequestLocation) async throws -> WeatherData {
+        let urlString = "https://api.openweathermap.org/data/2.5/weather?lat=\(location.latitude)&lon=\(location.longitude)&appid=\(apiKey)&units=metric&lang=zh_cn"
+
+        guard let url = URL(string: urlString) else {
+            throw WeatherServiceError.invalidURL
+        }
+
+        let (data, response) = try await urlSession.data(from: url)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw WeatherServiceError.invalidResponse
+        }
+
+        guard 200...299 ~= httpResponse.statusCode else {
+            throw WeatherServiceError.httpError(httpResponse.statusCode)
+        }
+
+        do {
+            let weatherResponse = try JSONDecoder().decode(OpenWeatherMapResponse.self, from: data)
+            return Self.convertToWeatherData(from: weatherResponse, location: location)
+        } catch {
+            throw WeatherServiceError.decodingError(error)
+        }
+    }
+
+    private static func convertToWeatherData(from response: OpenWeatherMapResponse, location: WeatherRequestLocation) -> WeatherData {
+        let weatherLocation = WeatherLocation(
+            latitude: response.coord.lat,
+            longitude: response.coord.lon,
+            city: response.name,
+            country: response.sys.country
+        )
+
+        return WeatherData(
+            temperature: response.main.temp,
+            humidity: Double(response.main.humidity) / 100.0,
+            windSpeed: response.wind?.speed ?? 0.0,
+            windDirection: response.wind?.deg ?? 0.0,
+            pressure: response.main.pressure,
+            visibility: Double(response.visibility ?? 10000) / 1000.0,
+            condition: mapWeatherCondition(from: response.weather.first?.main ?? "Clear"),
+            location: weatherLocation,
+            timestamp: Date(),
+            description: response.weather.first?.description ?? "未知天气"
+        )
+    }
+
+    private static func mapWeatherCondition(from apiCondition: String) -> WeatherDataService.WeatherType {
+        switch apiCondition.lowercased() {
+        case "clear":
+            return .clear
+        case "clouds":
+            return .cloudy
+        case "rain", "drizzle":
+            return .rain
+        case "snow":
+            return .snow
+        case "thunderstorm":
+            return .thunderstorm
+        case "mist", "fog", "haze":
+            return .fog
+        default:
+            return .clear
+        }
+    }
+}
+
 /// 实时天气服务 - Swift 6.2 严格并发控制
 @MainActor
 public final class RealTimeWeatherService: NSObject, ObservableObject, Sendable {
@@ -159,7 +235,7 @@ public final class RealTimeWeatherService: NSObject, ObservableObject, Sendable 
         }
     }
     
- /// 开始位置更新 - Swift 6.2 异步优化
+    /// 开始位置更新 - Swift 6.2 异步优化
     private func startLocationUpdates() async {
         guard CLLocationManager.locationServicesEnabled() else {
             await handleLocationError(.locationServicesDisabled)
@@ -170,120 +246,38 @@ public final class RealTimeWeatherService: NSObject, ObservableObject, Sendable 
         logger.info("开始位置更新")
     }
     
- /// 获取天气数据 - 使用 Swift 6.2 TaskGroup 并发优化
+    /// 获取天气数据 - 网络与解码在非主线程 worker 中完成
     private func fetchWeatherData(for location: CLLocation) async {
         serviceStatus = .fetchingWeather
         
         do {
- // 使用 TaskGroup 进行并发天气数据获取
-            let weatherData = try await withThrowingTaskGroup(of: WeatherData.self) { group in
-                group.addTask { [weak self] in
-                    guard let self = self else { 
-                        throw WeatherServiceError.invalidResponse 
-                    }
-                    return try await self.performWeatherRequest(location: location)
-                }
-                
- // 等待第一个成功的结果
-                for try await result in group {
-                    group.cancelAll()
-                    return result
-                }
-                
-                throw WeatherServiceError.invalidResponse
-            }
-            
-            await MainActor.run {
-                self.currentWeather = weatherData
-                self.serviceStatus = .completed
-                self.lastError = nil
-                self.logger.info("天气数据获取成功: \(weatherData.description)")
-            }
+            let requestLocation = WeatherRequestLocation(
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude
+            )
+            let worker = WeatherRequestWorker(urlSession: urlSession, apiKey: apiKey)
+            let weatherData = try await Task.detached(priority: .utility) {
+                try await worker.performWeatherRequest(location: requestLocation)
+            }.value
+
+            currentWeather = weatherData
+            serviceStatus = .completed
+            lastError = nil
+            logger.info("天气数据获取成功: \(weatherData.description)")
             
         } catch {
             await handleWeatherError(error)
         }
     }
 
- // 添加一个辅助方法用于判断是否可以执行拉取（去抖）
+    // 添加一个辅助方法用于判断是否可以执行拉取（去抖）
     private func canPerformFetch() -> Bool {
         if let last = lastFetchTimestamp {
             return Date().timeIntervalSince(last) >= fetchDebounceInterval
         }
         return true
     }
-    
- /// 执行天气请求 - Swift 6.2 严格错误处理
-    private func performWeatherRequest(location: CLLocation) async throws -> WeatherData {
-        let urlString = "https://api.openweathermap.org/data/2.5/weather?lat=\(location.coordinate.latitude)&lon=\(location.coordinate.longitude)&appid=\(apiKey)&units=metric&lang=zh_cn"
-        
-        guard let url = URL(string: urlString) else {
-            throw WeatherServiceError.invalidURL
-        }
-        
- // 使用 Swift 6.2 的 async/await 网络请求
-        let (data, response) = try await urlSession.data(from: url)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw WeatherServiceError.invalidResponse
-        }
-        
-        guard 200...299 ~= httpResponse.statusCode else {
-            throw WeatherServiceError.httpError(httpResponse.statusCode)
-        }
-        
-        do {
-            let weatherResponse = try JSONDecoder().decode(OpenWeatherMapResponse.self, from: data)
-            return convertToWeatherData(from: weatherResponse, location: location)
-        } catch {
-            throw WeatherServiceError.decodingError(error)
-        }
-    }
-    
- /// 转换天气数据
-    private func convertToWeatherData(from response: OpenWeatherMapResponse, location: CLLocation) -> WeatherData {
-        let weatherLocation = WeatherLocation(
-            latitude: response.coord.lat,
-            longitude: response.coord.lon,
-            city: response.name,
-            country: response.sys.country
-        )
-        
-        return WeatherData(
-            temperature: response.main.temp,
-            humidity: Double(response.main.humidity) / 100.0,
-            windSpeed: response.wind?.speed ?? 0.0,
-            windDirection: response.wind?.deg ?? 0.0,
-            pressure: response.main.pressure,
-            visibility: Double(response.visibility ?? 10000) / 1000.0,
-            condition: mapWeatherCondition(from: response.weather.first?.main ?? "Clear"),
-            location: weatherLocation,
-            timestamp: Date(),
-            description: response.weather.first?.description ?? "未知天气"
-        )
-    }
-    
- /// 映射天气条件
-    private func mapWeatherCondition(from apiCondition: String) -> WeatherDataService.WeatherType {
-        switch apiCondition.lowercased() {
-        case "clear":
-            return .clear
-        case "clouds":
-            return .cloudy
-        case "rain", "drizzle":
-            return .rain
-        case "snow":
-            return .snow
-        case "thunderstorm":
-            return .thunderstorm
-        case "mist", "fog", "haze":
-            return .fog
-        default:
-            return .clear
-        }
-    }
-    
- /// 处理位置错误 - Swift 6.2 异步错误处理
+    /// 处理位置错误 - Swift 6.2 异步错误处理
     private func handleLocationError(_ error: WeatherServiceError) async {
         await MainActor.run {
             self.lastError = error

@@ -191,6 +191,22 @@ enum AppleMobileDeviceIdentity {
     }
 
     #if canImport(UIKit)
+    @MainActor
+    private static func currentDeviceValuesOnMainActor() -> (
+        userInterfaceIdiom: UIUserInterfaceIdiom,
+        vendorDeviceId: String?,
+        deviceName: String,
+        systemVersion: String
+    ) {
+        let device = UIDevice.current
+        return (
+            device.userInterfaceIdiom,
+            device.identifierForVendor?.uuidString,
+            device.name,
+            device.systemVersion
+        )
+    }
+
     private static func currentDeviceValues() -> (
         userInterfaceIdiom: UIUserInterfaceIdiom,
         vendorDeviceId: String?,
@@ -199,24 +215,22 @@ enum AppleMobileDeviceIdentity {
     ) {
         if Thread.isMainThread {
             return MainActor.assumeIsolated {
-                let device = UIDevice.current
-                return (
-                    device.userInterfaceIdiom,
-                    device.identifierForVendor?.uuidString,
-                    device.name,
-                    device.systemVersion
-                )
+                currentDeviceValuesOnMainActor()
             }
         }
-        return DispatchQueue.main.sync {
-            let device = UIDevice.current
-            return (
-                device.userInterfaceIdiom,
-                device.identifierForVendor?.uuidString,
-                device.name,
-                device.systemVersion
-            )
-        }
+
+        // This path is used by networking/signaling code that may already be
+        // holding a worker queue while the main actor is busy. Never synchronously
+        // bounce to the main queue from here; use stable non-UIKit facts instead.
+        let modelIdentifier = currentModelIdentifier()
+        let platform: DevicePlatform = modelIdentifier.hasPrefix("iPad") ? .iPadOS : .iOS
+        let presentation = presentation(forModelIdentifier: modelIdentifier, platform: platform)
+        return (
+            platform == .iPadOS ? .pad : .phone,
+            nil,
+            displayDeviceName(rawDeviceName: nil, platform: platform, modelName: presentation.modelName),
+            ProcessInfo.processInfo.operatingSystemVersionString
+        )
     }
     #endif
 

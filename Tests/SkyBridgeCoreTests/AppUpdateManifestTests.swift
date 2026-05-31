@@ -118,6 +118,7 @@ final class AppUpdateManifestTests: XCTestCase {
 
     func testAppUpdateCheckerUsesTrustedSignedGitHubManifestContract() throws {
         let source = try repositorySource("Sources/SkyBridgeCompassApp/Services/AppUpdateChecker.swift")
+        let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let appInfo = try repositorySource("Sources/SkyBridgeCompassApp/Info.plist")
         let xcodeProjectSource = try repositorySource("SkyBridgeWidgets.xcodeproj/project.pbxproj")
         let generator = try repositorySource("Scripts/generate_macos_update_manifest.swift")
@@ -133,6 +134,11 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertTrue(source.contains("highestAcceptedSequence()"))
         XCTAssertTrue(source.contains("minimumAcceptedManifestSequence: minimumSequence"))
         XCTAssertTrue(source.contains("recordAcceptedSequence(decision.manifest.sequence)"))
+        XCTAssertTrue(source.contains("Task.detached(priority: .utility)"))
+        XCTAssertTrue(source.contains("SkyBridgeAppUpdateAutomaticCheckPolicy"))
+        XCTAssertTrue(source.contains("presentAutomaticUpdateIfNeeded"))
+        XCTAssertTrue(source.contains("claimPresentation(for: decision.manifest.sequence)"))
+        XCTAssertTrue(appSource.contains("SkyBridgeAppUpdateController.scheduleAutomaticCheckAfterLaunch()"))
         XCTAssertTrue(source.contains("https://github.com/billlza/Skybridge-Compass/releases/download/stable/macos-stable.json"))
         XCTAssertTrue(appInfo.contains("SKYBRIDGE_UPDATE_MANIFEST_ED25519_PUBLIC_KEYS"))
         XCTAssertTrue(

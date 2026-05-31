@@ -56,6 +56,10 @@ let package = Package(
                 .product(name: "SkyBridgeRealtimeMedia", package: "SkyBridgeMediaLocal")
             ],
             path: "SkyBridgeCompassiOS",
+            exclude: [
+                "Supporting Files/Info.plist",
+                "Supporting Files/LaunchScreen.storyboard"
+            ],
             sources: ["Sources"],
             resources: [
                 .process("Resources")
