@@ -40,7 +40,7 @@ extension CrossNetworkConnectionManager {
         }
     }
 
-    static func extractConnectPayload(from raw: String) -> String? {
+    nonisolated static func extractConnectPayload(from raw: String) -> String? {
         CrossNetworkConnectPayloadParser.extractPayload(from: raw)
     }
 

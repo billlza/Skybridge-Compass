@@ -834,11 +834,14 @@ struct QRCodeView: View {
 
     private func generateQRCode(from data: Data) -> NSImage? {
         let context = CIContext()
-        let filter = CIFilter.qrCodeGenerator()
-        filter.setValue(data, forKey: "inputMessage")
-        filter.setValue("M", forKey: "inputCorrectionLevel")
+        let ciImage = ["M", "L"].lazy.compactMap { correctionLevel -> CIImage? in
+            let filter = CIFilter.qrCodeGenerator()
+            filter.setValue(data, forKey: "inputMessage")
+            filter.setValue(correctionLevel, forKey: "inputCorrectionLevel")
+            return filter.outputImage
+        }.first
 
-        guard let ciImage = filter.outputImage else { return nil }
+        guard let ciImage else { return nil }
 
         let transform = CGAffineTransform(scaleX: 10, y: 10)
         let scaledImage = ciImage.transformed(by: transform)

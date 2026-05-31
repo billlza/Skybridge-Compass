@@ -1,6 +1,7 @@
 import Combine
 import Darwin
 import Foundation
+import Network
 import SystemConfiguration
 
 public enum TopBarNetworkProbeStatus: Equatable, Sendable {
@@ -87,18 +88,47 @@ public final class TopBarNetworkStatusService: ObservableObject {
     private let locationURL = URL(string: "https://ipapi.co/json/")!
     private let latencyURL = URL(string: "https://skybridge-compass.vercel.app")!
     private let urlSession: URLSession
-    private static let speedSamplingInterval: TimeInterval = 5.0
     private static let legacyConsumerID = UUID()
-    private var timer: Timer?
+    private let pathMonitorQueue = DispatchQueue(label: "com.skybridge.topbar.network-path", qos: .utility)
+    private var pathMonitor: NWPathMonitor?
+    private var lastObservedPathSignature: NetworkPathSignature?
     private var activeConsumers: Set<UUID> = []
     private var probeGeneration: UInt64 = 0
     private var previousCounters: InterfaceCounters?
     private var previousCounterDate: Date?
     private var speedTask: Task<Void, Never>?
+    private var initialSpeedSampleTask: Task<Void, Never>?
     private var locationTask: Task<Void, Never>?
     private var latencyTask: Task<Void, Never>?
     private var lastLocationRefresh: Date?
     private var lastLatencyRefresh: Date?
+
+    private struct NetworkPathSignature: Equatable, Sendable {
+        let status: String
+        let isExpensive: Bool
+        let isConstrained: Bool
+        let interfaceTypes: [String]
+
+        init(path: NWPath) {
+            self.status = String(describing: path.status)
+            self.isExpensive = path.isExpensive
+            self.isConstrained = path.isConstrained
+            self.interfaceTypes = path.availableInterfaces
+                .map { Self.interfaceTypeDescription($0.type) }
+                .sorted()
+        }
+
+        private static func interfaceTypeDescription(_ type: NWInterface.InterfaceType) -> String {
+            switch type {
+            case .wifi: return "wifi"
+            case .cellular: return "cellular"
+            case .wiredEthernet: return "wiredEthernet"
+            case .loopback: return "loopback"
+            case .other: return "other"
+            @unknown default: return "unknown"
+            }
+        }
+    }
 
     private init() {
         let configuration = URLSessionConfiguration.ephemeral
@@ -128,7 +158,7 @@ public final class TopBarNetworkStatusService: ObservableObject {
     }
 
     private func startMonitoringIfNeeded() {
-        guard timer == nil else { return }
+        guard pathMonitor == nil else { return }
 
         probeGeneration &+= 1
 
@@ -145,20 +175,19 @@ public final class TopBarNetworkStatusService: ObservableObject {
         snapshot = updated
 
         primeSpeedBaseline()
+        scheduleInitialSpeedSample(generation: probeGeneration)
         refreshLocationIfNeeded(force: true)
         refreshLatencyIfNeeded(force: true)
-
-        timer = Timer.scheduledTimer(withTimeInterval: Self.speedSamplingInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.tick()
-            }
-        }
+        startNetworkPathMonitoring()
     }
 
     private func stopMonitoring() {
         probeGeneration &+= 1
-        timer?.invalidate()
-        timer = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        lastObservedPathSignature = nil
+        initialSpeedSampleTask?.cancel()
+        initialSpeedSampleTask = nil
         speedTask?.cancel()
         speedTask = nil
         locationTask?.cancel()
@@ -179,10 +208,49 @@ public final class TopBarNetworkStatusService: ObservableObject {
         refreshLatencyIfNeeded(force: true)
     }
 
-    private func tick() {
+    private func refreshForNetworkPathChange() {
         sampleSpeed()
-        refreshLocationIfNeeded(force: false)
-        refreshLatencyIfNeeded(force: false)
+        refreshLocationIfNeeded(force: true)
+        refreshLatencyIfNeeded(force: true)
+    }
+
+    private func scheduleInitialSpeedSample(generation: UInt64) {
+        initialSpeedSampleTask?.cancel()
+        initialSpeedSampleTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(1))
+            } catch {
+                return
+            }
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.isCurrentProbeGeneration(generation),
+                      !Task.isCancelled else {
+                    return
+                }
+                self.initialSpeedSampleTask = nil
+                self.sampleSpeed()
+            }
+        }
+    }
+
+    private func startNetworkPathMonitoring() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let signature = NetworkPathSignature(path: path)
+            Task { @MainActor [weak self] in
+                self?.handleNetworkPathUpdate(signature)
+            }
+        }
+        pathMonitor = monitor
+        monitor.start(queue: pathMonitorQueue)
+    }
+
+    private func handleNetworkPathUpdate(_ signature: NetworkPathSignature) {
+        guard pathMonitor != nil else { return }
+        guard signature != lastObservedPathSignature else { return }
+        lastObservedPathSignature = signature
+        refreshForNetworkPathChange()
     }
 
     private func primeSpeedBaseline() {

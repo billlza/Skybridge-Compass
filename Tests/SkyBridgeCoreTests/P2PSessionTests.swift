@@ -102,6 +102,38 @@ final class P2PSessionTests: XCTestCase {
         XCTAssertEqual(decoded.normalizedKEMPublicKeys, original.normalizedKEMPublicKeys)
     }
 
+    func testServerBackedDynamicQRCodeInviteRoundTripStaysUnderRenderableLimit() throws {
+        let invite = ServerBackedDynamicQRCodeInvite(
+            version: 8,
+            sessionID: "session-12345678",
+            qrBootstrapToken: "bootstrap-token-1234567890",
+            signalingServerOrigin: "https://skybridge-compass.vercel.app",
+            deviceID: "12345678-1234-1234-1234-1234567890ab",
+            deviceName: "Test Mac",
+            deviceType: P2PDeviceType.macOS.rawValue,
+            osVersion: "macOS-test",
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+            expiresAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+
+        let linkData = try CrossNetworkConnectionManager.encodeQRCodeConnectLink(invite)
+        XCTAssertTrue(CrossNetworkConnectionManager.isQRCodeConnectLinkWithinCapacity(linkData))
+        XCTAssertLessThan(linkData.count, 700)
+
+        let link = try XCTUnwrap(String(data: linkData, encoding: .utf8))
+        let payload = try XCTUnwrap(CrossNetworkConnectionManager.extractConnectPayload(from: link))
+        let jsonData = try XCTUnwrap(CrossNetworkConnectionManager.decodeBase64Payload(payload))
+        let decoded = try CrossNetworkConnectionManager.decodeServerBackedQRCodeInvite(from: jsonData)
+
+        XCTAssertEqual(decoded.version, invite.version)
+        XCTAssertEqual(decoded.sessionID, invite.sessionID)
+        XCTAssertEqual(decoded.qrBootstrapToken, invite.qrBootstrapToken)
+        XCTAssertEqual(decoded.protocolSigningAlgorithm, invite.protocolSigningAlgorithm)
+        XCTAssertEqual(decoded.protocolPublicKeyFingerprint, invite.protocolPublicKeyFingerprint)
+        XCTAssertEqual(decoded.expiresAt.timeIntervalSince1970, invite.expiresAt.timeIntervalSince1970, accuracy: 0.001)
+    }
+
     func testDynamicQRCodeDataExpirationField() {
         let publicKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
         let expired = DynamicQRCodeData(

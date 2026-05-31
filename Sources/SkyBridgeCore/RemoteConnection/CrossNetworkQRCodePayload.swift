@@ -66,13 +66,77 @@ extension CrossNetworkConnectionManager {
         return data
     }
 
+    nonisolated static func encodeQRCodeConnectLink(_ invite: ServerBackedDynamicQRCodeInvite) throws -> Data {
+        let compactPayload = CompactServerBackedDynamicQRCodeInvite(from: invite)
+        let jsonData = try JSONEncoder().encode(compactPayload)
+        let base64String = Self.base64URLEncodedString(from: jsonData)
+        guard let data = "skybridge://connect/\(base64String)".data(using: .utf8) else {
+            throw CrossNetworkConnectionError.invalidQRCode
+        }
+        return data
+    }
+
     nonisolated static func isP2PKEMBootstrapCapability(_ capabilities: [String]) -> Bool {
         let normalized = Set(capabilities.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
         return normalized.contains("p2p-oob-kem") || normalized.contains("p2p-kem-bootstrap")
     }
 
-    static func decodeDynamicQRCodePayload(from jsonData: Data) throws -> DynamicQRCodeData {
+    nonisolated static func decodeDynamicQRCodePayload(from jsonData: Data) throws -> DynamicQRCodeData {
         try JSONDecoder().decode(DynamicQRCodeData.self, from: jsonData)
+    }
+
+    nonisolated static func decodeServerBackedQRCodeInvite(from jsonData: Data) throws -> ServerBackedDynamicQRCodeInvite {
+        try JSONDecoder().decode(ServerBackedDynamicQRCodeInvite.self, from: jsonData)
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+struct ServerBackedDynamicQRCodeInvite: Codable {
+    let version: Int
+    let sessionID: String
+    let qrBootstrapToken: String
+    let signalingServerOrigin: String
+    let deviceID: String
+    let deviceName: String
+    let deviceType: String
+    let osVersion: String
+    let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+    let protocolPublicKeyFingerprint: String
+    let expiresAt: Date
+
+    init(
+        version: Int,
+        sessionID: String,
+        qrBootstrapToken: String,
+        signalingServerOrigin: String,
+        deviceID: String,
+        deviceName: String,
+        deviceType: String,
+        osVersion: String,
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String,
+        expiresAt: Date
+    ) {
+        self.version = version
+        self.sessionID = sessionID
+        self.qrBootstrapToken = qrBootstrapToken
+        self.signalingServerOrigin = (try? CurrentPathOriginPolicy.canonicalOrigin(signalingServerOrigin)) ?? signalingServerOrigin
+        self.deviceID = deviceID
+        self.deviceName = deviceName.precomposedStringWithCanonicalMapping
+        self.deviceType = deviceType.precomposedStringWithCanonicalMapping
+        self.osVersion = osVersion.precomposedStringWithCanonicalMapping
+        self.protocolSigningAlgorithm = protocolSigningAlgorithm
+        self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint.lowercased()
+        self.expiresAt = expiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let compact = try CompactServerBackedDynamicQRCodeInvite(from: decoder)
+        self = try compact.expanded()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try CompactServerBackedDynamicQRCodeInvite(from: self).encode(to: encoder)
     }
 }
 
@@ -185,6 +249,57 @@ struct DynamicQRCodeData: Codable {
             signature: signature,
             signatureTimestampMs: signatureTimestampMs,
             expiresAt: expiresAt
+        )
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+struct CompactServerBackedDynamicQRCodeInvite: Codable {
+    let v: Int
+    let s: String
+    let q: String
+    let r: String
+    let d: String
+    let n: String
+    let y: String
+    let o: String
+    let a: String
+    let f: String
+    let e: Int64
+
+    init(from invite: ServerBackedDynamicQRCodeInvite) {
+        self.v = invite.version
+        self.s = invite.sessionID
+        self.q = invite.qrBootstrapToken
+        self.r = invite.signalingServerOrigin
+        self.d = invite.deviceID
+        self.n = invite.deviceName.precomposedStringWithCanonicalMapping
+        self.y = invite.deviceType.precomposedStringWithCanonicalMapping
+        self.o = invite.osVersion.precomposedStringWithCanonicalMapping
+        self.a = invite.protocolSigningAlgorithm.rawValue
+        self.f = invite.protocolPublicKeyFingerprint.lowercased()
+        self.e = Int64(invite.expiresAt.timeIntervalSince1970 * 1000)
+    }
+
+    func expanded() throws -> ServerBackedDynamicQRCodeInvite {
+        guard v >= 8 else {
+            throw CurrentPathSecurityError.invalidBootstrap("server-backed QR invite requires v8")
+        }
+        guard let algorithm = ProtocolSigningAlgorithm(rawValue: a) else {
+            throw CurrentPathSecurityError.invalidBootstrap("unknown protocol signing algorithm")
+        }
+        return ServerBackedDynamicQRCodeInvite(
+            version: v,
+            sessionID: s,
+            qrBootstrapToken: q,
+            signalingServerOrigin: r,
+            deviceID: d,
+            deviceName: n,
+            deviceType: y,
+            osVersion: o,
+            protocolSigningAlgorithm: algorithm,
+            protocolPublicKeyFingerprint: f,
+            expiresAt: Date(timeIntervalSince1970: TimeInterval(e) / 1000.0)
         )
     }
 }

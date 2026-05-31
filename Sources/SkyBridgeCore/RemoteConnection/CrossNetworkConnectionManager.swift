@@ -62,6 +62,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     var deviceFingerprint: String
     nonisolated static let qrCodeGenerationWatchdogTimeoutSeconds: TimeInterval = 30
     nonisolated static let qrCodeScanBootstrapWatchdogTimeoutSeconds: TimeInterval = 90
+    nonisolated static let qrCodeConnectLinkMaximumByteCount = 1_800
     nonisolated static let webRTCStartupJoinHeartbeatAttempts = 60
     private static let connectionCodeLeaseModeDefaultsKey = "cross_network_connection_code_lease_mode.macos"
     private var activeSessionReconnectTimeoutTask: Task<Void, Never>?
@@ -1545,6 +1546,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         )
     }
 
+    nonisolated static func isQRCodeConnectLinkWithinCapacity(_ data: Data) -> Bool {
+        data.count <= qrCodeConnectLinkMaximumByteCount
+    }
+
  // MARK: - 1️⃣ 动态二维码连接
 
  /// 生成动态加密二维码
@@ -1586,22 +1591,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             logQRCodeStage("generate", stage: "\(currentStage)_finished", sessionID: sessionID)
 
             let expiresAt = Date().addingTimeInterval(validDuration)
-            let signatureTimestampMs = Int64(Date().timeIntervalSince1970 * 1000)
-            let kemPublicKeys = KEMPublicKeyInfo.normalizedValidKeys(
-                try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(
-                    using: CryptoProviderFactory.make(policy: .preferPQC)
-                )
-            )
-            guard !kemPublicKeys.isEmpty else {
-                throw NSError(
-                    domain: "CrossNetworkConnectionManager",
-                    code: 8405,
-                    userInfo: [NSLocalizedDescriptionKey: "本机没有可用于二维码 OOB 引导的 PQC KEM 公钥"]
-                )
-            }
             let localPresentation = LocalDevicePresentation.current()
-            let qrData = DynamicQRCodeData(
-                version: 7,
+            let invite = ServerBackedDynamicQRCodeInvite(
+                version: 8,
                 sessionID: sessionID,
                 qrBootstrapToken: sessionLease.qrBootstrapToken,
                 signalingServerOrigin: sessionLease.signalingServerOrigin,
@@ -1609,26 +1601,17 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 deviceName: localPresentation.deviceName ?? localPresentation.modelName ?? "Mac",
                 deviceType: P2PDeviceType.macOS.rawValue,
                 osVersion: localPresentation.osVersion,
-                capabilities: ["cross-network", "p2p"],
                 protocolSigningAlgorithm: localBinding.protocolSigningAlgorithm,
-                protocolPublicKeyBytes: localBinding.protocolPublicKeyBytes,
                 protocolPublicKeyFingerprint: localBinding.protocolPublicKeyFingerprint,
-                kemPublicKeys: kemPublicKeys,
-                signature: nil,
-                signatureTimestampMs: signatureTimestampMs,
                 expiresAt: expiresAt
             )
 
-            currentStage = "sign_qr"
-            logQRCodeStage("generate", stage: "\(currentStage)_started", sessionID: sessionID)
-            let canonicalPayload = Self.buildCanonicalQRCodePayload(for: qrData)
-            let signatureProvider = ProtocolSignatureProviderSelector.select(for: localBinding.protocolSigningAlgorithm)
-            let signingHandle = try await DeviceIdentityKeyManager.shared.getProtocolSigningKeyHandle(for: localBinding.protocolSigningAlgorithm)
-            let signature = try await signatureProvider.sign(canonicalPayload, key: signingHandle)
-            logQRCodeStage("generate", stage: "\(currentStage)_finished", sessionID: sessionID)
-
             currentStage = "assign_payload"
-            self.qrCodeData = try Self.encodeQRCodeConnectLink(qrData.withSignature(signature))
+            let connectLink = try Self.encodeQRCodeConnectLink(invite)
+            guard Self.isQRCodeConnectLinkWithinCapacity(connectLink) else {
+                throw CrossNetworkConnectionError.invalidQRCode
+            }
+            self.qrCodeData = connectLink
             self.connectionStatus = .waiting(code: sessionID)
             self.readiness = .idle
             logQRCodeStage("generate", stage: "payload_assigned", sessionID: sessionID)
@@ -1672,6 +1655,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             logQRCodeStage("scan", stage: currentStage)
             guard let jsonData = Self.decodeBase64Payload(payload) else {
                 throw CrossNetworkConnectionError.invalidQRCode
+            }
+
+            if let invite = try? Self.decodeServerBackedQRCodeInvite(from: jsonData),
+               invite.version >= 8 {
+                return try await scanServerBackedQRCodeInvite(invite)
             }
 
             let qrData = try Self.decodeDynamicQRCodePayload(from: jsonData)
@@ -2163,6 +2151,50 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func scanServerBackedQRCodeInvite(_ invite: ServerBackedDynamicQRCodeInvite) async throws -> RemoteConnection {
+        guard invite.expiresAt > Date() else {
+            throw CrossNetworkConnectionError.qrCodeExpired
+        }
+        _ = try validateCurrentPathOrigin(invite.signalingServerOrigin)
+
+        logQRCodeStage("scan", stage: "server_backed_invite_redeem_started", sessionID: invite.sessionID)
+        let localBinding = try await currentPathLocalBinding()
+        let admissionLease = try await requestAdmissionLease(for: localBinding)
+        let redeemed = try await signalServer.redeemSession(
+            admissionToken: admissionLease.token,
+            sessionID: invite.sessionID,
+            qrBootstrapToken: invite.qrBootstrapToken
+        )
+        _ = try validateCurrentPathOrigin(redeemed.signalingServerOrigin)
+        guard redeemed.initiatorDeviceId == invite.deviceID,
+              redeemed.initiatorProtocolSigningAlgorithm == invite.protocolSigningAlgorithm,
+              redeemed.initiatorProtocolPublicKeyFingerprint == invite.protocolPublicKeyFingerprint else {
+            throw CrossNetworkConnectionError.invalidSignature
+        }
+
+        webrtcSignalingAuthTokenBySessionId[invite.sessionID] = redeemed.sessionToken
+        webrtcTurnAdmissionLeaseBySessionId[invite.sessionID] = redeemed.turnAdmissionLease
+        storeWebRTCMediaAdmissionLease(redeemed.mediaAdmissionLease, for: invite.sessionID)
+        currentPathSignalingOriginBySessionId[invite.sessionID] = redeemed.signalingServerOrigin
+        currentPathExpectedRemoteAuthorityBySessionId[invite.sessionID] = CurrentPathRemoteAuthority(
+            deviceId: invite.deviceID,
+            protocolSigningAlgorithm: invite.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: invite.protocolPublicKeyFingerprint,
+            protocolPublicKeyBytes: nil,
+            deviceName: invite.deviceName
+        )
+        webrtcRemoteIdBySessionId[invite.sessionID] = invite.deviceID
+        logQRCodeStage("scan", stage: "server_backed_invite_redeemed", sessionID: invite.sessionID)
+
+        let connection = try await establishWebRTCConnection(
+            sessionID: invite.sessionID,
+            remoteDeviceID: invite.deviceID,
+            remoteDeviceName: invite.deviceName
+        )
+        logger.info("✅ 通过服务端背书二维码连接成功")
+        return connection
+    }
+
  // MARK: - 私有方法 - P2P 连接建立
 
     private func establishP2PConnection(with qrData: DynamicQRCodeData) async throws -> RemoteConnection {
@@ -2197,6 +2229,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     }
 
     // MARK: - WebRTC Connection
+
+    private func establishWebRTCConnection(with qrData: DynamicQRCodeData) async throws -> RemoteConnection {
+        try await establishWebRTCConnection(
+            sessionID: qrData.sessionID,
+            remoteDeviceID: qrData.deviceID,
+            remoteDeviceName: qrData.deviceName
+        )
+    }
 
     private func signalingWebSocketURL(shardKey: String? = nil) -> URL? {
         guard let baseURL = URL(string: SkyBridgeServerConfig.signalingWebSocketURL) else { return nil }
@@ -2433,18 +2473,21 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
-    private func establishWebRTCConnection(with qrData: DynamicQRCodeData) async throws -> RemoteConnection {
-        guard webrtcSignalingAuthTokenBySessionId[qrData.sessionID]?.isEmpty == false else {
+    private func establishWebRTCConnection(
+        sessionID: String,
+        remoteDeviceID: String,
+        remoteDeviceName: String
+    ) async throws -> RemoteConnection {
+        guard webrtcSignalingAuthTokenBySessionId[sessionID]?.isEmpty == false else {
             throw CrossNetworkConnectionError.missingSignalingToken
         }
-        try await ensureSignalingConnected(shardKey: qrData.sessionID)
+        try await ensureSignalingConnected(shardKey: sessionID)
 
-        let sessionID = qrData.sessionID
         let snapshotMetadata = prepareSessionSnapshotMetadata(
             sessionID: sessionID,
             source: .qr,
-            deviceId: qrData.deviceID,
-            deviceName: qrData.deviceName
+            deviceId: remoteDeviceID,
+            deviceName: remoteDeviceName
         )
         activatePreparedSessionSnapshot(sessionID: sessionID, phase: .connecting)
         if webrtcSessionsBySessionId[sessionID] != nil, !canReuseWebRTCSession(sessionID) {
@@ -2526,15 +2569,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             Task { @MainActor in
                 self.logger.info("✅ WebRTC QR answerer ready: session=\(sessionID, privacy: .public)")
                 self.stopWebRTCConnectionTimeoutWatchdog(for: sessionID)
-                self.currentConnection = RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
+                self.currentConnection = RemoteConnection(id: sessionID, deviceName: remoteDeviceName, transport: .webrtc(session))
                 self.connectionStatus = .connecting
                 self.readiness = .transportReady(sessionId: sessionID)
                 self.startWebRTCLivenessWatchdogIfNeeded(for: sessionID)
                 self.updatePreparedSessionSnapshot(
                     sessionID: sessionID,
                     phase: .transportReady,
-                    deviceId: qrData.deviceID,
-                    deviceName: qrData.deviceName,
+                    deviceId: remoteDeviceID,
+                    deviceName: remoteDeviceName,
                     snapshotToken: snapshotMetadata.snapshotToken
                 )
                 self.startWebRTCInboundHandshakeAndControlLoop(sessionID: sessionID, session: session, endpointDescription: "webrtc:\(sessionID)")
@@ -2566,7 +2609,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         await sendSignal(.init(sessionId: sessionID, from: localDeviceId, type: .join, payload: nil), retries: 2)
         startJoinHeartbeat(for: sessionID, attempts: Self.webRTCStartupJoinHeartbeatAttempts)
 
-        return RemoteConnection(id: sessionID, deviceName: qrData.deviceName, transport: .webrtc(session))
+        return RemoteConnection(id: sessionID, deviceName: remoteDeviceName, transport: .webrtc(session))
     }
 
     private func authenticatedEnvelope(_ env: WebRTCSignalingEnvelope) -> WebRTCSignalingEnvelope? {
