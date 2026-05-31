@@ -344,27 +344,6 @@ verify_file_matches_source_icon() {
     fi
 }
 
-verify_icon_resources_match() {
-    local first="$1"
-    local second="$2"
-    local label="$3"
-    local first_hash=""
-    local second_hash=""
-
-    if [[ ! -f "$first" || ! -f "$second" ]]; then
-        log_error "缺少图标资源，无法校验同源 contract：$label"
-        exit 1
-    fi
-
-    first_hash="$(shasum -a 256 "$first" | awk '{print $1}')"
-    second_hash="$(shasum -a 256 "$second" | awk '{print $1}')"
-    if [[ "$first_hash" != "$second_hash" ]]; then
-        log_error "AppIconDock 必须与 canonical AppIcon 完全一致，避免启动后切换到另一套图标：$label"
-        log_error "AppIcon=${first_hash} AppIconDock=${second_hash}"
-        exit 1
-    fi
-}
-
 verify_iconcomposer_source_matches_canonical_icon() {
     local source_resources_dir="$1"
     local canonical_png="$source_resources_dir/AppIcon.png"
@@ -373,7 +352,7 @@ verify_iconcomposer_source_matches_canonical_icon() {
     verify_file_matches_source_icon "$iconcomposer_png" "$canonical_png" "AppIcon.icon/Assets/Image.png"
 }
 
-verify_packaged_app_does_not_override_icon_composer() {
+verify_packaged_app_does_not_override_system_icon() {
     local app_source="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift"
     local icon_loader_source="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SVGEmbeddedImageView.swift"
     local icon_function=""
@@ -394,7 +373,7 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
 start_marker = "private static func applyAppIconIfAvailable() -> Bool"
-end_marker = "func resolveIconURL(named baseName: String) -> URL?"
+end_marker = "func resolveDevelopmentIconURL() -> URL?"
 start = source.find(start_marker)
 end = source.find(end_marker, start)
 if start == -1 or end == -1:
@@ -407,7 +386,7 @@ PY
     }
 
     if [[ "$icon_function" != *"if isRunningFromPackagedApp"* ]]; then
-        log_error "packaged app 图标必须由 LaunchServices/Icon Composer 接管，缺少 isRunningFromPackagedApp 早返回"
+        log_error "packaged app 图标必须由 Info.plist + LaunchServices 接管，缺少 isRunningFromPackagedApp 早返回"
         exit 1
     fi
     if [[ "$icon_function" == *"NSApplication.shared.applicationIconImage ="* ]]; then
@@ -415,7 +394,7 @@ PY
         exit 1
     fi
     if grep -q "resolvePackagedIconURL" "$app_source"; then
-        log_error "packaged app 禁止从 raw AppIcon PNG/ICNS 解析 Dock 图标；请使用 LaunchServices/Icon Composer"
+        log_error "packaged app 禁止从 raw AppIcon PNG/ICNS 手动覆盖 Dock 图标；请使用 Info.plist 声明的 AppIcon.icns"
         exit 1
     fi
 
@@ -437,12 +416,16 @@ PY
         exit 1
     }
 
-    if [[ "$brand_loader" != *"NSApplication.shared.applicationIconImage"* ]]; then
-        log_error "packaged 品牌图标必须复用系统 app icon，避免启动页与 Dock 图标分叉"
+    if [[ "$brand_loader" != *"loadImageResource(named: preferredResourceName, withExtension: \"png\", bundle: .main)"* ]]; then
+        log_error "packaged 品牌图标必须优先读取调用方指定的主包资源，侧边栏应使用 SidebarBrandIcon.png"
         exit 1
     fi
-    if [[ "$brand_loader" == *"packagedResourceIconURLs"* ]]; then
-        log_error "packaged 品牌图标禁止读取 raw PNG 资源；这会绕过 Icon Composer"
+    if [[ "$brand_loader" != *"loadImageResource(named: \"BrandIcon\", withExtension: \"png\", bundle: .main)"* ]]; then
+        log_error "packaged 品牌图标必须读取包内 canonical BrandIcon.png，避免侧边栏图标由 AppIcon.icns 小尺寸 representation 漂移"
+        exit 1
+    fi
+    if [[ "$brand_loader" == *"packagedResourceIconURLs"* || "$brand_loader" == *"NSApplication.shared.applicationIconImage"* ]]; then
+        log_error "packaged 品牌图标禁止读取旧资源列表或系统缓存图标；必须使用 BrandIcon.png"
         exit 1
     fi
 }
@@ -462,32 +445,32 @@ verify_app_icon_contract() {
 
     icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$info_plist" 2>/dev/null || true)
     icon_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$info_plist" 2>/dev/null || true)
-    if [[ "$icon_file" != "AppIcon" ]]; then
-        log_error "CFBundleIconFile 必须指向 full-size AppIcon.icns，当前为：${icon_file:-missing}"
+    if [[ "$icon_file" != "AppIcon.icns" ]]; then
+        log_error "CFBundleIconFile 必须指向预合成 AppIcon.icns，当前为：${icon_file:-missing}"
         exit 1
     fi
-    if [[ "$icon_name" != "AppIcon" ]]; then
-        log_error "CFBundleIconName 必须指向 Icon Composer AppIcon，当前为：${icon_name:-missing}"
+    if [[ -n "$icon_name" ]]; then
+        log_error "CFBundleIconName 必须保持为空，避免 Icon Composer iconstack 二次套壳，当前为：${icon_name}"
         exit 1
     fi
 
-    verify_file_matches_source_icon "$resources_dir/AppIcon.icns" "$source_resources_dir/AppIcon.icns" "AppIcon.icns"
-    verify_file_matches_source_icon "$resources_dir/AppIconDock.icns" "$source_resources_dir/AppIconDock.icns" "AppIconDock.icns"
-    verify_file_matches_source_icon "$resources_dir/AppIcon.png" "$source_resources_dir/AppIcon.png" "AppIcon.png"
-    verify_file_matches_source_icon "$resources_dir/AppIconDock.png" "$source_resources_dir/AppIconDock.png" "AppIconDock.png"
+    if [[ ! -f "$resources_dir/AppIcon.icns" || ! -f "$resources_dir/BrandIcon.png" || ! -f "$resources_dir/SidebarBrandIcon.png" ]]; then
+        log_error "App Bundle 必须包含预合成 AppIcon.icns、BrandIcon.png 与 SidebarBrandIcon.png 图标产物"
+        exit 1
+    fi
     verify_iconcomposer_source_matches_canonical_icon "$source_resources_dir"
+    verify_file_matches_source_icon "$resources_dir/AppIcon.icns" "$source_resources_dir/AppIcon.icns" "AppIcon.icns"
+    verify_file_matches_source_icon "$resources_dir/BrandIcon.png" "$source_resources_dir/AppIcon.png" "BrandIcon.png"
+    verify_file_matches_source_icon "$resources_dir/SidebarBrandIcon.png" "$source_resources_dir/SidebarBrandIcon.png" "SidebarBrandIcon.png"
     verify_icns_has_full_size_reps "$resources_dir/AppIcon.icns" "AppIcon.icns"
-    verify_icns_has_full_size_reps "$resources_dir/AppIconDock.icns" "AppIconDock.icns"
-    verify_icon_resources_match "$resources_dir/AppIcon.icns" "$resources_dir/AppIconDock.icns" "icns"
-    verify_icon_resources_match "$resources_dir/AppIcon.png" "$resources_dir/AppIconDock.png" "png"
-    verify_packaged_app_does_not_override_icon_composer
+    verify_packaged_app_does_not_override_system_icon
 
-    if [[ -e "$resources_dir/icon.json" || -e "$resources_dir/Image.png" || -e "$resources_dir/AppIcon.icon" || -e "$resources_dir/Assets.xcassets" ]]; then
-        log_error "App Bundle 包含 Icon Composer/asset catalog 源文件，图标来源不明确"
+    if [[ -e "$resources_dir/icon.json" || -e "$resources_dir/Image.png" || -e "$resources_dir/AppIcon.icon" || -e "$resources_dir/Assets.xcassets" || -e "$resources_dir/AppIcon.png" || -e "$resources_dir/AppIconDock.icns" || -e "$resources_dir/AppIconDock.png" || -e "$resources_dir/app_icon.png" || -e "$resources_dir/AppIconMaster.png" || -e "$resources_dir/AppIconMaster.svg" || -e "$resources_dir/app-icon.svg" || -e "$resources_dir/Icons" ]]; then
+        log_error "App Bundle 包含 Icon Composer 输入或旧图标别名，图标来源不明确"
         exit 1
     fi
 
-    log_info "App 图标 contract 校验通过：LaunchServices/Icon Composer 持有 packaged app 图标，运行态不会覆盖"
+    log_info "App 图标 contract 校验通过：系统图标使用 canonical AppIcon.icns，运行态品牌 UI 使用 BrandIcon.png/SidebarBrandIcon.png"
 }
 
 verify_app_embedded_privacy_info_plist() {

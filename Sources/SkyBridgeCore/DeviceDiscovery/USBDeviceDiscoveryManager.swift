@@ -38,7 +38,6 @@ public class USBDeviceDiscoveryManager: ObservableObject, Sendable {
     public func start() async {
         logger.info("启动USB设备发现管理器")
         startMonitoring()
-        scanUSBDevices()
     }
     
  /// 停止USB设备发现管理器
@@ -79,6 +78,11 @@ public class USBDeviceDiscoveryManager: ObservableObject, Sendable {
     
  /// 开始监控 USB 设备插拔
     public func startMonitoring() {
+        guard notificationPort == nil else {
+            logger.debug("USB 设备插拔监控已启动，忽略重复启动")
+            return
+        }
+
         logger.info("开始监控 USB 设备插拔")
         
  // 创建通知端口
@@ -106,7 +110,7 @@ public class USBDeviceDiscoveryManager: ObservableObject, Sendable {
         )
         
  // 消费初始迭代器
-        deviceAdded(refcon: selfPtr, iterator: addedIterator)
+        _ = drainUSBIterator(addedIterator)
         
  // 监听设备移除
         let matchingDict2 = IOServiceMatching(kIOUSBDeviceClassName)
@@ -120,7 +124,7 @@ public class USBDeviceDiscoveryManager: ObservableObject, Sendable {
         )
         
  // 消费初始迭代器
-        deviceRemoved(refcon: selfPtr, iterator: removedIterator)
+        _ = drainUSBIterator(removedIterator)
         
  // 初始扫描
         scanUSBDevices()
@@ -328,9 +332,7 @@ private func deviceAdded(refcon: UnsafeMutableRawPointer?, iterator: io_iterator
     let manager = Unmanaged<USBDeviceDiscoveryManager>.fromOpaque(refcon).takeUnretainedValue()
     
  // 消费迭代器
-    while case let device = IOIteratorNext(iterator), device != 0 {
-        IOObjectRelease(device)
-    }
+    guard drainUSBIterator(iterator) else { return }
     
  // 触发重新扫描（显式切回主线程；弱引用避免悬垂对象）
     DispatchQueue.main.async { [weak manager] in
@@ -344,14 +346,21 @@ private func deviceRemoved(refcon: UnsafeMutableRawPointer?, iterator: io_iterat
     let manager = Unmanaged<USBDeviceDiscoveryManager>.fromOpaque(refcon).takeUnretainedValue()
     
  // 消费迭代器
-    while case let device = IOIteratorNext(iterator), device != 0 {
-        IOObjectRelease(device)
-    }
+    guard drainUSBIterator(iterator) else { return }
     
  // 触发重新扫描（显式切回主线程；弱引用避免悬垂对象）
     DispatchQueue.main.async { [weak manager] in
         manager?.scanUSBDevices()
     }
+}
+
+private func drainUSBIterator(_ iterator: io_iterator_t) -> Bool {
+    var didConsumeDevice = false
+    while case let device = IOIteratorNext(iterator), device != 0 {
+        didConsumeDevice = true
+        IOObjectRelease(device)
+    }
+    return didConsumeDevice
 }
 
 // MARK: - 数据模型

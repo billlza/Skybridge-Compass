@@ -97,7 +97,6 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
  // 启动USB发现
         usbDiscovery.startMonitoring()
-        usbDiscovery.scanUSBDevices()
 
  // 启动iCloud发现
         if iCloudDiscovery == nil {

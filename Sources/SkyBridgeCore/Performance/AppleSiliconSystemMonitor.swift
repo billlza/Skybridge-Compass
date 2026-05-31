@@ -60,6 +60,10 @@ public final class AppleSiliconSystemMonitor: ObservableObject {
         logger.info("AppleSiliconSystemMonitor stopped")
     }
 
+    public func refreshNow() {
+        refreshFromMonitor()
+    }
+
     private func refreshFromMonitor() {
         guard let monitor else { return }
 

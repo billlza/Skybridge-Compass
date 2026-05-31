@@ -144,27 +144,11 @@ public final class PairingTrustApprovalService: ObservableObject {
             return .alwaysAllow
         }
 
-        let deviceId = request.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let bindingKey = request.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !bindingKey.isEmpty,
-           let raw = policyByDeviceId[bindingKey],
-           let policy = Decision(rawValue: raw) {
-            switch policy {
-            case .alwaysAllow, .reject:
-                return policy
-            case .allowOnce:
-                break
-            }
+        if let policy = persistedPolicyDecision(for: request) {
+            return policy
         }
 
-        if let raw = policyByDeviceId[deviceId], let policy = Decision(rawValue: raw) {
-            switch policy {
-            case .alwaysAllow, .reject:
-                return policy
-            case .allowOnce:
-                break
-            }
-        }
+        let deviceId = request.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Only one prompt at a time (keep first to avoid UI spam).
         if let pendingRequest {
@@ -192,6 +176,33 @@ public final class PairingTrustApprovalService: ObservableObject {
         return await withCheckedContinuation { cont in
             continuationByRequestId[request.id, default: []].append(cont)
         }
+    }
+
+    /// Returns a persisted allow/reject decision without creating a new approval prompt.
+    public func persistedPolicyDecision(for request: Request) -> Decision? {
+        let deviceId = request.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let bindingKey = request.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !bindingKey.isEmpty,
+           let raw = policyByDeviceId[bindingKey],
+           let policy = Decision(rawValue: raw) {
+            switch policy {
+            case .alwaysAllow, .reject:
+                return policy
+            case .allowOnce:
+                break
+            }
+        }
+
+        if let raw = policyByDeviceId[deviceId], let policy = Decision(rawValue: raw) {
+            switch policy {
+            case .alwaysAllow, .reject:
+                return policy
+            case .allowOnce:
+                break
+            }
+        }
+
+        return nil
     }
 
     private func isSameTrustRequest(_ lhs: Request, _ rhs: Request) -> Bool {

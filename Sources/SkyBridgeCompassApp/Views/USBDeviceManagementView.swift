@@ -5,11 +5,16 @@ import SkyBridgeCore
 /// 展示已连接的USB设备，包括MFi认证设备、Android设备、硬盘和U盘
 @available(macOS 14.0, *)
 struct USBDeviceManagementView: View {
-    @StateObject private var usbManager = USBCConnectionManager()
+    @StateObject private var usbManager: USBCConnectionManager
     @EnvironmentObject var themeConfiguration: ThemeConfiguration
     @State private var connectedDevices: [USBDeviceInfo] = []
     @State private var isScanning = false
     @State private var lastScanTime: Date?
+    @State private var hasLoadedInitialDevices = false
+
+    init(usbManager: USBCConnectionManager = .shared) {
+        _usbManager = StateObject(wrappedValue: usbManager)
+    }
     
     var body: some View {
         NavigationView {
@@ -71,8 +76,10 @@ struct USBDeviceManagementView: View {
                 .padding(16)
             }
         }
-        .onAppear {
-            refreshDevices()
+        .onAppear(perform: loadCachedDevicesAndScanIfNeeded)
+        .onReceive(usbManager.$discoveredUSBDevices) { devices in
+            connectedDevices = devices.sorted { $0.name < $1.name }
+            lastScanTime = usbManager.lastScanCompletedAt
         }
     }
     
@@ -159,6 +166,18 @@ struct USBDeviceManagementView: View {
     }
     
  // MARK: - 方法
+
+    private func loadCachedDevicesAndScanIfNeeded() {
+        connectedDevices = usbManager.getConnectedUSBDevices().sorted { $0.name < $1.name }
+        lastScanTime = usbManager.lastScanCompletedAt
+
+        guard !hasLoadedInitialDevices else { return }
+        hasLoadedInitialDevices = true
+
+        if usbManager.lastScanCompletedAt == nil {
+            refreshDevices()
+        }
+    }
     
     private func refreshDevices() {
         isScanning = true

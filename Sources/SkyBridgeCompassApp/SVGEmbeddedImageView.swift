@@ -59,17 +59,20 @@ struct BrandAppIconView: View {
     let contentMode: ContentMode
     let safeInset: CGFloat
     let clipCornerRadius: CGFloat?
+    let preferredResourceName: String
 
     @State private var nsImage: NSImage?
 
     init(
         contentMode: ContentMode = .fit,
         safeInset: CGFloat = 0,
-        clipCornerRadius: CGFloat? = nil
+        clipCornerRadius: CGFloat? = nil,
+        preferredResourceName: String = "BrandIcon"
     ) {
         self.contentMode = contentMode
         self.safeInset = safeInset
         self.clipCornerRadius = clipCornerRadius
+        self.preferredResourceName = preferredResourceName
     }
 
     var body: some View {
@@ -86,58 +89,47 @@ struct BrandAppIconView: View {
                 Color.clear
             }
         }
-        .task {
-            if nsImage == nil {
-                nsImage = BrandIconAssetLoader.load()
-            }
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        guard nsImage == nil else { return }
+        let preferredResourceName = preferredResourceName
+        Task.detached(priority: .utility) {
+            let image = BrandIconAssetLoader.load(preferredResourceName: preferredResourceName)
+            guard let image else { return }
+            await MainActor.run { self.nsImage = image }
         }
     }
 }
 
-@MainActor
 private enum BrandIconAssetLoader {
-    static func load() -> NSImage? {
-        if isRunningFromPackagedApp,
-           let appIcon = NSApplication.shared.applicationIconImage.copy() as? NSImage,
-           appIcon.size.width > 0,
-           appIcon.size.height > 0 {
-            return appIcon
+    static func load(preferredResourceName: String) -> NSImage? {
+        if let image = loadImageResource(named: preferredResourceName, withExtension: "png", bundle: .main) {
+            return image
         }
 
-        for bundle in [Bundle.module] {
-            for candidate in iconCandidates {
-                if let url = bundle.url(forResource: candidate.name, withExtension: candidate.extensionName),
-                   let image = NSImage(contentsOf: url) {
-                    return image
-                }
-            }
+        if let image = loadImageResource(named: preferredResourceName, withExtension: "png", bundle: .module) {
+            return image
         }
 
-        return nil
-    }
-
-    private static let iconCandidates: [(name: String, extensionName: String)] = [
-        ("AppIcon", "png"),
-        ("BrandIcon", "png"),
-        ("AppIconDock", "png"),
-        ("app_icon", "png")
-    ]
-
-    private static var isRunningFromPackagedApp: Bool {
-        let executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
-        return packagedContentsURL(containing: executableURL) != nil
-    }
-
-    private static func packagedContentsURL(containing executableURL: URL) -> URL? {
-        var url = executableURL
-        while url.path != "/" {
-            if url.lastPathComponent == "Contents" {
-                return url
-            }
-            url.deleteLastPathComponent()
+        if let image = loadImageResource(named: "BrandIcon", withExtension: "png", bundle: .main) {
+            return image
         }
-        return nil
+
+        return loadImageResource(named: "AppIcon", withExtension: "png", bundle: .module)
     }
+
+    private static func loadImageResource(named name: String, withExtension extensionName: String, bundle: Bundle) -> NSImage? {
+        guard let url = bundle.url(forResource: name, withExtension: extensionName),
+              let image = NSImage(contentsOf: url),
+              image.size.width > 0,
+              image.size.height > 0 else {
+            return nil
+        }
+        return image
+    }
+
 }
 
 private extension View {

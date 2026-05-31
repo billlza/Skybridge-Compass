@@ -11,6 +11,7 @@ struct RemoteDesktopView: View {
     @State private var searchText = ""
     @State private var selectedQuality: VideoQuality = .high
     @State private var newConnectionPrefersAdvanced: Bool = false
+    @State private var hasRequestedManagerBootstrap = false
  // 新增：维护从管理器发布的所有会话快照
     @State private var allSessions: [RemoteSessionSummary] = []
  // 新增：最近会话本地存储（断开后加入）
@@ -50,13 +51,7 @@ struct RemoteDesktopView: View {
         .sheet(isPresented: $showingSettingsSheet) {
             RemoteDesktopSettingsView(isPresented: $showingSettingsSheet)
         }
-        .onAppear {
- // 延迟初始化，避免在视图创建时立即启动所有服务
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
-                remoteDesktopManager.bootstrap()
-            }
-        }
+        .onAppear(perform: bootstrapRemoteDesktopManagerIfNeeded)
 // 订阅远程桌面管理器的会话发布，实时更新侧边栏列表
         .onReceive(remoteDesktopManager.sessions) { sessions in
 // 说明：该订阅仅更新会话快照，不改变连接状态
@@ -66,9 +61,17 @@ struct RemoteDesktopView: View {
         .onReceive(RemoteDesktopSettingsManager.shared.settings.$displaySettings) { displaySettings in
             applyRemoteDesktopFullScreen(displaySettings.fullScreenMode, persist: false)
         }
-        .onDisappear {
-// 确保在视图消失时正确清理资源
-            remoteDesktopManager.shutdown()
+    }
+
+    private func bootstrapRemoteDesktopManagerIfNeeded() {
+        guard !hasRequestedManagerBootstrap else { return }
+        hasRequestedManagerBootstrap = true
+
+ // 延迟初始化，避免在视图创建时立即启动所有服务；管理器自身保证幂等。
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard !Task.isCancelled else { return }
+            remoteDesktopManager.bootstrap()
         }
     }
 

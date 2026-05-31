@@ -2,13 +2,52 @@ import Foundation
 import SkyBridgeCore
 
 @available(macOS 14.0, *)
-@MainActor
 enum OnlineDeviceConnectionCoordinator {
+    private struct ConnectionPlan: Sendable {
+        let discoveredCandidates: [DiscoveredDevice]
+        let routePreference: P2PDiscoveryService.ConnectionRoutePreference
+    }
+
+    @MainActor
+    static func connect(to device: OnlineDevice) async throws {
+        try await connect(
+            to: device,
+            unifiedDeviceManager: .shared,
+            p2pDiscoveryService: .shared
+        )
+    }
+
     static func connect(
         to device: OnlineDevice,
-        unifiedDeviceManager: UnifiedOnlineDeviceManager = .shared,
-        p2pDiscoveryService: P2PDiscoveryService = .shared
+        unifiedDeviceManager: UnifiedOnlineDeviceManager,
+        p2pDiscoveryService: P2PDiscoveryService
     ) async throws {
+        let plan = try await MainActor.run {
+            try makeConnectionPlan(for: device, unifiedDeviceManager: unifiedDeviceManager)
+        }
+
+        var lastError: Error?
+        for candidate in plan.discoveredCandidates {
+            do {
+                try await p2pDiscoveryService.connectToDevice(candidate, routePreference: plan.routePreference)
+                await unifiedDeviceManager.markDeviceAsConnected(device.id)
+                return
+            } catch {
+                lastError = error
+                SkyBridgeLogger.discovery.warning(
+                    "在线设备候选连接失败，将尝试下一个候选: \(candidate.name, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        throw lastError ?? P2PDiscoveryError.noConnectableEndpoint
+    }
+
+    @MainActor
+    private static func makeConnectionPlan(
+        for device: OnlineDevice,
+        unifiedDeviceManager: UnifiedOnlineDeviceManager
+    ) throws -> ConnectionPlan {
         let liveDiscoveredCandidates = unifiedDeviceManager.resolvedConnectableDiscoveredCandidates(for: device, limit: 6)
         var discoveredCandidates = liveDiscoveredCandidates
         if let fallback = fallbackDiscoveredDevice(for: device, unifiedDeviceManager: unifiedDeviceManager),
@@ -27,22 +66,10 @@ enum OnlineDeviceConnectionCoordinator {
             }
             return preferUSBRoute ? .preferUSB : .automatic
         }()
-
-        var lastError: Error?
-        for candidate in discoveredCandidates {
-            do {
-                try await p2pDiscoveryService.connectToDevice(candidate, routePreference: routePreference)
-                unifiedDeviceManager.markDeviceAsConnected(device.id)
-                return
-            } catch {
-                lastError = error
-                SkyBridgeLogger.discovery.warning(
-                    "在线设备候选连接失败，将尝试下一个候选: \(candidate.name, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
-                )
-            }
-        }
-
-        throw lastError ?? P2PDiscoveryError.noConnectableEndpoint
+        return ConnectionPlan(
+            discoveredCandidates: discoveredCandidates,
+            routePreference: routePreference
+        )
     }
 
     private static func isSameConnectTarget(_ lhs: DiscoveredDevice, _ rhs: DiscoveredDevice) -> Bool {
@@ -79,6 +106,7 @@ enum OnlineDeviceConnectionCoordinator {
         }
     }
 
+    @MainActor
     private static func fallbackDiscoveredDevice(
         for device: OnlineDevice,
         unifiedDeviceManager: UnifiedOnlineDeviceManager
@@ -137,6 +165,7 @@ enum OnlineDeviceConnectionCoordinator {
         return fallback
     }
 
+    @MainActor
     private static func authoritativeProtocolDeviceId(
         for device: OnlineDevice,
         unifiedDeviceManager: UnifiedOnlineDeviceManager
@@ -151,6 +180,7 @@ enum OnlineDeviceConnectionCoordinator {
             ?? nonEmptyIdentity(record.deviceId)
     }
 
+    @MainActor
     private static func authoritativeProtocolFingerprint(
         for device: OnlineDevice,
         unifiedDeviceManager: UnifiedOnlineDeviceManager

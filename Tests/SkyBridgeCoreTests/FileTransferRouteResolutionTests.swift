@@ -660,10 +660,15 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/FileTransferManager.swift"),
             encoding: .utf8
         )
+        let p2pSource = try String(
+            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(source.contains("ensureClassicTransferIdentityBridgeReady(for: resolvedDevice)"))
         XCTAssertTrue(source.contains("connectionManager.sendPairingIdentityExchange(to: device.id)"))
         XCTAssertTrue(source.contains("waitForPairingIdentityExchangeActivity"))
+        XCTAssertTrue(p2pSource.contains("pairingIdentityObservationAliases(for: deviceId)"))
         XCTAssertTrue(source.contains("P2P pairing identity exchange 未被对端确认，拒绝启动经典文件传输"))
         XCTAssertTrue(source.contains("stage: \"identity_bridge_send_failed\""))
         XCTAssertTrue(source.contains("stage: \"identity_bridge_not_confirmed\""))
@@ -671,6 +676,18 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("stage: \"route_resolution_invalid_destination\""))
         XCTAssertTrue(source.contains("stage: \"connect_no_endpoint_candidates\""))
         XCTAssertTrue(source.contains("stage: \"\\(stage)_connection_closed\""))
+
+        let invalidPayloadStart = try XCTUnwrap(
+            p2pSource.range(of: "guard let payload = payload.normalizedBootstrapPayload else {")
+        )
+        let invalidPayloadEnd = try XCTUnwrap(
+            p2pSource.range(of: "let declaredDeviceId = payload.deviceId", range: invalidPayloadStart.lowerBound..<p2pSource.endIndex)
+        )
+        let invalidPayloadBlock = String(p2pSource[invalidPayloadStart.lowerBound..<invalidPayloadEnd.lowerBound])
+        XCTAssertFalse(
+            invalidPayloadBlock.contains("lastPairingIdentityExchangeReceivedAt"),
+            "Malformed pairingIdentityExchange frames must not confirm the classic file-transfer identity bridge."
+        )
     }
 
     func testFileTransferSmokeRejectsUnknownFailurePhaseAndPreservesConcreteIOSPhases() throws {
@@ -803,7 +820,40 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         let persistRange = try XCTUnwrap(handler.range(of: "await persistAuthenticatedRemoteAuthority"))
 
         XCTAssertLessThan(replyRange.lowerBound, persistRange.lowerBound)
+        XCTAssertTrue(handler.contains("isPairingIdentityBoundToAuthenticatedAuthority(payload)"))
+        XCTAssertTrue(handler.contains("persistedPolicyDecision(for: request)"))
+        XCTAssertTrue(handler.contains("pairingIdentityExchange accepted on authenticated protocol-identity channel"))
         XCTAssertTrue(source.contains("protocolIdentityPublicKeys: await Self.localProtocolIdentityPublicKeysForPairing()"))
+    }
+
+    func testAuthenticatedPairingIdentityBridgeStillRespectsPersistedRejectPolicy() throws {
+        let service = PairingTrustApprovalService.shared
+        let deviceId = "policy-reject-\(UUID().uuidString)"
+        let fingerprint = String(repeating: "a", count: 64)
+        let bindingKey = try XCTUnwrap(
+            PairingTrustApprovalService.policyBindingKey(
+                declaredDeviceId: deviceId,
+                algorithmRawValue: ProtocolSigningAlgorithm.ed25519.rawValue,
+                protocolPublicKeyFingerprint: fingerprint
+            )
+        )
+        let request = PairingTrustApprovalService.Request(
+            peerEndpoint: "127.0.0.1:9000",
+            declaredDeviceId: deviceId,
+            policyBindingKey: bindingKey,
+            displayName: "Rejected iPad",
+            model: "iPad",
+            platform: "iOS",
+            osVersion: "18.0",
+            kemKeyCount: 2
+        )
+
+        service.clearPolicy(for: deviceId)
+        defer { service.clearPolicy(for: deviceId) }
+
+        XCTAssertNil(service.persistedPolicyDecision(for: request))
+        service.resolve(request, decision: .reject)
+        XCTAssertEqual(service.persistedPolicyDecision(for: request), .reject)
     }
 
     func testTrustBridgeKeychainInteractionFailureUsesProtectedLocalMirror() throws {

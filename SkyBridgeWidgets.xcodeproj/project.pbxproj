@@ -12,13 +12,10 @@
 		0B678571CB3B88CBD991C927 /* CustomBackgroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 825CF90D2A0365C9B9F0A7F5 /* CustomBackgroundView.swift */; };
 		1107809D175EC5DE28930559 /* RemoteDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B1FB7AA1712E13D6F941B63 /* RemoteDisplayView.swift */; };
 		14F0E1D218B84170A8F10BCE /* GlobalHazeShaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = CFCE049A1A7724672405473E /* GlobalHazeShaders.metal */; };
-		1648DA143122FEAE697FC7F8 /* app_icon.png in Resources */ = {isa = PBXBuildFile; fileRef = BFFF0177072A08B62103F153 /* app_icon.png */; };
 		195373F5C2826F2164ADA210 /* QuickActionButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27F1FDDA6E8134F99044B055 /* QuickActionButton.swift */; };
 		19B6F9FEF50AFBB2F2389FC5 /* WindowFocusManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F08A9E6530CC6C2AB42A1164 /* WindowFocusManager.swift */; };
-		1B615D30B7949E25F0242CB4 /* AppIcon.png in Resources */ = {isa = PBXBuildFile; fileRef = EB79A9CD6CDE01E4D03B7052 /* AppIcon.png */; };
 		1CD6D2548A45F0CE0B868CAE /* UserNotifications.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9842147459203026BBF10390 /* UserNotifications.framework */; };
 		21C986C5254A1432048CEC23 /* AppleSiliconOptimizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96EC655F5DBE77E1A3D0BFBD /* AppleSiliconOptimizer.swift */; };
-		222CA52844563ADD78381D08 /* AppIconMaster.svg in Resources */ = {isa = PBXBuildFile; fileRef = F059831D58B7E74D438B7946 /* AppIconMaster.svg */; };
 		254927ADE12338ECAA061354 /* OrderedCollections in Frameworks */ = {isa = PBXBuildFile; productRef = 40C692463D61FF3FD0CFD937 /* OrderedCollections */; };
 		2924D972BBAC27169E7EE8F6 /* EventMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 271098ACD4DC0594546D9468 /* EventMonitor.swift */; };
 		2A3B800F46EE5850165847B5 /* SkyBridgeProtocolCore in Frameworks */ = {isa = PBXBuildFile; productRef = E0E308E97B432D86D27EEC34 /* SkyBridgeProtocolCore */; };
@@ -27,38 +24,35 @@
 		2E251BC35BA073961CBEF59F /* CurrentPathDeviceActivationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */; };
 		2F9EFBC936751A50E4539FC5 /* PreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B94E56E85A4296340AE2361F /* PreferencesView.swift */; };
 		306A4A889A8ECD7F0D631141 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */; };
+		31370A0F880FBCEC4782E390 /* AppUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = C19289634BAF7B5DEB829B96 /* AppUpdateChecker.swift */; };
 		33AB642A10F5D94F285B83FC /* MetricChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06339FDDB8B71E52F8BD41F9 /* MetricChartView.swift */; };
 		3685AE9894ADAC0AC97FAE1C /* DashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0310489E5FE84E88C2AA09 /* DashboardViewModel.swift */; };
 		3718C6A09071B63D5A584DC2 /* USBDeviceManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72CCFF8EFF1A7A7B473878F4 /* USBDeviceManagementView.swift */; };
 		37D0AB8ABBF69CB961977B17 /* ThemeConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D1E1B2B213D3C7CA21D24F /* ThemeConfiguration.swift */; };
 		3E1E8CDD5E02C9D0EBFE7DC2 /* PerformanceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4A43A751BE9D7EF1691A7E4 /* PerformanceMonitor.swift */; };
+		3FF17718EF869FEE946BAEC2 /* LocalP2PFileTransferSmokeHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3084584BF0FDE053BBC5C0C /* LocalP2PFileTransferSmokeHarness.swift */; };
 		4195DB68957C37F2112E4114 /* MetalPerformanceOptimizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC73A329850D8E20553B4C60 /* MetalPerformanceOptimizer.swift */; };
 		4202FE43689DB0FAFA65F335 /* EnhancedDeviceDiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */; };
 		460A1A9C2CD7B05278490283 /* NavigationItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC06DE625F848AA1986847EB /* NavigationItem.swift */; };
 		46232BE959AC8B34E517C798 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */; };
 		46E9BD8263B340621DE3E145 /* UserProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39D2A37D92B82FBD25E719A3 /* UserProfileView.swift */; };
-		46F3D5F3C45056CD18AE4355 /* about-main-icon.svg in Resources */ = {isa = PBXBuildFile; fileRef = D759DFEDD41AB404216F0021 /* about-main-icon.svg */; };
+		47408F11F55E2E3497CF25CF /* OnlineDeviceConnectionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61B6C5B59BA95D28F13245A6 /* OnlineDeviceConnectionCoordinator.swift */; };
 		4950910AF6588D333D47018B /* DashboardContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74DF29B58CA8ADE6A6AD3F74 /* DashboardContentView.swift */; };
 		4DF7982B3966C816E9E52BC0 /* SystemMetricsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD76C79AD9E56BFA57C1F041 /* SystemMetricsPanelView.swift */; };
 		4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FD3678EA90CE43D8B206FD5 /* RealTimeWeatherService.swift */; };
 		508D04834661A08F8BCF47C4 /* DeviceChainViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9EF4C7CF9BE849F017EDA /* DeviceChainViewModel.swift */; };
 		513D63C5FD6A64DCFB0E0437 /* CloudDeviceListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */; };
-		51A7B7E0A61F4F5A9C85A8B2 /* CloudDevicePresentationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E7F9D9C16B348B5B4C5A8A2 /* CloudDevicePresentationPolicy.swift */; };
 		56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCCDC5283DA30812C545D629 /* OnlineDeviceRow.swift */; };
 		56B662DC159A06A386023551 /* StartupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28A863D8FACC89865E5B02AE /* StartupCoordinator.swift */; };
 		589EE25508C29C0854EB4912 /* MissingIconHintView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85A2082093DBBCD396198A9C /* MissingIconHintView.swift */; };
-		5A9E3D9F4A4146F5AD219601 /* AppUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A9E3D9E4A4146F5AD219600 /* AppUpdateChecker.swift */; };
 		5A25017DFEF93E116ECA08E2 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
 		5B92DEAF73D4A58CD8B62A69 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */; };
 		5C76D7E4E513E62149275F6A /* ClassicBackgroundV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDC840D20233F0618288F1E6 /* ClassicBackgroundV2.swift */; };
 		5C993AF7FD43EAFB765E4AC7 /* FileTransferRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D9A4EDD78AB3ED51D441734 /* FileTransferRow.swift */; };
 		5EE1800E4C259668BD77A84C /* ClassicBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3388F3763B3264B31C56F6A4 /* ClassicBackground.swift */; };
 		5EEE661E2440BD1615A2FAC2 /* SVGEmbeddedImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F8976817A70651D31498598 /* SVGEmbeddedImageView.swift */; };
-		509C55AFB81E4008B1B5D0F4 /* LocalP2PFileTransferSmokeHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF5DB93E00D44E869300B260 /* LocalP2PFileTransferSmokeHarness.swift */; };
 		61117B98453EDD7EFFB38D6A /* EnhancedDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8793A89866E33950D6F13A33 /* EnhancedDeviceRow.swift */; };
-		617E33E5B02A7202C97933CD /* BrandIcon.png in Resources */ = {isa = PBXBuildFile; fileRef = 10384E630E9ABF87508AC6ED /* BrandIcon.png */; };
 		64A3EA9E284F96AF9C3084B2 /* SkyBridgeVisualParity in Frameworks */ = {isa = PBXBuildFile; productRef = 207088C036D7A7F97A6A0444 /* SkyBridgeVisualParity */; };
-		6696E14B73BEF52586DD13EA /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 4EBDD94C659F2EC1275A278C /* Assets.xcassets */; };
 		6820DA289F7FA98B38EBE133 /* SkyBridgeCore in Frameworks */ = {isa = PBXBuildFile; productRef = 921C38E07E934A5CDB49F41E /* SkyBridgeCore */; };
 		6B9C2343C5BE6AFBB0F37B2F /* MetricsTimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E0064CA0B644C4F8C054C1 /* MetricsTimelineView.swift */; };
 		70C604B3B95BA156481FB8C7 /* SSHTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 904A7A42479065B9367A8E4D /* SSHTerminalView.swift */; };
@@ -69,8 +63,8 @@
 		7A447F0A23637367C8D92BD7 /* AppleSiliconSystemCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09525D33288E26F88FF2AA60 /* AppleSiliconSystemCoordinator.swift */; };
 		7A82E21B4233C8E31F7F217F /* UserProfileOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7AA82D7D5FC282FEB03C6D1 /* UserProfileOverlay.swift */; };
 		7AC9D3D4188016B890EBE9A0 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E06A601920A0654D26DC0CF /* DashboardView.swift */; };
-		2D88B02F6C9D4D8E83F19F01 /* RemoteControlSecurityNoticePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D88B02E6C9D4D8E83F19F00 /* RemoteControlSecurityNoticePanelController.swift */; };
 		83E3064711CB4C8FDB487DAB /* AuthenticationViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A7DACBA6F3DD4E715607BD /* AuthenticationViewModel.swift */; };
+		8588F906B788D45CD60F17F0 /* CloudDevicePresentationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFC8E7BB960527B5BC052F04 /* CloudDevicePresentationPolicy.swift */; };
 		8604A809C8518BE2CC1E8129 /* PerformanceMonitoringPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA0B3F8DBAA95AD39757262 /* PerformanceMonitoringPanelView.swift */; };
 		87D4E408B8934CF67E9FF500 /* DeviceDiscoveryPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFEB5C8A3A97F114A59348AC /* DeviceDiscoveryPanelView.swift */; };
 		8B7E29A1DF3C80E7F309FE53 /* PerformanceErrorHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83227A90FFD3F72879561C7C /* PerformanceErrorHandler.swift */; };
@@ -87,10 +81,8 @@
 		9B428D23CA3ECDB5E2A163E4 /* CopyToastView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE3E2F0E44685A79BA4C94DD /* CopyToastView.swift */; };
 		9B5E9C84738C88F50CDDFB5D /* DashboardBackgroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 453B52513C3C99FB3DD15270 /* DashboardBackgroundView.swift */; };
 		A17447C790F9151442DBEC93 /* AuroraBackgroundV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCD3371C10C30C141796DCAD /* AuroraBackgroundV2.swift */; };
-		A1E3DA4D6CDBD4961FFB442C /* AppIconDock.icns in Resources */ = {isa = PBXBuildFile; fileRef = C29A92C78926A2995AB5A04F /* AppIconDock.icns */; };
 		A351D181FFC11D0E226EED9E /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4F654D338CC30B122FE4B133 /* WebKit.framework */; };
 		A4FB6EB862F04D9BB309A69A /* WidgetIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CEA4D01349D879638CC4917 /* WidgetIntents.swift */; };
-		A5B2242292E41B5BE150BCCD /* custom-globe.svg in Resources */ = {isa = PBXBuildFile; fileRef = DE8FF424355FD3A38BD40DEC /* custom-globe.svg */; };
 		A75371379A7B47C826D07860 /* StatCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A11BCD0B79A6F1CDD86265 /* StatCard.swift */; };
 		A754A5A5420B98FC76F858A0 /* UnifiedDeviceDiscoveryIntegrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B71CE711B673A2D01534F10 /* UnifiedDeviceDiscoveryIntegrationView.swift */; };
 		A9EC192B3EAACD1D9DDD648C /* AppleSiliconFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA32C39188C5F008B50B36E5 /* AppleSiliconFeatures.swift */; };
@@ -98,22 +90,20 @@
 		AFB7B013F2F76496BAEA8D8D /* GlobalMouseTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */; };
 		AFCFB84CB3BED724BF7B7625 /* SkyBridgeCompassWidgetsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B024F123E545DB94D950046D /* CrossNetworkConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614723D38FB3796157959949 /* CrossNetworkConnectionView.swift */; };
+		B4038A16C208252420D8A71F /* RemoteControlSecurityNoticePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B291696558158CD2FCBA53 /* RemoteControlSecurityNoticePanelController.swift */; };
 		B443104E298B5FCAAAC7AB11 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA4009F3AB9EC57282EBCD07 /* WidgetKit.framework */; };
 		B70CD70DCDCA73539F3EA1B1 /* AppleSiliconInfoCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE7D0EE9AAE38836D4F2611 /* AppleSiliconInfoCardView.swift */; };
 		B9967812E8862B2D5E969337 /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59C11557E4D37206C350EB7 /* AuthenticationView.swift */; };
 		BA379AB843B4BAD867386914 /* SiriIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */; };
-		BC2A52E86F0D41DB8B4B9A16 /* OnlineDeviceConnectionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A5F1CF7485D4C08A1F9355D /* OnlineDeviceConnectionCoordinator.swift */; };
 		BC8915FB56BCA3D001CEC9AD /* LiquidGlassUserArea.swift in Sources */ = {isa = PBXBuildFile; fileRef = C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */; };
 		BCCE38FACB757941021C0F32 /* CloudDeviceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E05B03AA449A0E8D2C4820E /* CloudDeviceService.swift */; };
 		BD94EE9880420BECE2D44FBF /* CompactDeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAFBEC275559A384FBE1B542 /* CompactDeviceRow.swift */; };
 		C00EEDBECAC4FEC52B10FA31 /* SkyBridgeUI in Frameworks */ = {isa = PBXBuildFile; productRef = 962ACD1027DC997E30E6FD7B /* SkyBridgeUI */; };
-		C3289C4C332751DA0734C68F /* app-icon.svg in Resources */ = {isa = PBXBuildFile; fileRef = 5E3E7BAB3B34858277B55286 /* app-icon.svg */; };
 		C4F836ECF847653206BAA2C7 /* NSTextFieldRepresentable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31C4F642A50FB646F1B464CD /* NSTextFieldRepresentable.swift */; };
 		C91899FAFC645E27B5CFCEC5 /* TrustedDeviceDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */; };
 		D150ECFD3F644A3C36BC983F /* DeepSpaceBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43B75F6178584EDAD57DED90 /* DeepSpaceBackground.swift */; };
 		D18FEAF482D5F10FC9FF76D1 /* SkyBridgeWidgetShared in Frameworks */ = {isa = PBXBuildFile; productRef = 0EEB3E27748D53378DDED79E /* SkyBridgeWidgetShared */; };
 		D1AA0048AE2EFE6CAA48604F /* WeatherDashboardCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A605DDC91BE62D3D7CDC61C7 /* WeatherDashboardCard.swift */; };
-		D453B26935EB98F5D6C3BC0E /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 457DD196A7C6A5E5E3C11952 /* AppIcon.icns */; };
 		D4D432BD658297ACD73A41A1 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */; };
 		D701D1AEA7BC985D7A1E0B81 /* GlassSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5181227F31B316BCC735B8FA /* GlassSidebar.swift */; };
 		DABEA837C02F24603DAE0260 /* SupabaseConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3445ED6C3F4CBF4F08CDBEB5 /* SupabaseConfiguration.swift */; };
@@ -127,7 +117,6 @@
 		F9096AB77DFBB5B022AFA4EE /* SkyBridgeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EF31CD7A8365F25C7F6BDBE /* SkyBridgeCommands.swift */; };
 		FB5D3C7F0F4BCF51EFA9DBD4 /* RemoteSessionStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6DD40EDD84B524150667A28 /* RemoteSessionStatusView.swift */; };
 		FDD48779FE89C3C746869876 /* SupabaseTurnstileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D5F467BEAD915B84BACF7DF /* SupabaseTurnstileView.swift */; };
-		FE0E1D3FD29C2CDD20364243 /* AppIconDock.png in Resources */ = {isa = PBXBuildFile; fileRef = 033230544C8FB70DBDF38544 /* AppIconDock.png */; };
 		FEB4E5F083CBE09135FC0B5A /* BackgroundControlManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C029BBBAD7F82EA70394637A /* BackgroundControlManager.swift */; };
 		FF7C91DAC645B2312CA969B0 /* RemoteSessionsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9084B8D1A2C8E96846F2EABC /* RemoteSessionsPanelView.swift */; };
 /* End PBXBuildFile section */
@@ -158,11 +147,9 @@
 
 /* Begin PBXFileReference section */
 		011B25C12BF2C1EB67D2D843 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
-		033230544C8FB70DBDF38544 /* AppIconDock.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = AppIconDock.png; sourceTree = "<group>"; };
 		06339FDDB8B71E52F8BD41F9 /* MetricChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricChartView.swift; sourceTree = "<group>"; };
 		09525D33288E26F88FF2AA60 /* AppleSiliconSystemCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSiliconSystemCoordinator.swift; sourceTree = "<group>"; };
 		0BE7D0EE9AAE38836D4F2611 /* AppleSiliconInfoCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSiliconInfoCardView.swift; sourceTree = "<group>"; };
-		10384E630E9ABF87508AC6ED /* BrandIcon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = BrandIcon.png; sourceTree = "<group>"; };
 		1B2691D9D9A0E7E40DAC0794 /* SkyBridgeCompassWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SkyBridgeCompassWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		271098ACD4DC0594546D9468 /* EventMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventMonitor.swift; sourceTree = "<group>"; };
 		27F1FDDA6E8134F99044B055 /* QuickActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionButton.swift; sourceTree = "<group>"; };
@@ -170,7 +157,6 @@
 		2B68DC27EAEE5485CBDDAE6B /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppIntents.framework; sourceTree = "<group>"; };
 		2D9A4EDD78AB3ED51D441734 /* FileTransferRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferRow.swift; sourceTree = "<group>"; };
 		2E06A601920A0654D26DC0CF /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
-		2D88B02E6C9D4D8E83F19F00 /* RemoteControlSecurityNoticePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlSecurityNoticePanelController.swift; sourceTree = "<group>"; };
 		2F34F8DCDE6691F163DC5C82 /* SkyBridgeCompassMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SkyBridgeCompassMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnhancedDeviceDiscoveryView.swift; sourceTree = "<group>"; };
 		310BAB0F526B509D794C9F8F /* AuroraBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuroraBackground.swift; sourceTree = "<group>"; };
@@ -187,20 +173,17 @@
 		43B75F6178584EDAD57DED90 /* DeepSpaceBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepSpaceBackground.swift; sourceTree = "<group>"; };
 		451C648AD24D1A64C8C8D3CC /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
 		453B52513C3C99FB3DD15270 /* DashboardBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardBackgroundView.swift; sourceTree = "<group>"; };
-		457DD196A7C6A5E5E3C11952 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 		4AA118FAF4446AA7A926A272 /* PerformanceMetricRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMetricRow.swift; sourceTree = "<group>"; };
 		4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustedDeviceDetailView.swift; sourceTree = "<group>"; };
 		4C0310489E5FE84E88C2AA09 /* DashboardViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardViewModel.swift; sourceTree = "<group>"; };
-		4EBDD94C659F2EC1275A278C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4F654D338CC30B122FE4B133 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = WebKit.framework; sourceTree = "<group>"; };
 		5181227F31B316BCC735B8FA /* GlassSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassSidebar.swift; sourceTree = "<group>"; };
 		5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalMouseTracker.swift; sourceTree = "<group>"; };
-		5A9E3D9E4A4146F5AD219600 /* AppUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateChecker.swift; sourceTree = "<group>"; };
 		5BA0B3F8DBAA95AD39757262 /* PerformanceMonitoringPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMonitoringPanelView.swift; sourceTree = "<group>"; };
 		5CEA4D01349D879638CC4917 /* WidgetIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetIntents.swift; sourceTree = "<group>"; };
-		5E3E7BAB3B34858277B55286 /* app-icon.svg */ = {isa = PBXFileReference; path = "app-icon.svg"; sourceTree = "<group>"; };
 		5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiriIntents.swift; sourceTree = "<group>"; };
 		614723D38FB3796157959949 /* CrossNetworkConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkConnectionView.swift; sourceTree = "<group>"; };
+		61B6C5B59BA95D28F13245A6 /* OnlineDeviceConnectionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineDeviceConnectionCoordinator.swift; sourceTree = "<group>"; };
 		6D5F467BEAD915B84BACF7DF /* SupabaseTurnstileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseTurnstileView.swift; sourceTree = "<group>"; };
 		6F343001F48A7DD45E78B48B /* SkyBridge Compass Pro release */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "SkyBridge Compass Pro release"; path = .; sourceTree = SOURCE_ROOT; };
 		71D9EF4C7CF9BE849F017EDA /* DeviceChainViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceChainViewModel.swift; sourceTree = "<group>"; };
@@ -208,8 +191,6 @@
 		72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationBellView.swift; sourceTree = "<group>"; };
 		7421CFFDEE7371624E428DBF /* AuthenticationServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AuthenticationServices.framework; sourceTree = "<group>"; };
 		74DF29B58CA8ADE6A6AD3F74 /* DashboardContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardContentView.swift; sourceTree = "<group>"; };
-		6A5F1CF7485D4C08A1F9355D /* OnlineDeviceConnectionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineDeviceConnectionCoordinator.swift; sourceTree = "<group>"; };
-		6E7F9D9C16B348B5B4C5A8A2 /* CloudDevicePresentationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudDevicePresentationPolicy.swift; sourceTree = "<group>"; };
 		80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldMirrorView.swift; sourceTree = "<group>"; };
 		825CF90D2A0365C9B9F0A7F5 /* CustomBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomBackgroundView.swift; sourceTree = "<group>"; };
 		83227A90FFD3F72879561C7C /* PerformanceErrorHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceErrorHandler.swift; sourceTree = "<group>"; };
@@ -230,6 +211,7 @@
 		9F8976817A70651D31498598 /* SVGEmbeddedImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SVGEmbeddedImageView.swift; sourceTree = "<group>"; };
 		9FD3678EA90CE43D8B206FD5 /* RealTimeWeatherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealTimeWeatherService.swift; sourceTree = "<group>"; };
 		A4A43A751BE9D7EF1691A7E4 /* PerformanceMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceMonitor.swift; sourceTree = "<group>"; };
+		A5B291696558158CD2FCBA53 /* RemoteControlSecurityNoticePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlSecurityNoticePanelController.swift; sourceTree = "<group>"; };
 		A605DDC91BE62D3D7CDC61C7 /* WeatherDashboardCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherDashboardCard.swift; sourceTree = "<group>"; };
 		A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationNotifications.swift; sourceTree = "<group>"; };
 		A8D1E1B2B213D3C7CA21D24F /* ThemeConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeConfiguration.swift; sourceTree = "<group>"; };
@@ -243,16 +225,15 @@
 		BC06DE625F848AA1986847EB /* NavigationItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationItem.swift; sourceTree = "<group>"; };
 		BCCDC5283DA30812C545D629 /* OnlineDeviceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineDeviceRow.swift; sourceTree = "<group>"; };
 		BCD3371C10C30C141796DCAD /* AuroraBackgroundV2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuroraBackgroundV2.swift; sourceTree = "<group>"; };
-		BFFF0177072A08B62103F153 /* app_icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = app_icon.png; sourceTree = "<group>"; };
+		BFC8E7BB960527B5BC052F04 /* CloudDevicePresentationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudDevicePresentationPolicy.swift; sourceTree = "<group>"; };
 		C029BBBAD7F82EA70394637A /* BackgroundControlManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundControlManager.swift; sourceTree = "<group>"; };
 		C06FBCEF936A2D2849046F52 /* TopNavigationBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopNavigationBarView.swift; sourceTree = "<group>"; };
-		C29A92C78926A2995AB5A04F /* AppIconDock.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIconDock.icns; sourceTree = "<group>"; };
+		C19289634BAF7B5DEB829B96 /* AppUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateChecker.swift; sourceTree = "<group>"; };
 		C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassUserArea.swift; sourceTree = "<group>"; };
 		C6DD40EDD84B524150667A28 /* RemoteSessionStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionStatusView.swift; sourceTree = "<group>"; };
 		C7AA82D7D5FC282FEB03C6D1 /* UserProfileOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserProfileOverlay.swift; sourceTree = "<group>"; };
 		CC73A329850D8E20553B4C60 /* MetalPerformanceOptimizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalPerformanceOptimizer.swift; sourceTree = "<group>"; };
 		CD76C79AD9E56BFA57C1F041 /* SystemMetricsPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemMetricsPanelView.swift; sourceTree = "<group>"; };
-		CF5DB93E00D44E869300B260 /* LocalP2PFileTransferSmokeHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalP2PFileTransferSmokeHarness.swift; sourceTree = "<group>"; };
 		CFCE049A1A7724672405473E /* GlobalHazeShaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GlobalHazeShaders.metal; sourceTree = "<group>"; };
 		CFEB5C8A3A97F114A59348AC /* DeviceDiscoveryPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDiscoveryPanelView.swift; sourceTree = "<group>"; };
 		D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentPathDeviceActivationCoordinator.swift; sourceTree = "<group>"; };
@@ -260,17 +241,14 @@
 		D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudDeviceListViewModel.swift; sourceTree = "<group>"; };
 		D22DC77505406627AA516040 /* DashboardDataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardDataService.swift; sourceTree = "<group>"; };
 		D3517C71164458BF6CE15043 /* GPUUsageMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUUsageMonitor.swift; sourceTree = "<group>"; };
-		D759DFEDD41AB404216F0021 /* about-main-icon.svg */ = {isa = PBXFileReference; path = "about-main-icon.svg"; sourceTree = "<group>"; };
 		D77D1FEE9D791CA02A737B6C /* CompassWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompassWidget.swift; sourceTree = "<group>"; };
 		D7A7DACBA6F3DD4E715607BD /* AuthenticationViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationViewModel.swift; sourceTree = "<group>"; };
 		D981C5DE0E776952AD0B0761 /* LocalPeerServiceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPeerServiceCoordinator.swift; sourceTree = "<group>"; };
 		DD91A8E4CBF6638B206BB830 /* VNCViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VNCViewerView.swift; sourceTree = "<group>"; };
 		DE3E2F0E44685A79BA4C94DD /* CopyToastView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyToastView.swift; sourceTree = "<group>"; };
-		DE8FF424355FD3A38BD40DEC /* custom-globe.svg */ = {isa = PBXFileReference; path = "custom-globe.svg"; sourceTree = "<group>"; };
 		E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderedCollectionsFallback.swift; sourceTree = "<group>"; };
-		EB79A9CD6CDE01E4D03B7052 /* AppIcon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = AppIcon.png; sourceTree = "<group>"; };
-		F059831D58B7E74D438B7946 /* AppIconMaster.svg */ = {isa = PBXFileReference; path = AppIconMaster.svg; sourceTree = "<group>"; };
 		F08A9E6530CC6C2AB42A1164 /* WindowFocusManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFocusManager.swift; sourceTree = "<group>"; };
+		F3084584BF0FDE053BBC5C0C /* LocalP2PFileTransferSmokeHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalP2PFileTransferSmokeHarness.swift; sourceTree = "<group>"; };
 		F619970AE867A40F81CB88B7 /* RemoteSessionRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionRow.swift; sourceTree = "<group>"; };
 		F63965829D3ABAF0609035D3 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		F82B594F9E6F32F8BBED768E /* EmptyStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyStateView.swift; sourceTree = "<group>"; };
@@ -345,15 +323,6 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		4BDCDB24F480C3605ADA2515 /* Icons */ = {
-			isa = PBXGroup;
-			children = (
-				D759DFEDD41AB404216F0021 /* about-main-icon.svg */,
-				DE8FF424355FD3A38BD40DEC /* custom-globe.svg */,
-			);
-			path = Icons;
-			sourceTree = "<group>";
-		};
 		552266FC4F792A927F711658 /* SkyBridgeCompassApp */ = {
 			isa = PBXGroup;
 			children = (
@@ -372,15 +341,15 @@
 				90E4C0DD7117D686BDBD4290 /* GlobalHazeBackground.swift */,
 				CFCE049A1A7724672405473E /* GlobalHazeShaders.metal */,
 				5ADCEA738722364F1411533F /* GlobalMouseTracker.swift */,
-				CF5DB93E00D44E869300B260 /* LocalP2PFileTransferSmokeHarness.swift */,
+				F3084584BF0FDE053BBC5C0C /* LocalP2PFileTransferSmokeHarness.swift */,
 				D981C5DE0E776952AD0B0761 /* LocalPeerServiceCoordinator.swift */,
 				85A2082093DBBCD396198A9C /* MissingIconHintView.swift */,
 				A838B3029CCDE75BA6832A13 /* NavigationNotifications.swift */,
 				31C4F642A50FB646F1B464CD /* NSTextFieldRepresentable.swift */,
-					E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */,
-					B94E56E85A4296340AE2361F /* PreferencesView.swift */,
-					2D88B02E6C9D4D8E83F19F00 /* RemoteControlSecurityNoticePanelController.swift */,
-					3AE55FABF0A44C3E6FE9698E /* RemoteDesktopView.swift */,
+				E89F31AF69B932F78DB1AE86 /* OrderedCollectionsFallback.swift */,
+				B94E56E85A4296340AE2361F /* PreferencesView.swift */,
+				A5B291696558158CD2FCBA53 /* RemoteControlSecurityNoticePanelController.swift */,
+				3AE55FABF0A44C3E6FE9698E /* RemoteDesktopView.swift */,
 				8B1FB7AA1712E13D6F941B63 /* RemoteDisplayView.swift */,
 				5F090D8487D23F8EA06E4ECA /* SiriIntents.swift */,
 				8EF31CD7A8365F25C7F6BDBE /* SkyBridgeCommands.swift */,
@@ -428,17 +397,7 @@
 		56FB408858272D2FFA8F6DB4 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				BFFF0177072A08B62103F153 /* app_icon.png */,
-				5E3E7BAB3B34858277B55286 /* app-icon.svg */,
-				457DD196A7C6A5E5E3C11952 /* AppIcon.icns */,
-				EB79A9CD6CDE01E4D03B7052 /* AppIcon.png */,
-				C29A92C78926A2995AB5A04F /* AppIconDock.icns */,
-				033230544C8FB70DBDF38544 /* AppIconDock.png */,
-				F059831D58B7E74D438B7946 /* AppIconMaster.svg */,
-				4EBDD94C659F2EC1275A278C /* Assets.xcassets */,
-				10384E630E9ABF87508AC6ED /* BrandIcon.png */,
 				F4D58C1923FEAD79BD120C04 /* Localizable.strings */,
-				4BDCDB24F480C3605ADA2515 /* Icons */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -446,11 +405,11 @@
 		5794F40FE79DFC3FF1BD8A0E /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				C19289634BAF7B5DEB829B96 /* AppUpdateChecker.swift */,
 				9E05B03AA449A0E8D2C4820E /* CloudDeviceService.swift */,
-				5A9E3D9E4A4146F5AD219600 /* AppUpdateChecker.swift */,
 				D086B736FD10715191789EF6 /* CurrentPathDeviceActivationCoordinator.swift */,
 				D22DC77505406627AA516040 /* DashboardDataService.swift */,
-				6A5F1CF7485D4C08A1F9355D /* OnlineDeviceConnectionCoordinator.swift */,
+				61B6C5B59BA95D28F13245A6 /* OnlineDeviceConnectionCoordinator.swift */,
 				F0BFA79F007535E0ADD84BC2 /* Weather */,
 			);
 			path = Services;
@@ -501,7 +460,7 @@
 			isa = PBXGroup;
 			children = (
 				D1892E8C5984E31A156FAEE2 /* CloudDeviceListViewModel.swift */,
-				6E7F9D9C16B348B5B4C5A8A2 /* CloudDevicePresentationPolicy.swift */,
+				BFC8E7BB960527B5BC052F04 /* CloudDevicePresentationPolicy.swift */,
 				71D9EF4C7CF9BE849F017EDA /* DeviceChainViewModel.swift */,
 			);
 			path = ViewModels;
@@ -633,6 +592,7 @@
 				BF892A9EF24111D8DF30BFEB /* Resources */,
 				2E2945BB3663704CC7F25280 /* Frameworks */,
 				D89476B82486194D80E7A3F7 /* Embed Foundation Extensions */,
+				9D6E4906A19D134C20183320 /* Compile Icon Composer AppIcon */,
 			);
 			buildRules = (
 			);
@@ -699,33 +659,53 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				D453B26935EB98F5D6C3BC0E /* AppIcon.icns in Resources */,
-				1B615D30B7949E25F0242CB4 /* AppIcon.png in Resources */,
-				A1E3DA4D6CDBD4961FFB442C /* AppIconDock.icns in Resources */,
-				FE0E1D3FD29C2CDD20364243 /* AppIconDock.png in Resources */,
-				222CA52844563ADD78381D08 /* AppIconMaster.svg in Resources */,
-				6696E14B73BEF52586DD13EA /* Assets.xcassets in Resources */,
-				617E33E5B02A7202C97933CD /* BrandIcon.png in Resources */,
 				DF057D8E9931418687E6EAAF /* Localizable.strings in Resources */,
-				46F3D5F3C45056CD18AE4355 /* about-main-icon.svg in Resources */,
-				C3289C4C332751DA0734C68F /* app-icon.svg in Resources */,
-				1648DA143122FEAE697FC7F8 /* app_icon.png in Resources */,
-				A5B2242292E41B5BE150BCCD /* custom-globe.svg in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		9D6E4906A19D134C20183320 /* Compile Icon Composer AppIcon */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/compile_xcode_icon_composer_assets.sh",
+				"$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/AppIcon.png",
+				"$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/BrandIcon.png",
+				"$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/SidebarBrandIcon.png",
+				"$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/icon.json",
+				"$(SRCROOT)/Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/Assets/Image.png",
+			);
+			name = "Compile Icon Composer AppIcon";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Assets.car",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AppIcon.icns",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BrandIcon.png",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SidebarBrandIcon.png",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "#!/usr/bin/env bash\nset -euo pipefail\n\nsrcroot=\"${SRCROOT:-$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)}\"\ntarget_build_dir=\"${TARGET_BUILD_DIR:?TARGET_BUILD_DIR is required}\"\nresources_folder=\"${UNLOCALIZED_RESOURCES_FOLDER_PATH:?UNLOCALIZED_RESOURCES_FOLDER_PATH is required}\"\nresources_dir=\"${target_build_dir}/${resources_folder}\"\nicon_doc_dir=\"${srcroot}/Sources/SkyBridgeCompassApp/Resources/AppIcon.icon\"\ncanonical_png=\"${srcroot}/Sources/SkyBridgeCompassApp/Resources/AppIcon.png\"\nbrand_icon_png=\"${srcroot}/Sources/SkyBridgeCompassApp/Resources/BrandIcon.png\"\nsidebar_brand_icon_png=\"${srcroot}/Sources/SkyBridgeCompassApp/Resources/SidebarBrandIcon.png\"\ntmp_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/skybridge-xcode-iconcomposer.XXXXXX\")\"\nactool_log=\"${tmp_dir}/actool.log\"\npartial_info_plist=\"${tmp_dir}/assetcatalog_generated_info.plist\"\n\ncleanup() {\n  rm -rf \"${tmp_dir}\"\n}\ntrap cleanup EXIT\n\nif [[ ! -f \"${icon_doc_dir}/icon.json\" || ! -f \"${icon_doc_dir}/Assets/Image.png\" ]]; then\n  echo \"AppIcon.icon is incomplete: ${icon_doc_dir}\" >&2\n  exit 1\nfi\n\nif [[ ! -f \"${canonical_png}\" ]]; then\n  echo \"canonical AppIcon.png is missing: ${canonical_png}\" >&2\n  exit 1\nfi\n\ncanonical_png_hash=\"$(shasum -a 256 \"${canonical_png}\" | awk '{print $1}')\"\niconcomposer_png_hash=\"$(shasum -a 256 \"${icon_doc_dir}/Assets/Image.png\" | awk '{print $1}')\"\nif [[ \"${canonical_png_hash}\" != \"${iconcomposer_png_hash}\" ]]; then\n  echo \"AppIcon.icon/Assets/Image.png must match canonical AppIcon.png\" >&2\n  echo \"AppIcon.png=${canonical_png_hash} IconComposerImage=${iconcomposer_png_hash}\" >&2\n  exit 1\nfi\n\nif [[ ! -f \"${brand_icon_png}\" ]]; then\n  echo \"runtime BrandIcon.png is missing: ${brand_icon_png}\" >&2\n  exit 1\nfi\n\nbrand_icon_png_hash=\"$(shasum -a 256 \"${brand_icon_png}\" | awk '{print $1}')\"\nif [[ \"${canonical_png_hash}\" != \"${brand_icon_png_hash}\" ]]; then\n  echo \"BrandIcon.png must match canonical AppIcon.png\" >&2\n  echo \"AppIcon.png=${canonical_png_hash} BrandIcon=${brand_icon_png_hash}\" >&2\n  exit 1\nfi\n\nif [[ ! -f \"${sidebar_brand_icon_png}\" ]]; then\n  echo \"runtime SidebarBrandIcon.png is missing: ${sidebar_brand_icon_png}\" >&2\n  exit 1\nfi\n\nsidebar_brand_icon_png_hash=\"$(shasum -a 256 \"${sidebar_brand_icon_png}\" | awk '{print $1}')\"\nif [[ \"${canonical_png_hash}\" == \"${sidebar_brand_icon_png_hash}\" ]]; then\n  echo \"SidebarBrandIcon.png must be a small-size optimized derivative, not a duplicate of AppIcon.png\" >&2\n  exit 1\nfi\n\ngenerate_full_size_icns() {\n  local source_png=\"$1\"\n  local output_icns=\"$2\"\n  local iconset_dir=\"${tmp_dir}/AppIcon.iconset\"\n\n  if ! command -v iconutil >/dev/null 2>&1; then\n    echo \"iconutil is required to generate the full-size AppIcon.icns\" >&2\n    exit 1\n  fi\n\n  rm -rf \"${iconset_dir}\"\n  mkdir -p \"${iconset_dir}\"\n  sips -z 16 16 \"${source_png}\" --out \"${iconset_dir}/icon_16x16.png\" >/dev/null\n  sips -z 32 32 \"${source_png}\" --out \"${iconset_dir}/icon_16x16@2x.png\" >/dev/null\n  sips -z 32 32 \"${source_png}\" --out \"${iconset_dir}/icon_32x32.png\" >/dev/null\n  sips -z 64 64 \"${source_png}\" --out \"${iconset_dir}/icon_32x32@2x.png\" >/dev/null\n  sips -z 128 128 \"${source_png}\" --out \"${iconset_dir}/icon_128x128.png\" >/dev/null\n  sips -z 256 256 \"${source_png}\" --out \"${iconset_dir}/icon_128x128@2x.png\" >/dev/null\n  sips -z 256 256 \"${source_png}\" --out \"${iconset_dir}/icon_256x256.png\" >/dev/null\n  sips -z 512 512 \"${source_png}\" --out \"${iconset_dir}/icon_256x256@2x.png\" >/dev/null\n  sips -z 512 512 \"${source_png}\" --out \"${iconset_dir}/icon_512x512.png\" >/dev/null\n  cp \"${source_png}\" \"${iconset_dir}/icon_512x512@2x.png\"\n  iconutil -c icns \"${iconset_dir}\" -o \"${output_icns}\"\n}\n\nmkdir -p \"${resources_dir}\"\n\nif ! xcrun actool \\\n    \"${icon_doc_dir}\" \\\n    --compile \"${tmp_dir}\" \\\n    --output-format human-readable-text \\\n    --notices \\\n    --warnings \\\n    --output-partial-info-plist \"${partial_info_plist}\" \\\n    --app-icon AppIcon \\\n    --enable-on-demand-resources NO \\\n    --development-region \"${DEVELOPMENT_LANGUAGE:-en}\" \\\n    --target-device mac \\\n    --minimum-deployment-target \"${MACOSX_DEPLOYMENT_TARGET:-14.0}\" \\\n    --platform macosx \\\n    --bundle-identifier \"${PRODUCT_BUNDLE_IDENTIFIER:-com.skybridge.compass.pro}\" \\\n    >\"${actool_log}\" 2>&1; then\n  cat \"${actool_log}\" >&2\n  exit 1\nfi\n\nif grep -qi 'warning:' \"${actool_log}\"; then\n  cat \"${actool_log}\" >&2\n  exit 1\nfi\n\nif [[ ! -f \"${tmp_dir}/Assets.car\" || ! -f \"${tmp_dir}/AppIcon.icns\" ]]; then\n  cat \"${actool_log}\" >&2\n  echo \"actool did not produce Assets.car and AppIcon.icns from AppIcon.icon\" >&2\n  exit 1\nfi\n\ngenerate_full_size_icns \"${canonical_png}\" \"${tmp_dir}/AppIcon.full-size.icns\"\n\ncp \"${tmp_dir}/Assets.car\" \"${resources_dir}/Assets.car\"\ncp \"${tmp_dir}/AppIcon.full-size.icns\" \"${resources_dir}/AppIcon.icns\"\ncp \"${brand_icon_png}\" \"${resources_dir}/BrandIcon.png\"\ncp \"${sidebar_brand_icon_png}\" \"${resources_dir}/SidebarBrandIcon.png\"\n\nrm -f \\\n  \"${resources_dir}/icon.json\" \\\n  \"${resources_dir}/Image.png\" \\\n  \"${resources_dir}/AppIcon.png\" \\\n  \"${resources_dir}/AppIconDock.icns\" \\\n  \"${resources_dir}/AppIconDock.png\" \\\n  \"${resources_dir}/app_icon.png\" \\\n  \"${resources_dir}/AppIconMaster.png\" \\\n  \"${resources_dir}/AppIconMaster.svg\" \\\n  \"${resources_dir}/app-icon.svg\"\nrm -rf \"${resources_dir}/AppIcon.icon\" \"${resources_dir}/Assets.xcassets\" \"${resources_dir}/Icons\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		490846018FEF8931A893C8D1 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				31370A0F880FBCEC4782E390 /* AppUpdateChecker.swift in Sources */,
 				A9EC192B3EAACD1D9DDD648C /* AppleSiliconFeatures.swift in Sources */,
 				B70CD70DCDCA73539F3EA1B1 /* AppleSiliconInfoCardView.swift in Sources */,
 				21C986C5254A1432048CEC23 /* AppleSiliconOptimizer.swift in Sources */,
 				7A447F0A23637367C8D92BD7 /* AppleSiliconSystemCoordinator.swift in Sources */,
-				5A9E3D9F4A4146F5AD219601 /* AppUpdateChecker.swift in Sources */,
 				91C63733F74A311A141A022C /* AuroraBackground.swift in Sources */,
 				A17447C790F9151442DBEC93 /* AuroraBackgroundV2.swift in Sources */,
 				B9967812E8862B2D5E969337 /* AuthenticationView.swift in Sources */,
@@ -735,7 +715,7 @@
 				5EE1800E4C259668BD77A84C /* ClassicBackground.swift in Sources */,
 				5C76D7E4E513E62149275F6A /* ClassicBackgroundV2.swift in Sources */,
 				513D63C5FD6A64DCFB0E0437 /* CloudDeviceListViewModel.swift in Sources */,
-				51A7B7E0A61F4F5A9C85A8B2 /* CloudDevicePresentationPolicy.swift in Sources */,
+				8588F906B788D45CD60F17F0 /* CloudDevicePresentationPolicy.swift in Sources */,
 				BCCE38FACB757941021C0F32 /* CloudDeviceService.swift in Sources */,
 				BD94EE9880420BECE2D44FBF /* CompactDeviceRow.swift in Sources */,
 				E02FFD8F6509AEAC92FAC3D7 /* ConcurrentSystemMonitor.swift in Sources */,
@@ -763,7 +743,7 @@
 				14F0E1D218B84170A8F10BCE /* GlobalHazeShaders.metal in Sources */,
 				AFB7B013F2F76496BAEA8D8D /* GlobalMouseTracker.swift in Sources */,
 				BC8915FB56BCA3D001CEC9AD /* LiquidGlassUserArea.swift in Sources */,
-				509C55AFB81E4008B1B5D0F4 /* LocalP2PFileTransferSmokeHarness.swift in Sources */,
+				3FF17718EF869FEE946BAEC2 /* LocalP2PFileTransferSmokeHarness.swift in Sources */,
 				719D81F3008816D48A6AA1EB /* LocalPeerServiceCoordinator.swift in Sources */,
 				4195DB68957C37F2112E4114 /* MetalPerformanceOptimizer.swift in Sources */,
 				33AB642A10F5D94F285B83FC /* MetricChartView.swift in Sources */,
@@ -775,7 +755,7 @@
 				E1E33C33EF35461B1031B9F9 /* NavigationNotifications.swift in Sources */,
 				7905FFC1F533B585ED3BA250 /* NearFieldMirrorView.swift in Sources */,
 				E93F2D2FEF6DB167B7A65C17 /* NotificationBellView.swift in Sources */,
-				BC2A52E86F0D41DB8B4B9A16 /* OnlineDeviceConnectionCoordinator.swift in Sources */,
+				47408F11F55E2E3497CF25CF /* OnlineDeviceConnectionCoordinator.swift in Sources */,
 				56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */,
 				732868A8F7E1C04A5E32E73C /* OrderedCollectionsFallback.swift in Sources */,
 				8B7E29A1DF3C80E7F309FE53 /* PerformanceErrorHandler.swift in Sources */,
@@ -784,10 +764,10 @@
 				8604A809C8518BE2CC1E8129 /* PerformanceMonitoringPanelView.swift in Sources */,
 				2F9EFBC936751A50E4539FC5 /* PreferencesView.swift in Sources */,
 				195373F5C2826F2164ADA210 /* QuickActionButton.swift in Sources */,
-					92AC76905AB39D110030E66C /* QuickActionsPanelView.swift in Sources */,
-					4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */,
-					2D88B02F6C9D4D8E83F19F01 /* RemoteControlSecurityNoticePanelController.swift in Sources */,
-					941EAC8F6EC80A3726E76FDD /* RemoteDesktopView.swift in Sources */,
+				92AC76905AB39D110030E66C /* QuickActionsPanelView.swift in Sources */,
+				4FE9CFF08B9C6B07EB02C9C9 /* RealTimeWeatherService.swift in Sources */,
+				B4038A16C208252420D8A71F /* RemoteControlSecurityNoticePanelController.swift in Sources */,
+				941EAC8F6EC80A3726E76FDD /* RemoteDesktopView.swift in Sources */,
 				1107809D175EC5DE28930559 /* RemoteDisplayView.swift in Sources */,
 				F2AD1913110B4DC7058F4997 /* RemoteSessionRow.swift in Sources */,
 				FB5D3C7F0F4BCF51EFA9DBD4 /* RemoteSessionStatusView.swift in Sources */,
@@ -884,8 +864,8 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
@@ -946,7 +926,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
-				CODE_SIGN_ENTITLEMENTS = Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements;
+				CODE_SIGN_ENTITLEMENTS = XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
 				EXECUTABLE_NAME = SkyBridgeCompassApp;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -1003,8 +983,8 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = YES;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
@@ -1038,7 +1018,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
-				CODE_SIGN_ENTITLEMENTS = Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements;
+				CODE_SIGN_ENTITLEMENTS = XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
 				EXECUTABLE_NAME = SkyBridgeCompassApp;
 				FRAMEWORK_SEARCH_PATHS = (

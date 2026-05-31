@@ -120,7 +120,6 @@ public final class UnifiedDeviceDiscoveryManager: ObservableObject {
             }, usb: { [weak self] in
                 await MainActor.run {
                     self?.usbDiscovery.startMonitoring()
-                    self?.usbDiscovery.scanUSBDevices()
                 }
             }, bluetooth: {
  // 预留：如需启用蓝牙扫描，在此接入 BluetoothManager.startScanning()
@@ -554,4 +553,3 @@ public enum PermissionState: String, Sendable {
     case partiallyGranted
     case denied
 }
-

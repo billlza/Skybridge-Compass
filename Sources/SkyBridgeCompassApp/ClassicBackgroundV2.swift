@@ -16,8 +16,10 @@ struct ClassicBackgroundV2: View {
     var body: some View {
         Group {
             if !bgControl.isPaused {
-                TimelineView(.periodic(from: .now, by: 1.0 / bgControl.getEffectiveFPS(base: settingsManager.performanceMode.targetFPS))) { timeline in
-                    let time = timeline.date.timeIntervalSince(Self.animationEpoch)
+                let baseFPS = settingsManager.performanceMode.targetFPS
+                TimelineView(.periodic(from: .now, by: bgControl.stableTimelineInterval(base: baseFPS))) { timeline in
+                    let elapsed = timeline.date.timeIntervalSince(Self.animationEpoch)
+                    let time = bgControl.throttledAnimationTime(elapsed, baseFPS: baseFPS)
                     ZStack {
  // 1. 深色底色
                         Color(red: 0.05, green: 0.08, blue: 0.15)

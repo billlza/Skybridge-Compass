@@ -309,120 +309,116 @@ function embed_macos_provisionprofile_if_available() {
   log "未找到匹配的 macOS provisioning profile，继续生成不含 embedded.provisionprofile 的开发包"
 }
 
-function compile_icon_composer_assets() {
+function install_precomposed_app_icon_assets() {
   local source_resources_dir="$1"
   local app_resources_dir="$2"
   local info_plist_path="$3"
   local icon_doc_dir="${source_resources_dir}/AppIcon.icon"
-  local asset_catalog_dir="${source_resources_dir}/Assets.xcassets"
-  local bundle_identifier=""
   local tmp_dir=""
-  local actool_log=""
-  local partial_info_plist=""
-  local icon_file=""
-  local icon_name=""
   local canonical_png_hash=""
   local iconcomposer_png_hash=""
-  local actool_inputs=()
-
-  if [[ "${SKYBRIDGE_ENABLE_ICON_COMPOSER:-1}" == "0" ]]; then
-    log "使用静态 AppIcon.icns，跳过 Icon Composer 编译（SKYBRIDGE_ENABLE_ICON_COMPOSER=0）"
-    return 0
-  fi
-
-  if [[ ! -d "${icon_doc_dir}" || ! -f "${icon_doc_dir}/icon.json" || ! -f "${icon_doc_dir}/Assets/Image.png" ]]; then
-    if is_release_distribution_context; then
-      echo "错误：release_dmg 打包缺少 AppIcon.icon 图标源，无法生成现代 app 图标。" >&2
-      exit 1
-    fi
-    log "未检测到完整 AppIcon.icon 图标源，沿用静态 AppIcon.icns"
-    return 0
-  fi
+  local brand_icon_png_hash=""
+  local sidebar_brand_icon_png_hash=""
+  local source_icns_hash=""
+  local generated_icns_hash=""
 
   if [[ ! -f "${source_resources_dir}/AppIcon.png" ]]; then
-    echo "错误：缺少 canonical AppIcon.png，无法证明 Icon Composer 图标源没有漂移。" >&2
+    echo "错误：缺少 canonical AppIcon.png，无法生成预合成 app 图标。" >&2
     exit 1
   fi
   canonical_png_hash="$(shasum -a 256 "${source_resources_dir}/AppIcon.png" | awk '{print $1}')"
-  iconcomposer_png_hash="$(shasum -a 256 "${icon_doc_dir}/Assets/Image.png" | awk '{print $1}')"
-  if [[ "${canonical_png_hash}" != "${iconcomposer_png_hash}" ]]; then
-    echo "错误：AppIcon.icon/Assets/Image.png 必须与 canonical AppIcon.png 完全一致，避免 Assets.car 与运行态图标漂移。" >&2
-    echo "AppIcon.png=${canonical_png_hash} IconComposerImage=${iconcomposer_png_hash}" >&2
-    exit 1
-  fi
 
-  if ! xcrun -f actool >/dev/null 2>&1; then
-    if is_release_distribution_context; then
-      echo "错误：release_dmg 打包需要 actool 来编译 AppIcon.icon。" >&2
+  if [[ -f "${icon_doc_dir}/Assets/Image.png" ]]; then
+    iconcomposer_png_hash="$(shasum -a 256 "${icon_doc_dir}/Assets/Image.png" | awk '{print $1}')"
+    if [[ "${canonical_png_hash}" != "${iconcomposer_png_hash}" ]]; then
+      echo "错误：AppIcon.icon/Assets/Image.png 必须与 canonical AppIcon.png 完全一致，避免开发期资源漂移。" >&2
+      echo "AppIcon.png=${canonical_png_hash} IconComposerImage=${iconcomposer_png_hash}" >&2
       exit 1
     fi
-    log "未找到 actool，沿用静态 AppIcon.icns"
-    return 0
   fi
 
-  bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${info_plist_path}" 2>/dev/null || echo "com.skybridge.compass.pro")
-  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-iconcomposer.XXXXXX")"
-  actool_log="${tmp_dir}/actool.log"
-
-  if [[ -d "${asset_catalog_dir}" ]]; then
-    actool_inputs=("${asset_catalog_dir}" "${icon_doc_dir}")
-  else
-    actool_inputs=("${icon_doc_dir}")
+  if [[ ! -f "${source_resources_dir}/BrandIcon.png" ]]; then
+    echo "错误：缺少运行态 BrandIcon.png，无法证明侧边栏品牌图标没有漂移。" >&2
+    exit 1
   fi
-
-  partial_info_plist="${tmp_dir}/assetcatalog_generated_info.plist"
-
-  log "编译 Icon Composer 应用图标（AppIcon.icon）"
-  if ! xcrun actool \
-      "${actool_inputs[@]}" \
-      --compile "${tmp_dir}" \
-      --output-format human-readable-text \
-      --notices \
-      --warnings \
-      --output-partial-info-plist "${partial_info_plist}" \
-      --app-icon AppIcon \
-      --enable-on-demand-resources NO \
-      --development-region en \
-      --target-device mac \
-      --minimum-deployment-target 14.0 \
-      --platform macosx \
-      --bundle-identifier "${bundle_identifier}" \
-      >"${actool_log}" 2>&1; then
-    cat "${actool_log}" >&2
-    rm -rf "${tmp_dir}"
-    echo "错误：Icon Composer 图标编译失败。" >&2
+  brand_icon_png_hash="$(shasum -a 256 "${source_resources_dir}/BrandIcon.png" | awk '{print $1}')"
+  if [[ "${canonical_png_hash}" != "${brand_icon_png_hash}" ]]; then
+    echo "错误：BrandIcon.png 必须与 canonical AppIcon.png 完全一致，避免侧边栏品牌图标漂移。" >&2
+    echo "AppIcon.png=${canonical_png_hash} BrandIcon=${brand_icon_png_hash}" >&2
     exit 1
   fi
 
-  if grep -qi 'warning:' "${actool_log}"; then
-    cat "${actool_log}" >&2
-    rm -rf "${tmp_dir}"
-    echo "错误：Icon Composer 图标编译出现 warning，不满足 0-warning 发布要求。" >&2
+  if [[ ! -f "${source_resources_dir}/SidebarBrandIcon.png" ]]; then
+    echo "错误：缺少运行态 SidebarBrandIcon.png，无法保证侧边栏小尺寸图标质量。" >&2
+    exit 1
+  fi
+  sidebar_brand_icon_png_hash="$(shasum -a 256 "${source_resources_dir}/SidebarBrandIcon.png" | awk '{print $1}')"
+  if [[ "${canonical_png_hash}" == "${sidebar_brand_icon_png_hash}" ]]; then
+    echo "错误：SidebarBrandIcon.png 必须是从 canonical AppIcon.png 派生的小尺寸优化资源，不能退回普通 BrandIcon.png。" >&2
     exit 1
   fi
 
-  if [[ ! -f "${tmp_dir}/AppIcon.icns" || ! -f "${tmp_dir}/Assets.car" ]]; then
+  if [[ ! -f "${source_resources_dir}/AppIcon.icns" ]]; then
+    echo "错误：缺少 canonical AppIcon.icns，无法安装预合成系统图标。" >&2
+    exit 1
+  fi
+  source_icns_hash="$(shasum -a 256 "${source_resources_dir}/AppIcon.icns" | awk '{print $1}')"
+
+  if ! command -v iconutil >/dev/null 2>&1; then
+    echo "错误：打包需要 iconutil 来生成 AppIcon.icns。" >&2
+    exit 1
+  fi
+
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-precomposed-icon.XXXXXX")"
+
+  generate_full_size_icns() {
+    local source_png="$1"
+    local output_icns="$2"
+    local iconset_dir="${tmp_dir}/AppIcon.iconset"
+
+    rm -rf "${iconset_dir}"
+    mkdir -p "${iconset_dir}"
+    sips -z 16 16 "${source_png}" --out "${iconset_dir}/icon_16x16.png" >/dev/null
+    sips -z 32 32 "${source_png}" --out "${iconset_dir}/icon_16x16@2x.png" >/dev/null
+    sips -z 32 32 "${source_png}" --out "${iconset_dir}/icon_32x32.png" >/dev/null
+    sips -z 64 64 "${source_png}" --out "${iconset_dir}/icon_32x32@2x.png" >/dev/null
+    sips -z 128 128 "${source_png}" --out "${iconset_dir}/icon_128x128.png" >/dev/null
+    sips -z 256 256 "${source_png}" --out "${iconset_dir}/icon_128x128@2x.png" >/dev/null
+    sips -z 256 256 "${source_png}" --out "${iconset_dir}/icon_256x256.png" >/dev/null
+    sips -z 512 512 "${source_png}" --out "${iconset_dir}/icon_256x256@2x.png" >/dev/null
+    sips -z 512 512 "${source_png}" --out "${iconset_dir}/icon_512x512.png" >/dev/null
+    cp "${source_png}" "${iconset_dir}/icon_512x512@2x.png"
+    iconutil -c icns "${iconset_dir}" -o "${output_icns}"
+  }
+
+  log "安装预合成应用图标（AppIcon.icns）"
+  generate_full_size_icns "${source_resources_dir}/AppIcon.png" "${tmp_dir}/AppIcon.full-size.icns"
+  generated_icns_hash="$(shasum -a 256 "${tmp_dir}/AppIcon.full-size.icns" | awk '{print $1}')"
+  if [[ "${source_icns_hash}" != "${generated_icns_hash}" ]]; then
     rm -rf "${tmp_dir}"
-    echo "错误：actool 未生成 AppIcon.icns/Assets.car。" >&2
+    echo "错误：AppIcon.icns 必须由 canonical AppIcon.png 生成，当前源码 icns 已漂移。" >&2
+    echo "source=${source_icns_hash} generated=${generated_icns_hash}" >&2
     exit 1
   fi
 
   mkdir -p "${app_resources_dir}"
-  cp "${tmp_dir}/Assets.car" "${app_resources_dir}/Assets.car"
+  cp "${tmp_dir}/AppIcon.full-size.icns" "${app_resources_dir}/AppIcon.icns"
+  cp "${source_resources_dir}/BrandIcon.png" "${app_resources_dir}/BrandIcon.png"
+  cp "${source_resources_dir}/SidebarBrandIcon.png" "${app_resources_dir}/SidebarBrandIcon.png"
 
-  if [[ ! -f "${source_resources_dir}/AppIcon.icns" || ! -f "${source_resources_dir}/AppIconDock.icns" ]]; then
-    rm -rf "${tmp_dir}"
-    echo "错误：缺少 full-size AppIcon.icns/AppIconDock.icns；请先运行 Scripts/regenerate_app_icons.sh。" >&2
-    exit 1
-  fi
-  cp "${source_resources_dir}/AppIcon.icns" "${app_resources_dir}/AppIcon.icns"
-  cp "${source_resources_dir}/AppIconDock.icns" "${app_resources_dir}/AppIconDock.icns"
-
-  icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "${partial_info_plist}" 2>/dev/null || true)
-  icon_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "${partial_info_plist}" 2>/dev/null || true)
-  plutil -replace CFBundleIconFile -string "${icon_file:-AppIcon}" "${info_plist_path}"
-  plutil -replace CFBundleIconName -string "${icon_name:-AppIcon}" "${info_plist_path}"
-  rm -f "${app_resources_dir}/icon.json" "${app_resources_dir}/Image.png"
+  plutil -remove CFBundleIconName "${info_plist_path}" 2>/dev/null || true
+  plutil -replace CFBundleIconFile -string "AppIcon.icns" "${info_plist_path}"
+  rm -f \
+    "${app_resources_dir}/icon.json" \
+    "${app_resources_dir}/Image.png" \
+    "${app_resources_dir}/AppIcon.png" \
+    "${app_resources_dir}/AppIconDock.icns" \
+    "${app_resources_dir}/AppIconDock.png" \
+    "${app_resources_dir}/app_icon.png" \
+    "${app_resources_dir}/AppIconMaster.png" \
+    "${app_resources_dir}/AppIconMaster.svg" \
+    "${app_resources_dir}/app-icon.svg"
+  rm -rf "${app_resources_dir}/AppIcon.icon" "${app_resources_dir}/Assets.xcassets" "${app_resources_dir}/Icons"
   rm -rf "${tmp_dir}"
 }
 
@@ -525,7 +521,6 @@ function copy_source_app_resources_to_main_bundle() {
   local entry=""
   local resource_name=""
   local copied_count=0
-  local required_icon_resource=""
 
   if [[ ! -d "${source_resources_dir}" ]]; then
     echo "错误：缺少 app 源资源目录，无法打包图标资源：${source_resources_dir}" >&2
@@ -537,9 +532,9 @@ function copy_source_app_resources_to_main_bundle() {
   for entry in "${source_resources_dir}"/*(N); do
     resource_name="$(basename "${entry}")"
     case "${resource_name}" in
-      AppIcon.icon|Assets.xcassets)
-        # These are actool inputs. The final app must contain compiled Assets.car,
-        # not Icon Composer or asset catalog source directories.
+      AppIcon.icon|Assets.xcassets|AppIcon.icns|AppIcon.png|AppIconDock.icns|AppIconDock.png|AppIconMaster.png|AppIconMaster.svg|BrandIcon.png|SidebarBrandIcon.png|Icons|app-icon.svg|app_icon.png)
+        # These are icon pipeline inputs or compatibility aliases. The final app
+        # installs only the precomposed AppIcon.icns plus runtime brand PNGs.
         continue
         ;;
     esac
@@ -553,19 +548,8 @@ function copy_source_app_resources_to_main_bundle() {
     exit 1
   fi
 
-  for required_icon_resource in \
-    AppIcon.icns \
-    AppIconDock.icns \
-    AppIcon.png \
-    AppIconDock.png; do
-    if [[ ! -f "${app_resources_dir}/${required_icon_resource}" ]]; then
-      echo "错误：app 包缺少必需图标资源：${required_icon_resource}" >&2
-      exit 1
-    fi
-  done
-
   if [[ -e "${app_resources_dir}/AppIcon.icon" || -e "${app_resources_dir}/Assets.xcassets" ]]; then
-    echo "错误：最终 app 包不应包含 Icon Composer/asset catalog 源目录；只允许包含编译后的 Assets.car。" >&2
+    echo "错误：最终 app 包不应包含 Icon Composer/asset catalog 源目录；只允许包含发布图标产物。" >&2
     exit 1
   fi
 }
@@ -1152,7 +1136,7 @@ fi
 plutil -replace CFBundleVersion -string "${SKYBRIDGE_PACKAGE_BUILD_ID}" "${INFO_PLIST_DST}"
 log "设置打包 Build ID: ${SKYBRIDGE_PACKAGE_BUILD_ID}"
 
-compile_icon_composer_assets "${SRC_RES_DIR}" "${RES_DIR}" "${INFO_PLIST_DST}"
+  install_precomposed_app_icon_assets "${SRC_RES_DIR}" "${RES_DIR}" "${INFO_PLIST_DST}"
 
 # 移除可能不需要的主 storyboard 键（SwiftUI App 生命周期无需该键）
 if /usr/libexec/PlistBuddy -c 'Print :NSMainStoryboardFile' "${INFO_PLIST_DST}" >/dev/null 2>&1; then

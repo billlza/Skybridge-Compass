@@ -114,12 +114,15 @@ public class NetworkPreferenceService: ObservableObject {
     private var wifiInterface: CWInterface?
     private var cancellables = Set<AnyCancellable>()
     private var scanTimer: Timer?
+    private var scanIntervalSeconds: Int = 10
+    private var shouldMonitorNetworks = true
+    private var isMonitoringStarted = false
     
     private init() {
         setupWiFiClient()
         setupSettingsObserver()
         loadKnownNetworks()
-        applyRuntimeSettingsSnapshot()
+        applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: false)
     }
     
  // MARK: - 初始化
@@ -139,23 +142,26 @@ public class NetworkPreferenceService: ObservableObject {
     private func setupSettingsObserver() {
  // 监听设置变化
         SettingsManager.shared.$prefer5GHz
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.applyRuntimeSettingsSnapshot()
+                self?.applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: true)
             }
             .store(in: &cancellables)
         
         SettingsManager.shared.$autoConnectKnownNetworks
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.applyRuntimeSettingsSnapshot()
+                self?.applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: true)
             }
             .store(in: &cancellables)
 
         SettingsManager.shared.$wifiScanTimeout
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.applyRuntimeSettingsSnapshot()
+                self?.applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: true)
             }
             .store(in: &cancellables)
     }
@@ -163,7 +169,8 @@ public class NetworkPreferenceService: ObservableObject {
     public func applyRuntimeSettings(
         prefer5GHz: Bool,
         autoConnectKnownNetworks: Bool,
-        scanIntervalSeconds: Int
+        scanIntervalSeconds: Int,
+        startMonitoringIfNeeded: Bool = false
     ) {
         if self.prefer5GHz != prefer5GHz {
             self.prefer5GHz = prefer5GHz
@@ -171,22 +178,37 @@ public class NetworkPreferenceService: ObservableObject {
         if self.autoConnectKnownNetworks != autoConnectKnownNetworks {
             self.autoConnectKnownNetworks = autoConnectKnownNetworks
         }
+        self.scanIntervalSeconds = max(10, scanIntervalSeconds)
+        shouldMonitorNetworks = prefer5GHz || autoConnectKnownNetworks
 
         updateRecommendedNetwork()
 
-        if prefer5GHz || autoConnectKnownNetworks {
-            startNetworkMonitoring(interval: TimeInterval(max(10, scanIntervalSeconds)))
+        guard startMonitoringIfNeeded || isMonitoringStarted else {
+            return
+        }
+
+        if shouldMonitorNetworks {
+            startNetworkMonitoring(interval: TimeInterval(self.scanIntervalSeconds))
         } else {
             stopNetworkMonitoring()
         }
     }
 
-    private func applyRuntimeSettingsSnapshot() {
+    public func startConfiguredNetworkMonitoring() {
+        guard shouldMonitorNetworks else {
+            stopNetworkMonitoring()
+            return
+        }
+        startNetworkMonitoring(interval: TimeInterval(scanIntervalSeconds))
+    }
+
+    private func applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: Bool) {
         let settings = SettingsManager.shared
         applyRuntimeSettings(
             prefer5GHz: settings.prefer5GHz,
             autoConnectKnownNetworks: settings.autoConnectKnownNetworks,
-            scanIntervalSeconds: settings.wifiScanTimeout
+            scanIntervalSeconds: settings.wifiScanTimeout,
+            startMonitoringIfNeeded: startMonitoringIfNeeded
         )
     }
     
@@ -414,6 +436,7 @@ public class NetworkPreferenceService: ObservableObject {
  /// 启动周期性网络监控
     public func startNetworkMonitoring(interval: TimeInterval = 30) {
         stopNetworkMonitoring()
+        isMonitoringStarted = true
         
         scanTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -434,6 +457,7 @@ public class NetworkPreferenceService: ObservableObject {
     public func stopNetworkMonitoring() {
         scanTimer?.invalidate()
         scanTimer = nil
+        isMonitoringStarted = false
         logger.info("⏹️ 停止网络监控")
     }
 

@@ -138,26 +138,25 @@ public struct NotificationBellView: View {
             scheduleHourlyWellness()
  // 可选：启用实时天气获取（包含AQI），避免阻塞主线程
             if settingsManager.enableRealTimeWeather, !weatherIntegration.isInitialized {
-                Task {
+                await StartupCoordinator.shared.waitUntilLaunchSettled()
  // 启动集成天气（wttr.in/Open‑Meteo + AQI），用于雨天等提醒
-                    await weatherIntegration.start()
+                await weatherIntegration.start()
  // 启动完成后立即触发一次天气建议，避免用户需要等待定时器
-                    if let cond = weatherIntegration.currentWeather?.condition {
-                        let t = mapConditionToWeatherType(cond)
+                if let cond = weatherIntegration.currentWeather?.condition {
+                    let t = mapConditionToWeatherType(cond)
  // 仅在首次或上次建议超过30分钟时立即提醒，避免短时间内重复
-                        let shouldImmediate = {
-                            if let last = lastHourlyAdvice { return Date().timeIntervalSince(last) >= 1800 }
-                            return true
-                        }()
-                        if shouldImmediate {
+                    let shouldImmediate = {
+                        if let last = lastHourlyAdvice { return Date().timeIntervalSince(last) >= 1800 }
+                        return true
+                    }()
+                    if shouldImmediate {
  // 若为雨天或暴风雨，立即触发雨伞提醒
-                            switch t {
-                            case .rain, .heavyRain, .thunderstorm:
-                                sendWeatherAdvice()
-                                lastHourlyAdvice = Date()
-                            default:
-                                break
-                            }
+                        switch t {
+                        case .rain, .heavyRain, .thunderstorm:
+                            sendWeatherAdvice()
+                            lastHourlyAdvice = Date()
+                        default:
+                            break
                         }
                     }
                 }

@@ -33,6 +33,12 @@ public struct SettingsExportData: Codable {
     public let performanceMode: String?
  /// 隐私诊断开关：是否启用TLS握手诊断（可选，兼容旧版本导入）
     public let enableHandshakeDiagnostics: Bool?
+ /// 顶部栏：是否显示公网 IP、城市与代理状态（可选，兼容旧版本导入）
+    public let showTopBarIPLocation: Bool?
+ /// 顶部栏：是否显示实时网络吞吐（可选，兼容旧版本导入）
+    public let showTopBarNetworkSpeed: Bool?
+ /// 顶部栏：是否显示公网延迟（可选，兼容旧版本导入）
+    public let showTopBarNetworkLatency: Bool?
 
  // 系统监控设置
     public let enableCPUMonitoring: Bool
@@ -192,8 +198,14 @@ public class SettingsManager: ObservableObject, Sendable {
     }
     @Published public var performanceMode: PerformanceMode = .balanced
 
- /// 是否在仪表盘顶部显示实时FPS（默认关闭）
+/// 是否在仪表盘顶部显示实时FPS（默认关闭）
     @Published public var showRealtimeFPS: Bool = false
+ /// 是否在仪表盘顶部显示公网 IP、城市与代理状态
+    @Published public var showTopBarIPLocation: Bool = true
+ /// 是否在仪表盘顶部显示实时网络吞吐
+    @Published public var showTopBarNetworkSpeed: Bool = true
+ /// 是否在仪表盘顶部显示公网延迟
+    @Published public var showTopBarNetworkLatency: Bool = true
  /// 兼容/更多设备发现开关（默认关闭，正常用户场景仅SkyBridge）
     @Published public var enableCompatibilityMode: Bool = false
  /// 是否启用 companion‑link 服务类型（默认关闭）
@@ -382,6 +394,9 @@ public class SettingsManager: ObservableObject, Sendable {
         enableRealTimeWeather = false
         performanceMode = .balanced
         showRealtimeFPS = false
+        showTopBarIPLocation = true
+        showTopBarNetworkSpeed = true
+        showTopBarNetworkLatency = true
         enableCompatibilityMode = false
         enableCompanionLink = false
         enableHandshakeDiagnostics = false
@@ -480,7 +495,8 @@ public class SettingsManager: ObservableObject, Sendable {
             NetworkPreferenceService.shared.applyRuntimeSettings(
                 prefer5GHz: self.prefer5GHz,
                 autoConnectKnownNetworks: self.autoConnectKnownNetworks,
-                scanIntervalSeconds: self.wifiScanTimeout
+                scanIntervalSeconds: self.wifiScanTimeout,
+                startMonitoringIfNeeded: false
             )
             let sharedScanInterval = Double(self.scanInterval)
             DeviceManagementSettingsManager.shared.wifiScanInterval = sharedScanInterval
@@ -498,7 +514,6 @@ public class SettingsManager: ObservableObject, Sendable {
             if #available(macOS 14.0, *) {
                 UnifiedOnlineDeviceManager.shared.applyRuntimeDiscoverySettings(restartIfNeeded: false)
             }
-            self.applyWeatherRuntimeSetting(self.enableRealTimeWeather)
             self.applyRemotePerformanceSettings(self.enableHardwareAcceleration)
         }
     }
@@ -671,6 +686,9 @@ public class SettingsManager: ObservableObject, Sendable {
             "performanceMode": performanceMode.rawValue,
             "enableHandshakeDiagnostics": enableHandshakeDiagnostics,
             "showRealtimeFPS": showRealtimeFPS,
+            "showTopBarIPLocation": showTopBarIPLocation,
+            "showTopBarNetworkSpeed": showTopBarNetworkSpeed,
+            "showTopBarNetworkLatency": showTopBarNetworkLatency,
             "enableCompatibilityMode": enableCompatibilityMode,
             "enableCompanionLink": enableCompanionLink,
             "strictModeForSensitiveGroups": strictModeForSensitiveGroups,
@@ -920,6 +938,9 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["enableHandshakeDiagnostics"] as? Bool { enableHandshakeDiagnostics = value }
         if let value = settings["performanceMode"] as? String, let pm = PerformanceMode(rawValue: value) { performanceMode = pm }
         if let value = settings["showRealtimeFPS"] as? Bool { showRealtimeFPS = value }
+        if let value = settings["showTopBarIPLocation"] as? Bool { showTopBarIPLocation = value }
+        if let value = settings["showTopBarNetworkSpeed"] as? Bool { showTopBarNetworkSpeed = value }
+        if let value = settings["showTopBarNetworkLatency"] as? Bool { showTopBarNetworkLatency = value }
         if let value = settings["enableCompatibilityMode"] as? Bool { enableCompatibilityMode = value }
         if let value = settings["enableCompanionLink"] as? Bool { enableCompanionLink = value }
         if let value = settings["strictModeForSensitiveGroups"] as? Bool { strictModeForSensitiveGroups = value }
@@ -1065,6 +1086,9 @@ public class SettingsManager: ObservableObject, Sendable {
         if let diagEnabled = settingsData.enableHandshakeDiagnostics {
             enableHandshakeDiagnostics = diagEnabled
         }
+        if let value = settingsData.showTopBarIPLocation { showTopBarIPLocation = value }
+        if let value = settingsData.showTopBarNetworkSpeed { showTopBarNetworkSpeed = value }
+        if let value = settingsData.showTopBarNetworkLatency { showTopBarNetworkLatency = value }
  // 注意：enableDebugMode和enablePerformanceMonitoring需要添加到SettingsManager
 
  // 系统监控设置
@@ -1478,6 +1502,9 @@ public class SettingsManager: ObservableObject, Sendable {
         enableRealTimeWeather = userDefaults.bool(forKey: "Settings.EnableRealTimeWeather", defaultValue: false)
         performanceMode = PerformanceMode(rawValue: userDefaults.string(forKey: "Settings.PerformanceMode") ?? "") ?? .balanced
         showRealtimeFPS = userDefaults.bool(forKey: "Settings.ShowRealtimeFPS", defaultValue: false)
+        showTopBarIPLocation = userDefaults.bool(forKey: "Settings.ShowTopBarIPLocation", defaultValue: true)
+        showTopBarNetworkSpeed = userDefaults.bool(forKey: "Settings.ShowTopBarNetworkSpeed", defaultValue: true)
+        showTopBarNetworkLatency = userDefaults.bool(forKey: "Settings.ShowTopBarNetworkLatency", defaultValue: true)
         enableCompatibilityMode = userDefaults.bool(forKey: "Settings.EnableCompatibilityMode", defaultValue: false)
         enableCompanionLink = userDefaults.bool(forKey: "Settings.EnableCompanionLink", defaultValue: false)
         // PQC settings (previously not persisted)
@@ -1858,10 +1885,13 @@ public class SettingsManager: ObservableObject, Sendable {
             self?.userDefaults.set(value, forKey: "Settings.EnableHandshakeDiagnostics")
         }.store(in: &settingsCancellables)
 
-        $enableRealTimeWeather.sink { [weak self] value in
-            self?.userDefaults.set(value, forKey: "Settings.EnableRealTimeWeather")
-            self?.applyWeatherRuntimeSetting(value)
-        }.store(in: &settingsCancellables)
+        $enableRealTimeWeather
+            .dropFirst()
+            .sink { [weak self] value in
+                self?.userDefaults.set(value, forKey: "Settings.EnableRealTimeWeather")
+                self?.applyWeatherRuntimeSetting(value)
+            }
+            .store(in: &settingsCancellables)
 
         $performanceMode.sink { [weak self] value in
             self?.userDefaults.set(value.rawValue, forKey: "Settings.PerformanceMode")
@@ -1874,6 +1904,18 @@ public class SettingsManager: ObservableObject, Sendable {
  // 实时FPS显示持久化
         $showRealtimeFPS.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ShowRealtimeFPS")
+        }.store(in: &settingsCancellables)
+
+        $showTopBarIPLocation.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowTopBarIPLocation")
+        }.store(in: &settingsCancellables)
+
+        $showTopBarNetworkSpeed.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowTopBarNetworkSpeed")
+        }.store(in: &settingsCancellables)
+
+        $showTopBarNetworkLatency.sink { [weak self] value in
+            self?.userDefaults.set(value, forKey: "Settings.ShowTopBarNetworkLatency")
         }.store(in: &settingsCancellables)
 	 // 兼容/更多设备模式与 companion‑link 开关持久化，并实时驱动 P2P Bonjour 浏览器集合。
         $enableCompatibilityMode

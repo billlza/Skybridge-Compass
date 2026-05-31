@@ -115,8 +115,8 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "The cross-network iCloud button must surface connection failures in the current UI."
         )
         XCTAssertTrue(
-            discoverySource.contains("canConnect: unifiedDeviceManager.hasResolvedConnectableControlRoute(for: device)") &&
-            discoverySource.contains("!device.isLocalDevice && effectiveConnectionStatus == .online && canConnect") &&
+            discoverySource.contains("canConnect: cachedCanConnect(device)") &&
+            discoverySource.contains("hasResolvedConnectableControlRouteByDeviceId") &&
             crossNetworkSource.contains(".disabled(isConnecting)"),
             "Online-device Connect buttons must only be visible for rows with a resolved SkyBridge control route."
         )
@@ -490,7 +490,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         )
         XCTAssertTrue(
             discoverySource.contains("let buttonIdentity = canonicalAccessibilityIdentity(for: effectiveAccessibilityIdentity)") &&
-            discoverySource.contains("accessibilityIdentity: resolvedPresentationIdentityKey(for: device)") &&
+            discoverySource.contains("accessibilityIdentity: cachedPresentationIdentityKey(for: device)") &&
             discoverySource.contains("skybridge-online-device-connect-button-") &&
             discoverySource.contains("UUID(uuidString: normalized)"),
             "Online-device connect button accessibility identifier must use the resolved live protocol identity and canonical stable-id token so the external AX smoke does not split the same iPad by stale aliases, UUID case, or id: prefix."
@@ -526,7 +526,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "Enhanced discovery iCloud rows must not change visible online status just to satisfy the Mac online iPad smoke."
         )
         XCTAssertTrue(
-            discoverySource.contains("trustedRecordsForUI.map(\\.displayRecord)"),
+            discoverySource.contains("trustedGroups.map(\\.displayRecord)"),
             "Recent/trusted grouping must stay on the production display-record grouping path for the Mac online iPad smoke."
         )
         XCTAssertTrue(
@@ -537,9 +537,15 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             discoverySource.contains("appleMobileStrongPresentationTokens(") &&
             discoverySource.contains("appleMobileCanonicalBonjourRouteToken(") &&
             discoverySource.contains("$0.connectionStatus == .offline") &&
+            discoverySource.contains("let connectedCandidates = nonLocalDevices") &&
+            discoverySource.contains("let activeCandidates = nonLocalDevices") &&
+            discoverySource.contains("hasHigherPriorityPresentation(") &&
+            discoverySource.contains("represented.id == candidate.id") &&
             discoverySource.contains("private var displayedTrustedRecordsForUI") &&
-            discoverySource.contains("hasVisibleOnlineRepresentation(for: group)"),
-            "Enhanced discovery must keep connected, recent, trusted, and online sections mutually exclusive so one physical iPad is not rendered multiple times."
+            discoverySource.contains("hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices)") &&
+            discoverySource.contains("let records = trustedLookupRecords(for: group)") &&
+            discoverySource.contains("resolvedTrustRecord(for: device, among: records)"),
+            "Enhanced discovery must keep connected, recent, trusted, and online sections mutually exclusive across the full trust group so one physical iPad is not rendered multiple times."
         )
         XCTAssertFalse(
             discoverySource.contains("appleMobilePresentationNamesRepresentSameDevice("),
@@ -584,6 +590,9 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         let macDev = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.entitlements")
         let macPackaging = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.packaging.entitlements")
         let macNativePackaging = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.native.packaging.entitlements")
+        let macLocalXcode = try repositorySource("XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements")
+        let projectYAML = try repositorySource("project.yml")
+        let xcodeProject = try repositorySource("SkyBridgeWidgets.xcodeproj/project.pbxproj")
         let iosDebug = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements")
         let iosRelease = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements")
         let iosAppSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/SkyBridgeCompassApp.swift")
@@ -603,6 +612,17 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
                 "Mac iCloud/App Group packaging entitlements must carry the profile-backed application identifier used by iCloud Drive and KVS at runtime."
             )
         }
+        XCTAssertTrue(projectYAML.contains("CODE_SIGN_ENTITLEMENTS: XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements"))
+        XCTAssertTrue(xcodeProject.contains("CODE_SIGN_ENTITLEMENTS = XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements;"))
+        XCTAssertFalse(
+            macLocalXcode.contains("com.apple.application-identifier") ||
+                macLocalXcode.contains("keychain-access-groups") ||
+                macLocalXcode.contains("com.apple.developer.icloud") ||
+                macLocalXcode.contains("com.apple.security.application-groups"),
+            "The Xcode local Release target must stay ad-hoc signable for smoke builds; profile-backed entitlements belong to the packaging signing step."
+        )
+        XCTAssertTrue(macLocalXcode.contains("com.apple.security.network.client"))
+        XCTAssertTrue(macLocalXcode.contains("com.apple.security.network.server"))
 
         XCTAssertTrue(signingHelperSource.contains("skybridge_expand_build_setting_entitlements"))
         XCTAssertTrue(signingHelperSource.contains("ApplicationIdentifierPrefix"))
@@ -626,6 +646,40 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(
             macICloudSource.contains("iCloud 容器不可用：请检查 iCloud Drive"),
             "iCloud KVS device presence must not be blocked by the optional iCloud Documents container."
+        )
+    }
+
+    func testDeviceDiscoveryViewCachesPresentationDerivedStateOffBody() throws {
+        let discoverySource = try repositorySource("Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift")
+
+        XCTAssertTrue(
+            discoverySource.contains("private struct DeviceDiscoveryPresentationSnapshot"),
+            "The Mac discovery view must cache derived presentation rows instead of rebuilding dedupe/trust state in every SwiftUI body pass."
+        )
+        XCTAssertTrue(
+            discoverySource.contains("LazyVStack(spacing: 20)"),
+            "The local scan scroll content must not eagerly instantiate every off-screen recent-device row during navigation."
+        )
+        XCTAssertTrue(
+            discoverySource.contains("@State private var cachedPresentationSnapshot") &&
+            discoverySource.contains("refreshPresentationState(") &&
+            discoverySource.contains("buildPresentationSnapshot("),
+            "Presentation state should be recomputed when discovery/trust/presence inputs change, not from computed properties inside body."
+        )
+        XCTAssertTrue(
+            discoverySource.contains("private var activeOnlineDevicesNonLocal: [OnlineDevice] {\n        cachedPresentationSnapshot.activeOnlineDevicesNonLocal") &&
+            discoverySource.contains("private var groupedRecentlyConnectedDevices: [OnlineDevice] {\n        cachedPresentationSnapshot.groupedRecentlyConnectedDevices") &&
+            discoverySource.contains("private var displayedTrustedRecordsForUI: [TrustedRecordCardPresentation] {\n        cachedPresentationSnapshot.displayedTrustedRecords"),
+            "Hot UI accessors must read the cached snapshot rather than re-running online dedupe, recent grouping, and trusted-device matching."
+        )
+        XCTAssertTrue(
+            discoverySource.contains("private var trustedBonjourRefreshKey: String {\n        cachedTrustedBonjourRefreshKey"),
+            "The trusted Bonjour refresh key should be maintained from input publishers instead of concatenating online/trust summaries during body evaluation."
+        )
+        XCTAssertTrue(
+            discoverySource.contains("cachedPresentationIdentityKey(for: device)") &&
+            discoverySource.contains("accessibilityIdentityByDeviceId"),
+            "Online row accessibility identities should be calculated with the presentation snapshot instead of resolving protocol identity for every row render."
         )
     }
 

@@ -54,7 +54,7 @@ public class BackgroundControlManager: ObservableObject {
         setupSubscriptions()
     }
 
- /// Calculate effective FPS based on current throttling level and base performance mode
+    /// Calculate effective FPS based on current throttling level and base performance mode
     public func getEffectiveFPS(base: Double) -> Double {
         switch throttleLevel {
         case .none:
@@ -64,6 +64,16 @@ public class BackgroundControlManager: ObservableObject {
         case .max:
             return min(base, 15.0)
         }
+    }
+
+    public func stableTimelineInterval(base: Double) -> TimeInterval {
+        1.0 / max(base, 1.0)
+    }
+
+    public func throttledAnimationTime(_ elapsed: TimeInterval, baseFPS: Double) -> TimeInterval {
+        let effectiveFPS = max(getEffectiveFPS(base: baseFPS), 1.0)
+        guard effectiveFPS < max(baseFPS, 1.0) else { return elapsed }
+        return floor(elapsed * effectiveFPS) / effectiveFPS
     }
 
     private func setupSubscriptions() {
@@ -181,16 +191,12 @@ public class BackgroundControlManager: ObservableObject {
 
     private func startThrottling() {
  // Step 1: Drop to Medium
-        withAnimation {
-            throttleLevel = .medium
-        }
+        throttleLevel = .medium
 
  // Schedule Step 2: Drop to Max (Low FPS)
         throttleTimer = Timer.scheduledTimer(withTimeInterval: throttleStepDuration, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                withAnimation {
-                    self?.throttleLevel = .max
-                }
+                self?.throttleLevel = .max
             }
         }
     }

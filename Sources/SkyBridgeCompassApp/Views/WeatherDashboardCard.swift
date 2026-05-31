@@ -14,14 +14,16 @@ import SkyBridgeCore
 @MainActor
 public struct WeatherDashboardCard: View {
     @ObservedObject var weatherManager = WeatherIntegrationManager.shared
+    @ObservedObject private var settingsManager = SettingsManager.shared
     
     @State private var refreshFlash: Bool = false
     @State private var isHovering: Bool = false
     
     public var body: some View {
         VStack(spacing: 0) {
- // 天气内容
-            if let weather = weatherManager.currentWeather {
+            if !settingsManager.enableRealTimeWeather {
+                disabledView
+            } else if let weather = weatherManager.currentWeather {
                 weatherContent(weather: weather)
             } else if let error = weatherManager.error {
                 errorView(message: error)
@@ -78,6 +80,9 @@ public struct WeatherDashboardCard: View {
         .onHover { hovering in
             isHovering = hovering
         }
+        .task(id: settingsManager.enableRealTimeWeather) {
+            await synchronizeWeatherService(enabled: settingsManager.enableRealTimeWeather)
+        }
         .onChange(of: weatherManager.currentWeather?.timestamp) { _, _ in
  // 天气数据时间戳变化时触发刷新闪光效果
             refreshFlash = true
@@ -86,10 +91,15 @@ public struct WeatherDashboardCard: View {
                 refreshFlash = false
             }
         }
-        .task {
-            if !weatherManager.isInitialized {
+    }
+
+    private func synchronizeWeatherService(enabled: Bool) async {
+        if enabled {
+            if !weatherManager.isInitialized && !weatherManager.isLoading {
                 await weatherManager.start()
             }
+        } else {
+            weatherManager.stop()
         }
     }
     
@@ -292,6 +302,45 @@ public struct WeatherDashboardCard: View {
                     .foregroundColor(.white.opacity(0.6))
             }
             
+            Spacer()
+        }
+        .frame(height: 120)
+    }
+
+    private var disabledView: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "cloud.slash.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.72),
+                            Color.cyan.opacity(0.48)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("实时天气未启用")
+                    .font(.headline)
+                    .foregroundColor(.white)
+
+                Text("启用后会按需读取定位与天气数据，不会在关闭时空转加载。")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.68))
+
+                Button {
+                    settingsManager.enableRealTimeWeather = true
+                } label: {
+                    Label("启用天气", systemImage: "location.fill")
+                        .font(.caption.bold())
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.cyan)
+            }
+
             Spacer()
         }
         .frame(height: 120)

@@ -53,6 +53,10 @@ public final class AppleSiliconFanMonitor: ObservableObject {
         logger.info("AppleSiliconFanMonitor stopped")
     }
 
+    public func refreshNow() {
+        refreshFromMonitor()
+    }
+
     private func refreshFromMonitor() {
         guard let monitor else { return }
 

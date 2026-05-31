@@ -11,6 +11,7 @@ final class RemoteControlSecurityNoticePanelController: NSObject, ObservableObje
     private var cancellable: AnyCancellable?
     private var panel: NSPanel?
     private var lastRenderedNotice: RemoteControlSecurityNotice?
+    private var collapsedNoticeIDs = Set<UUID>()
 
     private override init() {
         super.init()
@@ -33,16 +34,21 @@ final class RemoteControlSecurityNoticePanelController: NSObject, ObservableObje
                     descriptor: lastRenderedNotice.descriptor,
                     phase: lastRenderedNotice.phase
                 )
+                collapsedNoticeIDs.remove(lastRenderedNotice.id)
             }
             lastRenderedNotice = nil
             panel?.orderOut(nil)
             return
         }
 
-        let content = RemoteControlSecurityNoticePanelView(notice: notice)
+        let content = makeContent(for: notice)
         if let panel {
             panel.contentView = NSHostingView(rootView: content)
-            position(panel: panel, notice: notice)
+            position(
+                panel: panel,
+                notice: notice,
+                isCollapsed: collapsedNoticeIDs.contains(notice.id)
+            )
             lastRenderedNotice = notice
             panel.orderFrontRegardless()
             return
@@ -68,20 +74,52 @@ final class RemoteControlSecurityNoticePanelController: NSObject, ObservableObje
         newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         newPanel.contentView = NSHostingView(rootView: content)
         newPanel.isReleasedWhenClosed = false
-        position(panel: newPanel, notice: notice)
+        position(
+            panel: newPanel,
+            notice: notice,
+            isCollapsed: collapsedNoticeIDs.contains(notice.id)
+        )
         panel = newPanel
         lastRenderedNotice = notice
         newPanel.orderFrontRegardless()
     }
 
+    private func makeContent(for notice: RemoteControlSecurityNotice) -> RemoteControlSecurityNoticePanelView {
+        RemoteControlSecurityNoticePanelView(
+            notice: notice,
+            isInitiallyCollapsed: collapsedNoticeIDs.contains(notice.id)
+        ) { [weak self] isCollapsed in
+            self?.setCollapsed(isCollapsed, for: notice)
+        }
+    }
+
+    private func setCollapsed(
+        _ isCollapsed: Bool,
+        for notice: RemoteControlSecurityNotice
+    ) {
+        if isCollapsed {
+            collapsedNoticeIDs.insert(notice.id)
+        } else {
+            collapsedNoticeIDs.remove(notice.id)
+        }
+        guard lastRenderedNotice?.id == notice.id, let panel else { return }
+        position(panel: panel, notice: notice, isCollapsed: isCollapsed)
+    }
+
     private func position(
         panel: NSPanel,
-        notice: RemoteControlSecurityNotice
+        notice: RemoteControlSecurityNotice,
+        isCollapsed: Bool
     ) {
         let phase = notice.phase
         let visibleFrame = currentScreen()?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        let width = min(max(visibleFrame.width - 48, 360), 760)
-        let height: CGFloat = phase == .awaitingApproval ? 188 : 154
+        let width = isCollapsed
+            ? min(max(visibleFrame.width - 48, 360), 520)
+            : min(max(visibleFrame.width - 48, 360), 760)
+        let height: CGFloat = {
+            if isCollapsed { return 82 }
+            return phase == .awaitingApproval ? 188 : 154
+        }()
         let origin = CGPoint(
             x: visibleFrame.midX - width / 2,
             y: visibleFrame.maxY - height - 18
@@ -101,7 +139,7 @@ final class RemoteControlSecurityNoticePanelController: NSObject, ObservableObje
             visibleFrame: statusRect(visibleFrame),
             windowLevel: "statusBar",
             collectionBehavior: ["canJoinAllSpaces", "fullScreenAuxiliary", "transient"],
-            buttons: buttons(for: notice.phase),
+            buttons: buttons(for: notice.phase, isCollapsed: isCollapsed),
             topCentered: topCentered
         )
     }
@@ -113,12 +151,18 @@ final class RemoteControlSecurityNoticePanelController: NSObject, ObservableObje
         } ?? NSScreen.main ?? NSScreen.screens.first
     }
 
-    private func buttons(for phase: RemoteControlSecurityNoticePhase) -> [String] {
+    private func buttons(
+        for phase: RemoteControlSecurityNoticePhase,
+        isCollapsed: Bool
+    ) -> [String] {
+        if isCollapsed {
+            return ["expand", "close"]
+        }
         switch phase {
         case .awaitingApproval:
-            return ["close", "reject", "approve"]
+            return ["collapse", "close", "reject", "approve"]
         case .active:
-            return ["close", "disconnect"]
+            return ["collapse", "close", "disconnect"]
         }
     }
 
@@ -137,6 +181,19 @@ final class RemoteControlSecurityNoticePanelController: NSObject, ObservableObje
 @available(macOS 14.0, *)
 private struct RemoteControlSecurityNoticePanelView: View {
     let notice: RemoteControlSecurityNotice
+    let onCollapsedChange: (Bool) -> Void
+
+    @State private var isCollapsed: Bool
+
+    init(
+        notice: RemoteControlSecurityNotice,
+        isInitiallyCollapsed: Bool,
+        onCollapsedChange: @escaping (Bool) -> Void
+    ) {
+        self.notice = notice
+        self.onCollapsedChange = onCollapsedChange
+        _isCollapsed = State(initialValue: isInitiallyCollapsed)
+    }
 
     private var descriptor: RemoteControlSecurityDescriptor {
         notice.descriptor
@@ -147,7 +204,7 @@ private struct RemoteControlSecurityNoticePanelView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: isCollapsed ? 0 : 14) {
             HStack(spacing: 12) {
                 Image(systemName: isPending ? "hand.raised.fill" : "display.and.arrow.down")
                     .font(.system(size: 24, weight: .semibold))
@@ -158,14 +215,25 @@ private struct RemoteControlSecurityNoticePanelView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(titleText)
                         .font(.system(size: 17, weight: .semibold))
-                        .lineLimit(2)
+                        .lineLimit(isCollapsed ? 1 : 2)
                     Text(subtitleText)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(isCollapsed ? 1 : 2)
                 }
 
                 Spacer(minLength: 12)
+
+                Button {
+                    isCollapsed.toggle()
+                    onCollapsedChange(isCollapsed)
+                } label: {
+                    Image(systemName: isCollapsed ? "chevron.down" : "chevron.up")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("remoteControlSecurityNoticeCollapseButton")
+                .help(localized(isCollapsed ? "remoteControl.securityNotice.expand" : "remoteControl.securityNotice.collapse"))
 
                 Button {
                     RemoteControlSecurityNoticeCenter.shared.closeCurrentNoticeFailClosed()
@@ -178,55 +246,57 @@ private struct RemoteControlSecurityNoticePanelView: View {
                 .help(localized("remoteControl.securityNotice.close"))
             }
 
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(minimum: 160), spacing: 12),
-                    GridItem(.flexible(minimum: 160), spacing: 12)
-                ],
-                alignment: .leading,
-                spacing: 8
-            ) {
-                field(localized("remoteControl.securityNotice.remoteIP"), descriptor.remoteIPAddress)
-                field(localized("remoteControl.securityNotice.transport"), transportText)
-                field(
-                    localized("remoteControl.securityNotice.account"),
-                    masked(descriptor.remoteAccountDisplayName)
-                )
-                field(
-                    localized("remoteControl.securityNotice.nebulaID"),
-                    masked(descriptor.remoteNebulaId)
-                )
-                field(localized("remoteControl.securityNotice.device"), RemoteControlSecurityNoticePresenter.deviceIdentity(descriptor))
-                field(localized("remoteControl.securityNotice.pqc"), descriptor.cryptoSuite)
-            }
+            if !isCollapsed {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(minimum: 160), spacing: 12),
+                        GridItem(.flexible(minimum: 160), spacing: 12)
+                    ],
+                    alignment: .leading,
+                    spacing: 8
+                ) {
+                    field(localized("remoteControl.securityNotice.remoteIP"), descriptor.remoteIPAddress)
+                    field(localized("remoteControl.securityNotice.transport"), transportText)
+                    field(
+                        localized("remoteControl.securityNotice.account"),
+                        masked(descriptor.remoteAccountDisplayName)
+                    )
+                    field(
+                        localized("remoteControl.securityNotice.nebulaID"),
+                        masked(descriptor.remoteNebulaId)
+                    )
+                    field(localized("remoteControl.securityNotice.device"), RemoteControlSecurityNoticePresenter.deviceIdentity(descriptor))
+                    field(localized("remoteControl.securityNotice.pqc"), descriptor.cryptoSuite)
+                }
 
-            HStack(spacing: 10) {
-                Spacer()
-                if isPending {
-                    Button {
-                        RemoteControlSecurityNoticeCenter.shared.rejectCurrentNotice()
-                    } label: {
-                        Label(localized("remoteControl.securityNotice.reject"), systemImage: "xmark.circle")
-                    }
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityIdentifier("remoteControlSecurityNoticeRejectButton")
+                HStack(spacing: 10) {
+                    Spacer()
+                    if isPending {
+                        Button {
+                            RemoteControlSecurityNoticeCenter.shared.rejectCurrentNotice()
+                        } label: {
+                            Label(localized("remoteControl.securityNotice.reject"), systemImage: "xmark.circle")
+                        }
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityIdentifier("remoteControlSecurityNoticeRejectButton")
 
-                    Button {
-                        RemoteControlSecurityNoticeCenter.shared.approveCurrentNotice()
-                    } label: {
-                        Label(localized("remoteControl.securityNotice.approve"), systemImage: "checkmark.shield")
+                        Button {
+                            RemoteControlSecurityNoticeCenter.shared.approveCurrentNotice()
+                        } label: {
+                            Label(localized("remoteControl.securityNotice.approve"), systemImage: "checkmark.shield")
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("remoteControlSecurityNoticeApproveButton")
+                    } else {
+                        Button(role: .destructive) {
+                            RemoteControlSecurityNoticeCenter.shared.disconnectCurrentNotice()
+                        } label: {
+                            Label(localized("remoteControl.securityNotice.disconnect"), systemImage: "power")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("remoteControlSecurityNoticeDisconnectButton")
                     }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("remoteControlSecurityNoticeApproveButton")
-                } else {
-                    Button(role: .destructive) {
-                        RemoteControlSecurityNoticeCenter.shared.disconnectCurrentNotice()
-                    } label: {
-                        Label(localized("remoteControl.securityNotice.disconnect"), systemImage: "power")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("remoteControlSecurityNoticeDisconnectButton")
                 }
             }
         }

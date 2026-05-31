@@ -28,7 +28,7 @@
 "startup.step.performanceFoundation" = "Performance foundation";
 "startup.step.networkServices" = "Network services";
 "startup.step.fileSystemServices" = "File system services";
-"startup.step.deviceDiscovery" = "Device discovery";
+"startup.step.serviceLaunchPlan" = "Service launch plan";
 "startup.step.themeConfiguration" = "Theme configuration";
 "startup.step.mainInterface" = "Main interface";
 "startup.step.systemMonitorInterface" = "System monitor";

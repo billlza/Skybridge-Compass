@@ -147,6 +147,7 @@ import Combine
     private var isSupabaseMode: Bool = false
     private var accessTokenRefreshTask: Task<AuthSession, Error>?
     private var persistedSessionLoadTask: Task<Void, Never>?
+    private var authSessionDeletionTask: Task<Void, Never>?
 
     private init() {
         let config = URLSessionConfiguration.ephemeral
@@ -411,7 +412,7 @@ import Combine
             issuedAt: Date()
         )
 
-        KeychainManager.shared.deleteAuthSession()
+        schedulePersistedSessionDeletion(reason: "activateGuestSession")
         sessionSubject.send(guestSession)
         Task {
             await TenantAccessController.shared.clearAuthentication()
@@ -658,8 +659,22 @@ import Combine
         persistedSessionLoadTask?.cancel()
         persistedSessionLoadTask = nil
         sessionSubject.send(nil)
-        KeychainManager.shared.deleteAuthSession()
+        schedulePersistedSessionDeletion(reason: "clearLocalSessionState")
         await TenantAccessController.shared.clearAuthentication()
+    }
+
+    private func schedulePersistedSessionDeletion(reason: String) {
+        authSessionDeletionTask?.cancel()
+        authSessionDeletionTask = Task.detached(priority: .utility) {
+            guard !Task.isCancelled else { return }
+            do {
+                try KeychainManager.shared.deleteAuthSession()
+            } catch {
+                await MainActor.run {
+                    self.logger.error("AuthenticationService Keychain 会话清理失败 [\(reason, privacy: .public)]: \(error.localizedDescription, privacy: .private)")
+                }
+            }
+        }
     }
 }
 

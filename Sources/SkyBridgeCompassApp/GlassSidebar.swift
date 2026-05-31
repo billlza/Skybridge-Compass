@@ -11,6 +11,7 @@ struct GlassSidebar: View {
     @State private var hoverTab: SidebarTab?
     @State private var isExpanded: Bool = true
     @Namespace private var glassNamespace
+    @State private var localizedSidebarText = LocalizedSidebarText.resolve()
  // 设备信息（本机名称与CPU型号）用于在侧边栏头部展示，避免运行时频繁查询。
     @State private var localDeviceName: String = Host.current().localizedName ?? "本机"
     @State private var localCPUModel: String = ""
@@ -24,15 +25,7 @@ struct GlassSidebar: View {
     @ObservedObject private var localizationManager = LocalizationManager.shared
     
     var sidebarTabs: [SidebarTab] {
-        [
-            SidebarTab(id: "sidebar.dashboard", title: localizationManager.localizedString("sidebar.dashboard"), icon: "house", color: .blue),
-            SidebarTab(id: "sidebar.deviceDiscovery", title: localizationManager.localizedString("sidebar.deviceDiscovery"), icon: "magnifyingglass", color: .green),
-            SidebarTab(id: "sidebar.usbManagement", title: localizationManager.localizedString("sidebar.usbManagement"), icon: "cable.connector", color: .indigo),
-            SidebarTab(id: "sidebar.fileTransfer", title: localizationManager.localizedString("sidebar.fileTransfer") + "（" + localizationManager.localizedString("quantum.title") + "）", icon: "folder", color: .orange),
-            SidebarTab(id: "sidebar.remoteDesktop", title: localizationManager.localizedString("sidebar.remoteDesktop") + "（" + localizationManager.localizedString("quantum.title") + "）", icon: "display", color: .cyan),
-            SidebarTab(id: "sidebar.systemMonitor", title: localizationManager.localizedString("sidebar.systemMonitor"), icon: "speedometer", color: .orange),
-            SidebarTab(id: "sidebar.settings", title: localizationManager.localizedString("sidebar.settings"), icon: "gearshape", color: .secondary)
-        ]
+        localizedSidebarText.tabs
     }
     
     var body: some View {
@@ -68,7 +61,6 @@ struct GlassSidebar: View {
             alignment: .trailing
         )
         .animation(.spring(response: 0.6, dampingFraction: 0.8), value: isExpanded)
-        .animation(.spring(response: 0.4, dampingFraction: 0.9), value: selectedTab)
         .background(
             Group {
                 if showingUserProfile {
@@ -80,6 +72,10 @@ struct GlassSidebar: View {
                 }
             }
         )
+        .onAppear(perform: refreshLocalizedSidebarText)
+        .onChange(of: localizationManager.currentLanguage) { _, _ in
+            refreshLocalizedSidebarText()
+        }
         .task {
  // 在视图加载时一次性提取设备名称与CPU型号，避免在主线程上同步sysctl导致卡顿。
             let deviceName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
@@ -135,28 +131,50 @@ struct GlassSidebar: View {
             showingUserProfile = false
         }
     }
+
+    private func refreshLocalizedSidebarText() {
+        localizedSidebarText = LocalizedSidebarText.resolve()
+    }
     
  // MARK: - 头部区域
     private var headerSection: some View {
         VStack(spacing: 12) {
             HStack {
  // 应用图标
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.white)
-                    .frame(width: 40, height: 40)
-                    .overlay(
-                        CustomGlobeIconView(cornerRadius: 12)
-                            .frame(width: 40, height: 40)
-                    )
+                BrandAppIconView(
+                    contentMode: .fit,
+                    safeInset: 1,
+                    clipCornerRadius: 12,
+                    preferredResourceName: "SidebarBrandIcon"
+                )
+                .frame(width: 44, height: 44)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.34),
+                                    Color(red: 0.16, green: 0.58, blue: 1.0).opacity(0.28),
+                                    Color.black.opacity(0.18)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.9
+                        )
+                )
+                .shadow(color: Color(red: 0.08, green: 0.52, blue: 1.0).opacity(0.34), radius: 10, x: 0, y: 2)
+                .shadow(color: Color(red: 0.95, green: 0.72, blue: 0.34).opacity(0.12), radius: 5, x: 0, y: 0)
+                .shadow(color: .black.opacity(0.24), radius: 3, x: 0, y: 1)
                 
                 if isExpanded {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(localizationManager.localizedString("app.name"))
+                        Text(localizedSidebarText.appName)
                             .font(.headline)
                             .fontWeight(.semibold)
                             .foregroundColor(.primary)
                         
-                        Text(localizationManager.localizedString("app.slogan"))
+                        Text(localizedSidebarText.appSlogan)
                             .font(.caption)
                             .foregroundColor(.secondary)
  // 在应用名右侧展示本机设备名称与CPU型号，使用单行紧凑样式。
@@ -189,19 +207,42 @@ struct GlassSidebar: View {
                     isExpanded: isExpanded,
                     namespace: glassNamespace
                 ) {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) {
-                        selectedTab = tab
-                    }
+                    guard selectedTab.id != tab.id else { return }
+                    selectedTab = tab
                 }
                 .onHover { hovering in
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        hoverTab = hovering ? tab : nil
-                    }
+                    hoverTab = hovering ? tab : nil
                 }
             }
         }
         .padding(.horizontal, 12)
         .padding(.top, 16)
+    }
+}
+
+// MARK: - 侧边栏本地化快照
+private struct LocalizedSidebarText: Equatable {
+    let appName: String
+    let appSlogan: String
+    let tabs: [SidebarTab]
+
+    @MainActor
+    static func resolve() -> LocalizedSidebarText {
+        let localizationManager = LocalizationManager.shared
+        let quantumTitle = localizationManager.localizedString("quantum.title")
+        return LocalizedSidebarText(
+            appName: localizationManager.localizedString("app.name"),
+            appSlogan: localizationManager.localizedString("app.slogan"),
+            tabs: [
+                SidebarTab(id: "sidebar.dashboard", title: localizationManager.localizedString("sidebar.dashboard"), icon: "house", color: .blue),
+                SidebarTab(id: "sidebar.deviceDiscovery", title: localizationManager.localizedString("sidebar.deviceDiscovery"), icon: "magnifyingglass", color: .green),
+                SidebarTab(id: "sidebar.usbManagement", title: localizationManager.localizedString("sidebar.usbManagement"), icon: "cable.connector", color: .indigo),
+                SidebarTab(id: "sidebar.fileTransfer", title: localizationManager.localizedString("sidebar.fileTransfer") + "（" + quantumTitle + "）", icon: "folder", color: .orange),
+                SidebarTab(id: "sidebar.remoteDesktop", title: localizationManager.localizedString("sidebar.remoteDesktop") + "（" + quantumTitle + "）", icon: "display", color: .cyan),
+                SidebarTab(id: "sidebar.systemMonitor", title: localizationManager.localizedString("sidebar.systemMonitor"), icon: "speedometer", color: .orange),
+                SidebarTab(id: "sidebar.settings", title: localizationManager.localizedString("sidebar.settings"), icon: "gearshape", color: .secondary)
+            ]
+        )
     }
 }
 

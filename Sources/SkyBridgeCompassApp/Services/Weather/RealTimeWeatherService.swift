@@ -51,15 +51,8 @@ public final class RealTimeWeatherService: NSObject, ObservableObject, Sendable 
     @Published public private(set) var lastError: WeatherServiceError?
     
  /// 是否启用服务
-    @Published public var isEnabled: Bool = false {
-        didSet {
-            if isEnabled {
-                startWeatherService()
-            } else {
-                stopWeatherService()
-            }
-        }
-    }
+    @Published public private(set) var isEnabled: Bool = false
+    private var activationTask: Task<Void, Never>?
     
  /// 单例实例
     public static let shared = RealTimeWeatherService()
@@ -78,11 +71,16 @@ public final class RealTimeWeatherService: NSObject, ObservableObject, Sendable 
  // 配置位置管理器
         setupLocationManager()
         
- // 同步初始启用状态并监听设置变化
-        self.isEnabled = SettingsManager.shared.enableRealTimeWeather
+ // 同步初始启用状态并监听设置变化。初始启动必须等待启动页稳定期结束，
+ // 避免 CLLocationManager/网络请求和 RootView 首帧争抢主线程。
+        applyEnabledState(
+            SettingsManager.shared.enableRealTimeWeather,
+            waitForLaunchSettled: true
+        )
         SettingsManager.shared.$enableRealTimeWeather
+            .dropFirst()
             .sink { [weak self] enabled in
-                self?.isEnabled = enabled
+                self?.applyEnabledState(enabled, waitForLaunchSettled: false)
             }
             .store(in: &cancellables)
         
@@ -99,6 +97,12 @@ public final class RealTimeWeatherService: NSObject, ObservableObject, Sendable 
  /// 开始天气服务 - 使用 Swift 6.2 异步优化
     public func startWeatherService() {
         guard isEnabled else { return }
+        switch serviceStatus {
+        case .requestingLocation, .fetchingWeather:
+            return
+        case .idle, .completed, .error:
+            break
+        }
         
         serviceStatus = .requestingLocation
         
@@ -129,9 +133,30 @@ public final class RealTimeWeatherService: NSObject, ObservableObject, Sendable 
     
  /// 停止天气服务
     public func stopWeatherService() {
+        activationTask?.cancel()
+        activationTask = nil
         locationManager.stopUpdatingLocation()
         serviceStatus = .idle
         logger.info("天气服务已停止")
+    }
+
+    private func applyEnabledState(_ enabled: Bool, waitForLaunchSettled: Bool) {
+        activationTask?.cancel()
+        activationTask = nil
+        isEnabled = enabled
+
+        guard enabled else {
+            stopWeatherService()
+            return
+        }
+
+        activationTask = Task { @MainActor [weak self] in
+            if waitForLaunchSettled {
+                await StartupCoordinator.shared.waitUntilLaunchSettled()
+            }
+            guard !Task.isCancelled, let self, self.isEnabled else { return }
+            self.startWeatherService()
+        }
     }
     
  /// 开始位置更新 - Swift 6.2 异步优化

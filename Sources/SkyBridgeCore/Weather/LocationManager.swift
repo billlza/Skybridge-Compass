@@ -136,6 +136,9 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
         isLocating = true
         error = nil
         logger.info("🔍 开始定位...")
+        defer {
+            isLocating = false
+        }
 
         // 策略1: 尝试CoreLocation
         if await requestLocationAuthorization() {
@@ -151,7 +154,6 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
                 if let loc = currentLocation, loc.source == .coreLocation,
                    Date().timeIntervalSince(loc.timestamp) < 5 {
                     logger.info("✅ GPS定位成功")
-                    isLocating = false
                     return
                 }
 
@@ -169,8 +171,6 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
             logger.warning("⚠️ CoreLocation不可用，降级到IP定位")
             await fallbackToIPGeolocation()
         }
-
-        isLocating = false
     }
     
  /// 请求位置权限
@@ -228,7 +228,11 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
         guard let url = URL(string: "https://ipapi.co/json/") else { return }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 5
+            let session = Self.ephemeralURLSession(timeout: 5)
+            let (data, urlResponse) = try await session.data(for: request)
+            try validateHTTPResponse(urlResponse)
             let response = try JSONDecoder().decode(IPLocationResponse.self, from: data)
 
             // 再次检查：在网络请求期间可能已获得GPS定位
@@ -258,6 +262,21 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
                 logger.info("📦 使用缓存位置")
                 currentLocation = cached
             }
+        }
+    }
+
+    private static func ephemeralURLSession(timeout: TimeInterval) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }
+
+    private func validateHTTPResponse(_ response: URLResponse) throws {
+        guard let httpResponse = response as? HTTPURLResponse else { return }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw LocationError.networkError("HTTP \(httpResponse.statusCode)")
         }
     }
     

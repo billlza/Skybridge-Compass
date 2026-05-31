@@ -28,7 +28,7 @@
 "startup.step.performanceFoundation" = "性能监控基础";
 "startup.step.networkServices" = "网络管理";
 "startup.step.fileSystemServices" = "文件系统";
-"startup.step.deviceDiscovery" = "设备发现";
+"startup.step.serviceLaunchPlan" = "服务启动计划";
 "startup.step.themeConfiguration" = "主题配置";
 "startup.step.mainInterface" = "主界面";
 "startup.step.systemMonitorInterface" = "系统监控";

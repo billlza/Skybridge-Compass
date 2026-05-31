@@ -758,8 +758,7 @@ public class P2PDiscoveryService: BaseManager {
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
         let requestedSelection: CryptoProviderFactory.SelectionPolicy = requestedPolicy.requirePQC ? .requirePQC : .preferPQC
-        let prefersPQC = CryptoProviderFactory.make(policy: requestedSelection)
-            .supportedSuites
+        let prefersPQC = await Self.cryptoProviderSupportedSuites(policy: requestedSelection)
             .contains(where: { $0.isPQCGroup })
         let effectiveTimeoutSeconds: TimeInterval
         if requestedPolicy.requirePQC {
@@ -1055,7 +1054,7 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         let candidates = Self.outboundStrictPQCTrustCandidates(for: device, stableTarget: targetDeviceId)
-        let preferredTargetSuite = Self.preferredStrictPQCOutboundTargetSuite()
+        let preferredTargetSuite = await Self.preferredStrictPQCOutboundTargetSuite()
         let trustProvider = DefaultHandshakeTrustProvider()
         let trustedKEMSuites = await Self.trustedKEMSuites(
             provider: trustProvider,
@@ -1265,7 +1264,7 @@ public class P2PDiscoveryService: BaseManager {
         pinnedProtocolFingerprints: Set<String>,
         preferredTargetSuite: CryptoSuite?
     ) async throws {
-        let requestedSuites = Self.signedLANRefreshRequestedSuites(preferredTargetSuite: preferredTargetSuite)
+        let requestedSuites = await Self.signedLANRefreshRequestedSuites(preferredTargetSuite: preferredTargetSuite)
         let requesterDeviceId = try await localOutboundProtocolIdentityDeviceId()
         let requesterProof = try await localProtocolIdentityProofForOutboundPIB()
         let requesterFingerprint = requesterProof.fingerprint
@@ -1491,16 +1490,22 @@ public class P2PDiscoveryService: BaseManager {
         return trimmed
     }
 
-    private static func preferredStrictPQCOutboundTargetSuite() -> CryptoSuite? {
-        CryptoProviderFactory.make(policy: .requirePQC)
-            .supportedSuites
+    private nonisolated static func cryptoProviderSupportedSuites(
+        policy: CryptoProviderFactory.SelectionPolicy
+    ) async -> [CryptoSuite] {
+        await Task.detached(priority: .utility) {
+            CryptoProviderFactory.make(policy: policy).supportedSuites
+        }.value
+    }
+
+    private static func preferredStrictPQCOutboundTargetSuite() async -> CryptoSuite? {
+        await cryptoProviderSupportedSuites(policy: .requirePQC)
             .first(where: { $0.isPQCGroup })?
             .canonicalKEMSuite
     }
 
-    private static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) -> [CryptoSuite] {
-        let providerSuites = CryptoProviderFactory.make(policy: .requirePQC)
-            .supportedSuites
+    private static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
+        let providerSuites = await cryptoProviderSupportedSuites(policy: .requirePQC)
             .filter(\.isPQCGroup)
             .map(\.canonicalKEMSuite)
         var suites = providerSuites
@@ -2752,6 +2757,32 @@ public class P2PDiscoveryService: BaseManager {
             return normalized
         }
 
+        func isPairingIdentityBoundToAuthenticatedAuthority(
+            _ payload: AppMessage.PairingIdentityExchangePayload
+        ) -> Bool {
+            guard let authority = authenticatedRemoteAuthority else { return false }
+            let expectedAlgorithm = authority.protocolSigningAlgorithm.rawValue
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .uppercased()
+            let expectedFingerprint = authority.protocolPublicKeyFingerprint
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard !expectedAlgorithm.isEmpty, !expectedFingerprint.isEmpty else {
+                return false
+            }
+
+            let protocolKeys =
+                AppMessage.ProtocolIdentityPublicKeyInfo.normalizedValidKeys(payload.protocolIdentityPublicKeys) ?? []
+            return protocolKeys.contains { key in
+                key.protocolSigningAlgorithm
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .uppercased() == expectedAlgorithm
+                    && key.authoritativeFingerprint?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased() == expectedFingerprint
+            }
+        }
+
         func cryptoKind(for suite: CryptoSuite) -> String {
             ConnectionCryptoPresentation.modeLabel(kind: nil, suite: suite.rawValue) ?? suite.rawValue
         }
@@ -3261,7 +3292,6 @@ public class P2PDiscoveryService: BaseManager {
                                         protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
                                     )
                                 }
-
                                 let request = PairingTrustApprovalService.Request(
                                     peerEndpoint: endpointDescriptionForPresence,
                                     declaredDeviceId: payload.deviceId,
@@ -3273,7 +3303,22 @@ public class P2PDiscoveryService: BaseManager {
                                     kemKeyCount: payload.kemPublicKeys.count
                                 )
 
-                                let decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                let decision: PairingTrustApprovalService.Decision
+                                if isPairingIdentityBoundToAuthenticatedAuthority(payload) {
+                                    if let persistedDecision = await PairingTrustApprovalService.shared.persistedPolicyDecision(for: request) {
+                                        decision = persistedDecision
+                                        logger.info(
+                                            "🔐 pairingIdentityExchange resolved by persisted policy on authenticated protocol-identity channel: declared=\(payload.deviceId, privacy: .public) decision=\(persistedDecision.rawValue, privacy: .public)"
+                                        )
+                                    } else {
+                                        decision = .allowOnce
+                                        logger.info(
+                                            "🔐 pairingIdentityExchange accepted on authenticated protocol-identity channel: declared=\(payload.deviceId, privacy: .public)"
+                                        )
+                                    }
+                                } else {
+                                    decision = await PairingTrustApprovalService.shared.decide(for: request)
+                                }
                                 guard decision != PairingTrustApprovalService.Decision.reject else {
                                     logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(payload.deviceId, privacy: .public)")
                                     break

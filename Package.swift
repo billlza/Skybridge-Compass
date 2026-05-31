@@ -404,12 +404,22 @@ let package = Package(
             exclude: [
                 "Info.plist",
                 "Resources/AppIcon.icon",
+                "Resources/AppIcon.icns",
+                "Resources/AppIconDock.icns",
+                "Resources/AppIconDock.png",
+                "Resources/AppIconMaster.png",
+                "Resources/AppIconMaster.svg",
+                "Resources/Assets.xcassets",
+                "Resources/BrandIcon.png",
+                "Resources/Icons",
+                "Resources/app-icon.svg",
+                "Resources/app_icon.png",
                 "SkyBridgeCompassApp.entitlements",
                 "SkyBridgeCompassApp.packaging.entitlements",
                 "SkyBridgeCompassApp.native.packaging.entitlements"
             ],
             resources: [
-                // 处理并打包目标内的 Resources 目录（例如 AppIcon.icns / AppIcon.png）
+                // Process the development-only Resources directory; release packaging installs precomposed icon assets separately.
                 .process("Resources"),
                 // 全页面雾霾效果着色器
                 .process("GlobalHazeShaders.metal"),

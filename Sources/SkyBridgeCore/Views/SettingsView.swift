@@ -522,6 +522,17 @@ public struct SettingsView: View {
                         }
                     }
                 }
+
+                settingsSection(localizationManager.localizedString("settings.network.topBar.title")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle(localizationManager.localizedString("settings.network.topBar.showIPLocation"), isOn: $settingsManager.showTopBarIPLocation)
+                            .help(localizationManager.localizedString("settings.network.topBar.showIPLocation.help"))
+                        Toggle(localizationManager.localizedString("settings.network.topBar.showSpeed"), isOn: $settingsManager.showTopBarNetworkSpeed)
+                            .help(localizationManager.localizedString("settings.network.topBar.showSpeed.help"))
+                        Toggle(localizationManager.localizedString("settings.network.topBar.showLatency"), isOn: $settingsManager.showTopBarNetworkLatency)
+                            .help(localizationManager.localizedString("settings.network.topBar.showLatency.help"))
+                    }
+                }
                 
                 settingsSection(localizationManager.localizedString("settings.network.connection.title")) {
                     VStack(alignment: .leading, spacing: 12) {

@@ -72,16 +72,14 @@ public final class MenuBarController: NSObject, ObservableObject {
             return
         }
         
- // 设置图标（使用模板图像以支持深色/浅色模式自动切换）
+ // 设置图标：菜单栏也必须使用 bundled AppIcon.icns 作为唯一品牌真源。
  // Requirements: 6.1, 6.2
-        if let icon = createMenuBarIcon() {
-            icon.isTemplate = true
-            button.image = icon
-        } else {
- // 回退到 SF Symbol
-            button.image = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "SkyBridge")
-            button.image?.isTemplate = true
+        guard let icon = createMenuBarIcon() else {
+            logger.error("菜单栏图标真源 AppIcon.icns 不可用，跳过状态栏设置")
+            statusItem = nil
+            return
         }
+        button.image = icon
         
         button.toolTip = "SkyBridge Compass"
         
@@ -129,183 +127,69 @@ public final class MenuBarController: NSObject, ObservableObject {
         
         switch state {
         case .normal:
- // 使用司南图标
-            let icon = createCompassMenuBarIcon()
-            icon.isTemplate = true
-            button.image = icon
+            button.image = createMenuBarIcon()
             
         case .transferring(let progress):
- // 创建带进度的司南图标
-            button.image = createProgressCompassIcon(progress: progress)
-            button.image?.isTemplate = false
+            button.image = createProgressMenuBarIcon(progress: progress)
             
         case .error:
- // 创建带错误标记的司南图标
-            button.image = createErrorCompassIcon()
-            button.image?.isTemplate = false
+            button.image = createErrorMenuBarIcon()
             
         case .scanning:
- // 使用带动画效果的司南图标
-            let icon = createScanningCompassIcon()
-            icon.isTemplate = true
-            button.image = icon
+            button.image = createScanningMenuBarIcon()
+        }
+
+        if button.image == nil {
+            logger.error("菜单栏图标状态更新失败：AppIcon.icns 真源不可用")
         }
     }
     
- /// 创建扫描中的司南图标（带圆点动画效果）
-    private func createScanningCompassIcon() -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size)
-        
-        image.lockFocus()
-        
-        let center = NSPoint(x: 9, y: 9)
-        let radius: CGFloat = 7.5
-        
- // 外圈（虚线表示扫描中）
-        let circlePath = NSBezierPath(ovalIn: NSRect(
-            x: center.x - radius,
-            y: center.y - radius,
-            width: radius * 2,
-            height: radius * 2
-        ))
-        NSColor.labelColor.setStroke()
-        circlePath.lineWidth = 1.2
-        let pattern: [CGFloat] = [2, 2]
-        circlePath.setLineDash(pattern, count: 2, phase: 0)
-        circlePath.stroke()
-        
- // 北指针
-        let northPath = NSBezierPath()
-        northPath.move(to: NSPoint(x: center.x, y: center.y + radius * 0.75))
-        northPath.line(to: NSPoint(x: center.x - 2.5, y: center.y))
-        northPath.line(to: NSPoint(x: center.x + 2.5, y: center.y))
-        northPath.close()
-        NSColor.labelColor.setFill()
-        northPath.fill()
-        
- // 南指针
-        let southPath = NSBezierPath()
-        southPath.move(to: NSPoint(x: center.x, y: center.y - radius * 0.75))
-        southPath.line(to: NSPoint(x: center.x - 2.5, y: center.y))
-        southPath.line(to: NSPoint(x: center.x + 2.5, y: center.y))
-        southPath.close()
-        southPath.lineWidth = 0.8
-        NSColor.labelColor.setStroke()
-        southPath.stroke()
-        
- // 中心点
-        let centerDot = NSBezierPath(ovalIn: NSRect(x: center.x - 1.5, y: center.y - 1.5, width: 3, height: 3))
-        NSColor.labelColor.setFill()
-        centerDot.fill()
-        
-        image.unlockFocus()
-        return image
+    private func createScanningMenuBarIcon() -> NSImage? {
+        renderCanonicalMenuBarIcon { rect in
+            let dotDiameter: CGFloat = 4
+            let dotRect = NSRect(
+                x: rect.maxX - dotDiameter - 1,
+                y: rect.maxY - dotDiameter - 1,
+                width: dotDiameter,
+                height: dotDiameter
+            )
+            NSColor.systemGreen.setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+        }
     }
-    
- /// 创建带进度的司南图标
-    private func createProgressCompassIcon(progress: Double) -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size)
-        
-        image.lockFocus()
-        
-        let center = NSPoint(x: 9, y: 9)
-        let radius: CGFloat = 7.5
-        
- // 背景圆环
-        let bgPath = NSBezierPath(ovalIn: NSRect(
-            x: center.x - radius,
-            y: center.y - radius,
-            width: radius * 2,
-            height: radius * 2
-        ))
-        NSColor.systemGray.withAlphaComponent(0.3).setStroke()
-        bgPath.lineWidth = 1.5
-        bgPath.stroke()
-        
- // 进度圆弧
-        let progressPath = NSBezierPath()
-        progressPath.appendArc(
-            withCenter: center,
-            radius: radius,
-            startAngle: 90,
-            endAngle: 90 - CGFloat(progress * 360),
-            clockwise: true
-        )
-        NSColor.systemBlue.setStroke()
-        progressPath.lineWidth = 1.5
-        progressPath.stroke()
-        
- // 北指针（蓝色）
-        let northPath = NSBezierPath()
-        northPath.move(to: NSPoint(x: center.x, y: center.y + radius * 0.6))
-        northPath.line(to: NSPoint(x: center.x - 2, y: center.y))
-        northPath.line(to: NSPoint(x: center.x + 2, y: center.y))
-        northPath.close()
-        NSColor.systemBlue.setFill()
-        northPath.fill()
-        
- // 南指针
-        let southPath = NSBezierPath()
-        southPath.move(to: NSPoint(x: center.x, y: center.y - radius * 0.6))
-        southPath.line(to: NSPoint(x: center.x - 2, y: center.y))
-        southPath.line(to: NSPoint(x: center.x + 2, y: center.y))
-        southPath.close()
-        NSColor.systemGray.setFill()
-        southPath.fill()
-        
-        image.unlockFocus()
-        return image
+
+    private func createProgressMenuBarIcon(progress: Double) -> NSImage? {
+        renderCanonicalMenuBarIcon { rect in
+            let clampedProgress = min(max(progress, 0), 1)
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let radius = min(rect.width, rect.height) / 2 - 1.5
+            let progressPath = NSBezierPath()
+            progressPath.appendArc(
+                withCenter: center,
+                radius: radius,
+                startAngle: 90,
+                endAngle: 90 - CGFloat(clampedProgress * 360),
+                clockwise: true
+            )
+            NSColor.systemBlue.setStroke()
+            progressPath.lineWidth = 1.5
+            progressPath.lineCapStyle = .round
+            progressPath.stroke()
+        }
     }
-    
- /// 创建带错误标记的司南图标
-    private func createErrorCompassIcon() -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size)
-        
-        image.lockFocus()
-        
-        let center = NSPoint(x: 9, y: 9)
-        let radius: CGFloat = 7.5
-        
- // 外圈（红色）
-        let circlePath = NSBezierPath(ovalIn: NSRect(
-            x: center.x - radius,
-            y: center.y - radius,
-            width: radius * 2,
-            height: radius * 2
-        ))
-        NSColor.systemRed.withAlphaComponent(0.8).setStroke()
-        circlePath.lineWidth = 1.2
-        circlePath.stroke()
-        
- // 北指针
-        let northPath = NSBezierPath()
-        northPath.move(to: NSPoint(x: center.x, y: center.y + radius * 0.75))
-        northPath.line(to: NSPoint(x: center.x - 2.5, y: center.y))
-        northPath.line(to: NSPoint(x: center.x + 2.5, y: center.y))
-        northPath.close()
-        NSColor.systemRed.setFill()
-        northPath.fill()
-        
- // 南指针
-        let southPath = NSBezierPath()
-        southPath.move(to: NSPoint(x: center.x, y: center.y - radius * 0.75))
-        southPath.line(to: NSPoint(x: center.x - 2.5, y: center.y))
-        southPath.line(to: NSPoint(x: center.x + 2.5, y: center.y))
-        southPath.close()
-        NSColor.systemGray.setStroke()
-        southPath.lineWidth = 0.8
-        southPath.stroke()
-        
- // 错误红点
-        let errorDot = NSBezierPath(ovalIn: NSRect(x: 12, y: 0, width: 5, height: 5))
-        NSColor.systemRed.setFill()
-        errorDot.fill()
-        
-        image.unlockFocus()
-        return image
+
+    private func createErrorMenuBarIcon() -> NSImage? {
+        renderCanonicalMenuBarIcon { rect in
+            let dotDiameter: CGFloat = 5
+            let dotRect = NSRect(
+                x: rect.maxX - dotDiameter,
+                y: rect.minY,
+                width: dotDiameter,
+                height: dotDiameter
+            )
+            NSColor.systemRed.setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+        }
     }
     
  /// 清理资源
@@ -401,70 +285,26 @@ public final class MenuBarController: NSObject, ObservableObject {
         }
     }
     
- /// 创建菜单栏图标 - 司南风格
+ /// 创建菜单栏图标。
     private func createMenuBarIcon() -> NSImage? {
- // 尝试从 bundle 加载图标
-        if let icon = NSImage(named: "MenuBarIcon") {
-            return icon
-        }
-        
- // 生成司南风格图标
-        return createCompassMenuBarIcon()
+        renderCanonicalMenuBarIcon()
     }
-    
- /// 生成司南/指南针风格的菜单栏图标
-    private func createCompassMenuBarIcon() -> NSImage {
+
+    private func renderCanonicalMenuBarIcon(
+        overlay: ((NSRect) -> Void)? = nil
+    ) -> NSImage? {
+        guard let source = MenuBarCanonicalAppIconLoader.load() else {
+            return nil
+        }
+
         let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size)
-        
-        image.lockFocus()
-        
         let rect = NSRect(origin: .zero, size: size)
-        let center = NSPoint(x: rect.midX, y: rect.midY)
-        let radius: CGFloat = 7.5
-        
- // 外圈
-        let circlePath = NSBezierPath(ovalIn: NSRect(
-            x: center.x - radius,
-            y: center.y - radius,
-            width: radius * 2,
-            height: radius * 2
-        ))
-        NSColor.labelColor.setStroke()
-        circlePath.lineWidth = 1.2
-        circlePath.stroke()
-        
- // 北指针（向上的三角形）
-        let northPath = NSBezierPath()
-        northPath.move(to: NSPoint(x: center.x, y: center.y + radius * 0.75)) // 顶点
-        northPath.line(to: NSPoint(x: center.x - 2.5, y: center.y))
-        northPath.line(to: NSPoint(x: center.x + 2.5, y: center.y))
-        northPath.close()
-        NSColor.labelColor.setFill()
-        northPath.fill()
-        
- // 南指针（向下的三角形，空心）
-        let southPath = NSBezierPath()
-        southPath.move(to: NSPoint(x: center.x, y: center.y - radius * 0.75)) // 底点
-        southPath.line(to: NSPoint(x: center.x - 2.5, y: center.y))
-        southPath.line(to: NSPoint(x: center.x + 2.5, y: center.y))
-        southPath.close()
-        NSColor.labelColor.setStroke()
-        southPath.lineWidth = 0.8
-        southPath.stroke()
-        
- // 中心点
-        let centerDot = NSBezierPath(ovalIn: NSRect(
-            x: center.x - 1.5,
-            y: center.y - 1.5,
-            width: 3,
-            height: 3
-        ))
-        NSColor.labelColor.setFill()
-        centerDot.fill()
-        
+        let image = NSImage(size: size)
+        image.lockFocus()
+        source.draw(in: rect)
+        overlay?(rect)
         image.unlockFocus()
-        
+        image.isTemplate = false
         return image
     }
     
@@ -499,5 +339,17 @@ public final class MenuBarController: NSObject, ObservableObject {
     
     @objc private func quitApp() {
         NSApp.terminate(nil)
+    }
+}
+
+private enum MenuBarCanonicalAppIconLoader {
+    static func load() -> NSImage? {
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+              let image = NSImage(contentsOf: url),
+              image.size.width > 0,
+              image.size.height > 0 else {
+            return nil
+        }
+        return image
     }
 }

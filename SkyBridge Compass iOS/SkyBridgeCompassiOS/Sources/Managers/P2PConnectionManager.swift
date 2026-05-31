@@ -3631,11 +3631,7 @@ public class P2PConnectionManager: ObservableObject {
         persistTrust: Bool
     ) async {
         guard let payload = payload.normalizedBootstrapPayload else {
-            let observedAt = Date()
             let runtimePeerId = canonicalPeerLookupKey(peerId)
-            lastPairingIdentityExchangeReceivedAt[runtimePeerId] = observedAt
-            let presentationPeerId = presentationPeerId(for: runtimePeerId)
-            lastPairingIdentityExchangeReceivedAt[presentationPeerId] = observedAt
             SkyBridgeLogger.shared.warning(
                 "⚠️ 忽略无效 pairingIdentityExchange: peer=\(runtimePeerId) keys=\(payload.kemPublicKeys.count)"
             )
@@ -3803,18 +3799,15 @@ public class P2PConnectionManager: ObservableObject {
         since: Date,
         timeout: Duration = .seconds(3)
     ) async -> Bool {
-        let canonicalPeerId = canonicalPeerLookupKey(deviceId)
-        let presentationPeerId = presentationPeerId(for: canonicalPeerId)
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
 
         while clock.now < deadline {
-            if let observedAt = lastPairingIdentityExchangeReceivedAt[canonicalPeerId],
-               observedAt >= since {
-                return true
-            }
-            if let observedAt = lastPairingIdentityExchangeReceivedAt[presentationPeerId],
-               observedAt >= since {
+            if hasPairingIdentityObservation(
+                in: lastPairingIdentityExchangeReceivedAt,
+                matching: pairingIdentityObservationAliases(for: deviceId),
+                since: since
+            ) {
                 return true
             }
             try? await Task.sleep(for: .milliseconds(100))
@@ -3828,26 +3821,80 @@ public class P2PConnectionManager: ObservableObject {
         since: Date,
         timeout: Duration = .seconds(8)
     ) async -> Bool {
-        let canonicalPeerId = canonicalPeerLookupKey(deviceId)
-        let presentationPeerId = presentationPeerId(for: canonicalPeerId)
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
 
         while clock.now < deadline {
-            if await hasStrictPQCTrustBootstrapMaterial(for: canonicalPeerId) {
-                return true
+            let aliases = pairingIdentityObservationAliases(for: deviceId)
+            for alias in aliases {
+                if await hasStrictPQCTrustBootstrapMaterial(for: alias) {
+                    return true
+                }
             }
-            if let observedAt = lastPairingIdentityBootstrapReadyAt[canonicalPeerId],
-               observedAt >= since {
-                return true
-            }
-            if let observedAt = lastPairingIdentityBootstrapReadyAt[presentationPeerId],
-               observedAt >= since {
+            if hasPairingIdentityObservation(
+                in: lastPairingIdentityBootstrapReadyAt,
+                matching: aliases,
+                since: since
+            ) {
                 return true
             }
             try? await Task.sleep(for: .milliseconds(100))
         }
 
+        return false
+    }
+
+    private func pairingIdentityObservationAliases(for deviceId: String) -> Set<String> {
+        let canonicalPeerId = canonicalPeerLookupKey(deviceId)
+        let runtimePeerId = runtimePeerId(forAnyPeerId: canonicalPeerId)
+        let presentationPeerId = presentationPeerId(for: runtimePeerId)
+        var aliases = connectionAliasSet(for: runtimePeerId)
+
+        func insertAliases(_ raw: String?) {
+            guard let raw else { return }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            aliases.insert(trimmed.lowercased())
+            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: trimmed))
+        }
+
+        for candidate in [deviceId, canonicalPeerId, runtimePeerId, presentationPeerId] {
+            insertAliases(candidate)
+        }
+
+        var seedAliases = aliases
+        for (deviceId, device) in lastKnownDevices {
+            let deviceAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+                .union(PeerIdentityAliasResolver.aliasKeys(for: device))
+            guard !deviceAliases.isDisjoint(with: seedAliases) else { continue }
+            insertAliases(deviceId)
+            insertAliases(device.id)
+            aliases.formUnion(deviceAliases)
+            seedAliases = aliases
+        }
+
+        for connection in activeConnections {
+            let deviceAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: connection.device.id))
+                .union(PeerIdentityAliasResolver.aliasKeys(for: connection.device))
+            guard !deviceAliases.isDisjoint(with: seedAliases) else { continue }
+            insertAliases(connection.device.id)
+            aliases.formUnion(deviceAliases)
+            seedAliases = aliases
+        }
+
+        return aliases
+    }
+
+    private func hasPairingIdentityObservation(
+        in observations: [String: Date],
+        matching aliases: Set<String>,
+        since: Date
+    ) -> Bool {
+        for key in stateKeysMatchingAliases(aliases, keys: observations.keys) {
+            if let observedAt = observations[key], observedAt >= since {
+                return true
+            }
+        }
         return false
     }
 

@@ -6,7 +6,7 @@ struct MissingIconHintView: View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.yellow)
-            Text("未检测到 AppIcon 资源。请添加 AppIcon.icns 或 AppIcon.png 并重新构建。")
+            Text("未检测到 AppIcon 资源。请修复 AppIcon.icns 后重新构建。")
                 .font(.subheadline)
             Button("查看指南") {
                 openResourcesREADME()

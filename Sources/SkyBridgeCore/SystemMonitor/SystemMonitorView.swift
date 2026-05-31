@@ -21,6 +21,7 @@ public struct SystemMonitorView: View {
     @State private var thermalStatus: String = "正常"
     @State private var helperInstalled: Bool = false
     @State private var pollingStarted: Bool = false
+    @State private var hasInitializedMonitoring = false
     
     private let logger = Logger(subsystem: "SkyBridgeCore", category: "SystemMonitorView")
     
@@ -241,6 +242,8 @@ public struct SystemMonitorView: View {
                 .padding()
         }
         .task {
+            guard !hasInitializedMonitoring else { return }
+            hasInitializedMonitoring = true
             await initializeAndStartMonitoring()
             helperInstalled = HelperInstaller.isHelperInstalled()
         }
@@ -260,7 +263,7 @@ public struct SystemMonitorView: View {
             }
         }
         .onDisappear {
-            stopMonitoring()
+            suspendViewMonitoring()
         }
     }
 
@@ -1264,31 +1267,17 @@ public struct SystemMonitorView: View {
         performanceModeManager = manager
         
  // 获取SystemPerformanceMonitor实例
-        var monitor = manager.systemPerformanceMonitor
+        let monitor = manager.systemPerformanceMonitor
         
- // 如果monitor还未初始化（可能需要先启用自适应模式），等待一下
-        if monitor == nil {
-            logger.info("⏳ SystemPerformanceMonitor尚未初始化，等待...")
- // 等待2秒后重试（给PerformanceModeManager时间初始化）
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            
- // 重新获取
-            monitor = manager.systemPerformanceMonitor
-            
-            if monitor == nil {
-                logger.warning("⚠️ SystemPerformanceMonitor获取失败，创建独立实例")
-                let newMonitor = SystemPerformanceMonitor()
-                systemPerformanceMonitor = newMonitor
-                newMonitor.startMonitoring(afterDelay: 10.0)
-                observeMonitoringStatus()
-                return
-            }
+        guard let monitor else {
+            logger.error("SystemPerformanceMonitor unavailable from PerformanceModeManager")
+            return
         }
         
         systemPerformanceMonitor = monitor
         
  // ✅ 自动启动监控（延迟启动，等待CPU负载平稳）
-        monitor?.startMonitoring(afterDelay: 10.0)
+        monitor.startMonitoring(afterDelay: 10.0)
         
  // 监听监控状态变化
         observeMonitoringStatus()
@@ -1348,13 +1337,20 @@ public struct SystemMonitorView: View {
         updateOverallHealth(monitor: monitor)
     }
     
- /// 停止监控
+ /// 暂停当前视图的本地轮询；共享 SystemPerformanceMonitor 生命周期由 PerformanceModeManager 持有。
+    private func suspendViewMonitoring() {
+        isMonitoring = false
+        pollingStarted = false
+        logger.info("⏸️ 系统监控视图轮询已暂停")
+    }
+
+ /// 用户显式停止系统监控时，才停止共享监控器。
     private func stopMonitoring() {
         guard isMonitoring else { return }
-        
+
         isMonitoring = false
         systemPerformanceMonitor?.stopMonitoring()
-        
+
         logger.info("⏹️ 系统监控已停止")
     }
     

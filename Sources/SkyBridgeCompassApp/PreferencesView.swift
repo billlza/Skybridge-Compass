@@ -344,6 +344,17 @@ struct NetworkPreferencesView: View {
                     .help("网络发现的超时时间")
             }
 
+            Section("顶部网络信息") {
+                Toggle("显示 IP 城市与代理状态", isOn: $settingsManager.showTopBarIPLocation)
+                    .help("在顶部栏显示公网 IP 出口城市，并标注系统代理是否开启")
+
+                Toggle("显示实时网速", isOn: $settingsManager.showTopBarNetworkSpeed)
+                    .help("在顶部栏显示当前网络下载和上传吞吐")
+
+                Toggle("显示网络延迟", isOn: $settingsManager.showTopBarNetworkLatency)
+                    .help("在顶部栏显示 HTTPS 网络延迟探测结果")
+            }
+
             Section("连接设置") {
                 Stepper("连接超时: \(settingsManager.connectionTimeout)秒",
                        value: $settingsManager.connectionTimeout,

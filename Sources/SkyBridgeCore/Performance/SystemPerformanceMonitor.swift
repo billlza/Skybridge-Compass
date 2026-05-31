@@ -84,6 +84,7 @@ public final class SystemPerformanceMonitor: ObservableObject {
 
     public func startMonitoring(afterDelay delay: TimeInterval = 1.5) {
         guard !isMonitoring else { return }
+        guard startupDelayTimer == nil else { return }
 
         initializeIfNeeded()
 

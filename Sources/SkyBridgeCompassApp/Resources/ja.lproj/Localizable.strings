@@ -19,7 +19,7 @@
 "startup.step.performanceFoundation" = "パフォーマンス基盤";
 "startup.step.networkServices" = "ネットワークサービス";
 "startup.step.fileSystemServices" = "ファイルシステム";
-"startup.step.deviceDiscovery" = "デバイス検出";
+"startup.step.serviceLaunchPlan" = "サービス起動計画";
 "startup.step.themeConfiguration" = "テーマ設定";
 "startup.step.mainInterface" = "メインインターフェース";
 "startup.step.systemMonitorInterface" = "システムモニタ";

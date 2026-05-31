@@ -867,28 +867,7 @@ validate_icns_contains_full_size_reps() {
   rm -rf "${tmp_dir}"
 }
 
-validate_icon_resources_match() {
-  local first="$1"
-  local second="$2"
-  local label="$3"
-  local first_hash
-  local second_hash
-
-  if [[ ! -f "${first}" || ! -f "${second}" ]]; then
-    echo "missing icon resources required for ${label} identity check" >&2
-    return 1
-  fi
-
-  first_hash="$(shasum -a 256 "${first}" | awk '{print $1}')"
-  second_hash="$(shasum -a 256 "${second}" | awk '{print $1}')"
-  if [[ "${first_hash}" != "${second_hash}" ]]; then
-    echo "AppIconDock must exactly match canonical AppIcon for ${label}; otherwise the app can switch icons after launch" >&2
-    echo "AppIcon=${first_hash} AppIconDock=${second_hash}" >&2
-    return 1
-  fi
-}
-
-validate_packaged_app_does_not_override_icon_composer() {
+validate_packaged_app_does_not_override_system_icon() {
   local app_source="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift"
   local icon_loader_source="${PROJECT_ROOT}/Sources/SkyBridgeCompassApp/SVGEmbeddedImageView.swift"
   local icon_function
@@ -910,7 +889,7 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
 start_marker = "private static func applyAppIconIfAvailable() -> Bool"
-end_marker = "func resolveIconURL(named baseName: String) -> URL?"
+end_marker = "func resolveDevelopmentIconURL() -> URL?"
 start = source.find(start_marker)
 end = source.find(end_marker, start)
 if start == -1 or end == -1:
@@ -923,7 +902,7 @@ PY
   }
 
   if [[ "${icon_function}" != *"if isRunningFromPackagedApp"* ]]; then
-    echo "packaged app icon must return before debug raw-icon fallback; LaunchServices/Icon Composer must own it" >&2
+    echo "packaged app icon must return before debug raw-icon fallback; Info.plist + LaunchServices must own it" >&2
     return 1
   fi
   if [[ "${icon_function}" == *"NSApplication.shared.applicationIconImage ="* ]]; then
@@ -954,12 +933,16 @@ PY
     return 1
   }
 
-  if [[ "${brand_loader}" != *"NSApplication.shared.applicationIconImage"* ]]; then
-    echo "packaged brand icon must reuse the system app icon instead of raw PNG resources" >&2
+  if [[ "${brand_loader}" != *"loadImageResource(named: preferredResourceName, withExtension: \"png\", bundle: .main)"* ]]; then
+    echo "packaged brand icon must first read the requested main-bundle resource so the sidebar can use SidebarBrandIcon.png" >&2
     return 1
   fi
-  if [[ "${brand_loader}" == *"packagedResourceIconURLs"* ]]; then
-    echo "packaged brand icon must not bypass Icon Composer by reading raw PNG resources" >&2
+  if [[ "${brand_loader}" != *"loadImageResource(named: \"BrandIcon\", withExtension: \"png\", bundle: .main)"* ]]; then
+    echo "packaged brand icon must read bundled BrandIcon.png so in-app branding does not drift through AppIcon.icns representation selection" >&2
+    return 1
+  fi
+  if [[ "${brand_loader}" == *"packagedResourceIconURLs"* || "${brand_loader}" == *"NSApplication.shared.applicationIconImage"* ]]; then
+    echo "packaged brand icon must not use legacy resource lists or cached system icons; BrandIcon.png is the runtime brand truth" >&2
     return 1
   fi
 }
@@ -973,44 +956,70 @@ validate_modern_app_icon_contract() {
   local icon_name
   local canonical_png_hash
   local iconcomposer_png_hash
+  local source_icns_hash
+  local packaged_icns_hash
+  local packaged_brand_hash
+  local source_sidebar_brand_hash
+  local packaged_sidebar_brand_hash
   icon_file="$(plist_read_value "${info_plist}" "CFBundleIconFile" 2>/dev/null || true)"
   icon_name="$(plist_read_value "${info_plist}" "CFBundleIconName" 2>/dev/null || true)"
 
-  if [[ "${icon_file}" != "AppIcon" ]]; then
-    echo "app Info.plist CFBundleIconFile must point to the full-size AppIcon.icns resource (actual: ${icon_file:-missing})" >&2
+  if [[ "${icon_file}" != "AppIcon.icns" ]]; then
+    echo "app Info.plist CFBundleIconFile must point to precomposed AppIcon.icns (actual: ${icon_file:-missing})" >&2
     return 1
   fi
 
-  if [[ "${icon_name}" != "AppIcon" ]]; then
-    echo "app Info.plist CFBundleIconName must point to the Icon Composer app icon (actual: ${icon_name:-missing})" >&2
+  if [[ -n "${icon_name}" ]]; then
+    echo "app Info.plist CFBundleIconName must be absent so Icon Composer iconstack cannot wrap the precomposed icon (actual: ${icon_name})" >&2
     return 1
   fi
 
-  if [[ ! -f "${resources_dir}/AppIcon.icns" || ! -f "${resources_dir}/AppIconDock.icns" || ! -f "${resources_dir}/AppIcon.png" || ! -f "${resources_dir}/Assets.car" ]]; then
-    echo "app bundle is missing AppIcon.icns/AppIconDock.icns/AppIcon.png/Assets.car resources" >&2
+  if [[ ! -f "${resources_dir}/AppIcon.icns" || ! -f "${resources_dir}/BrandIcon.png" || ! -f "${resources_dir}/SidebarBrandIcon.png" ]]; then
+    echo "app bundle is missing precomposed AppIcon.icns, runtime BrandIcon.png, or runtime SidebarBrandIcon.png resources" >&2
     return 1
   fi
 
   validate_icns_contains_full_size_reps "${resources_dir}/AppIcon.icns" "AppIcon.icns" || return 1
-  validate_icns_contains_full_size_reps "${resources_dir}/AppIconDock.icns" "AppIconDock.icns" || return 1
-  validate_icon_resources_match "${resources_dir}/AppIcon.icns" "${resources_dir}/AppIconDock.icns" "icns" || return 1
-  validate_icon_resources_match "${resources_dir}/AppIcon.png" "${resources_dir}/AppIconDock.png" "png" || return 1
-  validate_packaged_app_does_not_override_icon_composer || return 1
+  validate_packaged_app_does_not_override_system_icon || return 1
 
-  if [[ ! -f "${source_resources_dir}/AppIcon.png" || ! -f "${source_resources_dir}/AppIcon.icon/Assets/Image.png" ]]; then
-    echo "source resources are missing AppIcon.png or AppIcon.icon/Assets/Image.png; Icon Composer source cannot be proven canonical" >&2
+  if [[ ! -f "${source_resources_dir}/AppIcon.png" || ! -f "${source_resources_dir}/AppIcon.icon/Assets/Image.png" || ! -f "${source_resources_dir}/AppIcon.icns" || ! -f "${source_resources_dir}/SidebarBrandIcon.png" ]]; then
+    echo "source resources are missing AppIcon.png, AppIcon.icon/Assets/Image.png, AppIcon.icns, or SidebarBrandIcon.png; icon sources cannot be proven canonical" >&2
     return 1
   fi
   canonical_png_hash="$(shasum -a 256 "${source_resources_dir}/AppIcon.png" | awk '{print $1}')"
   iconcomposer_png_hash="$(shasum -a 256 "${source_resources_dir}/AppIcon.icon/Assets/Image.png" | awk '{print $1}')"
+  source_icns_hash="$(shasum -a 256 "${source_resources_dir}/AppIcon.icns" | awk '{print $1}')"
+  packaged_icns_hash="$(shasum -a 256 "${resources_dir}/AppIcon.icns" | awk '{print $1}')"
+  packaged_brand_hash="$(shasum -a 256 "${resources_dir}/BrandIcon.png" | awk '{print $1}')"
+  source_sidebar_brand_hash="$(shasum -a 256 "${source_resources_dir}/SidebarBrandIcon.png" | awk '{print $1}')"
+  packaged_sidebar_brand_hash="$(shasum -a 256 "${resources_dir}/SidebarBrandIcon.png" | awk '{print $1}')"
   if [[ "${canonical_png_hash}" != "${iconcomposer_png_hash}" ]]; then
-    echo "Icon Composer AppIcon.icon/Assets/Image.png must match canonical AppIcon.png; otherwise Assets.car and runtime AppIcon can drift" >&2
+    echo "Icon Composer AppIcon.icon/Assets/Image.png must match canonical AppIcon.png; otherwise development assets can drift" >&2
     echo "AppIcon.png=${canonical_png_hash} IconComposerImage=${iconcomposer_png_hash}" >&2
     return 1
   fi
+  if [[ "${source_icns_hash}" != "${packaged_icns_hash}" ]]; then
+    echo "packaged AppIcon.icns must match the source AppIcon.icns derived from canonical AppIcon.png" >&2
+    echo "source=${source_icns_hash} packaged=${packaged_icns_hash}" >&2
+    return 1
+  fi
+  if [[ "${canonical_png_hash}" != "${packaged_brand_hash}" ]]; then
+    echo "packaged BrandIcon.png must match canonical AppIcon.png for in-app branding" >&2
+    echo "AppIcon.png=${canonical_png_hash} BrandIcon=${packaged_brand_hash}" >&2
+    return 1
+  fi
+  if [[ "${source_sidebar_brand_hash}" != "${packaged_sidebar_brand_hash}" ]]; then
+    echo "packaged SidebarBrandIcon.png must match the source small-size brand icon resource" >&2
+    echo "source=${source_sidebar_brand_hash} packaged=${packaged_sidebar_brand_hash}" >&2
+    return 1
+  fi
+  if [[ "${canonical_png_hash}" == "${source_sidebar_brand_hash}" ]]; then
+    echo "SidebarBrandIcon.png must be a small-size optimized derivative, not a duplicate of canonical AppIcon.png" >&2
+    return 1
+  fi
 
-  if [[ -e "${resources_dir}/icon.json" || -e "${resources_dir}/Image.png" || -e "${resources_dir}/AppIcon.icon" || -e "${resources_dir}/Assets.xcassets" ]]; then
-    echo "app bundle still contains Icon Composer/asset catalog source resources; release icon source is ambiguous" >&2
+  if [[ -e "${resources_dir}/icon.json" || -e "${resources_dir}/Image.png" || -e "${resources_dir}/AppIcon.icon" || -e "${resources_dir}/Assets.xcassets" || -e "${resources_dir}/AppIcon.png" || -e "${resources_dir}/AppIconDock.icns" || -e "${resources_dir}/AppIconDock.png" || -e "${resources_dir}/app_icon.png" || -e "${resources_dir}/AppIconMaster.png" || -e "${resources_dir}/AppIconMaster.svg" || -e "${resources_dir}/app-icon.svg" || -e "${resources_dir}/Icons" ]]; then
+    echo "app bundle still contains Icon Composer inputs or legacy icon aliases; release icon source is ambiguous" >&2
     return 1
   fi
 }
@@ -1377,7 +1386,7 @@ validate_swift_toolchain_baseline
 validate_update_check_configuration "${APP_INFO_PLIST}"
 
 validate_modern_app_icon_contract "${APP_INFO_PLIST}" "${APP_RESOURCES_DIR}" \
-  || fail "app icon contract drifted from the modern Icon Composer release path"
+  || fail "app icon contract drifted from the precomposed AppIcon.icns release path"
 
 validate_macos_platform_metadata "${APP_INFO_PLIST}" "${APP_EXECUTABLE_PATH}" \
   || fail "app bundle macOS platform metadata is invalid"

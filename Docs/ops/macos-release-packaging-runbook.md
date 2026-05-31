@@ -147,10 +147,10 @@ the fix is to rebuild `SkyBridgeCompassApp` from
 
 ## Correct Icon Assets
 
-The canonical icon artwork lives in:
+The canonical macOS icon artwork source lives in:
 
 ```text
-Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg
+Sources/SkyBridgeCompassApp/Resources/AppIconMaster.png
 ```
 
 Generate derived assets only through:
@@ -159,39 +159,49 @@ Generate derived assets only through:
 Scripts/regenerate_app_icons.sh
 ```
 
-Correct derived assets as verified on 2026-05-28:
+For the cross-platform macOS/iOS icon invariants, see
+`Docs/ops/app-icon-asset-governance.md`. The important split is that macOS keeps
+the recovered transparent pre-rounded artwork, while iOS launcher icons must be
+generated as opaque full-square PNGs from the cropped alpha bounding box.
+
+Correct derived assets as verified on 2026-05-31:
 
 ```text
-98a2ab817277e4ab3f05edb48e1d908c7c4d1870c544bc2edce29b1af7dc673c  Sources/SkyBridgeCompassApp/Resources/AppIcon.png
-98a2ab817277e4ab3f05edb48e1d908c7c4d1870c544bc2edce29b1af7dc673c  Sources/SkyBridgeCompassApp/Resources/AppIconDock.png
-98a2ab817277e4ab3f05edb48e1d908c7c4d1870c544bc2edce29b1af7dc673c  Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/Assets/Image.png
-706dd8153720f12ed9a89ab3725a7ad0ef1553c0e25bae9e6d650a2043079ded  Sources/SkyBridgeCompassApp/Resources/AppIcon.icns
-706dd8153720f12ed9a89ab3725a7ad0ef1553c0e25bae9e6d650a2043079ded  Sources/SkyBridgeCompassApp/Resources/AppIconDock.icns
+979d15acb9367e86256d383e0c9f6d27e2e6e17725664178703672c9164c5c82  Sources/SkyBridgeCompassApp/Resources/AppIconMaster.png
+979d15acb9367e86256d383e0c9f6d27e2e6e17725664178703672c9164c5c82  Sources/SkyBridgeCompassApp/Resources/AppIcon.png
+979d15acb9367e86256d383e0c9f6d27e2e6e17725664178703672c9164c5c82  Sources/SkyBridgeCompassApp/Resources/AppIconDock.png
+979d15acb9367e86256d383e0c9f6d27e2e6e17725664178703672c9164c5c82  Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/Assets/Image.png
+bd2c0d852163d99f2ff683f5c5767f24419770d832e5f82d244d9af24d3d77e6  Sources/SkyBridgeCompassApp/Resources/AppIcon.icns
+bd2c0d852163d99f2ff683f5c5767f24419770d832e5f82d244d9af24d3d77e6  Sources/SkyBridgeCompassApp/Resources/AppIconDock.icns
 270943495835f20e8520e72c14fa4b41d013e7b2f73038b91c2bb3882b96f76c  Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/icon.json
 ```
 
-`AppIcon.png` and `AppIconDock.png` are 1024x1024 PNGs. The visually correct
-icon is the compass over blue clouds filling the rounded square, without the
-extra white inset box. If Finder shows a smaller icon nested inside another
-rounded rectangle, reject that build and regenerate from `AppIconMaster.svg`.
-Both `AppIcon.icns` and `AppIconDock.icns` must include 512x512 and 1024x1024
-representations so LaunchServices and the runtime Dock icon resolve the same
-full-size artwork.
+`AppIconMaster.png` is the recovered canonical artwork source. `AppIcon.png`,
+`AppIconDock.png`, `BrandIcon.png`, `app_icon.png`,
+`Assets.xcassets/BrandIcon.imageset/BrandIcon.png`, and
+`AppIcon.icon/Assets/Image.png` are generated outputs. Those PNG outputs must be
+byte-for-byte identical after regeneration. The visually correct icon is the
+blue-bottom compass icon recovered from the historical `979d15ac...` app-icon
+artifact. If Finder shows a smaller icon nested inside another rounded
+rectangle, reject that build and regenerate from `AppIconMaster.png`.
 
-The app plist must continue to point at `AppIcon`:
+Both `AppIcon.icns` and `AppIconDock.icns` are generated compatibility outputs
+and must include 512x512 and 1024x1024 representations.
+
+The packaged macOS app plist must point at the precomposed ICNS:
 
 ```text
-CFBundleIconFile = AppIcon
-CFBundleIconName = AppIcon
+CFBundleIconFile = AppIcon.icns
 ```
 
 For the packaged macOS app, the correct runtime icon path is:
 
 ```text
-Sources/SkyBridgeCompassApp/Resources/AppIcon.icon
-  -> actool
-  -> SkyBridge Compass Pro.app/Contents/Resources/Assets.car
-  -> CFBundleIconName = AppIcon
+Sources/SkyBridgeCompassApp/Resources/AppIconMaster.png
+  -> Scripts/regenerate_app_icons.sh
+  -> Sources/SkyBridgeCompassApp/Resources/AppIcon.icns
+  -> SkyBridge Compass Pro.app/Contents/Resources/AppIcon.icns
+  -> CFBundleIconFile = AppIcon.icns
   -> LaunchServices / NSApplication.shared.applicationIconImage
 ```
 
@@ -199,19 +209,19 @@ Sources/SkyBridgeCompassApp/Resources/AppIcon.icon
 `Sources/SkyBridgeCompassApp/Resources/Assets.xcassets` are source inputs only.
 They must stay in source control, but they must not be copied into
 `SkyBridge Compass Pro.app/Contents/Resources/`. The final app bundle should
-contain the compiled `Assets.car` plus the required `AppIcon.*` compatibility
-resources; it must not contain flattened Icon Composer source files such as
-`icon.json` or `Image.png`.
+contain only the full-size precomposed `AppIcon.icns` plus runtime
+`BrandIcon.png` for visible brand UI; it must not contain flattened Icon Composer
+source files such as `icon.json` or `Image.png`, raw PNG aliases, or asset
+catalog sources.
 
 Do not set `NSApplication.shared.applicationIconImage` from bundled
 `AppIcon.png`, `AppIcon.icns`, `AppIconDock.png`, or `AppIconDock.icns` in the
-packaged app startup path. Those files are source/compatibility resources, not
-the owner of the launched app icon. The runtime icon should come back through
+packaged app startup path. The launched app icon should come back through
 LaunchServices as `NSApplication.shared.applicationIconImage` after
-`CFBundleIconName = AppIcon` has resolved the compiled Icon Composer asset.
+`CFBundleIconFile = AppIcon.icns` resolves the precomposed ICNS.
 
-Do not recover icons from `/Applications`, Finder cache, screenshots, temporary
-DMG staging folders, or old `dist` bundles.
+Do not recover icons from `/Applications`, Finder cache, temporary DMG staging
+folders, or old `dist` bundles.
 
 ## Release Verification
 

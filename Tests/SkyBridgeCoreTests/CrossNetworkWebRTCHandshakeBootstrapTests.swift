@@ -982,7 +982,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
         XCTAssertTrue(appSource.contains("MacOnlineIPadSmokeBootMarker.appendIfNeeded(uiRole: \"app-init-pre-state\")"))
         XCTAssertTrue(
-            appSource.contains("MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment || startupCoordinator.isStartupComplete"),
+            appSource.contains("MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment || startupCoordinator.isLaunchSettled"),
             "The mac-online packaged-app smoke must render the device-management root before the normal startup gate can block OnlineDeviceCard evidence."
         )
         XCTAssertTrue(appSource.contains("SKYBRIDGE_SMOKE_ROLE"))
@@ -994,9 +994,13 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         let dashboardSource = try readSource("Sources/SkyBridgeCompassApp/DashboardViewModel.swift")
         let localizationSource = try readSource("Sources/SkyBridgeCore/Localization/LocalizationManager.swift")
         let appSource = try readSource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
+        let startupCoordinatorSource = try readSource("Sources/SkyBridgeCompassApp/Core/StartupCoordinator.swift")
         let appInfoPlist = try readSource("Sources/SkyBridgeCompassApp/Info.plist")
         let xcodeInfoPlist = try readSource("XcodeSupport/SkyBridgeCompassMac/Info.plist")
+        let projectYAML = try readSource("project.yml")
         let brandIconSource = try readSource("Sources/SkyBridgeCompassApp/SVGEmbeddedImageView.swift")
+        let menuBarControllerSource = try readSource("Sources/SkyBridgeUI/MenuBar/MenuBarController.swift")
+        let menuBarIconGeneratorSource = try readSource("Sources/SkyBridgeUI/MenuBar/MenuBarIconGenerator.swift")
         let dashboardStoredProperties = try sourceSlice(
             from: "final class DashboardViewModel: ObservableObject",
             to: "// MARK: - 初始化",
@@ -1009,17 +1013,22 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
         let iconSource = try sourceSlice(
             from: "private static func applyAppIconIfAvailable() -> Bool",
-            to: "func resolveIconURL(named baseName: String) -> URL?",
+            to: "func resolveDevelopmentIconURL() -> URL?",
             in: appSource
         )
         let appIconFallbackSource = try sourceSlice(
-            from: "let chosenURL = resolveIconURL",
+            from: "guard let url = resolveDevelopmentIconURL() else",
             to: "guard let icon = NSImage(contentsOf: url) else",
             in: appSource
         )
         let notificationSource = try sourceSlice(
             from: "private static func configureNotificationsUnified()",
             to: "/// 设置菜单栏通知处理器",
+            in: appSource
+        )
+        let rootServicesContainerSource = try sourceSlice(
+            from: "private struct RootAppServicesContainer: View",
+            to: "private struct PreferencesSceneContent: View",
             in: appSource
         )
 
@@ -1030,6 +1039,62 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(
             dashboardStoredProperties.contains("statusText: ConnectionStatus.disconnected.displayName"),
             "The pre-render disconnected label should come from the non-resource connection status until live presentation bindings install localized labels."
+        )
+        XCTAssertTrue(
+            dashboardStoredProperties.contains("private lazy var discoveryService = DeviceDiscoveryService.shared"),
+            "DashboardViewModel must not construct the discovery service while SwiftUI is still creating App-level StateObjects."
+        )
+        XCTAssertTrue(
+            dashboardStoredProperties.contains("private lazy var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared"),
+            "The unified online manager starts path monitors, timers, and persisted-device loading; keep it out of App StateObject initialization."
+        )
+        XCTAssertFalse(
+            dashboardStoredProperties.contains("private let unifiedDeviceManager = UnifiedOnlineDeviceManager.shared"),
+            "Do not eagerly construct the unified online manager before the startup progress view can render."
+        )
+        guard let coordinatedLaunch = appSource.range(of: "await startupCoordinator.startCoordinatedLaunch()"),
+              let connectionBindings = appSource.range(of: "appModel.bootstrapConnectionPresentationBindings()") else {
+            XCTFail("Expected coordinated launch and deferred dashboard bindings in SkyBridgeCompassApp.")
+            return
+        }
+        XCTAssertLessThan(
+            coordinatedLaunch.lowerBound,
+            connectionBindings.lowerBound,
+            "Dashboard presentation bindings subscribe to device/presence managers and must install after coordinated launch settles."
+        )
+        guard let rootServiceSettledGate = rootServicesContainerSource.range(
+            of: "await StartupCoordinator.shared.waitUntilLaunchSettled()"
+        ),
+              let rootServiceBindings = rootServicesContainerSource.range(
+                of: "appModel.bootstrapConnectionPresentationBindings()"
+              ) else {
+            XCTFail("Expected RootAppServicesContainer to gate service bootstrapping on launch settled.")
+            return
+        }
+        XCTAssertLessThan(
+            rootServiceSettledGate.lowerBound,
+            rootServiceBindings.lowerBound,
+            "Root service bootstrapping must wait for the startup progress stable period before subscribing to device managers."
+        )
+        XCTAssertTrue(
+            startupCoordinatorSource.contains("prepareDeferredServiceLaunch()"),
+            "StartupCoordinator should show progress for the launch plan without starting Bonjour/P2P/USB listeners before the first interactive frame."
+        )
+        XCTAssertFalse(
+            startupCoordinatorSource.contains("LocalPeerServiceCoordinator.shared.ensureHealthy()"),
+            "Local peer listeners must start from the post-first-frame service queue, not the blocking launch coordinator."
+        )
+        XCTAssertFalse(
+            startupCoordinatorSource.contains("P2PNetworkManager.shared.start()"),
+            "P2P/Bonjour listener startup can create identity TXT and network listeners; keep it out of the startup progress gate."
+        )
+        XCTAssertFalse(
+            startupCoordinatorSource.contains("UnifiedOnlineDeviceManager.shared.startDiscovery"),
+            "USB/Bonjour discovery must not be started by StartupCoordinator before the root view can render."
+        )
+        XCTAssertFalse(
+            startupCoordinatorSource.contains("try MetalPerformanceOptimizer()"),
+            "Metal performance optimizer construction is heavyweight and must not run before first frame."
         )
         XCTAssertTrue(localizationSource.contains("LocalizationBundleLookupCache"))
         XCTAssertFalse(
@@ -1046,28 +1111,54 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertFalse(iconSource.contains("Bundle.main.url(forResource"))
         XCTAssertFalse(
             iconSource.contains("NSApplication.shared.applicationIconImage ="),
-            "Packaged app startup must not overwrite the LaunchServices/Icon Composer app icon with a raw PNG or ICNS."
+            "Packaged app startup must not overwrite the Info.plist-declared app icon with a raw PNG or ICNS."
         )
         XCTAssertFalse(
             appSource.contains("resolvePackagedIconURL"),
-            "Packaged app icon resolution must stay under LaunchServices/Icon Composer ownership."
+            "Packaged app icon resolution must stay under Info.plist + LaunchServices ownership."
         )
         XCTAssertTrue(
             iconSource.contains("if isRunningFromPackagedApp"),
             "Packaged app startup should return after confirming LaunchServices owns the app icon."
         )
         XCTAssertTrue(
-            appIconFallbackSource.contains("resolveIconURL(named: \"AppIcon\")")
+            appIconFallbackSource.contains("resolveDevelopmentIconURL()")
         )
         XCTAssertFalse(
-            appIconFallbackSource.contains("resolveIconURL(named: \"AppIconDock\")"),
+            appSource.contains("resolveIconURL(named: \"AppIconDock\")"),
             "Debug fallback should not silently switch to the alternate Dock icon resource."
         )
-        XCTAssertTrue(appInfoPlist.contains("<key>CFBundleIconName</key>"))
-        XCTAssertTrue(appInfoPlist.contains("<string>AppIcon</string>"))
-        XCTAssertTrue(xcodeInfoPlist.contains("<key>CFBundleIconName</key>"))
-        XCTAssertTrue(xcodeInfoPlist.contains("<string>AppIcon</string>"))
-        XCTAssertTrue(brandIconLoaderSource.contains("NSApplication.shared.applicationIconImage"))
+        XCTAssertFalse(
+            appSource.contains("withExtension: \"icns\""),
+            "Runtime icon setup must not fall back to legacy ICNS resources."
+        )
+        XCTAssertTrue(appInfoPlist.contains("<key>CFBundleIconFile</key>"))
+        XCTAssertTrue(appInfoPlist.contains("<string>AppIcon.icns</string>"))
+        XCTAssertTrue(xcodeInfoPlist.contains("<key>CFBundleIconFile</key>"))
+        XCTAssertTrue(xcodeInfoPlist.contains("<string>AppIcon.icns</string>"))
+        XCTAssertFalse(appInfoPlist.contains("CFBundleIconName"))
+        XCTAssertFalse(xcodeInfoPlist.contains("CFBundleIconName"))
+        XCTAssertTrue(projectYAML.contains("Scripts/compile_xcode_icon_composer_assets.sh"))
+        XCTAssertTrue(projectYAML.contains("inputFiles:"))
+        XCTAssertTrue(projectYAML.contains("outputFiles:"))
+        XCTAssertTrue(projectYAML.contains("Resources/AppIcon.icon/**"))
+        XCTAssertTrue(projectYAML.contains("Resources/Assets.xcassets/**"))
+        XCTAssertTrue(
+            brandIconLoaderSource.contains("loadImageResource(named: preferredResourceName, withExtension: \"png\", bundle: .main)"),
+            "Sidebar brand UI must be able to request the small-size optimized SidebarBrandIcon.png from the main bundle."
+        )
+        XCTAssertTrue(
+            brandIconLoaderSource.contains("loadImageResource(named: \"BrandIcon\", withExtension: \"png\", bundle: .main)"),
+            "Packaged in-app brand UI must read the canonical BrandIcon.png so sidebar/header icons do not drift through AppIcon.icns representation selection."
+        )
+        XCTAssertTrue(
+            brandIconLoaderSource.contains("loadImageResource(named: \"AppIcon\", withExtension: \"png\", bundle: .module)"),
+            "Non-packaged development runs must read the single canonical AppIcon.png resource."
+        )
+        XCTAssertFalse(
+            brandIconLoaderSource.contains("NSApplication.shared.applicationIconImage"),
+            "Brand UI must not read the mutable/cached applicationIconImage as a visual source of truth."
+        )
         XCTAssertTrue(brandIconLoaderSource.contains("return nil"))
         XCTAssertFalse(
             brandIconLoaderSource.contains("image(forResource"),
@@ -1075,16 +1166,110 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
         XCTAssertFalse(
             brandIconLoaderSource.contains("packagedResourceIconURLs"),
-            "Packaged brand icon loading must not bypass Icon Composer by reading raw PNG resources."
+            "Packaged brand icon loading must not scan legacy resource lists."
         )
         XCTAssertFalse(
-            brandIconLoaderSource.contains("Bundle.main"),
-            "Packaged brand icon loading must not fall through to Bundle.main on the LaunchServices smoke path."
+            brandIconLoaderSource.contains("\"AppIconDock\""),
+            "Brand icon loading must not consult the alternate Dock icon resource."
+        )
+        XCTAssertFalse(
+            brandIconLoaderSource.contains("\"app_icon\""),
+            "Brand icon loading must not consult stale snake-case icon aliases."
+        )
+        XCTAssertTrue(
+            menuBarControllerSource.contains("MenuBarCanonicalAppIconLoader.load()"),
+            "Menu bar status icons must derive from the same canonical AppIcon loader as the rest of the brand UI."
+        )
+        XCTAssertTrue(
+            menuBarControllerSource.contains("Bundle.main.url(forResource: \"AppIcon\", withExtension: \"icns\")"),
+            "Packaged menu bar icons must read bundled AppIcon.icns directly."
+        )
+        XCTAssertFalse(
+            menuBarControllerSource.contains("NSImage(named: \"MenuBarIcon\")"),
+            "Menu bar status icons must not consult alternate named icon resources."
+        )
+        XCTAssertFalse(
+            menuBarControllerSource.contains("systemSymbolName:"),
+            "Menu bar status icons must not hide a missing canonical AppIcon behind an SF Symbol fallback."
+        )
+        XCTAssertFalse(
+            menuBarControllerSource.contains("createCompassMenuBarIcon"),
+            "Menu bar status icons must not redraw a separate compass glyph instead of using the canonical AppIcon."
+        )
+        XCTAssertTrue(
+            menuBarIconGeneratorSource.contains("Bundle.main.url(forResource: \"AppIcon\", withExtension: \"icns\")"),
+            "The legacy menu bar icon generator API must also render from the bundled canonical AppIcon.icns."
+        )
+        XCTAssertFalse(
+            menuBarIconGeneratorSource.contains("NSColor.black.setStroke()"),
+            "The legacy menu bar icon generator API must not draw an alternate monochrome signal glyph."
+        )
+        XCTAssertFalse(
+            menuBarIconGeneratorSource.contains("isTemplate = true"),
+            "The legacy menu bar icon generator API must not convert the canonical brand icon into a template replacement."
         )
         XCTAssertFalse(
             notificationSource.contains("Bundle.main"),
             "Startup notification setup must not touch Bundle.main before the root view can render."
         )
+    }
+
+    func testIOSAppIconPipelineDerivesFromCanonicalAppIcon() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let regenerateScript = try readSource("Scripts/regenerate_app_icons.sh")
+        let iosProject = try readSource("SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.pbxproj")
+        let iosAppIconContents = try readSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json"
+        )
+
+        let canonicalAppIcon = try Data(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCompassApp/Resources/AppIcon.png")
+        )
+        let iconComposerAppIcon = try Data(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCompassApp/Resources/AppIcon.icon/Assets/Image.png")
+        )
+        let iosBrandIcon = try Data(
+            contentsOf: root.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Resources/Assets.xcassets/BrandIcon.imageset/BrandIcon.png"
+            )
+        )
+        let sidebarBrandIcon = try Data(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCompassApp/Resources/SidebarBrandIcon.png")
+        )
+
+        XCTAssertEqual(
+            iconComposerAppIcon,
+            canonicalAppIcon,
+            "Icon Composer must use the same canonical AppIcon.png as the runtime brand icon source."
+        )
+        XCTAssertEqual(
+            iosBrandIcon,
+            canonicalAppIcon,
+            "iOS in-app BrandIcon must not drift from the canonical blue compass AppIcon.png."
+        )
+        XCTAssertNotEqual(
+            sidebarBrandIcon,
+            canonicalAppIcon,
+            "SidebarBrandIcon.png must stay as a small-size optimized derivative instead of drifting back to the regular icon."
+        )
+        XCTAssertTrue(regenerateScript.contains("MASTER_PNG=\"$RES_DIR/AppIconMaster.png\""))
+        XCTAssertTrue(regenerateScript.contains("SidebarBrandIcon.png"))
+        XCTAssertTrue(
+            regenerateScript.contains("sidebar_safe_area_padding = 64"),
+            "SidebarBrandIcon.png needs an optical safe area so the sidebar icon does not touch the 44pt grid edge."
+        )
+        XCTAssertFalse(regenerateScript.contains("rsvg-convert"))
+        XCTAssertTrue(
+            regenerateScript.contains("def ios_app_icon_rgb(image):")
+        )
+        XCTAssertTrue(
+            regenerateScript.contains("cropped = image.crop(alpha_bbox)") &&
+                regenerateScript.contains("ImageOps.fit(") &&
+                regenerateScript.contains("ios_base = ios_app_icon_rgb(img)"),
+            "iOS AppIcon.appiconset must crop away the Mac transparent pre-rounded padding and produce a full-square opaque icon."
+        )
+        XCTAssertTrue(iosProject.contains("ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;"))
+        XCTAssertTrue(iosAppIconContents.contains("\"filename\" : \"AppIcon-1024.png\""))
     }
 
     func testWebRTCInboundControlLoopIgnoresDuplicateMessageAWithoutResettingSessionState() throws {

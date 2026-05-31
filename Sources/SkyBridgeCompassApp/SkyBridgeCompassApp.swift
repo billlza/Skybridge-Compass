@@ -36,35 +36,55 @@ private enum MacOnlineIPadSmokeBootMarker {
     }
 }
 
+private enum VolatileSwiftUIAutosaveDefaultsPruner {
+    private static let keyPrefixes = [
+        "NSWindow Frame SwiftUI",
+        "NSSplitView Subview Frames SwiftUI"
+    ]
+    private static let unknownContextMarker = "(unknown context at $"
+
+    static func schedule() {
+        Task(priority: .utility) {
+            await StartupCoordinator.shared.waitUntilLaunchSettled()
+            do {
+                try await Task.sleep(for: .milliseconds(800))
+            } catch {
+                return
+            }
+            await pruneVolatileSwiftUIAutosaveDefaults()
+        }
+    }
+
+    private static func pruneVolatileSwiftUIAutosaveDefaults() async {
+        let removedCount = await Task.detached(priority: .utility) { () -> Int in
+            let defaults = UserDefaults.standard
+            let volatileKeys = defaults.dictionaryRepresentation().keys.filter { key in
+                keyPrefixes.contains { key.hasPrefix($0) } || key.contains(unknownContextMarker)
+            }
+
+            for key in volatileKeys {
+                defaults.removeObject(forKey: key)
+            }
+
+            return volatileKeys.count
+        }.value
+
+        guard removedCount > 0 else { return }
+        SkyBridgeLogger.ui.info("🧹 已延后清理 \(removedCount, privacy: .public) 个 SwiftUI 临时窗口偏好键")
+    }
+}
+
 @available(macOS 14.0, *)
 @main
 struct SkyBridgeCompassApp: App {
     private let macOnlineSmokeBootMarker: Void = MacOnlineIPadSmokeBootMarker.appendIfNeeded(uiRole: "app-init-pre-state")
-
-    @StateObject private var appModel = DashboardViewModel()
-    @StateObject private var authModel = AuthenticationViewModel()
-    @StateObject private var localPeerServices = LocalPeerServiceCoordinator.shared
-    @StateObject private var themeConfiguration = ThemeConfiguration.shared
-    @StateObject private var supabaseConfiguration = SupabaseConfiguration.shared
-    @StateObject private var vncLaunchContext = VNCLaunchContext.shared
-    @StateObject private var sshLaunchContext = SSHLaunchContext.shared
-    @StateObject private var pairingTrustApproval = PairingTrustApprovalService.shared
-    @StateObject private var remoteControlSecurityPanel = RemoteControlSecurityNoticePanelController.shared
-
- /// 天气服务 - 提供天气数据和位置服务
-    @StateObject private var weatherDataService = WeatherDataService()
-    @StateObject private var weatherLocationService = WeatherLocationService()
-    @StateObject private var weatherIntegrationManager = WeatherIntegrationManager.shared
-    @StateObject private var weatherEffectsSettings = WeatherEffectsSettings.shared
-
- /// 设置管理器（延迟初始化以避免阻塞）
-    @StateObject private var settingsManager = SettingsManager.shared
 
  /// 启动协调器 - 管理分阶段加载
     @StateObject private var startupCoordinator = StartupCoordinator.shared
 
  /// 本地化管理器
     @StateObject private var localizationManager = LocalizationManager.shared
+    @StateObject private var pairingTrustApproval = PairingTrustApprovalService.shared
 
     private let renderConfig: DMGBackgroundRenderConfig?
     private let iconApplied: Bool
@@ -79,48 +99,24 @@ struct SkyBridgeCompassApp: App {
                 if let _ = renderConfig {
                     Color.clear
                         .frame(width: 1, height: 1)
-                } else if MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment || startupCoordinator.isStartupComplete {
+                } else if MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment || startupCoordinator.isLaunchSettled {
  // 启动完成后显示主界面
-                    RootContainerView()
-                        .environmentObject(appModel)
-                        .environmentObject(authModel)
-                        .environmentObject(localPeerServices)
-                        .environmentObject(themeConfiguration)
-                        .environmentObject(supabaseConfiguration)
-                        .environmentObject(weatherDataService)
-                        .environmentObject(weatherLocationService)
-                        .environmentObject(weatherIntegrationManager)
-                        .environmentObject(weatherEffectsSettings)
-                        .environmentObject(settingsManager)
+                    RootAppServicesContainer(
+                        iconApplied: iconApplied,
+                        localWebRTCSmokeHarness: localWebRTCSmokeHarness
+                    )
                         .environmentObject(localizationManager)
                         .environment(\.iconMissingHint, !iconApplied)
                         .environment(\.locale, localizationManager.locale)
         } else {
  // 显示启动加载界面
             startupLoadingView
-                .environmentObject(settingsManager)
                 .environmentObject(localizationManager)
                 .environment(\.locale, localizationManager.locale)
-                .environmentObject(themeConfiguration)
-                .environmentObject(supabaseConfiguration)
         }
             }
             .frame(minWidth: 1280, minHeight: 720)
             .preferredColorScheme(.dark)
-            .onOpenURL { url in
-                if url.scheme == "skybridge", url.host == "auth" {
-                    Task { @MainActor in
-                        _ = await authModel.handleSupabaseAuthCallback(url)
-                    }
-                    return
-                }
- // 处理 Widget Deep Link
-                DeepLinkRouter.shared.handleDeepLink(url)
-            }
-            .sheet(isPresented: $authModel.showPasswordResetSheet) {
-                SupabasePasswordResetSheet()
-                    .environmentObject(authModel)
-            }
             .sheet(item: Binding(get: { pairingTrustApproval.pendingRequest }, set: { newValue in
                 if newValue == nil {
                     pairingTrustApproval.userDismissedCurrentPrompt()
@@ -135,7 +131,9 @@ struct SkyBridgeCompassApp: App {
             }
             .task {
                 if renderConfig == nil {
-                    configureRemoteControlSecurityNoticeServices()
+                    await MainActor.run {
+                        RemoteControlSecurityNoticePanelController.shared.start()
+                    }
                     macOnlineIPadSmokeHarness.appendAppBootIfNeeded()
 
                     if remoteControlNoticePanelProbeHarness.isEnabledForCurrentEnvironment {
@@ -148,12 +146,6 @@ struct SkyBridgeCompassApp: App {
                         return
                     }
 
-                    await localPeerServices.startIfNeeded()
-
-                    await MainActor.run {
-                        appModel.bootstrapConnectionPresentationBindings()
-                    }
-
                     if localWebRTCSmokeHarness.isEnabledForCurrentEnvironment {
                         localWebRTCSmokeHarness.startIfNeeded()
                         return
@@ -161,15 +153,6 @@ struct SkyBridgeCompassApp: App {
 
  // 开始协调启动流程
                     await startupCoordinator.startCoordinatedLaunch()
-
- // 启动完成后配置Supabase
-                    if let config = supabaseConfiguration.resolvedConfiguration
-                        ?? SupabaseService.Configuration.fromEnvironment() {
-                        AuthenticationService.shared.enableSupabaseMode(supabaseConfig: config)
-                        SkyBridgeLogger.ui.debugOnly("✅ Supabase模式已启用")
-                    }
-
-                    localWebRTCSmokeHarness.startIfNeeded()
                 }
             }
         }
@@ -179,30 +162,16 @@ struct SkyBridgeCompassApp: App {
  // 应用菜单命令
             SkyBridgeCommands()
         }
-        .environmentObject(vncLaunchContext)
-        .environmentObject(sshLaunchContext)
 
  // 偏好设置窗口
         Settings {
-            PreferencesView()
-                .environmentObject(appModel)
-                .environmentObject(authModel)
-                .environmentObject(weatherDataService)
-                .environmentObject(weatherLocationService)
-                .environmentObject(weatherIntegrationManager)
-                .environmentObject(weatherEffectsSettings)
-                .environmentObject(settingsManager)
-                .environmentObject(localizationManager)
-                .environment(\.locale, localizationManager.locale)
-                .environmentObject(themeConfiguration)
-                .environmentObject(supabaseConfiguration)
+            PreferencesSceneContent()
         }
 
 // 近距硬件镜像窗口 - macOS 15/26 最佳实践
 // 说明：macOS Tahoe 26 已于 2025-09-15 正式发布，CryptoKit 原生支持 HPKE X-Wing、ML-KEM、ML-DSA
         WindowGroup(id: "near-field-mirror") {
             NearFieldMirrorView()
-                .environmentObject(appModel)
                 .frame(minWidth: 800, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
@@ -223,7 +192,6 @@ struct SkyBridgeCompassApp: App {
  // 动态二维码 + iCloud 设备链 + 智能连接码
         WindowGroup(id: "cross-network-connection") {
             CrossNetworkConnectionView()
-                .environmentObject(appModel)
                 .frame(minWidth: 700, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
@@ -243,7 +211,7 @@ struct SkyBridgeCompassApp: App {
  // 🆕 VNC 查看器窗口
         WindowGroup(id: "vnc-viewer") {
             VNCViewerView()
-                .environmentObject(vncLaunchContext)
+                .environmentObject(VNCLaunchContext.shared)
                 .frame(minWidth: 800, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
@@ -252,30 +220,12 @@ struct SkyBridgeCompassApp: App {
  // 🆕 SSH 终端窗口
         WindowGroup(id: "ssh-terminal") {
             SSHTerminalView()
-                .environmentObject(sshLaunchContext)
+                .environmentObject(SSHLaunchContext.shared)
                 .frame(minWidth: 800, minHeight: 600)
                 .preferredColorScheme(.dark)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
-    }
-
- /// 安装远控安全提示面板与本机账号身份提供者
-    @MainActor
-    private func configureRemoteControlSecurityNoticeServices() {
-        remoteControlSecurityPanel.start()
-        RemoteControlSecurityNoticeCenter.shared.setLocalIdentityProvider { [weak authModel] in
-            guard let session = authModel?.currentSession else { return nil }
-            let displayName = session.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-            let account = displayName.isEmpty ? session.userIdentifier : displayName
-            return RemoteControlSecurityIdentity(
-                accountDisplayName: account,
-                nebulaId: session.nebulaId,
-                deviceId: nil,
-                deviceName: Host.current().localizedName
-            )
-        }
-        _ = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
     }
 
  /// 打开跨网络连接窗口（已在 @available(macOS 14.0, *) 作用域内）
@@ -303,9 +253,8 @@ struct SkyBridgeCompassApp: App {
  /// 启动加载界面 - 显示启动进度和当前加载的组件
     private var startupLoadingView: some View {
         ZStack {
- // 星空背景
-            StarryBackground()
-                .opacity(0.8)
+ // 启动页使用轻量静态背景，避免首帧前拉起天气/鼠标追踪/动态背景链路。
+            StartupLoadingBackground()
                 .ignoresSafeArea(.all)
 
             VStack(spacing: 32) {
@@ -405,22 +354,10 @@ struct SkyBridgeCompassApp: App {
             return
         }
         macOnlineIPadSmokeHarness.appendAppBootIfNeeded(uiRole: "app-init")
-        Self.pruneVolatileSwiftUIAutosaveDefaults()
+        VolatileSwiftUIAutosaveDefaultsPruner.schedule()
 
-        // Phase C3: Boot self-test for SBP2 TrafficPadding + CSV stats.
-        // This guarantees we can see DIAG/CSV path even if no handshake happens yet.
-        // If you don't see these logs, you are not running the newly built binary.
-        _ = TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
-        Task { try? await TrafficPaddingStats.shared.flushToCSV() }
+        Self.runTrafficPaddingBootSelfTestIfRequested()
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            WidgetCenter.shared.getCurrentConfigurations { result in
-                guard case .success(let configurations) = result, !configurations.isEmpty else { return }
-                WidgetCenter.shared.reloadAllTimelines()
-            }
-        }
-        BackgroundTaskCoordinator.shared.registerSystemTasks()
-        Self.configureNotificationsUnified()
         let applied = Self.applyAppIconIfAvailable()
         self.iconApplied = applied
 
@@ -431,35 +368,7 @@ struct SkyBridgeCompassApp: App {
             }
         }
 
- // 🔧 修复命令行启动时的键盘输入问题
- // 确保应用能够接收键盘输入和焦点事件
-        DispatchQueue.main.async {
-            Self.activateApplicationForKeyboardInput()
-
- // 🖱️ 启动全局鼠标追踪器（苹果官方推荐方式）
- // 延迟 1 秒确保窗口已创建
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                GlobalMouseTracker.shared.startTracking()
-            }
-
- // 🆕 初始化菜单栏图标
- // Requirements: 1.1 - 应用启动后在状态栏显示 SkyBridge 图标
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                MenuBarController.shared.setup()
-                Self.setupMenuBarNotificationHandlers()
-            }
-        }
-
- // 配置受信公钥白名单提供者（Supabase）
- // 🔒 安全改进：从安全配置加载凭据，不再硬编码
-        if let config = SupabaseService.Configuration.fromEnvironment() {
-            RemoteDesktopManager.shared.bootstrapTrustedKeysFromSupabase(
-                url: config.url.absoluteString,
-                anonKey: config.anonKey
-            )
-        } else {
-            SkyBridgeLogger.ui.error("⚠️ Supabase配置未找到，请在设置中配置、提供环境变量或检查包内配置")
-        }
+        Self.schedulePostLaunchAppServices()
 
  // DEBUG 模式下：应用退出时打印 Deprecated API 使用报告
  // Requirements: 11.1
@@ -473,9 +382,15 @@ struct SkyBridgeCompassApp: App {
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil) { _ in
  // 按图片最佳实践使用 而非 .detached，继承当前 actor 更安全
             Task(priority: .utility) {
+                await StartupCoordinator.shared.waitUntilLaunchSettled()
  // 第1层：天气系统轻量刷新（延迟 600ms）
                 try? await Task.sleep(nanoseconds: 600_000_000)
-                await WeatherIntegrationManager.shared.refresh()
+                let weatherEnabled = await MainActor.run {
+                    SettingsManager.shared.enableRealTimeWeather
+                }
+                if weatherEnabled {
+                    await WeatherIntegrationManager.shared.refresh()
+                }
                 // 第2层：设备发现（延迟 1200ms）
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 let shouldAutoScan = await MainActor.run {
@@ -493,26 +408,44 @@ struct SkyBridgeCompassApp: App {
         }
     }
 
-    /// SwiftUI/AppKit autosave keys can include anonymous view type names and load addresses.
-    /// Those keys are not stable across builds, so old releases accumulated hundreds of
-    /// window/split-view entries and eventually pushed the app defaults domain over 4 MB.
-    private static func pruneVolatileSwiftUIAutosaveDefaults() {
-        let defaults = UserDefaults.standard
-        let volatilePrefixes = [
-            "NSWindow Frame SwiftUI",
-            "NSSplitView Subview Frames SwiftUI"
-        ]
-        let staleKeys = defaults.dictionaryRepresentation().keys.filter { key in
-            volatilePrefixes.contains { key.hasPrefix($0) }
-                && key.contains("(unknown context at $")
+    /// 安排非首帧关键服务在启动页进度完成后再接入，避免它们和 RootView 首帧竞争主线程。
+    @MainActor
+    private static func schedulePostLaunchAppServices() {
+        DispatchQueue.main.async {
+            Self.activateApplicationForKeyboardInput()
         }
 
-        guard !staleKeys.isEmpty else { return }
+        Task { @MainActor in
+            await StartupCoordinator.shared.waitUntilLaunchSettled()
 
-        for key in staleKeys {
-            defaults.removeObject(forKey: key)
+            BackgroundTaskCoordinator.shared.registerSystemTasks()
+            Self.configureNotificationsUnified()
+
+            if SettingsManager.shared.enableRealTimeWeather {
+                try? await Task.sleep(for: .milliseconds(400))
+                await WeatherIntegrationManager.shared.start()
+                GlobalMouseTracker.shared.startTracking()
+            }
+
+            try? await Task.sleep(for: .milliseconds(300))
+            MenuBarController.shared.setup()
+            Self.setupMenuBarNotificationHandlers()
+
+            if let config = SupabaseService.Configuration.fromEnvironment() {
+                RemoteDesktopManager.shared.bootstrapTrustedKeysFromSupabase(
+                    url: config.url.absoluteString,
+                    anonKey: config.anonKey
+                )
+            } else {
+                SkyBridgeLogger.ui.error("⚠️ Supabase配置未找到，请在设置中配置、提供环境变量或检查包内配置")
+            }
+
+            try? await Task.sleep(for: .seconds(2))
+            WidgetCenter.shared.getCurrentConfigurations { result in
+                guard case .success(let configurations) = result, !configurations.isEmpty else { return }
+                WidgetCenter.shared.reloadAllTimelines()
+            }
         }
-        SkyBridgeLogger.ui.debugOnly("🧹 清理不稳定 SwiftUI 自动保存偏好项: \(staleKeys.count)")
     }
 
  /// 激活应用以接收键盘输入
@@ -677,29 +610,24 @@ struct SkyBridgeCompassApp: App {
         SkyBridgeLogger.ui.debugOnly("✅ 菜单栏通知处理器已设置")
     }
 
-    /// Keep the packaged app icon under LaunchServices/Icon Composer ownership.
-    /// Manually assigning `applicationIconImage` from raw PNG/ICNS resources drops
-    /// the modern AppIcon.icon composition and makes the Dock icon regress after launch.
+    /// Keep the packaged app icon under LaunchServices ownership.
+    /// Manually assigning `applicationIconImage` from raw resources drops
+    /// the bundle-declared AppIcon.icns and makes the Dock icon regress after launch.
     @MainActor
     private static func applyAppIconIfAvailable() -> Bool {
         if isRunningFromPackagedApp {
-            SkyBridgeLogger.ui.debugOnly("✅ 使用系统解析的 packaged AppIcon，避免运行态覆盖 Icon Composer 图标")
+            SkyBridgeLogger.ui.debugOnly("✅ 使用系统解析的 packaged AppIcon.icns，避免运行态覆盖系统图标")
             return true
         }
 
-        // Fallback for non-bundled/debug launches where the process has no
-        // packaged app icon for LaunchServices to resolve.
-        func resolveIconURL(named baseName: String) -> URL? {
-            let modulePNG = Bundle.module.url(forResource: baseName, withExtension: "png")
-            let mainPNG = Bundle.main.url(forResource: baseName, withExtension: "png")
-            let moduleICNS = Bundle.module.url(forResource: baseName, withExtension: "icns")
-            let mainICNS = Bundle.main.url(forResource: baseName, withExtension: "icns")
-            return modulePNG ?? mainPNG ?? moduleICNS ?? mainICNS
+        // Development-only path for non-bundled launches where the process has
+        // no packaged app icon for LaunchServices to resolve.
+        func resolveDevelopmentIconURL() -> URL? {
+            Bundle.module.url(forResource: "AppIcon", withExtension: "png")
         }
 
-        let chosenURL = resolveIconURL(named: "AppIcon")
-        guard let url = chosenURL else {
-            SkyBridgeLogger.ui.debugOnly("⚠️ 未找到 AppIcon 图标资源（module/main 均为空）")
+        guard let url = resolveDevelopmentIconURL() else {
+            SkyBridgeLogger.ui.debugOnly("⚠️ 未找到开发期 AppIcon.png 图标资源")
             return false
         }
         guard let icon = NSImage(contentsOf: url) else {
@@ -707,7 +635,7 @@ struct SkyBridgeCompassApp: App {
             return false
         }
         NSApplication.shared.applicationIconImage = icon
-        SkyBridgeLogger.ui.debugOnly("✅ 非打包启动图标已设置: \(url.path.hasSuffix(".png") ? "PNG" : "ICNS") @ \(url.path)")
+        SkyBridgeLogger.ui.debugOnly("✅ 非打包启动图标已设置: AppIcon.png @ \(url.path)")
         return true
     }
 
@@ -750,16 +678,151 @@ struct SkyBridgeCompassApp: App {
         return identifier
     }
 
+    private static func runTrafficPaddingBootSelfTestIfRequested() {
+        #if DEBUG
+        _ = TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
+        Task(priority: .utility) {
+            try? await TrafficPaddingStats.shared.flushToCSV()
+        }
+        #else
+        let environment = ProcessInfo.processInfo.environment
+        let shouldRun = environment["SKYBRIDGE_BOOT_TRAFFIC_PADDING_SELF_TEST"] == "1"
+            || environment["SKYBRIDGE_SMOKE_TRAFFIC_PADDING_BOOT_SELF_TEST"] == "1"
+
+        guard shouldRun else { return }
+        _ = TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
+        Task(priority: .utility) {
+            try? await TrafficPaddingStats.shared.flushToCSV()
+        }
+        #endif
+    }
+
+}
+
+@available(macOS 14.0, *)
+private struct StartupLoadingBackground: View {
+    var body: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.01, green: 0.01, blue: 0.08),
+                Color(red: 0.03, green: 0.04, blue: 0.15),
+                Color(red: 0.07, green: 0.08, blue: 0.22)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
 }
 
 // MARK: - 根容器视图
+
+@available(macOS 14.0, *)
+private struct RootAppServicesContainer: View {
+    @EnvironmentObject private var localizationManager: LocalizationManager
+    @Environment(\.locale) private var locale
+    @Environment(\.iconMissingHint) private var iconMissingHint
+
+    let iconApplied: Bool
+    let localWebRTCSmokeHarness: LocalWebRTCSmokeHarness
+
+    @StateObject private var appModel = DashboardViewModel()
+    @StateObject private var authModel = AuthenticationViewModel()
+    @StateObject private var themeConfiguration = ThemeConfiguration.shared
+    @StateObject private var supabaseConfiguration = SupabaseConfiguration.shared
+    @StateObject private var weatherDataService = WeatherDataService()
+    @StateObject private var weatherLocationService = WeatherLocationService()
+    @StateObject private var weatherIntegrationManager = WeatherIntegrationManager.shared
+    @StateObject private var weatherEffectsSettings = WeatherEffectsSettings.shared
+    @StateObject private var settingsManager = SettingsManager.shared
+    @StateObject private var remoteControlSecurityPanel = RemoteControlSecurityNoticePanelController.shared
+
+    var body: some View {
+        RootContainerView()
+            .environmentObject(appModel)
+            .environmentObject(authModel)
+            .environmentObject(themeConfiguration)
+            .environmentObject(supabaseConfiguration)
+            .environmentObject(weatherDataService)
+            .environmentObject(weatherLocationService)
+            .environmentObject(weatherIntegrationManager)
+            .environmentObject(weatherEffectsSettings)
+            .environmentObject(settingsManager)
+            .environmentObject(localizationManager)
+            .environment(\.iconMissingHint, iconMissingHint || !iconApplied)
+            .environment(\.locale, locale)
+            .onOpenURL { url in
+                if url.scheme == "skybridge", url.host == "auth" {
+                    Task { @MainActor in
+                        _ = await authModel.handleSupabaseAuthCallback(url)
+                    }
+                    return
+                }
+                DeepLinkRouter.shared.handleDeepLink(url)
+            }
+            .sheet(isPresented: $authModel.showPasswordResetSheet) {
+                SupabasePasswordResetSheet()
+                    .environmentObject(authModel)
+            }
+            .task {
+                await StartupCoordinator.shared.waitUntilLaunchSettled()
+                NetworkPreferenceService.shared.startConfiguredNetworkMonitoring()
+                configureRemoteControlSecurityNoticeServices()
+                appModel.bootstrapConnectionPresentationBindings()
+                configureSupabaseModeIfAvailable()
+                localWebRTCSmokeHarness.startIfNeeded()
+            }
+    }
+
+    @MainActor
+    private func configureRemoteControlSecurityNoticeServices() {
+        remoteControlSecurityPanel.start()
+        RemoteControlSecurityNoticeCenter.shared.setLocalIdentityProvider { [weak authModel] in
+            guard let session = authModel?.currentSession else { return nil }
+            let displayName = session.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let account = displayName.isEmpty ? session.userIdentifier : displayName
+            return RemoteControlSecurityIdentity(
+                accountDisplayName: account,
+                nebulaId: session.nebulaId,
+                deviceId: nil,
+                deviceName: Host.current().localizedName
+            )
+        }
+        _ = RemoteControlSecurityNoticeCenter.shared.localIdentitySnapshot()
+    }
+
+    @MainActor
+    private func configureSupabaseModeIfAvailable() {
+        guard let config = supabaseConfiguration.resolvedConfiguration
+            ?? SupabaseService.Configuration.fromEnvironment() else {
+            return
+        }
+        AuthenticationService.shared.enableSupabaseMode(supabaseConfig: config)
+        SkyBridgeLogger.ui.debugOnly("✅ Supabase模式已启用")
+    }
+}
+
+@available(macOS 14.0, *)
+private struct PreferencesSceneContent: View {
+    @StateObject private var settingsManager = SettingsManager.shared
+    @StateObject private var themeConfiguration = ThemeConfiguration.shared
+    @StateObject private var localizationManager = LocalizationManager.shared
+    @StateObject private var weatherIntegrationManager = WeatherIntegrationManager.shared
+
+    var body: some View {
+        PreferencesView()
+            .environmentObject(settingsManager)
+            .environmentObject(weatherIntegrationManager)
+            .environmentObject(localizationManager)
+            .environment(\.locale, localizationManager.locale)
+            .environmentObject(themeConfiguration)
+    }
+}
 
 /// 根容器视图 - 根据认证状态显示不同界面
 @available(macOS 14.0, *)
 private struct RootContainerView: View {
     @EnvironmentObject private var dashboardModel: DashboardViewModel
     @EnvironmentObject private var authModel: AuthenticationViewModel
-    @EnvironmentObject private var localPeerServices: LocalPeerServiceCoordinator
     @Environment(\.iconMissingHint) private var iconMissingHint
     @StateObject private var performanceHUD = MetalPerformanceHUD.shared
 
@@ -802,8 +865,12 @@ private struct RootContainerView: View {
                 .allowsHitTesting(false)
         }
         .task(id: authModel.currentSession) {
-            await localPeerServices.startIfNeeded()
-            await dashboardModel.updateAuthentication(session: authModel.currentSession)
+            await StartupCoordinator.shared.waitUntilLaunchSettled()
+            if MacOnlineIPadSmokeHarness.isEnabledForCurrentEnvironment {
+                await dashboardModel.start()
+            } else {
+                await dashboardModel.updateAuthentication(session: authModel.currentSession)
+            }
             await CurrentPathDeviceActivationCoordinator.shared.syncIfNeeded(session: authModel.currentSession)
         }
         .animation(.easeInOut(duration: 0.25), value: authModel.currentSession != nil)
@@ -816,6 +883,7 @@ private struct RootContainerView: View {
             }
         }
     }
+
 }
 
 @available(macOS 14.0, *)

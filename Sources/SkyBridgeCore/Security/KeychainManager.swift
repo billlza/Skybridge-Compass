@@ -603,8 +603,8 @@ extension KeychainManager {
         return try? JSONDecoder().decode(AuthSession.self, from: data)
     }
 
-    public nonisolated func deleteAuthSession() {
-        try? deleteAPIKey(service: "com.skybridge.compass.authsession", account: "primary")
+    public nonisolated func deleteAuthSession() throws {
+        try deleteAPIKey(service: "com.skybridge.compass.authsession", account: "primary")
     }
 }
 @available(macOS 14.0, *)

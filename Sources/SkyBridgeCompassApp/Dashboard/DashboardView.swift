@@ -35,14 +35,8 @@ public struct DashboardView: View {
  // 多语言管理器
     @ObservedObject private var localizationManager = LocalizationManager.shared
 
- // 实时天气服务状态
-    @StateObject private var realTimeWeatherService = RealTimeWeatherService.shared
-
  // 雾霾交互管理器
     @StateObject private var hazeClearManager = InteractiveClearManager()
-
- // 数据服务
-    @StateObject private var dataService = DashboardDataService()
 
  // ✅ 性能监控器 - 通过PerformanceModeManager获取真实的系统性能数据
     @State private var performanceModeManager: PerformanceModeManager?
@@ -81,6 +75,8 @@ public struct DashboardView: View {
     @State private var windowDeminiObserver: Any?
     @State private var wasPausedByInactive: Bool = false
     @State private var wasPausedByOcclusion: Bool = false
+    @State private var didSetupLifecycle = false
+    @State private var weatherStartupTask: Task<Void, Never>?
 
     private let logger = Logger(subsystem: "com.skybridge.SkyBridgeCompassApp", category: "Dashboard")
 
@@ -106,9 +102,8 @@ public struct DashboardView: View {
                     },
                     set: { newTab in
                         if let navigationItem = NavigationItem.allCases.first(where: { $0.rawValue == newTab.id }) {
-                            DispatchQueue.main.async { [navigationItem] in
-                                selectedNavigation = navigationItem
-                            }
+                            guard navigationItem != selectedNavigation else { return }
+                            selectedNavigation = navigationItem
                         }
                     }
                 ))
@@ -144,11 +139,6 @@ public struct DashboardView: View {
             .navigationSplitViewStyle(.prominentDetail)
             .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 400)
             .task {
- // 🚀 启动天气系统
-                if !weatherManager.isInitialized {
-                    await weatherManager.start()
-                }
-
  // 🔍 初始化设备列表
                 await filterDevices(with: deviceSearchText)
 
@@ -197,22 +187,15 @@ public struct DashboardView: View {
             guard !filteredDevices.isEmpty else { return }
             filteredDevices = sortDevicesBySignalStrength(filteredDevices)
         }
-        .task {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    await dataService.loadDashboardDataOptimized()
-                }
-                group.addTask {
-                    await appModel.start()
-                }
-            }
-        }
         .onDisappear {
+            weatherStartupTask?.cancel()
+            weatherStartupTask = nil
             appModel.stop()
             weatherDataService.stopWeatherUpdates()
             weatherLocationService.stopLocationUpdates()
             removeNotificationObservers()
             stopFPSMonitor()
+            didSetupLifecycle = false
         }
         .onAppear {
             setupOnAppear()
@@ -344,9 +327,18 @@ public struct DashboardView: View {
         appModel.onNavigateToSettings = {
             selectedNavigation = .settings
         }
-        weatherLocationService.requestLocationPermission()
-        weatherLocationService.startLocationUpdates()
-        GlobalMouseTracker.shared.startTracking()
+        guard !didSetupLifecycle else { return }
+        didSetupLifecycle = true
+
+        if SettingsManager.shared.enableRealTimeWeather {
+            weatherStartupTask = Task { @MainActor in
+                await StartupCoordinator.shared.waitUntilLaunchSettled()
+                guard !Task.isCancelled, SettingsManager.shared.enableRealTimeWeather else { return }
+                weatherLocationService.requestLocationPermission()
+                weatherLocationService.startLocationUpdates()
+                GlobalMouseTracker.shared.startTracking()
+            }
+        }
         signalSortTimerEnabled = true
 
         setupNotificationObservers()
@@ -356,6 +348,7 @@ public struct DashboardView: View {
  /// 轻量级 FPS 监控（3秒刷新一次）
     private func startFPSMonitor() {
         guard SettingsManager.shared.showRealtimeFPS else { return }
+        guard fpsTimer == nil else { return }
         lastFPSUpdate = CACurrentMediaTime()
         frameCount = 0
 
@@ -382,6 +375,7 @@ public struct DashboardView: View {
     }
 
     private func setupNotificationObservers() {
+        removeNotificationObservers()
         let center = NotificationCenter.default
 
         appDidResignActiveObserver = center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
@@ -394,8 +388,10 @@ public struct DashboardView: View {
 
         appDidBecomeActiveObserver = center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
             Task { @MainActor in
-                GlobalMouseTracker.shared.startTracking()
-                self.hazeClearManager.resumeUpdateLoop()
+                if SettingsManager.shared.enableRealTimeWeather {
+                    GlobalMouseTracker.shared.startTracking()
+                    self.hazeClearManager.resumeUpdateLoop()
+                }
                 self.wasPausedByInactive = false
             }
         }
@@ -405,8 +401,10 @@ public struct DashboardView: View {
             Task { @MainActor in
                 let visible = window.occlusionState.contains(.visible)
                 if visible {
-                    self.hazeClearManager.resumeUpdateLoop()
-                    GlobalMouseTracker.shared.startTracking()
+                    if SettingsManager.shared.enableRealTimeWeather {
+                        self.hazeClearManager.resumeUpdateLoop()
+                        GlobalMouseTracker.shared.startTracking()
+                    }
                     self.wasPausedByOcclusion = false
                 } else {
                     self.hazeClearManager.stopUpdateLoop()
@@ -423,8 +421,10 @@ public struct DashboardView: View {
 
         windowDeminiObserver = center.addObserver(forName: NSWindow.didDeminiaturizeNotification, object: nil, queue: .main) { _ in
             Task { @MainActor in
-                self.hazeClearManager.resumeUpdateLoop()
-                GlobalMouseTracker.shared.startTracking()
+                if SettingsManager.shared.enableRealTimeWeather {
+                    self.hazeClearManager.resumeUpdateLoop()
+                    GlobalMouseTracker.shared.startTracking()
+                }
             }
         }
     }

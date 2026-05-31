@@ -1,6 +1,20 @@
 import Foundation
 import SkyBridgeCore
 
+private enum LocalPeerServiceCoordinatorError: LocalizedError {
+    case fileTransferListenerUnavailable
+    case remoteControlServerUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .fileTransferListenerUnavailable:
+            return "文件传输监听器启动后没有可用端口"
+        case .remoteControlServerUnavailable:
+            return "远程控制监听器启动后没有可用端口"
+        }
+    }
+}
+
 @available(macOS 14.0, *)
 @MainActor
 final class LocalPeerServiceCoordinator: ObservableObject {
@@ -38,27 +52,25 @@ final class LocalPeerServiceCoordinator: ObservableObject {
 
         try await fileTransferListener.ensureHealthy()
         fileTransferReady = fileTransferListener.activePort != nil
-
-        do {
-            try await remoteControlServer.ensureHealthy()
-        } catch {
-            SkyBridgeLogger.ui.error("❌ 启动常驻远程控制监听失败: \(error.localizedDescription, privacy: .public)")
+        guard fileTransferReady else {
+            throw LocalPeerServiceCoordinatorError.fileTransferListenerUnavailable
         }
+
+        try await remoteControlServer.ensureHealthy()
         remoteControlReady = remoteControlServer.activePort != nil
+        guard remoteControlReady else {
+            throw LocalPeerServiceCoordinatorError.remoteControlServerUnavailable
+        }
 
         await p2pDiscoveryService.ensureAdvertisingHealthy()
 
         let endpoints = ServiceEndpointRegistry.shared.snapshot()
-        hasStarted = fileTransferReady && remoteControlReady
-        if hasStarted {
-            SkyBridgeLogger.ui.info(
-                """
-                ✅ 常驻本地服务已就绪: transfer=\(endpoints.fileTransferPort.map(String.init) ?? "-", privacy: .public) \
-                remote=\(endpoints.remoteControlPort.map(String.init) ?? "-", privacy: .public)
-                """
-            )
-        } else {
-            SkyBridgeLogger.ui.warning("⚠️ 常驻本地服务未全部就绪，将在下次调用时重试启动")
-        }
+        hasStarted = true
+        SkyBridgeLogger.ui.info(
+            """
+            ✅ 常驻本地服务已就绪: transfer=\(endpoints.fileTransferPort.map(String.init) ?? "-", privacy: .public) \
+            remote=\(endpoints.remoteControlPort.map(String.init) ?? "-", privacy: .public)
+            """
+        )
     }
 }

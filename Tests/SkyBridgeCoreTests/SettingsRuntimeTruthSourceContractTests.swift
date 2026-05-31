@@ -119,6 +119,139 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
         XCTAssertEqual(fpsToggleCount, 1)
     }
 
+    func testWeatherDashboardDoesNotTreatDisabledWeatherAsLoading() throws {
+        let cardSource = try readSource("Sources/SkyBridgeCompassApp/Views/WeatherDashboardCard.swift")
+        let managerSource = try readSource("Sources/SkyBridgeCore/Weather/WeatherIntegrationManager.swift")
+        let weatherServiceSource = try readSource("Sources/SkyBridgeCore/Weather/WeatherService.swift")
+        let locationSource = try readSource("Sources/SkyBridgeCore/Weather/LocationManager.swift")
+
+        let cardBody = try extract(
+            source: cardSource,
+            from: "public var body: some View",
+            to: "private func synchronizeWeatherService"
+        )
+        XCTAssertTrue(cardBody.contains("if !settingsManager.enableRealTimeWeather"))
+        XCTAssertTrue(cardBody.contains("disabledView"))
+        XCTAssertTrue(cardBody.contains(".task(id: settingsManager.enableRealTimeWeather)"))
+        XCTAssertLessThan(
+            try XCTUnwrap(cardBody.range(of: "if !settingsManager.enableRealTimeWeather")).lowerBound,
+            try XCTUnwrap(cardBody.range(of: "loadingView")).lowerBound,
+            "The dashboard weather card must not show an infinite loading state while real-time weather is disabled."
+        )
+
+        let startBody = try extract(
+            source: managerSource,
+            from: "public func start() async",
+            to: "/// 手动刷新"
+        )
+        XCTAssertTrue(startBody.contains("defer"))
+        XCTAssertTrue(startBody.contains("lifecycleGeneration == generation"))
+        XCTAssertTrue(startBody.contains("error = \"无法获取位置信息\""))
+        XCTAssertTrue(startBody.contains("error = runtime.weatherService.error?.localizedDescription ?? \"无法获取天气数据\""))
+
+        XCTAssertFalse(weatherServiceSource.contains("URLSession.shared"))
+        XCTAssertFalse(locationSource.contains("URLSession.shared"))
+        XCTAssertTrue(weatherServiceSource.contains("waitsForConnectivity = false"))
+        XCTAssertTrue(locationSource.contains("waitsForConnectivity = false"))
+    }
+
+    func testSidebarNavigationSelectionDoesNotAnimateHeavyDashboardContent() throws {
+        let sidebarSource = try readSource("Sources/SkyBridgeCompassApp/GlassSidebar.swift")
+        let dashboardSource = try readSource("Sources/SkyBridgeCompassApp/Dashboard/DashboardView.swift")
+        let remoteDesktopSource = try readSource("Sources/SkyBridgeCompassApp/RemoteDesktopView.swift")
+        let systemMonitorViewSource = try readSource("Sources/SkyBridgeCore/SystemMonitor/SystemMonitorView.swift")
+        let systemPerformanceMonitorSource = try readSource("Sources/SkyBridgeCore/Performance/SystemPerformanceMonitor.swift")
+        let usbManagerSource = try readSource("Sources/SkyBridgeCore/Connection/USBCConnectionManager.swift")
+        let usbViewSource = try readSource("Sources/SkyBridgeCompassApp/Views/USBDeviceManagementView.swift")
+        let deviceDiscoverySource = try readSource("Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift")
+
+        let sidebarBody = try extract(
+            source: sidebarSource,
+            from: "var body: some View",
+            to: "// MARK: - macOS 原生窗口管理"
+        )
+        XCTAssertFalse(
+            sidebarBody.contains(".animation(.spring(response: 0.4, dampingFraction: 0.9), value: selectedTab)"),
+            "Selecting a sidebar tab must not install a broad implicit animation over the whole sidebar/root tree."
+        )
+
+        let navigationSection = try extract(
+            source: sidebarSource,
+            from: "private var navigationSection: some View",
+            to: "// MARK: - 侧边栏本地化快照"
+        )
+        XCTAssertTrue(
+            navigationSection.contains("guard selectedTab.id != tab.id else { return }"),
+            "Repeated clicks on the already selected sidebar row should not rebuild dashboard content."
+        )
+        XCTAssertFalse(
+            navigationSection.contains("withAnimation(.spring(response: 0.4, dampingFraction: 0.9))"),
+            "The sidebar selection mutation should not wrap the dashboard detail switch in an animated transaction."
+        )
+        XCTAssertFalse(
+            navigationSection.contains("withAnimation(.easeInOut(duration: 0.2))"),
+            "Hover changes should rely on the row-local animation instead of opening a parent transaction."
+        )
+
+        XCTAssertTrue(
+            sidebarSource.contains("@State private var localizedSidebarText = LocalizedSidebarText.resolve()"),
+            "Sidebar labels should be resolved once per language change, not from Bundle resources on every hover/click render."
+        )
+        XCTAssertTrue(
+            dashboardSource.contains("guard navigationItem != selectedNavigation else { return }"),
+            "Dashboard selection binding should ignore duplicate selections."
+        )
+        XCTAssertFalse(
+            dashboardSource.contains("DispatchQueue.main.async { [navigationItem]"),
+            "DashboardView is already MainActor-isolated; queueing the selection update adds jitter to clicks."
+        )
+        XCTAssertTrue(dashboardSource.contains("@State private var didSetupLifecycle = false"))
+        XCTAssertTrue(
+            dashboardSource.contains("guard !didSetupLifecycle else { return }"),
+            "Dashboard lifecycle hooks should not stack notification observers and timers on repeated appearances."
+        )
+        XCTAssertTrue(
+            dashboardSource.contains("guard fpsTimer == nil else { return }"),
+            "Realtime FPS polling must not create duplicate timers."
+        )
+        XCTAssertTrue(
+            dashboardSource.contains("removeNotificationObservers()\n        let center = NotificationCenter.default"),
+            "Notification observer setup should clear any prior tokens before adding new observers."
+        )
+
+        XCTAssertTrue(remoteDesktopSource.contains("bootstrapRemoteDesktopManagerIfNeeded()"))
+        XCTAssertFalse(
+            remoteDesktopSource.contains("remoteDesktopManager.shutdown()"),
+            "Switching away from the remote desktop tab must not tear down global sessions and timers."
+        )
+
+        let systemMonitorSuspend = try extract(
+            source: systemMonitorViewSource,
+            from: "private func suspendViewMonitoring()",
+            to: "/// 用户显式停止系统监控时，才停止共享监控器。"
+        )
+        XCTAssertFalse(
+            systemMonitorSuspend.contains("systemPerformanceMonitor?.stopMonitoring()"),
+            "Leaving the system monitor tab should cancel view-local polling, not stop the shared performance monitor."
+        )
+        XCTAssertTrue(
+            systemPerformanceMonitorSource.contains("guard startupDelayTimer == nil else { return }"),
+            "Repeated tab appearances should not keep resetting the shared monitor startup delay."
+        )
+
+        XCTAssertTrue(usbManagerSource.contains("public static let shared = USBCConnectionManager()"))
+        XCTAssertTrue(usbManagerSource.contains("@Published public private(set) var lastScanCompletedAt: Date?"))
+        XCTAssertTrue(usbViewSource.contains("USBCConnectionManager = .shared"))
+        XCTAssertTrue(
+            usbViewSource.contains("if usbManager.lastScanCompletedAt == nil"),
+            "USB management should reuse the cached shared scan and reserve enumeration for first load or explicit refresh."
+        )
+
+        XCTAssertTrue(deviceDiscoverySource.contains("startDiscoveryForInitialPresentationIfNeeded()"))
+        XCTAssertTrue(deviceDiscoverySource.contains("guard SettingsManager.shared.autoScanOnStartup else { return }"))
+        XCTAssertTrue(deviceDiscoverySource.contains("guard !unifiedDeviceManager.isScanning else { return }"))
+    }
+
     func testFileTransferSettingsAreNotCoupledToUnrelatedSwitches() throws {
         let source = try readSource("Sources/SkyBridgeCore/FileTransfer/FileTransferSettingsBridge.swift")
         let engine = try readSource("Sources/SkyBridgeCore/FileTransfer/FileTransferEngine.swift")
@@ -180,6 +313,8 @@ final class SettingsRuntimeTruthSourceContractTests: XCTestCase {
         XCTAssertTrue(networkPreferences.contains("autoConnectRecommendedNetworkIfAppropriate()"))
         XCTAssertTrue(networkPreferences.contains("currentNetwork == nil"))
         XCTAssertTrue(networkPreferences.contains("recommendedNetwork?.isKnown == true"))
+        XCTAssertTrue(networkPreferences.contains("applyRuntimeSettingsSnapshot(startMonitoringIfNeeded: false)"))
+        XCTAssertTrue(networkPreferences.contains("public func startConfiguredNetworkMonitoring()"))
     }
 
     func testBackgroundScanningUsesSharedDiscoveryRuntimeSettings() throws {

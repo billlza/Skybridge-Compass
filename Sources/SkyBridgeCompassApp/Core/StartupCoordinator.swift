@@ -23,8 +23,11 @@ public class StartupCoordinator: ObservableObject {
  /// 已完成的启动步骤数
     @Published public private(set) var completedStepCount: Int = 0
     
- /// 是否启动完成
+    /// 是否启动完成
     @Published public var isStartupComplete: Bool = false
+
+    /// 启动完成后的首帧稳定期是否结束
+    @Published public private(set) var isLaunchSettled: Bool = false
     
  /// 启动错误信息
     @Published public var startupError: String?
@@ -37,6 +40,10 @@ public class StartupCoordinator: ObservableObject {
     
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "StartupCoordinator")
     private var startupStartTime: Date?
+    private var launchInProgress = false
+    private var launchWaiters: [CheckedContinuation<Void, Never>] = []
+    private let stepAnnouncementDelay: Duration = .milliseconds(70)
+    private let stepCompletionDelay: Duration = .milliseconds(130)
     
  /// 单例实例
     public static let shared = StartupCoordinator()
@@ -47,9 +54,21 @@ public class StartupCoordinator: ObservableObject {
     
  // MARK: - 公共方法
     
- /// 开始分阶段启动流程
- /// 按照预定义的优先级和依赖关系加载组件
+    /// 开始分阶段启动流程
+    /// 按照预定义的优先级和依赖关系加载组件
     public func startCoordinatedLaunch() async {
+        if isStartupComplete || startupError != nil {
+            return
+        }
+
+        if launchInProgress {
+            await waitUntilLaunchSettled()
+            return
+        }
+
+        launchInProgress = true
+        defer { launchInProgress = false }
+
         resetStartupState()
         startupStartTime = Date()
         logger.info("🎯 开始协调启动流程")
@@ -82,6 +101,18 @@ public class StartupCoordinator: ObservableObject {
             await handleStartupError(error)
         }
     }
+
+    @discardableResult
+    public func waitUntilLaunchSettled() async -> Bool {
+        if isLaunchSettled {
+            return isStartupComplete && startupError == nil
+        }
+
+        await withCheckedContinuation { continuation in
+            launchWaiters.append(continuation)
+        }
+        return isStartupComplete && startupError == nil
+    }
     
  // MARK: - 私有方法 - 阶段执行
     
@@ -104,6 +135,7 @@ public class StartupCoordinator: ObservableObject {
         currentStage = step.stage
         currentStep = step
         logger.info("🔄 启动步骤开始: \(step.logLabel)")
+        try await Task.sleep(for: stepAnnouncementDelay)
         await Task.yield()
 
         let stepStartTime = Date()
@@ -112,6 +144,7 @@ public class StartupCoordinator: ObservableObject {
             try await operation()
             completedStepCount += 1
             progress = Double(completedStepCount) / Double(totalStepCount)
+            try await Task.sleep(for: stepCompletionDelay)
 
             let duration = Date().timeIntervalSince(stepStartTime)
             logger.info(
@@ -130,6 +163,7 @@ public class StartupCoordinator: ObservableObject {
         currentStep = nil
         completedStepCount = 0
         isStartupComplete = false
+        isLaunchSettled = false
         startupError = nil
     }
     
@@ -209,10 +243,11 @@ public class StartupCoordinator: ObservableObject {
         try await executeStep(.fileSystemServices) {
             await initializeFileSystemServices()
         }
-        
- // 3. 设备发现服务
-        try await executeStep(.deviceDiscovery) {
-            await initializeDeviceDiscovery()
+
+        // 常驻 listener、Bonjour/P2P 广播和 USB 发现由首帧后的服务队列启动。
+        // 启动页阶段只做轻量配置预热，避免主线程被系统服务初始化挤占。
+        try await executeStep(.serviceLaunchPlan) {
+            await prepareDeferredServiceLaunch()
         }
         
         logger.info("✅ 基础服务加载完成")
@@ -225,7 +260,8 @@ public class StartupCoordinator: ObservableObject {
         networkPreferenceService.applyRuntimeSettings(
             prefer5GHz: SettingsManager.shared.prefer5GHz,
             autoConnectKnownNetworks: SettingsManager.shared.autoConnectKnownNetworks,
-            scanIntervalSeconds: SettingsManager.shared.wifiScanTimeout
+            scanIntervalSeconds: SettingsManager.shared.wifiScanTimeout,
+            startMonitoringIfNeeded: false
         )
         _ = BackgroundScanningService.shared
         _ = AutoConnectService.shared
@@ -240,31 +276,11 @@ public class StartupCoordinator: ObservableObject {
         _ = FileTransferManager.shared
         logger.debug("📁 文件系统服务初始化完成")
     }
-    
-    /// 初始化设备发现服务
-    private func initializeDeviceDiscovery() async {
-        logger.info("🔍 开始初始化设备发现服务")
 
-        // 修复：避免在启动阶段创建“临时”发现管理器实例。
-        // 临时实例释放后会留下无效 listener handler，导致 iOS 连接后握手超时。
-        // 这里统一收敛到单例 P2PNetworkManager。
-        // 注意：不要直接 stopAdvertising("_skybridge._tcp")，否则会把
-        // P2PDiscoveryService 的内部 `isAdvertising` 状态和中央监听器状态打散，
-        // 进而造成 Bonjour 仍可见但实际 listener 已失效、iOS 连接即 RST。
-
-        // 启动 P2P 网络管理器（使用单例）
-        do {
-            if !P2PNetworkManager.shared.isStarted {
-                try await P2PNetworkManager.shared.start()
-            } else {
-                await P2PNetworkManager.shared.startDiscovery()
-            }
-            logger.info("✅ P2P网络管理器启动成功（监听器已重绑）")
-        } catch {
-            logger.error("❌ P2P网络管理器启动失败: \(error)")
-        }
-        
-        logger.debug("🔍 设备发现服务初始化完成")
+    /// 准备首帧后的服务启动计划，不在启动页阶段创建监听器或扫描硬件。
+    private func prepareDeferredServiceLaunch() async {
+        await Task.yield()
+        logger.debug("🧭 常驻本地服务、P2P/Bonjour 和 USB 发现已排入首帧后启动队列")
     }
     
  // MARK: - 第三阶段：用户界面组件
@@ -286,7 +302,7 @@ public class StartupCoordinator: ObservableObject {
         
  // 3. 系统监控界面
         try await executeStep(.systemMonitorInterface) {
-            await initializeSystemMonitorInterface()
+            await prepareSystemMonitorInterface()
         }
         
         logger.info("✅ 用户界面组件加载完成")
@@ -307,10 +323,9 @@ public class StartupCoordinator: ObservableObject {
     }
     
  /// 初始化系统监控界面
-    private func initializeSystemMonitorInterface() async {
- // 预热系统监控协调器，避免首次打开时冷启动
-        _ = ConcurrentSystemMonitor.shared
-        logger.debug("📊 系统监控界面初始化完成")
+    private func prepareSystemMonitorInterface() async {
+        await Task.yield()
+        logger.debug("📊 系统监控界面已延后到首帧后按需启动")
     }
     
  // MARK: - 第四阶段：高级功能
@@ -327,16 +342,12 @@ public class StartupCoordinator: ObservableObject {
         
  // 2. Apple Silicon优化
         try await executeStep(.appleSiliconOptimization) {
-            if #available(macOS 14.0, *) {
-                await initializeAppleSiliconOptimization()
-            } else {
-                logger.info("⚠️ Apple Silicon优化需要macOS 14.0或更高版本")
-            }
+            await prepareAppleSiliconOptimization()
         }
         
  // 3. 远程桌面服务
         try await executeStep(.remoteDesktopServices) {
-            await initializeRemoteDesktopServices()
+            await prepareRemoteDesktopServices()
         }
         
         logger.info("✅ 高级功能加载完成")
@@ -344,45 +355,22 @@ public class StartupCoordinator: ObservableObject {
     
  /// 初始化天气服务
     private func initializeWeatherServices() async {
- // 预热天气集成单例，避免首次进入相关界面时冷启动
-        _ = WeatherIntegrationManager.shared
-        _ = WeatherEffectsSettings.shared
-        logger.debug("🌤️ 天气服务初始化完成")
+ // 天气定位、网络请求与动态效果由首帧后的服务队列或用户进入天气相关界面时启动。
+        await Task.yield()
+        logger.debug("🌤️ 天气服务已登记为按需启动，启动页阶段不创建定位/天气运行时")
     }
     
  /// 初始化Apple Silicon优化
-    @available(macOS 14.0, *)
-    private func initializeAppleSiliconOptimization() async {
-        logger.debug("⚡ 开始初始化Apple Silicon优化")
-        
- // 初始化Apple Silicon优化器
-        _ = AppleSiliconOptimizer.shared
-        logger.debug("✅ Apple Silicon优化器已初始化")
-        
- // 初始化性能模式管理器
+    private func prepareAppleSiliconOptimization() async {
         _ = PerformanceModeManager.shared
-        logger.debug("✅ 性能模式管理器已初始化")
-        
- // 初始化Metal性能优化器（使用SkyBridgeCompassApp版本）
-        do {
-            _ = try MetalPerformanceOptimizer()
-            logger.debug("✅ Metal性能优化器已初始化")
-        } catch {
-            logger.error("❌ Metal性能优化器初始化失败: \(error)")
-        }
-        
- // 应用初始性能优化
-        logger.debug("✅ 初始性能优化已应用")
-        
-        logger.debug("⚡ Apple Silicon优化初始化完成")
+        await Task.yield()
+        logger.debug("⚡ Apple Silicon/Metal 重量级优化已延后到首帧后按需初始化")
     }
     
- /// 初始化远程桌面服务
-    private func initializeRemoteDesktopServices() async {
- // 预热远程桌面相关单例，但不主动启动会话
-        _ = RemoteDesktopManager.shared
-        _ = CrossNetworkConnectionManager.shared
-        logger.debug("🖥️ 远程桌面服务初始化完成")
+    /// 准备远程桌面服务。真正的会话/信令管理器由根界面和用户操作触发。
+    private func prepareRemoteDesktopServices() async {
+        await Task.yield()
+        logger.debug("🖥️ 远程桌面服务已延后到首帧后按需初始化")
     }
     
  // MARK: - 启动完成处理
@@ -394,6 +382,15 @@ public class StartupCoordinator: ObservableObject {
         completedStepCount = totalStepCount
         progress = 1.0
         isStartupComplete = true
+
+        do {
+            try await Task.sleep(for: .milliseconds(450))
+        } catch {
+            logger.warning("启动完成后的首帧稳定等待被取消: \(error.localizedDescription)")
+        }
+
+        isLaunchSettled = true
+        resumeLaunchWaiters()
         
         if let startTime = startupStartTime {
             let duration = Date().timeIntervalSince(startTime)
@@ -404,7 +401,17 @@ public class StartupCoordinator: ObservableObject {
  /// 处理启动错误
     private func handleStartupError(_ error: Error) async {
         startupError = error.localizedDescription
+        isLaunchSettled = true
+        resumeLaunchWaiters()
         logger.error("💥 启动过程中发生错误: \(error.localizedDescription)")
+    }
+
+    private func resumeLaunchWaiters() {
+        let waiters = launchWaiters
+        launchWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 }
 
@@ -479,7 +486,7 @@ public enum StartupStep: CaseIterable {
     case performanceFoundation
     case networkServices
     case fileSystemServices
-    case deviceDiscovery
+    case serviceLaunchPlan
     case themeConfiguration
     case mainInterface
     case systemMonitorInterface
@@ -491,7 +498,7 @@ public enum StartupStep: CaseIterable {
         switch self {
         case .loggingSystem, .configurationManager, .securityServices, .performanceFoundation:
             return .coreSystem
-        case .networkServices, .fileSystemServices, .deviceDiscovery:
+        case .networkServices, .fileSystemServices, .serviceLaunchPlan:
             return .basicServices
         case .themeConfiguration, .mainInterface, .systemMonitorInterface:
             return .userInterface
@@ -514,8 +521,8 @@ public enum StartupStep: CaseIterable {
             return "startup.step.networkServices"
         case .fileSystemServices:
             return "startup.step.fileSystemServices"
-        case .deviceDiscovery:
-            return "startup.step.deviceDiscovery"
+        case .serviceLaunchPlan:
+            return "startup.step.serviceLaunchPlan"
         case .themeConfiguration:
             return "startup.step.themeConfiguration"
         case .mainInterface:
@@ -545,8 +552,8 @@ public enum StartupStep: CaseIterable {
             return "networkServices"
         case .fileSystemServices:
             return "fileSystemServices"
-        case .deviceDiscovery:
-            return "deviceDiscovery"
+        case .serviceLaunchPlan:
+            return "serviceLaunchPlan"
         case .themeConfiguration:
             return "themeConfiguration"
         case .mainInterface:

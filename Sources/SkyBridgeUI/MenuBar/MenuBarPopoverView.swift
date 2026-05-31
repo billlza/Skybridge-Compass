@@ -95,16 +95,16 @@ struct HeaderSection: View {
     }
 }
 
-// MARK: - CompassIcon (司南图标)
+// MARK: - CompassIcon
 
-/// 司南/指南针风格图标
 @available(macOS 14.0, *)
 struct CompassIcon: View {
     let size: CGFloat
+    @State private var image: NSImage?
     
     var body: some View {
         Group {
-            if let image = MenuBarBrandIconLoader.load() {
+            if let image {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
@@ -112,105 +112,53 @@ struct CompassIcon: View {
                     .aspectRatio(contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
             } else {
-                legacyCompassIcon
+                Color.clear
             }
         }
         .frame(width: size, height: size)
+        .onAppear(perform: load)
     }
 
-    private var legacyCompassIcon: some View {
-        ZStack {
-            Circle()
-                .stroke(
-                    LinearGradient(
-                        colors: [.blue.opacity(0.8), .cyan.opacity(0.6)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 2
-                )
-
-            Circle()
-                .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
-                .padding(4)
-
-            CompassNeedle(isNorth: true)
-                .fill(
-                    LinearGradient(
-                        colors: [.red, .red.opacity(0.7)],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                )
-
-            CompassNeedle(isNorth: false)
-                .fill(
-                    LinearGradient(
-                        colors: [.white.opacity(0.9), .gray.opacity(0.5)],
-                        startPoint: .bottom,
-                        endPoint: .center
-                    )
-                )
-
-            Circle()
-                .fill(Color.blue)
-                .frame(width: size * 0.15, height: size * 0.15)
+    private func load() {
+        guard image == nil else { return }
+        Task.detached(priority: .utility) {
+            let loadedImage = MenuBarBrandIconLoader.load()
+            guard let loadedImage else { return }
+            await MainActor.run { self.image = loadedImage }
         }
     }
 }
 
-@MainActor
 private enum MenuBarBrandIconLoader {
     static func load() -> NSImage? {
-        if let appIcon = NSApp.applicationIconImage.copy() as? NSImage,
-           appIcon.size.width > 0,
-           appIcon.size.height > 0 {
-            return appIcon
-        }
-
-        for bundle in [Bundle.main] {
-            if let image = bundle.image(forResource: NSImage.Name("BrandIcon")) {
-                return image
-            }
-
-            for candidate in [("AppIcon", "png"), ("AppIconDock", "png"), ("BrandIcon", "png")] {
-                if let url = bundle.url(forResource: candidate.0, withExtension: candidate.1),
-                   let image = NSImage(contentsOf: url) {
-                    return image
-                }
-            }
-        }
-
-        return nil
+        guard isRunningFromPackagedApp else { return nil }
+        return loadImageResource(named: "AppIcon", withExtension: "icns", bundle: .main)
     }
-}
 
-/// 指南针指针形状
-@available(macOS 14.0, *)
-struct CompassNeedle: Shape {
-    let isNorth: Bool
-    
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let needleLength = rect.height * 0.35
-        let needleWidth = rect.width * 0.12
-        
-        if isNorth {
- // 北指针（向上）
-            path.move(to: CGPoint(x: center.x, y: center.y - needleLength))
-            path.addLine(to: CGPoint(x: center.x - needleWidth, y: center.y))
-            path.addLine(to: CGPoint(x: center.x + needleWidth, y: center.y))
-            path.closeSubpath()
-        } else {
- // 南指针（向下）
-            path.move(to: CGPoint(x: center.x, y: center.y + needleLength))
-            path.addLine(to: CGPoint(x: center.x - needleWidth, y: center.y))
-            path.addLine(to: CGPoint(x: center.x + needleWidth, y: center.y))
-            path.closeSubpath()
+    private static func loadImageResource(named name: String, withExtension extensionName: String, bundle: Bundle) -> NSImage? {
+        guard let url = bundle.url(forResource: name, withExtension: extensionName),
+              let image = NSImage(contentsOf: url),
+              image.size.width > 0,
+              image.size.height > 0 else {
+            return nil
         }
-        
-        return path
+        return image
+    }
+
+    private static var isRunningFromPackagedApp: Bool {
+        guard let executablePath = CommandLine.arguments.first, !executablePath.isEmpty else {
+            return false
+        }
+
+        var url = URL(fileURLWithPath: executablePath).standardizedFileURL
+        while url.path != "/" {
+            if url.lastPathComponent == "Contents" {
+                return true
+            }
+            url.deleteLastPathComponent()
+        }
+
+        return false
     }
 }
 

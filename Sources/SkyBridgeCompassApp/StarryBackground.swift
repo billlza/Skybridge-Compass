@@ -14,8 +14,10 @@ struct StarryBackground: View {
  // 当处于暂停状态时，不进行重绘以节省资源
         Group {
             if !bgControl.isPaused {
-                TimelineView(.periodic(from: .now, by: 1.0 / bgControl.getEffectiveFPS(base: settingsManager.performanceMode.targetFPS))) { timeline in
-                    let time = timeline.date.timeIntervalSince(Self.animationEpoch)
+                let baseFPS = settingsManager.performanceMode.targetFPS
+                TimelineView(.periodic(from: .now, by: bgControl.stableTimelineInterval(base: baseFPS))) { timeline in
+                    let elapsed = timeline.date.timeIntervalSince(Self.animationEpoch)
+                    let time = bgControl.throttledAnimationTime(elapsed, baseFPS: baseFPS)
                     ZStack {
  // 1. 基础夜空背景 (更丰富的渐变 - 动态微调)
                         LinearGradient(

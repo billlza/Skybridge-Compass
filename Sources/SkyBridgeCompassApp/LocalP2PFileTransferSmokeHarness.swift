@@ -14,7 +14,7 @@ final class LocalP2PFileTransferSmokeHarness {
     }
 
     private var didStart = false
-    private let fileTransferManager = FileTransferManager.shared
+    private lazy var fileTransferManager = FileTransferManager.shared
     private let runStartedAt = Date()
 
     var isEnabledForCurrentEnvironment: Bool {

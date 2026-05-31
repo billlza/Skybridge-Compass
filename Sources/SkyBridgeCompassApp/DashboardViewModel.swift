@@ -53,19 +53,19 @@ final class DashboardViewModel: ObservableObject {
     var onNavigateToSettings: (() -> Void)?
 
  // 修改：避免重复初始化设备发现服务，使用单独的实例但检查是否已启动
-    private let discoveryService = DeviceDiscoveryService.shared
-    private let p2pDiscoveryService = P2PDiscoveryService.shared
-    private let connectionManager = ConnectionManager()  // 添加连接管理器以支持USB设备扫描
-    private let crossNetworkManager = CrossNetworkConnectionManager.shared
-    private let usbcManager = USBCConnectionManager()    // 直接监听USB设备连接，计入在线设备
-    private let sessionService = RemoteDesktopManager.shared
-    private let fileTransferService = FileTransferManager.shared
-    private let localPeerServices = LocalPeerServiceCoordinator.shared
+    private lazy var discoveryService = DeviceDiscoveryService.shared
+    private lazy var p2pDiscoveryService = P2PDiscoveryService.shared
+    private lazy var connectionManager = ConnectionManager()  // 添加连接管理器以支持USB设备扫描
+    private lazy var crossNetworkManager = CrossNetworkConnectionManager.shared
+    private lazy var usbcManager = USBCConnectionManager()    // 直接监听USB设备连接，计入在线设备
+    private lazy var sessionService = RemoteDesktopManager.shared
+    private lazy var fileTransferService = FileTransferManager.shared
+    private lazy var localPeerServices = LocalPeerServiceCoordinator.shared
     let systemMetricsService = SystemMetricsService()
-    private let tenantController = TenantAccessController.shared
+    private lazy var tenantController = TenantAccessController.shared
 
  // 🆕 统一的在线设备管理器(单例)
-    private let unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
+    private lazy var unifiedDeviceManager = UnifiedOnlineDeviceManager.shared
 
  // 性能优化组件
     private var performanceCoordinator: PerformanceCoordinator?
@@ -76,6 +76,7 @@ final class DashboardViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var presentationCancellables = Set<AnyCancellable>()
     private var hasStartedServices = false
+    private var isStartingServices = false
     private var isAuthenticated: Bool {
         tenantController.accessToken != nil
     }
@@ -133,6 +134,12 @@ final class DashboardViewModel: ObservableObject {
             return
         }
 
+        guard !isStartingServices else {
+            return
+        }
+        isStartingServices = true
+        defer { isStartingServices = false }
+
         #if DEBUG
         SkyBridgeLogger.ui.debugOnly("🚀 [DashboardViewModel] 启动所有后台服务")
         #endif
@@ -143,9 +150,13 @@ final class DashboardViewModel: ObservableObject {
 // 启动系统指标监控
         systemMetricsService.startMonitoring()
 
-        await localPeerServices.startIfNeeded()
+        if !localPeerServices.hasStarted {
+            guard await pauseBetweenStartupBursts() else { return }
+            await localPeerServices.startIfNeeded()
+        }
 
         if shouldAutoScan {
+            guard await pauseBetweenStartupBursts() else { return }
             // 检查设备发现服务是否已启动，避免重复初始化
             if !discoveryService.isScanning {
                 #if DEBUG
@@ -162,11 +173,13 @@ final class DashboardViewModel: ObservableObject {
             #if DEBUG
             SkyBridgeLogger.ui.debugOnly("🔌 [DashboardViewModel] 启动连接管理器")
             #endif
+            guard await pauseBetweenStartupBursts() else { return }
             connectionManager.scanAvailableConnections()  // 触发USB设备扫描
 
             // 检查P2P服务是否已启动
             if !p2pDiscoveryService.isAdvertising {
                 // 启动P2P广播服务（由系统分配端口，避免撞车）
+                guard await pauseBetweenStartupBursts() else { return }
                 await MainActor.run { p2pDiscoveryService.startAdvertising() }
                 #if DEBUG
                 SkyBridgeLogger.ui.debugOnly("✅ P2P广播已启动")
@@ -185,6 +198,7 @@ final class DashboardViewModel: ObservableObject {
                 // 将设置中的兼容模式与 companion‑link 开关注入到P2P发现服务
                 p2pDiscoveryService.enableCompatibilityMode = SettingsManager.shared.enableCompatibilityMode
                 p2pDiscoveryService.enableCompanionLink = SettingsManager.shared.enableCompanionLink
+                guard await pauseBetweenStartupBursts() else { return }
                 p2pDiscoveryService.startDiscovery()
             } else {
                 #if DEBUG
@@ -196,6 +210,7 @@ final class DashboardViewModel: ObservableObject {
             #if DEBUG
             SkyBridgeLogger.ui.debugOnly("🌐 [DashboardViewModel] 启动统一在线设备管理器")
             #endif
+            guard await pauseBetweenStartupBursts() else { return }
             unifiedDeviceManager.startDiscovery()
         } else {
             #if DEBUG
@@ -339,6 +354,16 @@ final class DashboardViewModel: ObservableObject {
             .store(in: &cancellables)
 
         hasStartedServices = true
+    }
+
+    private func pauseBetweenStartupBursts() async -> Bool {
+        await Task.yield()
+        do {
+            try await Task.sleep(for: .milliseconds(220))
+            return !Task.isCancelled
+        } catch {
+            return false
+        }
     }
 
     private func synthesizedCrossNetworkSnapshot(
@@ -544,9 +569,10 @@ final class DashboardViewModel: ObservableObject {
             .store(in: &presentationCancellables)
     }
 
- /// 停止所有订阅并释放资源，通常在界面离开或退出登录时调用。
+    /// 停止所有订阅并释放资源，通常在界面离开或退出登录时调用。
     func stop() {
         hasStartedServices = false
+        isStartingServices = false
         presentationCancellables.removeAll()
         cancellables.removeAll()
         discoveryService.stop()
