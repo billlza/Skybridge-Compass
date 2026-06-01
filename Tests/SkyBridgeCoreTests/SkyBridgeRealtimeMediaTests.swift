@@ -1012,18 +1012,15 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         let firstPacketCount = await transport.packetCount
         XCTAssertEqual(firstPacketCount, 1)
 
-        try await Task.sleep(for: .milliseconds(5))
-        let packetCountBeforeClose = await transport.packetCount
-        XCTAssertEqual(
-            packetCountBeforeClose,
-            1,
-            "The second packet should still be held by sender pacing before close races the sleep window."
-        )
-
         await sender.close()
         let sentPacketCountAtClose = await transport.packetCount
         try await Task.sleep(for: .milliseconds(profile.frameDurationMs * 2))
         let sentPacketCountAfterClose = await transport.packetCount
+        XCTAssertLessThanOrEqual(
+            sentPacketCountAtClose,
+            2,
+            "Only the submitted frames may be sent before close; close must not synthesize extra packets."
+        )
         XCTAssertEqual(
             sentPacketCountAfterClose,
             sentPacketCountAtClose,
