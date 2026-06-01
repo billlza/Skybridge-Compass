@@ -2410,6 +2410,17 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
         var parent = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0.id) })
         let trustAliasRecords = TrustSyncService.shared.activeTrustRecords.filter { !$0.isTombstone }
+        let trustAliasCandidateSets: [Set<String>] = trustAliasRecords.compactMap { record in
+            let candidates = Set(
+                PeerTrustLookup.recordLookupCandidates(record).map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }.filter { !$0.isEmpty }
+            )
+            return candidates.isEmpty ? nil : candidates
+        }
+        let deviceTrustCandidatesById = Dictionary(uniqueKeysWithValues: devices.map { device in
+            (device.id, Self.deviceTrustLookupCandidates(for: device))
+        })
 
         func find(_ id: UUID) -> UUID {
             var current = id
@@ -2432,7 +2443,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     || shouldCoalesceTrustedAliasDevices(
                         devices[lhsIndex],
                         devices[rhsIndex],
-                        trustRecords: trustAliasRecords
+                        deviceTrustCandidatesById: deviceTrustCandidatesById,
+                        trustRecordCandidateSets: trustAliasCandidateSets
                     ) {
                     union(devices[lhsIndex].id, devices[rhsIndex].id)
                 }
@@ -2676,21 +2688,16 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     private func shouldCoalesceTrustedAliasDevices(
         _ lhs: OnlineDevice,
         _ rhs: OnlineDevice,
-        trustRecords: [TrustRecord]
+        deviceTrustCandidatesById: [UUID: Set<String>],
+        trustRecordCandidateSets: [Set<String>]
     ) -> Bool {
-        guard !trustRecords.isEmpty else { return false }
-        let lhsCandidates = Self.deviceTrustLookupCandidates(for: lhs)
-        let rhsCandidates = Self.deviceTrustLookupCandidates(for: rhs)
+        guard !trustRecordCandidateSets.isEmpty else { return false }
+        let lhsCandidates = deviceTrustCandidatesById[lhs.id] ?? []
+        let rhsCandidates = deviceTrustCandidatesById[rhs.id] ?? []
         guard !lhsCandidates.isEmpty, !rhsCandidates.isEmpty else { return false }
 
-        for record in trustRecords {
-            let recordCandidates = Set(
-                PeerTrustLookup.recordLookupCandidates(record).map {
-                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                }.filter { !$0.isEmpty }
-            )
-            if !recordCandidates.isEmpty,
-               !lhsCandidates.isDisjoint(with: recordCandidates),
+        for recordCandidates in trustRecordCandidateSets {
+            if !lhsCandidates.isDisjoint(with: recordCandidates),
                !rhsCandidates.isDisjoint(with: recordCandidates) {
                 return true
             }

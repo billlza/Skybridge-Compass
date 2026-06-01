@@ -2,7 +2,91 @@ import Foundation
 import Network
 
 @available(macOS 14.0, iOS 17.0, *)
+private struct PeerTrustRecordLookupCacheKey: Hashable {
+    let deviceId: String
+    let currentDeviceId: String?
+    let knownDeviceIds: [String]
+    let capabilities: [String]
+
+    init(_ record: TrustRecord) {
+        self.deviceId = record.deviceId
+        self.currentDeviceId = record.currentDeviceIdMetadata
+        self.knownDeviceIds = record.knownDeviceIdsMetadata ?? []
+        self.capabilities = record.capabilities
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+private final class PeerTrustLookupCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private let maximumEntryCount = 4096
+    private var lookupCandidatesByIdentifier: [String: [String]] = [:]
+    private var recordCandidatesByKey: [PeerTrustRecordLookupCacheKey: [String]] = [:]
+    private var literalIPAddressByToken: [String: Bool] = [:]
+
+    func lookupCandidates(for key: String, compute: () -> [String]) -> [String] {
+        lock.lock()
+        if let cached = lookupCandidatesByIdentifier[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let resolved = compute()
+
+        lock.lock()
+        resetIfNeeded(lookupCandidatesByIdentifier.count)
+        lookupCandidatesByIdentifier[key] = resolved
+        lock.unlock()
+        return resolved
+    }
+
+    func recordLookupCandidates(for key: PeerTrustRecordLookupCacheKey, compute: () -> [String]) -> [String] {
+        lock.lock()
+        if let cached = recordCandidatesByKey[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let resolved = compute()
+
+        lock.lock()
+        resetIfNeeded(recordCandidatesByKey.count)
+        recordCandidatesByKey[key] = resolved
+        lock.unlock()
+        return resolved
+    }
+
+    func literalIPAddress(for key: String, compute: () -> Bool) -> Bool {
+        lock.lock()
+        if let cached = literalIPAddressByToken[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let resolved = compute()
+
+        lock.lock()
+        resetIfNeeded(literalIPAddressByToken.count)
+        literalIPAddressByToken[key] = resolved
+        lock.unlock()
+        return resolved
+    }
+
+    private func resetIfNeeded(_ count: Int) {
+        guard count >= maximumEntryCount else { return }
+        lookupCandidatesByIdentifier.removeAll(keepingCapacity: true)
+        recordCandidatesByKey.removeAll(keepingCapacity: true)
+        literalIPAddressByToken.removeAll(keepingCapacity: true)
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
 enum PeerTrustLookup {
+    private static let cache = PeerTrustLookupCache()
+
     static func trimmedIdentifier(_ raw: String?) -> String? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else {
@@ -25,7 +109,25 @@ enum PeerTrustLookup {
 
     private static func isLiteralIPAddress(_ raw: String) -> Bool {
         let scopedToken = raw.split(separator: "%", maxSplits: 1).first.map(String.init) ?? raw
-        return IPv4Address(scopedToken) != nil || IPv6Address(scopedToken) != nil
+        guard looksLikeLiteralIPAddress(scopedToken) else { return false }
+        return cache.literalIPAddress(for: scopedToken) {
+            IPv4Address(scopedToken) != nil || IPv6Address(scopedToken) != nil
+        }
+    }
+
+    private static func looksLikeLiteralIPAddress(_ token: String) -> Bool {
+        guard !token.isEmpty else { return false }
+        if token.contains(":") {
+            return token.unicodeScalars.allSatisfy { scalar in
+                scalar == ":" || scalar == "." || (scalar.value >= 48 && scalar.value <= 57)
+                    || (scalar.value >= 65 && scalar.value <= 70)
+                    || (scalar.value >= 97 && scalar.value <= 102)
+            }
+        }
+        guard token.contains(".") else { return false }
+        return token.unicodeScalars.allSatisfy { scalar in
+            scalar == "." || (scalar.value >= 48 && scalar.value <= 57)
+        }
     }
 
     static func sanitizedBonjourServiceInstanceName(_ raw: String?) -> String? {
@@ -95,6 +197,13 @@ enum PeerTrustLookup {
     }
 
     static func lookupCandidates(for identifier: String?) -> [String] {
+        guard let cacheKey = trimmedIdentifier(identifier) else { return [] }
+        return cache.lookupCandidates(for: cacheKey) {
+            lookupCandidatesUncached(for: cacheKey)
+        }
+    }
+
+    private static func lookupCandidatesUncached(for identifier: String) -> [String] {
         var ordered: [String] = []
         var seen: Set<String> = []
 
@@ -171,6 +280,13 @@ enum PeerTrustLookup {
     }
 
     static func recordLookupCandidates(_ record: TrustRecord) -> [String] {
+        let cacheKey = PeerTrustRecordLookupCacheKey(record)
+        return cache.recordLookupCandidates(for: cacheKey) {
+            recordLookupCandidatesUncached(record)
+        }
+    }
+
+    private static func recordLookupCandidatesUncached(_ record: TrustRecord) -> [String] {
         var ordered: [String] = []
         var seen: Set<String> = []
 

@@ -6,6 +6,18 @@ private struct LocalizationBundleCacheKey: Hashable {
     let languageCode: String
 }
 
+private struct LocalizationPreferenceSnapshot: Sendable {
+    let languageCode: String
+    let isSystemPreference: Bool
+}
+
+private struct LocalizationStringCacheKey: Hashable {
+    let key: String
+    let bundlePath: String
+    let languageCode: String
+    let isSystemPreference: Bool
+}
+
 private final class LocalizationBundleLookupCache: @unchecked Sendable {
     private enum CachedBundle {
         case found(Bundle)
@@ -15,6 +27,10 @@ private final class LocalizationBundleLookupCache: @unchecked Sendable {
     private let lock = NSLock()
     private var localizedBundles: [LocalizationBundleCacheKey: CachedBundle] = [:]
     private var resourceBundlesByKey: [String: [Bundle]] = [:]
+    private var resourceSearchRootsByBundlePath: [String: [URL]] = [:]
+    private var defaultResourceRootsByExecutablePath: [String: [URL]] = [:]
+    private var localizedStrings: [LocalizationStringCacheKey: String] = [:]
+    private var preferenceSnapshot: LocalizationPreferenceSnapshot?
 
     func localizedBundle(
         in bundle: Bundle,
@@ -72,6 +88,88 @@ private final class LocalizationBundleLookupCache: @unchecked Sendable {
 
         return resolved
     }
+
+    func resourceSearchBaseURLs(cacheKey: String, lookup: () -> [URL]) -> [URL] {
+        lock.lock()
+        if let cached = resourceSearchRootsByBundlePath[cacheKey] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let resolved = lookup()
+
+        lock.lock()
+        resourceSearchRootsByBundlePath[cacheKey] = resolved
+        lock.unlock()
+
+        return resolved
+    }
+
+    func defaultResourceSearchBaseURLs(executablePath: String, lookup: () -> [URL]) -> [URL] {
+        lock.lock()
+        if let cached = defaultResourceRootsByExecutablePath[executablePath] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let resolved = lookup()
+
+        lock.lock()
+        defaultResourceRootsByExecutablePath[executablePath] = resolved
+        lock.unlock()
+
+        return resolved
+    }
+
+    func preferenceSnapshot(lookup: () -> LocalizationPreferenceSnapshot) -> LocalizationPreferenceSnapshot {
+        lock.lock()
+        if let cached = preferenceSnapshot {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let resolved = lookup()
+
+        lock.lock()
+        preferenceSnapshot = resolved
+        lock.unlock()
+
+        return resolved
+    }
+
+    func updatePreferenceSnapshot(_ snapshot: LocalizationPreferenceSnapshot) {
+        lock.lock()
+        preferenceSnapshot = snapshot
+        localizedStrings.removeAll()
+        lock.unlock()
+    }
+
+    func invalidateRuntimePreferences() {
+        lock.lock()
+        preferenceSnapshot = nil
+        localizedStrings.removeAll()
+        lock.unlock()
+    }
+
+    func localizedString(key: LocalizationStringCacheKey, lookup: () -> String) -> String {
+        lock.lock()
+        if let cached = localizedStrings[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let resolved = lookup()
+
+        lock.lock()
+        localizedStrings[key] = resolved
+        lock.unlock()
+
+        return resolved
+    }
 }
 
 /// 本地化管理器 - 负责应用内语言动态切换
@@ -97,12 +195,26 @@ public final class LocalizationManager: ObservableObject {
         }
         
         updateLocale()
+        Self.lookupCache.updatePreferenceSnapshot(Self.makePreferenceSnapshot(storedValue: currentLanguage.rawValue))
+
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .sink { _ in
+                Self.lookupCache.invalidateRuntimePreferences()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)
+            .sink { _ in
+                Self.lookupCache.invalidateRuntimePreferences()
+            }
+            .store(in: &cancellables)
     }
     
     public func setLanguage(_ language: AppLanguage) {
         self.currentLanguage = language
         UserDefaults.standard.set(language.rawValue, forKey: kAppLanguageKey)
         updateLocale()
+        Self.lookupCache.updatePreferenceSnapshot(Self.makePreferenceSnapshot(storedValue: language.rawValue))
     }
     
     private func updateLocale() {
@@ -114,13 +226,26 @@ public final class LocalizationManager: ObservableObject {
     }
     
  /// 获取当前生效的语言代码（用于加载资源）
-    private nonisolated static func getEffectiveLanguageCodeStatic() -> String {
-        if let storedValue = UserDefaults.standard.string(forKey: "AppLanguagePreference"),
+    private nonisolated static func runtimePreferenceSnapshot() -> LocalizationPreferenceSnapshot {
+        lookupCache.preferenceSnapshot {
+            makePreferenceSnapshot(storedValue: UserDefaults.standard.string(forKey: "AppLanguagePreference"))
+        }
+    }
+
+    private nonisolated static func makePreferenceSnapshot(storedValue: String?) -> LocalizationPreferenceSnapshot {
+        if let storedValue,
            let language = AppLanguage(rawValue: storedValue),
            let code = language.localeIdentifier {
-            return code
+            return LocalizationPreferenceSnapshot(languageCode: code, isSystemPreference: false)
         }
- // 使用系统首选语言，映射到资源目录
+
+        return LocalizationPreferenceSnapshot(
+            languageCode: systemPreferredLanguageCode(),
+            isSystemPreference: true
+        )
+    }
+
+    private nonisolated static func systemPreferredLanguageCode() -> String {
         let preferred = Locale.preferredLanguages.first ?? Locale.current.identifier
         if preferred.hasPrefix("zh") { return "zh-Hans" }
         if preferred.hasPrefix("ja") { return "ja" }
@@ -135,7 +260,26 @@ public final class LocalizationManager: ObservableObject {
  /// - bundle: 资源包，默认为 Bundle.module (当前模块资源)
  /// - Returns: 翻译后的字符串
     public nonisolated func localizedString(_ key: String, bundle: Bundle? = nil) -> String {
-        let languageCode = LocalizationManager.getEffectiveLanguageCodeStatic()
+        let preference = LocalizationManager.runtimePreferenceSnapshot()
+        let bundlePath = bundle?.bundlePath ?? "<default>"
+        let cacheKey = LocalizationStringCacheKey(
+            key: key,
+            bundlePath: bundlePath,
+            languageCode: preference.languageCode,
+            isSystemPreference: preference.isSystemPreference
+        )
+
+        return Self.lookupCache.localizedString(key: cacheKey) {
+            localizedStringUncached(key, bundle: bundle, preference: preference)
+        }
+    }
+
+    private nonisolated func localizedStringUncached(
+        _ key: String,
+        bundle: Bundle?,
+        preference: LocalizationPreferenceSnapshot
+    ) -> String {
+        let languageCode = preference.languageCode
         if bundle == nil,
            let value = localizedStringFromDefaultResourceRoots(key, languageCode: languageCode) {
             return value
@@ -146,14 +290,7 @@ public final class LocalizationManager: ObservableObject {
 
  // 系统默认语言直接查找（避免返回原始key）
         let systemValue = primaryBundle.localizedString(forKey: key, value: nil, table: nil)
-        let storedPref = UserDefaults.standard.string(forKey: "AppLanguagePreference")
-        let isSystemPref: Bool
-        if let storedPref, let pref = AppLanguage(rawValue: storedPref) {
-            isSystemPref = pref == .system
-        } else {
-            isSystemPref = true
-        }
-        if systemValue != key, isSystemPref {
+        if systemValue != key, preference.isSystemPreference {
             return systemValue
         }
 
@@ -350,10 +487,17 @@ public final class LocalizationManager: ObservableObject {
     }
 
     private nonisolated func defaultResourceSearchBaseURLs() -> [URL] {
-        let fileManager = FileManager.default
         guard let executablePath = CommandLine.arguments.first, !executablePath.isEmpty else {
             return []
         }
+
+        return Self.lookupCache.defaultResourceSearchBaseURLs(executablePath: executablePath) {
+            defaultResourceSearchBaseURLsUncached(executablePath: executablePath)
+        }
+    }
+
+    private nonisolated func defaultResourceSearchBaseURLsUncached(executablePath: String) -> [URL] {
+        let fileManager = FileManager.default
 
         let executableURL = URL(fileURLWithPath: executablePath).standardizedFileURL
         let executableDirectory = executableURL.deletingLastPathComponent()
@@ -393,6 +537,13 @@ public final class LocalizationManager: ObservableObject {
     }
 
     private nonisolated func resourceSearchBaseURLs(for bundle: Bundle) -> [URL] {
+        let cacheKey = bundle.bundlePath
+        return Self.lookupCache.resourceSearchBaseURLs(cacheKey: cacheKey) {
+            resourceSearchBaseURLsUncached(for: bundle)
+        }
+    }
+
+    private nonisolated func resourceSearchBaseURLsUncached(for bundle: Bundle) -> [URL] {
         let fileManager = FileManager.default
         let bundleURL = bundle.bundleURL.standardizedFileURL
         var candidates: [URL] = []

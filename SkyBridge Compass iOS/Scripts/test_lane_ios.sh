@@ -17,12 +17,21 @@ fi
 bash "${ROOT_DIR}/Scripts/check_ios_test_configuration.sh"
 
 pick_simulator_id() {
-  xcrun simctl list devices available -j | python3 -c '
+  local payload_file
+  local error_file
+  payload_file="$(mktemp)"
+  error_file="$(mktemp)"
+
+  local attempt
+  for attempt in 1 2; do
+    if xcrun simctl list devices available -j >"${payload_file}" 2>"${error_file}" && [[ -s "${payload_file}" ]]; then
+      if python3 - "${payload_file}" <<'PY'
 import json
 import re
 import sys
 
-payload = json.load(sys.stdin)
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
 best = None
 for runtime, devices in payload.get("devices", {}).items():
     if "iOS" not in runtime:
@@ -42,10 +51,26 @@ for runtime, devices in payload.get("devices", {}).items():
 if best is None:
     raise SystemExit("No available iOS simulator device found.")
 print(best[1])
-'
+PY
+      then
+        rm -f "${payload_file}" "${error_file}"
+        return
+      fi
+    fi
+
+    sleep 2
+  done
+
+  echo "[iOS test lane] simctl did not return a non-empty simulator device list." >&2
+  if [[ -s "${error_file}" ]]; then
+    cat "${error_file}" >&2
+  fi
+  rm -f "${payload_file}" "${error_file}"
+  return 1
 }
 
 SIM_ID="$(pick_simulator_id)"
+SIM_ARCH="${SIM_ARCH:-$(uname -m)}"
 DERIVED_DATA_PATH="$(mktemp -d)"
 trap 'rm -rf "${DERIVED_DATA_PATH}"' EXIT
 
@@ -98,14 +123,14 @@ echo "[iOS test lane] running full ${IOS_TEST_TARGET} suite"
 run_xcodebuild_with_retry \
   -project "${IOS_PROJECT}" \
   -scheme "${IOS_SCHEME}" \
-  -destination "platform=iOS Simulator,id=${SIM_ID}" \
+  -destination "platform=iOS Simulator,id=${SIM_ID},arch=${SIM_ARCH}" \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
   build-for-testing
 
 run_xcodebuild_with_retry \
   -project "${IOS_PROJECT}" \
   -scheme "${IOS_SCHEME}" \
-  -destination "platform=iOS Simulator,id=${SIM_ID}" \
+  -destination "platform=iOS Simulator,id=${SIM_ID},arch=${SIM_ARCH}" \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
   test-without-building
 
