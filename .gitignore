@@ -12,6 +12,8 @@ Thumbs.db
 *.xcworkspace/xcuserdata/
 *.xcuserstate
 *.xcscheme
+!SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xcschemes/SkyBridgeCompass-iOS.xcscheme
+!SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xcschemes/SkyBridgeCompassiOSTests.xcscheme
 *.xccheckout
 *.moved-aside
 DerivedData/
