@@ -159,6 +159,14 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertTrue(publisher.contains("gh release upload"))
         XCTAssertTrue(publisher.contains("gh release download"))
         XCTAssertTrue(publisher.contains("xcrun stapler validate"))
+        XCTAssertTrue(
+            publisher.contains("DMG_DIR=\"$(cd \"$(dirname \"$DMG_PATH\")\" && pwd)\""),
+            "The publisher should canonicalize DMG paths before notarization and upload tools inspect them."
+        )
+        XCTAssertFalse(
+            publisher.contains("xcrun stapler validate \"$dmg_path\" >/dev/null"),
+            "stapler validate returns failure on notarized DMGs on some macOS versions when stdout is redirected; keep the output visible so the publish gate observes the real notarization result."
+        )
         XCTAssertTrue(publisher.contains("--clobber"))
         XCTAssertTrue(publisher.contains("resolve_default_sequence"))
         XCTAssertTrue(publisher.contains("date -u '+%Y%m%d%H%M%S'"))

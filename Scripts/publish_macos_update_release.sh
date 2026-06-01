@@ -179,7 +179,7 @@ validate_notarized_dmg_before_publish() {
 
   command -v xcrun >/dev/null 2>&1 || fail "xcrun is required for notarization verification"
   command -v spctl >/dev/null 2>&1 || fail "spctl is required for Gatekeeper verification"
-  xcrun stapler validate "$dmg_path" >/dev/null \
+  xcrun stapler validate "$dmg_path" \
     || fail "DMG does not have a valid stapled notarization ticket: $dmg_path"
   spctl --assess --type open --verbose=4 "$dmg_path" >/dev/null \
     || fail "Gatekeeper rejects the notarized DMG: $dmg_path"
@@ -243,6 +243,9 @@ if [[ -z "$SEQUENCE" ]]; then
   SEQUENCE="$(resolve_default_sequence "$APP_INFO_PLIST")"
 fi
 [[ "$SEQUENCE" =~ ^[0-9]+$ && "$SEQUENCE" -gt 0 ]] || fail "manifest sequence must be a positive integer"
+
+DMG_DIR="$(cd "$(dirname "$DMG_PATH")" && pwd)"
+DMG_PATH="${DMG_DIR}/$(basename "$DMG_PATH")"
 
 if [[ -z "$PUBLISHED_AT" ]]; then
   PUBLISHED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
