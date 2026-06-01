@@ -5530,6 +5530,7 @@ final class RegressionHardeningTests: XCTestCase {
     let runtimePeerId = "host:192.168.1.63"
     let declaredDeviceId = UUID().uuidString.lowercased()
     let connectedText = RuntimeLocalization.string("已连接")
+    let rekeyingText = RuntimeLocalization.string("Rekey 中")
 
     manager.installTestPeerRuntimeState(
       runtimePeerId: runtimePeerId,
@@ -5555,7 +5556,7 @@ final class RegressionHardeningTests: XCTestCase {
     await Task.yield()
 
     XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic \(connectedText)")
-    XCTAssertEqual(viewModel.topConnectionPresentation.detailText, "Classic → X-Wing · Rekey 中")
+    XCTAssertEqual(viewModel.topConnectionPresentation.detailText, "Classic → X-Wing · \(rekeyingText)")
     XCTAssertFalse(viewModel.topConnectionPresentation.statusText.contains("X-Wing"))
 
     manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)

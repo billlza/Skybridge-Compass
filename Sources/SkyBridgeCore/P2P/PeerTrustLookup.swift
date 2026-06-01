@@ -1,5 +1,9 @@
 import Foundation
-import Network
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 @available(macOS 14.0, iOS 17.0, *)
 private struct PeerTrustRecordLookupCacheKey: Hashable {
@@ -111,8 +115,22 @@ enum PeerTrustLookup {
         let scopedToken = raw.split(separator: "%", maxSplits: 1).first.map(String.init) ?? raw
         guard looksLikeLiteralIPAddress(scopedToken) else { return false }
         return cache.literalIPAddress(for: scopedToken) {
-            IPv4Address(scopedToken) != nil || IPv6Address(scopedToken) != nil
+            isLiteralIPAddressUncached(scopedToken)
         }
+    }
+
+    private static func isLiteralIPAddressUncached(_ token: String) -> Bool {
+        #if canImport(Darwin) || canImport(Glibc)
+        var ipv4Address = in_addr()
+        if token.withCString({ inet_pton(AF_INET, $0, &ipv4Address) }) == 1 {
+            return true
+        }
+
+        var ipv6Address = in6_addr()
+        return token.withCString { inet_pton(AF_INET6, $0, &ipv6Address) } == 1
+        #else
+        return false
+        #endif
     }
 
     private static func looksLikeLiteralIPAddress(_ token: String) -> Bool {
