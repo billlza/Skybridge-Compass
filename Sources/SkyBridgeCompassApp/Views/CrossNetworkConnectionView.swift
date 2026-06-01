@@ -818,22 +818,76 @@ struct InfoCard: View {
 @MainActor
 struct QRCodeView: View {
     let data: Data
+    @State private var renderedImage: NSImage?
+    @State private var renderError: String?
 
     var body: some View {
-        if let qrImage = generateQRCode(from: data) {
-            Image(nsImage: qrImage)
-                .interpolation(.none)
-                .resizable()
-                .scaledToFit()
-        } else {
-            Image(systemName: "xmark.circle")
-                .font(.system(size: 60))
-                .foregroundColor(.red)
+        Group {
+            if let qrImage = renderedImage {
+                Image(nsImage: qrImage)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                VStack(spacing: 8) {
+                    if renderError == nil {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "xmark.circle")
+                            .font(.system(size: 60))
+                            .foregroundColor(.red)
+                        Text(renderError ?? "二维码渲染失败")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 16)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task(id: data) {
+            renderedImage = nil
+            renderError = nil
+            do {
+                let image = try await QRCodeBitmapRenderer.shared.render(data: data)
+                guard !Task.isCancelled else { return }
+                renderedImage = image
+            } catch {
+                guard !Task.isCancelled else { return }
+                renderError = error.localizedDescription
+            }
+        }
+    }
+}
+
+actor QRCodeBitmapRenderer {
+    static let shared = QRCodeBitmapRenderer()
+
+    enum RenderError: Error, LocalizedError {
+        case unsupportedPayload
+        case imageCreationFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .unsupportedPayload:
+                return "二维码 payload 超出渲染容量"
+            case .imageCreationFailed:
+                return "二维码位图生成失败"
+            }
         }
     }
 
-    private func generateQRCode(from data: Data) -> NSImage? {
-        let context = CIContext()
+    private let context = CIContext()
+    private var cachedData: Data?
+    private var cachedImage: NSImage?
+
+    func render(data: Data) throws -> NSImage {
+        if cachedData == data, let cachedImage {
+            return cachedImage
+        }
+
         let ciImage = ["M", "L"].lazy.compactMap { correctionLevel -> CIImage? in
             let filter = CIFilter.qrCodeGenerator()
             filter.setValue(data, forKey: "inputMessage")
@@ -841,14 +895,19 @@ struct QRCodeView: View {
             return filter.outputImage
         }.first
 
-        guard let ciImage else { return nil }
+        guard let ciImage else { throw RenderError.unsupportedPayload }
 
         let transform = CGAffineTransform(scaleX: 10, y: 10)
         let scaledImage = ciImage.transformed(by: transform)
 
-        guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else { return nil }
+        guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else {
+            throw RenderError.imageCreationFailed
+        }
 
-        return NSImage(cgImage: cgImage, size: NSSize(width: 250, height: 250))
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: 250, height: 250))
+        cachedData = data
+        cachedImage = image
+        return image
     }
 }
 

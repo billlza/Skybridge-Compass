@@ -602,66 +602,83 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     public func start() throws {
         try withState {
-            guard !isClosed else { throw WebRTCError.alreadyClosed }
-            didNotifyDisconnected = false
-            didNotifyReady = false
-            hasRemoteDescription = false
-            lastEmittedLocalSDP = nil
-            lifecycleToken &+= 1
-#if canImport(WebRTC)
-            pendingRemoteICECandidates.removeAll(keepingCapacity: false)
-            seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
-            WebRTCSSL.retain()
-            sslHeld = true
-            let factory = WebRTCPeerConnectionFactoryProvider.factory(
-                useCustomAudioDevice: prefersNativeOutgoingAudioTrack
-            )
-            
-            let config = RTCConfiguration()
-            config.sdpSemantics = .unifiedPlan
-            config.continualGatheringPolicy = .gatherContinually
-            if Self.shouldForceRelayOnlyForSmoke {
-                config.iceTransportPolicy = .relay
-            }
-            config.iceServers = buildIceServers()
-            
-            let constraints = RTCMediaConstraints(
-                mandatoryConstraints: nil,
-                optionalConstraints: ["DtlsSrtpKeyAgreement": "true"]
-            )
-            
-            guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
-                logger.error("❌ RTCPeerConnection creation failed: sessionId=\(self.sessionId, privacy: .public) iceServerCount=\(config.iceServers.count, privacy: .public)")
-                sslHeld = false
-                WebRTCSSL.release()
-                throw WebRTCError.peerConnectionCreationFailed
-            }
-            self.peerConnection = pc
-            if prefersNativeOutgoingScreenTrack {
-                configureOutgoingScreenVideoIfNeeded(factory: factory, peerConnection: pc)
-            }
-            if prefersNativeOutgoingAudioTrack {
-                configureOutgoingSystemAudioIfNeeded(factory: factory, peerConnection: pc)
-            }
-            
-            if role == .offerer {
-                let dcConfig = RTCDataChannelConfiguration()
-                dcConfig.isOrdered = true
-                dcConfig.isNegotiated = false
-                let dc = pc.dataChannel(forLabel: Self.controlChannelLabel, configuration: dcConfig)
-                dc?.delegate = self
-                self.dataChannel = dc
-            }
-            
-            logger.info("✅ WebRTCSession started role=\(String(describing: self.role), privacy: .public) sessionId=\(self.sessionId, privacy: .public)")
-            
-            if role == .offerer {
-                createOffer()
-            }
-#else
-            throw WebRTCError.webRTCNotAvailable
-#endif
+            try startOnStateQueue()
         }
+    }
+
+    public func startAsync() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            stateQueue.async { [self] in
+                do {
+                    try startOnStateQueue()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func startOnStateQueue() throws {
+        guard !isClosed else { throw WebRTCError.alreadyClosed }
+        didNotifyDisconnected = false
+        didNotifyReady = false
+        hasRemoteDescription = false
+        lastEmittedLocalSDP = nil
+        lifecycleToken &+= 1
+#if canImport(WebRTC)
+        pendingRemoteICECandidates.removeAll(keepingCapacity: false)
+        seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
+        WebRTCSSL.retain()
+        sslHeld = true
+        let factory = WebRTCPeerConnectionFactoryProvider.factory(
+            useCustomAudioDevice: prefersNativeOutgoingAudioTrack
+        )
+
+        let config = RTCConfiguration()
+        config.sdpSemantics = .unifiedPlan
+        config.continualGatheringPolicy = .gatherContinually
+        if Self.shouldForceRelayOnlyForSmoke {
+            config.iceTransportPolicy = .relay
+        }
+        config.iceServers = buildIceServers()
+
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: nil,
+            optionalConstraints: ["DtlsSrtpKeyAgreement": "true"]
+        )
+
+        guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
+            logger.error("❌ RTCPeerConnection creation failed: sessionId=\(self.sessionId, privacy: .public) iceServerCount=\(config.iceServers.count, privacy: .public)")
+            sslHeld = false
+            WebRTCSSL.release()
+            throw WebRTCError.peerConnectionCreationFailed
+        }
+        self.peerConnection = pc
+        if prefersNativeOutgoingScreenTrack {
+            configureOutgoingScreenVideoIfNeeded(factory: factory, peerConnection: pc)
+        }
+        if prefersNativeOutgoingAudioTrack {
+            configureOutgoingSystemAudioIfNeeded(factory: factory, peerConnection: pc)
+        }
+
+        if role == .offerer {
+            let dcConfig = RTCDataChannelConfiguration()
+            dcConfig.isOrdered = true
+            dcConfig.isNegotiated = false
+            let dc = pc.dataChannel(forLabel: Self.controlChannelLabel, configuration: dcConfig)
+            dc?.delegate = self
+            self.dataChannel = dc
+        }
+
+        logger.info("✅ WebRTCSession started role=\(String(describing: self.role), privacy: .public) sessionId=\(self.sessionId, privacy: .public)")
+
+        if role == .offerer {
+            createOffer()
+        }
+#else
+        throw WebRTCError.webRTCNotAvailable
+#endif
     }
 
     @discardableResult

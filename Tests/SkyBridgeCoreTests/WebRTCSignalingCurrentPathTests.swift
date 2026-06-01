@@ -73,7 +73,8 @@ struct WebRTCSignalingCurrentPathTests {
                     "sessionId": "ABCDEFGH",
                     "initiatorToken": "init-token",
                     "expiresIn": 600,
-                    "signalingServerOrigin": "https://api.example.com"
+                    "signalingServerOrigin": "https://api.example.com",
+                    "wsPath": "/tenant/ws"
                 ],
                 options: [.sortedKeys]
             )
@@ -82,6 +83,7 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(registerCodeLease.sessionID == "ABCDEFGH")
         #expect(registerCodeLease.initiatorToken == "init-token")
         #expect(registerCodeLease.signalingServerOrigin == "https://api.example.com")
+        #expect(registerCodeLease.wsPath == "/tenant/ws")
 
         let lookup = try SignalServerClient.decodeLookupCodeResponse(
             from: try JSONSerialization.data(
@@ -91,6 +93,7 @@ struct WebRTCSignalingCurrentPathTests {
                     "responderToken": "resp-token",
                     "expiresIn": 540,
                     "signalingServerOrigin": "https://api.example.com",
+                    "wsPath": "/tenant/ws",
                     "initiatorDeviceId": binding.deviceId,
                     "initiatorProtocolSigningAlgorithm": ProtocolSigningAlgorithm.ed25519.rawValue,
                     "initiatorProtocolPublicKeyFingerprint": binding.protocolPublicKeyFingerprint,
@@ -101,6 +104,7 @@ struct WebRTCSignalingCurrentPathTests {
         )
         #expect(lookup.sessionID == "ABCDEFGH")
         #expect(lookup.responderToken == "resp-token")
+        #expect(lookup.wsPath == "/tenant/ws")
         #expect(lookup.initiatorDeviceId == binding.deviceId)
         #expect(lookup.initiatorProtocolPublicKeyFingerprint == binding.protocolPublicKeyFingerprint)
 
@@ -123,7 +127,8 @@ struct WebRTCSignalingCurrentPathTests {
                     "initiatorSignalingToken": "qr-token",
                     "qrBootstrapToken": "bootstrap-token",
                     "expiresIn": 300,
-                    "signalingServerOrigin": "https://api.example.com"
+                    "signalingServerOrigin": "https://api.example.com",
+                    "wsPath": "/tenant/ws"
                 ],
                 options: [.sortedKeys]
             )
@@ -132,6 +137,42 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(sessionLease.signalingToken == "qr-token")
         #expect(sessionLease.qrBootstrapToken == "bootstrap-token")
         #expect(sessionLease.signalingServerOrigin == "https://api.example.com")
+        #expect(sessionLease.wsPath == "/tenant/ws")
+    }
+
+    @Test("Current-path WebSocket URL follows server origin and wsPath")
+    func currentPathWebSocketURLFollowsLeaseEndpoint() throws {
+        let url = try #require(CrossNetworkConnectionManager.currentPathSignalingWebSocketURL(
+            signalingServerOrigin: "https://api.example.com",
+            wsPath: "/tenant/ws",
+            sessionID: "abc123",
+            sessionToken: "token-1",
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        ))
+        #expect(url.scheme == "wss")
+        #expect(url.host == "api.example.com")
+        #expect(url.path == "/tenant/ws")
+
+        let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
+            item.value.map { (item.name, $0) }
+        })
+        #expect(query["shard"] == "ABC123")
+        #expect(query["st"] == "token-1")
+        #expect(query["cv"] == "1.2.3")
+        #expect(query["pv"] == "2")
+
+        let defaultPathURL = try #require(CrossNetworkConnectionManager.currentPathSignalingWebSocketURL(
+            signalingServerOrigin: "http://localhost:8787",
+            wsPath: "bad?path",
+            sessionID: "room",
+            sessionToken: "token-2",
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        ))
+        #expect(defaultPathURL.scheme == "ws")
+        #expect(defaultPathURL.path == "/ws")
     }
 
     @Test("WebRTC signaling envelope 保留 authToken 字段")

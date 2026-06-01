@@ -142,8 +142,8 @@ struct GlassSidebar: View {
             HStack {
  // 应用图标
                 BrandAppIconView(
-                    contentMode: .fit,
-                    safeInset: 1,
+                    contentMode: .fill,
+                    safeInset: 0,
                     clipCornerRadius: 12,
                     preferredResourceName: "SidebarBrandIcon"
                 )
@@ -296,9 +296,10 @@ struct SidebarTabButton: View {
             HStack(spacing: 12) {
  // 图标
                 Image(systemName: tab.icon)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: isExpanded ? 18 : 22, weight: .semibold))
                     .foregroundColor(isSelected ? .white : tab.color)
-                    .frame(width: 20, height: 20)
+                    .symbolRenderingMode(.hierarchical)
+                    .frame(width: isExpanded ? 28 : 44, height: isExpanded ? 28 : 44)
                 
                 if isExpanded {
  // 标题
@@ -310,9 +311,9 @@ struct SidebarTabButton: View {
                     Spacer()
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, isExpanded ? 12 : 0)
+            .padding(.vertical, isExpanded ? 8 : 0)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: isExpanded ? .leading : .center)
             .background(
                 Group {
                     if isSelected {

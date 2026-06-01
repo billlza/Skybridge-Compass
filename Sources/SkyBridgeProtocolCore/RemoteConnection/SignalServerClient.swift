@@ -57,6 +57,7 @@ public actor SignalServerClient {
         public let mediaAdmissionToken: String?
         public let expiresIn: Int
         public let signalingServerOrigin: String
+        public let wsPath: String?
     }
 
     public struct RegisterCodeRequestBody: Encodable, Sendable {
@@ -72,6 +73,7 @@ public actor SignalServerClient {
         public let mediaAdmissionToken: String?
         public let expiresIn: Int
         public let signalingServerOrigin: String
+        public let wsPath: String?
     }
 
     public struct LookupCodeResponseBody: Decodable, Sendable {
@@ -82,6 +84,7 @@ public actor SignalServerClient {
         public let mediaAdmissionToken: String?
         public let expiresIn: Int
         public let signalingServerOrigin: String
+        public let wsPath: String?
         public let initiatorDeviceId: String
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
@@ -100,6 +103,7 @@ public actor SignalServerClient {
         public let mediaAdmissionToken: String?
         public let expiresIn: Int
         public let signalingServerOrigin: String
+        public let wsPath: String?
         public let initiatorDeviceId: String
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
@@ -299,6 +303,7 @@ public actor SignalServerClient {
         public let mediaAdmissionLease: MediaAdmissionLease?
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
+        public let wsPath: String?
 
         public var initiatorToken: String {
             sessionToken
@@ -312,6 +317,7 @@ public actor SignalServerClient {
         public let mediaAdmissionLease: MediaAdmissionLease?
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
+        public let wsPath: String?
         public let initiatorDeviceId: String
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
@@ -330,6 +336,7 @@ public actor SignalServerClient {
         public let mediaAdmissionLease: MediaAdmissionLease?
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
+        public let wsPath: String?
 
         public var signalingToken: String {
             sessionToken
@@ -343,6 +350,7 @@ public actor SignalServerClient {
         public let mediaAdmissionLease: MediaAdmissionLease?
         public let expiresIn: TimeInterval
         public let signalingServerOrigin: String
+        public let wsPath: String?
         public let initiatorDeviceId: String
         public let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         public let initiatorProtocolPublicKeyFingerprint: String
@@ -515,7 +523,8 @@ public actor SignalServerClient {
                 expiresIn: response.expiresIn
             ),
             expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin
+            signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath
         )
     }
 
@@ -549,7 +558,8 @@ public actor SignalServerClient {
                 expiresIn: response.expiresIn
             ),
             expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin
+            signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath
         )
     }
 
@@ -576,6 +586,7 @@ public actor SignalServerClient {
             ),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath,
             initiatorDeviceId: response.initiatorDeviceId,
             initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
             initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
@@ -618,6 +629,7 @@ public actor SignalServerClient {
             ),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath,
             initiatorDeviceId: response.initiatorDeviceId,
             initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
             initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint
@@ -755,7 +767,8 @@ public actor SignalServerClient {
                 expiresIn: expiresIn
             ),
             expiresIn: TimeInterval(expiresIn),
-            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? ""
+            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? "",
+            wsPath: object["wsPath"] as? String
         )
     }
 
@@ -780,6 +793,7 @@ public actor SignalServerClient {
             ),
             expiresIn: TimeInterval(expiresIn),
             signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? "",
+            wsPath: object["wsPath"] as? String,
             initiatorDeviceId: (object["initiatorDeviceId"] as? String) ?? "",
             initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: rawAlgorithm) ?? .ed25519,
             initiatorProtocolPublicKeyFingerprint: (object["initiatorProtocolPublicKeyFingerprint"] as? String) ?? "",
@@ -827,7 +841,8 @@ public actor SignalServerClient {
                 expiresIn: expiresIn
             ),
             expiresIn: TimeInterval(expiresIn),
-            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? ""
+            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? "",
+            wsPath: object["wsPath"] as? String
         )
     }
 

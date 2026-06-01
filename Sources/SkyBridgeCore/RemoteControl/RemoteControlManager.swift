@@ -411,7 +411,7 @@ public final class RemoteControlManager: BaseManager {
         let sanitizedReason = Self.sanitizeTelemetryToken(reason)
         logger.error(
             """
-            ⛔️ 严格媒体策略触发 fail-close: peer=\(peer.id, privacy: .public) \
+            ⛔️ 严格媒体策略禁止远控采集/编码降级或静默重启: peer=\(peer.id, privacy: .public) \
             component=\(component, privacy: .public) reason=\(reason, privacy: .public)
             """
         )
@@ -1428,7 +1428,11 @@ public final class RemoteControlManager: BaseManager {
                             encodedAge=\(encodedAge, privacy: .public)
                             """
                         )
-                        await self.restartScreenSharingIfNeeded(for: peer.id, reason: "encoded-stall")
+                        if strictMediaFallbacks {
+                            await self.failStrictMediaCapture(for: peer, reason: "strict-encoded-stall", component: "video")
+                        } else {
+                            await self.restartScreenSharingIfNeeded(for: peer.id, reason: "encoded-stall")
+                        }
                         break
                     } else if hasMeaningfulSampleFlow,
                               encodedAge < 1.0,
@@ -1441,8 +1445,12 @@ public final class RemoteControlManager: BaseManager {
                             waitingForSync=\(framePumpHealth.waitingForSyncFrame, privacy: .public)
                             """
                         )
-                        streamer.requestKeyFrameRefresh(reason: "frame-send-stall")
-                        await self.restartScreenSharingIfNeeded(for: peer.id, reason: "frame-send-stall")
+                        if strictMediaFallbacks {
+                            await self.failStrictMediaCapture(for: peer, reason: "strict-frame-send-stall", component: "video")
+                        } else {
+                            streamer.requestKeyFrameRefresh(reason: "frame-send-stall")
+                            await self.restartScreenSharingIfNeeded(for: peer.id, reason: "frame-send-stall")
+                        }
                         break
                     } else if hasSampleFlow,
                               !hasMeaningfulSampleFlow,

@@ -2750,7 +2750,8 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     turnAdmissionToken: artifacts.turnAdmissionToken,
     mediaAdmissionToken: artifacts.mediaAdmissionToken,
     expiresIn: Math.max(0, Math.round((connectionActiveUntil(result.item) - now()) / 1000)),
-    signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req)
+    signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req),
+    wsPath: '/ws'
   });
 }));
 
@@ -2889,6 +2890,7 @@ app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) =>
       mediaAdmissionToken: artifacts.mediaAdmissionToken,
       expiresIn: Math.max(0, Math.round((connectionActiveUntil(result.item) - now()) / 1000)),
       signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req),
+      wsPath: '/ws',
       initiatorDeviceId: result.item.deviceId,
       initiatorProtocolSigningAlgorithm: result.item.initiatorProtocolSigningAlgorithm,
       initiatorProtocolPublicKeyFingerprint: result.item.initiatorProtocolPublicKeyFingerprint

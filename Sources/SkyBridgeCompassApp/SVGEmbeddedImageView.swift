@@ -105,16 +105,17 @@ struct BrandAppIconView: View {
 
 private enum BrandIconAssetLoader {
     static func load(preferredResourceName: String) -> NSImage? {
+        let shouldTrimTransparentBounds = preferredResourceName == "SidebarBrandIcon"
         if let image = loadImageResource(named: preferredResourceName, withExtension: "png", bundle: .main) {
-            return image
+            return normalizedBrandImage(image, trimTransparentBounds: shouldTrimTransparentBounds)
         }
 
         if let image = loadImageResource(named: preferredResourceName, withExtension: "png", bundle: .module) {
-            return image
+            return normalizedBrandImage(image, trimTransparentBounds: shouldTrimTransparentBounds)
         }
 
         if let image = loadImageResource(named: "BrandIcon", withExtension: "png", bundle: .main) {
-            return image
+            return normalizedBrandImage(image, trimTransparentBounds: false)
         }
 
         return loadImageResource(named: "AppIcon", withExtension: "png", bundle: .module)
@@ -130,6 +131,61 @@ private enum BrandIconAssetLoader {
         return image
     }
 
+    private static func normalizedBrandImage(_ image: NSImage, trimTransparentBounds: Bool) -> NSImage {
+        trimTransparentBounds ? Self.trimTransparentBounds(image) : image
+    }
+
+    private static func trimTransparentBounds(_ image: NSImage) -> NSImage {
+        var proposedRect = NSRect(origin: .zero, size: image.size)
+        guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
+            return image
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 1, height > 1 else { return image }
+
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &rgba,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return image
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var minX = width
+        var minY = height
+        var maxX = -1
+        var maxY = -1
+        for y in 0..<height {
+            for x in 0..<width {
+                let alpha = rgba[(y * width + x) * 4 + 3]
+                guard alpha > 8 else { continue }
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return image }
+
+        let cropRect = CGRect(
+            x: minX,
+            y: minY,
+            width: maxX - minX + 1,
+            height: maxY - minY + 1
+        )
+        guard cropRect.width < CGFloat(width) * 0.98 || cropRect.height < CGFloat(height) * 0.98,
+              let cropped = cgImage.cropping(to: cropRect) else {
+            return image
+        }
+        return NSImage(cgImage: cropped, size: NSSize(width: cropRect.width, height: cropRect.height))
+    }
 }
 
 private extension View {

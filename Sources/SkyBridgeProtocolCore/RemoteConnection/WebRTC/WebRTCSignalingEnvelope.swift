@@ -41,23 +41,45 @@ public struct WebRTCSignalingEnvelope: Codable, Sendable, Equatable {
     }
     
     public struct Payload: Codable, Sendable, Equatable {
+        public struct BootstrapKEMPublicKey: Codable, Sendable, Equatable {
+            public let suiteWireId: UInt16
+            public let publicKey: Data
+
+            public init(suiteWireId: UInt16, publicKey: Data) {
+                self.suiteWireId = suiteWireId
+                self.publicKey = publicKey
+            }
+        }
+
         public var sdp: String?
         
         public var candidate: String?
         public var sdpMid: String?
         public var sdpMLineIndex: Int32?
+
+        public var protocolSigningAlgorithm: ProtocolSigningAlgorithm?
+        public var protocolPublicKeyFingerprint: String?
+        public var protocolPublicKeyBytes: Data?
+        public var kemPublicKeys: [BootstrapKEMPublicKey]?
         
         public init(
             sdp: String? = nil,
             candidate: String? = nil,
             sdpMid: String? = nil,
-            sdpMLineIndex: Int32? = nil
+            sdpMLineIndex: Int32? = nil,
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm? = nil,
+            protocolPublicKeyFingerprint: String? = nil,
+            protocolPublicKeyBytes: Data? = nil,
+            kemPublicKeys: [BootstrapKEMPublicKey]? = nil
         ) {
             self.sdp = sdp
             self.candidate = candidate
             self.sdpMid = sdpMid
             self.sdpMLineIndex = sdpMLineIndex
+            self.protocolSigningAlgorithm = protocolSigningAlgorithm
+            self.protocolPublicKeyFingerprint = protocolPublicKeyFingerprint
+            self.protocolPublicKeyBytes = protocolPublicKeyBytes
+            self.kemPublicKeys = kemPublicKeys
         }
     }
 }
-

@@ -236,6 +236,7 @@ test('live register-session route replays same request and rejects mismatched re
   assert.equal(typeof first.json.sessionId, 'string');
   assert.equal(typeof first.json.sessionToken, 'string');
   assert.equal(typeof first.json.qrBootstrapToken, 'string');
+  assert.equal(first.json.wsPath, '/ws');
 
   const replay = await postJSON('/api/webrtc/register-session', {
     headers: {
@@ -338,6 +339,7 @@ test('live redeem-session route replays same request and rejects mismatched reus
 
   assert.equal(first.status, 200);
   assert.equal(typeof first.json.sessionToken, 'string');
+  assert.equal(first.json.wsPath, '/ws');
 
   const replay = await postJSON('/api/webrtc/redeem-session', {
     headers: {
@@ -744,6 +746,7 @@ test('webrtc session refresh reauthenticates active initiator and rotates all ro
   assert.equal(typeof refresh.json.mediaAdmissionToken, 'string');
   assert.equal(typeof refresh.json.serverBuildFingerprint, 'string');
   assert.equal(refresh.json.supportsSessionRefresh, true);
+  assert.equal(refresh.json.wsPath, '/ws');
   assert.equal(typeof refresh.json.sessionTokenGeneration, 'string');
   assert.equal(typeof refresh.json.mediaTokenGeneration, 'string');
   assert.notEqual(refresh.json.sessionToken, sessionResponse.json.sessionToken);
@@ -1030,6 +1033,7 @@ test('duplicate responder lookup conflicts without rotating active tokens', asyn
   });
 
   assert.equal(codeResponse.status, 200);
+  assert.equal(codeResponse.json.wsPath, '/ws');
 
   const responder = makeIdentityBinding('duplicate-lookup-responder');
   const responderAdmission = await issueAdmissionLease(responder);
@@ -1042,6 +1046,7 @@ test('duplicate responder lookup conflicts without rotating active tokens', asyn
   assert.equal(first.status, 200);
   assert.equal(first.json.found, true);
   assert.equal(typeof first.json.sessionToken, 'string');
+  assert.equal(first.json.wsPath, '/ws');
 
   const duplicateAdmission = await issueAdmissionLease(responder);
   const duplicate = await getJSON(`/api/webrtc/lookup/${codeResponse.json.code}`, {

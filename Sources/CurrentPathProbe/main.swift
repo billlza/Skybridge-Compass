@@ -137,6 +137,7 @@ struct CurrentPathProbe {
             "session_id": lease.sessionID,
             "expires_in": Int(lease.expiresIn),
             "signaling_server_origin": lease.signalingServerOrigin,
+            "signaling_ws_path": lease.wsPath ?? "/ws",
             "device_id": context.binding.deviceId,
             "protocol_public_key_fingerprint": context.binding.protocolPublicKeyFingerprint
         ])
@@ -167,7 +168,12 @@ struct CurrentPathProbe {
         let admission = try await requestAdmissionLease(signalServer: signalServer, binding: context.binding)
         let lookup = try await signalServer.lookupConnectionCode(admissionToken: admission.token, code: code)
         let origin = try canonicalOrigin(lookup.signalingServerOrigin)
-        guard let wsURL = signalingWebSocketURL(origin: origin, sessionID: lookup.sessionID, token: lookup.sessionToken) else {
+        guard let wsURL = signalingWebSocketURL(
+            origin: origin,
+            wsPath: lookup.wsPath,
+            sessionID: lookup.sessionID,
+            token: lookup.sessionToken
+        ) else {
             throw ProbeError.invalidArguments("invalid signaling websocket url")
         }
 
@@ -847,23 +853,15 @@ struct CurrentPathProbe {
         try CurrentPathOriginPolicy.canonicalOrigin(raw)
     }
 
-    private static func signalingWebSocketURL(origin: String, sessionID: String, token: String) -> URL? {
-        let wsOrigin: String
-        if origin.hasPrefix("https://") {
-            wsOrigin = origin.replacingOccurrences(of: "https://", with: "wss://")
-        } else if origin.hasPrefix("http://") {
-            wsOrigin = origin.replacingOccurrences(of: "http://", with: "ws://")
-        } else {
-            return nil
-        }
-        guard var components = URLComponents(string: "\(wsOrigin)/ws") else { return nil }
-        components.queryItems = [
-            URLQueryItem(name: "shard", value: sessionID),
-            URLQueryItem(name: "st", value: token),
-            URLQueryItem(name: "cv", value: resolvedClientVersion()),
-            URLQueryItem(name: "pv", value: resolvedProtocolVersion())
-        ]
-        return components.url
+    private static func signalingWebSocketURL(origin: String, wsPath: String?, sessionID: String, token: String) -> URL? {
+        CrossNetworkConnectionManager.currentPathSignalingWebSocketURL(
+            signalingServerOrigin: origin,
+            wsPath: wsPath,
+            sessionID: sessionID,
+            sessionToken: token,
+            clientVersion: resolvedClientVersion(),
+            protocolVersion: resolvedProtocolVersion()
+        )
     }
 
     private static func resolvedClientVersion() -> String {
