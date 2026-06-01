@@ -60,6 +60,8 @@ out/
 *.dylib
 *.framework
 !Sources/Vendor/*.xcframework/**/*.a
+!SkyBridge Compass iOS/Vendor/liboqs.xcframework/**/*.a
+!SkyBridge Compass iOS/LocalPackages/SkyBridgeMediaLocal/Vendor/libopus.xcframework/**/*.a
 !SkyBridge Compass iOS/Vendor/WebRTC/WebRTC.xcframework/**/*.framework/
 !SkyBridge Compass iOS/Vendor/WebRTC/WebRTC.xcframework/**/*.framework/**
 
