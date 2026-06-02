@@ -28,6 +28,7 @@ final class TransferLinkFlowTests: XCTestCase {
         createdLinkIDs.removeAll()
         temporaryFiles.removeAll()
         LocalFileTransferHTTPServer.testingStartDelayNanos = 0
+        LocalFileTransferHTTPServer.testingStartHook = nil
         scanner.cleanup()
         try await manager.start()
         try await waitForHTTPServerReady()
@@ -43,6 +44,7 @@ final class TransferLinkFlowTests: XCTestCase {
         await manager.stop()
         scanner.cleanup()
         LocalFileTransferHTTPServer.testingStartDelayNanos = 0
+        LocalFileTransferHTTPServer.testingStartHook = nil
         createdLinkIDs.removeAll()
         temporaryFiles.removeAll()
         try await super.tearDown()
@@ -219,24 +221,57 @@ final class TransferLinkFlowTests: XCTestCase {
 
     func testConcurrentStartupWaitsForSingleServerReadyState() async throws {
         await manager.stop()
-        LocalFileTransferHTTPServer.testingStartDelayNanos = 400_000_000
-        defer { LocalFileTransferHTTPServer.testingStartDelayNanos = 0 }
+        let startGate = LocalFileTransferStartGate()
+        let completionProbe = TransferLinkStartupCompletionProbe()
+        LocalFileTransferHTTPServer.testingStartHook = {
+            await startGate.waitForRelease()
+        }
+        defer {
+            LocalFileTransferHTTPServer.testingStartHook = nil
+            Task { await startGate.release() }
+        }
 
         let firstStart = Task { @MainActor in
             try await self.manager.start()
+            await completionProbe.markFirstCompleted()
+            return self.manager.isServerRunning && self.manager.currentServerPort != nil
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        let firstStartEnteredHTTPStart = await startGate.waitUntilEntered(timeoutNanos: 1_000_000_000)
+        guard firstStartEnteredHTTPStart else {
+            await startGate.release()
+            _ = try? await firstStart.value
+            XCTFail("测试 hook 未观察到 HTTP server startup，无法验证 starting 分支等待共享启动任务。")
+            return
+        }
+        let firstBeforeRelease = await completionProbe.snapshot()
+        XCTAssertFalse(firstBeforeRelease.firstCompleted, "首次 start 不能在 HTTP server ready 之前返回。")
 
-        let secondStartedAt = Date()
-        try await manager.start()
-        let secondElapsed = Date().timeIntervalSince(secondStartedAt)
-        try await firstStart.value
+        let secondStart = Task { @MainActor in
+            await completionProbe.markSecondEntered()
+            try await self.manager.start()
+            await completionProbe.markSecondCompleted()
+            return self.manager.isServerRunning && self.manager.currentServerPort != nil
+        }
+        let secondStartEntered = await completionProbe.waitUntilSecondEntered(timeoutNanos: 1_000_000_000)
+        guard secondStartEntered else {
+            await startGate.release()
+            _ = try? await firstStart.value
+            _ = try? await secondStart.value
+            XCTFail("第二个 start task 未进入并发启动路径，无法验证 starting 分支等待共享启动任务。")
+            return
+        }
+        await Task.yield()
+        let beforeRelease = await completionProbe.snapshot()
+        XCTAssertFalse(beforeRelease.secondCompleted, "并发 start 不能在共享启动任务 ready 之前提前返回。")
 
-        XCTAssertGreaterThanOrEqual(
-            secondElapsed,
-            0.25,
-            "当 server 还在 starting 时，后续调用必须等待 ready，而不是提前返回伪成功。"
-        )
+        await startGate.release()
+        let firstReturnedReady = try await firstStart.value
+        let secondReturnedReady = try await secondStart.value
+
+        XCTAssertTrue(firstReturnedReady, "首次 start 返回时必须已经进入 ready 状态。")
+        XCTAssertTrue(secondReturnedReady, "并发 start 返回时必须等待 ready，而不是提前返回伪成功。")
+        XCTAssertTrue(manager.isServerRunning)
+        XCTAssertNotNil(manager.currentServerPort)
         try await waitForHTTPServerReady()
     }
 
@@ -381,5 +416,59 @@ final class TransferLinkFlowTests: XCTestCase {
         let components = cookiePair.split(separator: "=", maxSplits: 1)
         XCTAssertEqual(components.first, "SkyBridgeLinkAccess")
         return String(try XCTUnwrap(components.last))
+    }
+}
+
+private actor LocalFileTransferStartGate {
+    private var entered = false
+    private var released = false
+
+    func waitForRelease() async {
+        entered = true
+        while !released {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
+    func release() {
+        released = true
+    }
+
+    func waitUntilEntered(timeoutNanos: UInt64) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanos
+        while !entered, DispatchTime.now().uptimeNanoseconds < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return entered
+    }
+}
+
+private actor TransferLinkStartupCompletionProbe {
+    private var firstStartCompleted = false
+    private var secondStartEntered = false
+    private var secondStartCompleted = false
+
+    func markFirstCompleted() {
+        firstStartCompleted = true
+    }
+
+    func markSecondCompleted() {
+        secondStartCompleted = true
+    }
+
+    func markSecondEntered() {
+        secondStartEntered = true
+    }
+
+    func waitUntilSecondEntered(timeoutNanos: UInt64) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanos
+        while !secondStartEntered, DispatchTime.now().uptimeNanoseconds < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return secondStartEntered
+    }
+
+    func snapshot() -> (firstCompleted: Bool, secondCompleted: Bool) {
+        (firstStartCompleted, secondStartCompleted)
     }
 }

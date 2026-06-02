@@ -980,7 +980,10 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             sessionId: sessionId,
             transcriptHash: Data(repeating: 0x53, count: 32)
         )
-        let transport = SuspendedCapturingRealtimeMediaTransport(sendDelayMs: 0)
+        let transport = SuspendedCapturingRealtimeMediaTransport(
+            sendDelayMs: 0,
+            suspendBeforeAppendingSendNumber: 2
+        )
         let sender = try RemoteRealtimeMediaAudioSender(
             sessionId: sessionId,
             endpoint: SkyBridgeMediaEndpoint(host: "127.0.0.1", port: 55_556),
@@ -1005,27 +1008,33 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             )
         }
 
-        let deadline = Date().addingTimeInterval(1)
-        while await transport.packetCount < 1, Date() < deadline {
-            try await Task.sleep(for: .milliseconds(5))
-        }
+        let didSuspendSecondSend = await transport.waitForSuspendedSend(timeoutMs: 1_000)
+        XCTAssertTrue(didSuspendSecondSend, "第二帧必须进入可控的 send 挂起点，才能验证 close 取消真实发送路径。")
+        let sendAttemptCount = await transport.sendAttemptCount
+        XCTAssertEqual(sendAttemptCount, 2)
         let firstPacketCount = await transport.packetCount
-        XCTAssertEqual(firstPacketCount, 1)
+        XCTAssertEqual(
+            firstPacketCount,
+            1,
+            "The gated test transport keeps the second frame out of the capture list until close cancels the drain task."
+        )
 
         await sender.close()
         let sentPacketCountAtClose = await transport.packetCount
         try await Task.sleep(for: .milliseconds(profile.frameDurationMs * 2))
         let sentPacketCountAfterClose = await transport.packetCount
-        XCTAssertLessThanOrEqual(
+        let closeSnapshot = await sender.diagnosticSnapshot()
+        XCTAssertEqual(
             sentPacketCountAtClose,
-            2,
-            "Only the submitted frames may be sent before close; close must not synthesize extra packets."
+            1,
+            "Only the first frame should be sent before close; the second submitted frame must remain cancellable."
         )
         XCTAssertEqual(
             sentPacketCountAfterClose,
             sentPacketCountAtClose,
             "Closing during the pacing window must cancel the drain loop without sending after close."
         )
+        XCTAssertEqual(closeSnapshot.queuedFrames, 0)
     }
 
     @available(macOS 14.0, *)
@@ -2041,25 +2050,60 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
 
 private actor SuspendedCapturingRealtimeMediaTransport: SkyBridgeRealtimeMediaTransport {
     private let sendDelayMs: Int
+    private let suspendBeforeAppendingSendNumber: Int?
     private var packets: [Data] = []
+    private var attemptedSends = 0
+    private var stopRequested = false
+    private var suspendedSendContinuation: CheckedContinuation<Void, Never>?
 
-    init(sendDelayMs: Int) {
+    init(sendDelayMs: Int, suspendBeforeAppendingSendNumber: Int? = nil) {
         self.sendDelayMs = sendDelayMs
+        self.suspendBeforeAppendingSendNumber = suspendBeforeAppendingSendNumber
     }
 
     func start() async throws {}
 
     func send(_ packet: Data) async throws {
+        attemptedSends += 1
+        let sendNumber = attemptedSends
+        if sendNumber == suspendBeforeAppendingSendNumber {
+            await withCheckedContinuation { continuation in
+                suspendedSendContinuation = continuation
+            }
+        }
+        if stopRequested || Task.isCancelled {
+            throw CancellationError()
+        }
         if sendDelayMs > 0 {
             try await Task.sleep(for: .milliseconds(sendDelayMs))
+        }
+        if stopRequested || Task.isCancelled {
+            throw CancellationError()
         }
         packets.append(packet)
     }
 
-    func stop() async {}
+    func stop() async {
+        stopRequested = true
+        suspendedSendContinuation?.resume()
+        suspendedSendContinuation = nil
+    }
 
     var packetCount: Int {
         packets.count
+    }
+
+    var sendAttemptCount: Int {
+        attemptedSends
+    }
+
+    func waitForSuspendedSend(timeoutMs: Int) async -> Bool {
+        let timeoutNanos = UInt64(max(0, timeoutMs)) * 1_000_000
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanos
+        while suspendedSendContinuation == nil, DispatchTime.now().uptimeNanoseconds < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return suspendedSendContinuation != nil
     }
 
     func packetsSnapshot() -> [Data] {

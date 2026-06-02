@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 import os.lock
 
 final class LocalFileTransferHTTPServer: @unchecked Sendable {
+    typealias TestingStartHook = @Sendable () async -> Void
+
     private final class StartState: @unchecked Sendable {
         var finished = false
     }
@@ -107,10 +109,16 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
     private static let testingDelay = OSAllocatedUnfairLock(initialState: UInt64(0))
+    private static let testingStartHookStorage = OSAllocatedUnfairLock(initialState: TestingStartHook?.none)
 
     static var testingStartDelayNanos: UInt64 {
         get { testingDelay.withLock { $0 } }
         set { testingDelay.withLock { $0 = newValue } }
+    }
+
+    static var testingStartHook: TestingStartHook? {
+        get { testingStartHookStorage.withLock { $0 } }
+        set { testingStartHookStorage.withLock { $0 = newValue } }
     }
 
     init(callbacks: Callbacks) {
@@ -119,6 +127,10 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
 
     func start(port: UInt16) async throws {
         guard listener == nil else { return }
+
+        if let testingStartHook = Self.testingStartHook {
+            await testingStartHook()
+        }
 
         let startDelay = Self.testingStartDelayNanos
         if startDelay > 0 {
