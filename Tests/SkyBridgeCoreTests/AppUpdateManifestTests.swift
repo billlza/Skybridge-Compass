@@ -174,6 +174,14 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertTrue(releaseReadiness.contains("generate_macos_update_manifest.swift"))
         XCTAssertTrue(releaseReadiness.contains("publish_macos_update_release.sh"))
         XCTAssertTrue(releaseReadiness.contains("verify_xcode_toolchain.sh"))
+        XCTAssertTrue(
+            releaseReadiness.contains("stapled_notarization_ticket_is_valid \"${target_path}\""),
+            "Release readiness must accept stapled notarization evidence for the exact App or DMG target when spctl omits notarized source context."
+        )
+        XCTAssertFalse(
+            releaseReadiness.contains("[[ \"${target_path}\" == *.dmg ]] && xcrun stapler validate"),
+            "The notarization confirmation path must not be limited to DMGs; stapled App bundles are release evidence too."
+        )
         XCTAssertTrue(workflow.contains("DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer"))
         XCTAssertTrue(workflow.contains("SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: \"6.3.2\""))
         XCTAssertFalse(

@@ -37,7 +37,7 @@ Options:
   --memory-timeout <seconds>    Timeout for `skybridge check memory` leaks scan (default: 60)
   --launch-timeout <seconds>    Seconds to wait for a fresh process to appear (default: 20)
   --steady-state <seconds>      Seconds the launched process must stay alive (default: 5)
-  --require-notarization        Fail when Gatekeeper does not report notarization
+  --require-notarization        Fail unless notarization can be confirmed
   -h, --help                    Show this help
 
 Checks:
@@ -1130,7 +1130,7 @@ assess_gatekeeper_target() {
   fi
 
   if skybridge_gatekeeper_is_accepted "${output}"; then
-    if [[ "${target_path}" == *.dmg ]] && xcrun stapler validate "${target_path}" >/dev/null 2>&1; then
+    if stapled_notarization_ticket_is_valid "${target_path}"; then
       log_info "${label} Gatekeeper assessment lacked notarization context, but stapler validation confirmed a stapled ticket"
       return 0
     fi
@@ -1147,6 +1147,11 @@ assess_gatekeeper_target() {
   fi
 
   fail "${label} Gatekeeper assessment returned no output"
+}
+
+stapled_notarization_ticket_is_valid() {
+  local target_path="$1"
+  xcrun stapler validate "${target_path}" >/dev/null 2>&1
 }
 
 smoke_launch_app() {
