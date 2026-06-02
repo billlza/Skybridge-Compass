@@ -4,6 +4,22 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class WebRTCInboundFileTransferSupportTests: XCTestCase {
+    func testValidateTransferIdRequiresCanonicalUUID() {
+        XCTAssertNil(WebRTCInboundFileTransferSupport.validateTransferId(UUID().uuidString))
+        XCTAssertEqual(
+            WebRTCInboundFileTransferSupport.validateTransferId("../escape"),
+            "Invalid metadata (invalid transferId)"
+        )
+        XCTAssertEqual(
+            WebRTCInboundFileTransferSupport.validateTransferId("a/b"),
+            "Invalid metadata (invalid transferId)"
+        )
+        XCTAssertEqual(
+            WebRTCInboundFileTransferSupport.validateTransferId("transfer"),
+            "Invalid metadata (invalid transferId)"
+        )
+    }
+
     func testValidateMetadataRejectsInvalidFileShapes() {
         XCTAssertNil(
             WebRTCInboundFileTransferSupport.validateMetadata(

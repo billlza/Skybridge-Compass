@@ -183,9 +183,10 @@ sudo mkdir -p "$REMOTE_RELEASE_DIR"
 sudo tar -xzf "$REMOTE_ARCHIVE" -C "$REMOTE_RELEASE_DIR"
 sudo rm -f "$REMOTE_ARCHIVE"
 printf '%s\n' "$BUILD_FINGERPRINT" | sudo tee "$REMOTE_RELEASE_DIR/.skybridge-build-fingerprint" >/dev/null
+sudo chown -R skybridge:skybridge "$REMOTE_RELEASE_DIR"
 
 pushd "$REMOTE_RELEASE_DIR" >/dev/null
-sudo npm ci --omit=dev --no-audit --no-fund
+sudo -u skybridge npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 popd >/dev/null
 
 PREVIOUS_CURRENT_TARGET=""

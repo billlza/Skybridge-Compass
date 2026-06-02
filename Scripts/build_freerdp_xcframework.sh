@@ -8,7 +8,7 @@ set -euo pipefail
 
 # 默认参数（可根据需要调整）：
 FREERDP_GIT_URL="https://github.com/FreeRDP/FreeRDP.git"
-FREERDP_BRANCH="3.4.0"
+FREERDP_BRANCH="3.26.0"
 DEPLOYMENT_TARGET="14.0"
 ARCH="arm64"
 BUILD_TYPE="Release"

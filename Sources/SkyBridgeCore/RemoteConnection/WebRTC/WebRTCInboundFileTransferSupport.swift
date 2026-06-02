@@ -47,6 +47,7 @@ enum WebRTCInboundFileTransferIntegrityFailure: Equatable {
 @available(macOS 14.0, iOS 17.0, *)
 enum WebRTCInboundFileTransferSupport {
     static let maxChunkSize = 512 * 1024
+    static let transferIdLength = 36
 
     static func sanitizedFileName(_ name: String) -> String {
         FileTransferPathPolicy.sanitizedFileName(name)
@@ -78,6 +79,15 @@ enum WebRTCInboundFileTransferSupport {
         let total = (fileSize + Int64(chunkSize) - 1) / Int64(chunkSize)
         guard total >= 0, total <= Int64(Int.max) else { return nil }
         return Int(total)
+    }
+
+    static func validateTransferId(_ transferId: String) -> String? {
+        guard transferId.count == transferIdLength,
+              transferId.trimmingCharacters(in: .whitespacesAndNewlines) == transferId,
+              UUID(uuidString: transferId) != nil else {
+            return "Invalid metadata (invalid transferId)"
+        }
+        return nil
     }
 
     static func validateMetadata(

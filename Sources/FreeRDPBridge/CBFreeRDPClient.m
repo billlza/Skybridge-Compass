@@ -77,6 +77,43 @@ typedef struct {
 } AppleSiliconDecoder;
 
 static os_log_t CBFreeRDPLogger;
+static NSString * const CBFreeRDPMinimumVersionString = @"3.26.0";
+
+static NSArray<NSNumber *> *CBFreeRDPVersionComponents(NSString *versionString) {
+    NSMutableArray<NSNumber *> *components = [NSMutableArray arrayWithCapacity:3];
+    NSScanner *scanner = [NSScanner scannerWithString:versionString ?: @""];
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+    while (!scanner.isAtEnd && components.count < 3) {
+        [scanner scanUpToCharactersFromSet:digits intoString:NULL];
+        NSString *numberString = nil;
+        if ([scanner scanCharactersFromSet:digits intoString:&numberString] && numberString.length > 0) {
+            [components addObject:@(numberString.integerValue)];
+        }
+    }
+    return components;
+}
+
+static BOOL CBFreeRDPVersionMeetsMinimum(NSString *versionString) {
+    NSArray<NSNumber *> *components = CBFreeRDPVersionComponents(versionString);
+    if (components.count < 2) {
+        return NO;
+    }
+    NSInteger actual[3] = {
+        components[0].integerValue,
+        components[1].integerValue,
+        components.count > 2 ? components[2].integerValue : 0
+    };
+    const NSInteger minimum[3] = {3, 26, 0};
+    for (NSInteger index = 0; index < 3; index++) {
+        if (actual[index] > minimum[index]) {
+            return YES;
+        }
+        if (actual[index] < minimum[index]) {
+            return NO;
+        }
+    }
+    return YES;
+}
 
 @interface CBFreeRDPClient ()
 {
@@ -647,18 +684,19 @@ static void videoToolboxDecompressionCallback(
         return YES;
     }
 
-    NSArray<NSString *> *candidatePaths = @[
-        @"/opt/homebrew/lib/libfreerdp3.dylib",
-        @"/usr/local/lib/libfreerdp3.dylib",
-        @"/usr/lib/libfreerdp3.dylib",
-        @"libfreerdp3.dylib",
-        @"/opt/homebrew/lib/libfreerdp2.dylib",
-        @"/usr/local/lib/libfreerdp2.dylib",
-        @"/usr/lib/libfreerdp2.dylib",
-        @"libfreerdp2.dylib"
-    ];
+    NSString *frameworksPath = NSBundle.mainBundle.privateFrameworksPath ?: @"";
+    NSMutableArray<NSString *> *candidatePaths = [NSMutableArray array];
+    if (frameworksPath.length > 0) {
+        [candidatePaths addObject:[frameworksPath stringByAppendingPathComponent:@"libfreerdp3.dylib"]];
+        [candidatePaths addObject:[frameworksPath stringByAppendingPathComponent:@"FreeRDP.framework/FreeRDP"]];
+    }
+    [candidatePaths addObject:@"/opt/homebrew/lib/libfreerdp3.dylib"];
+    [candidatePaths addObject:@"/usr/local/lib/libfreerdp3.dylib"];
 
     for (NSString *path in candidatePaths) {
+        if (path.length == 0) {
+            continue;
+        }
         void *handle = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
         if (handle != NULL) {
             _libraryHandle = handle;
@@ -667,24 +705,24 @@ static void videoToolboxDecompressionCallback(
     }
 
     if (!_libraryHandle) {
-        os_log_error(CBFreeRDPLogger, "❌ 无法加载 libfreerdp3/libfreerdp2 动态库 - RDP 远程桌面功能不可用");
+        os_log_error(CBFreeRDPLogger, "❌ 无法加载受支持的 libfreerdp3 动态库 - RDP 远程桌面功能不可用");
         if (error) {
  // 提供详细的安装说明
-            NSString *installGuide = @"远程桌面 (RDP) 功能需要 FreeRDP 库支持。\n\n"
+            NSString *installGuide = @"远程桌面 (RDP) 功能需要 FreeRDP 3.26.0 或更高版本支持。\n\n"
                                      @"安装方法：\n"
                                      @"1. 打开终端 (Terminal.app)\n"
                                      @"2. 安装 Homebrew（如未安装）:\n"
                                      @"   /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\n"
-                                     @"3. 安装 FreeRDP:\n"
-                                     @"   brew install freerdp\n\n"
+                                     @"3. 安装或更新 FreeRDP:\n"
+                                     @"   brew install freerdp || brew upgrade freerdp\n\n"
                                      @"安装完成后重启 SkyBridge Compass Pro 即可使用 RDP 功能。\n\n"
                                      @"注意：其他远程桌面功能（VNC、自研协议）不受此影响，可正常使用。";
             
             NSDictionary *userInfo = @{
                 NSLocalizedDescriptionKey: @"RDP 远程桌面功能暂不可用",
                 NSLocalizedRecoverySuggestionErrorKey: installGuide,
-                NSLocalizedFailureReasonErrorKey: @"未找到 libfreerdp3.dylib 或 libfreerdp2.dylib 库文件",
-                @"InstallCommand": @"brew install freerdp",
+                NSLocalizedFailureReasonErrorKey: @"未找到受支持的 libfreerdp3.dylib 库文件",
+                @"InstallCommand": @"brew install freerdp || brew upgrade freerdp",
                 @"AlternativeFeatures": @[@"VNC", @"SSH", @"UltraStream"]
             };
  *error = [NSError errorWithDomain:@"com.skybridge.compass.freerdp"
@@ -739,20 +777,36 @@ static void videoToolboxDecompressionCallback(
         return NO;
     }
     
- // 验证版本字符串（如果可用）
+    NSString *versionStr = nil;
     if (_versionString) {
         const char *version = _versionString();
         if (version) {
             os_log_info(CBFreeRDPLogger, "✅ FreeRDP 版本: %{public}s", version);
- // 检查是否为 FreeRDP 3.x
-            NSString *versionStr = [NSString stringWithUTF8String:version];
-            if ([versionStr containsString:@"3."] || [versionStr containsString:@"3.0"]) {
-                os_log_info(CBFreeRDPLogger, "✅ 检测到 FreeRDP 3.x，启用完整功能支持");
-            } else {
-                os_log_info(CBFreeRDPLogger, "⚠️ 检测到 FreeRDP 2.x，部分功能可能受限");
-            }
+            versionStr = [NSString stringWithUTF8String:version];
         }
     }
+    if (!versionStr || !CBFreeRDPVersionMeetsMinimum(versionStr)) {
+        os_log_error(
+            CBFreeRDPLogger,
+            "❌ FreeRDP 版本过旧或无法识别: %{public}@，最低要求 %{public}@",
+            versionStr ?: @"(unknown)",
+            CBFreeRDPMinimumVersionString
+        );
+        if (error) {
+            NSDictionary *userInfo = @{
+                NSLocalizedDescriptionKey: @"FreeRDP 版本不满足安全要求",
+                NSLocalizedFailureReasonErrorKey: [NSString stringWithFormat:@"检测到版本 %@，最低要求 %@。", versionStr ?: @"unknown", CBFreeRDPMinimumVersionString],
+                NSLocalizedRecoverySuggestionErrorKey: @"请更新到 FreeRDP 3.26.0 或更高版本后重试。"
+            };
+            *error = [NSError errorWithDomain:@"com.skybridge.compass.freerdp"
+                                         code:-102
+                                     userInfo:userInfo];
+        }
+        dlclose(_libraryHandle);
+        _libraryHandle = NULL;
+        return NO;
+    }
+    os_log_info(CBFreeRDPLogger, "✅ FreeRDP 版本满足安全要求，启用完整功能支持");
     
  // 设置 API 为可选（读取路径可降级），写入路径在连接时会做强校验
     NSMutableArray<NSString *> *optionalMissing = [NSMutableArray array];

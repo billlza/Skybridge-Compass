@@ -81,6 +81,18 @@ final class WebRTCInboundFileTransferReceiver {
         endpointDescription: String,
         sendMessage: SendMessage
     ) async throws {
+        if let validationError = WebRTCInboundFileTransferSupport.validateTransferId(message.transferId) {
+            try await sendMessage(
+                CrossNetworkFileTransferMessage(
+                    op: .error,
+                    transferId: message.transferId,
+                    message: validationError
+                ),
+                "tx/webrtc-ft-error"
+            )
+            return
+        }
+
         if transfers[message.transferId] != nil {
             try await sendMessage(
                 CrossNetworkFileTransferMessage(op: .metadataAck, transferId: message.transferId),
