@@ -98,6 +98,9 @@ jobs:
       - name: Run iOS XCTest Lane
         run: bash "SkyBridge Compass iOS/Scripts/test_lane_ios.sh"
 
+      - name: Run Localization Notification Isolation Regression Tests
+        run: swift test --filter SkyBridgeCoreTests.LocalizationManagerNotificationIsolationTests
+
       - name: Run Swift Package Tests
         run: swift test
 

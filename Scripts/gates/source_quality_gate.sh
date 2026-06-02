@@ -16,6 +16,12 @@ run_check_strict_no_warnings \
   swift build
 
 run_check_strict_no_warnings \
+  "swift-test-localization-notification-isolation" \
+  "code" \
+  "source-quality" \
+  swift test --filter SkyBridgeCoreTests.LocalizationManagerNotificationIsolationTests
+
+run_check_strict_no_warnings \
   "swift-test" \
   "code" \
   "source-quality" \

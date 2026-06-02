@@ -197,16 +197,10 @@ public final class LocalizationManager: ObservableObject {
         updateLocale()
         Self.lookupCache.updatePreferenceSnapshot(Self.makePreferenceSnapshot(storedValue: currentLanguage.rawValue))
 
-        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
-            .sink { _ in
-                Self.lookupCache.invalidateRuntimePreferences()
-            }
+        Self.makeRuntimePreferenceInvalidationSubscription(for: UserDefaults.didChangeNotification)
             .store(in: &cancellables)
 
-        NotificationCenter.default.publisher(for: NSLocale.currentLocaleDidChangeNotification)
-            .sink { _ in
-                Self.lookupCache.invalidateRuntimePreferences()
-            }
+        Self.makeRuntimePreferenceInvalidationSubscription(for: NSLocale.currentLocaleDidChangeNotification)
             .store(in: &cancellables)
     }
     
@@ -243,6 +237,18 @@ public final class LocalizationManager: ObservableObject {
             languageCode: systemPreferredLanguageCode(),
             isSystemPreference: true
         )
+    }
+
+    private nonisolated static func makeRuntimePreferenceInvalidationSubscription(
+        for notificationName: Notification.Name
+    ) -> AnyCancellable {
+        NotificationCenter.default
+            .publisher(for: notificationName)
+            .sink(receiveValue: invalidateRuntimePreferenceCache)
+    }
+
+    private nonisolated static func invalidateRuntimePreferenceCache(_: Notification) {
+        lookupCache.invalidateRuntimePreferences()
     }
 
     private nonisolated static func systemPreferredLanguageCode() -> String {
