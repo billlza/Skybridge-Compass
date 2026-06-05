@@ -555,6 +555,12 @@ struct SkyBridgeCompassApp: App {
                 ],
                 intentIdentifiers: [],
                 options: []
+            ),
+            UNNotificationCategory(
+                identifier: NotificationManager.remoteDesktopSessionCategoryIdentifier,
+                actions: [],
+                intentIdentifiers: [],
+                options: []
             )
         ]
         

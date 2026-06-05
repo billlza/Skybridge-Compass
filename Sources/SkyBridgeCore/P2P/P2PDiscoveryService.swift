@@ -2124,6 +2124,26 @@ public class P2PDiscoveryService: BaseManager {
         return P2PDiscoveryBonjourPolicy.normalizeSOAFlag(dict["hs_soa"] ?? dict["HS_SOA"])
     }
 
+    private func extractNetworkLinkStatus(from result: NWBrowser.Result) -> DeviceNetworkLinkStatus? {
+        guard case .bonjour(let txtRecord) = result.metadata else { return nil }
+        return BonjourTXTParser.extractNetworkLinkStatus(txtRecord)
+    }
+
+    private nonisolated static func connectionTypes(
+        from status: DeviceNetworkLinkStatus?,
+        defaultTypes: Set<DeviceConnectionType>
+    ) -> Set<DeviceConnectionType> {
+        guard let status else { return defaultTypes }
+        var updated = defaultTypes
+        updated.remove(.unknown)
+        updated.insert(status.connectionType)
+        return updated
+    }
+
+    private nonisolated static func signalPercentage(from status: DeviceNetworkLinkStatus?) -> Double? {
+        status?.normalizedSignalStrength.map { $0 * 100.0 }
+    }
+
     private func extractAdvertisedServicePort(from result: NWBrowser.Result, serviceType: String) -> Int? {
         guard case .bonjour(let txtRecord) = result.metadata else { return nil }
         let dict = BonjourTXTParser.parse(txtRecord)
@@ -2202,6 +2222,11 @@ public class P2PDiscoveryService: BaseManager {
         let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
         let strongIdentity = extractStrongIdentity(from: result)
         let supportsSOA = extractSOAFlag(from: result)
+        let networkLinkStatus = extractNetworkLinkStatus(from: result)
+        let connectionTypes = Self.connectionTypes(
+            from: networkLinkStatus,
+            defaultTypes: [.wifi]
+        )
 
  // 根据服务类型推断设备类型（纯 UI 用，不影响连接逻辑）
         var detectedDeviceType = ""
@@ -2227,7 +2252,7 @@ public class P2PDiscoveryService: BaseManager {
             ipv6: ipv6,
             services: supportsSOA ? [serviceType, "hs_soa"] : [serviceType],
             portMap: [serviceType: port],
-            connectionTypes: [.wifi], // 网络发现的设备默认为 Wi-Fi
+            connectionTypes: connectionTypes,
             uniqueIdentifier: P2PDiscoveryBonjourPolicy.preferredUniqueIdentifier(
                 deviceId: strongIdentity.deviceId,
                 pubKeyFP: strongIdentity.pubKeyFP,
@@ -2236,7 +2261,8 @@ public class P2PDiscoveryService: BaseManager {
                 ipv6: ipv6
             ),
             routeIdentifiers: [bonjourUniqueIdentifier].compactMap { $0 },
-            signalStrength: nil,
+            signalStrength: Self.signalPercentage(from: networkLinkStatus),
+            networkLinkStatus: networkLinkStatus,
             isLocalDevice: isProbablyLocalDevice(name: deviceName, ipv4: ipv4, ipv6: ipv6),
             deviceId: strongIdentity.deviceId,
             pubKeyFP: strongIdentity.pubKeyFP
@@ -2261,6 +2287,9 @@ public class P2PDiscoveryService: BaseManager {
             if supportsSOA, !existingDevice.services.contains("hs_soa") {
                 existingDevice.services.append("hs_soa")
             }
+            existingDevice.connectionTypes = existingDevice.connectionTypes.union(connectionTypes)
+            existingDevice.signalStrength = Self.signalPercentage(from: networkLinkStatus) ?? existingDevice.signalStrength
+            existingDevice.networkLinkStatus = networkLinkStatus ?? existingDevice.networkLinkStatus
             if let newDeviceId = strongIdentity.deviceId, !newDeviceId.isEmpty {
                 existingDevice.deviceId = newDeviceId
             }
@@ -2294,8 +2323,21 @@ public class P2PDiscoveryService: BaseManager {
         let bonjourUniqueIdentifier = bonjourIdentifier(from: result.endpoint)
         let strongIdentity = extractStrongIdentity(from: result)
         let supportsSOA = extractSOAFlag(from: result)
+        let networkLinkStatus = extractNetworkLinkStatus(from: result)
+        let connectionTypes = Self.connectionTypes(
+            from: networkLinkStatus,
+            defaultTypes: [.wifi]
+        )
         let advertisedPort = extractAdvertisedServicePort(from: result, serviceType: serviceType) ?? 0
-        Task.detached { [serviceType, bonjourUniqueIdentifier, strongIdentity, supportsSOA, advertisedPort] in
+        Task.detached { [
+            serviceType,
+            bonjourUniqueIdentifier,
+            strongIdentity,
+            supportsSOA,
+            networkLinkStatus,
+            connectionTypes,
+            advertisedPort
+        ] in
             let deviceName = P2P_ExtractDeviceName(result)
             let (ipv4, ipv6) = P2P_ExtractNetworkAddrs(result)
             let port = advertisedPort
@@ -2318,7 +2360,7 @@ public class P2PDiscoveryService: BaseManager {
                 ipv6: ipv6,
                 services: supportsSOA ? [serviceType, "hs_soa"] : [serviceType],
                 portMap: [serviceType: port],
-                connectionTypes: [.wifi],
+                connectionTypes: connectionTypes,
                 uniqueIdentifier: P2PDiscoveryBonjourPolicy.preferredUniqueIdentifier(
                     deviceId: strongIdentity.deviceId,
                     pubKeyFP: strongIdentity.pubKeyFP,
@@ -2327,6 +2369,8 @@ public class P2PDiscoveryService: BaseManager {
                     ipv6: ipv6
                 ),
                 routeIdentifiers: [bonjourUniqueIdentifier].compactMap { $0 },
+                signalStrength: Self.signalPercentage(from: networkLinkStatus),
+                networkLinkStatus: networkLinkStatus,
                 deviceId: strongIdentity.deviceId,
                 pubKeyFP: strongIdentity.pubKeyFP
             )
@@ -2348,6 +2392,9 @@ public class P2PDiscoveryService: BaseManager {
                     if supportsSOA, !existing.services.contains("hs_soa") {
                         existing.services.append("hs_soa")
                     }
+                    existing.connectionTypes = existing.connectionTypes.union(connectionTypes)
+                    existing.signalStrength = Self.signalPercentage(from: networkLinkStatus) ?? existing.signalStrength
+                    existing.networkLinkStatus = networkLinkStatus ?? existing.networkLinkStatus
                     if let newDeviceId = strongIdentity.deviceId, !newDeviceId.isEmpty {
                         existing.deviceId = newDeviceId
                     }
@@ -4255,6 +4302,7 @@ public class P2PDiscoveryService: BaseManager {
                     [bonjourUniqueIdentifier].compactMap { $0 }
                 ),
                 signalStrength: dd.signalStrength,
+                networkLinkStatus: dd.networkLinkStatus,
                 source: dd.source,
                 isLocalDevice: dd.isLocalDevice,
                 deviceId: dd.deviceId,

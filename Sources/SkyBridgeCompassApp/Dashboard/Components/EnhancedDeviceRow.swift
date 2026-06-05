@@ -121,6 +121,8 @@ public struct EnhancedDeviceRow: View {
         switch type {
         case .wifi:
             return Color.blue.opacity(0.8)
+        case .cellular:
+            return Color.green.opacity(0.8)
         case .usb:
             return Color.green.opacity(0.8)
         case .ethernet:

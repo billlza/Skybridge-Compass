@@ -46,6 +46,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
+        let wsPath: String?
     }
 
     struct SessionRefreshLease: Sendable, Equatable {
@@ -55,7 +56,8 @@ actor SignalServerClientCompat {
         let turnAdmissionToken: String
         let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
-        let signalingServerOrigin: String?
+        let signalingServerOrigin: String
+        let wsPath: String
         let serverBuildFingerprint: String?
         let sessionTokenGeneration: String?
         let mediaTokenGeneration: String?
@@ -68,6 +70,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
+        let wsPath: String?
         let initiatorDeviceId: String
         let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         let initiatorProtocolPublicKeyFingerprint: String
@@ -81,6 +84,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
+        let wsPath: String?
     }
 
     struct ConnectionCodeLookup: Sendable, Equatable {
@@ -90,6 +94,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: TimeInterval
         let signalingServerOrigin: String
+        let wsPath: String?
         let initiatorDeviceId: String
         let initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm
         let initiatorProtocolPublicKeyFingerprint: String
@@ -101,6 +106,7 @@ actor SignalServerClientCompat {
         case invalidResponse
         case missingAuthentication
         case missingTenantID
+        case missingIdempotencyKey
         case requestTimedOut(String)
         case serverRejected(Int, String)
         case malformedResponse(String)
@@ -115,6 +121,8 @@ actor SignalServerClientCompat {
                 return "缺少上游登录态，无法申请 admission"
             case .missingTenantID:
                 return "缺少租户标识，无法访问当前租户的公网能力"
+            case .missingIdempotencyKey:
+                return "缺少幂等键，无法安全执行当前跨网请求"
             case .requestTimedOut(let path):
                 return "当前跨网请求超时: \(path)"
             case .serverRejected(let status, let body):
@@ -178,6 +186,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String
+        let wsPath: String?
     }
 
     private struct RedeemSessionRequestBody: Encodable {
@@ -197,6 +206,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String
+        let wsPath: String?
         let initiatorDeviceId: String
         let initiatorProtocolSigningAlgorithm: String
         let initiatorProtocolPublicKeyFingerprint: String
@@ -210,6 +220,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String?
+        let wsPath: String?
         let serverBuildFingerprint: String?
         let sessionTokenGeneration: String?
         let mediaTokenGeneration: String?
@@ -228,6 +239,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String
+        let wsPath: String?
     }
 
     private struct LookupCodeResponseBody: Decodable {
@@ -238,6 +250,7 @@ actor SignalServerClientCompat {
         let mediaAdmissionToken: String?
         let expiresIn: Int
         let signalingServerOrigin: String
+        let wsPath: String?
         let initiatorDeviceId: String
         let initiatorProtocolSigningAlgorithm: String
         let initiatorProtocolPublicKeyFingerprint: String
@@ -406,17 +419,23 @@ actor SignalServerClientCompat {
             sessionToken: response.sessionToken,
             qrBootstrapToken: response.qrBootstrapToken,
             turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
             expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin
+            signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath
         )
     }
 
     func redeemSession(
         admissionToken: String,
         sessionId: String,
-        qrBootstrapToken: String
+        qrBootstrapToken: String,
+        idempotencyKey: String
     ) async throws -> RedeemedSessionLease {
+        let normalizedIdempotencyKey = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedIdempotencyKey.isEmpty else {
+            throw ClientError.missingIdempotencyKey
+        }
         logger.info(
             "🌐 current-path request start path=/api/webrtc/redeem-session sessionId=\(sessionId, privacy: .public)"
         )
@@ -428,7 +447,10 @@ actor SignalServerClientCompat {
             path: "/api/webrtc/redeem-session",
             method: "POST",
             body: try JSONEncoder().encode(body),
-            extraHeaders: ["X-SkyBridge-Admission": admissionToken]
+            extraHeaders: [
+                "X-SkyBridge-Admission": admissionToken,
+                "Idempotency-Key": normalizedIdempotencyKey
+            ]
         )
         logger.info(
             "🌐 current-path request ok path=/api/webrtc/redeem-session sessionId=\(response.sessionId, privacy: .public)"
@@ -437,9 +459,10 @@ actor SignalServerClientCompat {
             sessionID: response.sessionId,
             sessionToken: response.sessionToken,
             turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath,
             initiatorDeviceId: response.initiatorDeviceId,
             initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: response.initiatorProtocolSigningAlgorithm) ?? .ed25519,
             initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint
@@ -461,26 +484,13 @@ actor SignalServerClientCompat {
             body: try JSONEncoder().encode(body),
             extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
-        guard response.sessionId == sessionId,
-              response.role == role,
-              !response.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !response.turnAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw ClientError.malformedResponse("invalid session refresh response")
-        }
         logger.info(
             "🌐 current-path request ok path=/api/webrtc/session/refresh sessionId=\(response.sessionId, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) sessionTokenGeneration=\(response.sessionTokenGeneration ?? "-", privacy: .public) mediaTokenGeneration=\(response.mediaTokenGeneration ?? "-", privacy: .public)"
         )
-        return SessionRefreshLease(
-            sessionID: response.sessionId,
-            role: response.role,
-            sessionToken: response.sessionToken,
-            turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            serverBuildFingerprint: response.serverBuildFingerprint,
-            sessionTokenGeneration: response.sessionTokenGeneration,
-            mediaTokenGeneration: response.mediaTokenGeneration
+        return try Self.sessionRefreshLease(
+            from: response,
+            expectedSessionId: sessionId,
+            expectedRole: role
         )
     }
 
@@ -510,9 +520,10 @@ actor SignalServerClientCompat {
             sessionID: response.sessionId,
             sessionToken: response.sessionToken,
             turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
             expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin
+            signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath
         )
     }
 
@@ -530,16 +541,18 @@ actor SignalServerClientCompat {
         guard !response.sessionToken.isEmpty else {
             throw ClientError.malformedResponse("missing sessionToken")
         }
+        let websocketPathForLog = Self.normalizedOptionalToken(response.wsPath) ?? "<missing>"
         logger.info(
-            "🌐 current-path request ok path=/api/webrtc/lookup sessionId=\(response.sessionId, privacy: .public) found=\(response.found)"
+            "🌐 current-path request ok path=/api/webrtc/lookup sessionId=\(response.sessionId, privacy: .public) found=\(response.found) wsPath=\(websocketPathForLog, privacy: .public)"
         )
         return ConnectionCodeLookup(
             sessionID: response.sessionId,
             sessionToken: response.sessionToken,
             turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: normalizedOptionalToken(response.mediaAdmissionToken),
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
             expiresIn: TimeInterval(response.expiresIn),
             signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath,
             initiatorDeviceId: response.initiatorDeviceId,
             initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: response.initiatorProtocolSigningAlgorithm) ?? .ed25519,
             initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
@@ -623,6 +636,36 @@ actor SignalServerClientCompat {
 
     private var accessTokenRefreshTask: Task<AuthSession, Error>?
 
+    private static func sessionRefreshLease(
+        from response: SessionRefreshResponseBody,
+        expectedSessionId sessionId: String,
+        expectedRole role: String
+    ) throws -> SessionRefreshLease {
+        guard response.sessionId == sessionId,
+              response.role == role,
+              !response.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !response.turnAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let signalingServerOrigin = response.signalingServerOrigin?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !signalingServerOrigin.isEmpty,
+              let wsPath = response.wsPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !wsPath.isEmpty else {
+            throw ClientError.malformedResponse("invalid session refresh response")
+        }
+        return SessionRefreshLease(
+            sessionID: response.sessionId,
+            role: response.role,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: signalingServerOrigin,
+            wsPath: wsPath,
+            serverBuildFingerprint: response.serverBuildFingerprint,
+            sessionTokenGeneration: response.sessionTokenGeneration,
+            mediaTokenGeneration: response.mediaTokenGeneration
+        )
+    }
+
     static func testOnlyDecodeMediaRelayLeaseResponse(_ data: Data) throws -> MediaRelayLease {
         let response = try JSONDecoder().decode(MediaLeaseResponseBody.self, from: data)
         return MediaRelayLease(
@@ -639,6 +682,50 @@ actor SignalServerClientCompat {
         )
     }
 
+    static func testOnlyDecodeRegisterSessionResponse(_ data: Data) throws -> SessionLease {
+        let response = try JSONDecoder().decode(RegisterSessionResponseBody.self, from: data)
+        return SessionLease(
+            sessionID: response.sessionId,
+            sessionToken: response.sessionToken,
+            qrBootstrapToken: response.qrBootstrapToken,
+            turnAdmissionToken: response.turnAdmissionToken,
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath
+        )
+    }
+
+    static func testOnlyDecodeSessionRefreshResponse(
+        _ data: Data,
+        sessionId: String,
+        role: String
+    ) throws -> SessionRefreshLease {
+        let response = try JSONDecoder().decode(SessionRefreshResponseBody.self, from: data)
+        return try Self.sessionRefreshLease(
+            from: response,
+            expectedSessionId: sessionId,
+            expectedRole: role
+        )
+    }
+
+    static func testOnlyDecodeLookupConnectionCodeResponse(_ data: Data) throws -> ConnectionCodeLookup {
+        let response = try JSONDecoder().decode(LookupCodeResponseBody.self, from: data)
+        return ConnectionCodeLookup(
+            sessionID: response.sessionId,
+            sessionToken: response.sessionToken,
+            turnAdmissionToken: response.turnAdmissionToken,
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
+            expiresIn: TimeInterval(response.expiresIn),
+            signalingServerOrigin: response.signalingServerOrigin,
+            wsPath: response.wsPath,
+            initiatorDeviceId: response.initiatorDeviceId,
+            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: response.initiatorProtocolSigningAlgorithm) ?? .ed25519,
+            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
+            initiatorDeviceName: response.initiatorDeviceName
+        )
+    }
+
     private static func normalizedMediaRelayExpiresAt(_ rawValue: Int64) -> TimeInterval {
         let seconds = TimeInterval(rawValue)
         return seconds > 10_000_000_000 ? seconds / 1000 : seconds
@@ -648,7 +735,7 @@ actor SignalServerClientCompat {
         requestTimeoutSeconds
     }
 
-    private func normalizedOptionalToken(_ token: String?) -> String? {
+    private static func normalizedOptionalToken(_ token: String?) -> String? {
         guard let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty else {
             return nil

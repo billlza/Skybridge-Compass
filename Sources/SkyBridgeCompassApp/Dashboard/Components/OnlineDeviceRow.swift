@@ -282,6 +282,7 @@ public struct OnlineDeviceRow: View {
     private func connectionTypeColor(for type: DeviceConnectionType) -> Color {
         switch type {
         case .wifi: return Color.blue.opacity(0.8)
+        case .cellular: return Color.green.opacity(0.8)
         case .usb: return Color.green.opacity(0.8)
         case .ethernet: return Color.purple.opacity(0.8)
         case .thunderbolt: return Color.orange.opacity(0.8)

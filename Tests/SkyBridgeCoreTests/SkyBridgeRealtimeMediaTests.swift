@@ -1641,6 +1641,26 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         )
     }
 
+    func testP2PViewerAdvertisesAudioOnlyAfterRealtimeEndpointIsReady() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let p2pSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(p2pSource.contains("let realtimeMediaAudioReady = settings.interactionSettings.enableAudioRedirection"))
+        XCTAssertTrue(p2pSource.contains("&& mediaAudioEndpoint != nil"))
+        XCTAssertTrue(p2pSource.contains("&& mediaSessionId != nil"))
+        XCTAssertTrue(p2pSource.contains("audioRedirectionEnabled: realtimeMediaAudioReady"))
+        XCTAssertTrue(p2pSource.contains("audioTransport: realtimeMediaAudioReady"))
+        XCTAssertTrue(p2pSource.contains("audioMode: realtimeMediaAudioReady ? mediaAudioMode.rawValue : nil"))
+        XCTAssertTrue(p2pSource.contains("mediaSessionId: realtimeMediaAudioReady ? mediaSessionId : nil"))
+        XCTAssertTrue(p2pSource.contains("mediaAudioEndpoint: realtimeMediaAudioReady ? mediaAudioEndpoint : nil"))
+    }
+
     func testIOSRealtimeAudioIsJitterPacedAndMetalSkipsBeforeDrawable() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

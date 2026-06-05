@@ -264,8 +264,8 @@ struct DeviceRow: View {
                 
                 HStack(spacing: 4) {
  // 连接类型标签
-                    ForEach(Array(device.connectionTypes.prefix(2)), id: \.self) { (type: DeviceConnectionType) in
-                        Text(type.displayName)
+                    ForEach(connectionBadges, id: \.self) { badge in
+                        Text(badge)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 4)
@@ -278,8 +278,11 @@ struct DeviceRow: View {
             
             Spacer()
             
- // 信号强度 - 始终显示，使用实际值或基于连接类型估算
-            SignalStrengthIndicator(strength: estimatedSignalStrength)
+            if let signalStrength {
+                SignalStrengthIndicator(strength: signalStrength)
+            } else {
+                SignalUnavailableIndicator()
+            }
             
             Image(systemName: "chevron.right")
                 .font(.caption)
@@ -295,6 +298,9 @@ struct DeviceRow: View {
     }
     
     private var deviceIcon: String {
+        if let networkLinkStatus = device.networkLinkStatus {
+            return networkLinkStatus.iconName
+        }
         if device.connectionTypes.contains(.usb) {
             return "cable.connector"
         } else if device.connectionTypes.contains(.bluetooth) {
@@ -305,7 +311,9 @@ struct DeviceRow: View {
     }
     
     private var connectionColor: Color {
-        let strength = estimatedSignalStrength
+        guard let strength = signalStrength else {
+            return .secondary
+        }
         if strength > 0.7 {
             return .green
         } else if strength > 0.3 {
@@ -314,27 +322,54 @@ struct DeviceRow: View {
             return .secondary
         }
     }
-    
- /// 估算信号强度：优先使用实际值，否则基于连接类型估算
-    private var estimatedSignalStrength: Double {
- // 如果有实际测量值，直接使用
-        if let strength = device.signalStrength {
-            return strength
+
+    private var signalStrength: Double? {
+        device.networkLinkStatus?.normalizedSignalStrength
+    }
+
+    private var connectionBadges: [String] {
+        var badges: [String] = []
+        var seen = Set<String>()
+
+        func append(_ label: String) {
+            let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            guard seen.insert(trimmed.lowercased()).inserted else { return }
+            badges.append(trimmed)
         }
-        
- // 基于连接类型估算信号强度
-        if device.connectionTypes.contains(.thunderbolt) {
-            return 1.0  // 雷电连接最强
-        } else if device.connectionTypes.contains(.usb) {
-            return 0.95 // USB 连接很强
-        } else if device.connectionTypes.contains(.ethernet) {
-            return 0.9  // 有线网络很强
-        } else if device.connectionTypes.contains(.wifi) {
-            return 0.7  // Wi-Fi 默认中等偏强
-        } else if device.connectionTypes.contains(.bluetooth) {
-            return 0.5  // 蓝牙默认中等
-        } else {
-            return 0.3  // 未知连接类型默认较弱
+
+        if let status = device.networkLinkStatus {
+            if status.kind == .unknown {
+                append(device.primaryConnectionType.displayName)
+            } else {
+                append(status.displayLabel)
+            }
+        }
+
+        for type in sortedConnectionTypes where badges.count < 2 {
+            append(type.displayName)
+        }
+
+        return Array(badges.prefix(2))
+    }
+
+    private var sortedConnectionTypes: [DeviceConnectionType] {
+        let priority: [DeviceConnectionType] = [
+            .cellular,
+            .wifi,
+            .thunderbolt,
+            .ethernet,
+            .usb,
+            .bluetooth,
+            .unknown
+        ]
+        return device.connectionTypes.sorted { lhs, rhs in
+            let lhsIndex = priority.firstIndex(of: lhs) ?? priority.count
+            let rhsIndex = priority.firstIndex(of: rhs) ?? priority.count
+            if lhsIndex != rhsIndex {
+                return lhsIndex < rhsIndex
+            }
+            return lhs.rawValue < rhs.rawValue
         }
     }
 }
@@ -373,6 +408,16 @@ struct SignalStrengthIndicator: View {
     private func barHeight(for index: Int) -> CGFloat {
  // iPhone 风格递增高度：4, 7, 10, 14
         CGFloat(4 + index * 3 + (index > 0 ? 1 : 0))
+    }
+}
+
+@available(macOS 14.0, *)
+struct SignalUnavailableIndicator: View {
+    var body: some View {
+        Text("—")
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .frame(width: 22, height: 14)
     }
 }
 
@@ -564,6 +609,7 @@ extension DeviceConnectionType {
     var displayName: String {
         switch self {
         case .wifi: return "Wi-Fi"
+        case .cellular: return "蜂窝"
         case .bluetooth: return "蓝牙"
         case .usb: return "USB"
         case .ethernet: return "以太网"

@@ -284,7 +284,15 @@ extension CrossNetworkConnectionManager {
         nativeVideoTrackReady: Bool,
         format: String?
     ) -> Bool {
-        supportsNativeVideoTrack && !nativeVideoTrackReady
+        guard supportsNativeVideoTrack, !nativeVideoTrackReady else {
+            return false
+        }
+        switch format?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "jpeg", "jpg":
+            return false
+        default:
+            return true
+        }
     }
 
     static func streamConfigurationByPreservingAudioEndpointForVideoRefresh(
@@ -373,8 +381,12 @@ extension CrossNetworkConnectionManager {
     static func shouldFailFastRemoteMediaFallbacks(
         remoteStreamConfiguration: RemoteDesktopStreamConfiguration?
     ) -> Bool {
-        guard let remoteStreamConfiguration else { return false }
-        return !remoteStreamConfiguration.isStopRequest
+        guard let remoteStreamConfiguration,
+              !remoteStreamConfiguration.isStopRequest else {
+            return false
+        }
+        return remoteStreamConfiguration.allowsDegradedMediaFallbacks == false
+            || remoteStreamConfiguration.requiresExtremePerformanceValidation
     }
 
     static func policyByEnforcingStrictMediaFrameRateFloor(

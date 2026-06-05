@@ -68,8 +68,12 @@ extension RemoteDesktopManager {
               !nativeVideoTrackHasRenderedFrame else {
             return false
         }
-        _ = format
-        return true
+        switch format?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "jpeg", "jpg":
+            return false
+        default:
+            return true
+        }
     }
 
     nonisolated static func shouldUseJPEGOnlyFallbackDuringNativeWarmup(
@@ -77,10 +81,30 @@ extension RemoteDesktopManager {
         hasRemoteNativeVideoTrack: Bool,
         nativeVideoTrackHasRenderedFrame: Bool
     ) -> Bool {
-        _ = activeTransportModeIsCrossNetwork
-        _ = hasRemoteNativeVideoTrack
-        _ = nativeVideoTrackHasRenderedFrame
-        return false
+        activeTransportModeIsCrossNetwork
+            && hasRemoteNativeVideoTrack
+            && !nativeVideoTrackHasRenderedFrame
+    }
+
+    nonisolated static func shouldAllowNativeWarmupJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: Bool,
+        hasRemoteNativeVideoTrack: Bool,
+        nativeVideoTrackHasRenderedFrame: Bool,
+        format: String?
+    ) -> Bool {
+        guard shouldUseJPEGOnlyFallbackDuringNativeWarmup(
+            activeTransportModeIsCrossNetwork: activeTransportModeIsCrossNetwork,
+            hasRemoteNativeVideoTrack: hasRemoteNativeVideoTrack,
+            nativeVideoTrackHasRenderedFrame: nativeVideoTrackHasRenderedFrame
+        ) else {
+            return false
+        }
+        switch format?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "jpeg", "jpg":
+            return true
+        default:
+            return false
+        }
     }
 
     nonisolated static func shouldRequestExtremeMediaValidation(

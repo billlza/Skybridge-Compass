@@ -405,6 +405,7 @@ public struct UnifiedDeviceDiscoveryIntegrationView: View {
     private func connectionTypeColor(_ type: DeviceConnectionType) -> Color {
         switch type {
         case .wifi: return .blue
+        case .cellular: return .green
         case .ethernet: return .orange
         case .usb: return .green
         case .thunderbolt: return .purple
@@ -477,4 +478,3 @@ struct UnifiedDeviceDiscoveryIntegrationView_Previews: PreviewProvider {
     }
 }
 #endif
-

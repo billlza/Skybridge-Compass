@@ -26,6 +26,8 @@ process.env.HTTP_LOOKUP_RATE_LIMIT_PER_MIN = process.env.HTTP_LOOKUP_RATE_LIMIT_
 process.env.HTTP_TURN_RATE_LIMIT_PER_MIN = process.env.HTTP_TURN_RATE_LIMIT_PER_MIN || '1000';
 process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN = process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN || '1000';
 process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN = process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN || '1000';
+process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH = process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH || '/current-path/ws';
+const expectedSignalingWebSocketPath = process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH;
 
 const { createSignalingStateBackend } = require('../lib/signaling_state_backend');
 const { verifySignedMediaLeaseToken } = require('../lib/media_relay');
@@ -236,7 +238,7 @@ test('live register-session route replays same request and rejects mismatched re
   assert.equal(typeof first.json.sessionId, 'string');
   assert.equal(typeof first.json.sessionToken, 'string');
   assert.equal(typeof first.json.qrBootstrapToken, 'string');
-  assert.equal(first.json.wsPath, '/ws');
+  assert.equal(first.json.wsPath, expectedSignalingWebSocketPath);
 
   const replay = await postJSON('/api/webrtc/register-session', {
     headers: {
@@ -339,7 +341,7 @@ test('live redeem-session route replays same request and rejects mismatched reus
 
   assert.equal(first.status, 200);
   assert.equal(typeof first.json.sessionToken, 'string');
-  assert.equal(first.json.wsPath, '/ws');
+  assert.equal(first.json.wsPath, expectedSignalingWebSocketPath);
 
   const replay = await postJSON('/api/webrtc/redeem-session', {
     headers: {
@@ -497,7 +499,7 @@ test('ICE candidate burst drops excess candidates without revoking session media
   assert.equal(sessionResponse.status, 200);
 
   const ws = new WebSocket(
-    `${baseURL.replace(/^http/, 'ws')}/ws?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
+    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
   );
   try {
     const bound = await waitForWebSocketMessage(ws, (message) => message.type === 'bound');
@@ -746,7 +748,7 @@ test('webrtc session refresh reauthenticates active initiator and rotates all ro
   assert.equal(typeof refresh.json.mediaAdmissionToken, 'string');
   assert.equal(typeof refresh.json.serverBuildFingerprint, 'string');
   assert.equal(refresh.json.supportsSessionRefresh, true);
-  assert.equal(refresh.json.wsPath, '/ws');
+  assert.equal(refresh.json.wsPath, expectedSignalingWebSocketPath);
   assert.equal(typeof refresh.json.sessionTokenGeneration, 'string');
   assert.equal(typeof refresh.json.mediaTokenGeneration, 'string');
   assert.notEqual(refresh.json.sessionToken, sessionResponse.json.sessionToken);
@@ -1033,7 +1035,7 @@ test('duplicate responder lookup conflicts without rotating active tokens', asyn
   });
 
   assert.equal(codeResponse.status, 200);
-  assert.equal(codeResponse.json.wsPath, '/ws');
+  assert.equal(codeResponse.json.wsPath, expectedSignalingWebSocketPath);
 
   const responder = makeIdentityBinding('duplicate-lookup-responder');
   const responderAdmission = await issueAdmissionLease(responder);
@@ -1046,7 +1048,7 @@ test('duplicate responder lookup conflicts without rotating active tokens', asyn
   assert.equal(first.status, 200);
   assert.equal(first.json.found, true);
   assert.equal(typeof first.json.sessionToken, 'string');
-  assert.equal(first.json.wsPath, '/ws');
+  assert.equal(first.json.wsPath, expectedSignalingWebSocketPath);
 
   const duplicateAdmission = await issueAdmissionLease(responder);
   const duplicate = await getJSON(`/api/webrtc/lookup/${codeResponse.json.code}`, {
@@ -1376,7 +1378,7 @@ test('heartbeat pong renews idle room membership leases', async () => {
   assert.equal(sessionResponse.status, 200);
 
   const ws = new WebSocket(
-    `${baseURL.replace(/^http/, 'ws')}/ws?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
+    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
   );
   try {
     const bound = await waitForWebSocketMessage(ws, (message) => message.type === 'bound');

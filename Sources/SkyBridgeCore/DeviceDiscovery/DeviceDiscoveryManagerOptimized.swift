@@ -904,6 +904,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                             ? existingDevice.routeIdentifiers
                             : DiscoveredDevice.mergedRouteIdentifiers(sanitized.routeIdentifiers, existingDevice.routeIdentifiers),
                         signalStrength: sanitized.signalStrength ?? existingDevice.signalStrength,
+                        networkLinkStatus: sanitized.networkLinkStatus ?? existingDevice.networkLinkStatus,
                         source: preserveExistingNetworkIdentity ? existingDevice.source : sanitized.source,
                         isLocalDevice: false, // 强制非本机
                         deviceId: preserveExistingNetworkIdentity ? existingDevice.deviceId : nil,
@@ -1007,6 +1008,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 2.1 始终更新 transient 字段（IP、在线状态、延迟等）
                 merged._updateTransient(ipv4: device.ipv4, ipv6: device.ipv6)
                 merged.signalStrength = device.signalStrength ?? merged.signalStrength
+                merged.networkLinkStatus = device.networkLinkStatus ?? merged.networkLinkStatus
                 merged.connectionTypes = merged.connectionTypes.union(device.connectionTypes)
 
  // 2.2 字段保护策略
@@ -1240,6 +1242,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         )
         let strong = extractStrongIdentityQuick(from: result)
         let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
+        let networkLinkStatus = extractNetworkLinkStatus(from: result)
+        let connectionTypes = Self.connectionTypes(
+            from: networkLinkStatus,
+            defaultTypes: [.wifi]
+        )
         let deviceId = UUID()
 
  // 守卫：非 SkyBridge serviceType 的设备强制标记为非本机
@@ -1264,7 +1271,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             services: [serviceType],
             portMap: [serviceType: 0],
             remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? []),
-            connectionTypes: [.wifi], // 网络发现默认为Wi-Fi
+            connectionTypes: connectionTypes,
             uniqueIdentifier: Self.preferredUniqueIdentifier(
                 deviceId: strong.deviceId,
                 pubKeyFP: strong.pubKeyFP,
@@ -1273,7 +1280,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 ipv6: nil
             ),
             routeIdentifiers: [bonjourID].compactMap { $0 },
-            signalStrength: nil,
+            signalStrength: Self.signalPercentage(from: networkLinkStatus),
+            networkLinkStatus: networkLinkStatus,
             isLocalDevice: false, // 非SkyBridge服务默认非本机，后续由resolveIsLocal统一判定
             deviceId: strong.deviceId,
             pubKeyFP: strong.pubKeyFP
@@ -1294,6 +1302,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             )
 
  // 更新设备信息
+            let resolvedSignalStrength: Double?
+            if let advertisedSignalStrength = Self.signalPercentage(from: networkLinkStatus) {
+                resolvedSignalStrength = advertisedSignalStrength
+            } else {
+                resolvedSignalStrength = await self.measureLinkQuality(host: ipv4 ?? ipv6, port: port)
+            }
             let updatedDevice = DiscoveredDevice(
                 id: deviceId,
                 name: deviceName,
@@ -1306,7 +1320,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 services: [serviceType],
                 portMap: [serviceType: port],
                 remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? []),
-                connectionTypes: [.wifi],
+                connectionTypes: connectionTypes,
                 uniqueIdentifier: Self.preferredUniqueIdentifier(
                     deviceId: strong.deviceId,
                     pubKeyFP: strong.pubKeyFP,
@@ -1315,7 +1329,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     ipv6: ipv6
                 ),
                 routeIdentifiers: [bonjourID].compactMap { $0 },
-                signalStrength: await self.measureLinkQuality(host: ipv4 ?? ipv6, port: port),
+                signalStrength: resolvedSignalStrength,
+                networkLinkStatus: networkLinkStatus,
                 isLocalDevice: false, // 后续由 resolveIsLocal 统一判定
                 deviceId: strong.deviceId,
                 pubKeyFP: strong.pubKeyFP
@@ -1565,6 +1580,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         )
         let strong = extractStrongIdentityQuick(from: result)
         let bonjourID = Self.bonjourIdentifier(from: result.endpoint)
+        let networkLinkStatus = extractNetworkLinkStatus(from: result)
         let (ipv4, ipv6, port) = await extractNetworkInfoAsync(
             from: result,
             serviceType: serviceType
@@ -1606,7 +1622,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     services: newServices,
                     portMap: newPortMap,
                     remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? Array(existingDevice.remoteVideoFormats)),
-                    connectionTypes: existingDevice.connectionTypes,
+                    connectionTypes: Self.connectionTypes(
+                        from: networkLinkStatus ?? existingDevice.networkLinkStatus,
+                        defaultTypes: existingDevice.connectionTypes
+                    ),
                     uniqueIdentifier: Self.preferredUniqueIdentifier(
                         deviceId: strong.deviceId ?? existingDevice.deviceId,
                         pubKeyFP: strong.pubKeyFP ?? existingDevice.pubKeyFP,
@@ -1618,7 +1637,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         existingDevice.routeIdentifiers,
                         [bonjourID].compactMap { $0 }
                     ),
-                    signalStrength: existingDevice.signalStrength,
+                    signalStrength: Self.signalPercentage(from: networkLinkStatus) ?? existingDevice.signalStrength,
+                    networkLinkStatus: networkLinkStatus ?? existingDevice.networkLinkStatus,
                     source: existingDevice.source,
                     isLocalDevice: existingDevice.isLocalDevice,
                     deviceId: strong.deviceId ?? existingDevice.deviceId,
@@ -1669,6 +1689,26 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             return nil
         }
         return info
+    }
+
+    private func extractNetworkLinkStatus(from result: NWBrowser.Result) -> DeviceNetworkLinkStatus? {
+        guard case .bonjour(let txtRecord) = result.metadata else { return nil }
+        return BonjourTXTParser.extractNetworkLinkStatus(txtRecord)
+    }
+
+    private nonisolated static func connectionTypes(
+        from status: DeviceNetworkLinkStatus?,
+        defaultTypes: Set<DeviceConnectionType>
+    ) -> Set<DeviceConnectionType> {
+        guard let status else { return defaultTypes }
+        var updated = defaultTypes
+        updated.remove(.unknown)
+        updated.insert(status.connectionType)
+        return updated
+    }
+
+    private nonisolated static func signalPercentage(from status: DeviceNetworkLinkStatus?) -> Double? {
+        status?.normalizedSignalStrength.map { $0 * 100.0 }
     }
 
     private static func extractAdvertisedServicePort(from result: NWBrowser.Result, serviceType: String) -> Int? {

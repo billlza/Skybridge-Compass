@@ -172,6 +172,10 @@ public enum BonjourTXTParser: Sendable {
             "platform", "osVersion", "os_version", "platformVersion", "platform_version", "os", "systemVersion",
             "model", "modelName", "hardwareModel", "hwModel", "name",
             "capabilities", "pqc", "version", "kemRefreshVersion", "kemKeyDigest", "hs_soa",
+            "linkKind", "networkType", "network_kind", "network_type", "interfaceType", "interface_type",
+            "radioAccessTechnology", "radio_access_technology", "radioTech", "radio_tech",
+            "cellularTechnology", "cellular_technology", "mobileDataLabel", "mobile_data_label",
+            "signalUnit", "signal_unit", "signalPercent", "signal_percent", "signalFraction", "signal_fraction",
             "rssi", "signalStrength", "signal_strength", "signal",
             "port", "skybridgePort", "p2pPort", "controlPort", "controlPortSource",
             "transferPort", "fileTransferPort", "file_transfer_port",
@@ -384,6 +388,106 @@ extension NWTXTRecord {
         }
 
         return nil
+    }
+}
+
+extension BonjourTXTParser {
+    public static func extractNetworkLinkStatus(_ txtRecord: NWTXTRecord) -> DeviceNetworkLinkStatus? {
+        extractNetworkLinkStatus(from: parse(txtRecord))
+    }
+
+    public static func extractNetworkLinkStatus(from dict: [String: String]) -> DeviceNetworkLinkStatus? {
+        let rawKind = firstValue(
+            in: dict,
+            keys: [
+                "linkKind", "networkType", "network_kind", "network_type",
+                "interfaceType", "interface_type", "connectionType", "connection_type"
+            ]
+        )
+        let radioTechnology = firstValue(
+            in: dict,
+            keys: [
+                "radioAccessTechnology", "radio_access_technology",
+                "radioTech", "radio_tech",
+                "cellularTechnology", "cellular_technology",
+                "mobileDataLabel", "mobile_data_label", "rat"
+            ]
+        )
+        let rssi = firstValue(in: dict, keys: ["rssi", "wifiRSSI", "wifi_rssi"])
+            .flatMap(parseRSSI)
+        let explicitSignal = firstValue(
+            in: dict,
+            keys: [
+                "signalStrength", "signal_strength", "signal",
+                "signalPercent", "signal_percent",
+                "signalFraction", "signal_fraction"
+            ]
+        ).flatMap { parseSignalStrength($0, unit: firstValue(in: dict, keys: ["signalUnit", "signal_unit"])) }
+
+        let inferredKind = DeviceNetworkLinkStatus.kind(fromAdvertisement: rawKind)
+            ?? (radioTechnology == nil ? nil : .cellular)
+
+        guard let kind = inferredKind ?? (rssi != nil || explicitSignal != nil ? .unknown : nil) else {
+            return nil
+        }
+
+        return DeviceNetworkLinkStatus(
+            kind: kind,
+            radioAccessTechnology: radioTechnology,
+            signalStrength: explicitSignal,
+            rssi: rssi
+        )
+    }
+
+    private static func firstValue(in dict: [String: String], keys: [String]) -> String? {
+        for key in keys {
+            if let value = nonEmpty(dict[key]) ?? nonEmpty(dict[key.lowercased()]) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func nonEmpty(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private static func parseRSSI(_ raw: String) -> Int? {
+        let cleaned = raw
+            .replacingOccurrences(of: "dbm", with: "", options: [.caseInsensitive])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let value = Int(cleaned) {
+            return value
+        }
+        if let value = Double(cleaned) {
+            return Int(value.rounded())
+        }
+        let numeric = cleaned.filter { "-0123456789.".contains($0) }
+        return Double(numeric).map { Int($0.rounded()) }
+    }
+
+    private static func parseSignalStrength(_ raw: String, unit: String?) -> Double? {
+        let cleaned = raw
+            .replacingOccurrences(of: "%", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(cleaned), value.isFinite else {
+            return nil
+        }
+
+        let normalizedUnit = unit?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedUnit == "percent" || normalizedUnit == "%" {
+            return DeviceNetworkLinkStatus.normalizedSignalStrength(value)
+        }
+        if normalizedUnit == "fraction" || normalizedUnit == "ratio" {
+            return DeviceNetworkLinkStatus.normalizedSignalStrength(value)
+        }
+        if normalizedUnit == "dbm" {
+            return nil
+        }
+        return DeviceNetworkLinkStatus.normalizedSignalStrength(value)
     }
 }
 

@@ -71,6 +71,8 @@ public struct ConnectionTypeBadge: View {
         switch connectionType {
         case .wifi:
             return .blue
+        case .cellular:
+            return .green
         case .ethernet:
             return .orange
         case .usb:
@@ -128,6 +130,7 @@ public struct MultiConnectionTypeBadge: View {
             .thunderbolt,
             .ethernet,
             .usb,
+            .cellular,
             .wifi,
             .bluetooth,
             .unknown
@@ -170,6 +173,8 @@ public struct ConnectionTypeIndicator: View {
         switch connectionType {
         case .wifi:
             return .blue
+        case .cellular:
+            return .green
         case .ethernet:
             return .orange
         case .usb:
@@ -241,4 +246,3 @@ struct ConnectionTypeBadge_Previews: PreviewProvider {
     }
 }
 #endif
-

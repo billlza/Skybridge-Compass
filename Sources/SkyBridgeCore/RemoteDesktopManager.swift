@@ -492,6 +492,7 @@ final class RemoteDesktopSession {
     private var connectionContinuation: CheckedContinuation<Void, Error>?
     private let continuationLock = NSLock()
     private var lastPointerLocation: CGPoint?
+    private var hasEstablishedConnection = false
 
     private(set) var clientState: CBFreeRDPClientState = .idle
     private(set) var summary: RemoteSessionSummary
@@ -564,6 +565,15 @@ final class RemoteDesktopSession {
     }
 
     func stop() {
+        if hasEstablishedConnection {
+            RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                sessionID: id.uuidString,
+                deviceName: device.name,
+                transport: "rdp",
+                kind: .normal,
+                reason: "rdp_terminate"
+            )
+        }
         renderer.teardown()
         client.disconnect()
         client.frameCallback = nil
@@ -726,12 +736,35 @@ final class RemoteDesktopSession {
 
                 switch self.clientState {
                 case .connected:
+                    self.hasEstablishedConnection = true
+                    RemoteDesktopSessionNotificationService.shared.beginSession(
+                        sessionID: self.id.uuidString,
+                        transport: "rdp"
+                    )
                     self.resolveConnectionContinuation(.success(()))
                 case .failed:
+                    if self.hasEstablishedConnection {
+                        RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                            sessionID: self.id.uuidString,
+                            deviceName: self.device.name,
+                            transport: "rdp",
+                            kind: .interrupted,
+                            reason: desc
+                        )
+                    }
                     self.resolveConnectionContinuation(.failure(
                         RemoteDesktopError.connectionFailed(desc)
                     ))
                 case .disconnected:
+                    if self.hasEstablishedConnection {
+                        RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                            sessionID: self.id.uuidString,
+                            deviceName: self.device.name,
+                            transport: "rdp",
+                            kind: .interrupted,
+                            reason: "rdp_disconnected"
+                        )
+                    }
                     self.resolveConnectionContinuation(.failure(
                         RemoteDesktopError.connectionFailed("RDP 会话已断开")
                     ))

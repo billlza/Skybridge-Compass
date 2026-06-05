@@ -111,4 +111,38 @@ final class BonjourTXTParsingTests: XCTestCase {
         XCTAssertEqual(dict["controlPort"], "9527")
         XCTAssertEqual(dict["p2pPort"], "9527")
     }
+
+    func testNetworkLinkStatusParsesWiFiRSSIFromTXTRecord() {
+        var record = NWTXTRecord()
+        record["networkType"] = "wifi"
+        record["rssi"] = "-58"
+
+        let status = BonjourTXTParser.extractNetworkLinkStatus(record)
+
+        XCTAssertEqual(status?.kind, .wifi)
+        XCTAssertEqual(status?.connectionType, .wifi)
+        XCTAssertEqual(status?.displayLabel, "Wi-Fi")
+        XCTAssertEqual(status?.rssi, -58)
+        XCTAssertGreaterThan(status?.normalizedSignalStrength ?? 0, 0.5)
+        XCTAssertLessThan(status?.normalizedSignalStrength ?? 1, 0.8)
+    }
+
+    func testNetworkLinkStatusParsesCellularRadioTechnologyAndSignalFraction() {
+        let status = BonjourTXTParser.extractNetworkLinkStatus(from: [
+            "networkType": "cellular",
+            "radioAccessTechnology": "5GUW",
+            "signalStrength": "0.82",
+            "signalUnit": "fraction"
+        ])
+
+        XCTAssertEqual(status?.kind, .cellular)
+        XCTAssertEqual(status?.connectionType, .cellular)
+        XCTAssertEqual(status?.displayLabel, "5GUW")
+        XCTAssertEqual(status?.radioAccessTechnology, "5GUW")
+        guard let normalizedSignalStrength = status?.normalizedSignalStrength else {
+            XCTFail("Expected cellular signal fraction to parse")
+            return
+        }
+        XCTAssertEqual(normalizedSignalStrength, 0.82, accuracy: 0.001)
+    }
 }

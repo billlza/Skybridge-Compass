@@ -416,6 +416,7 @@ public class DeviceDiscoveryManager: BaseManager {
                 txt["platform"] = "macos"
                 txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
                 txt["name"] = self.getDeviceName()
+                LocalNetworkLinkStatusProvider.attachCurrentStatus(to: &txt)
                 if !snap.deviceId.isEmpty {
                     txt["deviceId"] = snap.deviceId
                     txt["uniqueId"] = snap.deviceId

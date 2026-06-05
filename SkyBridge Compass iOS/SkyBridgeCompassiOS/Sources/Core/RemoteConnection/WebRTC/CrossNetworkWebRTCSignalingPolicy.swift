@@ -4,15 +4,23 @@ import Foundation
 extension CrossNetworkWebRTCManager {
     static func resolvedSignalingWebSocketURLString(
         signalingOrigin: String?,
-        fallbackWebSocketURL: String
-    ) -> String {
+        signalingWebSocketPath: String?
+    ) -> String? {
         guard let rawOrigin = signalingOrigin?.trimmingCharacters(in: .whitespacesAndNewlines),
               !rawOrigin.isEmpty,
               let originURL = URL(string: rawOrigin),
               let scheme = originURL.scheme?.lowercased(),
               let host = originURL.host,
               !host.isEmpty else {
-            return fallbackWebSocketURL
+            return nil
+        }
+        guard originURL.path.isEmpty || originURL.path == "/",
+              originURL.query == nil,
+              originURL.fragment == nil else {
+            return nil
+        }
+        guard let path = normalizedSignalingWebSocketPath(signalingWebSocketPath) else {
+            return nil
         }
 
         let websocketScheme: String
@@ -22,22 +30,48 @@ extension CrossNetworkWebRTCManager {
         case "http":
             websocketScheme = "ws"
         default:
-            return fallbackWebSocketURL
+            return nil
         }
 
         var components = URLComponents()
         components.scheme = websocketScheme
         components.host = host
         components.port = originURL.port
-        let originPath = originURL.path.trimmingCharacters(in: .whitespacesAndNewlines)
-        if originPath.isEmpty || originPath == "/" {
-            components.path = "/ws"
-        } else if originPath.hasSuffix("/ws") {
-            components.path = originPath
-        } else {
-            components.path = originPath + "/ws"
+        components.path = path
+        return components.url?.absoluteString
+    }
+
+    static func normalizedSignalingWebSocketPath(_ rawPath: String?) -> String? {
+        guard let trimmed = rawPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              trimmed.first == "/",
+              trimmed != "/",
+              !trimmed.contains("?"),
+              !trimmed.contains("#"),
+              trimmed.unicodeScalars.allSatisfy({ scalar in
+                  scalar.isASCII && !CharacterSet.whitespacesAndNewlines.contains(scalar)
+              }) else {
+            return nil
         }
-        return components.url?.absoluteString ?? fallbackWebSocketURL
+        return trimmed
+    }
+
+    func validateCurrentPathWebSocketPath(_ rawPath: String?) throws -> String {
+        guard let rawPath,
+              !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(
+                domain: "CrossNetworkWebRTCManager",
+                code: 42,
+                userInfo: [NSLocalizedDescriptionKey: "missing current-path signaling websocket path"]
+            )
+        }
+        guard let normalized = Self.normalizedSignalingWebSocketPath(rawPath) else {
+            throw NSError(
+                domain: "CrossNetworkWebRTCManager",
+                code: 42,
+                userInfo: [NSLocalizedDescriptionKey: "invalid current-path signaling websocket path"]
+            )
+        }
+        return normalized
     }
 
     static func shouldScheduleSignalingRecovery(

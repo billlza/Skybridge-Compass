@@ -15,6 +15,25 @@ const TURN_URIS = String(process.env.TURN_URIS || '')
   .map((value) => value.trim())
   .filter(Boolean);
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function normalizeSignalingWebSocketPath(rawPath) {
+  const value = String(rawPath || '').trim();
+  if (
+    !value
+    || value === '/'
+    || !value.startsWith('/')
+    || value.includes('?')
+    || value.includes('#')
+    || !/^[\x21-\x7E]+$/.test(value)
+  ) {
+    throw new Error('invalid_signaling_websocket_path');
+  }
+  return value;
+}
+const SIGNALING_WEBSOCKET_PATH = normalizeSignalingWebSocketPath(
+  process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH
+  || process.env.SIGNALING_WEBSOCKET_PATH
+  || '/ws'
+);
 
 const app = express();
 app.disable('x-powered-by');
@@ -141,7 +160,7 @@ function sessionResponse(record, role) {
     turnAdmissionToken,
     expiresIn: Math.max(0, Math.round((record.expiresAt - nowMs()) / 1000)),
     signalingServerOrigin: record.signalingServerOrigin,
-    wsPath: '/ws',
+    wsPath: SIGNALING_WEBSOCKET_PATH,
     initiatorDeviceId: record.initiator.deviceId,
     initiatorProtocolSigningAlgorithm: record.initiator.protocolSigningAlgorithm,
     initiatorProtocolPublicKeyFingerprint: record.initiator.protocolPublicKeyFingerprint,
@@ -189,7 +208,7 @@ app.get('/', (req, res) => {
       '/api/webrtc/register-code',
       '/api/webrtc/lookup/:code',
       '/api/turn/credentials',
-      '/ws'
+      SIGNALING_WEBSOCKET_PATH
     ]
   });
 });
@@ -336,7 +355,7 @@ app.use((err, req, res, next) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ server, path: SIGNALING_WEBSOCKET_PATH });
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://127.0.0.1');
@@ -406,4 +425,5 @@ setInterval(() => {
 
 server.listen(PORT, HOST, () => {
   console.log(`SkyBridge local compat signaling listening on http://${HOST}:${PORT}`);
+  console.log(`WS path: ${SIGNALING_WEBSOCKET_PATH}`);
 });

@@ -153,6 +153,25 @@ const REQUIRE_CONFIGURED_SIGNALING_SERVER_ORIGIN = /^(1|true|yes)$/i.test(
   process.env.REQUIRE_CONFIGURED_SIGNALING_SERVER_ORIGIN
   || ((process.env.NODE_ENV || '').trim().toLowerCase() === 'production' ? 'true' : 'false')
 );
+function normalizeSignalingWebSocketPath(rawPath) {
+  const value = String(rawPath || '').trim();
+  if (
+    !value
+    || value === '/'
+    || !value.startsWith('/')
+    || value.includes('?')
+    || value.includes('#')
+    || !/^[\x21-\x7E]+$/.test(value)
+  ) {
+    throw new Error('invalid_signaling_websocket_path');
+  }
+  return value;
+}
+const SIGNALING_WEBSOCKET_PATH = normalizeSignalingWebSocketPath(
+  process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH
+  || process.env.SIGNALING_WEBSOCKET_PATH
+  || '/ws'
+);
 const CLIENT_IP_HASH_SECRET = String(process.env.CLIENT_IP_HASH_SECRET || process.env.SIGNALING_IP_HASH_SECRET || 'skybridge-ip-hash').trim();
 const SUPABASE_SEND_SMS_HOOK_SECRET = String(
   process.env.SUPABASE_SEND_SMS_HOOK_SECRET
@@ -2401,7 +2420,7 @@ app.get('/', asyncRoute(async (req, res) => {
       '/api/media/lease',
       '/api/devices/enroll/first',
       '/api/devices/enroll/confirm',
-      '/ws?shard=<session_id>&st=<session_token>'
+      `${SIGNALING_WEBSOCKET_PATH}?shard=<session_id>&st=<session_token>`
     ]
   });
 }));
@@ -2695,7 +2714,7 @@ app.post('/api/webrtc/register-code', rlControl, asyncRoute(async (req, res) => 
     mediaAdmissionToken: artifacts.mediaAdmissionToken,
     expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
     signalingServerOrigin: resolvedSignalingServerOrigin(req),
-    wsPath: '/ws'
+    wsPath: SIGNALING_WEBSOCKET_PATH
   });
 }));
 
@@ -2751,7 +2770,7 @@ app.get('/api/webrtc/lookup/:code', rlLookup, asyncRoute(async (req, res) => {
     mediaAdmissionToken: artifacts.mediaAdmissionToken,
     expiresIn: Math.max(0, Math.round((connectionActiveUntil(result.item) - now()) / 1000)),
     signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req),
-    wsPath: '/ws'
+    wsPath: SIGNALING_WEBSOCKET_PATH
   });
 }));
 
@@ -2814,7 +2833,7 @@ app.post('/api/webrtc/register-session', rlControl, asyncRoute(async (req, res) 
       mediaAdmissionToken: artifacts.mediaAdmissionToken,
       expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
       signalingServerOrigin: resolvedSignalingServerOrigin(req),
-      wsPath: '/ws'
+      wsPath: SIGNALING_WEBSOCKET_PATH
     };
     await completeIdempotencyGuard(idempotency, responseBody);
     res.json(responseBody);
@@ -2890,7 +2909,7 @@ app.post('/api/webrtc/redeem-session', rlControl, asyncRoute(async (req, res) =>
       mediaAdmissionToken: artifacts.mediaAdmissionToken,
       expiresIn: Math.max(0, Math.round((connectionActiveUntil(result.item) - now()) / 1000)),
       signalingServerOrigin: result.item.signalingServerOrigin || resolvedSignalingServerOrigin(req),
-      wsPath: '/ws',
+      wsPath: SIGNALING_WEBSOCKET_PATH,
       initiatorDeviceId: result.item.deviceId,
       initiatorProtocolSigningAlgorithm: result.item.initiatorProtocolSigningAlgorithm,
       initiatorProtocolPublicKeyFingerprint: result.item.initiatorProtocolPublicKeyFingerprint
@@ -2924,7 +2943,7 @@ app.post('/api/webrtc/session/refresh', rlControl, asyncRoute(async (req, res) =
     mediaAdmissionToken: artifacts.mediaAdmissionToken,
     expiresIn: Math.max(0, Math.round((expiresAt - now()) / 1000)),
     signalingServerOrigin: resolvedSignalingServerOrigin(req),
-    wsPath: '/ws',
+    wsPath: SIGNALING_WEBSOCKET_PATH,
     serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
     supportsSessionRefresh: true,
     sessionTokenGeneration: artifacts.sessionTokenHash.slice(0, 16),
@@ -3262,7 +3281,7 @@ const server = (() => {
 let wss = null;
 wss = new WebSocketServer({
   server,
-  path: '/ws',
+  path: SIGNALING_WEBSOCKET_PATH,
   maxPayload: WS_MAX_MSG_BYTES,
   perMessageDeflate: false
 });
@@ -3620,7 +3639,7 @@ async function startRuntime({ port = PORT, host = HOST } = {}) {
         console.warn('[startup] memory state backend is single-instance only; do not deploy behind a multi-instance load balancer');
       }
       console.log(`SMS: provider=${smsStartup.provider} ready=${smsStartup.ready} hookConfigured=${smsStartup.hookConfigured} providerConfigured=${smsStartup.providerConfigured} required=${smsStartup.required}`);
-      console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${port}/ws?shard=<session_id>&st=<session_token>`);
+      console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${port}${SIGNALING_WEBSOCKET_PATH}?shard=<session_id>&st=<session_token>`);
       if (mediaRelayAddress) {
         console.log(`Media relay: udp://${mediaRelayAddress.host}:${mediaRelayAddress.port} maxPacketBytes=${MEDIA_RELAY_MAX_PACKET_BYTES}`);
       } else if (hasExternalMediaRelay()) {

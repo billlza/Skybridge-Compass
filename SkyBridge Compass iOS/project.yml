@@ -173,12 +173,19 @@ schemes:
         SkyBridgeCompass-Widgets: all
         SkyBridgeCompassiOSTests: [test]
     test:
+      macroExpansion: SkyBridgeCompass-iOS
+      testPlans:
+        - path: SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xctestplans/SkyBridgeCompass-iOS-Shared.xctestplan
+          defaultPlan: true
       targets:
         - SkyBridgeCompassiOSTests
     run:
-      config: Debug
+      config: Release
+      executable: SkyBridgeCompass-iOS
+      debugEnabled: false
     profile:
       config: Release
+      executable: SkyBridgeCompass-iOS
     analyze:
       config: Debug
     archive:

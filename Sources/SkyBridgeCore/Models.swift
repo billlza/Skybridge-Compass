@@ -75,6 +75,7 @@ public enum SessionStatus: String, Codable, Hashable, Sendable {
 /// 设备连接方式
 public enum DeviceConnectionType: String, Codable, Hashable, Sendable, CaseIterable {
     case wifi = "Wi-Fi"
+    case cellular = "蜂窝"
     case ethernet = "有线"
     case usb = "USB"
     case thunderbolt = "雷雳"
@@ -86,6 +87,8 @@ public enum DeviceConnectionType: String, Codable, Hashable, Sendable, CaseItera
         switch self {
         case .wifi:
             return "wifi"
+        case .cellular:
+            return "antenna.radiowaves.left.and.right"
         case .ethernet:
             return "cable.connector.horizontal"
         case .usb:
@@ -104,6 +107,8 @@ public enum DeviceConnectionType: String, Codable, Hashable, Sendable, CaseItera
         switch self {
         case .wifi:
             return "blue"
+        case .cellular:
+            return "green"
         case .ethernet:
             return "orange"
         case .usb:
@@ -115,6 +120,157 @@ public enum DeviceConnectionType: String, Codable, Hashable, Sendable, CaseItera
         case .unknown:
             return "gray"
         }
+    }
+}
+
+/// 当前设备对外广播的网络链路状态。
+///
+/// `signalStrength` 使用 0...1 的归一化真实测量值；若来源提供 RSSI，则保留在 `rssi`
+/// 并由展示层按 Wi-Fi RSSI 范围换算成信号格。没有真实测量值时保持 nil。
+public struct DeviceNetworkLinkStatus: Codable, Hashable, Sendable {
+    public enum Kind: String, Codable, Hashable, Sendable {
+        case wifi
+        case cellular
+        case ethernet
+        case unknown
+
+        public var connectionType: DeviceConnectionType {
+            switch self {
+            case .wifi:
+                return .wifi
+            case .cellular:
+                return .cellular
+            case .ethernet:
+                return .ethernet
+            case .unknown:
+                return .unknown
+            }
+        }
+    }
+
+    public let kind: Kind
+    public let radioAccessTechnology: String?
+    public let signalStrength: Double?
+    public let rssi: Int?
+
+    public init(
+        kind: Kind,
+        radioAccessTechnology: String? = nil,
+        signalStrength: Double? = nil,
+        rssi: Int? = nil
+    ) {
+        self.kind = kind
+        self.radioAccessTechnology = Self.sanitizedRadioAccessTechnology(radioAccessTechnology)
+        self.signalStrength = Self.normalizedSignalStrength(signalStrength)
+        self.rssi = rssi
+    }
+
+    public var connectionType: DeviceConnectionType {
+        kind.connectionType
+    }
+
+    public var displayLabel: String {
+        switch kind {
+        case .wifi:
+            return "Wi-Fi"
+        case .cellular:
+            return radioAccessTechnology ?? "蜂窝"
+        case .ethernet:
+            return "以太网"
+        case .unknown:
+            return radioAccessTechnology ?? "未知"
+        }
+    }
+
+    public var iconName: String {
+        switch kind {
+        case .wifi:
+            return "wifi"
+        case .cellular:
+            return "antenna.radiowaves.left.and.right"
+        case .ethernet:
+            return "cable.connector.horizontal"
+        case .unknown:
+            return "questionmark.circle"
+        }
+    }
+
+    public var normalizedSignalStrength: Double? {
+        if let signalStrength {
+            return signalStrength
+        }
+        guard let rssi else { return nil }
+        return Self.normalizedRSSI(rssi)
+    }
+
+    public var advertisementFields: [String: String] {
+        var fields: [String: String] = [
+            "linkKind": kind.rawValue,
+            "networkType": kind.rawValue
+        ]
+        if let radioAccessTechnology {
+            fields["radioAccessTechnology"] = radioAccessTechnology
+            fields["cellularTechnology"] = radioAccessTechnology
+        }
+        if let signalStrength {
+            fields["signalStrength"] = Self.formatSignalFraction(signalStrength)
+            fields["signalUnit"] = "fraction"
+        }
+        if let rssi {
+            fields["rssi"] = String(rssi)
+            fields["signalUnit"] = "dbm"
+        }
+        return fields
+    }
+
+    public static func kind(fromAdvertisement raw: String?) -> Kind? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !raw.isEmpty else {
+            return nil
+        }
+        switch raw {
+        case "wifi", "wi-fi", "wlan", "awdl":
+            return .wifi
+        case "cellular", "cell", "mobile", "wwan", "4g", "5g", "lte", "5guw", "5g uw":
+            return .cellular
+        case "ethernet", "wired", "wire", "lan":
+            return .ethernet
+        default:
+            return .unknown
+        }
+    }
+
+    public static func normalizedSignalStrength(_ raw: Double?) -> Double? {
+        guard let raw, raw.isFinite else { return nil }
+        let fraction = raw > 1.0 ? raw / 100.0 : raw
+        return min(1.0, max(0.0, fraction))
+    }
+
+    public static func normalizedRSSI(_ rssi: Int) -> Double {
+        let minRSSI = -100.0
+        let maxRSSI = -30.0
+        let clamped = min(maxRSSI, max(minRSSI, Double(rssi)))
+        return (clamped - minRSSI) / (maxRSSI - minRSSI)
+    }
+
+    private static func sanitizedRadioAccessTechnology(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        let allowed = value.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.alphanumerics.contains(scalar)
+                || CharacterSet.whitespaces.contains(scalar)
+                || scalar == UnicodeScalar("-")
+                || scalar == UnicodeScalar("_")
+        }
+        guard allowed else { return nil }
+        let collapsed = value.replacingOccurrences(of: "_", with: " ")
+        return collapsed.uppercased()
+    }
+
+    private static func formatSignalFraction(_ value: Double) -> String {
+        String(format: "%.3f", min(1.0, max(0.0, value)))
     }
 }
 
@@ -149,6 +305,8 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
     public var routeIdentifiers: [String]
  /// 链路强度（0-100），来源于真实测量（RSSI或RTT映射）
     public var signalStrength: Double?
+ /// 对端声明的真实网络链路状态；没有公开/协议来源时保持 nil，不做猜测。
+    public var networkLinkStatus: DeviceNetworkLinkStatus?
  /// 设备来源（默认 unknown，不断断逻辑化）
     public var source: DeviceSource = DeviceSource.unknown
  /// 是否为本机设备（只读对外，内部唯一写入点 _setIsLocalInternal）
@@ -178,6 +336,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         uniqueIdentifier: String? = nil,
         routeIdentifiers: [String] = [],
         signalStrength: Double? = nil,
+        networkLinkStatus: DeviceNetworkLinkStatus? = nil,
         source: DeviceSource = DeviceSource.unknown,
         isLocalDevice: Bool = false,
         deviceId: String? = nil,
@@ -199,6 +358,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         self.uniqueIdentifier = uniqueIdentifier
         self.routeIdentifiers = Self.normalizedRouteIdentifiers(routeIdentifiers)
         self.signalStrength = signalStrength
+        self.networkLinkStatus = networkLinkStatus
         self.source = source
         self.isLocalDevice = isLocalDevice
         self.deviceId = deviceId
@@ -256,6 +416,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
         if connectionTypes.contains(.ethernet) { return .ethernet }
         if connectionTypes.contains(.usb) { return .usb }
         if connectionTypes.contains(.wifi) { return .wifi }
+        if connectionTypes.contains(.cellular) { return .cellular }
         if connectionTypes.contains(.bluetooth) { return .bluetooth }
         return DeviceConnectionType.unknown
     }

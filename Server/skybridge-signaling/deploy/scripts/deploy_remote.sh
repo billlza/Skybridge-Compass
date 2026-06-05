@@ -138,7 +138,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[deploy] Packaging release $RELEASE_NAME"
-tar \
+COPYFILE_DISABLE=1 tar --no-xattrs \
   --exclude='node_modules' \
   --exclude='.DS_Store' \
   --exclude='*.log' \
@@ -186,7 +186,8 @@ printf '%s\n' "$BUILD_FINGERPRINT" | sudo tee "$REMOTE_RELEASE_DIR/.skybridge-bu
 sudo chown -R skybridge:skybridge "$REMOTE_RELEASE_DIR"
 
 pushd "$REMOTE_RELEASE_DIR" >/dev/null
-sudo -u skybridge npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+sudo -u skybridge env NPM_CONFIG_UPDATE_NOTIFIER=false NO_UPDATE_NOTIFIER=1 \
+  npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 popd >/dev/null
 
 PREVIOUS_CURRENT_TARGET=""

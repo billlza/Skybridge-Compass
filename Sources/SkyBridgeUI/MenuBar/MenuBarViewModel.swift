@@ -9,6 +9,7 @@
 import Foundation
 import Combine
 import AppKit
+import Network
 import os.log
 import SkyBridgeCore
 
@@ -166,7 +167,9 @@ public final class MenuBarViewModel: ObservableObject {
             .sink { [weak self] devices in
                 guard let self = self else { return }
  // 🔧 修复：过滤掉本机设备，只显示远程设备
-                let remoteDevices = devices.filter { !$0.isLocalDevice }
+                let remoteDevices = Self.deduplicatedMenuBarDevices(
+                    devices.filter { !$0.isLocalDevice }
+                )
  // 限制显示数量
                 let maxDevices = self.configuration.maxDevicesShown
                 self.discoveredDevices = Array(remoteDevices.prefix(maxDevices))
@@ -216,6 +219,193 @@ public final class MenuBarViewModel: ObservableObject {
                 self?.handleTransferFailed(notification)
             }
             .store(in: &cancellables)
+    }
+
+    static func deduplicatedMenuBarDevices(_ devices: [DiscoveredDevice]) -> [DiscoveredDevice] {
+        var orderedKeys: [String] = []
+        var devicesByKey: [String: DiscoveredDevice] = [:]
+        var passthrough: [DiscoveredDevice] = []
+
+        for device in devices {
+            guard let key = stablePresentationKey(for: device) else {
+                passthrough.append(device)
+                continue
+            }
+
+            if let existing = devicesByKey[key] {
+                devicesByKey[key] = preferredMenuBarDevice(existing, device)
+            } else {
+                orderedKeys.append(key)
+                devicesByKey[key] = device
+            }
+        }
+
+        let deduplicated = orderedKeys.compactMap { devicesByKey[$0] }
+        return deduplicated + passthrough
+    }
+
+    private static func preferredMenuBarDevice(
+        _ lhs: DiscoveredDevice,
+        _ rhs: DiscoveredDevice
+    ) -> DiscoveredDevice {
+        scoreForMenuBarPresentation(rhs) > scoreForMenuBarPresentation(lhs) ? rhs : lhs
+    }
+
+    private static func scoreForMenuBarPresentation(_ device: DiscoveredDevice) -> Int {
+        var score = 0
+        if stableIdentityPayload(from: device.deviceId) != nil { score += 1_000 }
+        if stableFingerprintPayload(from: device.pubKeyFP) != nil { score += 800 }
+        if device.networkLinkStatus != nil { score += 300 }
+        if device.signalStrength != nil { score += 120 }
+        if device.ipv4 != nil { score += 80 }
+        if device.ipv6 != nil { score += 60 }
+        score += min(device.services.count, 20) * 4
+        score += min(device.portMap.count, 20) * 4
+        score += min(device.routeIdentifiers.count, 20) * 2
+        if device.platformName != nil { score += 8 }
+        if device.osVersion != nil { score += 8 }
+        if device.modelName != nil { score += 8 }
+        if !device.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            score += min(device.name.count, 40)
+        }
+        return score
+    }
+
+    private static func stablePresentationKey(for device: DiscoveredDevice) -> String? {
+        if let deviceId = stableIdentityPayload(from: device.deviceId) {
+            return "id:\(deviceId)"
+        }
+        if let fingerprint = stableFingerprintPayload(from: device.pubKeyFP) {
+            return "fp:\(fingerprint)"
+        }
+
+        for raw in [device.uniqueIdentifier] + device.routeIdentifiers.map(Optional.some) {
+            guard let raw else { continue }
+            if let deviceId = stableIdentityAliasPayload(from: raw) {
+                return "id:\(deviceId)"
+            }
+            if let fingerprint = stableFingerprintAliasPayload(from: raw) {
+                return "fp:\(fingerprint)"
+            }
+            if let serial = stableSerialPayload(from: raw) {
+                return "serial:\(serial)"
+            }
+        }
+
+        if let routeKey = stableBonjourRouteKey(for: device) {
+            return routeKey
+        }
+        if let ipKey = stableIPAddressKey(for: device) {
+            return ipKey
+        }
+        return nil
+    }
+
+    private static func stableIdentityPayload(from raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        let payload: String
+        if trimmed.lowercased().hasPrefix("id:") {
+            payload = String(trimmed.dropFirst(3))
+        } else {
+            payload = trimmed
+        }
+        let normalized = payload.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalized.count >= 8 else { return nil }
+        return normalized
+    }
+
+    private static func stableIdentityAliasPayload(from raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              trimmed.lowercased().hasPrefix("id:") else {
+            return nil
+        }
+        return stableIdentityPayload(from: trimmed)
+    }
+
+    private static func stableFingerprintPayload(from raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        let payload: String
+        if trimmed.lowercased().hasPrefix("fp:") {
+            payload = String(trimmed.dropFirst(3))
+        } else {
+            payload = trimmed
+        }
+        let normalized = payload.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalized.range(of: "^[0-9a-f]{16,128}$", options: .regularExpression) != nil else {
+            return nil
+        }
+        return normalized
+    }
+
+    private static func stableFingerprintAliasPayload(from raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              trimmed.lowercased().hasPrefix("fp:") else {
+            return nil
+        }
+        return stableFingerprintPayload(from: trimmed)
+    }
+
+    private static func stableSerialPayload(from raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              trimmed.lowercased().hasPrefix("serial:") else {
+            return nil
+        }
+        let payload = String(trimmed.dropFirst("serial:".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard payload.count >= 4 else { return nil }
+        return payload
+    }
+
+    private static func stableBonjourRouteKey(for device: DiscoveredDevice) -> String? {
+        let candidates = [device.uniqueIdentifier] + device.routeIdentifiers.map(Optional.some)
+        for candidate in candidates {
+            guard let normalized = normalizedBonjourIdentifier(candidate) else { continue }
+            return "bonjour:\(normalized)"
+        }
+        return nil
+    }
+
+    private static func normalizedBonjourIdentifier(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !value.isEmpty else {
+            return nil
+        }
+        if value.hasPrefix("recent:") {
+            value = String(value.dropFirst("recent:".count))
+        }
+        guard value.hasPrefix("bonjour:") else { return nil }
+        let payload = String(value.dropFirst("bonjour:".count))
+        guard payload.contains("@"), payload.count >= 4 else { return nil }
+        return payload
+    }
+
+    private static func stableIPAddressKey(for device: DiscoveredDevice) -> String? {
+        if let ipv4 = normalizedIPAddress(device.ipv4) {
+            return "ip:\(ipv4)"
+        }
+        if let ipv6 = normalizedIPAddress(device.ipv6) {
+            return "ip:\(ipv6)"
+        }
+        return nil
+    }
+
+    private static func normalizedIPAddress(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !raw.isEmpty else {
+            return nil
+        }
+        let unscoped = raw.split(separator: "%", maxSplits: 1).first.map(String.init) ?? raw
+        guard IPv4Address(unscoped) != nil || IPv6Address(unscoped) != nil else {
+            return nil
+        }
+        return unscoped
     }
     
  /// 处理传输进度更新

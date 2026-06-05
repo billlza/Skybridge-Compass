@@ -180,6 +180,12 @@
 "idleConnection.notification.title" = "リモート接続が継続中です";
 "idleConnection.notification.body" = "%@ へのリモート接続はバックグラウンドでまだ有効です。切断したい場合はアプリを開いてください。";
 "idleConnection.notification.defaultDevice" = "リモートデバイス";
+"remoteDesktop.notification.ended.title" = "リモートデスクトップ終了";
+"remoteDesktop.notification.ended.body" = "リモートデスクトップセッションは正常に終了しました。";
+"remoteDesktop.notification.ended.bodyWithDevice" = "%@ とのリモートデスクトップセッションは正常に終了しました。";
+"remoteDesktop.notification.interrupted.title" = "リモートデスクトップが中断";
+"remoteDesktop.notification.interrupted.body" = "リモートデスクトップセッションが予期せず中断されました。";
+"remoteDesktop.notification.interrupted.bodyWithDevice" = "%@ とのリモートデスクトップセッションが予期せず中断されました。";
 "连接设备" = "デバイスに接続";
 "连接失败" = "接続失敗";
 "disconnect.failed" = "切断が完了しませんでした。しばらくしてから再試行してください。";

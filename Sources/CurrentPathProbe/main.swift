@@ -132,12 +132,16 @@ struct CurrentPathProbe {
             deviceName: deviceName,
             validDuration: validDuration
         )
+        guard let wsPath = lease.wsPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !wsPath.isEmpty else {
+            throw ProbeError.invalidArguments("signaling server response is missing wsPath")
+        }
         try printJSONObject([
             "code": lease.code,
             "session_id": lease.sessionID,
             "expires_in": Int(lease.expiresIn),
             "signaling_server_origin": lease.signalingServerOrigin,
-            "signaling_ws_path": lease.wsPath ?? "/ws",
+            "signaling_ws_path": wsPath,
             "device_id": context.binding.deviceId,
             "protocol_public_key_fingerprint": context.binding.protocolPublicKeyFingerprint
         ])

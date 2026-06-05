@@ -468,22 +468,173 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     }
 
     @MainActor
-    func testSessionScopedSignalingURLPrefersCurrentPathOrigin() {
+    func testSessionScopedSignalingURLFollowsCurrentPathEndpoint() {
         let resolved = CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
             signalingOrigin: "https://signal.example.com:8443",
-            fallbackWebSocketURL: "wss://fallback.example.com/ws"
+            signalingWebSocketPath: "/tenant/ws"
         )
-        XCTAssertEqual(resolved, "wss://signal.example.com:8443/ws")
+        XCTAssertEqual(resolved, "wss://signal.example.com:8443/tenant/ws")
     }
 
     @MainActor
-    func testSessionScopedSignalingURLFallsBackForInvalidOrigin() {
-        let fallback = "wss://fallback.example.com/ws"
+    func testSessionScopedSignalingURLFailsClosedForInvalidOrigin() {
         let resolved = CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
             signalingOrigin: "not a url",
-            fallbackWebSocketURL: fallback
+            signalingWebSocketPath: "/tenant/ws"
         )
-        XCTAssertEqual(resolved, fallback)
+        XCTAssertNil(resolved)
+    }
+
+    @MainActor
+    func testSessionScopedSignalingURLFailsClosedForInvalidWebSocketPath() {
+        let resolved = CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
+            signalingOrigin: "https://signal.example.com:8443",
+            signalingWebSocketPath: "tenant/ws?fallback=/ws"
+        )
+        XCTAssertNil(resolved)
+    }
+
+    @MainActor
+    func testCurrentPathWebSocketPathValidationDistinguishesMissingFromInvalid() {
+        XCTAssertThrowsError(
+            try CrossNetworkWebRTCManager.instance.validateCurrentPathWebSocketPath(nil)
+        ) { error in
+            XCTAssertEqual(
+                (error as NSError).localizedDescription,
+                "missing current-path signaling websocket path"
+            )
+        }
+
+        XCTAssertThrowsError(
+            try CrossNetworkWebRTCManager.instance.validateCurrentPathWebSocketPath("tenant/ws")
+        ) { error in
+            XCTAssertEqual(
+                (error as NSError).localizedDescription,
+                "invalid current-path signaling websocket path"
+            )
+        }
+    }
+
+    func testCurrentPathArtifactsValidateEndpointBeforeCachingTokens() throws {
+        let source = try repositorySource(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+
+        assertEndpointValidationPrecedesTokenCaching(
+            in: source,
+            sectionStart: "public func connect(withCode rawCode: String)",
+            sectionEnd: "public func generateConnectionCode()",
+            endpointVariable: "let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(\n                origin: lookup.signalingServerOrigin,\n                wsPath: lookup.wsPath\n            )",
+            tokenWrite: "webrtcSignalingAuthTokenBySessionId[lookup.sessionID] = lookup.sessionToken"
+        )
+        assertEndpointValidationPrecedesTokenCaching(
+            in: source,
+            sectionStart: "public func generateConnectionCode()",
+            sectionEnd: "private func scheduleConnectionCodeLeaseInvalidation",
+            endpointVariable: "let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(\n                origin: lease.signalingServerOrigin,\n                wsPath: lease.wsPath\n            )",
+            tokenWrite: "webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken"
+        )
+        assertEndpointValidationPrecedesTokenCaching(
+            in: source,
+            sectionStart: "public func generateConnectLink",
+            sectionEnd: "public func disconnect",
+            endpointVariable: "let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(\n                origin: lease.signalingServerOrigin,\n                wsPath: lease.wsPath\n            )",
+            tokenWrite: "webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken"
+        )
+        assertEndpointValidationPrecedesTokenCaching(
+            in: source,
+            sectionStart: "private func parseSkybridgeConnectLink",
+            sectionEnd: "nonisolated private static func normalizedNonEmptyToken",
+            endpointVariable: "let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(\n            origin: redeemed.signalingServerOrigin,\n            wsPath: redeemed.wsPath\n        )",
+            tokenWrite: "webrtcSignalingAuthTokenBySessionId[qr.sessionID] = redeemed.sessionToken"
+        )
+        XCTAssertFalse(source.contains("cacheCurrentPathSignalingEndpoint("))
+    }
+
+    func testCurrentPathLeaseDecodingPreservesSignalingWebSocketPath() throws {
+        let registerData = try JSONSerialization.data(
+            withJSONObject: [
+                "sessionId": "SESSION123",
+                "sessionToken": "session-token",
+                "qrBootstrapToken": "qr-token",
+                "turnAdmissionToken": "turn-token",
+                "mediaAdmissionToken": "media-token",
+                "expiresIn": 300,
+                "signalingServerOrigin": "https://signal.example.com",
+                "wsPath": "/tenant/ws"
+            ],
+            options: [.sortedKeys]
+        )
+        let sessionLease = try SignalServerClientCompat.testOnlyDecodeRegisterSessionResponse(registerData)
+        XCTAssertEqual(sessionLease.signalingServerOrigin, "https://signal.example.com")
+        XCTAssertEqual(sessionLease.wsPath, "/tenant/ws")
+
+        let lookupData = try JSONSerialization.data(
+            withJSONObject: [
+                "found": true,
+                "sessionId": "SESSION123",
+                "sessionToken": "responder-token",
+                "turnAdmissionToken": "turn-token",
+                "mediaAdmissionToken": "media-token",
+                "expiresIn": 300,
+                "signalingServerOrigin": "https://signal.example.com",
+                "wsPath": "/tenant/ws",
+                "initiatorDeviceId": "device-123",
+                "initiatorProtocolSigningAlgorithm": ProtocolSigningAlgorithm.ed25519.rawValue,
+                "initiatorProtocolPublicKeyFingerprint": "fingerprint-123",
+                "initiatorDeviceName": "SkyBridge Mac"
+            ],
+            options: [.sortedKeys]
+        )
+        let lookup = try SignalServerClientCompat.testOnlyDecodeLookupConnectionCodeResponse(lookupData)
+        XCTAssertEqual(lookup.signalingServerOrigin, "https://signal.example.com")
+        XCTAssertEqual(lookup.wsPath, "/tenant/ws")
+    }
+
+    func testCurrentPathSessionRefreshRequiresSignalingWebSocketPath() throws {
+        let validRefreshData = try JSONSerialization.data(
+            withJSONObject: [
+                "sessionId": "SESSION123",
+                "role": "responder",
+                "sessionToken": "session-token",
+                "turnAdmissionToken": "turn-token",
+                "mediaAdmissionToken": "media-token",
+                "expiresIn": 300,
+                "signalingServerOrigin": "https://signal.example.com",
+                "wsPath": "/tenant/ws",
+                "serverBuildFingerprint": "test-build",
+                "sessionTokenGeneration": "session-generation",
+                "mediaTokenGeneration": "media-generation"
+            ],
+            options: [.sortedKeys]
+        )
+        let refresh = try SignalServerClientCompat.testOnlyDecodeSessionRefreshResponse(
+            validRefreshData,
+            sessionId: "SESSION123",
+            role: "responder"
+        )
+        XCTAssertEqual(refresh.signalingServerOrigin, "https://signal.example.com")
+        XCTAssertEqual(refresh.wsPath, "/tenant/ws")
+
+        let missingPathData = try JSONSerialization.data(
+            withJSONObject: [
+                "sessionId": "SESSION123",
+                "role": "responder",
+                "sessionToken": "session-token",
+                "turnAdmissionToken": "turn-token",
+                "mediaAdmissionToken": "media-token",
+                "expiresIn": 300,
+                "signalingServerOrigin": "https://signal.example.com"
+            ],
+            options: [.sortedKeys]
+        )
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.testOnlyDecodeSessionRefreshResponse(
+                missingPathData,
+                sessionId: "SESSION123",
+                role: "responder"
+            )
+        )
     }
 
     @MainActor
@@ -558,6 +709,39 @@ private func framedPayload(_ payload: Data) -> Data {
     withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
     framed.append(payload)
     return framed
+}
+
+@available(iOS 17.0, *)
+private func repositorySource(_ relativePath: String) throws -> String {
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let sourceURL = root.appendingPathComponent(relativePath)
+    return try String(contentsOf: sourceURL, encoding: .utf8)
+}
+
+@available(iOS 17.0, *)
+private func assertEndpointValidationPrecedesTokenCaching(
+    in source: String,
+    sectionStart: String,
+    sectionEnd: String,
+    endpointVariable: String,
+    tokenWrite: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    guard let startRange = source.range(of: sectionStart),
+          let endRange = source.range(of: sectionEnd, range: startRange.upperBound..<source.endIndex) else {
+        XCTFail("Missing source section \(sectionStart)", file: file, line: line)
+        return
+    }
+    let section = source[startRange.lowerBound..<endRange.lowerBound]
+    guard let endpointRange = section.range(of: endpointVariable),
+          let tokenRange = section.range(of: tokenWrite) else {
+        XCTFail("Missing endpoint validation or token write in \(sectionStart)", file: file, line: line)
+        return
+    }
+    XCTAssertLessThan(endpointRange.lowerBound, tokenRange.lowerBound, file: file, line: line)
 }
 
 @available(iOS 17.0, *)

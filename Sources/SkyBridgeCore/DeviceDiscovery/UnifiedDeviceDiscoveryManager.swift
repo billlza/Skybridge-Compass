@@ -484,6 +484,7 @@ public struct UnifiedDevice: Identifiable, Hashable, Sendable {
         if connectionTypes.contains(.thunderbolt) { return .thunderbolt }
         if connectionTypes.contains(.ethernet) { return .ethernet }
         if connectionTypes.contains(.usb) { return .usb }
+        if connectionTypes.contains(.cellular) { return .cellular }
         if connectionTypes.contains(.wifi) { return .wifi }
         if connectionTypes.contains(.bluetooth) { return .bluetooth }
         return .unknown
@@ -493,7 +494,7 @@ public struct UnifiedDevice: Identifiable, Hashable, Sendable {
     public var connectionTypesDescription: String {
         let types = connectionTypes.sorted { lhs, rhs in
  // 按优先级排序
-            let priority: [DeviceConnectionType] = [.thunderbolt, .ethernet, .usb, .wifi, .bluetooth, .unknown]
+            let priority: [DeviceConnectionType] = [.thunderbolt, .ethernet, .usb, .cellular, .wifi, .bluetooth, .unknown]
             let lhsIndex = priority.firstIndex(of: lhs) ?? priority.count
             let rhsIndex = priority.firstIndex(of: rhs) ?? priority.count
             return lhsIndex < rhsIndex

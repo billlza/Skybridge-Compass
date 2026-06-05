@@ -70,6 +70,12 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
             videoLowLatencyMode: videoLowLatencyMode,
             targetFrameRate: targetFrameRate
         )
+        let realtimeMediaAudioReady = viewerSettings.audioRedirectionEnabled
+            && input.mediaAudioEndpoint != nil
+            && input.mediaSessionId != nil
+        let nativeAudioReady = viewerSettings.audioRedirectionEnabled
+            && input.nativeAudioReceiveEnabled
+        let effectiveAudioRedirectionEnabled = realtimeMediaAudioReady || nativeAudioReady
 
         return RemoteDesktopStreamConfigurationPayload(
             width: dimensions?.width,
@@ -104,15 +110,17 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
             // Native WebRTC audio on iOS still competes for AVAudioSession ownership
             // during startup and has been causing crashy/privacy-sensitive behavior.
             nativeAudioTrackEnabled: input.nativeAudioReceiveEnabled,
-            audioRedirectionEnabled: viewerSettings.audioRedirectionEnabled,
-            audioTransport: viewerSettings.audioRedirectionEnabled ? "pqc-media-v1" : "disabled",
-            audioMode: realtimeMediaAudioMode.rawValue,
-            mediaSessionId: input.mediaSessionId,
-            mediaAudioEndpoint: input.mediaAudioEndpoint,
+            audioRedirectionEnabled: effectiveAudioRedirectionEnabled,
+            audioTransport: realtimeMediaAudioReady
+                ? SkyBridgeRealtimeMediaConstants.audioTransportPQCv1
+                : SkyBridgeRealtimeMediaConstants.audioTransportDisabled,
+            audioMode: realtimeMediaAudioReady ? realtimeMediaAudioMode.rawValue : nil,
+            mediaSessionId: realtimeMediaAudioReady ? input.mediaSessionId : nil,
+            mediaAudioEndpoint: realtimeMediaAudioReady ? input.mediaAudioEndpoint : nil,
             compatibilityAudioFallbackEnabled: false,
             preferredAudioEncoding: nil,
-            audioSampleRate: 48_000,
-            audioChannelCount: 2,
+            audioSampleRate: effectiveAudioRedirectionEnabled ? 48_000 : nil,
+            audioChannelCount: effectiveAudioRedirectionEnabled ? 2 : nil,
             performanceValidationMode: strictMediaValidationEnabled ? "extreme" : nil,
             mediaFallbackPolicy: activeTransportMode == .crossNetwork ? "forbidden" : "fail-fast",
             streamRefreshToken: input.streamRefreshToken,

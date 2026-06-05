@@ -860,6 +860,11 @@ public class RemoteDesktopManager: ObservableObject {
 
             // 创建 Connection 对象
             currentConnection = Connection(device: refreshedLANDevice, status: .connected)
+            NotificationManager.beginRemoteDesktopSession(
+                sessionId: refreshedLANDevice.id,
+                transport: "lan",
+                role: "viewer"
+            )
             state = .connected
 
             try await establishLANSecureChannel(for: refreshedLANDevice, over: connection)
@@ -1105,6 +1110,8 @@ public class RemoteDesktopManager: ObservableObject {
         )
         let wasCrossNetworkTransport = activeTransportMode == .crossNetwork
         let shouldDisconnectCrossNetworkSession = tearDownTransport && activeTransportMode == .crossNetwork
+        let terminalConnection = currentConnection
+        let shouldNotifyLANSessionEnd = tearDownTransport && activeTransportMode == .lan
         await sendViewerStreamStopConfigurationIfNeeded()
         crossNetwork.stopRemoteDesktopHeartbeat()
         cancelCrossNetworkFrameSubscription()
@@ -1170,6 +1177,17 @@ public class RemoteDesktopManager: ObservableObject {
         activeTransportMode = .none
         isUsingCrossNetworkTransport = false
         transportStatusText = currentTransportStatusText()
+
+        if shouldNotifyLANSessionEnd, let terminalConnection {
+            await NotificationManager.sendRemoteDesktopTerminalNotificationIfNeeded(
+                sessionId: terminalConnection.device.id,
+                deviceName: terminalConnection.device.name,
+                transport: "lan",
+                role: "viewer",
+                kind: .normal,
+                reason: "viewer_disconnect_transport"
+            )
+        }
 
         if shouldDisconnectCrossNetworkSession {
             await crossNetwork.disconnect(clearSnapshot: true)
@@ -1416,12 +1434,26 @@ public class RemoteDesktopManager: ObservableObject {
             ? (RemoteDesktopError.disconnected.errorDescription ?? "连接已断开")
             : normalizedReason
         let failedTransport = transportStatusText ?? currentTransportStatusText() ?? "unknown"
-        let failedConnection = currentConnection?.device.id ?? "-"
+        let failedConnection = currentConnection
+        let failedConnectionId = failedConnection?.device.id ?? "-"
         let shouldDisconnectCrossNetworkSession = activeTransportMode == .crossNetwork
 
         SkyBridgeLogger.shared.error(
-            "❌ 远程桌面传输失败: device=\(failedConnection) transport=\(failedTransport) reason=\(errorMessage)"
+            "❌ 远程桌面传输失败: device=\(failedConnectionId) transport=\(failedTransport) reason=\(errorMessage)"
         )
+
+        if activeTransportMode == .lan, let failedConnection {
+            await NotificationManager.sendRemoteDesktopTerminalNotificationIfNeeded(
+                sessionId: failedConnection.device.id,
+                deviceName: failedConnection.device.name,
+                transport: "lan",
+                role: "viewer",
+                kind: .interrupted,
+                reason: errorMessage
+            )
+        } else if shouldDisconnectCrossNetworkSession {
+            await crossNetwork.notifyRemoteDesktopInterruptedForActiveSession(reason: errorMessage)
+        }
 
         crossNetwork.stopRemoteDesktopHeartbeat()
         firstFrameWatchdogTask?.cancel()
@@ -1998,41 +2030,29 @@ public class RemoteDesktopManager: ObservableObject {
         realtimeMediaAudioEndpoint = nil
     }
 
-	    private func pushViewerStreamConfiguration(force: Bool, refreshStream: Bool = false) async {
-	        guard isStreaming else { return }
-	        guard !handleCrossNetworkSessionAuthorityLostIfNeeded(source: "stream-config") else { return }
-	        let mediaAudioMode = preferredRealtimeMediaAudioMode()
-	        let mediaAudioBinding = currentRealtimeMediaAudioBindingIfUsable()
-	        let strictValidationRequiresAudioEndpoint = viewerSettings.audioRedirectionEnabled
-	            && Self.shouldRequestExtremeMediaValidation(
-	                activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
-	                viewerSettings: viewerSettings
-	            )
-	        let preparationPlan = RemoteDesktopViewerStreamConfigurationPushPolicy.prepare(
-	            activeTransportMode: activeTransportMode,
-	            hasCurrentConnection: currentConnection != nil,
-	            hasLANConnection: networkConnection != nil,
-	            audioRedirectionEnabled: viewerSettings.audioRedirectionEnabled,
-	            strictValidationRequiresAudioEndpoint: strictValidationRequiresAudioEndpoint,
-	            hasUsableMediaAudioBinding: mediaAudioBinding != nil,
-	            refreshStream: refreshStream,
-	            lastSentMediaAudioEndpointPresent: lastSentStreamConfiguration?.mediaAudioEndpoint != nil,
-	            lastAcknowledgedMediaAudioEndpointPresent: lastAcknowledgedMediaAudioEndpointPresent
-	        )
-	        guard preparationPlan.canSend else { return }
-	        if preparationPlan.shouldStartRealtimeMediaAudioReceiver {
-	            ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mediaAudioMode)
-	        } else if preparationPlan.shouldStopRealtimeMediaAudioReceiver {
-	            realtimeMediaAudioReceiverStartTask?.cancel()
-	            realtimeMediaAudioReceiverStartTask = nil
-	            stopRealtimeMediaAudioReceiver(reason: "stream-config-plan-stop-audio")
-	        }
-	        if preparationPlan.shouldDeferUntilAudioEndpointReady {
-	            SkyBridgeSmokeTraceWriter.append(
-	                "stream-config deferred session=\(crossNetwork.activeRemoteDesktopSessionId ?? "-") reason=await_audio_endpoint transport=\(activeTransportModeLabel())"
-	            )
-	            return
-	        }
+    private func pushViewerStreamConfiguration(force: Bool, refreshStream: Bool = false) async {
+        guard isStreaming else { return }
+        guard !handleCrossNetworkSessionAuthorityLostIfNeeded(source: "stream-config") else { return }
+        let mediaAudioMode = preferredRealtimeMediaAudioMode()
+        let mediaAudioBinding = currentRealtimeMediaAudioBindingIfUsable()
+        let preparationPlan = RemoteDesktopViewerStreamConfigurationPushPolicy.prepare(
+            activeTransportMode: activeTransportMode,
+            hasCurrentConnection: currentConnection != nil,
+            hasLANConnection: networkConnection != nil,
+            audioRedirectionEnabled: viewerSettings.audioRedirectionEnabled,
+            hasUsableMediaAudioBinding: mediaAudioBinding != nil,
+            refreshStream: refreshStream,
+            lastSentMediaAudioEndpointPresent: lastSentStreamConfiguration?.mediaAudioEndpoint != nil,
+            lastAcknowledgedMediaAudioEndpointPresent: lastAcknowledgedMediaAudioEndpointPresent
+        )
+        guard preparationPlan.canSend else { return }
+        if preparationPlan.shouldStartRealtimeMediaAudioReceiver {
+            ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mediaAudioMode)
+        } else if preparationPlan.shouldStopRealtimeMediaAudioReceiver {
+            realtimeMediaAudioReceiverStartTask?.cancel()
+            realtimeMediaAudioReceiverStartTask = nil
+            stopRealtimeMediaAudioReceiver(reason: "stream-config-plan-stop-audio")
+        }
         let payload = makeViewerStreamConfigurationPayload(
             refreshStream: refreshStream,
             mediaAudioEndpoint: preparationPlan.includeAudioEndpointInStreamConfig ? mediaAudioBinding?.endpoint : nil,
@@ -2043,16 +2063,16 @@ public class RemoteDesktopManager: ObservableObject {
             force: force,
             payloadMatchesLastSent: payload == lastSentStreamConfiguration
         ) else { return }
-	        do {
-	            try await sendViewerStreamConfigurationPayload(payload, retryAttempt: nil)
-	            lastSentStreamConfiguration = payload
-	            if payload.mediaAudioEndpoint != nil {
-	                lastAcknowledgedMediaAudioEndpointPresent = false
-	            }
-	            if preparationPlan.includeAudioEndpointInStreamConfig, payload.mediaAudioEndpoint != nil {
-	                SkyBridgeLogger.shared.info(
-	                    "🎧 PQC media audio-present config sent: event=audioPresentConfigSent refreshStream=\(payload.streamRefreshToken != nil) mediaSession=\(payload.mediaSessionId ?? "-") audioRelayToken=\(payload.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
-	                )
+        do {
+            try await sendViewerStreamConfigurationPayload(payload, retryAttempt: nil)
+            lastSentStreamConfiguration = payload
+            if payload.mediaAudioEndpoint != nil {
+                lastAcknowledgedMediaAudioEndpointPresent = false
+            }
+            if preparationPlan.includeAudioEndpointInStreamConfig, payload.mediaAudioEndpoint != nil {
+                SkyBridgeLogger.shared.info(
+                    "🎧 PQC media audio-present config sent: event=audioPresentConfigSent refreshStream=\(payload.streamRefreshToken != nil) mediaSession=\(payload.mediaSessionId ?? "-") audioRelayToken=\(payload.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") transport=\(activeTransportModeLabel())"
+                )
             }
             if let token = payload.streamRefreshToken {
                 let now = Date()
@@ -4548,7 +4568,19 @@ public class RemoteDesktopManager: ObservableObject {
             )
             return
         }
-        if strictCrossNetworkMediaValidationActive {
+        let hasRemoteNativeVideoTrack: Bool
+#if canImport(WebRTC)
+        hasRemoteNativeVideoTrack = crossNetwork.remoteVideoTrack != nil
+#else
+        hasRemoteNativeVideoTrack = false
+#endif
+        let allowsNativeWarmupJPEGFallback = Self.shouldAllowNativeWarmupJPEGFallbackFrame(
+            activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
+            hasRemoteNativeVideoTrack: hasRemoteNativeVideoTrack,
+            nativeVideoTrackHasRenderedFrame: crossNetwork.remoteVideoTrackHasRenderedFrame,
+            format: screenData.format
+        )
+        if strictCrossNetworkMediaValidationActive && !allowsNativeWarmupJPEGFallback {
             let reason = "strict media validation failed: fallback screen frame received"
             SkyBridgeLogger.shared.error(
                 "⛔️ WebRTC strict media validation failed on viewer: reason=fallback-screen-frame-received size=\(screenData.width)x\(screenData.height) format=\(screenData.format ?? "unknown")"
@@ -4559,12 +4591,6 @@ public class RemoteDesktopManager: ObservableObject {
             await handleTransportFailure(reason)
             return
         }
-        let hasRemoteNativeVideoTrack: Bool
-#if canImport(WebRTC)
-        hasRemoteNativeVideoTrack = crossNetwork.remoteVideoTrack != nil
-#else
-        hasRemoteNativeVideoTrack = false
-#endif
         if Self.shouldDropNativeWarmupNonJPEGFallbackFrame(
             activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork,
             hasRemoteNativeVideoTrack: hasRemoteNativeVideoTrack,

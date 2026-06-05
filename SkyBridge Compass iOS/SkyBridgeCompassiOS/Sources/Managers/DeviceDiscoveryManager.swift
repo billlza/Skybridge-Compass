@@ -15,6 +15,12 @@ import Foundation
 import Darwin
 import Network
 import Combine
+#if canImport(CoreTelephony)
+import CoreTelephony
+#endif
+#if canImport(NetworkExtension)
+import NetworkExtension
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -1912,8 +1918,183 @@ public class DeviceDiscoveryManager: ObservableObject {
             record["vendorDeviceId"] = vendorDeviceId
         }
         #endif
+
+        let networkFields = await currentNetworkLinkAdvertisementFields()
+        for (key, value) in networkFields {
+            record[key] = value
+        }
         
         return record
+    }
+
+    private enum LocalNetworkInterfaceKind: Hashable {
+        case wifi
+        case cellular
+        case ethernet
+    }
+
+    private func currentNetworkLinkAdvertisementFields() async -> [String: String] {
+        let interfaceKinds = Self.activeNetworkInterfaceKinds()
+
+        if interfaceKinds.contains(.wifi) {
+            var fields: [String: String] = [
+                "linkKind": "wifi",
+                "networkType": "wifi"
+            ]
+            if let signalStrength = await Self.currentWiFiSignalStrength() {
+                fields["signalStrength"] = Self.formatSignalFraction(signalStrength)
+                fields["signalUnit"] = "fraction"
+            }
+            return fields
+        }
+
+        if interfaceKinds.contains(.cellular) {
+            var fields: [String: String] = [
+                "linkKind": "cellular",
+                "networkType": "cellular"
+            ]
+            if let radioAccessTechnology = Self.currentCellularRadioAccessTechnology() {
+                fields["radioAccessTechnology"] = radioAccessTechnology
+                fields["cellularTechnology"] = radioAccessTechnology
+            }
+            return fields
+        }
+
+        if interfaceKinds.contains(.ethernet) {
+            return [
+                "linkKind": "ethernet",
+                "networkType": "ethernet"
+            ]
+        }
+
+        return [:]
+    }
+
+    nonisolated private static func activeNetworkInterfaceKinds() -> Set<LocalNetworkInterfaceKind> {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let firstInterface = interfaces else {
+            return []
+        }
+        defer { freeifaddrs(interfaces) }
+
+        var kinds = Set<LocalNetworkInterfaceKind>()
+        var cursor: UnsafeMutablePointer<ifaddrs>? = firstInterface
+
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+
+            let flags = Int32(current.pointee.ifa_flags)
+            guard (flags & IFF_UP) != 0,
+                  (flags & IFF_RUNNING) != 0,
+                  (flags & IFF_LOOPBACK) == 0,
+                  let address = current.pointee.ifa_addr else {
+                continue
+            }
+
+            let family = address.pointee.sa_family
+            guard family == UInt8(AF_INET) || family == UInt8(AF_INET6),
+                  let namePointer = current.pointee.ifa_name else {
+                continue
+            }
+
+            let name = String(cString: namePointer).lowercased()
+            if name == "en0" {
+                kinds.insert(.wifi)
+            } else if name.hasPrefix("pdp_ip") {
+                kinds.insert(.cellular)
+            } else if name.hasPrefix("en") || name.hasPrefix("bridge") {
+                kinds.insert(.ethernet)
+            }
+        }
+
+        return kinds
+    }
+
+    nonisolated private static func currentWiFiSignalStrength() async -> Double? {
+        #if canImport(NetworkExtension)
+        guard #available(iOS 14.0, *) else {
+            return nil
+        }
+        return await withCheckedContinuation { continuation in
+            NEHotspotNetwork.fetchCurrent { network in
+                continuation.resume(returning: network?.signalStrength)
+            }
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    nonisolated private static func currentCellularRadioAccessTechnology() -> String? {
+        #if canImport(CoreTelephony)
+        let networkInfo = CTTelephonyNetworkInfo()
+        var technologies: [String] = []
+        if let serviceTechnologies = networkInfo.serviceCurrentRadioAccessTechnology {
+            technologies.append(contentsOf: serviceTechnologies.values)
+        }
+
+        let ranked = technologies
+            .compactMap(Self.cellularRadioAccessTechnologyLabel)
+            .max { Self.radioAccessTechnologyRank($0) < Self.radioAccessTechnologyRank($1) }
+
+        return ranked
+        #else
+        return nil
+        #endif
+    }
+
+    nonisolated private static func cellularRadioAccessTechnologyLabel(_ technology: String) -> String? {
+        #if canImport(CoreTelephony)
+        if technology == CTRadioAccessTechnologyLTE {
+            return "LTE"
+        }
+        if #available(iOS 14.1, *) {
+            if technology == CTRadioAccessTechnologyNR || technology == CTRadioAccessTechnologyNRNSA {
+                return "5G"
+            }
+        }
+        switch technology {
+        case CTRadioAccessTechnologyWCDMA,
+            CTRadioAccessTechnologyHSDPA,
+            CTRadioAccessTechnologyHSUPA,
+            CTRadioAccessTechnologyCDMAEVDORev0,
+            CTRadioAccessTechnologyCDMAEVDORevA,
+            CTRadioAccessTechnologyCDMAEVDORevB,
+            CTRadioAccessTechnologyeHRPD:
+            return "3G"
+        case CTRadioAccessTechnologyGPRS,
+            CTRadioAccessTechnologyEdge,
+            CTRadioAccessTechnologyCDMA1x:
+            return "2G"
+        default:
+            return nil
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    nonisolated private static func radioAccessTechnologyRank(_ label: String) -> Int {
+        switch label.uppercased() {
+        case "5GUW", "5G UW":
+            return 6
+        case "5G":
+            return 5
+        case "LTE":
+            return 4
+        case "4G":
+            return 3
+        case "3G":
+            return 2
+        case "2G":
+            return 1
+        default:
+            return 0
+        }
+    }
+
+    nonisolated private static func formatSignalFraction(_ value: Double) -> String {
+        String(format: "%.3f", min(1.0, max(0.0, value)))
     }
 
     private func localProtocolIdentityFingerprintForAdvertisement() async -> String? {

@@ -4715,6 +4715,12 @@ final class RegressionHardeningTests: XCTestCase {
     )
     guard
       let preStreamingGuardRange = handleScreenDataBody.range(of: "dropReason=pre-streaming-frame"),
+      let hasRemoteNativeTrackRange = handleScreenDataBody.range(
+        of: "let hasRemoteNativeVideoTrack: Bool"),
+      let warmupAllowRange = handleScreenDataBody.range(
+        of: "shouldAllowNativeWarmupJPEGFallbackFrame"),
+      let strictValidationRange = handleScreenDataBody.range(
+        of: "strictCrossNetworkMediaValidationActive && !allowsNativeWarmupJPEGFallback"),
       let warmupDropGuardRange = handleScreenDataBody.range(
         of: "shouldDropNativeWarmupNonJPEGFallbackFrame"),
       let renderedGuardRange = handleScreenDataBody.range(
@@ -4730,6 +4736,21 @@ final class RegressionHardeningTests: XCTestCase {
       preStreamingGuardRange.lowerBound,
       warmupDropGuardRange.lowerBound,
       "Frames that arrive before the viewer enters streaming must be dropped before any codec/topology handling can consume an early predictive frame."
+    )
+    XCTAssertLessThan(
+      hasRemoteNativeTrackRange.lowerBound,
+      warmupAllowRange.lowerBound,
+      "Strict media validation must know whether a native track exists before classifying bounded JPEG warmup."
+    )
+    XCTAssertLessThan(
+      warmupAllowRange.lowerBound,
+      strictValidationRange.lowerBound,
+      "Bounded JPEG warmup must be classified before strict fallback rejection, otherwise iOS rejects the frame that prevents native warmup black screens."
+    )
+    XCTAssertLessThan(
+      strictValidationRange.lowerBound,
+      warmupDropGuardRange.lowerBound,
+      "Strict validation should still fail non-warmup fallback frames before topology handling."
     )
     XCTAssertLessThan(
       warmupDropGuardRange.lowerBound,
@@ -4793,7 +4814,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(gapBody.contains("clearLANSecureChannelState"))
   }
 
-  func testNativeWarmupFallbackGuardDropsAllFallbackBeforeVisibleNativeRender() {
+  func testNativeWarmupFallbackGuardDropsNonJPEGBeforeVisibleNativeRender() {
     XCTAssertTrue(
       RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
         activeTransportModeIsCrossNetwork: true,
@@ -4815,7 +4836,7 @@ final class RegressionHardeningTests: XCTestCase {
         activeTransportModeIsCrossNetwork: true,
         hasRemoteNativeVideoTrack: true,
         nativeVideoTrackHasRenderedFrame: false,
-        format: "jpeg"
+        format: nil
       )
     )
     XCTAssertTrue(
@@ -4823,7 +4844,23 @@ final class RegressionHardeningTests: XCTestCase {
         activeTransportModeIsCrossNetwork: true,
         hasRemoteNativeVideoTrack: true,
         nativeVideoTrackHasRenderedFrame: false,
-        format: "jpg"
+        format: " bgra "
+      )
+    )
+    XCTAssertFalse(
+      RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: true,
+        hasRemoteNativeVideoTrack: true,
+        nativeVideoTrackHasRenderedFrame: false,
+        format: "jpeg"
+      )
+    )
+    XCTAssertFalse(
+      RemoteDesktopManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: true,
+        hasRemoteNativeVideoTrack: true,
+        nativeVideoTrackHasRenderedFrame: false,
+        format: " JPG "
       )
     )
     XCTAssertFalse(
@@ -4832,6 +4869,49 @@ final class RegressionHardeningTests: XCTestCase {
         hasRemoteNativeVideoTrack: true,
         nativeVideoTrackHasRenderedFrame: true,
         format: "hevc"
+      )
+    )
+  }
+
+  func testStrictMediaValidationAllowsOnlyBoundedJPEGDuringNativeWarmup() {
+    XCTAssertTrue(
+      RemoteDesktopManager.shouldAllowNativeWarmupJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: true,
+        hasRemoteNativeVideoTrack: true,
+        nativeVideoTrackHasRenderedFrame: false,
+        format: "jpeg"
+      )
+    )
+    XCTAssertTrue(
+      RemoteDesktopManager.shouldAllowNativeWarmupJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: true,
+        hasRemoteNativeVideoTrack: true,
+        nativeVideoTrackHasRenderedFrame: false,
+        format: " JPG "
+      )
+    )
+    XCTAssertFalse(
+      RemoteDesktopManager.shouldAllowNativeWarmupJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: true,
+        hasRemoteNativeVideoTrack: true,
+        nativeVideoTrackHasRenderedFrame: false,
+        format: "h264"
+      )
+    )
+    XCTAssertFalse(
+      RemoteDesktopManager.shouldAllowNativeWarmupJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: true,
+        hasRemoteNativeVideoTrack: false,
+        nativeVideoTrackHasRenderedFrame: false,
+        format: "jpeg"
+      )
+    )
+    XCTAssertFalse(
+      RemoteDesktopManager.shouldAllowNativeWarmupJPEGFallbackFrame(
+        activeTransportModeIsCrossNetwork: true,
+        hasRemoteNativeVideoTrack: true,
+        nativeVideoTrackHasRenderedFrame: true,
+        format: "jpeg"
       )
     )
   }
@@ -5198,15 +5278,22 @@ final class RegressionHardeningTests: XCTestCase {
       ))
     XCTAssertTrue(pushBody.contains("if preparationPlan.includeAudioEndpointInStreamConfig"))
     XCTAssertTrue(
-      pushBody.contains(
-        "let strictValidationRequiresAudioEndpoint = viewerSettings.audioRedirectionEnabled"))
-    XCTAssertTrue(
       pushBody.contains("activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork"))
     XCTAssertTrue(
-      pushBody.contains("reason=await_audio_endpoint transport=\\(activeTransportModeLabel())"))
+      pushBody.contains("ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mediaAudioMode)"))
+    XCTAssertFalse(
+      pushBody.contains("reason=await_audio_endpoint"))
+    XCTAssertFalse(
+      pushPolicySource.contains("shouldDeferUntilAudioEndpointReady"))
+    XCTAssertTrue(
+      factorySource.contains("let realtimeMediaAudioReady = viewerSettings.audioRedirectionEnabled"))
+    XCTAssertTrue(
+      factorySource.contains("audioRedirectionEnabled: effectiveAudioRedirectionEnabled"))
+    XCTAssertTrue(
+      factorySource.contains("SkyBridgeRealtimeMediaConstants.audioTransportDisabled"))
     XCTAssertFalse(
       pushPolicySource.contains("if refreshStream,\n           strictValidationRequiresAudioEndpoint"),
-      "Strict LAN/PQC media smoke must defer the first stream config until the audio endpoint is ready instead of starting video and restarting SCK when audio binds late."
+      "Strict LAN/PQC media smoke must not hide video startup behind refresh-only audio endpoint gating."
     )
     XCTAssertTrue(
       source.contains("func handleCrossNetworkNativeVideoWarmupEvidence(reason: String)"))

@@ -10,7 +10,6 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             hasCurrentConnection: false,
             hasLANConnection: false,
             audioRedirectionEnabled: true,
-            strictValidationRequiresAudioEndpoint: false,
             hasUsableMediaAudioBinding: false,
             refreshStream: false,
             lastSentMediaAudioEndpointPresent: false,
@@ -24,13 +23,12 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
         XCTAssertFalse(plan.shouldStopRealtimeMediaAudioReceiver)
     }
 
-    func testStrictAudioValidationDefersUntilEndpointIsReady() {
+    func testStrictAudioValidationSendsExplicitVideoOnlyWhileEndpointPrepares() {
         let plan = RemoteDesktopViewerStreamConfigurationPushPolicy.prepare(
             activeTransportMode: .crossNetwork,
             hasCurrentConnection: true,
             hasLANConnection: false,
             audioRedirectionEnabled: true,
-            strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: false,
             refreshStream: false,
             lastSentMediaAudioEndpointPresent: false,
@@ -38,7 +36,7 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
         )
 
         XCTAssertTrue(plan.canSend)
-        XCTAssertTrue(plan.shouldDeferUntilAudioEndpointReady)
+        XCTAssertTrue(plan.shouldStartRealtimeMediaAudioReceiver)
         XCTAssertFalse(plan.includeAudioEndpointInStreamConfig)
     }
 
@@ -48,14 +46,12 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             hasCurrentConnection: true,
             hasLANConnection: false,
             audioRedirectionEnabled: true,
-            strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: true,
             refreshStream: true,
             lastSentMediaAudioEndpointPresent: true,
             lastAcknowledgedMediaAudioEndpointPresent: true
         )
 
-        XCTAssertFalse(plan.shouldDeferUntilAudioEndpointReady)
         XCTAssertFalse(plan.includeAudioEndpointInStreamConfig)
     }
 
@@ -65,14 +61,12 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             hasCurrentConnection: true,
             hasLANConnection: false,
             audioRedirectionEnabled: true,
-            strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: true,
             refreshStream: true,
             lastSentMediaAudioEndpointPresent: true,
             lastAcknowledgedMediaAudioEndpointPresent: false
         )
 
-        XCTAssertFalse(plan.shouldDeferUntilAudioEndpointReady)
         XCTAssertTrue(plan.includeAudioEndpointInStreamConfig)
     }
 
@@ -82,7 +76,6 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             hasCurrentConnection: true,
             hasLANConnection: false,
             audioRedirectionEnabled: true,
-            strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: true,
             refreshStream: false,
             lastSentMediaAudioEndpointPresent: false,
@@ -98,7 +91,6 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
             hasCurrentConnection: false,
             hasLANConnection: true,
             audioRedirectionEnabled: true,
-            strictValidationRequiresAudioEndpoint: true,
             hasUsableMediaAudioBinding: true,
             refreshStream: true,
             lastSentMediaAudioEndpointPresent: true,

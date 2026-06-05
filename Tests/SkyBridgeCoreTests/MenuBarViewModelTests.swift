@@ -95,6 +95,84 @@ struct MenuBarViewModelTests {
         #expect(viewModel.configuration.maxDevicesShown == 5)
         #expect(viewModel.configuration.showTransferProgress == true)
     }
+
+    @Test("Menu bar devices are deduplicated by stable identity")
+    func menuBarDevicesAreDeduplicatedByStableIdentity() {
+        let weakBonjourEntry = Self.device(
+            id: "D066CB21-E35D-42E7-9661-2C356670C1B2",
+            name: "Lza MacBook Pro",
+            routeIdentifiers: ["bonjour:lza-macbook-pro@local."],
+            signalStrength: nil,
+            networkLinkStatus: nil,
+            deviceId: "D4C02C72-0C77-409C-A9DA-F72F57B8C671"
+        )
+        let richIdentityEntry = Self.device(
+            id: "E37F3E2E-33C2-41FE-9D78-522F27A04C23",
+            name: "Lza MacBook Pro",
+            ipv4: "192.168.0.42",
+            connectionTypes: [.wifi],
+            signalStrength: 73,
+            networkLinkStatus: DeviceNetworkLinkStatus(kind: .wifi, rssi: -49),
+            deviceId: "D4C02C72-0C77-409C-A9DA-F72F57B8C671",
+            pubKeyFP: "8f5f1fb6a7fb3c3b8c35d57b7fd1e4f934c847037b9c33f6f4d475167afae3ab"
+        )
+
+        let devices = MenuBarViewModel.deduplicatedMenuBarDevices([weakBonjourEntry, richIdentityEntry])
+
+        #expect(devices.count == 1)
+        #expect(devices.first?.id == richIdentityEntry.id)
+        #expect(devices.first?.networkLinkStatus == richIdentityEntry.networkLinkStatus)
+        #expect(devices.first?.signalStrength == richIdentityEntry.signalStrength)
+    }
+
+    @Test("Menu bar dedupe does not merge distinct strong identities with same name")
+    func menuBarDedupeKeepsDistinctStrongIdentitiesWithSameName() {
+        let first = Self.device(
+            id: "4838E0D0-35F0-4FD1-85E2-57C6AC4EE5E5",
+            name: "MacBook Pro",
+            deviceId: "A8C245B0-0276-45FD-B8E5-39FEE42B9218"
+        )
+        let second = Self.device(
+            id: "63796EE6-5C32-433F-9B2C-1C49C5F42E4F",
+            name: "MacBook Pro",
+            deviceId: "D1B5E5B7-EEAF-4D01-A748-C9244687C5EB"
+        )
+
+        let devices = MenuBarViewModel.deduplicatedMenuBarDevices([first, second])
+
+        #expect(devices.count == 2)
+        #expect(Set(devices.map(\.deviceId)) == [
+            "A8C245B0-0276-45FD-B8E5-39FEE42B9218",
+            "D1B5E5B7-EEAF-4D01-A748-C9244687C5EB"
+        ])
+    }
+
+    private static func device(
+        id: String,
+        name: String,
+        ipv4: String? = nil,
+        connectionTypes: Set<DeviceConnectionType> = [.unknown],
+        routeIdentifiers: [String] = [],
+        signalStrength: Double? = nil,
+        networkLinkStatus: DeviceNetworkLinkStatus? = nil,
+        deviceId: String? = nil,
+        pubKeyFP: String? = nil
+    ) -> DiscoveredDevice {
+        DiscoveredDevice(
+            id: UUID(uuidString: id)!,
+            name: name,
+            ipv4: ipv4,
+            ipv6: nil,
+            services: ["_skybridge._tcp"],
+            portMap: [:],
+            connectionTypes: connectionTypes,
+            routeIdentifiers: routeIdentifiers,
+            signalStrength: signalStrength,
+            networkLinkStatus: networkLinkStatus,
+            deviceId: deviceId,
+            pubKeyFP: pubKeyFP
+        )
+    }
 }
 
 // MARK: - MenuBarController Tests

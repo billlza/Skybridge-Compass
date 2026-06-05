@@ -180,6 +180,12 @@
 "idleConnection.notification.title" = "Remote Connection Still Running";
 "idleConnection.notification.body" = "Your remote connection to %@ is still active in the background. Open the app if you want to disconnect it.";
 "idleConnection.notification.defaultDevice" = "the remote device";
+"remoteDesktop.notification.ended.title" = "Remote Desktop Ended";
+"remoteDesktop.notification.ended.body" = "The remote desktop session ended normally.";
+"remoteDesktop.notification.ended.bodyWithDevice" = "The remote desktop session with %@ ended normally.";
+"remoteDesktop.notification.interrupted.title" = "Remote Desktop Interrupted";
+"remoteDesktop.notification.interrupted.body" = "The remote desktop session was interrupted.";
+"remoteDesktop.notification.interrupted.bodyWithDevice" = "The remote desktop session with %@ was interrupted.";
 "连接设备" = "Connect Device";
 "连接失败" = "Connection Failed";
 "disconnect.failed" = "The disconnect did not complete. Please try again.";

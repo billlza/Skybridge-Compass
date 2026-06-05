@@ -388,7 +388,7 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
     }
 
     @MainActor
-    func testNativeWarmupScreenChannelFinalGateDropsAllFallback() {
+    func testNativeWarmupScreenChannelFinalGateDropsNonJPEGFallbackAndAllowsBoundedJPEG() {
         XCTAssertTrue(
             CrossNetworkConnectionManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 supportsNativeVideoTrack: true,
@@ -407,14 +407,28 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             CrossNetworkConnectionManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 supportsNativeVideoTrack: true,
                 nativeVideoTrackReady: false,
-                format: "jpeg"
+                format: nil
             )
         )
         XCTAssertTrue(
             CrossNetworkConnectionManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
                 supportsNativeVideoTrack: true,
                 nativeVideoTrackReady: false,
-                format: "jpg"
+                format: " bgra "
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+                supportsNativeVideoTrack: true,
+                nativeVideoTrackReady: false,
+                format: "jpeg"
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.shouldDropNativeWarmupNonJPEGFallbackFrame(
+                supportsNativeVideoTrack: true,
+                nativeVideoTrackReady: false,
+                format: " JPG "
             )
         )
         XCTAssertFalse(
@@ -983,7 +997,7 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         )
         XCTAssertFalse(explicitDegradedConfig.requiresExtremePerformanceValidation)
         XCTAssertTrue(explicitDegradedConfig.allowsDegradedMediaFallbacks)
-        XCTAssertTrue(
+        XCTAssertFalse(
             CrossNetworkConnectionManager.shouldFailFastRemoteMediaFallbacks(
                 remoteStreamConfiguration: explicitDegradedConfig
             )

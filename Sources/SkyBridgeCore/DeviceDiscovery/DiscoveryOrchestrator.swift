@@ -527,6 +527,7 @@ public actor ServiceAdvertiserCenter {
         record["osVersion"] = localPresentation.osVersion
         record["name"] = localPresentation.deviceName ?? localPresentation.modelName ?? "Mac"
         LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &record)
+        LocalNetworkLinkStatusProvider.attachCurrentStatus(to: &record)
 
         if #available(macOS 14.0, *) {
             let snap = await SelfIdentityProvider.shared.snapshotEnsuringProtocolDeviceId(allowCreate: true)

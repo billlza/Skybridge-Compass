@@ -105,6 +105,74 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
         XCTAssertEqual(payload.keyFrameInterval, 60)
         XCTAssertEqual(payload.performanceValidationMode, "extreme")
         XCTAssertEqual(payload.mediaFallbackPolicy, "forbidden")
+        XCTAssertEqual(payload.audioRedirectionEnabled, false)
+        XCTAssertEqual(payload.audioTransport, SkyBridgeRealtimeMediaConstants.audioTransportDisabled)
+        XCTAssertNil(payload.audioMode)
+        XCTAssertNil(payload.mediaSessionId)
+        XCTAssertNil(payload.mediaAudioEndpoint)
+    }
+
+    func testCrossNetworkAudioIntentWithoutEndpointProducesExplicitVideoOnlyPayload() {
+        var settings = RemoteDesktopViewerSettings()
+        settings.audioRedirectionEnabled = true
+
+        let payload = RemoteDesktopViewerStreamConfigurationFactory.makePayload(
+            .init(
+                viewerSettings: settings,
+                supportedVideoFormats: ["h264", "hevc"],
+                preferredCodec: "h264",
+                activeTransportMode: .crossNetwork,
+                strictMediaValidationEnabled: true,
+                hasRenderedCrossNetworkNativeFrame: false,
+                nativeAudioReceiveEnabled: false,
+                realtimeMediaAudioMode: .highFidelity,
+                mediaAudioEndpoint: nil,
+                mediaSessionId: nil,
+                streamRefreshToken: nil,
+                securityIdentity: nil,
+                smokeDimensions: nil,
+                smokeTargetFrameRate: nil
+            )
+        )
+
+        XCTAssertEqual(payload.screenFrameTransport, "webrtc-native-main")
+        XCTAssertEqual(payload.mediaFallbackPolicy, "forbidden")
+        XCTAssertEqual(payload.audioRedirectionEnabled, false)
+        XCTAssertEqual(payload.audioTransport, SkyBridgeRealtimeMediaConstants.audioTransportDisabled)
+        XCTAssertNil(payload.audioMode)
+        XCTAssertNil(payload.mediaSessionId)
+        XCTAssertNil(payload.mediaAudioEndpoint)
+    }
+
+    func testCrossNetworkAudioEndpointProducesPQCRealtimeAudioPayload() {
+        var settings = RemoteDesktopViewerSettings()
+        settings.audioRedirectionEnabled = true
+        let endpoint = SkyBridgeMediaEndpoint(host: "relay.example.com", port: 44_44)
+
+        let payload = RemoteDesktopViewerStreamConfigurationFactory.makePayload(
+            .init(
+                viewerSettings: settings,
+                supportedVideoFormats: ["h264", "hevc"],
+                preferredCodec: "h264",
+                activeTransportMode: .crossNetwork,
+                strictMediaValidationEnabled: true,
+                hasRenderedCrossNetworkNativeFrame: false,
+                nativeAudioReceiveEnabled: false,
+                realtimeMediaAudioMode: .lowLatency,
+                mediaAudioEndpoint: endpoint,
+                mediaSessionId: "media-session-ready",
+                streamRefreshToken: nil,
+                securityIdentity: nil,
+                smokeDimensions: nil,
+                smokeTargetFrameRate: nil
+            )
+        )
+
+        XCTAssertEqual(payload.audioRedirectionEnabled, true)
+        XCTAssertEqual(payload.audioTransport, SkyBridgeRealtimeMediaConstants.audioTransportPQCv1)
+        XCTAssertEqual(payload.audioMode, SkyBridgeMediaAudioMode.lowLatency.rawValue)
+        XCTAssertEqual(payload.mediaSessionId, "media-session-ready")
+        XCTAssertEqual(payload.mediaAudioEndpoint, endpoint)
     }
 
     func testSmokeOverridesWinAndRefreshTokenIsPassThrough() {

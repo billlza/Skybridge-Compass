@@ -583,6 +583,7 @@ public final class RemoteControlManager: BaseManager {
             }
         }
 
+        beginRemoteControlTerminalNotificationTracking(for: peer)
         await sendViewerStreamConfigurationIfPossible(to: peer)
     }
 
@@ -595,6 +596,11 @@ public final class RemoteControlManager: BaseManager {
             return
         }
 
+        notifyRemoteControlTerminalSessionIfNeeded(
+            peer: peer,
+            kind: .normal,
+            reason: "p2p_user_stop"
+        )
         peer.connection.cancel()
         _ = removePeer(deviceId: deviceId, role: .controlling)
         if #available(macOS 14.0, *) {
@@ -653,6 +659,7 @@ public final class RemoteControlManager: BaseManager {
             return
         }
 
+        beginRemoteControlTerminalNotificationTracking(for: peer)
         let hasInitialStreamConfiguration = await waitForInitialStreamConfigurationIfAvailable(for: peer)
         guard isCurrentPeer(peer), isBeingControlled else { return }
         if peer.requestedStreamConfiguration?.isStopRequest == true {
@@ -695,6 +702,11 @@ public final class RemoteControlManager: BaseManager {
             return
         }
 
+        notifyRemoteControlTerminalSessionIfNeeded(
+            peer: peer,
+            kind: .normal,
+            reason: "p2p_user_stop"
+        )
         RemoteControlSecurityNoticeCenter.shared.endNotice(
             sessionId: peer.id,
             transportKind: .p2p
@@ -739,6 +751,18 @@ public final class RemoteControlManager: BaseManager {
         logger.warning(
             "🔁 RemoteControl superseding existing session for \(peer.id, privacy: .public)"
         )
+
+        notifyRemoteControlTerminalSessionIfNeeded(
+            peer: previousPeer,
+            kind: .normal,
+            reason: "p2p_superseded_by_new_session"
+        )
+        if previousPeer.role == .beingControlled {
+            RemoteControlSecurityNoticeCenter.shared.endNotice(
+                sessionId: previousPeer.id,
+                transportKind: .p2p
+            )
+        }
 
         if activeClipboardPeerId == previousPeer.id {
             let clipboard = ClipboardRedirectionManager.shared
@@ -1007,6 +1031,64 @@ public final class RemoteControlManager: BaseManager {
             return false
         }
         return !trimmed.isEmpty && trimmed != "missing" && trimmed != "-"
+    }
+
+    private func hasUserVisibleRemoteControlSession(_ peer: PeerConnection) -> Bool {
+        if peer.securityAdmissionApproved {
+            return true
+        }
+        if #available(macOS 14.0, *), peer.sessionKeys != nil {
+            return true
+        }
+        return false
+    }
+
+    private func remoteControlNotificationDeviceName(for peer: PeerConnection) -> String? {
+        if let identity = RemoteControlSecurityPeerIdentityStore.identity(
+            forAliases: remoteControlSecurityIdentityAliases(for: peer)
+        ) {
+            if Self.noticeMetadataPresent(identity.deviceName) {
+                return identity.deviceName
+            }
+            if Self.noticeMetadataPresent(identity.deviceId) {
+                return identity.deviceId
+            }
+        }
+
+        if #available(macOS 14.0, *), let handshakePeer = peer.handshakePeer {
+            if Self.noticeMetadataPresent(handshakePeer.displayName) {
+                return handshakePeer.displayName
+            }
+            if Self.noticeMetadataPresent(handshakePeer.deviceId) {
+                return handshakePeer.deviceId
+            }
+        }
+
+        return Self.noticeMetadataPresent(peer.id) ? peer.id : nil
+    }
+
+    private func beginRemoteControlTerminalNotificationTracking(for peer: PeerConnection) {
+        RemoteDesktopSessionNotificationService.shared.beginSession(
+            sessionID: peer.id,
+            transport: "p2p",
+            role: peer.role.rawValue
+        )
+    }
+
+    private func notifyRemoteControlTerminalSessionIfNeeded(
+        peer: PeerConnection,
+        kind: RemoteDesktopSessionTerminationKind,
+        reason: String
+    ) {
+        guard hasUserVisibleRemoteControlSession(peer) else { return }
+        RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+            sessionID: peer.id,
+            deviceName: remoteControlNotificationDeviceName(for: peer),
+            transport: "p2p",
+            role: peer.role.rawValue,
+            kind: kind,
+            reason: reason
+        )
     }
 
     private func requestRemoteControlSecurityApproval(for peer: PeerConnection) async -> Bool {
@@ -2281,6 +2363,9 @@ public final class RemoteControlManager: BaseManager {
         } else {
             mediaSessionId = nil
         }
+        let realtimeMediaAudioReady = settings.interactionSettings.enableAudioRedirection
+            && mediaAudioEndpoint != nil
+            && mediaSessionId != nil
         let payload = RemoteDesktopStreamConfiguration(
             width: dimensions?.width,
             height: dimensions?.height,
@@ -2306,13 +2391,13 @@ public final class RemoteControlManager: BaseManager {
             screenChannelWireFormat: nil,
             nativeVideoTrackReady: false,
             nativeAudioTrackEnabled: false,
-            audioRedirectionEnabled: settings.interactionSettings.enableAudioRedirection,
-            audioTransport: settings.interactionSettings.enableAudioRedirection
+            audioRedirectionEnabled: realtimeMediaAudioReady,
+            audioTransport: realtimeMediaAudioReady
                 ? SkyBridgeRealtimeMediaConstants.audioTransportPQCv1
                 : SkyBridgeRealtimeMediaConstants.audioTransportDisabled,
-            audioMode: mediaAudioMode.rawValue,
-            mediaSessionId: mediaSessionId,
-            mediaAudioEndpoint: mediaAudioEndpoint,
+            audioMode: realtimeMediaAudioReady ? mediaAudioMode.rawValue : nil,
+            mediaSessionId: realtimeMediaAudioReady ? mediaSessionId : nil,
+            mediaAudioEndpoint: realtimeMediaAudioReady ? mediaAudioEndpoint : nil,
             compatibilityAudioFallbackEnabled: false,
             preferredAudioEncoding: nil,
             audioSampleRate: 48_000,
@@ -3371,6 +3456,11 @@ public final class RemoteControlManager: BaseManager {
             "🔌 连接 \(peer.id, privacy: .public) 关闭或出错: \(error.localizedDescription, privacy: .public) screenSharingActive=\(self.screenSharingActive, privacy: .public) hasCaptureStreamer=\(self.captureStreamer != nil, privacy: .public)"
         )
 
+        notifyRemoteControlTerminalSessionIfNeeded(
+            peer: peer,
+            kind: .interrupted,
+            reason: error.localizedDescription
+        )
         peer.connection.cancel()
         if peer.role == .beingControlled {
             RemoteControlSecurityNoticeCenter.shared.endNotice(

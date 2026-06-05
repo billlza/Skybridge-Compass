@@ -178,16 +178,47 @@ public struct QuantumGlassBackground: View {
     @StateObject private var settingsManager = SettingsManager.instance
     @StateObject private var fileTransferManager = FileTransferManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+    @State private var animationPolicyGeneration = 0
 
     private let enableAnimations: Bool
     private let enableWeatherEffects: Bool
+    private let isHomeVisible: Bool
 
-    public init(enableAnimations: Bool = true, enableWeatherEffects: Bool = true) {
+    public init(
+        enableAnimations: Bool = true,
+        enableWeatherEffects: Bool = true,
+        isHomeVisible: Bool = true
+    ) {
         self.enableAnimations = enableAnimations
         self.enableWeatherEffects = enableWeatherEffects
+        self.isHomeVisible = isHomeVisible
     }
 
     public var body: some View {
+        let highLoadMode = fileTransferManager.isTransferring || remoteDesktopManager.isStreaming
+        let thermalState = ProcessInfo.processInfo.thermalState
+        let lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+        let thermalPressureMode = thermalState == .serious || thermalState == .critical
+        let shouldAnimateBackground =
+            enableAnimations &&
+            !highLoadMode &&
+            !reduceMotion &&
+            !lowPowerMode &&
+            !thermalPressureMode
+        let shouldRunWeatherEffects =
+            enableWeatherEffects &&
+            settingsManager.enableRealTimeWeather &&
+            isHomeVisible &&
+            !highLoadMode &&
+            !lowPowerMode &&
+            !thermalPressureMode &&
+            !reduceMotion &&
+            !reduceTransparency &&
+            !differentiateWithoutColor
+
         ZStack {
             // 1. Rich deep-space gradient (navy → deep indigo, NOT pure black)
             LinearGradient(
@@ -202,7 +233,7 @@ public struct QuantumGlassBackground: View {
             .ignoresSafeArea()
 
             // 2. Motion layer (deferred on launch to avoid startup stutter)
-            if enableAnimations {
+            if shouldAnimateBackground {
                 TimelineView(.periodic(from: .now, by: 1.0 / 24.0)) { timeline in
                     let currentTime = timeline.date.timeIntervalSinceReferenceDate
                     ZStack {
@@ -233,13 +264,22 @@ public struct QuantumGlassBackground: View {
                 .ignoresSafeArea()
 
             // 4. Weather effects (independent lifecycle, must NOT be re-created per frame)
-            WeatherEffectsBackgroundLayer(
-                isActive: enableWeatherEffects &&
-                    settingsManager.enableRealTimeWeather &&
-                    !(fileTransferManager.isTransferring || remoteDesktopManager.isStreaming)
+            DashboardWeatherEffectsBackgroundLayer(
+                isActive: shouldRunWeatherEffects
             )
         }
+        .id(animationPolicyGeneration)
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name.NSProcessInfoPowerStateDidChange)) { _ in
+            bumpAnimationPolicyGeneration()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
+            bumpAnimationPolicyGeneration()
+        }
         .ignoresSafeArea()
+    }
+
+    private func bumpAnimationPolicyGeneration() {
+        animationPolicyGeneration = animationPolicyGeneration == Int.max ? 0 : animationPolicyGeneration + 1
     }
 }
 
@@ -356,7 +396,8 @@ private struct QuantumStarLayer: View {
             ZStack {
                 QuantumGlassBackground(
                     enableAnimations: enableAnimatedBackground,
-                    enableWeatherEffects: enableWeatherEffects
+                    enableWeatherEffects: enableWeatherEffects,
+                    isHomeVisible: selectedTab == .home
                 )
 
                 ScrollView(showsIndicators: false) {
@@ -1579,419 +1620,6 @@ private struct MyConnectionQRCodeView: View {
         return .success(image)
     }
 
-}
-
-// MARK: - Weather Effects (iOS)
-
-	@available(iOS 17.0, *)
-	private enum WeatherEffectsFrameRatePolicy {
-    static func targetFPS() -> Double {
-        let processInfo = ProcessInfo.processInfo
-        if processInfo.isLowPowerModeEnabled {
-            return 24
-        }
-
-        switch processInfo.thermalState {
-        case .serious, .critical:
-            return 20
-        case .fair:
-            return 28
-        case .nominal:
-            return 36
-        @unknown default:
-            return 28
-        }
-    }
-
-    static func minimumInterval() -> TimeInterval {
-        let fps = max(10, targetFPS())
-        return 1.0 / fps
-    }
-}
-
-@available(iOS 17.0, *)
-private struct WeatherEffectsBackgroundLayer: View {
-    @StateObject private var weatherManager = WeatherManager.shared
-    private let isActive: Bool
-
-    init(isActive: Bool = true) {
-        self.isActive = isActive
-    }
-
-    var body: some View {
-        Group {
-            if isActive {
-                WeatherEffectsContent(condition: weatherManager.currentWeather?.condition)
-                    .task {
-                        if !weatherManager.isInitialized {
-                            await weatherManager.start()
-                        }
-                    }
-            }
-        }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-    }
-}
-
-@available(iOS 17.0, *)
-private struct WeatherEffectsContent: View {
-    let condition: WeatherCondition?
-
-    var body: some View {
-        let minimumInterval = WeatherEffectsFrameRatePolicy.minimumInterval()
-
-        ZStack {
-            if let condition {
-                WeatherEffectsTintGradient(condition: condition)
-                    .opacity(0.40)
-
-                Group {
-                    switch condition {
-                    case .clear:
-                        CinematicClearSkyEffectView_iOS(minimumInterval: minimumInterval)
-                    case .cloudy:
-                        CinematicCloudySkyEffectView_iOS(minimumInterval: minimumInterval)
-                    case .rainy:
-                        CinematicRainEffectView_iOS(minimumInterval: minimumInterval, isStorm: false)
-                    case .snowy:
-                        CinematicSnowEffectView_iOS(minimumInterval: minimumInterval)
-                    case .foggy:
-                        CinematicFogEffectView_iOS(minimumInterval: minimumInterval, tint: .white, seed: 0xF06F_0001)
-                    case .haze:
-                        CinematicFogEffectView_iOS(
-                            minimumInterval: minimumInterval,
-                            tint: Color(red: 0.95, green: 0.86, blue: 0.72),
-                            seed: 0xBEEF_0001
-                        )
-                    case .stormy:
-                        CinematicRainEffectView_iOS(minimumInterval: minimumInterval, isStorm: true)
-                    case .unknown:
-                        EmptyView()
-                    }
-                }
-                .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.8), value: condition?.rawValue ?? "")
-    }
-}
-
-@available(iOS 17.0, *)
-private struct WeatherEffectsTintGradient: View {
-    let condition: WeatherCondition
-
-    var body: some View {
-        LinearGradient(
-            colors: colors(for: condition),
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .ignoresSafeArea()
-    }
-
-    private func colors(for condition: WeatherCondition) -> [Color] {
-        switch condition {
-        case .clear:
-            return [Color.orange.opacity(0.35), Color.yellow.opacity(0.18)]
-        case .cloudy:
-            return [Color.gray.opacity(0.25), Color.blue.opacity(0.10)]
-        case .rainy:
-            return [Color.blue.opacity(0.26), Color.cyan.opacity(0.12)]
-        case .snowy:
-            return [Color.cyan.opacity(0.18), Color.white.opacity(0.10)]
-        case .foggy:
-            return [Color.gray.opacity(0.16), Color.white.opacity(0.08)]
-        case .haze:
-            return [Color.orange.opacity(0.14), Color.gray.opacity(0.14)]
-        case .stormy:
-            return [Color.purple.opacity(0.22), Color.blue.opacity(0.18)]
-        case .unknown:
-            return [Color.gray.opacity(0.10), Color.clear]
-        }
-    }
-}
-
-@available(iOS 17.0, *)
-private struct CinematicClearSkyEffectView_iOS: View {
-    private struct Particle: Hashable {
-        let id: Int
-        let origin: CGPoint
-        let speed: Double
-        let phase: Double
-        let size: Double
-        let hueShift: Double
-        let twinkle: Double
-    }
-
-    private let particles: [Particle]
-    private let minimumInterval: TimeInterval
-
-    init(minimumInterval: TimeInterval) {
-        self.minimumInterval = minimumInterval
-        var tmp: [Particle] = []
-        tmp.reserveCapacity(120)
-        for i in 0..<120 {
-            tmp.append(
-                Particle(
-                    id: i,
-                    origin: CGPoint(x: Double.random(in: 0...1), y: Double.random(in: 0...1)),
-                    speed: Double.random(in: 0.02...0.10),
-                    phase: Double.random(in: 0...(2 * .pi)),
-                    size: Double.random(in: 0.8...2.0),
-                    hueShift: Double.random(in: -0.08...0.08),
-                    twinkle: Double.random(in: 0.6...1.4)
-                )
-            )
-        }
-        self.particles = tmp
-    }
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: minimumInterval, paused: false)) { context in
-            Canvas { ctx, size in
-                let t = context.date.timeIntervalSinceReferenceDate
-                for p in particles {
-                    let x = (p.origin.x + sin(t * p.speed + p.phase) * 0.05) * size.width
-                    let y = (p.origin.y + cos(t * p.speed + p.phase) * 0.05) * size.height
-                    let tw = (sin(t * p.twinkle + p.phase) * 0.5 + 0.5)
-
-                    var resolved = ctx.resolve(Text("•").font(.system(size: p.size)))
-                    resolved.shading = .color(
-                        Color(hue: 0.60 + p.hueShift, saturation: 0.35, brightness: 1.0, opacity: 0.20 + 0.18 * tw)
-                    )
-                    ctx.draw(resolved, at: CGPoint(x: x, y: y))
-                }
-            }
-        }
-        .ignoresSafeArea()
-    }
-}
-
-@available(iOS 17.0, *)
-private struct CinematicCloudySkyEffectView_iOS: View {
-    private let minimumInterval: TimeInterval
-
-    init(minimumInterval: TimeInterval) {
-        self.minimumInterval = minimumInterval
-    }
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: minimumInterval, paused: false)) { context in
-            Canvas { ctx, size in
-                let t = context.date.timeIntervalSinceReferenceDate
-                let base = Color.white.opacity(0.10)
-
-                for layer in 0..<3 {
-                    let progress = (t * (0.02 + Double(layer) * 0.01)).truncatingRemainder(dividingBy: 1.0)
-                    let xOffset = CGFloat(progress) * size.width
-                    let yOffset = CGFloat(layer) * 40
-
-                    let rect = CGRect(x: -size.width + xOffset, y: yOffset, width: size.width * 2, height: size.height * 0.7)
-                    let path = Path(roundedRect: rect, cornerRadius: 220)
-                    ctx.fill(path, with: .color(base.opacity(0.35 - Double(layer) * 0.08)))
-                }
-            }
-        }
-        .ignoresSafeArea()
-    }
-}
-
-@available(iOS 17.0, *)
-private struct CinematicRainEffectView_iOS: View {
-    private struct Drop: Hashable {
-        let id: Int
-        let x: Double
-        let y: Double
-        let speed: Double
-        let length: Double
-        let width: Double
-        let alpha: Double
-        let drift: Double
-    }
-
-    private let drops: [Drop]
-    private let minimumInterval: TimeInterval
-    private let isStorm: Bool
-
-    init(minimumInterval: TimeInterval, isStorm: Bool) {
-        self.minimumInterval = minimumInterval
-        self.isStorm = isStorm
-        let count = isStorm ? 520 : 360
-        var tmp: [Drop] = []
-        tmp.reserveCapacity(count)
-        for i in 0..<count {
-            tmp.append(
-                Drop(
-                    id: i,
-                    x: Double.random(in: 0...1),
-                    y: Double.random(in: 0...1),
-                    speed: Double.random(in: isStorm ? 1.6...2.6 : 1.0...2.1),
-                    length: Double.random(in: isStorm ? 20...55 : 14...40),
-                    width: Double.random(in: 0.7...1.4),
-                    alpha: Double.random(in: 0.12...0.26),
-                    drift: Double.random(in: -0.08...0.08)
-                )
-            )
-        }
-        self.drops = tmp
-    }
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: minimumInterval, paused: false)) { context in
-            Canvas { ctx, size in
-                let t = context.date.timeIntervalSinceReferenceDate
-                let wind = sin(t * 0.15) * (isStorm ? 0.35 : 0.20)
-                let color = Color.white.opacity(isStorm ? 0.26 : 0.20)
-
-                for d in drops {
-                    let px = (d.x + (wind + d.drift) * 0.04) * size.width
-                    let py = (d.y + t * d.speed * 0.10).truncatingRemainder(dividingBy: 1.0) * size.height
-
-                    var path = Path()
-                    path.move(to: CGPoint(x: px, y: py))
-                    path.addLine(to: CGPoint(x: px + CGFloat(wind * d.length * 0.25), y: py + d.length))
-
-                    ctx.stroke(path, with: .color(color.opacity(d.alpha)), lineWidth: d.width)
-                }
-
-                if isStorm {
-                    let flash = max(0, sin(t * 1.6) - 0.82) * 2.0
-                    if flash > 0 {
-                        ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color.white.opacity(0.12 * flash)))
-                    }
-                }
-            }
-        }
-        .ignoresSafeArea()
-    }
-}
-
-@available(iOS 17.0, *)
-private struct CinematicSnowEffectView_iOS: View {
-    private struct Flake: Hashable {
-        let id: Int
-        let x: Double
-        let y: Double
-        let speed: Double
-        let size: Double
-        let sway: Double
-        let alpha: Double
-        let phase: Double
-    }
-
-    private let flakes: [Flake]
-    private let minimumInterval: TimeInterval
-
-    init(minimumInterval: TimeInterval) {
-        self.minimumInterval = minimumInterval
-        var tmp: [Flake] = []
-        tmp.reserveCapacity(260)
-        for i in 0..<260 {
-            tmp.append(
-                Flake(
-                    id: i,
-                    x: Double.random(in: 0...1),
-                    y: Double.random(in: 0...1),
-                    speed: Double.random(in: 0.10...0.32),
-                    size: Double.random(in: 1.2...3.2),
-                    sway: Double.random(in: 0.18...0.60),
-                    alpha: Double.random(in: 0.10...0.22),
-                    phase: Double.random(in: 0...(2 * .pi))
-                )
-            )
-        }
-        self.flakes = tmp
-    }
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: minimumInterval, paused: false)) { context in
-            Canvas { ctx, size in
-                let t = context.date.timeIntervalSinceReferenceDate
-                for f in flakes {
-                    let x = (f.x + sin(t * f.sway + f.phase) * 0.03) * size.width
-                    let y = (f.y + t * f.speed).truncatingRemainder(dividingBy: 1.0) * size.height
-
-                    let rect = CGRect(x: x, y: y, width: f.size, height: f.size)
-                    ctx.fill(Path(ellipseIn: rect), with: .color(Color.white.opacity(f.alpha)))
-                }
-            }
-        }
-        .ignoresSafeArea()
-    }
-}
-
-@available(iOS 17.0, *)
-private struct CinematicFogEffectView_iOS: View {
-    private struct Puff: Hashable {
-        let id: Int
-        let origin: CGPoint
-        let radius: Double
-        let speed: Double
-        let phase: Double
-        let alpha: Double
-    }
-
-    private let puffs: [Puff]
-    private let minimumInterval: TimeInterval
-    private let tint: Color
-    private let seed: UInt64
-
-    init(minimumInterval: TimeInterval, tint: Color, seed: UInt64) {
-        self.minimumInterval = minimumInterval
-        self.tint = tint
-        self.seed = seed
-
-        var rng = SeededGenerator(seed: seed)
-        var tmp: [Puff] = []
-        tmp.reserveCapacity(46)
-        for i in 0..<46 {
-            tmp.append(
-                Puff(
-                    id: i,
-                    origin: CGPoint(x: Double.random(in: 0...1, using: &rng), y: Double.random(in: 0...1, using: &rng)),
-                    radius: Double.random(in: 140...340, using: &rng),
-                    speed: Double.random(in: 0.02...0.10, using: &rng),
-                    phase: Double.random(in: 0...(2 * .pi), using: &rng),
-                    alpha: Double.random(in: 0.05...0.12, using: &rng)
-                )
-            )
-        }
-        self.puffs = tmp
-    }
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: minimumInterval, paused: false)) { context in
-            Canvas { ctx, size in
-                let t = context.date.timeIntervalSinceReferenceDate
-                for p in puffs {
-                    let x = (p.origin.x + sin(t * p.speed + p.phase) * 0.06) * size.width
-                    let y = (p.origin.y + cos(t * p.speed + p.phase) * 0.06) * size.height
-                    let r = p.radius * (0.92 + 0.08 * sin(t * p.speed + p.phase))
-
-                    let rect = CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)
-                    ctx.fill(Path(ellipseIn: rect), with: .color(tint.opacity(p.alpha)))
-                }
-            }
-        }
-        .ignoresSafeArea()
-    }
-}
-
-private struct SeededGenerator: RandomNumberGenerator {
-    private var state: UInt64
-
-    init(seed: UInt64) {
-        self.state = seed == 0 ? 0xDEAD_BEEF : seed
-    }
-
-    mutating func next() -> UInt64 {
-        state &+= 0x9E3779B97F4A7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
-        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
-        return z ^ (z >> 31)
-    }
 }
 
 @available(iOS 17.0, *)

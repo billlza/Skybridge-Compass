@@ -981,6 +981,12 @@
 "notifications.fileReceived.completed" = "File Received";
 "notifications.fileReceived.savedTo" = "%@ saved to %@";
 "notifications.fileReceived.completedBody" = "%@ received successfully";
+"notifications.remoteDesktop.ended.title" = "Remote Desktop Ended";
+"notifications.remoteDesktop.ended.body" = "The remote desktop session ended normally.";
+"notifications.remoteDesktop.ended.bodyWithDevice" = "The remote desktop session with %@ ended normally.";
+"notifications.remoteDesktop.interrupted.title" = "Remote Desktop Interrupted";
+"notifications.remoteDesktop.interrupted.body" = "The remote desktop session was interrupted.";
+"notifications.remoteDesktop.interrupted.bodyWithDevice" = "The remote desktop session with %@ was interrupted.";
 "notifications.chunkVerification.passed" = "Chunk Verification Passed";
 "notifications.chunkVerification.failed" = "Chunk Verification Failed";
 "notifications.merkleVerification.passed" = "Merkle Verification Passed";

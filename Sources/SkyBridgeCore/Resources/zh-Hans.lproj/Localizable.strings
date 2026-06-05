@@ -1008,6 +1008,12 @@
 "notifications.fileReceived.completed" = "文件接收完成";
 "notifications.fileReceived.savedTo" = "%@ 已保存到 %@";
 "notifications.fileReceived.completedBody" = "%@ 已接收完成";
+"notifications.remoteDesktop.ended.title" = "远程桌面已结束";
+"notifications.remoteDesktop.ended.body" = "远程桌面会话已正常结束。";
+"notifications.remoteDesktop.ended.bodyWithDevice" = "与 %@ 的远程桌面会话已正常结束。";
+"notifications.remoteDesktop.interrupted.title" = "远程桌面异常中断";
+"notifications.remoteDesktop.interrupted.body" = "远程桌面会话已异常中断。";
+"notifications.remoteDesktop.interrupted.bodyWithDevice" = "与 %@ 的远程桌面会话已异常中断。";
 "notifications.chunkVerification.passed" = "分块校验通过";
 "notifications.chunkVerification.failed" = "分块校验失败";
 "notifications.merkleVerification.passed" = "Merkle 校验通过";

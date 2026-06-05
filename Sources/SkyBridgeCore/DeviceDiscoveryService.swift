@@ -233,7 +233,8 @@ public final class DeviceDiscoveryService: ObservableObject {
             remoteVideoFormats: mergedRemoteVideoFormats,
             connectionTypes: mergedConnectionTypes,
             uniqueIdentifier: mergedUniqueId,
-            signalStrength: mergedStrength
+            signalStrength: mergedStrength,
+            networkLinkStatus: newDevice.networkLinkStatus ?? existing.networkLinkStatus
         )
 
         discoveredDevices[existingIndex] = merged
@@ -271,6 +272,21 @@ public final class DeviceDiscoveryService: ObservableObject {
             return 90
         }
         return 100
+    }
+
+    private nonisolated static func connectionTypes(
+        from status: DeviceNetworkLinkStatus?,
+        defaultTypes: Set<DeviceConnectionType>
+    ) -> Set<DeviceConnectionType> {
+        guard let status else { return defaultTypes }
+        var updated = defaultTypes
+        updated.remove(.unknown)
+        updated.insert(status.connectionType)
+        return updated
+    }
+
+    private nonisolated static func signalPercentage(from status: DeviceNetworkLinkStatus?) -> Double? {
+        status?.normalizedSignalStrength.map { $0 * 100.0 }
     }
 
  /// 网络活跃度等级
@@ -520,10 +536,15 @@ public final class DeviceDiscoveryService: ObservableObject {
     private func fuseBluetoothStrength(into devices: [DiscoveredDevice]) -> [DiscoveredDevice] {
         var result: [DiscoveredDevice] = []
         for dev in devices {
-            var strength = dev.signalStrength ?? 0.0
+            var strength = dev.signalStrength
             if let bt = matchBluetooth(for: dev) {
                 let btStrength = bt.signalStrengthPercentage
-                strength = max(strength, btStrength)
+                strength = max(strength ?? btStrength, btStrength)
+            }
+            guard let strength else {
+                strengthCache.removeValue(forKey: dev.id)
+                result.append(dev)
+                continue
             }
             let alpha = min(0.95, max(0.1, SettingsManager.shared.signalStrengthAlpha))
             let smoothed = (strengthCache[dev.id] ?? strength) * alpha + strength * (1.0 - alpha)
@@ -685,6 +706,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                     var resolvedName = name
                     var uniqueId: String? = nil
                     var remoteVideoFormats = Set<String>()
+                    var networkLinkStatus: DeviceNetworkLinkStatus?
  // 解析 metadata 的 TXT 记录（使用统一解析器）
                     if case .bonjour(let txtRecord) = result.metadata {
                         let deviceInfo = BonjourTXTParser.extractDeviceInfo(txtRecord)
@@ -694,6 +716,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                         }
                         if let host = deviceInfo.hostname ?? deviceInfo.name { resolvedName = host }
                         remoteVideoFormats = Set(deviceInfo.remoteVideoFormats)
+                        networkLinkStatus = BonjourTXTParser.extractNetworkLinkStatus(txtRecord)
                     } else {
  // 回退：尝试 NetService 解析 TXT 记录
                         if case .service(let sName, let sType, _, _) = result.endpoint {
@@ -701,9 +724,10 @@ public final class DeviceDiscoveryService: ObservableObject {
                             netService.resolve(withTimeout: 0.8)
                             if let data = netService.txtRecordData() {
                                 let dict = NetService.dictionary(fromTXTRecord: data)
-                                let deviceInfo = BonjourTXTParser.extractDeviceInfo(from: dict.reduce(into: [String: String]()) { partialResult, item in
+                                let stringDict = dict.reduce(into: [String: String]()) { partialResult, item in
                                     partialResult[item.key] = String(data: item.value, encoding: .utf8)
-                                })
+                                }
+                                let deviceInfo = BonjourTXTParser.extractDeviceInfo(from: stringDict)
                                 if let devIdData = dict["deviceId"] ?? dict["id"] ?? dict["deviceID"],
                                    let devId = String(data: devIdData, encoding: .utf8) {
                                     uniqueId = devId
@@ -712,9 +736,14 @@ public final class DeviceDiscoveryService: ObservableObject {
                                 if let hostData = dict["hostname"] ?? dict["name"],
                                    let host = String(data: hostData, encoding: .utf8) { resolvedName = host }
                                 remoteVideoFormats = Set(deviceInfo.remoteVideoFormats)
+                                networkLinkStatus = BonjourTXTParser.extractNetworkLinkStatus(from: stringDict)
                             }
                         }
                     }
+                    let connectionTypes = Self.connectionTypes(
+                        from: networkLinkStatus,
+                        defaultTypes: [.wifi]
+                    )
                     let device = DiscoveredDevice(
                         id: UUID(),
                         name: resolvedName,
@@ -723,8 +752,10 @@ public final class DeviceDiscoveryService: ObservableObject {
                         services: [serviceType],
                         portMap: [:],
                         remoteVideoFormats: remoteVideoFormats,
-                        connectionTypes: [.wifi],
-                        uniqueIdentifier: uniqueId
+                        connectionTypes: connectionTypes,
+                        uniqueIdentifier: uniqueId,
+                        signalStrength: Self.signalPercentage(from: networkLinkStatus),
+                        networkLinkStatus: networkLinkStatus
                     )
                     allDevices.append(device)
                 }
@@ -749,7 +780,9 @@ public final class DeviceDiscoveryService: ObservableObject {
                         services: services,
                         portMap: ports,
                         connectionTypes: dev.connectionTypes.union([.wifi]),
-                        uniqueIdentifier: dev.uniqueIdentifier ?? item.usn
+                        uniqueIdentifier: dev.uniqueIdentifier ?? item.usn,
+                        signalStrength: dev.signalStrength,
+                        networkLinkStatus: dev.networkLinkStatus
                     )
                     allDevices[index] = updated
                 } else {
@@ -1024,6 +1057,7 @@ public final class DeviceDiscoveryService: ObservableObject {
                             }
  // 解析 Bonjour TXT 记录，填充 mdnsDeviceID（使用统一解析器）
                             var remoteVideoFormats = Set<String>()
+                            var networkLinkStatus: DeviceNetworkLinkStatus?
                             if case .bonjour(let txtRecord) = result.metadata, let strongSelf = self {
                                 let parsed = BonjourTXTParser.parse(txtRecord)
                                 if !parsed.isEmpty {
@@ -1033,8 +1067,13 @@ public final class DeviceDiscoveryService: ObservableObject {
                                         strongSelf.mdnsDeviceIdCache[resolvedName] = deviceId
                                     }
                                     remoteVideoFormats = Set(deviceInfo.remoteVideoFormats)
+                                    networkLinkStatus = BonjourTXTParser.extractNetworkLinkStatus(from: parsed)
                                 }
                             }
+                            let connectionTypes = Self.connectionTypes(
+                                from: networkLinkStatus,
+                                defaultTypes: [.wifi]
+                            )
                             let device = DiscoveredDevice(
                                 id: UUID(),
                                 name: resolvedName,
@@ -1043,8 +1082,10 @@ public final class DeviceDiscoveryService: ObservableObject {
                                 services: [serviceType],
                                 portMap: [:],
                                 remoteVideoFormats: remoteVideoFormats,
-                                connectionTypes: [.wifi],
-                                uniqueIdentifier: self?.mdnsDeviceIdCache[resolvedName]
+                                connectionTypes: connectionTypes,
+                                uniqueIdentifier: self?.mdnsDeviceIdCache[resolvedName],
+                                signalStrength: Self.signalPercentage(from: networkLinkStatus),
+                                networkLinkStatus: networkLinkStatus
                             )
 
  // 🔧 智能去重：使用新的智能匹配函数

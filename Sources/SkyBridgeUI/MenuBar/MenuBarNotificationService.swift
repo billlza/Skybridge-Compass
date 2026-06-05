@@ -156,11 +156,19 @@ public final class MenuBarNotificationService {
             intentIdentifiers: [],
             options: []
         )
+
+        let remoteDesktopSessionCategory = UNNotificationCategory(
+            identifier: RemoteDesktopSessionNotificationService.categoryIdentifier,
+            actions: [],
+            intentIdentifiers: [],
+            options: []
+        )
         
         notificationCenter.setNotificationCategories([
             transferCompleteCategory,
             transferFailedCategory,
-            deviceDiscoveredCategory
+            deviceDiscoveredCategory,
+            remoteDesktopSessionCategory
         ])
     }
 }

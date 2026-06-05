@@ -950,6 +950,12 @@
 "notifications.fileReceived.completed" = "ファイル受信完了";
 "notifications.fileReceived.savedTo" = "%@ を %@ に保存しました";
 "notifications.fileReceived.completedBody" = "%@ の受信が完了しました";
+"notifications.remoteDesktop.ended.title" = "リモートデスクトップ終了";
+"notifications.remoteDesktop.ended.body" = "リモートデスクトップセッションは正常に終了しました。";
+"notifications.remoteDesktop.ended.bodyWithDevice" = "%@ とのリモートデスクトップセッションは正常に終了しました。";
+"notifications.remoteDesktop.interrupted.title" = "リモートデスクトップが中断";
+"notifications.remoteDesktop.interrupted.body" = "リモートデスクトップセッションが予期せず中断されました。";
+"notifications.remoteDesktop.interrupted.bodyWithDevice" = "%@ とのリモートデスクトップセッションが予期せず中断されました。";
 "notifications.chunkVerification.passed" = "チャンク検証成功";
 "notifications.chunkVerification.failed" = "チャンク検証失敗";
 "notifications.merkleVerification.passed" = "Merkle 検証成功";

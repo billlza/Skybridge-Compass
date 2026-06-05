@@ -93,6 +93,7 @@ public actor WebSocketSignalingClient {
     public enum SignalingError: LocalizedError {
         case notConnected
         case connectTimedOut
+        case invalidSignalingEndpoint(String)
         case sendRequiresBound
         case serverRejected(String)
         case backendFailed(SignalingBackend, String)
@@ -103,6 +104,8 @@ public actor WebSocketSignalingClient {
                 return "信令 WebSocket 未连接"
             case .connectTimedOut:
                 return "信令 WebSocket 连接超时"
+            case .invalidSignalingEndpoint(let reason):
+                return "信令 WebSocket 端点无效: \(reason)"
             case .sendRequiresBound:
                 return "信令通道尚未 bound，不能发送业务消息"
             case .serverRejected(let reason):

@@ -180,6 +180,12 @@
 "idleConnection.notification.title" = "远程连接仍在后台运行";
 "idleConnection.notification.body" = "你与 %@ 的远程连接仍在后台保持，如需断开请回到应用操作。";
 "idleConnection.notification.defaultDevice" = "远程设备";
+"remoteDesktop.notification.ended.title" = "远程桌面已结束";
+"remoteDesktop.notification.ended.body" = "远程桌面会话已正常结束。";
+"remoteDesktop.notification.ended.bodyWithDevice" = "与 %@ 的远程桌面会话已正常结束。";
+"remoteDesktop.notification.interrupted.title" = "远程桌面异常中断";
+"remoteDesktop.notification.interrupted.body" = "远程桌面会话已异常中断。";
+"remoteDesktop.notification.interrupted.bodyWithDevice" = "与 %@ 的远程桌面会话已异常中断。";
 "连接设备" = "连接设备";
 "连接失败" = "连接失败";
 "disconnect.failed" = "断开没有完成，请稍后重试。";

@@ -517,6 +517,7 @@ struct SkyBridgeCompassApp: App {
             let categories: Set<UNNotificationCategory> = [
                 UNNotificationCategory(identifier: "DISCOVERY_ALERT", actions: [], intentIdentifiers: [], options: []),
                 UNNotificationCategory(identifier: "WEATHER_ADVICE", actions: [], intentIdentifiers: [], options: []),
+                UNNotificationCategory(identifier: RemoteDesktopSessionNotificationService.categoryIdentifier, actions: [], intentIdentifiers: [], options: []),
                 UNNotificationCategory(identifier: "PERFORMANCE_ALERT", actions: [], intentIdentifiers: [], options: [])
             ]
             center.setNotificationCategories(categories)

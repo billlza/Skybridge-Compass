@@ -642,21 +642,40 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         webrtcJoinHeartbeatTasksBySessionId.removeValue(forKey: sessionID)
     }
 
-    private func storeCurrentPathSignalingEndpoint(
-        sessionID: String,
+    private typealias CurrentPathSignalingEndpoint = (origin: String, wsPath: String)
+
+    private func validatedCurrentPathSignalingEndpoint(
         origin: String,
         wsPath: String?
-    ) {
-        currentPathSignalingOriginBySessionId[sessionID] = origin
-        currentPathSignalingWebSocketPathBySessionId[sessionID] = Self.normalizedSignalingWebSocketPath(wsPath)
+    ) throws -> CurrentPathSignalingEndpoint {
+        (
+            origin: try validateCurrentPathOrigin(origin),
+            wsPath: try Self.validatedSignalingWebSocketPath(wsPath)
+        )
     }
 
-    nonisolated static func normalizedSignalingWebSocketPath(_ rawPath: String?) -> String {
+    private func storeCurrentPathSignalingEndpoint(
+        sessionID: String,
+        endpoint: CurrentPathSignalingEndpoint
+    ) {
+        currentPathSignalingOriginBySessionId[sessionID] = endpoint.origin
+        currentPathSignalingWebSocketPathBySessionId[sessionID] = endpoint.wsPath
+    }
+
+    nonisolated static func validatedSignalingWebSocketPath(_ rawPath: String?) throws -> String {
         let trimmed = rawPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard trimmed.first == "/",
+              trimmed != "/",
               !trimmed.contains("?"),
-              !trimmed.contains("#") else {
-            return "/ws"
+              !trimmed.contains("#"),
+              trimmed.unicodeScalars.allSatisfy({ scalar in
+                  scalar.isASCII && !CharacterSet.whitespacesAndNewlines.contains(scalar)
+              }) else {
+            throw NSError(
+                domain: "CrossNetworkConnectionManager",
+                code: 654,
+                userInfo: [NSLocalizedDescriptionKey: "invalid current-path signaling websocket path"]
+            )
         }
         return trimmed
     }
@@ -680,8 +699,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             return nil
         }
 
+        guard let path = try? validatedSignalingWebSocketPath(wsPath) else {
+            return nil
+        }
         components.scheme = scheme == "https" ? "wss" : "ws"
-        components.path = normalizedSignalingWebSocketPath(wsPath)
+        components.path = path
         components.fragment = nil
         components.queryItems = [
             URLQueryItem(name: "shard", value: sessionID.uppercased()),
@@ -1003,6 +1025,12 @@ public final class CrossNetworkConnectionManager: ObservableObject {
     ) {
         logger.info("🧹 清理 WebRTC 会话: session=\(sessionID, privacy: .public) reason=\(reason, privacy: .public)")
 
+        notifyWebRTCTerminalSessionIfNeeded(
+            sessionID: sessionID,
+            reason: reason,
+            disconnectKind: disconnectKind
+        )
+
         RemoteControlSecurityNoticeCenter.shared.endNotice(
             sessionId: sessionID,
             transportKind: .webrtc
@@ -1181,6 +1209,78 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             return trimmed
         }
         return "Remote Device"
+    }
+
+    private func remoteDesktopNotificationDeviceName(sessionID: String) -> String? {
+        let fallback = activeSessionSnapshot?.sessionId == sessionID
+            ? activeSessionSnapshot?.deviceName
+            : nil
+        let resolved = resolvedCrossNetworkDisplayName(
+            sessionID: sessionID,
+            fallbackDeviceName: fallback
+        )
+        let trimmed = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "Remote Device" else { return nil }
+        return trimmed
+    }
+
+    private func hasUserVisibleWebRTCRemoteDesktopSession(sessionID: String) -> Bool {
+        if currentConnection?.id == sessionID {
+            return true
+        }
+        if let snapshot = activeSessionSnapshot, snapshot.sessionId == sessionID {
+            switch snapshot.phase {
+            case .connecting:
+                break
+            case .transportReady, .handshakeComplete, .reconnecting, .disconnecting:
+                return true
+            }
+        }
+        if webrtcSessionKeysBySessionId[sessionID] != nil {
+            return true
+        }
+        if webrtcRemoteDesktopHeartbeatAtBySessionId[sessionID] != nil {
+            return true
+        }
+        if webrtcScreenStreamingTasksBySessionId[sessionID] != nil {
+            return true
+        }
+        if webrtcInteractionStreamingAllowedSessionIds.contains(sessionID) {
+            return true
+        }
+        if webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) {
+            return true
+        }
+        return false
+    }
+
+    private func beginWebRTCTerminalNotificationTracking(sessionID: String) {
+        RemoteDesktopSessionNotificationService.shared.beginSession(
+            sessionID: sessionID,
+            transport: "webrtc"
+        )
+    }
+
+    private func notifyWebRTCTerminalSessionIfNeeded(
+        sessionID: String,
+        reason: String,
+        disconnectKind: SessionDisconnectKind
+    ) {
+        guard let kind = RemoteDesktopSessionTerminationPolicy.notificationKind(
+            disconnectKind: disconnectKind,
+            reason: reason,
+            hadUserVisibleSession: hasUserVisibleWebRTCRemoteDesktopSession(sessionID: sessionID)
+        ) else {
+            return
+        }
+
+        RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+            sessionID: sessionID,
+            deviceName: remoteDesktopNotificationDeviceName(sessionID: sessionID),
+            transport: "webrtc",
+            kind: kind,
+            reason: reason
+        )
     }
 
     private func updateCrossNetworkRemoteMetadata(
@@ -1585,6 +1685,15 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 transportKind: .webrtc
             )
         }
+        for sessionID in webrtcSessionsBySessionId.keys where hasUserVisibleWebRTCRemoteDesktopSession(sessionID: sessionID) {
+            RemoteDesktopSessionNotificationService.shared.sendTerminalNotificationIfNeeded(
+                sessionID: sessionID,
+                deviceName: remoteDesktopNotificationDeviceName(sessionID: sessionID),
+                transport: "webrtc",
+                kind: .normal,
+                reason: "explicit_disconnect"
+            )
+        }
 
         // 1) 关闭所有 WebRTC 会话
         for (_, session) in webrtcSessionsBySessionId {
@@ -1790,13 +1899,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 validDuration: validDuration
             )
             let sessionID = sessionLease.sessionID
+            let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+                origin: sessionLease.signalingServerOrigin,
+                wsPath: sessionLease.wsPath
+            )
             webrtcSignalingAuthTokenBySessionId[sessionLease.sessionID] = sessionLease.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[sessionLease.sessionID] = sessionLease.turnAdmissionLease
             storeWebRTCMediaAdmissionLease(sessionLease.mediaAdmissionLease, for: sessionLease.sessionID)
             storeCurrentPathSignalingEndpoint(
                 sessionID: sessionLease.sessionID,
-                origin: sessionLease.signalingServerOrigin,
-                wsPath: sessionLease.wsPath
+                endpoint: signalingEndpoint
             )
             authorityBoundWebRTCBootstrapSessionIds.insert(sessionID)
             logQRCodeStage("generate", stage: "\(currentStage)_finished", sessionID: sessionID)
@@ -1909,19 +2021,21 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 qrBootstrapToken: qrData.qrBootstrapToken,
                 idempotencyKey: "qr-redeem-\(qrData.sessionID)-\(localBinding.deviceId)"
             )
-            _ = try validateCurrentPathOrigin(redeemed.signalingServerOrigin)
             guard redeemed.initiatorDeviceId == qrData.deviceID,
                   redeemed.initiatorProtocolSigningAlgorithm == qrData.protocolSigningAlgorithm,
                   redeemed.initiatorProtocolPublicKeyFingerprint == qrData.protocolPublicKeyFingerprint else {
                 throw CrossNetworkConnectionError.invalidSignature
             }
+            let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+                origin: redeemed.signalingServerOrigin,
+                wsPath: redeemed.wsPath
+            )
             webrtcSignalingAuthTokenBySessionId[qrData.sessionID] = redeemed.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[qrData.sessionID] = redeemed.turnAdmissionLease
             storeWebRTCMediaAdmissionLease(redeemed.mediaAdmissionLease, for: qrData.sessionID)
             storeCurrentPathSignalingEndpoint(
                 sessionID: qrData.sessionID,
-                origin: redeemed.signalingServerOrigin,
-                wsPath: redeemed.wsPath
+                endpoint: signalingEndpoint
             )
             currentPathExpectedRemoteAuthorityBySessionId[qrData.sessionID] = CurrentPathRemoteAuthority(
                 deviceId: qrData.deviceID,
@@ -2084,13 +2198,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 validDuration: requestedLeaseMode.validDuration
             )
             let code = lease.code
+            let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+                origin: lease.signalingServerOrigin,
+                wsPath: lease.wsPath
+            )
             webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
             webrtcTurnAdmissionLeaseBySessionId[lease.sessionID] = lease.turnAdmissionLease
             storeWebRTCMediaAdmissionLease(lease.mediaAdmissionLease, for: lease.sessionID)
             storeCurrentPathSignalingEndpoint(
                 sessionID: lease.sessionID,
-                origin: lease.signalingServerOrigin,
-                wsPath: lease.wsPath
+                endpoint: signalingEndpoint
             )
 
             // 2) 当前主路径由服务端发放短期 code + initiator token，code 同时作为 WebRTC sessionId。
@@ -2185,7 +2302,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 admissionToken: admissionLease.token,
                 code: normalized
             )
-            _ = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
+            let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+                origin: lookup.signalingServerOrigin,
+                wsPath: lookup.wsPath
+            )
             try enforceCurrentPathTrustBinding(
                 deviceId: lookup.initiatorDeviceId,
                 protocolPublicKeyFingerprint: lookup.initiatorProtocolPublicKeyFingerprint,
@@ -2196,8 +2316,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             storeWebRTCMediaAdmissionLease(lookup.mediaAdmissionLease, for: lookup.sessionID)
             storeCurrentPathSignalingEndpoint(
                 sessionID: lookup.sessionID,
-                origin: lookup.signalingServerOrigin,
-                wsPath: lookup.wsPath
+                endpoint: signalingEndpoint
             )
             currentPathExpectedRemoteAuthorityBySessionId[lookup.sessionID] = CurrentPathRemoteAuthority(
                 deviceId: lookup.initiatorDeviceId,
@@ -2300,6 +2419,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 }
             }
 
+            beginWebRTCTerminalNotificationTracking(sessionID: sessionID)
             webrtcSessionsBySessionId[sessionID] = session
             await adoptPendingWebRTCJoinBootstrapIfPresent(sessionID: sessionID, session: session)
 
@@ -2391,20 +2511,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             qrBootstrapToken: invite.qrBootstrapToken,
             idempotencyKey: "qr-redeem-\(invite.sessionID)-\(localBinding.deviceId)"
         )
-        _ = try validateCurrentPathOrigin(redeemed.signalingServerOrigin)
         guard redeemed.initiatorDeviceId == invite.deviceID,
               redeemed.initiatorProtocolSigningAlgorithm == invite.protocolSigningAlgorithm,
               redeemed.initiatorProtocolPublicKeyFingerprint == invite.protocolPublicKeyFingerprint else {
             throw CrossNetworkConnectionError.invalidSignature
         }
+        let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(
+            origin: redeemed.signalingServerOrigin,
+            wsPath: redeemed.wsPath
+        )
 
         webrtcSignalingAuthTokenBySessionId[invite.sessionID] = redeemed.sessionToken
         webrtcTurnAdmissionLeaseBySessionId[invite.sessionID] = redeemed.turnAdmissionLease
         storeWebRTCMediaAdmissionLease(redeemed.mediaAdmissionLease, for: invite.sessionID)
         storeCurrentPathSignalingEndpoint(
             sessionID: invite.sessionID,
-            origin: redeemed.signalingServerOrigin,
-            wsPath: redeemed.wsPath
+            endpoint: signalingEndpoint
         )
         currentPathExpectedRemoteAuthorityBySessionId[invite.sessionID] = CurrentPathRemoteAuthority(
             deviceId: invite.deviceID,
@@ -2468,14 +2590,14 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         )
     }
 
-    private func signalingWebSocketURL(shardKey: String? = nil) -> URL? {
+    private func signalingWebSocketURL(shardKey: String? = nil) throws -> URL {
         guard let shardKey = shardKey?.trimmingCharacters(in: .whitespacesAndNewlines),
               !shardKey.isEmpty else {
-            return URL(string: SkyBridgeServerConfig.signalingWebSocketURL)
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path session id")
         }
         guard let sessionToken = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
               !sessionToken.isEmpty else {
-            return nil
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path session token")
         }
         let clientVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2484,33 +2606,26 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             : (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0")
         let protocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"] ?? "1"
 
-        if let origin = currentPathSignalingOriginBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !origin.isEmpty {
-            return Self.currentPathSignalingWebSocketURL(
-                signalingServerOrigin: origin,
-                wsPath: currentPathSignalingWebSocketPathBySessionId[shardKey],
-                sessionID: shardKey,
-                sessionToken: sessionToken,
-                clientVersion: resolvedClientVersion,
-                protocolVersion: protocolVersion
-            )
+        guard let origin = currentPathSignalingOriginBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !origin.isEmpty else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path signaling origin")
         }
-
-        guard let baseURL = URL(string: SkyBridgeServerConfig.signalingWebSocketURL) else { return nil }
-        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
-            return baseURL
+        do {
+            _ = try Self.validatedSignalingWebSocketPath(currentPathSignalingWebSocketPathBySessionId[shardKey])
+        } catch {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint(error.localizedDescription)
         }
-        var queryItems = components.queryItems ?? []
-        queryItems.removeAll { $0.name == "shard" }
-        queryItems.removeAll { $0.name == "st" }
-        queryItems.removeAll { $0.name == "cv" }
-        queryItems.removeAll { $0.name == "pv" }
-        queryItems.append(URLQueryItem(name: "shard", value: shardKey.uppercased()))
-        queryItems.append(URLQueryItem(name: "st", value: sessionToken))
-        queryItems.append(URLQueryItem(name: "cv", value: resolvedClientVersion))
-        queryItems.append(URLQueryItem(name: "pv", value: protocolVersion))
-        components.queryItems = queryItems
-        return components.url ?? baseURL
+        guard let url = Self.currentPathSignalingWebSocketURL(
+            signalingServerOrigin: origin,
+            wsPath: currentPathSignalingWebSocketPathBySessionId[shardKey],
+            sessionID: shardKey,
+            sessionToken: sessionToken,
+            clientVersion: resolvedClientVersion,
+            protocolVersion: protocolVersion
+        ) else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("invalid current-path signaling origin")
+        }
+        return url
     }
 
     private func ensureSignalingConnected(shardKey: String? = nil) async throws {
@@ -2529,10 +2644,10 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             try await client.connectOrThrow()
             return
         }
-        guard let sessionID = normalizedShardKey,
-              let url = signalingWebSocketURL(shardKey: normalizedShardKey) else {
-            throw WebSocketSignalingClient.SignalingError.notConnected
+        guard let sessionID = normalizedShardKey else {
+            throw WebSocketSignalingClient.SignalingError.invalidSignalingEndpoint("missing current-path session id")
         }
+        let url = try signalingWebSocketURL(shardKey: sessionID)
         let generation = nextSignalingGeneration(for: sessionID)
         let client = WebSocketSignalingClient(url: url, sessionId: sessionID, generation: generation)
         self.signalingClient = client
@@ -2687,6 +2802,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         }
 
+        beginWebRTCTerminalNotificationTracking(sessionID: sessionID)
         webrtcSessionsBySessionId[sessionID] = session
         await adoptPendingWebRTCJoinBootstrapIfPresent(sessionID: sessionID, session: session)
 
@@ -2824,6 +2940,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             }
         }
 
+        beginWebRTCTerminalNotificationTracking(sessionID: sessionID)
         webrtcSessionsBySessionId[sessionID] = session
         await adoptPendingWebRTCJoinBootstrapIfPresent(sessionID: sessionID, session: session)
 

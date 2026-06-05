@@ -301,7 +301,7 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(hostSource.contains("degradedFallbackJPEGProfile: nil"))
         #expect(hostSource.contains("format=webrtc-native-video-waiting"))
         #expect(hostSource.contains("fallback=forbidden"))
-        #expect(hostAndPolicySource.contains("return !remoteStreamConfiguration.isStopRequest"))
+        #expect(hostAndPolicySource.contains("remoteStreamConfiguration.allowsDegradedMediaFallbacks == false"))
         #expect(hostSource.contains("nativeVideoTrackReady"))
         #expect(hostAndPolicySource.contains("shouldDropNativeWarmupNonJPEGFallbackFrame"))
         #expect(hostSource.contains("dropReason=native-warmup-non-jpeg-fallback"))

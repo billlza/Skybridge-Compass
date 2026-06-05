@@ -7,7 +7,6 @@ enum RemoteDesktopViewerStreamConfigurationPushPolicy {
         let canSendOverLAN: Bool
         let shouldStartRealtimeMediaAudioReceiver: Bool
         let shouldStopRealtimeMediaAudioReceiver: Bool
-        let shouldDeferUntilAudioEndpointReady: Bool
         let includeAudioEndpointInStreamConfig: Bool
 
         var canSend: Bool {
@@ -20,7 +19,6 @@ enum RemoteDesktopViewerStreamConfigurationPushPolicy {
         hasCurrentConnection: Bool,
         hasLANConnection: Bool,
         audioRedirectionEnabled: Bool,
-        strictValidationRequiresAudioEndpoint: Bool,
         hasUsableMediaAudioBinding: Bool,
         refreshStream: Bool,
         lastSentMediaAudioEndpointPresent: Bool,
@@ -28,8 +26,6 @@ enum RemoteDesktopViewerStreamConfigurationPushPolicy {
     ) -> PreparationPlan {
         let canSendOverWebRTC = activeTransportMode == .crossNetwork && hasCurrentConnection
         let canSendOverLAN = activeTransportMode == .lan && hasLANConnection
-        let shouldDeferUntilAudioEndpointReady = strictValidationRequiresAudioEndpoint
-            && !hasUsableMediaAudioBinding
         let includeAudioEndpointInStreamConfig = audioRedirectionEnabled
             && hasUsableMediaAudioBinding
             && (activeTransportMode == .lan
@@ -42,7 +38,6 @@ enum RemoteDesktopViewerStreamConfigurationPushPolicy {
             canSendOverLAN: canSendOverLAN,
             shouldStartRealtimeMediaAudioReceiver: audioRedirectionEnabled,
             shouldStopRealtimeMediaAudioReceiver: !audioRedirectionEnabled,
-            shouldDeferUntilAudioEndpointReady: shouldDeferUntilAudioEndpointReady,
             includeAudioEndpointInStreamConfig: includeAudioEndpointInStreamConfig
         )
     }
