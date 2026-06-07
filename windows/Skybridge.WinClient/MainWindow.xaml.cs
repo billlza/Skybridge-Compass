@@ -27,6 +27,7 @@ public sealed partial class MainWindow : Window
             new SystemMonitorWorkspaceClient(),
             new UsbManagementWorkspaceClient(),
             new SettingsWorkspaceClient(),
+            new DashboardMetricsClient(),
             new TopBarStatusClient());
         DataContext = ViewModel;
     }

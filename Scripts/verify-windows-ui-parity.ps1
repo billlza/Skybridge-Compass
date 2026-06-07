@@ -43,6 +43,7 @@ function Assert-Ordered {
 
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
+$dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
 $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
@@ -58,12 +59,13 @@ $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/To
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
 $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
+$dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
@@ -212,6 +214,31 @@ Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles
     '<TextBlock Text="{Binding TopBarThemeStatus}"',
     'Command="{Binding HeartbeatCommand}"'
 )
+
+Assert-Ordered -Text $dashboardMetrics -Context "Dashboard metrics service order" -Needles @(
+    '"Online Devices"',
+    '"Active Sessions"',
+    '"Transfer Tasks"',
+    '"Performance"'
+)
+
+foreach ($dashboardSignal in @(
+    "public interface IDashboardMetricsClient",
+    "public sealed class DashboardMetricsClient : IDashboardMetricsClient",
+    "BuildReadOnlySnapshot",
+    "DashboardMetricsRequest",
+    "DashboardMetricsSnapshot",
+    "DashboardMetric",
+    "OnlineDeviceCount",
+    "ActiveSessionCount",
+    "TransferTaskCount",
+    "PerformanceStatus",
+    "new DashboardMetricsClient()",
+    "Core engine connected peer count placeholder",
+    "renderer and ETW telemetry providers"
+)) {
+    Assert-Contains -Text ($dashboardMetrics + $sessionViewModel + $mainWindow) -Needle $dashboardSignal -Message "Dashboard metrics parity signal missing: $dashboardSignal"
+}
 
 Assert-Ordered -Text $topBarStatus -Context "Top bar service parity order" -Needles @(
     '"Connection"',
@@ -586,6 +613,7 @@ foreach ($docSignal in @(
     "origin/tdsc-2026-01-0318-ios-sim-fix:Docs/ProtocolAlignmentPlan.md",
     "origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md",
     "Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings",
+    "DashboardMetricsClient",
     "ConnectionPreflightClient",
     "Prepare Connection",
     "WindowsDiscoveryBrowserClient",

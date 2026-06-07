@@ -45,6 +45,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ISystemMonitorWorkspaceClient _systemMonitorClient;
     private readonly IUsbManagementWorkspaceClient _usbManagementClient;
     private readonly ISettingsWorkspaceClient _settingsClient;
+    private readonly IDashboardMetricsClient _dashboardMetricsClient;
     private readonly ITopBarStatusClient _topBarStatusClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
@@ -71,6 +72,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _systemMonitorStatus = "Ready";
     private string _usbManagementStatus = "Ready";
     private string _settingsStatus = "Ready";
+    private int _onlineDeviceCount;
+    private int _activeSessionCount;
+    private int _transferTaskCount;
+    private string _performanceStatus = "Nominal";
     private string _topBarConnectionStatus = "Disconnected";
     private string _topBarDiagnosticsStatus = "Nominal";
     private string _topBarNotificationsStatus = "Off";
@@ -100,6 +105,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ISystemMonitorWorkspaceClient? systemMonitorClient = null,
         IUsbManagementWorkspaceClient? usbManagementClient = null,
         ISettingsWorkspaceClient? settingsClient = null,
+        IDashboardMetricsClient? dashboardMetricsClient = null,
         ITopBarStatusClient? topBarStatusClient = null)
     {
         _engineClient = engineClient;
@@ -115,6 +121,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _systemMonitorClient = systemMonitorClient ?? new UnavailableSystemMonitorWorkspaceClient();
         _usbManagementClient = usbManagementClient ?? new UnavailableUsbManagementWorkspaceClient();
         _settingsClient = settingsClient ?? new UnavailableSettingsWorkspaceClient();
+        _dashboardMetricsClient = dashboardMetricsClient ?? new DashboardMetricsClient();
         _topBarStatusClient = topBarStatusClient ?? new TopBarStatusClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
@@ -165,6 +172,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshSettingsCommand = new AsyncRelayCommand(RefreshSettingsAsync, CanRefreshSettings);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
+        RefreshDashboardMetrics();
         RefreshTopBarStatus();
     }
 
@@ -216,13 +224,29 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<SettingsDetailItemView> SettingsDetails { get; }
 
-    public int OnlineDeviceCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
+    public int OnlineDeviceCount
+    {
+        get => _onlineDeviceCount;
+        private set => SetField(ref _onlineDeviceCount, value);
+    }
 
-    public int ActiveSessionCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
+    public int ActiveSessionCount
+    {
+        get => _activeSessionCount;
+        private set => SetField(ref _activeSessionCount, value);
+    }
 
-    public int TransferTaskCount => FileTransferQueue.Count;
+    public int TransferTaskCount
+    {
+        get => _transferTaskCount;
+        private set => SetField(ref _transferTaskCount, value);
+    }
 
-    public string PerformanceStatus => IsBusy ? "Busy" : "Nominal";
+    public string PerformanceStatus
+    {
+        get => _performanceStatus;
+        private set => SetField(ref _performanceStatus, value);
+    }
 
     public string TopBarConnectionStatus
     {
@@ -290,8 +314,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _connectionState, value))
             {
                 OnPropertyChanged(nameof(ConnectionStatus));
-                OnPropertyChanged(nameof(OnlineDeviceCount));
-                OnPropertyChanged(nameof(ActiveSessionCount));
+                RefreshDashboardMetrics();
                 RefreshTopBarStatus();
                 RefreshCommandStates();
             }
@@ -307,7 +330,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _isBusy, value))
             {
-                OnPropertyChanged(nameof(PerformanceStatus));
+                RefreshDashboardMetrics();
                 RefreshTopBarStatus();
                 RefreshCommandStates();
             }
@@ -1006,7 +1029,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 FileTransferSecurityFacts.Add(FileTransferSecurityFactView.FromFact(fact));
             }
 
-            OnPropertyChanged(nameof(TransferTaskCount));
+            RefreshDashboardMetrics();
             OnPropertyChanged(nameof(FileTransferHistoryCount));
             FileTransferStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
             StatusMessage = "File transfer workspace updated";
@@ -1281,6 +1304,20 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSystemMonitorCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSettingsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+    }
+
+    private void RefreshDashboardMetrics()
+    {
+        var snapshot = _dashboardMetricsClient.BuildReadOnlySnapshot(
+            new DashboardMetricsRequest(
+                ConnectionState,
+                FileTransferQueue.Count,
+                IsBusy));
+
+        OnlineDeviceCount = snapshot.OnlineDeviceCount;
+        ActiveSessionCount = snapshot.ActiveSessionCount;
+        TransferTaskCount = snapshot.TransferTaskCount;
+        PerformanceStatus = snapshot.PerformanceStatus;
     }
 
     private void RefreshTopBarStatus()
