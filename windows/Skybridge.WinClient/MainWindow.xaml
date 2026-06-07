@@ -618,26 +618,23 @@
                                 </Button>
                             </Grid>
 
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE8E5;" FontSize="14" />
-                                        <TextBlock Text="Select Files" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE8B7;" FontSize="14" />
-                                        <TextBlock Text="Select Folder" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE97E;" FontSize="14" />
-                                        <TextBlock Text="Generate QR" />
-                                    </StackPanel>
-                                </Button>
-                            </StackPanel>
+                            <ItemsControl ItemsSource="{Binding FileTransferActions}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" Spacing="10" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button IsEnabled="{Binding IsEnabled}">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                <TextBlock Text="{Binding Title}" />
+                                            </StackPanel>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
 
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>

@@ -53,6 +53,7 @@ $connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
+$workspaceActionCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceActionCatalogClient.cs"
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
@@ -60,7 +61,7 @@ $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/To
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -76,6 +77,7 @@ $connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceSt
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
+$workspaceActionCatalog = Get-Content -Raw -LiteralPath $workspaceActionCatalogPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
@@ -152,6 +154,7 @@ foreach ($binding in @(
     "UsbDeviceStats",
     "UsbDevices",
     "IsUsbManagementSelected",
+    "FileTransferActions",
     "FileTransferStatus",
     "FileTransferQueue",
     "FileTransferHistory",
@@ -332,12 +335,19 @@ Assert-Ordered -Text $mainWindow -Context "USB Management action order" -Needles
 
 Assert-Ordered -Text $mainWindow -Context "File Transfer action order" -Needles @(
     '<TextBlock Text="File Transfer"',
-    '<TextBlock Text="Select Files"',
-    '<TextBlock Text="Select Folder"',
-    '<TextBlock Text="Generate QR"',
+    'ItemsSource="{Binding FileTransferActions}"',
     '<TextBlock Text="Transfer Queue"',
     '<TextBlock Text="Transfer History"',
     '<TextBlock Text="File Transfer Security"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "File Transfer action catalog order" -Needles @(
+    '"SelectFiles"',
+    '"Select Files"',
+    '"SelectFolder"',
+    '"Select Folder"',
+    '"GenerateQr"',
+    '"Generate QR"'
 )
 
 Assert-Ordered -Text $mainWindow -Context "Remote Desktop action order" -Needles @(
@@ -483,6 +493,10 @@ foreach ($fileTransferSignal in @(
     "Select Files",
     "Select Folder",
     "Generate QR",
+    "FileTransferActions",
+    "WorkspaceActionCatalogClient",
+    "WorkspaceActionItemView",
+    "WorkspaceActionSurface.FileTransfer",
     "Transfer Queue",
     "Transfer History",
     "HMAC",
@@ -492,7 +506,7 @@ foreach ($fileTransferSignal in @(
     "MapChannelAsync",
     "EncodeFrameAsync"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer + $workspaceActionCatalog) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", true)' -Message "File Transfer must be marked implemented once the queue/history workspace exists."
@@ -655,6 +669,7 @@ foreach ($docSignal in @(
     "Notifications",
     "Theme",
     "TopBarStatusClient",
+    "WorkspaceActionCatalogClient",
     "CrossNetworkConnectionClient",
     "Generate QR Code",
     "Smart Connection Code",

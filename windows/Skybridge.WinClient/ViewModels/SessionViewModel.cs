@@ -48,6 +48,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IDashboardMetricsClient _dashboardMetricsClient;
     private readonly ITopBarStatusClient _topBarStatusClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
+    private readonly IWorkspaceActionCatalogClient _workspaceActionCatalogClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoverySearchText = "";
@@ -108,7 +109,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ISettingsWorkspaceClient? settingsClient = null,
         IDashboardMetricsClient? dashboardMetricsClient = null,
         ITopBarStatusClient? topBarStatusClient = null,
-        IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null)
+        IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null,
+        IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -126,6 +128,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _dashboardMetricsClient = dashboardMetricsClient ?? new DashboardMetricsClient();
         _topBarStatusClient = topBarStatusClient ?? new TopBarStatusClient();
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient ?? new ConnectionWorkspaceStateClient();
+        _workspaceActionCatalogClient = workspaceActionCatalogClient ?? new WorkspaceActionCatalogClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
@@ -136,6 +139,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PairingFacts = new ObservableCollection<PairingFactView>();
         ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
+        FileTransferActions = new ObservableCollection<WorkspaceActionItemView>();
         FileTransferQueue = new ObservableCollection<FileTransferQueueItemView>();
         FileTransferHistory = new ObservableCollection<FileTransferHistoryItemView>();
         FileTransferSecurityFacts = new ObservableCollection<FileTransferSecurityFactView>();
@@ -175,6 +179,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshSettingsCommand = new AsyncRelayCommand(RefreshSettingsAsync, CanRefreshSettings);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
+        LoadWorkspaceActions();
         RefreshDashboardMetrics();
         RefreshTopBarStatus();
     }
@@ -200,6 +205,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<ConnectionPreflightFactView> ConnectionPreflightFacts { get; }
 
     public ObservableCollection<CoreDiagnosticFactView> CoreDiagnosticFacts { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> FileTransferActions { get; }
 
     public ObservableCollection<FileTransferQueueItemView> FileTransferQueue { get; }
 
@@ -1363,6 +1370,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PerformanceStatus = snapshot.PerformanceStatus;
     }
 
+    private void LoadWorkspaceActions()
+    {
+        var fileTransferSnapshot = _workspaceActionCatalogClient.BuildReadOnlySnapshot(
+            new WorkspaceActionCatalogRequest(WorkspaceActionSurface.FileTransfer));
+
+        FileTransferActions.Clear();
+        foreach (var action in fileTransferSnapshot.Actions)
+        {
+            FileTransferActions.Add(WorkspaceActionItemView.FromItem(action));
+        }
+    }
+
     private void RefreshTopBarStatus()
     {
         var snapshot = _topBarStatusClient.BuildReadOnlySnapshot(
@@ -1601,6 +1620,17 @@ public sealed record FileTransferSecurityFactView(
 {
     public static FileTransferSecurityFactView FromFact(FileTransferSecurityFact fact) =>
         new(fact.Label, fact.Value, fact.Detail);
+}
+
+public sealed record WorkspaceActionItemView(
+    string Key,
+    string Title,
+    string Glyph,
+    bool IsEnabled,
+    string Detail)
+{
+    public static WorkspaceActionItemView FromItem(WorkspaceActionItem item) =>
+        new(item.Key, item.Title, item.Glyph, item.IsEnabled, item.Detail);
 }
 
 public sealed record CoreDiagnosticFactView(

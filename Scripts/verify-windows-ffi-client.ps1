@@ -37,6 +37,7 @@ $connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
+$workspaceActionCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceActionCatalogClient.cs"
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
@@ -46,7 +47,7 @@ $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngi
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -62,6 +63,7 @@ $connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceSt
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
+$workspaceActionCatalog = Get-Content -Raw -LiteralPath $workspaceActionCatalogPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
@@ -116,6 +118,7 @@ Assert-Contains -Text $mainWindow -Needle "new ConnectionPreflightClient(coreBri
 Assert-Contains -Text $mainWindow -Needle "new ConnectionWorkspaceStateClient()" -Message "MainWindow should wire ConnectionWorkspaceStateClient for explicit connection state gates."
 Assert-Contains -Text $mainWindow -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "MainWindow should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "MainWindow should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
+Assert-Contains -Text $mainWindow -Needle "new WorkspaceActionCatalogClient()" -Message "MainWindow should wire WorkspaceActionCatalogClient for explicit workspace action order."
 Assert-Contains -Text $mainWindow -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "MainWindow should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new SystemMonitorWorkspaceClient()" -Message "MainWindow should wire SystemMonitorWorkspaceClient for explicit System Monitor diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new UsbManagementWorkspaceClient()" -Message "MainWindow should wire UsbManagementWorkspaceClient for explicit USB Management diagnostics."
@@ -402,6 +405,27 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "FileTransferWorkspaceClient" -Message "Architecture doc missing FileTransferWorkspaceClient status."
+
+foreach ($signal in @(
+    "public interface IWorkspaceActionCatalogClient",
+    "public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient",
+    "BuildReadOnlySnapshot",
+    "WorkspaceActionSurface.FileTransfer",
+    "WorkspaceActionCatalogRequest",
+    "WorkspaceActionCatalogSnapshot",
+    "WorkspaceActionItem",
+    "SelectFiles",
+    "Select Files",
+    "SelectFolder",
+    "Select Folder",
+    "GenerateQr",
+    "Generate QR",
+    "Visible mac-parity quick action"
+)) {
+    Assert-Contains -Text $workspaceActionCatalog -Needle $signal -Message "WorkspaceActionCatalogClient missing action-catalog signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "WorkspaceActionCatalogClient" -Message "Architecture doc missing WorkspaceActionCatalogClient status."
 
 foreach ($signal in @(
     "public interface IRemoteDesktopWorkspaceClient",
