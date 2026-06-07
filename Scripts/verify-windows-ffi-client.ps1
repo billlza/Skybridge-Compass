@@ -281,6 +281,7 @@ foreach ($signal in @(
     "BuildCodeInputPolicy",
     "CrossNetworkCodeInputPolicy",
     "DefaultCodeInputPolicy",
+    "NormalizeCodeInput",
     "CanConnectWithCode",
     "CanScanQrCode",
     "CanCopyCode",

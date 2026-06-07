@@ -17,7 +17,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IDeviceDiscoveryInputDefaultsClient _deviceDiscoveryInputDefaultsClient;
     private readonly IManualConnectionClient _manualConnectionClient;
     private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
-    private readonly CrossNetworkCodeInputPolicy _crossNetworkCodeInputPolicy;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionPreflightClient _connectionPreflightClient;
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
@@ -103,7 +102,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _deviceDiscoveryInputDefaultsClient = deviceDiscoveryInputDefaultsClient ?? new DeviceDiscoveryInputDefaultsClient();
         _manualConnectionClient = manualConnectionClient ?? new UnavailableManualConnectionClient();
         _crossNetworkConnectionClient = crossNetworkConnectionClient ?? new UnavailableCrossNetworkConnectionClient();
-        _crossNetworkCodeInputPolicy = _crossNetworkConnectionClient.BuildCodeInputPolicy();
         _pairingMaterialClient = pairingMaterialClient ?? new UnavailablePairingMaterialClient();
         _connectionPreflightClient = connectionPreflightClient ?? new UnavailableConnectionPreflightClient();
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
@@ -504,7 +502,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         get => _crossNetworkCodeInput;
         set
         {
-            var normalized = NormalizeCrossNetworkCodeInput(value, _crossNetworkCodeInputPolicy);
+            var normalized = _crossNetworkConnectionClient.NormalizeCodeInput(value);
             if (SetField(ref _crossNetworkCodeInput, normalized))
             {
                 ApplyConnectionWorkspaceStatusPatch(
@@ -1587,35 +1585,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         field = value;
         OnPropertyChanged(propertyName);
         return true;
-    }
-
-    private static string NormalizeCrossNetworkCodeInput(
-        string? value,
-        CrossNetworkCodeInputPolicy inputPolicy)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "";
-        }
-
-        var normalized = new char[inputPolicy.CodeLength];
-        var count = 0;
-        foreach (var current in value.ToUpperInvariant())
-        {
-            if (!inputPolicy.Alphabet.Contains(current))
-            {
-                continue;
-            }
-
-            normalized[count] = current;
-            count++;
-            if (count == normalized.Length)
-            {
-                break;
-            }
-        }
-
-        return new string(normalized, 0, count);
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)

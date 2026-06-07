@@ -51,6 +51,11 @@ internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkCon
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() =>
         CrossNetworkConnectionClient.DefaultCodeInputPolicy;
 
+    public string NormalizeCodeInput(string? value) =>
+        CrossNetworkConnectionClient.NormalizeCodeInput(
+            value,
+            CrossNetworkConnectionClient.DefaultCodeInputPolicy);
+
     public bool CanScanQrCode(string qrInput) =>
         CrossNetworkConnectionClient.HasQrInput(qrInput);
 

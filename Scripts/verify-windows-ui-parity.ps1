@@ -756,6 +756,7 @@ foreach ($crossNetworkInputPolicySignal in @(
     "BuildCodeInputPolicy",
     "CrossNetworkCodeInputPolicy",
     "DefaultCodeInputPolicy",
+    "NormalizeCodeInput",
     "CodeLength",
     "Alphabet",
     "CanConnectWithCode",
@@ -767,13 +768,15 @@ foreach ($crossNetworkInputPolicySignal in @(
     "TryNormalizeConnectionCode",
     "BuildPendingStatus",
     "BuildDefaultPendingStatus",
-    "_crossNetworkCodeInputPolicy",
-    "NormalizeCrossNetworkCodeInput(value, _crossNetworkCodeInputPolicy)"
+    "_crossNetworkConnectionClient.NormalizeCodeInput(value)"
 )) {
     Assert-Contains -Text ($crossNetwork + $sessionViewModel) -Needle $crossNetworkInputPolicySignal -Message "Cross-network input policy signal missing: $crossNetworkInputPolicySignal"
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeAlphabet")) -Message "SessionViewModel must not duplicate the Smart Connection Code alphabet."
+Assert-True -Condition (-not $sessionViewModel.Contains("NormalizeCrossNetworkCodeInput")) -Message "SessionViewModel must source Smart Connection Code input normalization from ICrossNetworkConnectionClient."
+Assert-True -Condition (-not $sessionViewModel.Contains("ToUpperInvariant()")) -Message "SessionViewModel must not own Smart Connection Code casing policy."
+Assert-True -Condition (-not $sessionViewModel.Contains("inputPolicy.Alphabet.Contains")) -Message "SessionViewModel must not own Smart Connection Code alphabet filtering."
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkStatus = action switch")) -Message "SessionViewModel must source Cross-network pending status from ICrossNetworkConnectionClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeInput.Length == 6")) -Message "SessionViewModel must source Smart Connection Code readiness from ICrossNetworkConnectionClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("!string.IsNullOrWhiteSpace(CrossNetworkQrInput)")) -Message "SessionViewModel must source QR scan readiness from ICrossNetworkConnectionClient."

@@ -12,6 +12,8 @@ public interface ICrossNetworkConnectionClient
 {
     CrossNetworkCodeInputPolicy BuildCodeInputPolicy();
 
+    string NormalizeCodeInput(string? value);
+
     bool CanScanQrCode(string qrInput);
 
     bool CanCopyCode(string generatedCode);
@@ -40,6 +42,39 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         new(ShortCodeAlphabet, 6);
 
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() => DefaultCodeInputPolicy;
+
+    public string NormalizeCodeInput(string? value) =>
+        NormalizeCodeInput(value, DefaultCodeInputPolicy);
+
+    public static string NormalizeCodeInput(
+        string? value,
+        CrossNetworkCodeInputPolicy inputPolicy)
+    {
+        ArgumentNullException.ThrowIfNull(inputPolicy);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = new char[inputPolicy.CodeLength];
+        var count = 0;
+        foreach (var current in value.ToUpperInvariant())
+        {
+            if (!inputPolicy.Alphabet.Contains(current))
+            {
+                continue;
+            }
+
+            normalized[count] = current;
+            count++;
+            if (count == normalized.Length)
+            {
+                break;
+            }
+        }
+
+        return new string(normalized, 0, count);
+    }
 
     public bool CanScanQrCode(string qrInput) =>
         HasQrInput(qrInput);
@@ -218,27 +253,7 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         CrossNetworkCodeInputPolicy inputPolicy,
         out string code)
     {
-        code = string.Empty;
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return false;
-        }
-
-        var normalized = new List<char>(inputPolicy.CodeLength);
-        foreach (var current in raw.Trim().ToUpperInvariant())
-        {
-            if (inputPolicy.Alphabet.Contains(current))
-            {
-                normalized.Add(current);
-            }
-
-            if (normalized.Count == inputPolicy.CodeLength)
-            {
-                break;
-            }
-        }
-
-        code = new string(normalized.ToArray());
+        code = NormalizeCodeInput(raw, inputPolicy);
         return code.Length == inputPolicy.CodeLength;
     }
 
