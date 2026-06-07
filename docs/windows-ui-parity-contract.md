@@ -22,7 +22,7 @@ This contract fixes the Windows shell entry points against the macOS reference s
 - `windows/Skybridge.WinClient/MainWindow.xaml` uses the contract as a shell skeleton with left navigation, top status bar, dashboard metrics, selected-feature workspace, and session controls.
 
 ## Acceptance checks to add
-- Static test: Windows `FeatureEntryContract.Entries` exactly matches the macOS navigation IDs and order.
+- Static test: run `Scripts/verify-windows-ui-parity.ps1` to verify `FeatureEntryContract.Entries` matches the macOS navigation IDs and order, and that the shell exposes the required bindings and commands.
 - UI automation: each navigation entry can be selected and updates the selected-feature heading.
 - UI automation: connect, heartbeat, and disconnect buttons enable/disable according to `EngineConnectionState`.
 - Visual QA: left navigation order, top status bar, metric row, and session controls remain in stable positions across desktop window sizes.

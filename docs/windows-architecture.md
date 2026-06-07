@@ -39,7 +39,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 
 ## Testing approach
 - UI logic remains in view models and services, enabling unit tests against `SessionViewModel` without a XAML runtime.
-- UI parity tests should compare `FeatureEntryContract.Entries` against the macOS navigation order and automate shell selection before adding deeper feature pages.
+- UI parity tests should compare `FeatureEntryContract.Entries` against the macOS navigation order and automate shell selection before adding deeper feature pages. `Scripts/verify-windows-ui-parity.ps1` is the current text-only gate for navigation order, shell bindings, command bindings, and parity-document signals.
 - FFI glue is covered in Rust integration tests for engine lifecycle, transport selection, channel mapping, and connection planning; Windows C# bindings should add text-only/interop tests once the WinUI test harness is introduced.
 - Rust tests must cover transport selection defaults, channel reliability, transport binding digest changes, and FFI selector contracts.
 - Channel mapping tests must prove WebRTC uses distinct DataChannel labels, Windows MsQuic uses stream/datagram mappings, Apple native does not route Apple-to-Apple through WebRTC, and TCP fallback is visible as head-of-line blocking risk.

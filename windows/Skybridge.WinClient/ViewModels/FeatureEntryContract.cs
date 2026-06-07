@@ -26,13 +26,13 @@ public static class FeatureEntryContract
     public static IReadOnlyList<FeatureEntry> Entries { get; } =
         new List<FeatureEntry>
         {
-        new(FeatureEntryId.Dashboard, "Dashboard", "\uE80F", "Live overview", true),
-        new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Scan and pair", false),
-        new(FeatureEntryId.UsbManagement, "USB Management", "\uE88E", "Device routing", false),
-        new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", false),
-        new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", false),
-        new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Suite policy", false),
-        new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", false),
-        new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", false)
+            new(FeatureEntryId.Dashboard, "Dashboard", "\uE80F", "Live overview", true),
+            new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Scan and pair", false),
+            new(FeatureEntryId.UsbManagement, "USB Management", "\uE88E", "Device routing", false),
+            new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", false),
+            new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", false),
+            new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Suite policy", false),
+            new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", false),
+            new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", false)
         }.AsReadOnly();
 }
