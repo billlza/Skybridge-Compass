@@ -106,7 +106,7 @@
                             Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xE9F5;" FontSize="12" />
-                                <TextBlock Text="{Binding ConnectionStatus}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold" />
                             </StackPanel>
                         </Border>
                         <Border
@@ -116,19 +116,21 @@
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xE9D9;" FontSize="12" />
                                 <TextBlock Text="FPS / Diagnostics" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Text="{Binding PerformanceStatus}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold" />
                             </StackPanel>
                         </Border>
                         <Button IsEnabled="False">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xEA8F;" FontSize="14" />
                                 <TextBlock Text="Notifications" />
+                                <TextBlock Text="{Binding TopBarNotificationsStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </Button>
                         <Button IsEnabled="False">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xE771;" FontSize="14" />
                                 <TextBlock Text="Theme" />
+                                <TextBlock Text="{Binding TopBarThemeStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </Button>
                         <Button Command="{Binding HeartbeatCommand}">

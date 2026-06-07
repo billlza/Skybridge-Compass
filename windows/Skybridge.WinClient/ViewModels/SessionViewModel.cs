@@ -45,6 +45,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ISystemMonitorWorkspaceClient _systemMonitorClient;
     private readonly IUsbManagementWorkspaceClient _usbManagementClient;
     private readonly ISettingsWorkspaceClient _settingsClient;
+    private readonly ITopBarStatusClient _topBarStatusClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoverySearchText = "";
@@ -70,6 +71,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _systemMonitorStatus = "Ready";
     private string _usbManagementStatus = "Ready";
     private string _settingsStatus = "Ready";
+    private string _topBarConnectionStatus = "Disconnected";
+    private string _topBarDiagnosticsStatus = "Nominal";
+    private string _topBarNotificationsStatus = "Off";
+    private string _topBarThemeStatus = "System";
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
@@ -94,7 +99,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IRemoteDesktopWorkspaceClient? remoteDesktopClient = null,
         ISystemMonitorWorkspaceClient? systemMonitorClient = null,
         IUsbManagementWorkspaceClient? usbManagementClient = null,
-        ISettingsWorkspaceClient? settingsClient = null)
+        ISettingsWorkspaceClient? settingsClient = null,
+        ITopBarStatusClient? topBarStatusClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -109,6 +115,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _systemMonitorClient = systemMonitorClient ?? new UnavailableSystemMonitorWorkspaceClient();
         _usbManagementClient = usbManagementClient ?? new UnavailableUsbManagementWorkspaceClient();
         _settingsClient = settingsClient ?? new UnavailableSettingsWorkspaceClient();
+        _topBarStatusClient = topBarStatusClient ?? new TopBarStatusClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
@@ -158,6 +165,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshSettingsCommand = new AsyncRelayCommand(RefreshSettingsAsync, CanRefreshSettings);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
+        RefreshTopBarStatus();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -216,6 +224,30 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public string PerformanceStatus => IsBusy ? "Busy" : "Nominal";
 
+    public string TopBarConnectionStatus
+    {
+        get => _topBarConnectionStatus;
+        private set => SetField(ref _topBarConnectionStatus, value);
+    }
+
+    public string TopBarDiagnosticsStatus
+    {
+        get => _topBarDiagnosticsStatus;
+        private set => SetField(ref _topBarDiagnosticsStatus, value);
+    }
+
+    public string TopBarNotificationsStatus
+    {
+        get => _topBarNotificationsStatus;
+        private set => SetField(ref _topBarNotificationsStatus, value);
+    }
+
+    public string TopBarThemeStatus
+    {
+        get => _topBarThemeStatus;
+        private set => SetField(ref _topBarThemeStatus, value);
+    }
+
     public FeatureEntry SelectedFeature
     {
         get => _selectedFeature;
@@ -230,6 +262,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 OnPropertyChanged(nameof(IsQuantumSelected));
                 OnPropertyChanged(nameof(IsSystemMonitorSelected));
                 OnPropertyChanged(nameof(IsSettingsSelected));
+                RefreshTopBarStatus();
                 RefreshCommandStates();
             }
         }
@@ -259,6 +292,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 OnPropertyChanged(nameof(ConnectionStatus));
                 OnPropertyChanged(nameof(OnlineDeviceCount));
                 OnPropertyChanged(nameof(ActiveSessionCount));
+                RefreshTopBarStatus();
                 RefreshCommandStates();
             }
         }
@@ -274,6 +308,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _isBusy, value))
             {
                 OnPropertyChanged(nameof(PerformanceStatus));
+                RefreshTopBarStatus();
                 RefreshCommandStates();
             }
         }
@@ -1246,6 +1281,36 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSystemMonitorCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSettingsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+    }
+
+    private void RefreshTopBarStatus()
+    {
+        var snapshot = _topBarStatusClient.BuildReadOnlySnapshot(
+            new TopBarStatusRequest(
+                ConnectionStatus,
+                PerformanceStatus,
+                SelectedFeature.Title));
+
+        TopBarConnectionStatus = GetTopBarStatusValue(snapshot, "Connection", ConnectionStatus);
+        TopBarDiagnosticsStatus = GetTopBarStatusValue(snapshot, "FPS / Diagnostics", PerformanceStatus);
+        TopBarNotificationsStatus = GetTopBarStatusValue(snapshot, "Notifications", "Off");
+        TopBarThemeStatus = GetTopBarStatusValue(snapshot, "Theme", "System");
+    }
+
+    private static string GetTopBarStatusValue(
+        TopBarStatusSnapshot snapshot,
+        string label,
+        string fallback)
+    {
+        foreach (var item in snapshot.Items)
+        {
+            if (string.Equals(item.Label, label, StringComparison.Ordinal))
+            {
+                return item.Value;
+            }
+        }
+
+        return fallback;
     }
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)

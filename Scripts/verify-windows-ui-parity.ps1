@@ -54,10 +54,11 @@ $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Fi
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
+$topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -74,6 +75,7 @@ $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
+$topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 
@@ -111,6 +113,10 @@ foreach ($binding in @(
     "ActiveSessionCount",
     "TransferTaskCount",
     "PerformanceStatus",
+    "TopBarConnectionStatus",
+    "TopBarDiagnosticsStatus",
+    "TopBarNotificationsStatus",
+    "TopBarThemeStatus",
     "BitrateProfiles",
     "FramerateProfiles",
     "DiscoveryService",
@@ -197,13 +203,40 @@ Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order"
 Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles @(
     '<TextBlock Text="{Binding SelectedFeature.Title}"',
     '<TextBlock Text="{Binding StatusMessage}"',
-    '<TextBlock Text="{Binding ConnectionStatus}" FontWeight="SemiBold"',
+    '<TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold"',
     '<TextBlock Text="FPS / Diagnostics"',
-    '<TextBlock Text="{Binding PerformanceStatus}" FontWeight="SemiBold"',
+    '<TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold"',
     '<TextBlock Text="Notifications"',
+    '<TextBlock Text="{Binding TopBarNotificationsStatus}"',
     '<TextBlock Text="Theme"',
+    '<TextBlock Text="{Binding TopBarThemeStatus}"',
     'Command="{Binding HeartbeatCommand}"'
 )
+
+Assert-Ordered -Text $topBarStatus -Context "Top bar service parity order" -Needles @(
+    '"Connection"',
+    '"FPS / Diagnostics"',
+    '"Notifications"',
+    '"Theme"'
+)
+
+foreach ($topBarSignal in @(
+    "public interface ITopBarStatusClient",
+    "public sealed class TopBarStatusClient : ITopBarStatusClient",
+    "BuildReadOnlySnapshot",
+    "TopBarStatusRequest",
+    "TopBarStatusSnapshot",
+    "TopBarStatusItem",
+    "TopBarConnectionStatus",
+    "TopBarDiagnosticsStatus",
+    "TopBarNotificationsStatus",
+    "TopBarThemeStatus",
+    "new TopBarStatusClient()",
+    "Visible mac-parity notification entry point",
+    "Visible mac-parity theme entry point"
+)) {
+    Assert-Contains -Text ($topBarStatus + $sessionViewModel + $mainWindow) -Needle $topBarSignal -Message "Top bar parity signal missing: $topBarSignal"
+}
 
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',
@@ -561,6 +594,7 @@ foreach ($docSignal in @(
     "FPS / Diagnostics",
     "Notifications",
     "Theme",
+    "TopBarStatusClient",
     "CrossNetworkConnectionClient",
     "Generate QR Code",
     "Smart Connection Code",

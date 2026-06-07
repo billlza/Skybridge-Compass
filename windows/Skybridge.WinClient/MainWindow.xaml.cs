@@ -26,7 +26,8 @@ public sealed partial class MainWindow : Window
             new RemoteDesktopWorkspaceClient(coreBridge),
             new SystemMonitorWorkspaceClient(),
             new UsbManagementWorkspaceClient(),
-            new SettingsWorkspaceClient());
+            new SettingsWorkspaceClient(),
+            new TopBarStatusClient());
         DataContext = ViewModel;
     }
 }
