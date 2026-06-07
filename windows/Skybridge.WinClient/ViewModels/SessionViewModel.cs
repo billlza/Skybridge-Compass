@@ -29,10 +29,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private const string SamplePairingPublicKey =
         "c2FtcGxlLXBlZXItcHVibGljLWtleQ==";
 
+    private const string CrossNetworkCodeAlphabet =
+        "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IDiscoveryBrowserClient _discoveryBrowserClient;
     private readonly IManualConnectionClient _manualConnectionClient;
+    private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionPreflightClient _connectionPreflightClient;
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
@@ -47,6 +51,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _manualConnectionHost = "";
     private string _manualConnectionPort = "11550";
     private string _manualConnectionCode = "";
+    private string _crossNetworkQrInput = "";
+    private string _crossNetworkCodeInput = "";
+    private string _crossNetworkGeneratedCode = "";
     private string _discoveryTxtRecord =
         $"deviceId=mac-1;pubKeyFP={SampleFingerprint};platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1";
     private string _pairingConnectionCode =
@@ -54,6 +61,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _discoveryStatus = "Ready";
     private string _discoveryBrowserStatus = "Ready";
     private string _manualConnectionStatus = "Ready";
+    private string _crossNetworkStatus = "Ready";
     private string _pairingStatus = "Ready";
     private string _connectionPreflightStatus = "Ready";
     private string _coreDiagnosticsStatus = "Ready";
@@ -78,6 +86,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IDiscoveryClient? discoveryClient = null,
         IDiscoveryBrowserClient? discoveryBrowserClient = null,
         IManualConnectionClient? manualConnectionClient = null,
+        ICrossNetworkConnectionClient? crossNetworkConnectionClient = null,
         IPairingMaterialClient? pairingMaterialClient = null,
         IConnectionPreflightClient? connectionPreflightClient = null,
         ICoreDiagnosticsClient? coreDiagnosticsClient = null,
@@ -91,6 +100,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         _discoveryBrowserClient = discoveryBrowserClient ?? new UnavailableDiscoveryBrowserClient();
         _manualConnectionClient = manualConnectionClient ?? new UnavailableManualConnectionClient();
+        _crossNetworkConnectionClient = crossNetworkConnectionClient ?? new UnavailableCrossNetworkConnectionClient();
         _pairingMaterialClient = pairingMaterialClient ?? new UnavailablePairingMaterialClient();
         _connectionPreflightClient = connectionPreflightClient ?? new UnavailableConnectionPreflightClient();
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
@@ -105,6 +115,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
         DiscoveryBrowserFacts = new ObservableCollection<DiscoveryBrowserFactView>();
         ManualConnectionFacts = new ObservableCollection<ManualConnectionFactView>();
+        CrossNetworkConnectionFacts = new ObservableCollection<CrossNetworkConnectionFactView>();
         PairingFacts = new ObservableCollection<PairingFactView>();
         ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
@@ -130,6 +141,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshDiscoveryCommand = new AsyncRelayCommand(RefreshDiscoveryAsync, CanUseDiscoveryBrowser);
         RunExtendedDiscoveryCommand = new AsyncRelayCommand(RunExtendedDiscoveryAsync, CanUseDiscoveryBrowser);
         PrepareManualConnectionCommand = new AsyncRelayCommand(PrepareManualConnectionAsync, CanPrepareManualConnection);
+        GenerateQRCodeCommand = new AsyncRelayCommand(GenerateQRCodeAsync, CanUseCrossNetworkConnection);
+        ScanQRCodeCommand = new AsyncRelayCommand(ScanQRCodeAsync, CanScanQRCode);
+        GenerateConnectionCodeCommand = new AsyncRelayCommand(GenerateConnectionCodeAsync, CanUseCrossNetworkConnection);
+        RegenerateConnectionCodeCommand = new AsyncRelayCommand(RegenerateConnectionCodeAsync, CanUseCrossNetworkConnection);
+        CopyConnectionCodeCommand = new AsyncRelayCommand(CopyConnectionCodeAsync, CanCopyConnectionCode);
+        ConnectConnectionCodeCommand = new AsyncRelayCommand(ConnectConnectionCodeAsync, CanConnectConnectionCode);
         ParseAdvertisementCommand = new AsyncRelayCommand(ParseAdvertisementAsync, CanParseAdvertisement);
         ValidatePairingCodeCommand = new AsyncRelayCommand(ValidatePairingCodeAsync, CanValidatePairingCode);
         PrepareConnectionCommand = new AsyncRelayCommand(PrepareConnectionAsync, CanPrepareConnection);
@@ -156,6 +173,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<DiscoveryBrowserFactView> DiscoveryBrowserFacts { get; }
 
     public ObservableCollection<ManualConnectionFactView> ManualConnectionFacts { get; }
+
+    public ObservableCollection<CrossNetworkConnectionFactView> CrossNetworkConnectionFacts { get; }
 
     public ObservableCollection<PairingFactView> PairingFacts { get; }
 
@@ -336,6 +355,43 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
+    public string CrossNetworkQrInput
+    {
+        get => _crossNetworkQrInput;
+        set
+        {
+            if (SetField(ref _crossNetworkQrInput, value))
+            {
+                CrossNetworkStatus = "Ready";
+                RefreshCommandStates();
+            }
+        }
+    }
+
+    public string CrossNetworkCodeInput
+    {
+        get => _crossNetworkCodeInput;
+        set
+        {
+            var normalized = NormalizeCrossNetworkCodeInput(value);
+            if (SetField(ref _crossNetworkCodeInput, normalized))
+            {
+                CrossNetworkStatus = "Ready";
+                RefreshCommandStates();
+            }
+            else if (!string.Equals(value, normalized, StringComparison.Ordinal))
+            {
+                OnPropertyChanged(nameof(CrossNetworkCodeInput));
+            }
+        }
+    }
+
+    public string CrossNetworkGeneratedCode
+    {
+        get => _crossNetworkGeneratedCode;
+        private set => SetField(ref _crossNetworkGeneratedCode, value);
+    }
+
     public string DiscoveryTxtRecord
     {
         get => _discoveryTxtRecord;
@@ -384,6 +440,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set => SetField(ref _manualConnectionStatus, value);
     }
 
+    public string CrossNetworkStatus
+    {
+        get => _crossNetworkStatus;
+        private set => SetField(ref _crossNetworkStatus, value);
+    }
+
     public bool IsDiscoveryScanning
     {
         get => _isDiscoveryScanning;
@@ -419,6 +481,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public int DiscoveryBrowserFactCount => DiscoveryBrowserFacts.Count;
 
     public int ManualConnectionFactCount => ManualConnectionFacts.Count;
+
+    public int CrossNetworkConnectionFactCount => CrossNetworkConnectionFacts.Count;
 
     public int PairingFactCount => PairingFacts.Count;
 
@@ -511,6 +575,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RunExtendedDiscoveryCommand { get; }
 
     public ICommand PrepareManualConnectionCommand { get; }
+
+    public ICommand GenerateQRCodeCommand { get; }
+
+    public ICommand ScanQRCodeCommand { get; }
+
+    public ICommand GenerateConnectionCodeCommand { get; }
+
+    public ICommand RegenerateConnectionCodeCommand { get; }
+
+    public ICommand CopyConnectionCodeCommand { get; }
+
+    public ICommand ConnectConnectionCodeCommand { get; }
 
     public ICommand ParseAdvertisementCommand { get; }
 
@@ -677,6 +753,75 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             DiscoveryStatus = "Manual target prepared";
             PairingStatus = "Ready";
             StatusMessage = "Manual connection target prepared";
+        });
+    }
+
+    private Task GenerateQRCodeAsync() =>
+        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.GenerateQrCode);
+
+    private Task ScanQRCodeAsync() =>
+        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.ScanQrCode);
+
+    private Task GenerateConnectionCodeAsync() =>
+        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.GenerateCode);
+
+    private Task RegenerateConnectionCodeAsync() =>
+        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.RegenerateCode);
+
+    private Task CopyConnectionCodeAsync() =>
+        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.CopyCode);
+
+    private Task ConnectConnectionCodeAsync() =>
+        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.ConnectWithCode);
+
+    private async Task RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction action)
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            CrossNetworkStatus = action switch
+            {
+                CrossNetworkConnectionAction.GenerateQrCode => "Generating...",
+                CrossNetworkConnectionAction.ScanQrCode => "Scanning...",
+                CrossNetworkConnectionAction.GenerateCode => "Generating...",
+                CrossNetworkConnectionAction.RegenerateCode => "Generating...",
+                CrossNetworkConnectionAction.CopyCode => "Copying...",
+                CrossNetworkConnectionAction.ConnectWithCode => "Connecting...",
+                _ => "Preparing..."
+            };
+
+            var snapshot = await _crossNetworkConnectionClient.BuildReadOnlySnapshotAsync(
+                new CrossNetworkConnectionRequest(
+                    action,
+                    CrossNetworkQrInput,
+                    CrossNetworkCodeInput,
+                    CrossNetworkGeneratedCode));
+
+            CrossNetworkConnectionFacts.Clear();
+            foreach (var fact in snapshot.Facts)
+            {
+                CrossNetworkConnectionFacts.Add(CrossNetworkConnectionFactView.FromFact(fact));
+            }
+
+            if (!string.IsNullOrWhiteSpace(snapshot.GeneratedCode))
+            {
+                CrossNetworkGeneratedCode = snapshot.GeneratedCode;
+            }
+
+            _validatedDiscoveredPeer = null;
+            _validatedPairingMaterial = null;
+            PairingFacts.Clear();
+            ClearConnectionPreflight();
+            OnPropertyChanged(nameof(CrossNetworkConnectionFactCount));
+            OnPropertyChanged(nameof(PairingFactCount));
+            CrossNetworkStatus = snapshot.Status;
+            DiscoveryStatus = "Cross-network envelope prepared";
+            PairingStatus = "Ready";
+            StatusMessage = "Cross-network connection snapshot updated";
         });
     }
 
@@ -977,6 +1122,20 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         && !string.IsNullOrWhiteSpace(ManualConnectionHost)
         && !string.IsNullOrWhiteSpace(ManualConnectionPort);
 
+    private bool CanUseCrossNetworkConnection() => !IsBusy && IsDeviceDiscoverySelected;
+
+    private bool CanScanQRCode() =>
+        CanUseCrossNetworkConnection()
+        && !string.IsNullOrWhiteSpace(CrossNetworkQrInput);
+
+    private bool CanCopyConnectionCode() =>
+        CanUseCrossNetworkConnection()
+        && !string.IsNullOrWhiteSpace(CrossNetworkGeneratedCode);
+
+    private bool CanConnectConnectionCode() =>
+        CanUseCrossNetworkConnection()
+        && CrossNetworkCodeInput.Length == 6;
+
     private bool CanParseAdvertisement() =>
         !IsBusy
         && IsDeviceDiscoverySelected
@@ -1021,6 +1180,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 DiscoveryStatus = ex.Message;
                 DiscoveryBrowserStatus = ex.Message;
                 ManualConnectionStatus = ex.Message;
+                CrossNetworkStatus = ex.Message;
                 PairingStatus = ex.Message;
                 ConnectionPreflightStatus = ex.Message;
             }
@@ -1071,6 +1231,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (RefreshDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RunExtendedDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (PrepareManualConnectionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (GenerateQRCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (ScanQRCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (GenerateConnectionCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (RegenerateConnectionCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (CopyConnectionCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (ConnectConnectionCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ValidatePairingCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (PrepareConnectionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
@@ -1105,6 +1271,33 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         field = value;
         OnPropertyChanged(propertyName);
         return true;
+    }
+
+    private static string NormalizeCrossNetworkCodeInput(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        var normalized = new char[6];
+        var count = 0;
+        foreach (var current in value.ToUpperInvariant())
+        {
+            if (!CrossNetworkCodeAlphabet.Contains(current))
+            {
+                continue;
+            }
+
+            normalized[count] = current;
+            count++;
+            if (count == normalized.Length)
+            {
+                break;
+            }
+        }
+
+        return new string(normalized, 0, count);
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
@@ -1296,6 +1489,15 @@ public sealed record ManualConnectionFactView(
         new(fact.Label, fact.Value, fact.Detail);
 }
 
+public sealed record CrossNetworkConnectionFactView(
+    string Label,
+    string Value,
+    string Detail)
+{
+    public static CrossNetworkConnectionFactView FromFact(CrossNetworkConnectionFact fact) =>
+        new(fact.Label, fact.Value, fact.Detail);
+}
+
 public sealed record ConnectionPreflightFactView(
     string Label,
     string Value,
@@ -1384,6 +1586,14 @@ internal sealed class UnavailableManualConnectionClient : IManualConnectionClien
     public Task<ManualConnectionSnapshot> BuildReadOnlySnapshotAsync(ManualConnectionRequest request)
     {
         throw new InvalidOperationException("Manual connection client is not configured.");
+    }
+}
+
+internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkConnectionClient
+{
+    public Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request)
+    {
+        throw new InvalidOperationException("Cross-network connection client is not configured.");
     }
 }
 

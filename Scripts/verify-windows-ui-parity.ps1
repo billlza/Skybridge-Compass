@@ -29,6 +29,7 @@ $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewMode
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
 $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
+$crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
@@ -40,7 +41,7 @@ $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Settin
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $discoveryBrowserPath, $manualConnectionPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -48,6 +49,7 @@ $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
+$crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
@@ -108,6 +110,11 @@ foreach ($binding in @(
     "ManualConnectionCode",
     "ManualConnectionStatus",
     "ManualConnectionFacts",
+    "CrossNetworkQrInput",
+    "CrossNetworkCodeInput",
+    "CrossNetworkGeneratedCode",
+    "CrossNetworkStatus",
+    "CrossNetworkConnectionFacts",
     "DiscoveredPeers",
     "PairingConnectionCode",
     "PairingStatus",
@@ -146,7 +153,7 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -184,6 +191,27 @@ foreach ($discoverySignal in @(
     "ManualConnectionFactView",
     "Manual connection port must be between 1 and 65535",
     "no connection started",
+    "Dynamic Encrypted QR Code",
+    "Generate QR Code",
+    "Scan QR Code",
+    "QR URI",
+    "skybridge://connect/",
+    "skybridge://connect?data=",
+    "Scan Error",
+    "Smart Connection Code",
+    "Generate Code",
+    "Copy",
+    "Regenerate",
+    "Connect",
+    "Waiting for connection...",
+    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789",
+    "6-digit code, valid for 10 mins, for remote assistance",
+    "CrossNetworkConnectionClient",
+    "CrossNetworkConnectionFactView",
+    "CrossNetworkReadiness",
+    "no WebRTC offerer started",
+    "no WebRTC answerer started",
+    "no signaling room registered",
     "DiscoveredPeerView",
     "Pairing Code",
     "Validate Pairing",
@@ -204,7 +232,7 @@ foreach ($discoverySignal in @(
     "Transport binding digest",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $manualConnection + $pairing + $connectionPreflight) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $manualConnection + $crossNetwork + $pairing + $connectionPreflight) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
@@ -400,6 +428,9 @@ foreach ($docSignal in @(
     "WindowsDiscoveryBrowserClient",
     "Start Scan",
     "Manual Connect",
+    "CrossNetworkConnectionClient",
+    "Generate QR Code",
+    "Smart Connection Code",
     "CoreBridge.PlanConnectionAsync",
     "Visual QA"
 )) {

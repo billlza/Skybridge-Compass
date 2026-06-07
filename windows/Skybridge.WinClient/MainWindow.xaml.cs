@@ -18,6 +18,7 @@ public sealed partial class MainWindow : Window
             discoveryClient,
             new WindowsDiscoveryBrowserClient(discoveryClient),
             new ManualConnectionClient(),
+            new CrossNetworkConnectionClient(),
             new PairingMaterialClient(),
             new ConnectionPreflightClient(coreBridge),
             new CoreDiagnosticsClient(coreBridge),
