@@ -35,6 +35,7 @@ $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Cr
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
 $connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs"
+$workspaceErrorStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceErrorStatusClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
@@ -49,7 +50,7 @@ $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngi
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -63,6 +64,7 @@ $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceStatePath
+$workspaceErrorStatus = Get-Content -Raw -LiteralPath $workspaceErrorStatusPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
@@ -121,6 +123,7 @@ Assert-Contains -Text $mainWindow -Needle "new CrossNetworkConnectionClient()" -
 Assert-Contains -Text $mainWindow -Needle "new PairingMaterialClient()" -Message "MainWindow should wire PairingMaterialClient for explicit manual pairing-code validation."
 Assert-Contains -Text $mainWindow -Needle "new ConnectionPreflightClient(coreBridge)" -Message "MainWindow should wire ConnectionPreflightClient for explicit connection preflight."
 Assert-Contains -Text $mainWindow -Needle "new ConnectionWorkspaceStateClient()" -Message "MainWindow should wire ConnectionWorkspaceStateClient for explicit connection state gates."
+Assert-Contains -Text $mainWindow -Needle "new WorkspaceErrorStatusClient()" -Message "MainWindow should wire WorkspaceErrorStatusClient for explicit workspace error routing."
 Assert-Contains -Text $mainWindow -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "MainWindow should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "MainWindow should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new WorkspaceActionCatalogClient()" -Message "MainWindow should wire WorkspaceActionCatalogClient for explicit workspace action order."
@@ -389,7 +392,6 @@ foreach ($signal in @(
     "public interface IConnectionWorkspaceStateClient",
     "public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateClient",
     "BuildInputResetPatch",
-    "BuildErrorPatch",
     "BuildDiscoveryBrowserResultPatch",
     "BuildManualTargetPreparedPatch",
     "BuildCrossNetworkPreparedPatch",
@@ -408,9 +410,32 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "ConnectionWorkspaceStateClient" -Message "Architecture doc missing ConnectionWorkspaceStateClient status."
+Assert-True -Condition (-not $connectionWorkspaceState.Contains("BuildErrorPatch")) -Message "ConnectionWorkspaceStateClient must not own busy-state error routing; use WorkspaceErrorStatusClient."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("FfiEngineClient")) -Message "ConnectionWorkspaceStateClient must not call or reference FfiEngineClient."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("WebRTC")) -Message "ConnectionWorkspaceStateClient must not start or own WebRTC adapters."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("signaling")) -Message "ConnectionWorkspaceStateClient must not own signaling side effects."
+
+foreach ($signal in @(
+    "public interface IWorkspaceErrorStatusClient",
+    "public sealed class WorkspaceErrorStatusClient : IWorkspaceErrorStatusClient",
+    "BuildErrorPatch",
+    "WorkspaceErrorScope",
+    "WorkspaceErrorStatusPatch",
+    "ConnectionWorkspacePatch",
+    "WorkspaceErrorScope.DeviceDiscovery",
+    "WorkspaceErrorScope.CoreDiagnostics",
+    "WorkspaceErrorScope.FileTransfer",
+    "WorkspaceErrorScope.RemoteDesktop",
+    "WorkspaceErrorScope.SystemMonitor",
+    "WorkspaceErrorScope.Settings"
+)) {
+    Assert-Contains -Text $workspaceErrorStatus -Needle $signal -Message "WorkspaceErrorStatusClient missing error routing signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "WorkspaceErrorStatusClient" -Message "Architecture doc missing WorkspaceErrorStatusClient status."
+Assert-True -Condition (-not $workspaceErrorStatus.Contains("FfiEngineClient")) -Message "WorkspaceErrorStatusClient must not call or reference FfiEngineClient."
+Assert-True -Condition (-not $workspaceErrorStatus.Contains("WebRTC")) -Message "WorkspaceErrorStatusClient must not start or own WebRTC adapters."
+Assert-True -Condition (-not $workspaceErrorStatus.Contains("signaling")) -Message "WorkspaceErrorStatusClient must not own signaling side effects."
 
 foreach ($signal in @(
     "public interface IUsbManagementWorkspaceClient",

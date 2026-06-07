@@ -97,6 +97,7 @@ $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Cr
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
 $connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs"
+$workspaceErrorStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceErrorStatusClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
@@ -109,7 +110,7 @@ $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/To
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -123,6 +124,7 @@ $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceStatePath
+$workspaceErrorStatus = Get-Content -Raw -LiteralPath $workspaceErrorStatusPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
@@ -523,7 +525,6 @@ foreach ($connectionStateSignal in @(
     "public interface IConnectionWorkspaceStateClient",
     "public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateClient",
     "BuildInputResetPatch",
-    "BuildErrorPatch",
     "BuildDiscoveryBrowserResultPatch",
     "BuildManualTargetPreparedPatch",
     "BuildCrossNetworkPreparedPatch",
@@ -545,6 +546,33 @@ foreach ($connectionStateSignal in @(
 )) {
     Assert-Contains -Text ($connectionWorkspaceState + $sessionViewModel + $mainWindow) -Needle $connectionStateSignal -Message "Connection workspace state signal missing: $connectionStateSignal"
 }
+
+foreach ($workspaceErrorSignal in @(
+    "public interface IWorkspaceErrorStatusClient",
+    "public sealed class WorkspaceErrorStatusClient : IWorkspaceErrorStatusClient",
+    "WorkspaceErrorScope",
+    "WorkspaceErrorStatusPatch",
+    "ConnectionWorkspacePatch",
+    "WorkspaceErrorScope.DeviceDiscovery",
+    "WorkspaceErrorScope.UsbManagement",
+    "WorkspaceErrorScope.CoreDiagnostics",
+    "WorkspaceErrorScope.FileTransfer",
+    "WorkspaceErrorScope.RemoteDesktop",
+    "WorkspaceErrorScope.SystemMonitor",
+    "WorkspaceErrorScope.Settings",
+    "new WorkspaceErrorStatusClient()",
+    "RunWithBusyState(WorkspaceErrorScope",
+    "_workspaceErrorStatusClient.BuildErrorPatch(errorScope, ex.Message)",
+    "ApplyWorkspaceErrorStatusPatch"
+)) {
+    Assert-Contains -Text ($workspaceErrorStatus + $sessionViewModel + $mainWindow) -Needle $workspaceErrorSignal -Message "Workspace error routing signal missing: $workspaceErrorSignal"
+}
+
+Assert-True -Condition (-not $sessionViewModel.Contains("RunWithBusyState(async () =>")) -Message "RunWithBusyState call sites must declare a WorkspaceErrorScope."
+Assert-True -Condition (-not $sessionViewModel.Contains("RunWithBusyState(Func<Task> action)")) -Message "RunWithBusyState must require an explicit WorkspaceErrorScope."
+Assert-True -Condition (-not $sessionViewModel.Contains("_connectionWorkspaceStateClient.BuildErrorPatch(ex.Message)")) -Message "RunWithBusyState must route errors through WorkspaceErrorStatusClient, not the currently selected feature."
+Assert-True -Condition (-not $connectionWorkspaceState.Contains("BuildErrorPatch")) -Message "ConnectionWorkspaceStateClient must not own busy-state error routing; use WorkspaceErrorStatusClient."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModel, "catch \(Exception ex\)[\s\S]*?if \(IsDeviceDiscoverySelected\)[\s\S]*?BuildErrorPatch\(ex\.Message\)")) -Message "RunWithBusyState catch must not route errors by currently selected feature."
 
 foreach ($deviceDiscoveryDefaultSignal in @(
     "public interface IDeviceDiscoveryInputDefaultsClient",

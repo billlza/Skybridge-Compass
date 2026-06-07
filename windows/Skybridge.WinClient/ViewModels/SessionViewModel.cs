@@ -31,6 +31,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ITopBarStatusClient _topBarStatusClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
     private readonly IWorkspaceActionCatalogClient _workspaceActionCatalogClient;
+    private readonly IWorkspaceErrorStatusClient _workspaceErrorStatusClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -92,7 +93,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IDashboardMetricsClient? dashboardMetricsClient = null,
         ITopBarStatusClient? topBarStatusClient = null,
         IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null,
-        IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null)
+        IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null,
+        IWorkspaceErrorStatusClient? workspaceErrorStatusClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -115,6 +117,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _topBarStatusClient = topBarStatusClient ?? new TopBarStatusClient();
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient ?? new ConnectionWorkspaceStateClient();
         _workspaceActionCatalogClient = workspaceActionCatalogClient ?? new WorkspaceActionCatalogClient();
+        _workspaceErrorStatusClient = workspaceErrorStatusClient ?? new WorkspaceErrorStatusClient();
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
         _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
         _manualConnectionPort = deviceDiscoveryInputDefaults.ManualConnectionPort;
@@ -747,7 +750,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
         {
             StatusMessage = "Connecting...";
             await _engineClient.ConnectAsync();
@@ -762,7 +765,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
         {
             StatusMessage = "Disconnecting...";
             await _engineClient.DisconnectAsync();
@@ -777,7 +780,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
         {
             await _engineClient.SendHeartbeatAsync();
             StatusMessage = "Heartbeat acknowledged";
@@ -806,7 +809,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
         {
             DiscoveryBrowserStatus = _discoveryBrowserClient.BuildPendingStatus(action);
             var snapshot = await _discoveryBrowserClient.BuildReadOnlySnapshotAsync(
@@ -856,7 +859,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
         {
             ManualConnectionStatus = _manualConnectionClient.BuildPendingStatus();
             var snapshot = await _manualConnectionClient.BuildReadOnlySnapshotAsync(
@@ -907,7 +910,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
         {
             CrossNetworkStatus = _crossNetworkConnectionClient.BuildPendingStatus(action);
 
@@ -947,7 +950,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
         {
             DiscoveryStatus = _discoveryClient.BuildPendingStatus();
             var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
@@ -971,7 +974,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
         {
             PairingStatus = _pairingMaterialClient.BuildPendingStatus();
             var expectedFingerprint = DiscoveredPeers.Count == 1
@@ -1002,7 +1005,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
         {
             var discoveredPeer = _validatedDiscoveredPeer;
             var pairingMaterial = _validatedPairingMaterial;
@@ -1037,7 +1040,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.CoreDiagnostics, async () =>
         {
             CoreDiagnosticsStatus = _coreDiagnosticsClient.BuildPendingStatus();
             var snapshot = await _coreDiagnosticsClient.BuildInteropSnapshotAsync();
@@ -1060,7 +1063,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.FileTransfer, async () =>
         {
             FileTransferStatus = _fileTransferClient.BuildPendingStatus();
             var snapshot = await _fileTransferClient.BuildReadOnlySnapshotAsync();
@@ -1096,7 +1099,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.UsbManagement, async () =>
         {
             UsbManagementStatus = _usbManagementClient.BuildPendingStatus();
             var snapshot = await _usbManagementClient.BuildReadOnlySnapshotAsync();
@@ -1125,7 +1128,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.RemoteDesktop, async () =>
         {
             RemoteDesktopStatus = _remoteDesktopClient.BuildPendingStatus();
             var snapshot = await _remoteDesktopClient.BuildReadOnlySnapshotAsync(
@@ -1156,7 +1159,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.SystemMonitor, async () =>
         {
             SystemMonitorStatus = _systemMonitorClient.BuildPendingStatus();
             var snapshot = await _systemMonitorClient.BuildReadOnlySnapshotAsync();
@@ -1191,7 +1194,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        await RunWithBusyState(async () =>
+        await RunWithBusyState(WorkspaceErrorScope.Settings, async () =>
         {
             SettingsStatus = _settingsClient.BuildPendingStatus();
             var snapshot = await _settingsClient.BuildReadOnlySnapshotAsync();
@@ -1275,7 +1278,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool CanRefreshSettings() => !IsBusy && IsSettingsSelected;
 
-    private async Task RunWithBusyState(Func<Task> action)
+    private async Task RunWithBusyState(
+        WorkspaceErrorScope errorScope,
+        Func<Task> action)
     {
         try
         {
@@ -1284,42 +1289,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
-            if (IsDeviceDiscoverySelected)
-            {
-                ApplyConnectionWorkspaceStatusPatch(
-                    _connectionWorkspaceStateClient.BuildErrorPatch(ex.Message));
-            }
-
-            if (IsUsbManagementSelected)
-            {
-                UsbManagementStatus = ex.Message;
-            }
-
-            if (IsQuantumSelected)
-            {
-                CoreDiagnosticsStatus = ex.Message;
-            }
-
-            if (IsFileTransferSelected)
-            {
-                FileTransferStatus = ex.Message;
-            }
-
-            if (IsRemoteDesktopSelected)
-            {
-                RemoteDesktopStatus = ex.Message;
-            }
-
-            if (IsSystemMonitorSelected)
-            {
-                SystemMonitorStatus = ex.Message;
-            }
-
-            if (IsSettingsSelected)
-            {
-                SettingsStatus = ex.Message;
-            }
+            ApplyWorkspaceErrorStatusPatch(
+                _workspaceErrorStatusClient.BuildErrorPatch(errorScope, ex.Message));
         }
         finally
         {
@@ -1408,6 +1379,49 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         if (patch.IsDiscoveryScanning.HasValue)
         {
             IsDiscoveryScanning = patch.IsDiscoveryScanning.Value;
+        }
+    }
+
+    private void ApplyWorkspaceErrorStatusPatch(WorkspaceErrorStatusPatch patch)
+    {
+        if (patch.ConnectionWorkspacePatch is not null)
+        {
+            ApplyConnectionWorkspaceStatusPatch(patch.ConnectionWorkspacePatch);
+        }
+
+        if (patch.StatusMessage is not null)
+        {
+            StatusMessage = patch.StatusMessage;
+        }
+
+        if (patch.UsbManagementStatus is not null)
+        {
+            UsbManagementStatus = patch.UsbManagementStatus;
+        }
+
+        if (patch.CoreDiagnosticsStatus is not null)
+        {
+            CoreDiagnosticsStatus = patch.CoreDiagnosticsStatus;
+        }
+
+        if (patch.FileTransferStatus is not null)
+        {
+            FileTransferStatus = patch.FileTransferStatus;
+        }
+
+        if (patch.RemoteDesktopStatus is not null)
+        {
+            RemoteDesktopStatus = patch.RemoteDesktopStatus;
+        }
+
+        if (patch.SystemMonitorStatus is not null)
+        {
+            SystemMonitorStatus = patch.SystemMonitorStatus;
+        }
+
+        if (patch.SettingsStatus is not null)
+        {
+            SettingsStatus = patch.SettingsStatus;
         }
     }
 

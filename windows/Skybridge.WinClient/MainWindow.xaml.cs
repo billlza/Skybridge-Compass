@@ -32,7 +32,8 @@ public sealed partial class MainWindow : Window
             new DashboardMetricsClient(),
             new TopBarStatusClient(),
             new ConnectionWorkspaceStateClient(),
-            new WorkspaceActionCatalogClient());
+            new WorkspaceActionCatalogClient(),
+            new WorkspaceErrorStatusClient());
         DataContext = ViewModel;
     }
 }

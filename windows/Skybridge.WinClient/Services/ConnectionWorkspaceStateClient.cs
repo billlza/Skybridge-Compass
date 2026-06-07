@@ -4,8 +4,6 @@ public interface IConnectionWorkspaceStateClient
 {
     ConnectionWorkspaceStatusPatch BuildInputResetPatch(ConnectionWorkspaceResetReason reason);
 
-    ConnectionWorkspaceStatusPatch BuildErrorPatch(string message);
-
     ConnectionWorkspaceStatusPatch BuildDiscoveryBrowserResultPatch(
         DiscoveryBrowserAction action,
         DiscoveryBrowserSnapshot snapshot,
@@ -54,15 +52,6 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
                 ConnectionPreflightStatus: Ready),
             _ => new ConnectionWorkspaceStatusPatch()
         };
-
-    public ConnectionWorkspaceStatusPatch BuildErrorPatch(string message) =>
-        new(
-            DiscoveryStatus: message,
-            DiscoveryBrowserStatus: message,
-            ManualConnectionStatus: message,
-            CrossNetworkStatus: message,
-            PairingStatus: message,
-            ConnectionPreflightStatus: message);
 
     public ConnectionWorkspaceStatusPatch BuildDiscoveryBrowserResultPatch(
         DiscoveryBrowserAction action,
