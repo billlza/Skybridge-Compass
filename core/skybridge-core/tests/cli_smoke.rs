@@ -170,6 +170,27 @@ fn cli_suite_offer_lists_provider_derived_suites() {
 }
 
 #[test]
+fn cli_suite_select_prefers_pqc_suite() {
+    let output = skybridge()
+        .args([
+            "suite",
+            "select",
+            "--local-caps",
+            "mlkem,x25519",
+            "--remote-suites",
+            "0x1001,0x0101",
+            "--allow-classic",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("suite=ml-kem-768-ml-dsa-65 (0x0101)"));
+    assert!(stdout.contains("audit=PurePqcPreferred"));
+}
+
+#[test]
 fn cli_suite_select_blocks_timeout_downgrade() {
     let output = skybridge()
         .args([
@@ -225,6 +246,30 @@ fn cli_channel_map_reports_transport_binding() {
     assert!(stdout.contains("binding=skybridge.telemetry"));
     assert!(stdout.contains("reliability=reliable-unordered"));
     assert!(stdout.contains("head_of_line_isolated=true"));
+}
+
+#[test]
+fn cli_frame_describe_accepts_plain_frame() {
+    let output = skybridge()
+        .args([
+            "frame",
+            "describe",
+            "--channel",
+            "control",
+            "--sequence",
+            "8",
+            "--payload",
+            "hello",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("channel=Control"));
+    assert!(stdout.contains("sequence=8"));
+    assert!(stdout.contains("flags=0x0002"));
+    assert!(stdout.contains("payload_len=5"));
 }
 
 #[test]

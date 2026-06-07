@@ -40,10 +40,28 @@ Assert-True -Condition (Test-Path -LiteralPath $cliSmokePath) -Message "Missing 
 $cliSmoke = Get-Content -Raw -LiteralPath $cliSmokePath
 
 foreach ($signal in @(
+    "cli_version_smoke",
+    "cli_windows_same_lan_selects_msquic",
+    "cli_windows_to_apple_selects_webrtc_interop",
+    "cli_transport_bind_reports_binding_digest",
+    "cli_transport_bind_accepts_relay_id",
+    "cli_suite_offer_lists_provider_derived_suites",
+    "cli_suite_select_prefers_pqc_suite",
+    "cli_suite_select_blocks_timeout_downgrade",
+    "cli_channel_profile_reports_default_reliability",
+    "cli_channel_map_reports_transport_binding",
+    "cli_frame_describe_accepts_plain_frame",
+    "cli_frame_describe_reports_roundtrip_metadata",
+    "cli_connection_plan_reports_core_contract",
+    "cli_discovery_parse_accepts_mac_bonjour_txt",
     "cli_no_args_prints_help_smoke",
+    "cli_rejects_incomplete_transport_command",
+    "cli_rejects_unknown_command",
     "cli_rejects_invalid_suite_id_smoke",
     "cli_rejects_bad_discovery_txt_smoke",
     "cli_rejects_too_small_sbp2_frame_smoke",
+    "PurePqcPreferred",
+    "flags=0x0002",
     "InvalidPublicKeyFingerprint",
     "TargetTooSmall",
     "invalid suite id: 0xzz"
