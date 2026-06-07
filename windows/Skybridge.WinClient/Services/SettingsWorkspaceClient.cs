@@ -9,6 +9,10 @@ public interface ISettingsWorkspaceClient
 {
     string BuildPendingStatus();
 
+    string BuildCompletedStatus(SettingsWorkspaceSnapshot snapshot);
+
+    string BuildCompletedStatusMessage();
+
     Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 }
 
@@ -16,7 +20,17 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 {
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildCompletedStatus(SettingsWorkspaceSnapshot snapshot) =>
+        BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
     public static string DefaultPendingStatus { get; } = "Refreshing...";
+
+    public static string DefaultCompletedStatusMessage { get; } = "Settings workspace updated";
+
+    public static string BuildDefaultCompletedStatus(SettingsWorkspaceSnapshot snapshot) =>
+        $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
 
     public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {

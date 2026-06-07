@@ -713,6 +713,25 @@ foreach ($workspaceRefreshPendingStatusSignal in @(
     Assert-Contains -Text ($coreDiagnostics + $fileTransfer + $usbManagement + $remoteDesktop + $systemMonitor + $settings + $unavailableClientStubs + $sessionViewModel) -Needle $workspaceRefreshPendingStatusSignal -Message "Workspace refresh pending status signal missing: $workspaceRefreshPendingStatusSignal"
 }
 
+foreach ($workspaceRefreshCompletedStatusSignal in @(
+    "_coreDiagnosticsClient.BuildCompletedStatus(snapshot)",
+    "_coreDiagnosticsClient.BuildCompletedStatusMessage()",
+    "_fileTransferClient.BuildCompletedStatus(snapshot)",
+    "_fileTransferClient.BuildCompletedStatusMessage()",
+    "_usbManagementClient.BuildCompletedStatus(snapshot)",
+    "_usbManagementClient.BuildCompletedStatusMessage()",
+    "_remoteDesktopClient.BuildCompletedStatus(snapshot)",
+    "_remoteDesktopClient.BuildCompletedStatusMessage()",
+    "_systemMonitorClient.BuildCompletedStatus(snapshot)",
+    "_systemMonitorClient.BuildCompletedStatusMessage()",
+    "_settingsClient.BuildCompletedStatus(snapshot)",
+    "_settingsClient.BuildCompletedStatusMessage()",
+    "BuildDefaultCompletedStatus",
+    "DefaultCompletedStatusMessage"
+)) {
+    Assert-Contains -Text ($coreDiagnostics + $fileTransfer + $usbManagement + $remoteDesktop + $systemMonitor + $settings + $unavailableClientStubs + $sessionViewModel) -Needle $workspaceRefreshCompletedStatusSignal -Message "Workspace refresh completed status signal missing: $workspaceRefreshCompletedStatusSignal"
+}
+
 foreach ($viewModelWorkspacePendingStatusLiteral in @(
     'CoreDiagnosticsStatus = "Running..."',
     'FileTransferStatus = "Refreshing..."',
@@ -722,6 +741,15 @@ foreach ($viewModelWorkspacePendingStatusLiteral in @(
     'SettingsStatus = "Refreshing..."'
 )) {
     Assert-True -Condition (-not $sessionViewModel.Contains($viewModelWorkspacePendingStatusLiteral)) -Message "SessionViewModel must source workspace pending status from service boundary instead of literal: $viewModelWorkspacePendingStatusLiteral"
+}
+
+foreach ($viewModelWorkspaceCompletedStatusLiteral in @(
+    'Snapshot {snapshot.CapturedAt',
+    'Last scan {snapshot.CapturedAt',
+    'Core diagnostics updated',
+    'workspace updated'
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelWorkspaceCompletedStatusLiteral)) -Message "SessionViewModel must source workspace completed status from service boundary instead of literal: $viewModelWorkspaceCompletedStatusLiteral"
 }
 
 foreach ($crossNetworkInputPolicySignal in @(

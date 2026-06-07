@@ -9,6 +9,10 @@ public interface ICoreDiagnosticsClient
 {
     string BuildPendingStatus();
 
+    string BuildCompletedStatus(CoreDiagnosticsSnapshot snapshot);
+
+    string BuildCompletedStatusMessage();
+
     Task<CoreDiagnosticsSnapshot> BuildInteropSnapshotAsync();
 }
 
@@ -23,7 +27,17 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
 
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildCompletedStatus(CoreDiagnosticsSnapshot snapshot) =>
+        BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
     public static string DefaultPendingStatus { get; } = "Running...";
+
+    public static string DefaultCompletedStatusMessage { get; } = "Core diagnostics updated";
+
+    public static string BuildDefaultCompletedStatus(CoreDiagnosticsSnapshot snapshot) =>
+        $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
 
     public async Task<CoreDiagnosticsSnapshot> BuildInteropSnapshotAsync()
     {

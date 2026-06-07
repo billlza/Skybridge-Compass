@@ -13,6 +13,10 @@ public interface ISystemMonitorWorkspaceClient
 {
     string BuildPendingStatus();
 
+    string BuildCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot);
+
+    string BuildCompletedStatusMessage();
+
     Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 }
 
@@ -20,7 +24,17 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 {
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) =>
+        BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
     public static string DefaultPendingStatus { get; } = "Refreshing...";
+
+    public static string DefaultCompletedStatusMessage { get; } = "System monitor workspace updated";
+
+    public static string BuildDefaultCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) =>
+        $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
 
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {

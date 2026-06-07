@@ -9,6 +9,10 @@ public interface IFileTransferWorkspaceClient
 {
     string BuildPendingStatus();
 
+    string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot);
+
+    string BuildCompletedStatusMessage();
+
     Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 }
 
@@ -23,7 +27,17 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
+        BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
     public static string DefaultPendingStatus { get; } = "Refreshing...";
+
+    public static string DefaultCompletedStatusMessage { get; } = "File transfer workspace updated";
+
+    public static string BuildDefaultCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
+        $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
 
     public async Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {

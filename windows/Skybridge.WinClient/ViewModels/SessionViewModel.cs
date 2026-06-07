@@ -1051,8 +1051,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             OnPropertyChanged(nameof(CoreDiagnosticFactCount));
-            CoreDiagnosticsStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
-            StatusMessage = "Core diagnostics updated";
+            CoreDiagnosticsStatus = _coreDiagnosticsClient.BuildCompletedStatus(snapshot);
+            StatusMessage = _coreDiagnosticsClient.BuildCompletedStatusMessage();
         });
     }
 
@@ -1087,8 +1087,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
             RefreshDashboardMetrics();
             OnPropertyChanged(nameof(FileTransferHistoryCount));
-            FileTransferStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
-            StatusMessage = "File transfer workspace updated";
+            FileTransferStatus = _fileTransferClient.BuildCompletedStatus(snapshot);
+            StatusMessage = _fileTransferClient.BuildCompletedStatusMessage();
         });
     }
 
@@ -1116,8 +1116,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             OnPropertyChanged(nameof(UsbDeviceCount));
-            UsbManagementStatus = $"Last scan {snapshot.CapturedAt:HH:mm:ss} UTC";
-            StatusMessage = "USB management workspace updated";
+            UsbManagementStatus = _usbManagementClient.BuildCompletedStatus(snapshot);
+            StatusMessage = _usbManagementClient.BuildCompletedStatusMessage();
         });
     }
 
@@ -1147,8 +1147,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             OnPropertyChanged(nameof(RemoteDesktopSessionCount));
-            RemoteDesktopStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
-            StatusMessage = "Remote desktop workspace updated";
+            RemoteDesktopStatus = _remoteDesktopClient.BuildCompletedStatus(snapshot);
+            StatusMessage = _remoteDesktopClient.BuildCompletedStatusMessage();
         });
     }
 
@@ -1182,8 +1182,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             OnPropertyChanged(nameof(SystemMonitorMetricCount));
-            SystemMonitorStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
-            StatusMessage = "System monitor workspace updated";
+            SystemMonitorStatus = _systemMonitorClient.BuildCompletedStatus(snapshot);
+            StatusMessage = _systemMonitorClient.BuildCompletedStatusMessage();
         });
     }
 
@@ -1217,8 +1217,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             OnPropertyChanged(nameof(SettingsActionCount));
-            SettingsStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
-            StatusMessage = "Settings workspace updated";
+            SettingsStatus = _settingsClient.BuildCompletedStatus(snapshot);
+            StatusMessage = _settingsClient.BuildCompletedStatusMessage();
         });
     }
 

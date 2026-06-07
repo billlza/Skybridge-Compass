@@ -100,6 +100,12 @@ internal sealed class UnavailableCoreDiagnosticsClient : ICoreDiagnosticsClient
 {
     public string BuildPendingStatus() => CoreDiagnosticsClient.DefaultPendingStatus;
 
+    public string BuildCompletedStatus(CoreDiagnosticsSnapshot snapshot) =>
+        CoreDiagnosticsClient.BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() =>
+        CoreDiagnosticsClient.DefaultCompletedStatusMessage;
+
     public Task<CoreDiagnosticsSnapshot> BuildInteropSnapshotAsync()
     {
         throw new InvalidOperationException("Core diagnostics client is not configured.");
@@ -110,6 +116,12 @@ internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWork
 {
     public string BuildPendingStatus() => FileTransferWorkspaceClient.DefaultPendingStatus;
 
+    public string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
+        FileTransferWorkspaceClient.BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() =>
+        FileTransferWorkspaceClient.DefaultCompletedStatusMessage;
+
     public Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("File transfer workspace client is not configured.");
@@ -119,6 +131,12 @@ internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWork
 internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
 {
     public string BuildPendingStatus() => RemoteDesktopWorkspaceClient.DefaultPendingStatus;
+
+    public string BuildCompletedStatus(RemoteDesktopWorkspaceSnapshot snapshot) =>
+        RemoteDesktopWorkspaceClient.BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() =>
+        RemoteDesktopWorkspaceClient.DefaultCompletedStatusMessage;
 
     public Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
         string bitrateProfile,
@@ -132,6 +150,12 @@ internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWo
 {
     public string BuildPendingStatus() => SystemMonitorWorkspaceClient.DefaultPendingStatus;
 
+    public string BuildCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) =>
+        SystemMonitorWorkspaceClient.BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() =>
+        SystemMonitorWorkspaceClient.DefaultCompletedStatusMessage;
+
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("System monitor workspace client is not configured.");
@@ -142,6 +166,12 @@ internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWo
 {
     public string BuildPendingStatus() => UsbManagementWorkspaceClient.DefaultPendingStatus;
 
+    public string BuildCompletedStatus(UsbManagementWorkspaceSnapshot snapshot) =>
+        UsbManagementWorkspaceClient.BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() =>
+        UsbManagementWorkspaceClient.DefaultCompletedStatusMessage;
+
     public Task<UsbManagementWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("USB management workspace client is not configured.");
@@ -151,6 +181,12 @@ internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWo
 internal sealed class UnavailableSettingsWorkspaceClient : ISettingsWorkspaceClient
 {
     public string BuildPendingStatus() => SettingsWorkspaceClient.DefaultPendingStatus;
+
+    public string BuildCompletedStatus(SettingsWorkspaceSnapshot snapshot) =>
+        SettingsWorkspaceClient.BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() =>
+        SettingsWorkspaceClient.DefaultCompletedStatusMessage;
 
     public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {

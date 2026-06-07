@@ -9,6 +9,10 @@ public interface IRemoteDesktopWorkspaceClient
 {
     string BuildPendingStatus();
 
+    string BuildCompletedStatus(RemoteDesktopWorkspaceSnapshot snapshot);
+
+    string BuildCompletedStatusMessage();
+
     Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
         string bitrateProfile,
         string framerateProfile);
@@ -25,7 +29,17 @@ public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
 
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildCompletedStatus(RemoteDesktopWorkspaceSnapshot snapshot) =>
+        BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
     public static string DefaultPendingStatus { get; } = "Refreshing...";
+
+    public static string DefaultCompletedStatusMessage { get; } = "Remote desktop workspace updated";
+
+    public static string BuildDefaultCompletedStatus(RemoteDesktopWorkspaceSnapshot snapshot) =>
+        $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
 
     public async Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
         string bitrateProfile,

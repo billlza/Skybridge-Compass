@@ -10,6 +10,10 @@ public interface IUsbManagementWorkspaceClient
 {
     string BuildPendingStatus();
 
+    string BuildCompletedStatus(UsbManagementWorkspaceSnapshot snapshot);
+
+    string BuildCompletedStatusMessage();
+
     Task<UsbManagementWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 }
 
@@ -17,7 +21,17 @@ public sealed class UsbManagementWorkspaceClient : IUsbManagementWorkspaceClient
 {
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildCompletedStatus(UsbManagementWorkspaceSnapshot snapshot) =>
+        BuildDefaultCompletedStatus(snapshot);
+
+    public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
     public static string DefaultPendingStatus { get; } = "Refreshing...";
+
+    public static string DefaultCompletedStatusMessage { get; } = "USB management workspace updated";
+
+    public static string BuildDefaultCompletedStatus(UsbManagementWorkspaceSnapshot snapshot) =>
+        $"Last scan {snapshot.CapturedAt:HH:mm:ss} UTC";
 
     public Task<UsbManagementWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
