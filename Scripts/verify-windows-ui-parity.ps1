@@ -57,6 +57,22 @@ function Assert-ActionItemsControlResources {
     Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml action surface must use shared resources: $Binding"
 }
 
+function Assert-ItemsControlResources {
+    param(
+        [string]$Text,
+        [string]$Binding,
+        [string]$ItemsPanel,
+        [string]$ItemTemplate
+    )
+
+    $bindingPattern = [regex]::Escape("ItemsSource=`"{Binding $Binding}`"")
+    $panelPattern = [regex]::Escape("ItemsPanel=`"{StaticResource $ItemsPanel}`"")
+    $templatePattern = [regex]::Escape("ItemTemplate=`"{StaticResource $ItemTemplate}`"")
+    $pattern = "<ItemsControl\b(?=[^>]*$bindingPattern)(?=[^>]*$panelPattern)(?=[^>]*$templatePattern)[^>]*/>"
+
+    Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml item source must use shared resources: $Binding"
+}
+
 function Assert-ItemsControlTemplate {
     param(
         [string]$Text,
@@ -247,6 +263,8 @@ foreach ($resourceSignal in @(
     'x:Key="SidebarWorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonWithDetailTemplate"',
+    'x:Key="WorkspaceMetricCardItemsPanel"',
+    'x:Key="WorkspaceMetricCardTemplate"',
     'x:Key="WorkspaceFactRowTemplate"',
     'x:Key="WorkspaceStateRowTemplate"',
     'Command="{Binding Command}"',
@@ -260,6 +278,8 @@ foreach ($resourceSignal in @(
 
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionActions" -ItemsPanel "VerticalWorkspaceActionItemsPanel" -ItemTemplate "SidebarWorkspaceActionButtonTemplate"
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
+
+Assert-ItemsControlResources -Text $mainWindow -Binding "UsbDeviceStats" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 
 foreach ($actionBinding in @(
     "DeviceDiscoveryPrimaryActions",

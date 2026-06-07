@@ -17,6 +17,9 @@
         <ItemsPanelTemplate x:Key="SessionWorkspaceActionItemsPanel">
             <StackPanel Orientation="Horizontal" Spacing="12" />
         </ItemsPanelTemplate>
+        <ItemsPanelTemplate x:Key="WorkspaceMetricCardItemsPanel">
+            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" />
+        </ItemsPanelTemplate>
         <DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">
             <Button
                 Command="{Binding Command}"
@@ -44,6 +47,24 @@
                     <TextBlock Text="{Binding Detail}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Button>
+        </DataTemplate>
+        <DataTemplate x:Key="WorkspaceMetricCardTemplate">
+            <Border
+                Width="210"
+                Margin="0,0,12,0"
+                Padding="14"
+                CornerRadius="8"
+                Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="{Binding Title}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding Value}" FontSize="24" FontWeight="SemiBold" />
+                    <TextBlock
+                        Text="{Binding Detail}"
+                        TextWrapping="Wrap"
+                        FontSize="12"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceFactRowTemplate">
             <Grid Padding="0,4" ColumnSpacing="12">
@@ -458,24 +479,10 @@
                                     VerticalAlignment="Center" />
                             </Grid>
 
-                            <ItemsControl ItemsSource="{Binding UsbDeviceStats}">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" />
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border Width="210" Margin="0,0,12,0" Padding="14" CornerRadius="8" Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
-                                            <StackPanel Spacing="4">
-                                                <TextBlock Text="{Binding Title}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                <TextBlock Text="{Binding Value}" FontSize="24" FontWeight="SemiBold" />
-                                                <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            </StackPanel>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            <ItemsControl
+                                ItemsSource="{Binding UsbDeviceStats}"
+                                ItemsPanel="{StaticResource WorkspaceMetricCardItemsPanel}"
+                                ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
 
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Connected Devices" FontWeight="SemiBold" />
