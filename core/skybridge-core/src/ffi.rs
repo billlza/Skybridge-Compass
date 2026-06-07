@@ -3,6 +3,9 @@ use crate::connection::{
     plan_connection, ConnectionPlan, ConnectionPlanError, ConnectionRequest, TrafficPaddingPlan,
 };
 use crate::crypto::{P256KeyExchange, P256SessionCrypto, SessionCryptoProvider, SessionSecrets};
+use crate::discovery::{
+    parse_service_kind, parse_txt_advertisement, DiscoveryServiceKind, PeerAdvertisement,
+};
 use crate::error::{CoreError, CoreResult};
 use crate::session::{AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState};
 use crate::stream::{FlowRate, StreamController, StreamMetrics};
@@ -273,6 +276,34 @@ pub struct SkybridgeConnectionPlan {
     pub frame_header_len: usize,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeDiscoveryServiceKind {
+    Unknown = 0,
+    QuicPrimary = 1,
+    TcpFallback = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeDiscoveryAdvertisement {
+    pub service_kind: SkybridgeDiscoveryServiceKind,
+    pub device_id: [u8; 64],
+    pub device_id_len: usize,
+    pub public_key_fingerprint: [u8; 64],
+    pub public_key_fingerprint_len: usize,
+    pub platform: SkybridgePeerPlatform,
+    pub platform_label: [u8; 32],
+    pub platform_label_len: usize,
+    pub capabilities: [u8; 256],
+    pub capabilities_len: usize,
+    pub name: [u8; 128],
+    pub name_len: usize,
+    pub protocol_version: [u8; 32],
+    pub protocol_version_len: usize,
+    pub peer_capabilities: SkybridgePeerCapabilities,
+}
+
 /// Maximum number of queued events retained by the engine handle.
 /// Older events are dropped once this capacity is reached so callers must poll
 /// regularly to avoid missing notifications.
@@ -329,6 +360,26 @@ fn map_peer_capabilities(caps: SkybridgePeerCapabilities) -> PeerCapabilities {
         supports_webrtc_data_channel: ffi_flag(caps.supports_webrtc_data_channel),
         supports_tcp_fallback: ffi_flag(caps.supports_tcp_fallback),
         supports_relay: ffi_flag(caps.supports_relay),
+    }
+}
+
+fn map_peer_capabilities_to_ffi(caps: PeerCapabilities) -> SkybridgePeerCapabilities {
+    SkybridgePeerCapabilities {
+        platform: map_platform_to_ffi(caps.platform),
+        supports_apple_native: u8::from(caps.supports_apple_native),
+        supports_msquic: u8::from(caps.supports_msquic),
+        supports_skybridge_ice_msquic: u8::from(caps.supports_skybridge_ice_msquic),
+        supports_webrtc_data_channel: u8::from(caps.supports_webrtc_data_channel),
+        supports_tcp_fallback: u8::from(caps.supports_tcp_fallback),
+        supports_relay: u8::from(caps.supports_relay),
+    }
+}
+
+fn map_platform_to_ffi(platform: PeerPlatform) -> SkybridgePeerPlatform {
+    match platform {
+        PeerPlatform::Apple => SkybridgePeerPlatform::Apple,
+        PeerPlatform::Windows => SkybridgePeerPlatform::Windows,
+        PeerPlatform::Unknown => SkybridgePeerPlatform::Unknown,
     }
 }
 
@@ -572,6 +623,79 @@ fn map_connection_plan_error(err: ConnectionPlanError) -> SkybridgeErrorCode {
             SkybridgeErrorCode::TimeoutCannotDowngrade
         }
     }
+}
+
+fn map_discovery_service(service: DiscoveryServiceKind) -> SkybridgeDiscoveryServiceKind {
+    match service {
+        DiscoveryServiceKind::QuicPrimary => SkybridgeDiscoveryServiceKind::QuicPrimary,
+        DiscoveryServiceKind::TcpFallback => SkybridgeDiscoveryServiceKind::TcpFallback,
+    }
+}
+
+fn map_discovery_advertisement(
+    service: DiscoveryServiceKind,
+    advertisement: PeerAdvertisement,
+) -> Result<SkybridgeDiscoveryAdvertisement, SkybridgeErrorCode> {
+    let mut ffi = SkybridgeDiscoveryAdvertisement {
+        service_kind: map_discovery_service(service),
+        device_id: [0; 64],
+        device_id_len: 0,
+        public_key_fingerprint: [0; 64],
+        public_key_fingerprint_len: 0,
+        platform: map_platform_to_ffi(advertisement.platform),
+        platform_label: [0; 32],
+        platform_label_len: 0,
+        capabilities: [0; 256],
+        capabilities_len: 0,
+        name: [0; 128],
+        name_len: 0,
+        protocol_version: [0; 32],
+        protocol_version_len: 0,
+        peer_capabilities: map_peer_capabilities_to_ffi(advertisement.peer_capabilities()),
+    };
+
+    ffi.device_id_len = write_utf8(&mut ffi.device_id, advertisement.device_id.as_bytes())?;
+    ffi.public_key_fingerprint_len = write_utf8(
+        &mut ffi.public_key_fingerprint,
+        advertisement.public_key_fingerprint.as_bytes(),
+    )?;
+    ffi.platform_label_len = write_utf8(
+        &mut ffi.platform_label,
+        advertisement.platform_label.as_bytes(),
+    )?;
+    ffi.capabilities_len = write_utf8(
+        &mut ffi.capabilities,
+        advertisement.capabilities.join(",").as_bytes(),
+    )?;
+    ffi.name_len = write_utf8(&mut ffi.name, advertisement.name.as_bytes())?;
+    ffi.protocol_version_len = write_utf8(
+        &mut ffi.protocol_version,
+        advertisement.protocol_version.as_bytes(),
+    )?;
+
+    Ok(ffi)
+}
+
+fn write_utf8(out: &mut [u8], value: &[u8]) -> Result<usize, SkybridgeErrorCode> {
+    if value.len() > out.len() {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+
+    out[..value.len()].copy_from_slice(value);
+    Ok(value.len())
+}
+
+unsafe fn read_utf8<'a>(ptr: *const u8, len: usize) -> Result<&'a str, SkybridgeErrorCode> {
+    if len > 0 && ptr.is_null() {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+
+    let bytes = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    };
+    from_utf8(bytes).map_err(|_| SkybridgeErrorCode::InvalidInput)
 }
 
 #[derive(Clone)]
@@ -938,6 +1062,52 @@ pub unsafe extern "C" fn skybridge_map_channel(
     }
 
     SkybridgeErrorCode::Ok
+}
+
+#[no_mangle]
+/// Parses a DNS-SD discovery advertisement using the Core-owned TXT contract.
+///
+/// # Safety
+/// `service_ptr` and `txt_ptr` must point to readable UTF-8 buffers when their
+/// lengths are greater than zero. `out_advertisement` must be a valid writable
+/// pointer.
+pub unsafe extern "C" fn skybridge_parse_discovery_advertisement(
+    service_ptr: *const u8,
+    service_len: usize,
+    txt_ptr: *const u8,
+    txt_len: usize,
+    out_advertisement: *mut SkybridgeDiscoveryAdvertisement,
+) -> SkybridgeErrorCode {
+    if out_advertisement.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+
+    let service = match unsafe { read_utf8(service_ptr, service_len) } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let txt = match unsafe { read_utf8(txt_ptr, txt_len) } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    let Some(service_kind) = parse_service_kind(service) else {
+        return SkybridgeErrorCode::InvalidInput;
+    };
+    let advertisement = match parse_txt_advertisement(txt) {
+        Ok(value) => value,
+        Err(_) => return SkybridgeErrorCode::InvalidInput,
+    };
+
+    match map_discovery_advertisement(service_kind, advertisement) {
+        Ok(advertisement) => {
+            unsafe {
+                *out_advertisement = advertisement;
+            }
+            SkybridgeErrorCode::Ok
+        }
+        Err(err) => err,
+    }
 }
 
 #[no_mangle]

@@ -26,15 +26,17 @@ function Assert-Contains {
 }
 
 $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngineClient.cs"
+$coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
 $client = Get-Content -Raw -LiteralPath $clientPath
+$coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
@@ -74,5 +76,17 @@ Assert-True -Condition (-not $client.Contains("var peerPublicKey = ReadLocalPubl
 Assert-Contains -Text $mainWindow -Needle "new DummyEngineClient()" -Message "MainWindow should keep the dummy client until native DLL deployment is explicit."
 Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not silently switch to FfiEngineClient before native DLL deployment."
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
+
+foreach ($signal in @(
+    "ParseDiscoveryAdvertisementAsync",
+    "skybridge_parse_discovery_advertisement",
+    "DiscoveryAdvertisement",
+    "NativeDiscoveryAdvertisement",
+    "PeerCapabilities.FromNative"
+)) {
+    Assert-Contains -Text $coreBridge -Needle $signal -Message "CoreBridge missing discovery FFI signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "CoreBridge.ParseDiscoveryAdvertisementAsync" -Message "Architecture doc missing discovery CoreBridge contract."
 
 Write-Output "windows-ffi-client: ok"

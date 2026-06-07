@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace Skybridge.WinClient.Services;
@@ -99,6 +100,53 @@ public sealed class CoreBridge
         });
     }
 
+    public Task<DiscoveryAdvertisement> ParseDiscoveryAdvertisementAsync(string service, string txt)
+    {
+        ArgumentNullException.ThrowIfNull(service);
+        ArgumentNullException.ThrowIfNull(txt);
+
+        return Task.Run(() =>
+        {
+            var serviceBytes = Encoding.UTF8.GetBytes(service);
+            var txtBytes = Encoding.UTF8.GetBytes(txt);
+            var serviceHandle = serviceBytes.Length == 0
+                ? default
+                : GCHandle.Alloc(serviceBytes, GCHandleType.Pinned);
+            var txtHandle = txtBytes.Length == 0
+                ? default
+                : GCHandle.Alloc(txtBytes, GCHandleType.Pinned);
+
+            try
+            {
+                var result = NativeMethods.ParseDiscoveryAdvertisement(
+                    serviceBytes.Length == 0 ? nint.Zero : serviceHandle.AddrOfPinnedObject(),
+                    (nuint)serviceBytes.Length,
+                    txtBytes.Length == 0 ? nint.Zero : txtHandle.AddrOfPinnedObject(),
+                    (nuint)txtBytes.Length,
+                    out var advertisement);
+
+                if (result != SkybridgeErrorCode.Ok)
+                {
+                    throw new InvalidOperationException($"Discovery advertisement parse failed: {result}");
+                }
+
+                return DiscoveryAdvertisement.FromNative(advertisement);
+            }
+            finally
+            {
+                if (serviceHandle.IsAllocated)
+                {
+                    serviceHandle.Free();
+                }
+
+                if (txtHandle.IsAllocated)
+                {
+                    txtHandle.Free();
+                }
+            }
+        });
+    }
+
     private static class NativeMethods
     {
         [DllImport("skybridge_core", EntryPoint = "skybridge_engine_new")]
@@ -131,6 +179,14 @@ public sealed class CoreBridge
             NativeCryptoSuitePolicy suitePolicy,
             NativeTrafficPaddingPlan trafficPadding,
             out NativeConnectionPlan plan);
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_parse_discovery_advertisement")]
+        public static extern SkybridgeErrorCode ParseDiscoveryAdvertisement(
+            nint servicePtr,
+            nuint serviceLen,
+            nint txtPtr,
+            nuint txtLen,
+            out NativeDiscoveryAdvertisement advertisement);
     }
 }
 
@@ -139,6 +195,13 @@ public enum CorePeerPlatform
     Unknown = 0,
     Apple = 1,
     Windows = 2
+}
+
+public enum CoreDiscoveryServiceKind
+{
+    Unknown = 0,
+    QuicPrimary = 1,
+    TcpFallback = 2
 }
 
 public enum CoreTransportKind
@@ -224,6 +287,16 @@ public sealed record PeerCapabilities(
     public static PeerCapabilities Windows() =>
         new(CorePeerPlatform.Windows, false, true, false, true, true, true);
 
+    internal static PeerCapabilities FromNative(NativePeerCapabilities capabilities) =>
+        new(
+            capabilities.Platform,
+            capabilities.SupportsAppleNative != 0,
+            capabilities.SupportsMsQuic != 0,
+            capabilities.SupportsSkyBridgeIceMsQuic != 0,
+            capabilities.SupportsWebRtcDataChannel != 0,
+            capabilities.SupportsTcpFallback != 0,
+            capabilities.SupportsRelay != 0);
+
     internal NativePeerCapabilities ToNative() =>
         new()
         {
@@ -237,6 +310,39 @@ public sealed record PeerCapabilities(
         };
 
     private static byte ToFlag(bool value) => value ? (byte)1 : (byte)0;
+}
+
+public sealed record DiscoveryAdvertisement(
+    CoreDiscoveryServiceKind ServiceKind,
+    string DeviceId,
+    string PublicKeyFingerprint,
+    CorePeerPlatform Platform,
+    string PlatformLabel,
+    string Capabilities,
+    string Name,
+    string ProtocolVersion,
+    PeerCapabilities PeerCapabilities)
+{
+    internal static DiscoveryAdvertisement FromNative(NativeDiscoveryAdvertisement advertisement) =>
+        new(
+            advertisement.ServiceKind,
+            ReadFixedUtf8(advertisement.DeviceId, advertisement.DeviceIdLen),
+            ReadFixedUtf8(
+                advertisement.PublicKeyFingerprint,
+                advertisement.PublicKeyFingerprintLen),
+            advertisement.Platform,
+            ReadFixedUtf8(advertisement.PlatformLabel, advertisement.PlatformLabelLen),
+            ReadFixedUtf8(advertisement.Capabilities, advertisement.CapabilitiesLen),
+            ReadFixedUtf8(advertisement.Name, advertisement.NameLen),
+            ReadFixedUtf8(advertisement.ProtocolVersion, advertisement.ProtocolVersionLen),
+            PeerCapabilities.FromNative(advertisement.PeerCapabilities));
+
+    private static string ReadFixedUtf8(byte[]? buffer, nuint len)
+    {
+        var bytes = buffer ?? Array.Empty<byte>();
+        var count = len > (nuint)bytes.Length ? bytes.Length : (int)len;
+        return Encoding.UTF8.GetString(bytes, 0, count);
+    }
 }
 
 public sealed record NetworkPath(bool SameLan, bool CrossNat)
@@ -494,4 +600,42 @@ internal struct NativeConnectionPlan
     public byte Sbp2Enabled;
     public nuint Sbp2FixedPayloadLen;
     public nuint FrameHeaderLen;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeDiscoveryAdvertisement
+{
+    public CoreDiscoveryServiceKind ServiceKind;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] DeviceId;
+
+    public nuint DeviceIdLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 64)]
+    public byte[] PublicKeyFingerprint;
+
+    public nuint PublicKeyFingerprintLen;
+    public CorePeerPlatform Platform;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+    public byte[] PlatformLabel;
+
+    public nuint PlatformLabelLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+    public byte[] Capabilities;
+
+    public nuint CapabilitiesLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 128)]
+    public byte[] Name;
+
+    public nuint NameLen;
+
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+    public byte[] ProtocolVersion;
+
+    public nuint ProtocolVersionLen;
+    public NativePeerCapabilities PeerCapabilities;
 }

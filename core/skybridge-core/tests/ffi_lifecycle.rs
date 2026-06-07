@@ -5,18 +5,53 @@ use skybridge_core::ffi::{
     skybridge_engine_local_public_key, skybridge_engine_metrics, skybridge_engine_new,
     skybridge_engine_poll_events, skybridge_engine_reconnect, skybridge_engine_send_heartbeat,
     skybridge_engine_send_input, skybridge_engine_snapshot, skybridge_engine_state,
-    skybridge_engine_throttle_stream, skybridge_map_channel, skybridge_plan_connection,
-    skybridge_select_transport, SkybridgeAdapterBindingKind, SkybridgeBuffer, SkybridgeChannelKind,
-    SkybridgeChannelMapping, SkybridgeConnectionPlan, SkybridgeCryptoProviderCapabilities,
-    SkybridgeCryptoSuiteAuditCode, SkybridgeCryptoSuiteKind, SkybridgeCryptoSuitePolicy,
-    SkybridgeEngineSnapshot, SkybridgeErrorCode, SkybridgeEvent, SkybridgeEventKind,
-    SkybridgeFlowRate, SkybridgeNetworkPath, SkybridgePeerCapabilities, SkybridgePeerPlatform,
-    SkybridgeReliabilityKind, SkybridgeSessionConfig, SkybridgeSessionState,
+    skybridge_engine_throttle_stream, skybridge_map_channel,
+    skybridge_parse_discovery_advertisement, skybridge_plan_connection, skybridge_select_transport,
+    SkybridgeAdapterBindingKind, SkybridgeBuffer, SkybridgeChannelKind, SkybridgeChannelMapping,
+    SkybridgeConnectionPlan, SkybridgeCryptoProviderCapabilities, SkybridgeCryptoSuiteAuditCode,
+    SkybridgeCryptoSuiteKind, SkybridgeCryptoSuitePolicy, SkybridgeDiscoveryAdvertisement,
+    SkybridgeDiscoveryServiceKind, SkybridgeEngineSnapshot, SkybridgeErrorCode, SkybridgeEvent,
+    SkybridgeEventKind, SkybridgeFlowRate, SkybridgeNetworkPath, SkybridgePeerCapabilities,
+    SkybridgePeerPlatform, SkybridgeReliabilityKind, SkybridgeSessionConfig, SkybridgeSessionState,
     SkybridgeStreamMetrics, SkybridgeTrafficPaddingPlan, SkybridgeTransportAuditCode,
     SkybridgeTransportKind, SkybridgeTransportSelection, SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
+
+const DISCOVERY_FP: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn empty_discovery_advertisement() -> SkybridgeDiscoveryAdvertisement {
+    SkybridgeDiscoveryAdvertisement {
+        service_kind: SkybridgeDiscoveryServiceKind::Unknown,
+        device_id: [0; 64],
+        device_id_len: 0,
+        public_key_fingerprint: [0; 64],
+        public_key_fingerprint_len: 0,
+        platform: SkybridgePeerPlatform::Unknown,
+        platform_label: [0; 32],
+        platform_label_len: 0,
+        capabilities: [0; 256],
+        capabilities_len: 0,
+        name: [0; 128],
+        name_len: 0,
+        protocol_version: [0; 32],
+        protocol_version_len: 0,
+        peer_capabilities: SkybridgePeerCapabilities {
+            platform: SkybridgePeerPlatform::Unknown,
+            supports_apple_native: 0,
+            supports_msquic: 0,
+            supports_skybridge_ice_msquic: 0,
+            supports_webrtc_data_channel: 0,
+            supports_tcp_fallback: 0,
+            supports_relay: 0,
+        },
+    }
+}
+
+fn fixed_utf8<const N: usize>(buffer: &[u8; N], len: usize) -> &str {
+    std::str::from_utf8(&buffer[..len]).expect("valid utf-8")
+}
 
 #[test]
 fn ffi_engine_lifecycle_runs() {
@@ -573,4 +608,100 @@ fn ffi_channel_mapping_exports_adapter_contracts() {
         )
     };
     assert_eq!(null_result, SkybridgeErrorCode::InvalidInput);
+}
+
+#[test]
+fn ffi_discovery_advertisement_exports_mac_bonjour_contract() {
+    let service = b"_skybridge._udp";
+    let txt = format!(
+        "deviceId=mac-1;pubKeyFP={DISCOVERY_FP};platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1"
+    );
+    let mut advertisement = empty_discovery_advertisement();
+
+    let result = unsafe {
+        skybridge_parse_discovery_advertisement(
+            service.as_ptr(),
+            service.len(),
+            txt.as_ptr(),
+            txt.len(),
+            &mut advertisement,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        advertisement.service_kind,
+        SkybridgeDiscoveryServiceKind::QuicPrimary
+    );
+    assert_eq!(advertisement.platform, SkybridgePeerPlatform::Apple);
+    assert_eq!(
+        advertisement.peer_capabilities.platform,
+        SkybridgePeerPlatform::Apple
+    );
+    assert_eq!(advertisement.peer_capabilities.supports_apple_native, 1);
+    assert_eq!(
+        advertisement.peer_capabilities.supports_webrtc_data_channel,
+        1
+    );
+    assert_eq!(advertisement.peer_capabilities.supports_tcp_fallback, 1);
+    assert_eq!(advertisement.peer_capabilities.supports_msquic, 0);
+    assert_eq!(
+        fixed_utf8(&advertisement.device_id, advertisement.device_id_len),
+        "mac-1"
+    );
+    assert_eq!(
+        fixed_utf8(
+            &advertisement.public_key_fingerprint,
+            advertisement.public_key_fingerprint_len
+        ),
+        DISCOVERY_FP
+    );
+    assert_eq!(
+        fixed_utf8(
+            &advertisement.platform_label,
+            advertisement.platform_label_len
+        ),
+        "macOS"
+    );
+    assert_eq!(
+        fixed_utf8(&advertisement.capabilities, advertisement.capabilities_len),
+        "webrtc,tcp"
+    );
+    assert_eq!(
+        fixed_utf8(&advertisement.name, advertisement.name_len),
+        "Desk Mac"
+    );
+    assert_eq!(
+        fixed_utf8(
+            &advertisement.protocol_version,
+            advertisement.protocol_version_len
+        ),
+        "v1"
+    );
+
+    let null_out = unsafe {
+        skybridge_parse_discovery_advertisement(
+            service.as_ptr(),
+            service.len(),
+            txt.as_ptr(),
+            txt.len(),
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(null_out, SkybridgeErrorCode::InvalidInput);
+
+    let bad_txt = format!(
+        "deviceId=mac-1;pubKeyFP={};platform=macOS",
+        DISCOVERY_FP.to_ascii_uppercase()
+    );
+    let bad_result = unsafe {
+        skybridge_parse_discovery_advertisement(
+            service.as_ptr(),
+            service.len(),
+            bad_txt.as_ptr(),
+            bad_txt.len(),
+            &mut advertisement,
+        )
+    };
+    assert_eq!(bad_result, SkybridgeErrorCode::InvalidInput);
 }
