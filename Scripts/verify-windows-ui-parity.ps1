@@ -266,6 +266,7 @@ foreach ($resourceSignal in @(
     'x:Key="VerticalWorkspaceActionItemsPanel"',
     'x:Key="HorizontalWorkspaceActionItemsPanel"',
     'x:Key="SessionWorkspaceActionItemsPanel"',
+    'x:Key="NavigationItemTemplate"',
     'x:Key="SidebarWorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonWithDetailTemplate"',
@@ -287,6 +288,7 @@ foreach ($resourceSignal in @(
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionActions" -ItemsPanel "VerticalWorkspaceActionItemsPanel" -ItemTemplate "SidebarWorkspaceActionButtonTemplate"
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
 
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "NavigationItems" -ItemTemplate "NavigationItemTemplate"
 Assert-ItemsControlResources -Text $mainWindow -Binding "DashboardMetrics" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 Assert-ItemsControlResources -Text $mainWindow -Binding "UsbDeviceStats" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 
