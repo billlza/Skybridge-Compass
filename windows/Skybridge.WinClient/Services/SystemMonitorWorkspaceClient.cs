@@ -11,11 +11,17 @@ namespace Skybridge.WinClient.Services;
 
 public interface ISystemMonitorWorkspaceClient
 {
+    string BuildPendingStatus();
+
     Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 }
 
 public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 {
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Refreshing...";
+
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         return Task.Run(() =>

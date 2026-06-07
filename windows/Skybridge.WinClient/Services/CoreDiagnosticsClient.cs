@@ -7,6 +7,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface ICoreDiagnosticsClient
 {
+    string BuildPendingStatus();
+
     Task<CoreDiagnosticsSnapshot> BuildInteropSnapshotAsync();
 }
 
@@ -18,6 +20,10 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
     {
         _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
     }
+
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Running...";
 
     public async Task<CoreDiagnosticsSnapshot> BuildInteropSnapshotAsync()
     {

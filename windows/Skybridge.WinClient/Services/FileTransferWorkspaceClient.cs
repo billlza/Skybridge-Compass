@@ -7,6 +7,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface IFileTransferWorkspaceClient
 {
+    string BuildPendingStatus();
+
     Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 }
 
@@ -18,6 +20,10 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
     {
         _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
     }
+
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Refreshing...";
 
     public async Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {

@@ -401,6 +401,8 @@ Assert-True -Condition (-not $connectionWorkspaceState.Contains("signaling")) -M
 foreach ($signal in @(
     "public interface IUsbManagementWorkspaceClient",
     "public sealed class UsbManagementWorkspaceClient : IUsbManagementWorkspaceClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "DriveInfo.GetDrives",
     "DriveType.Removable",
@@ -417,6 +419,8 @@ Assert-Contains -Text $architecture -Needle "UsbManagementWorkspaceClient" -Mess
 foreach ($signal in @(
     "public interface ICoreDiagnosticsClient",
     "public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildInteropSnapshotAsync",
     "PlanConnectionAsync",
     "ComputeTransportBindingDigestAsync",
@@ -449,6 +453,8 @@ foreach ($signal in @(
 foreach ($signal in @(
     "public interface IFileTransferWorkspaceClient",
     "public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "MapChannelAsync",
     "EncodeFrameAsync",
@@ -592,6 +598,8 @@ Assert-Contains -Text $architecture -Needle "WorkspaceActionCatalogClient" -Mess
 foreach ($signal in @(
     "public interface IRemoteDesktopWorkspaceClient",
     "public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "PlanConnectionAsync",
     "MapChannelAsync",
@@ -622,6 +630,8 @@ Assert-Contains -Text $architecture -Needle "RemoteDesktopProfileCatalogClient" 
 foreach ($signal in @(
     "public interface ISystemMonitorWorkspaceClient",
     "public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "Process.GetCurrentProcess",
     "GC.GetGCMemoryInfo",
@@ -639,6 +649,8 @@ Assert-Contains -Text $architecture -Needle "SystemMonitorWorkspaceClient" -Mess
 foreach ($signal in @(
     "public interface ISettingsWorkspaceClient",
     "public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "SettingsWorkspaceSnapshot",
     "SettingsTabItem",

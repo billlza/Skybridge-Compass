@@ -8,11 +8,17 @@ namespace Skybridge.WinClient.Services;
 
 public interface IUsbManagementWorkspaceClient
 {
+    string BuildPendingStatus();
+
     Task<UsbManagementWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 }
 
 public sealed class UsbManagementWorkspaceClient : IUsbManagementWorkspaceClient
 {
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Refreshing...";
+
     public Task<UsbManagementWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         return Task.Run(() =>

@@ -7,6 +7,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface IRemoteDesktopWorkspaceClient
 {
+    string BuildPendingStatus();
+
     Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
         string bitrateProfile,
         string framerateProfile);
@@ -20,6 +22,10 @@ public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
     {
         _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
     }
+
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Refreshing...";
 
     public async Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
         string bitrateProfile,

@@ -7,11 +7,17 @@ namespace Skybridge.WinClient.Services;
 
 public interface ISettingsWorkspaceClient
 {
+    string BuildPendingStatus();
+
     Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 }
 
 public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 {
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Refreshing...";
+
     public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         return Task.FromResult(new SettingsWorkspaceSnapshot(

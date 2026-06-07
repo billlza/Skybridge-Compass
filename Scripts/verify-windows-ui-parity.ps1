@@ -619,6 +619,34 @@ foreach ($viewModelPendingStatusLiteral in @(
     Assert-True -Condition (-not $sessionViewModel.Contains($viewModelPendingStatusLiteral)) -Message "SessionViewModel must source pending status from service boundary instead of literal: $viewModelPendingStatusLiteral"
 }
 
+foreach ($workspaceRefreshPendingStatusSignal in @(
+    "_coreDiagnosticsClient.BuildPendingStatus()",
+    "_fileTransferClient.BuildPendingStatus()",
+    "_usbManagementClient.BuildPendingStatus()",
+    "_remoteDesktopClient.BuildPendingStatus()",
+    "_systemMonitorClient.BuildPendingStatus()",
+    "_settingsClient.BuildPendingStatus()",
+    "CoreDiagnosticsClient.DefaultPendingStatus",
+    "FileTransferWorkspaceClient.DefaultPendingStatus",
+    "UsbManagementWorkspaceClient.DefaultPendingStatus",
+    "RemoteDesktopWorkspaceClient.DefaultPendingStatus",
+    "SystemMonitorWorkspaceClient.DefaultPendingStatus",
+    "SettingsWorkspaceClient.DefaultPendingStatus"
+)) {
+    Assert-Contains -Text ($coreDiagnostics + $fileTransfer + $usbManagement + $remoteDesktop + $systemMonitor + $settings + $sessionViewModel) -Needle $workspaceRefreshPendingStatusSignal -Message "Workspace refresh pending status signal missing: $workspaceRefreshPendingStatusSignal"
+}
+
+foreach ($viewModelWorkspacePendingStatusLiteral in @(
+    'CoreDiagnosticsStatus = "Running..."',
+    'FileTransferStatus = "Refreshing..."',
+    'UsbManagementStatus = "Refreshing..."',
+    'RemoteDesktopStatus = "Refreshing..."',
+    'SystemMonitorStatus = "Refreshing..."',
+    'SettingsStatus = "Refreshing..."'
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelWorkspacePendingStatusLiteral)) -Message "SessionViewModel must source workspace pending status from service boundary instead of literal: $viewModelWorkspacePendingStatusLiteral"
+}
+
 foreach ($crossNetworkInputPolicySignal in @(
     "BuildCodeInputPolicy",
     "CrossNetworkCodeInputPolicy",

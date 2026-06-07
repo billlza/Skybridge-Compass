@@ -1039,7 +1039,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            CoreDiagnosticsStatus = "Running...";
+            CoreDiagnosticsStatus = _coreDiagnosticsClient.BuildPendingStatus();
             var snapshot = await _coreDiagnosticsClient.BuildInteropSnapshotAsync();
             CoreDiagnosticFacts.Clear();
             foreach (var fact in snapshot.Facts)
@@ -1062,7 +1062,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            FileTransferStatus = "Refreshing...";
+            FileTransferStatus = _fileTransferClient.BuildPendingStatus();
             var snapshot = await _fileTransferClient.BuildReadOnlySnapshotAsync();
             FileTransferQueue.Clear();
             foreach (var item in snapshot.Queue)
@@ -1098,7 +1098,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            UsbManagementStatus = "Refreshing...";
+            UsbManagementStatus = _usbManagementClient.BuildPendingStatus();
             var snapshot = await _usbManagementClient.BuildReadOnlySnapshotAsync();
             UsbDeviceStats.Clear();
             foreach (var stat in snapshot.Stats)
@@ -1127,7 +1127,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            RemoteDesktopStatus = "Refreshing...";
+            RemoteDesktopStatus = _remoteDesktopClient.BuildPendingStatus();
             var snapshot = await _remoteDesktopClient.BuildReadOnlySnapshotAsync(
                 SelectedBitrate,
                 SelectedFramerate);
@@ -1158,7 +1158,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            SystemMonitorStatus = "Refreshing...";
+            SystemMonitorStatus = _systemMonitorClient.BuildPendingStatus();
             var snapshot = await _systemMonitorClient.BuildReadOnlySnapshotAsync();
             SystemMonitorOverview.Clear();
             foreach (var metric in snapshot.Overview)
@@ -1193,7 +1193,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            SettingsStatus = "Refreshing...";
+            SettingsStatus = _settingsClient.BuildPendingStatus();
             var snapshot = await _settingsClient.BuildReadOnlySnapshotAsync();
             SettingsTabs.Clear();
             foreach (var tab in snapshot.Tabs)
@@ -1951,6 +1951,8 @@ internal sealed class UnavailableConnectionPreflightClient : IConnectionPrefligh
 
 internal sealed class UnavailableCoreDiagnosticsClient : ICoreDiagnosticsClient
 {
+    public string BuildPendingStatus() => CoreDiagnosticsClient.DefaultPendingStatus;
+
     public Task<CoreDiagnosticsSnapshot> BuildInteropSnapshotAsync()
     {
         throw new InvalidOperationException("Core diagnostics client is not configured.");
@@ -1959,6 +1961,8 @@ internal sealed class UnavailableCoreDiagnosticsClient : ICoreDiagnosticsClient
 
 internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWorkspaceClient
 {
+    public string BuildPendingStatus() => FileTransferWorkspaceClient.DefaultPendingStatus;
+
     public Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("File transfer workspace client is not configured.");
@@ -1967,6 +1971,8 @@ internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWork
 
 internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
 {
+    public string BuildPendingStatus() => RemoteDesktopWorkspaceClient.DefaultPendingStatus;
+
     public Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
         string bitrateProfile,
         string framerateProfile)
@@ -1977,6 +1983,8 @@ internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWo
 
 internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 {
+    public string BuildPendingStatus() => SystemMonitorWorkspaceClient.DefaultPendingStatus;
+
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("System monitor workspace client is not configured.");
@@ -1985,6 +1993,8 @@ internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWo
 
 internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWorkspaceClient
 {
+    public string BuildPendingStatus() => UsbManagementWorkspaceClient.DefaultPendingStatus;
+
     public Task<UsbManagementWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("USB management workspace client is not configured.");
@@ -1993,6 +2003,8 @@ internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWo
 
 internal sealed class UnavailableSettingsWorkspaceClient : ISettingsWorkspaceClient
 {
+    public string BuildPendingStatus() => SettingsWorkspaceClient.DefaultPendingStatus;
+
     public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("Settings workspace client is not configured.");
