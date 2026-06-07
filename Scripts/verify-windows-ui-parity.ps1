@@ -57,6 +57,20 @@ function Assert-ActionItemsControlResources {
     Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml action surface must use shared resources: $Binding"
 }
 
+function Assert-ItemsControlTemplate {
+    param(
+        [string]$Text,
+        [string]$Binding,
+        [string]$ItemTemplate
+    )
+
+    $bindingPattern = [regex]::Escape("ItemsSource=`"{Binding $Binding}`"")
+    $templatePattern = [regex]::Escape("ItemTemplate=`"{StaticResource $ItemTemplate}`"")
+    $pattern = "<ItemsControl\b(?=[^>]*$bindingPattern)(?=[^>]*$templatePattern)[^>]*/>"
+
+    Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml item source must use shared template: $Binding"
+}
+
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
@@ -233,9 +247,12 @@ foreach ($resourceSignal in @(
     'x:Key="SidebarWorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonWithDetailTemplate"',
+    'x:Key="WorkspaceFactRowTemplate"',
     'Command="{Binding Command}"',
     'IsEnabled="{Binding IsEnabled}"',
-    'Text="{Binding Detail}"'
+    'Text="{Binding Detail}"',
+    '<ColumnDefinition Width="170" />',
+    '<ColumnDefinition Width="220" />'
 )) {
     Assert-Contains -Text $mainWindow -Needle $resourceSignal -Message "MainWindow.xaml missing shared action resource signal: $resourceSignal"
 }
@@ -265,6 +282,16 @@ foreach ($actionBinding in @(
 }
 
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "SessionControlActions" -ItemsPanel "SessionWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonTemplate"
+
+foreach ($factBinding in @(
+    "DiscoveryBrowserFacts",
+    "ManualConnectionFacts",
+    "CrossNetworkConnectionFacts",
+    "PairingFacts",
+    "ConnectionPreflightFacts"
+)) {
+    Assert-ItemsControlTemplate -Text $mainWindow -Binding $factBinding -ItemTemplate "WorkspaceFactRowTemplate"
+}
 
 foreach ($layoutSignal in @(
     "<ColumnDefinition Width=`"252`" />",

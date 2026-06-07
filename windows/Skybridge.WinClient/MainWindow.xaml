@@ -45,6 +45,22 @@
                 </StackPanel>
             </Button>
         </DataTemplate>
+        <DataTemplate x:Key="WorkspaceFactRowTemplate">
+            <Grid Padding="0,4" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="170" />
+                    <ColumnDefinition Width="220" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                <TextBlock
+                    Grid.Column="2"
+                    Text="{Binding Detail}"
+                    TextWrapping="Wrap"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+        </DataTemplate>
     </Window.Resources>
 
     <Grid Background="{ThemeResource SolidBackgroundFillColorBase}">
@@ -238,22 +254,9 @@
                             </Grid>
 
                             <TextBlock Text="{Binding DiscoveryBrowserStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <ItemsControl ItemsSource="{Binding DiscoveryBrowserFacts}">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Padding="0,4" ColumnSpacing="12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="170" />
-                                                <ColumnDefinition Width="220" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                            <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            <ItemsControl
+                                ItemsSource="{Binding DiscoveryBrowserFacts}"
+                                ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
 
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
@@ -282,22 +285,9 @@
                             </Grid>
 
                             <TextBlock Text="{Binding ManualConnectionStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <ItemsControl ItemsSource="{Binding ManualConnectionFacts}">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Padding="0,4" ColumnSpacing="12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="170" />
-                                                <ColumnDefinition Width="220" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                            <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            <ItemsControl
+                                ItemsSource="{Binding ManualConnectionFacts}"
+                                ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
 
                             <Grid ColumnSpacing="18">
                                 <Grid.ColumnDefinitions>
@@ -351,22 +341,9 @@
                             </Grid>
 
                             <TextBlock Text="{Binding CrossNetworkStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <ItemsControl ItemsSource="{Binding CrossNetworkConnectionFacts}">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Padding="0,4" ColumnSpacing="12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="170" />
-                                                <ColumnDefinition Width="220" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                            <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            <ItemsControl
+                                ItemsSource="{Binding CrossNetworkConnectionFacts}"
+                                ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
 
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>
@@ -434,39 +411,13 @@
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Spacing="8">
                                     <TextBlock Text="{Binding PairingStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                    <ItemsControl ItemsSource="{Binding PairingFacts}">
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate>
-                                                <Grid Padding="0,4" ColumnSpacing="12">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="170" />
-                                                        <ColumnDefinition Width="220" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                                    <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                                    <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
+                                    <ItemsControl
+                                        ItemsSource="{Binding PairingFacts}"
+                                        ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                                     <TextBlock Text="{Binding ConnectionPreflightStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                    <ItemsControl ItemsSource="{Binding ConnectionPreflightFacts}">
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate>
-                                                <Grid Padding="0,4" ColumnSpacing="12">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="170" />
-                                                        <ColumnDefinition Width="220" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                                    <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                                    <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
+                                    <ItemsControl
+                                        ItemsSource="{Binding ConnectionPreflightFacts}"
+                                        ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                                 </StackPanel>
                             </Grid>
                         </StackPanel>
