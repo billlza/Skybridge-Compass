@@ -30,6 +30,7 @@ This contract fixes the Windows shell entry points against the macOS reference s
 - The Extended Search countdown and DNS-SD query order must come from `DiscoveryBrowserInputPolicy` on `WindowsDiscoveryBrowserClient`; `SessionViewModel` may bind and pass the countdown through, but must not hardcode the 15-second discovery policy.
 - Discovered-peer row summaries must come from `DiscoveryBrowserPeerCandidate`; `SessionViewModel` may expose `DiscoveredPeerView` for XAML binding, but it must not reformat `PeerCapabilities` or recreate fingerprint-only trust text.
 - Device Discovery parser/manual/pairing/preflight, Discovery Browser, Cross-network, Core diagnostics, USB Management, File Transfer, Remote Desktop, System Monitor, and Settings pending statuses must come from `BuildPendingStatus` on their service clients; `SessionViewModel` must not own those progress literals or switch on those action enums to produce user-visible progress text.
+- Smart Connection Code readiness must come from `ICrossNetworkConnectionClient.CanConnectWithCode`, using the same `CrossNetworkCodeInputPolicy` as filtering and validation; `SessionViewModel` must not hardcode the 6-character rule.
 
 ## Current Windows implementation
 - `windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs` defines the fixed feature entry order.

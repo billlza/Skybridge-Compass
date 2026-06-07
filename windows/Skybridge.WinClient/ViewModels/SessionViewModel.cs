@@ -1245,7 +1245,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool CanConnectConnectionCode() =>
         CanUseCrossNetworkConnection()
-        && CrossNetworkCodeInput.Length == 6;
+        && _crossNetworkConnectionClient.CanConnectWithCode(CrossNetworkCodeInput);
 
     private bool CanParseAdvertisement() =>
         !IsBusy
@@ -1915,6 +1915,9 @@ internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkCon
 {
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() =>
         CrossNetworkConnectionClient.DefaultCodeInputPolicy;
+
+    public bool CanConnectWithCode(string codeInput) =>
+        CrossNetworkConnectionClient.CanConnectWithDefaultCodePolicy(codeInput);
 
     public string BuildPendingStatus(CrossNetworkConnectionAction action) =>
         CrossNetworkConnectionClient.BuildDefaultPendingStatus(action);

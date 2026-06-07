@@ -12,6 +12,8 @@ public interface ICrossNetworkConnectionClient
 {
     CrossNetworkCodeInputPolicy BuildCodeInputPolicy();
 
+    bool CanConnectWithCode(string codeInput);
+
     string BuildPendingStatus(CrossNetworkConnectionAction action);
 
     Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request);
@@ -34,6 +36,12 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         new(ShortCodeAlphabet, 6);
 
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() => DefaultCodeInputPolicy;
+
+    public bool CanConnectWithCode(string codeInput) =>
+        CanConnectWithDefaultCodePolicy(codeInput);
+
+    public static bool CanConnectWithDefaultCodePolicy(string codeInput) =>
+        TryNormalizeConnectionCode(codeInput, DefaultCodeInputPolicy, out _);
 
     public string BuildPendingStatus(CrossNetworkConnectionAction action) =>
         BuildDefaultPendingStatus(action);
@@ -181,28 +189,41 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
 
     private static string NormalizeConnectionCode(string raw)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(raw);
-        var normalized = new List<char>(6);
-        foreach (var current in raw.Trim().ToUpperInvariant())
-        {
-            if (ShortCodeAlphabet.Contains(current))
-            {
-                normalized.Add(current);
-            }
-
-            if (normalized.Count == 6)
-            {
-                break;
-            }
-        }
-
-        var code = new string(normalized.ToArray());
-        if (code.Length != 6)
+        if (!TryNormalizeConnectionCode(raw, DefaultCodeInputPolicy, out var code))
         {
             throw new InvalidOperationException("Connection Code must be exactly 6 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789.");
         }
 
         return code;
+    }
+
+    private static bool TryNormalizeConnectionCode(
+        string raw,
+        CrossNetworkCodeInputPolicy inputPolicy,
+        out string code)
+    {
+        code = string.Empty;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return false;
+        }
+
+        var normalized = new List<char>(inputPolicy.CodeLength);
+        foreach (var current in raw.Trim().ToUpperInvariant())
+        {
+            if (inputPolicy.Alphabet.Contains(current))
+            {
+                normalized.Add(current);
+            }
+
+            if (normalized.Count == inputPolicy.CodeLength)
+            {
+                break;
+            }
+        }
+
+        code = new string(normalized.ToArray());
+        return code.Length == inputPolicy.CodeLength;
     }
 
     private static QrInputEnvelope ExtractQrPayload(string qrInput)

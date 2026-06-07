@@ -653,6 +653,9 @@ foreach ($crossNetworkInputPolicySignal in @(
     "DefaultCodeInputPolicy",
     "CodeLength",
     "Alphabet",
+    "CanConnectWithCode",
+    "CanConnectWithDefaultCodePolicy",
+    "TryNormalizeConnectionCode",
     "BuildPendingStatus",
     "BuildDefaultPendingStatus",
     "_crossNetworkCodeInputPolicy",
@@ -663,6 +666,7 @@ foreach ($crossNetworkInputPolicySignal in @(
 
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeAlphabet")) -Message "SessionViewModel must not duplicate the Smart Connection Code alphabet."
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkStatus = action switch")) -Message "SessionViewModel must source Cross-network pending status from ICrossNetworkConnectionClient."
+Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeInput.Length == 6")) -Message "SessionViewModel must source Smart Connection Code readiness from ICrossNetworkConnectionClient."
 
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',
