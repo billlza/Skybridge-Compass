@@ -19,7 +19,7 @@ This contract fixes the Windows shell entry points against the macOS reference s
 - System Monitor must keep the macOS monitoring shape visible: monitoring status, stop monitoring, advanced/helper monitoring, overview metrics, detailed monitoring cards, health, thermal, and load indicators. Until ETW/GPU/thermal providers are wired, unsupported metrics must be labeled pending instead of synthesized.
 - Settings must keep the macOS preference-workspace shape visible: General, Network, Devices, File Transfer, Remote Desktop, System Monitor, Permissions, and Advanced tabs; export/import/reset actions; permission/system-settings actions; apply/default/reset-monitor actions; File Transfer, Video Transfer, Remote Desktop, System Monitor, and PQC/Core policy fields. Until persistence and providers are wired, high-risk writes must stay disabled and separated from read-only refresh.
 - Connection, heartbeat, and disconnect commands must stay bound to `SessionViewModel` and must not invent per-page state.
-- Runtime protocol facts must come from Rust Core contracts: transport selection, channel mapping, connection planning, suite selection, frame metadata, and engine diagnostics. Quantum/Core diagnostics must call `CoreDiagnosticsClient` over `CoreBridge`, not re-derive protocol state in XAML or view-model code.
+- Runtime protocol facts must come from Rust Core contracts: transport selection, transport binding digest, channel mapping, connection planning, suite selection, frame metadata, and engine diagnostics. Quantum/Core diagnostics must call `CoreDiagnosticsClient` over `CoreBridge`, not re-derive protocol state in XAML or view-model code.
 
 ## Current Windows implementation
 - `windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs` defines the fixed feature entry order.
@@ -31,4 +31,4 @@ This contract fixes the Windows shell entry points against the macOS reference s
 - UI automation: each navigation entry can be selected and updates the selected-feature heading.
 - UI automation: connect, heartbeat, and disconnect buttons enable/disable according to `EngineConnectionState`.
 - Visual QA: left navigation order, top status bar, metric row, and session controls remain in stable positions across desktop window sizes.
-- Diagnostic UI: expose `CoreBridge.PlanConnectionAsync`, transport selection, channel mapping, frame codec metadata, suite negotiation, engine snapshot, metrics, and event queue output without silent fallback.
+- Diagnostic UI: expose `CoreBridge.PlanConnectionAsync`, transport selection, transport binding digest, channel mapping, frame codec metadata, suite negotiation, engine snapshot, metrics, and event queue output without silent fallback.

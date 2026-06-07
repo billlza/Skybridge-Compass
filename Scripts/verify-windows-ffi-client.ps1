@@ -112,6 +112,17 @@ foreach ($signal in @(
 Assert-Contains -Text $architecture -Needle "CoreBridge.ParseDiscoveryAdvertisementAsync" -Message "Architecture doc missing discovery CoreBridge contract."
 
 foreach ($signal in @(
+    "ComputeTransportBindingDigestAsync",
+    "TransportBindingMaterial",
+    "NativeTransportBindingDigest",
+    "skybridge_transport_binding_digest"
+)) {
+    Assert-Contains -Text $coreBridge -Needle $signal -Message "CoreBridge missing transport binding FFI signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "CoreBridge.ComputeTransportBindingDigestAsync" -Message "Architecture doc missing transport binding CoreBridge contract."
+
+foreach ($signal in @(
     "EncodeFrameAsync",
     "EncodeSbp2FrameAsync",
     "DecodeFrameMetadataAsync",

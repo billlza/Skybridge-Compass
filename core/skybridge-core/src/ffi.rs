@@ -19,7 +19,8 @@ use crate::suite::{
 };
 use crate::transport::{
     NetworkPath, PeerCapabilities, PeerPlatform, RelayPolicy, SkyBridgeChannel,
-    SkyBridgeReliability, SkyBridgeTransportKind, TransportAuditReason, TransportSelector,
+    SkyBridgeReliability, SkyBridgeTransportKind, TransportAuditReason, TransportBindingMaterial,
+    TransportSelector,
 };
 use crate::CoreEngine;
 use std::collections::VecDeque;
@@ -176,6 +177,12 @@ pub struct SkybridgeTransportSelection {
     pub priority: u8,
     pub relay_required: u8,
     pub relay_allowed: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkybridgeTransportBindingDigest {
+    pub digest: [u8; 32],
 }
 
 #[repr(C)]
@@ -1053,6 +1060,94 @@ pub unsafe extern "C" fn skybridge_select_transport(
 
     unsafe {
         *out_selection = map_transport_selection(plan);
+    }
+
+    SkybridgeErrorCode::Ok
+}
+
+#[no_mangle]
+/// Computes the Core transcript digest that binds a selected transport adapter
+/// and candidate pair to the session handshake.
+///
+/// # Safety
+/// UTF-8 pointer/length pairs must be readable when their length is non-zero.
+/// Binary pointer/length pairs must be readable when their length is non-zero.
+/// `out_digest` must be a valid writable pointer.
+pub unsafe extern "C" fn skybridge_transport_binding_digest(
+    transport: SkybridgeTransportKind,
+    local_endpoint_ptr: *const u8,
+    local_endpoint_len: usize,
+    remote_endpoint_ptr: *const u8,
+    remote_endpoint_len: usize,
+    selected_candidate_pair_ptr: *const u8,
+    selected_candidate_pair_len: usize,
+    transport_secret_fingerprint_ptr: *const u8,
+    transport_secret_fingerprint_len: usize,
+    relay_id_ptr: *const u8,
+    relay_id_len: usize,
+    timestamp_window_ms: u64,
+    capability_digest_ptr: *const u8,
+    capability_digest_len: usize,
+    out_digest: *mut SkybridgeTransportBindingDigest,
+) -> SkybridgeErrorCode {
+    if out_digest.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+
+    let Some(transport_kind) = map_ffi_transport_kind(transport) else {
+        return SkybridgeErrorCode::InvalidInput;
+    };
+    let local_endpoint = match unsafe { read_utf8(local_endpoint_ptr, local_endpoint_len) } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let remote_endpoint = match unsafe { read_utf8(remote_endpoint_ptr, remote_endpoint_len) } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let selected_candidate_pair =
+        match unsafe { read_utf8(selected_candidate_pair_ptr, selected_candidate_pair_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+    let transport_secret_fingerprint = match unsafe {
+        read_bytes(
+            transport_secret_fingerprint_ptr,
+            transport_secret_fingerprint_len,
+        )
+    } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let relay_id = if relay_id_len == 0 {
+        None
+    } else {
+        match unsafe { read_utf8(relay_id_ptr, relay_id_len) } {
+            Ok(value) => Some(value.to_string()),
+            Err(err) => return err,
+        }
+    };
+    let capability_digest =
+        match unsafe { read_bytes(capability_digest_ptr, capability_digest_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+
+    let material = TransportBindingMaterial {
+        transport_kind,
+        local_endpoint: local_endpoint.to_string(),
+        remote_endpoint: remote_endpoint.to_string(),
+        selected_candidate_pair: selected_candidate_pair.to_string(),
+        transport_secret_fingerprint: transport_secret_fingerprint.to_vec(),
+        relay_id,
+        timestamp_window_ms,
+        capability_digest: capability_digest.to_vec(),
+    };
+
+    unsafe {
+        *out_digest = SkybridgeTransportBindingDigest {
+            digest: material.transcript_digest(),
+        };
     }
 
     SkybridgeErrorCode::Ok

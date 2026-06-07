@@ -9,8 +9,9 @@ use crate::suite::{
 };
 use crate::transport::{
     NetworkPath, PeerCapabilities, PeerPlatform, SkyBridgeChannel, SkyBridgeReliability,
-    SkyBridgeTransportKind, TransportPlan, TransportSelector,
+    SkyBridgeTransportKind, TransportBindingMaterial, TransportPlan, TransportSelector,
 };
+use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
 const HELP: &str = "\
@@ -19,6 +20,7 @@ skybridge command line
 USAGE:
   skybridge version
   skybridge transport select --local <apple|windows> --remote <apple|windows> --path <same-lan|cross-nat>
+  skybridge transport bind --transport <apple-native|msquic|webrtc|relay|tcp> --local-endpoint <text> --remote-endpoint <text> --candidate-pair <text> --secret-fp <text> --capability-digest <text> --timestamp-window-ms <n> [--relay-id <text>]
   skybridge suite offer --caps <xwing,mlkem,x25519,p256> [--allow-classic] [--allow-legacy-p256]
   skybridge suite select --local-caps <xwing,mlkem,x25519,p256> --remote-suites <0x0001,0x1001> [--allow-classic] [--allow-legacy-p256] [--timeout-observed]
   skybridge channel profile --channel <control|file|clipboard|telemetry|realtime>
@@ -65,10 +67,14 @@ fn execute(args: Vec<String>, out: &mut impl Write) -> Result<(), String> {
 }
 
 fn execute_transport(args: &[String], out: &mut impl Write) -> Result<(), String> {
-    if args.first().map(String::as_str) != Some("select") {
-        return Err("expected transport select".into());
+    match args.first().map(String::as_str) {
+        Some("select") => execute_transport_select(args, out),
+        Some("bind") => execute_transport_bind(args, out),
+        _ => Err("expected transport select or transport bind".into()),
     }
+}
 
+fn execute_transport_select(args: &[String], out: &mut impl Write) -> Result<(), String> {
     let local = required_option(args, "--local")?;
     let remote = required_option(args, "--remote")?;
     let path = required_option(args, "--path")?;
@@ -79,6 +85,39 @@ fn execute_transport(args: &[String], out: &mut impl Write) -> Result<(), String
     );
 
     print_transport_plan(plan, out)
+}
+
+fn execute_transport_bind(args: &[String], out: &mut impl Write) -> Result<(), String> {
+    let material = TransportBindingMaterial {
+        transport_kind: parse_transport_kind(required_option(args, "--transport")?)?,
+        local_endpoint: required_option(args, "--local-endpoint")?.to_string(),
+        remote_endpoint: required_option(args, "--remote-endpoint")?.to_string(),
+        selected_candidate_pair: required_option(args, "--candidate-pair")?.to_string(),
+        transport_secret_fingerprint: required_option(args, "--secret-fp")?.as_bytes().to_vec(),
+        relay_id: optional_option(args, "--relay-id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        timestamp_window_ms: parse_u64(
+            required_option(args, "--timestamp-window-ms")?,
+            "--timestamp-window-ms",
+        )?,
+        capability_digest: required_option(args, "--capability-digest")?
+            .as_bytes()
+            .to_vec(),
+    };
+    let digest = material.transcript_digest();
+
+    writeln!(out, "transport={:?}", material.transport_kind).map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "relay_id={}",
+        material.relay_id.as_deref().unwrap_or("none")
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "timestamp_window_ms={}", material.timestamp_window_ms)
+        .map_err(|err| err.to_string())?;
+    writeln!(out, "binding_digest={}", format_hex(&digest)).map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 fn execute_suite(args: &[String], out: &mut impl Write) -> Result<(), String> {
@@ -531,6 +570,14 @@ fn format_reliability(reliability: SkyBridgeReliability) -> String {
     }
 }
 
+fn format_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("write to String");
+    }
+    output
+}
+
 fn normalize(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
@@ -580,6 +627,48 @@ mod tests {
         assert!(stdout.contains("kind=WebRtcDataChannel"));
         assert!(stdout.contains("audit=WebRtcInterop"));
         assert!(stdout.contains("relay_allowed=true"));
+    }
+
+    #[test]
+    fn transport_bind_reports_core_transcript_digest() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let code = run(
+            [
+                "transport",
+                "bind",
+                "--transport",
+                "webrtc",
+                "--local-endpoint",
+                "10.0.0.1:443",
+                "--remote-endpoint",
+                "10.0.0.2:443",
+                "--candidate-pair",
+                "host/udp",
+                "--secret-fp",
+                "secret-fingerprint",
+                "--capability-digest",
+                "capability-digest",
+                "--timestamp-window-ms",
+                "10000",
+            ],
+            &mut out,
+            &mut err,
+        );
+
+        let stdout = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0);
+        assert!(err.is_empty());
+        assert!(stdout.contains("transport=WebRtcDataChannel"));
+        assert!(stdout.contains("relay_id=none"));
+        let digest = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("binding_digest="))
+            .expect("binding digest output");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|value| value.is_ascii_hexdigit()));
+        assert_eq!(digest, digest.to_ascii_lowercase());
     }
 
     #[test]

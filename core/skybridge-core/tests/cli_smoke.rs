@@ -61,6 +61,43 @@ fn cli_windows_to_apple_selects_webrtc_interop() {
 }
 
 #[test]
+fn cli_transport_bind_reports_binding_digest() {
+    let output = skybridge()
+        .args([
+            "transport",
+            "bind",
+            "--transport",
+            "webrtc",
+            "--local-endpoint",
+            "10.0.0.1:443",
+            "--remote-endpoint",
+            "10.0.0.2:443",
+            "--candidate-pair",
+            "host/udp",
+            "--secret-fp",
+            "secret-fingerprint",
+            "--capability-digest",
+            "capability-digest",
+            "--timestamp-window-ms",
+            "10000",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("transport=WebRtcDataChannel"));
+    assert!(stdout.contains("relay_id=none"));
+    let digest = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("binding_digest="))
+        .expect("binding digest output");
+    assert_eq!(digest.len(), 64);
+    assert!(digest.chars().all(|value| value.is_ascii_hexdigit()));
+    assert_eq!(digest, digest.to_ascii_lowercase());
+}
+
+#[test]
 fn cli_suite_offer_lists_provider_derived_suites() {
     let output = skybridge()
         .args([

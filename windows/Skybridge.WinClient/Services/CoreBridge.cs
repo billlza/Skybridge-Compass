@@ -57,6 +57,84 @@ public sealed class CoreBridge
         });
     }
 
+    public Task<byte[]> ComputeTransportBindingDigestAsync(TransportBindingMaterial material)
+    {
+        ArgumentNullException.ThrowIfNull(material);
+        ArgumentNullException.ThrowIfNull(material.LocalEndpoint);
+        ArgumentNullException.ThrowIfNull(material.RemoteEndpoint);
+        ArgumentNullException.ThrowIfNull(material.SelectedCandidatePair);
+        ArgumentNullException.ThrowIfNull(material.TransportSecretFingerprint);
+        ArgumentNullException.ThrowIfNull(material.CapabilityDigest);
+
+        var localEndpointBytes = Encoding.UTF8.GetBytes(material.LocalEndpoint);
+        var remoteEndpointBytes = Encoding.UTF8.GetBytes(material.RemoteEndpoint);
+        var selectedCandidatePairBytes = Encoding.UTF8.GetBytes(material.SelectedCandidatePair);
+        var relayIdBytes = string.IsNullOrEmpty(material.RelayId)
+            ? Array.Empty<byte>()
+            : Encoding.UTF8.GetBytes(material.RelayId);
+        var transportSecretFingerprint = (byte[])material.TransportSecretFingerprint.Clone();
+        var capabilityDigest = (byte[])material.CapabilityDigest.Clone();
+
+        return Task.Run(() =>
+        {
+            var handles = new List<GCHandle>();
+
+            nint Pin(byte[] bytes)
+            {
+                if (bytes.Length == 0)
+                {
+                    return nint.Zero;
+                }
+
+                var handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+                handles.Add(handle);
+                return handle.AddrOfPinnedObject();
+            }
+
+            try
+            {
+                var result = NativeMethods.TransportBindingDigest(
+                    material.Transport,
+                    Pin(localEndpointBytes),
+                    (nuint)localEndpointBytes.Length,
+                    Pin(remoteEndpointBytes),
+                    (nuint)remoteEndpointBytes.Length,
+                    Pin(selectedCandidatePairBytes),
+                    (nuint)selectedCandidatePairBytes.Length,
+                    Pin(transportSecretFingerprint),
+                    (nuint)transportSecretFingerprint.Length,
+                    Pin(relayIdBytes),
+                    (nuint)relayIdBytes.Length,
+                    material.TimestampWindowMs,
+                    Pin(capabilityDigest),
+                    (nuint)capabilityDigest.Length,
+                    out var nativeDigest);
+
+                if (result != SkybridgeErrorCode.Ok)
+                {
+                    throw new InvalidOperationException($"Transport binding digest failed: {result}");
+                }
+
+                if (nativeDigest.Digest is null || nativeDigest.Digest.Length != 32)
+                {
+                    throw new InvalidOperationException("skybridge_core returned an invalid transport binding digest.");
+                }
+
+                return nativeDigest.Digest;
+            }
+            finally
+            {
+                foreach (var handle in handles)
+                {
+                    if (handle.IsAllocated)
+                    {
+                        handle.Free();
+                    }
+                }
+            }
+        });
+    }
+
     public Task<ChannelMapping> MapChannelAsync(CoreTransportKind transport, CoreChannelKind channel)
     {
         return Task.Run(() =>
@@ -342,6 +420,24 @@ public sealed class CoreBridge
             NativeNetworkPath path,
             out NativeTransportSelection selection);
 
+        [DllImport("skybridge_core", EntryPoint = "skybridge_transport_binding_digest")]
+        public static extern SkybridgeErrorCode TransportBindingDigest(
+            CoreTransportKind transport,
+            nint localEndpointPtr,
+            nuint localEndpointLen,
+            nint remoteEndpointPtr,
+            nuint remoteEndpointLen,
+            nint selectedCandidatePairPtr,
+            nuint selectedCandidatePairLen,
+            nint transportSecretFingerprintPtr,
+            nuint transportSecretFingerprintLen,
+            nint relayIdPtr,
+            nuint relayIdLen,
+            ulong timestampWindowMs,
+            nint capabilityDigestPtr,
+            nuint capabilityDigestLen,
+            out NativeTransportBindingDigest digest);
+
         [DllImport("skybridge_core", EntryPoint = "skybridge_map_channel")]
         public static extern SkybridgeErrorCode MapChannel(
             CoreTransportKind transport,
@@ -608,6 +704,16 @@ public sealed record TransportSelection(
             selection.RelayAllowed != 0);
 }
 
+public sealed record TransportBindingMaterial(
+    CoreTransportKind Transport,
+    string LocalEndpoint,
+    string RemoteEndpoint,
+    string SelectedCandidatePair,
+    byte[] TransportSecretFingerprint,
+    string? RelayId,
+    ulong TimestampWindowMs,
+    byte[] CapabilityDigest);
+
 public sealed record ChannelMapping(
     CoreChannelKind Channel,
     CoreReliabilityKind Reliability,
@@ -798,6 +904,13 @@ internal struct NativeTransportSelection
     public byte Priority;
     public byte RelayRequired;
     public byte RelayAllowed;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeTransportBindingDigest
+{
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+    public byte[] Digest;
 }
 
 [StructLayout(LayoutKind.Sequential)]

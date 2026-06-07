@@ -1,3 +1,4 @@
+use skybridge_core::ffi::skybridge_transport_binding_digest;
 use skybridge_core::ffi::{
     skybridge_decode_frame_metadata, skybridge_decode_frame_payload, skybridge_encode_frame,
     skybridge_encode_sbp2_frame, skybridge_engine_check_liveness, skybridge_engine_clear_events,
@@ -15,8 +16,8 @@ use skybridge_core::ffi::{
     SkybridgeEventKind, SkybridgeFlowRate, SkybridgeFrameMetadata, SkybridgeNetworkPath,
     SkybridgePeerCapabilities, SkybridgePeerPlatform, SkybridgeReliabilityKind,
     SkybridgeSessionConfig, SkybridgeSessionState, SkybridgeStreamMetrics,
-    SkybridgeTrafficPaddingPlan, SkybridgeTransportAuditCode, SkybridgeTransportKind,
-    SkybridgeTransportSelection, SKYBRIDGE_EVENT_CAPACITY,
+    SkybridgeTrafficPaddingPlan, SkybridgeTransportAuditCode, SkybridgeTransportBindingDigest,
+    SkybridgeTransportKind, SkybridgeTransportSelection, SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -385,6 +386,106 @@ fn ffi_transport_selector_exports_adr_defaults() {
     let null_result =
         unsafe { skybridge_select_transport(windows, apple, cross_nat, ptr::null_mut()) };
     assert_eq!(null_result, SkybridgeErrorCode::InvalidInput);
+}
+
+#[test]
+fn ffi_transport_binding_digest_exports_core_transcript() {
+    let local_endpoint = b"10.0.0.1:443";
+    let remote_endpoint = b"10.0.0.2:443";
+    let candidate_pair = b"host/udp";
+    let secret_fingerprint = b"secret-fingerprint";
+    let capability_digest = b"capability-digest";
+    let mut digest = SkybridgeTransportBindingDigest { digest: [0; 32] };
+
+    let result = unsafe {
+        skybridge_transport_binding_digest(
+            SkybridgeTransportKind::WebRtcDataChannel,
+            local_endpoint.as_ptr(),
+            local_endpoint.len(),
+            remote_endpoint.as_ptr(),
+            remote_endpoint.len(),
+            candidate_pair.as_ptr(),
+            candidate_pair.len(),
+            secret_fingerprint.as_ptr(),
+            secret_fingerprint.len(),
+            ptr::null(),
+            0,
+            10_000,
+            capability_digest.as_ptr(),
+            capability_digest.len(),
+            &mut digest,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_ne!(digest.digest, [0; 32]);
+
+    let relay_id = b"turn-a";
+    let mut relay_digest = SkybridgeTransportBindingDigest { digest: [0; 32] };
+    let relay_result = unsafe {
+        skybridge_transport_binding_digest(
+            SkybridgeTransportKind::Relay,
+            local_endpoint.as_ptr(),
+            local_endpoint.len(),
+            remote_endpoint.as_ptr(),
+            remote_endpoint.len(),
+            candidate_pair.as_ptr(),
+            candidate_pair.len(),
+            secret_fingerprint.as_ptr(),
+            secret_fingerprint.len(),
+            relay_id.as_ptr(),
+            relay_id.len(),
+            10_000,
+            capability_digest.as_ptr(),
+            capability_digest.len(),
+            &mut relay_digest,
+        )
+    };
+
+    assert_eq!(relay_result, SkybridgeErrorCode::Ok);
+    assert_ne!(digest.digest, relay_digest.digest);
+
+    let unsupported_result = unsafe {
+        skybridge_transport_binding_digest(
+            SkybridgeTransportKind::Unsupported,
+            local_endpoint.as_ptr(),
+            local_endpoint.len(),
+            remote_endpoint.as_ptr(),
+            remote_endpoint.len(),
+            candidate_pair.as_ptr(),
+            candidate_pair.len(),
+            secret_fingerprint.as_ptr(),
+            secret_fingerprint.len(),
+            ptr::null(),
+            0,
+            10_000,
+            capability_digest.as_ptr(),
+            capability_digest.len(),
+            &mut digest,
+        )
+    };
+    assert_eq!(unsupported_result, SkybridgeErrorCode::InvalidInput);
+
+    let null_out = unsafe {
+        skybridge_transport_binding_digest(
+            SkybridgeTransportKind::WebRtcDataChannel,
+            local_endpoint.as_ptr(),
+            local_endpoint.len(),
+            remote_endpoint.as_ptr(),
+            remote_endpoint.len(),
+            candidate_pair.as_ptr(),
+            candidate_pair.len(),
+            secret_fingerprint.as_ptr(),
+            secret_fingerprint.len(),
+            ptr::null(),
+            0,
+            10_000,
+            capability_digest.as_ptr(),
+            capability_digest.len(),
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(null_out, SkybridgeErrorCode::InvalidInput);
 }
 
 #[test]
