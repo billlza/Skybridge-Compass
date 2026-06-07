@@ -24,6 +24,7 @@ public sealed partial class MainWindow : Window
             new CoreDiagnosticsClient(coreBridge),
             new FileTransferWorkspaceClient(coreBridge),
             new RemoteDesktopWorkspaceClient(coreBridge),
+            new RemoteDesktopProfileCatalogClient(),
             new SystemMonitorWorkspaceClient(),
             new UsbManagementWorkspaceClient(),
             new SettingsWorkspaceClient(),

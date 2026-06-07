@@ -8,19 +8,6 @@ using Skybridge.WinClient.Services;
 
 namespace Skybridge.WinClient.ViewModels;
 
-public enum BitrateProfile
-{
-    Low,
-    Medium,
-    High
-}
-
-public enum FramerateProfile
-{
-    Fps30,
-    Fps60
-}
-
 public sealed class SessionViewModel : INotifyPropertyChanged
 {
     private const string SampleFingerprint =
@@ -42,6 +29,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
     private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
+    private readonly IRemoteDesktopProfileCatalogClient _remoteDesktopProfileCatalogClient;
     private readonly ISystemMonitorWorkspaceClient _systemMonitorClient;
     private readonly IUsbManagementWorkspaceClient _usbManagementClient;
     private readonly ISettingsWorkspaceClient _settingsClient;
@@ -82,8 +70,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _topBarDiagnosticsStatus = "Nominal";
     private string _topBarNotificationsStatus = "Off";
     private string _topBarThemeStatus = "System";
-    private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
-    private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
+    private string _selectedBitrate = "Medium";
+    private string _selectedFramerate = "Fps60";
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
     private DiscoveredPeer? _validatedDiscoveredPeer;
@@ -104,6 +92,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ICoreDiagnosticsClient? coreDiagnosticsClient = null,
         IFileTransferWorkspaceClient? fileTransferClient = null,
         IRemoteDesktopWorkspaceClient? remoteDesktopClient = null,
+        IRemoteDesktopProfileCatalogClient? remoteDesktopProfileCatalogClient = null,
         ISystemMonitorWorkspaceClient? systemMonitorClient = null,
         IUsbManagementWorkspaceClient? usbManagementClient = null,
         ISettingsWorkspaceClient? settingsClient = null,
@@ -122,6 +111,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
         _fileTransferClient = fileTransferClient ?? new UnavailableFileTransferWorkspaceClient();
         _remoteDesktopClient = remoteDesktopClient ?? new UnavailableRemoteDesktopWorkspaceClient();
+        _remoteDesktopProfileCatalogClient = remoteDesktopProfileCatalogClient ?? new RemoteDesktopProfileCatalogClient();
         _systemMonitorClient = systemMonitorClient ?? new UnavailableSystemMonitorWorkspaceClient();
         _usbManagementClient = usbManagementClient ?? new UnavailableUsbManagementWorkspaceClient();
         _settingsClient = settingsClient ?? new UnavailableSettingsWorkspaceClient();
@@ -196,8 +186,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshSystemMonitorCommand = new AsyncRelayCommand(RefreshSystemMonitorAsync, CanRefreshSystemMonitor);
         RefreshUsbManagementCommand = new AsyncRelayCommand(RefreshUsbManagementAsync, CanRefreshUsbManagement);
         RefreshSettingsCommand = new AsyncRelayCommand(RefreshSettingsAsync, CanRefreshSettings);
-        BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
-        FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
+        var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
+        BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
+        FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
+        _selectedBitrate = profileCatalog.DefaultBitrateProfile;
+        _selectedFramerate = profileCatalog.DefaultFramerateProfile;
         LoadWorkspaceActions();
         RefreshDashboardMetrics();
         RefreshTopBarStatus();
@@ -209,9 +202,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<DashboardMetricView> DashboardMetrics { get; }
 
-    public ObservableCollection<BitrateProfile> BitrateProfiles { get; }
+    public ObservableCollection<string> BitrateProfiles { get; }
 
-    public ObservableCollection<FramerateProfile> FramerateProfiles { get; }
+    public ObservableCollection<string> FramerateProfiles { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SidebarSessionActions { get; }
 
@@ -675,7 +668,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public int SettingsActionCount => SettingsActions.Count;
 
-    public BitrateProfile SelectedBitrate
+    public string SelectedBitrate
     {
         get => _selectedBitrate;
         set
@@ -687,7 +680,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
-    public FramerateProfile SelectedFramerate
+    public string SelectedFramerate
     {
         get => _selectedFramerate;
         set
@@ -1146,8 +1139,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             RemoteDesktopStatus = "Refreshing...";
             var snapshot = await _remoteDesktopClient.BuildReadOnlySnapshotAsync(
-                SelectedBitrate.ToString(),
-                SelectedFramerate.ToString());
+                SelectedBitrate,
+                SelectedFramerate);
             RemoteDesktopSessions.Clear();
             foreach (var item in snapshot.Sessions)
             {

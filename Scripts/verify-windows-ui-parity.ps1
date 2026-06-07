@@ -101,13 +101,14 @@ $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
 $workspaceActionCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceActionCatalogClient.cs"
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
+$remoteDesktopProfileCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopProfileCatalogClient.cs"
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -125,6 +126,7 @@ $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
 $workspaceActionCatalog = Get-Content -Raw -LiteralPath $workspaceActionCatalogPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
+$remoteDesktopProfileCatalog = Get-Content -Raw -LiteralPath $remoteDesktopProfileCatalogPath
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
@@ -629,6 +631,28 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Remote Desktop action cat
     '"Disconnect Session"'
 )
 
+Assert-Ordered -Text $remoteDesktopProfileCatalog -Context "Remote Desktop profile catalog order" -Needles @(
+    '"Low"',
+    '"Medium"',
+    '"High"',
+    '"Fps30"',
+    '"Fps60"'
+)
+
+foreach ($profileCatalogSignal in @(
+    "public interface IRemoteDesktopProfileCatalogClient",
+    "public sealed class RemoteDesktopProfileCatalogClient : IRemoteDesktopProfileCatalogClient",
+    "RemoteDesktopProfileCatalogSnapshot",
+    "BuildReadOnlySnapshot",
+    "DefaultBitrateProfile",
+    "DefaultFramerateProfile",
+    "new RemoteDesktopProfileCatalogClient()"
+)) {
+    Assert-Contains -Text ($remoteDesktopProfileCatalog + $sessionViewModel + $mainWindow) -Needle $profileCatalogSignal -Message "Remote Desktop profile catalog signal missing: $profileCatalogSignal"
+}
+
+Assert-True -Condition (-not $sessionViewModel.Contains("Enum.GetValues")) -Message "SessionViewModel must not build Remote Desktop profile lists from local enum reflection."
+
 Assert-Ordered -Text $mainWindow -Context "Quantum diagnostics action order" -Needles @(
     '<TextBlock Text="Quantum / Core Diagnostics"',
     'ItemsSource="{Binding QuantumDiagnosticsHeaderActions}"',
@@ -842,6 +866,7 @@ foreach ($remoteDesktopSignal in @(
     "Full Screen",
     "Disconnect Session",
     "RemoteDesktopActions",
+    "RemoteDesktopProfileCatalogClient",
     "WorkspaceActionSurface.RemoteDesktopHeader",
     "WorkspaceActionSurface.RemoteDesktop",
     "RefreshSessions",
@@ -851,9 +876,11 @@ foreach ($remoteDesktopSignal in @(
     "PlanConnectionAsync",
     "CoreChannelKind.Realtime",
     "CoreChannelKind.Telemetry",
-    "EncodeSbp2FrameAsync"
+    "EncodeSbp2FrameAsync",
+    "BitrateProfiles",
+    "FramerateProfiles"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $remoteDesktop + $workspaceActionCatalog) -Needle $remoteDesktopSignal -Message "Remote Desktop parity signal missing: $remoteDesktopSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $remoteDesktop + $remoteDesktopProfileCatalog + $workspaceActionCatalog) -Needle $remoteDesktopSignal -Message "Remote Desktop parity signal missing: $remoteDesktopSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", true)' -Message "Remote Desktop must be marked implemented once the read-only session workspace exists."
@@ -1053,6 +1080,7 @@ foreach ($docSignal in @(
     "UsbManagementHeaderActions",
     "FileTransferHeaderActions",
     "RemoteDesktopHeaderActions",
+    "RemoteDesktopProfileCatalogClient",
     "QuantumDiagnosticsHeaderActions",
     "SettingsHeaderActions",
     "CrossNetworkConnectionClient",
