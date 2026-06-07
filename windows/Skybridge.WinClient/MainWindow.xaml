@@ -98,6 +98,42 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
         </DataTemplate>
+        <DataTemplate x:Key="SettingsDetailRowTemplate">
+            <Grid Padding="0,4" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="130" />
+                    <ColumnDefinition Width="160" />
+                    <ColumnDefinition Width="180" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Section}" FontWeight="SemiBold" />
+                <TextBlock Grid.Column="1" Text="{Binding Label}" />
+                <TextBlock Grid.Column="2" Text="{Binding Value}" TextWrapping="Wrap" />
+                <TextBlock
+                    Grid.Column="3"
+                    Text="{Binding Detail}"
+                    TextWrapping="Wrap"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+        </DataTemplate>
+        <DataTemplate x:Key="SettingsActionRowTemplate">
+            <Grid Padding="0,4" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="170" />
+                    <ColumnDefinition Width="190" />
+                    <ColumnDefinition Width="110" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Key}" FontWeight="SemiBold" />
+                <TextBlock Grid.Column="1" Text="{Binding Title}" />
+                <TextBlock Grid.Column="2" Text="{Binding State}" />
+                <TextBlock
+                    Grid.Column="3"
+                    Text="{Binding Detail}"
+                    TextWrapping="Wrap"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+        </DataTemplate>
     </Window.Resources>
 
     <Grid Background="{ThemeResource SolidBackgroundFillColorBase}">
@@ -757,47 +793,13 @@
 
                                 <StackPanel Grid.Column="1" Spacing="12">
                                     <TextBlock Text="Settings Details" FontWeight="SemiBold" />
-                                    <ItemsControl ItemsSource="{Binding SettingsDetails}">
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate>
-                                                <Grid Padding="0,4" ColumnSpacing="12">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="130" />
-                                                        <ColumnDefinition Width="160" />
-                                                        <ColumnDefinition Width="180" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="{Binding Section}" FontWeight="SemiBold" />
-                                                    <TextBlock Grid.Column="1" Text="{Binding Label}" />
-                                                    <TextBlock Grid.Column="2" Text="{Binding Value}" TextWrapping="Wrap" />
-                                                    <TextBlock Grid.Column="3" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
+                                    <ItemsControl ItemsSource="{Binding SettingsDetails}" ItemTemplate="{StaticResource SettingsDetailRowTemplate}" />
                                 </StackPanel>
                             </Grid>
 
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Settings Actions" FontWeight="SemiBold" />
-                                <ItemsControl ItemsSource="{Binding SettingsActions}">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Grid Padding="0,4" ColumnSpacing="12">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="170" />
-                                                    <ColumnDefinition Width="190" />
-                                                    <ColumnDefinition Width="110" />
-                                                    <ColumnDefinition Width="*" />
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding Key}" FontWeight="SemiBold" />
-                                                <TextBlock Grid.Column="1" Text="{Binding Title}" />
-                                                <TextBlock Grid.Column="2" Text="{Binding State}" />
-                                                <TextBlock Grid.Column="3" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            </Grid>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                <ItemsControl ItemsSource="{Binding SettingsActions}" ItemTemplate="{StaticResource SettingsActionRowTemplate}" />
                                 <ItemsControl
                                     ItemsSource="{Binding SettingsMaintenanceActions}"
                                     ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
