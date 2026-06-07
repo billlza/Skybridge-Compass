@@ -194,6 +194,17 @@ Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order"
     '<TextBlock Text="Session Controls"'
 )
 
+Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles @(
+    '<TextBlock Text="{Binding SelectedFeature.Title}"',
+    '<TextBlock Text="{Binding StatusMessage}"',
+    '<TextBlock Text="{Binding ConnectionStatus}" FontWeight="SemiBold"',
+    '<TextBlock Text="FPS / Diagnostics"',
+    '<TextBlock Text="{Binding PerformanceStatus}" FontWeight="SemiBold"',
+    '<TextBlock Text="Notifications"',
+    '<TextBlock Text="Theme"',
+    'Command="{Binding HeartbeatCommand}"'
+)
+
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',
     'Command="{Binding ParseAdvertisementCommand}"',
@@ -537,6 +548,7 @@ Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, "Se
 
 foreach ($docSignal in @(
     "origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
+    "origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift",
     "origin/tdsc-2026-01-0318-ios-sim-fix:Docs/CoreLayering.md",
     "origin/tdsc-2026-01-0318-ios-sim-fix:Docs/ProtocolAlignmentPlan.md",
     "origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md",
@@ -546,6 +558,9 @@ foreach ($docSignal in @(
     "WindowsDiscoveryBrowserClient",
     "Start Scan",
     "Manual Connect",
+    "FPS / Diagnostics",
+    "Notifications",
+    "Theme",
     "CrossNetworkConnectionClient",
     "Generate QR Code",
     "Smart Connection Code",
