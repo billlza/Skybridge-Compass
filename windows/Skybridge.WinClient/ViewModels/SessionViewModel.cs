@@ -32,6 +32,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
+    private readonly IConnectionPreflightClient _connectionPreflightClient;
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
     private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
@@ -46,6 +47,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         $"skybridge-pair:v1;deviceId=mac-1;pubKey={SamplePairingPublicKey};pubKeyFP={SampleFingerprint};platform=macOS;name=Desk%20Mac;version=v1";
     private string _discoveryStatus = "Ready";
     private string _pairingStatus = "Ready";
+    private string _connectionPreflightStatus = "Ready";
     private string _coreDiagnosticsStatus = "Ready";
     private string _fileTransferStatus = "Ready";
     private string _remoteDesktopStatus = "Ready";
@@ -56,12 +58,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
+    private DiscoveredPeer? _validatedDiscoveredPeer;
+    private PairingMaterial? _validatedPairingMaterial;
     private bool _isBusy;
 
     public SessionViewModel(
         IEngineClient engineClient,
         IDiscoveryClient? discoveryClient = null,
         IPairingMaterialClient? pairingMaterialClient = null,
+        IConnectionPreflightClient? connectionPreflightClient = null,
         ICoreDiagnosticsClient? coreDiagnosticsClient = null,
         IFileTransferWorkspaceClient? fileTransferClient = null,
         IRemoteDesktopWorkspaceClient? remoteDesktopClient = null,
@@ -72,6 +77,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         _pairingMaterialClient = pairingMaterialClient ?? new UnavailablePairingMaterialClient();
+        _connectionPreflightClient = connectionPreflightClient ?? new UnavailableConnectionPreflightClient();
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
         _fileTransferClient = fileTransferClient ?? new UnavailableFileTransferWorkspaceClient();
         _remoteDesktopClient = remoteDesktopClient ?? new UnavailableRemoteDesktopWorkspaceClient();
@@ -83,6 +89,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _selectedFeature = NavigationItems[0];
         DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
         PairingFacts = new ObservableCollection<PairingFactView>();
+        ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
         FileTransferQueue = new ObservableCollection<FileTransferQueueItemView>();
         FileTransferHistory = new ObservableCollection<FileTransferHistoryItemView>();
@@ -103,6 +110,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         HeartbeatCommand = new AsyncRelayCommand(SendHeartbeatAsync, CanSendHeartbeat);
         ParseAdvertisementCommand = new AsyncRelayCommand(ParseAdvertisementAsync, CanParseAdvertisement);
         ValidatePairingCodeCommand = new AsyncRelayCommand(ValidatePairingCodeAsync, CanValidatePairingCode);
+        PrepareConnectionCommand = new AsyncRelayCommand(PrepareConnectionAsync, CanPrepareConnection);
         RunCoreDiagnosticsCommand = new AsyncRelayCommand(RunCoreDiagnosticsAsync, CanRunCoreDiagnostics);
         RefreshFileTransferCommand = new AsyncRelayCommand(RefreshFileTransferAsync, CanRefreshFileTransfer);
         RefreshRemoteDesktopCommand = new AsyncRelayCommand(RefreshRemoteDesktopAsync, CanRefreshRemoteDesktop);
@@ -124,6 +132,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<DiscoveredPeerView> DiscoveredPeers { get; }
 
     public ObservableCollection<PairingFactView> PairingFacts { get; }
+
+    public ObservableCollection<ConnectionPreflightFactView> ConnectionPreflightFacts { get; }
 
     public ObservableCollection<CoreDiagnosticFactView> CoreDiagnosticFacts { get; }
 
@@ -237,6 +247,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoveryService, value))
             {
+                InvalidatePairingAndPreflight();
                 RefreshCommandStates();
             }
         }
@@ -249,6 +260,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoveryTxtRecord, value))
             {
+                InvalidatePairingAndPreflight();
                 RefreshCommandStates();
             }
         }
@@ -261,6 +273,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _pairingConnectionCode, value))
             {
+                _validatedPairingMaterial = null;
+                PairingFacts.Clear();
+                ClearConnectionPreflight();
+                PairingStatus = "Ready";
+                OnPropertyChanged(nameof(PairingFactCount));
                 RefreshCommandStates();
             }
         }
@@ -278,9 +295,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set => SetField(ref _pairingStatus, value);
     }
 
+    public string ConnectionPreflightStatus
+    {
+        get => _connectionPreflightStatus;
+        private set => SetField(ref _connectionPreflightStatus, value);
+    }
+
     public int DiscoveredPeerCount => DiscoveredPeers.Count;
 
     public int PairingFactCount => PairingFacts.Count;
+
+    public int ConnectionPreflightFactCount => ConnectionPreflightFacts.Count;
 
     public string CoreDiagnosticsStatus
     {
@@ -364,6 +389,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ICommand ValidatePairingCodeCommand { get; }
 
+    public ICommand PrepareConnectionCommand { get; }
+
     public ICommand RunCoreDiagnosticsCommand { get; }
 
     public ICommand RefreshFileTransferCommand { get; }
@@ -431,10 +458,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             DiscoveryStatus = "Parsing...";
             var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
+            _validatedDiscoveredPeer = peer;
+            _validatedPairingMaterial = null;
             DiscoveredPeers.Clear();
             DiscoveredPeers.Add(DiscoveredPeerView.FromPeer(peer));
+            PairingFacts.Clear();
+            ClearConnectionPreflight();
             OnPropertyChanged(nameof(DiscoveredPeerCount));
+            OnPropertyChanged(nameof(PairingFactCount));
             DiscoveryStatus = $"Validated {peer.DeviceId}";
+            PairingStatus = "Ready";
             StatusMessage = "Discovery advertisement validated";
         });
     }
@@ -455,6 +488,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var material = await _pairingMaterialClient.ParseConnectionCodeAsync(
                 PairingConnectionCode,
                 expectedFingerprint);
+            _validatedPairingMaterial = material;
+            ClearConnectionPreflight();
             PairingFacts.Clear();
             PairingFacts.Add(new PairingFactView("Device", material.DeviceId, $"{material.DisplayName} / {material.PlatformLabel}"));
             PairingFacts.Add(new PairingFactView("Public key fingerprint", material.PublicKeyFingerprint, "Verified against connection-code public key bytes."));
@@ -468,6 +503,41 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             OnPropertyChanged(nameof(PairingFactCount));
             PairingStatus = $"Validated {material.DeviceId}";
             StatusMessage = "Pairing code validated";
+        });
+    }
+
+    private async Task PrepareConnectionAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            if (_validatedDiscoveredPeer is null)
+            {
+                throw new InvalidOperationException("Parse a Core-validated discovery TXT record before connection preflight.");
+            }
+
+            if (_validatedPairingMaterial is null)
+            {
+                throw new InvalidOperationException("Validate pairing material before connection preflight.");
+            }
+
+            ConnectionPreflightStatus = "Preparing...";
+            var snapshot = await _connectionPreflightClient.BuildReadOnlySnapshotAsync(
+                _validatedDiscoveredPeer,
+                _validatedPairingMaterial);
+            ConnectionPreflightFacts.Clear();
+            foreach (var fact in snapshot.Facts)
+            {
+                ConnectionPreflightFacts.Add(ConnectionPreflightFactView.FromFact(fact));
+            }
+
+            OnPropertyChanged(nameof(ConnectionPreflightFactCount));
+            ConnectionPreflightStatus = $"Prepared {snapshot.CapturedAt:HH:mm:ss} UTC";
+            StatusMessage = "Connection preflight prepared";
         });
     }
 
@@ -677,6 +747,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         && IsDeviceDiscoverySelected
         && !string.IsNullOrWhiteSpace(PairingConnectionCode);
 
+    private bool CanPrepareConnection() =>
+        !IsBusy
+        && IsDeviceDiscoverySelected
+        && _validatedDiscoveredPeer is not null
+        && _validatedPairingMaterial is not null;
+
     private bool CanRefreshUsbManagement() => !IsBusy && IsUsbManagementSelected;
 
     private bool CanRunCoreDiagnostics() => !IsBusy && IsQuantumSelected;
@@ -703,6 +779,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             {
                 DiscoveryStatus = ex.Message;
                 PairingStatus = ex.Message;
+                ConnectionPreflightStatus = ex.Message;
             }
 
             if (IsUsbManagementSelected)
@@ -748,6 +825,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (HeartbeatCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ValidatePairingCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (PrepareConnectionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshUsbManagementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RunCoreDiagnosticsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshFileTransferCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
@@ -784,6 +862,26 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+
+    private void InvalidatePairingAndPreflight()
+    {
+        _validatedDiscoveredPeer = null;
+        _validatedPairingMaterial = null;
+        DiscoveredPeers.Clear();
+        PairingFacts.Clear();
+        ClearConnectionPreflight();
+        DiscoveryStatus = "Ready";
+        PairingStatus = "Ready";
+        OnPropertyChanged(nameof(DiscoveredPeerCount));
+        OnPropertyChanged(nameof(PairingFactCount));
+    }
+
+    private void ClearConnectionPreflight()
+    {
+        ConnectionPreflightFacts.Clear();
+        ConnectionPreflightStatus = "Ready";
+        OnPropertyChanged(nameof(ConnectionPreflightFactCount));
     }
 }
 
@@ -928,6 +1026,15 @@ public sealed record PairingFactView(
     string Value,
     string Detail);
 
+public sealed record ConnectionPreflightFactView(
+    string Label,
+    string Value,
+    string Detail)
+{
+    public static ConnectionPreflightFactView FromFact(ConnectionPreflightFact fact) =>
+        new(fact.Label, fact.Value, fact.Detail);
+}
+
 public sealed record DiscoveredPeerView(
     string DeviceId,
     string DisplayName,
@@ -1001,6 +1108,16 @@ internal sealed class UnavailablePairingMaterialClient : IPairingMaterialClient
         string? expectedPublicKeyFingerprint)
     {
         throw new InvalidOperationException("Pairing material client is not configured.");
+    }
+}
+
+internal sealed class UnavailableConnectionPreflightClient : IConnectionPreflightClient
+{
+    public Task<ConnectionPreflightSnapshot> BuildReadOnlySnapshotAsync(
+        DiscoveredPeer discoveredPeer,
+        PairingMaterial pairingMaterial)
+    {
+        throw new InvalidOperationException("Connection preflight client is not configured.");
     }
 }
 

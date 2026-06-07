@@ -179,6 +179,12 @@
                                             <TextBlock Text="Validate Pairing" />
                                         </StackPanel>
                                     </Button>
+                                    <Button Command="{Binding PrepareConnectionCommand}">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE768;" FontSize="14" />
+                                            <TextBlock Text="Prepare Connection" />
+                                        </StackPanel>
+                                    </Button>
                                 </StackPanel>
                             </Grid>
 
@@ -249,6 +255,23 @@
                                 <StackPanel Grid.Column="1" Spacing="8">
                                     <TextBlock Text="{Binding PairingStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                     <ItemsControl ItemsSource="{Binding PairingFacts}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Padding="0,4" ColumnSpacing="12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="170" />
+                                                        <ColumnDefinition Width="220" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                                                    <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="{Binding ConnectionPreflightStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ItemsControl ItemsSource="{Binding ConnectionPreflightFacts}">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
                                                 <Grid Padding="0,4" ColumnSpacing="12">

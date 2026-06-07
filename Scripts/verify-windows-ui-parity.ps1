@@ -28,6 +28,7 @@ function Assert-Contains {
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
+$connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
@@ -37,13 +38,14 @@ $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Settin
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $pairingPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
 $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
+$connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
@@ -96,6 +98,8 @@ foreach ($binding in @(
     "PairingConnectionCode",
     "PairingStatus",
     "PairingFacts",
+    "ConnectionPreflightStatus",
+    "ConnectionPreflightFacts",
     "IsDeviceDiscoverySelected",
     "UsbManagementStatus",
     "UsbDeviceStats",
@@ -128,7 +132,7 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -150,16 +154,24 @@ foreach ($discoverySignal in @(
     "DiscoveredPeerView",
     "Pairing Code",
     "Validate Pairing",
+    "Prepare Connection",
     "PairingFactView",
+    "ConnectionPreflightFactView",
     "PairingMaterialClient",
+    "ConnectionPreflightClient",
     "skybridge-pair:v1",
     "IPeerPublicKeyProvider",
     "PublicKeyFingerprint",
     "fingerprint only; pairing must provide the peer public key",
     "Discovery pubKeyFP is verification input only",
-    "Pairing code public key does not match pubKeyFP"
+    "Pairing code public key does not match pubKeyFP",
+    "BuildReadOnlySnapshotAsync",
+    "PlanConnectionAsync",
+    "ComputeTransportBindingDigestAsync",
+    "Transport binding digest",
+    "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $pairing) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $pairing + $connectionPreflight) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
@@ -350,6 +362,8 @@ Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, "Se
 foreach ($docSignal in @(
     "origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
     "Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings",
+    "ConnectionPreflightClient",
+    "Prepare Connection",
     "CoreBridge.PlanConnectionAsync",
     "Visual QA"
 )) {

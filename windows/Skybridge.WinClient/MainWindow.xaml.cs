@@ -16,6 +16,7 @@ public sealed partial class MainWindow : Window
             new DummyEngineClient(),
             new CoreDiscoveryClient(coreBridge),
             new PairingMaterialClient(),
+            new ConnectionPreflightClient(coreBridge),
             new CoreDiagnosticsClient(coreBridge),
             new FileTransferWorkspaceClient(coreBridge),
             new RemoteDesktopWorkspaceClient(coreBridge),
