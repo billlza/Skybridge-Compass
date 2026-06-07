@@ -35,6 +35,22 @@ function Get-LineCoverage {
 $coreRoot = Join-Path $RepoRoot "core/skybridge-core"
 Assert-True -Condition (Test-Path -LiteralPath (Join-Path $coreRoot "Cargo.toml")) -Message "Missing Rust core Cargo.toml: $coreRoot"
 
+$cliSmokePath = Join-Path $coreRoot "tests/cli_smoke.rs"
+Assert-True -Condition (Test-Path -LiteralPath $cliSmokePath) -Message "Missing CLI smoke tests: $cliSmokePath"
+$cliSmoke = Get-Content -Raw -LiteralPath $cliSmokePath
+
+foreach ($signal in @(
+    "cli_no_args_prints_help_smoke",
+    "cli_rejects_invalid_suite_id_smoke",
+    "cli_rejects_bad_discovery_txt_smoke",
+    "cli_rejects_too_small_sbp2_frame_smoke",
+    "InvalidPublicKeyFingerprint",
+    "TargetTooSmall",
+    "invalid suite id: 0xzz"
+)) {
+    Assert-True -Condition ($cliSmoke.Contains($signal)) -Message "CLI smoke coverage missing signal: $signal"
+}
+
 Push-Location $coreRoot
 try {
     & cargo test

@@ -15,6 +15,17 @@ fn cli_help_smoke() {
 }
 
 #[test]
+fn cli_no_args_prints_help_smoke() {
+    let output = skybridge().output().expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("USAGE:"));
+    assert!(stdout.contains("connection plan"));
+    assert!(stdout.contains("discovery parse"));
+}
+
+#[test]
 fn cli_version_smoke() {
     let output = skybridge().arg("version").output().expect("run cli");
 
@@ -319,4 +330,72 @@ fn cli_rejects_unknown_command() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("unknown command: bogus"));
+}
+
+#[test]
+fn cli_rejects_invalid_suite_id_smoke() {
+    let output = skybridge()
+        .args([
+            "suite",
+            "select",
+            "--local-caps",
+            "x25519",
+            "--remote-suites",
+            "0xzz",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid suite id: 0xzz"));
+}
+
+#[test]
+fn cli_rejects_bad_discovery_txt_smoke() {
+    let output = skybridge()
+        .args([
+            "discovery",
+            "parse",
+            "--service",
+            "_skybridge._udp",
+            "--txt",
+            "deviceId=mac-1;pubKeyFP=bad;platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("InvalidPublicKeyFingerprint"));
+}
+
+#[test]
+fn cli_rejects_too_small_sbp2_frame_smoke() {
+    let output = skybridge()
+        .args([
+            "frame",
+            "describe",
+            "--channel",
+            "control",
+            "--sequence",
+            "1",
+            "--payload",
+            "hello",
+            "--sbp2-fixed",
+            "4",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("frame encode failed"));
+    assert!(stderr.contains("TargetTooSmall"));
 }
