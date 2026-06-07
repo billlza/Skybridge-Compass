@@ -28,7 +28,8 @@ public sealed partial class MainWindow : Window
             new UsbManagementWorkspaceClient(),
             new SettingsWorkspaceClient(),
             new DashboardMetricsClient(),
-            new TopBarStatusClient());
+            new TopBarStatusClient(),
+            new ConnectionWorkspaceStateClient());
         DataContext = ViewModel;
     }
 }

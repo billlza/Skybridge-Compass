@@ -47,6 +47,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ISettingsWorkspaceClient _settingsClient;
     private readonly IDashboardMetricsClient _dashboardMetricsClient;
     private readonly ITopBarStatusClient _topBarStatusClient;
+    private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoverySearchText = "";
@@ -106,7 +107,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IUsbManagementWorkspaceClient? usbManagementClient = null,
         ISettingsWorkspaceClient? settingsClient = null,
         IDashboardMetricsClient? dashboardMetricsClient = null,
-        ITopBarStatusClient? topBarStatusClient = null)
+        ITopBarStatusClient? topBarStatusClient = null,
+        IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -123,6 +125,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _settingsClient = settingsClient ?? new UnavailableSettingsWorkspaceClient();
         _dashboardMetricsClient = dashboardMetricsClient ?? new DashboardMetricsClient();
         _topBarStatusClient = topBarStatusClient ?? new TopBarStatusClient();
+        _connectionWorkspaceStateClient = connectionWorkspaceStateClient ?? new ConnectionWorkspaceStateClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
@@ -376,7 +379,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _manualConnectionHost, value))
             {
                 ManualConnectionFacts.Clear();
-                ManualConnectionStatus = "Ready";
+                ApplyConnectionWorkspaceStatusPatch(
+                    _connectionWorkspaceStateClient.BuildInputResetPatch(
+                        ConnectionWorkspaceResetReason.ManualTargetInputChanged));
                 OnPropertyChanged(nameof(ManualConnectionFactCount));
                 RefreshCommandStates();
             }
@@ -391,7 +396,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _manualConnectionPort, value))
             {
                 ManualConnectionFacts.Clear();
-                ManualConnectionStatus = "Ready";
+                ApplyConnectionWorkspaceStatusPatch(
+                    _connectionWorkspaceStateClient.BuildInputResetPatch(
+                        ConnectionWorkspaceResetReason.ManualTargetInputChanged));
                 OnPropertyChanged(nameof(ManualConnectionFactCount));
                 RefreshCommandStates();
             }
@@ -406,7 +413,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _manualConnectionCode, value))
             {
                 ManualConnectionFacts.Clear();
-                ManualConnectionStatus = "Ready";
+                ApplyConnectionWorkspaceStatusPatch(
+                    _connectionWorkspaceStateClient.BuildInputResetPatch(
+                        ConnectionWorkspaceResetReason.ManualTargetInputChanged));
                 OnPropertyChanged(nameof(ManualConnectionFactCount));
                 RefreshCommandStates();
             }
@@ -420,7 +429,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _crossNetworkQrInput, value))
             {
-                CrossNetworkStatus = "Ready";
+                ApplyConnectionWorkspaceStatusPatch(
+                    _connectionWorkspaceStateClient.BuildInputResetPatch(
+                        ConnectionWorkspaceResetReason.CrossNetworkInputChanged));
                 RefreshCommandStates();
             }
         }
@@ -434,7 +445,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var normalized = NormalizeCrossNetworkCodeInput(value);
             if (SetField(ref _crossNetworkCodeInput, normalized))
             {
-                CrossNetworkStatus = "Ready";
+                ApplyConnectionWorkspaceStatusPatch(
+                    _connectionWorkspaceStateClient.BuildInputResetPatch(
+                        ConnectionWorkspaceResetReason.CrossNetworkInputChanged));
                 RefreshCommandStates();
             }
             else if (!string.Equals(value, normalized, StringComparison.Ordinal))
@@ -473,7 +486,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 _validatedPairingMaterial = null;
                 PairingFacts.Clear();
                 ClearConnectionPreflight();
-                PairingStatus = "Ready";
+                ApplyConnectionWorkspaceStatusPatch(
+                    _connectionWorkspaceStateClient.BuildInputResetPatch(
+                        ConnectionWorkspaceResetReason.PairingInputChanged));
                 OnPropertyChanged(nameof(PairingFactCount));
                 RefreshCommandStates();
             }
@@ -742,7 +757,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     IsDiscoveryCompatibilityModeEnabled,
                     ExtendedSearchCountdown));
 
-            IsDiscoveryScanning = snapshot.IsScanning;
             DiscoveryBrowserFacts.Clear();
             foreach (var fact in snapshot.Facts)
             {
@@ -766,16 +780,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
-            DiscoveryBrowserStatus = snapshot.IsScanning
-                ? $"Scanning {snapshot.CapturedAt:HH:mm:ss} UTC"
-                : $"Stopped {snapshot.CapturedAt:HH:mm:ss} UTC";
-            DiscoveryStatus = action == DiscoveryBrowserAction.Stop
-                ? "Discovery stopped"
-                : snapshot.Peers.Count == 0
-                    ? "No Core-validated peers"
-                    : $"Validated {snapshot.Peers.Count} peer(s)";
-            PairingStatus = action == DiscoveryBrowserAction.Stop ? PairingStatus : "Ready";
-            StatusMessage = "Discovery browser snapshot updated";
+            ApplyConnectionWorkspaceStatusPatch(
+                _connectionWorkspaceStateClient.BuildDiscoveryBrowserResultPatch(
+                    action,
+                    snapshot,
+                    PairingStatus));
         });
     }
 
@@ -806,11 +815,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ClearConnectionPreflight();
             OnPropertyChanged(nameof(ManualConnectionFactCount));
             OnPropertyChanged(nameof(PairingFactCount));
-            ManualConnectionStatus = $"Prepared {snapshot.Target.Host}:{snapshot.Target.Port}";
             DiscoveryService = snapshot.Target.Service;
-            DiscoveryStatus = "Manual target prepared";
-            PairingStatus = "Ready";
-            StatusMessage = "Manual connection target prepared";
+            ApplyConnectionWorkspaceStatusPatch(
+                _connectionWorkspaceStateClient.BuildManualTargetPreparedPatch(snapshot));
         });
     }
 
@@ -876,10 +883,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ClearConnectionPreflight();
             OnPropertyChanged(nameof(CrossNetworkConnectionFactCount));
             OnPropertyChanged(nameof(PairingFactCount));
-            CrossNetworkStatus = snapshot.Status;
-            DiscoveryStatus = "Cross-network envelope prepared";
-            PairingStatus = "Ready";
-            StatusMessage = "Cross-network connection snapshot updated";
+            ApplyConnectionWorkspaceStatusPatch(
+                _connectionWorkspaceStateClient.BuildCrossNetworkPreparedPatch(snapshot));
         });
     }
 
@@ -902,9 +907,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ClearConnectionPreflight();
             OnPropertyChanged(nameof(DiscoveredPeerCount));
             OnPropertyChanged(nameof(PairingFactCount));
-            DiscoveryStatus = $"Validated {peer.DeviceId}";
-            PairingStatus = "Ready";
-            StatusMessage = "Discovery advertisement validated";
+            ApplyConnectionWorkspaceStatusPatch(
+                _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedPatch(peer));
         });
     }
 
@@ -937,8 +941,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             PairingFacts.Add(new PairingFactView("Source", material.Source, "Manual validation only; no connection attempt is started."));
 
             OnPropertyChanged(nameof(PairingFactCount));
-            PairingStatus = $"Validated {material.DeviceId}";
-            StatusMessage = "Pairing code validated";
+            ApplyConnectionWorkspaceStatusPatch(
+                _connectionWorkspaceStateClient.BuildPairingValidatedPatch(material));
         });
     }
 
@@ -951,20 +955,20 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            if (_validatedDiscoveredPeer is null)
+            var discoveredPeer = _validatedDiscoveredPeer;
+            var pairingMaterial = _validatedPairingMaterial;
+            var readiness = _connectionWorkspaceStateClient.BuildPreflightReadiness(
+                discoveredPeer,
+                pairingMaterial);
+            if (!readiness.IsReady)
             {
-                throw new InvalidOperationException("Parse a Core-validated discovery TXT record before connection preflight.");
-            }
-
-            if (_validatedPairingMaterial is null)
-            {
-                throw new InvalidOperationException("Validate pairing material before connection preflight.");
+                throw new InvalidOperationException(readiness.ErrorMessage);
             }
 
             ConnectionPreflightStatus = "Preparing...";
             var snapshot = await _connectionPreflightClient.BuildReadOnlySnapshotAsync(
-                _validatedDiscoveredPeer,
-                _validatedPairingMaterial);
+                discoveredPeer!,
+                pairingMaterial!);
             ConnectionPreflightFacts.Clear();
             foreach (var fact in snapshot.Facts)
             {
@@ -972,8 +976,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             OnPropertyChanged(nameof(ConnectionPreflightFactCount));
-            ConnectionPreflightStatus = $"Prepared {snapshot.CapturedAt:HH:mm:ss} UTC";
-            StatusMessage = "Connection preflight prepared";
+            ApplyConnectionWorkspaceStatusPatch(
+                _connectionWorkspaceStateClient.BuildPreflightPreparedPatch(snapshot));
         });
     }
 
@@ -1235,12 +1239,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             StatusMessage = ex.Message;
             if (IsDeviceDiscoverySelected)
             {
-                DiscoveryStatus = ex.Message;
-                DiscoveryBrowserStatus = ex.Message;
-                ManualConnectionStatus = ex.Message;
-                CrossNetworkStatus = ex.Message;
-                PairingStatus = ex.Message;
-                ConnectionPreflightStatus = ex.Message;
+                ApplyConnectionWorkspaceStatusPatch(
+                    _connectionWorkspaceStateClient.BuildErrorPatch(ex.Message));
             }
 
             if (IsUsbManagementSelected)
@@ -1304,6 +1304,49 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSystemMonitorCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSettingsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+    }
+
+    private void ApplyConnectionWorkspaceStatusPatch(ConnectionWorkspaceStatusPatch patch)
+    {
+        if (patch.DiscoveryStatus is not null)
+        {
+            DiscoveryStatus = patch.DiscoveryStatus;
+        }
+
+        if (patch.DiscoveryBrowserStatus is not null)
+        {
+            DiscoveryBrowserStatus = patch.DiscoveryBrowserStatus;
+        }
+
+        if (patch.ManualConnectionStatus is not null)
+        {
+            ManualConnectionStatus = patch.ManualConnectionStatus;
+        }
+
+        if (patch.CrossNetworkStatus is not null)
+        {
+            CrossNetworkStatus = patch.CrossNetworkStatus;
+        }
+
+        if (patch.PairingStatus is not null)
+        {
+            PairingStatus = patch.PairingStatus;
+        }
+
+        if (patch.ConnectionPreflightStatus is not null)
+        {
+            ConnectionPreflightStatus = patch.ConnectionPreflightStatus;
+        }
+
+        if (patch.StatusMessage is not null)
+        {
+            StatusMessage = patch.StatusMessage;
+        }
+
+        if (patch.IsDiscoveryScanning.HasValue)
+        {
+            IsDiscoveryScanning = patch.IsDiscoveryScanning.Value;
+        }
     }
 
     private void RefreshDashboardMetrics()
@@ -1415,10 +1458,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         DiscoveryBrowserFacts.Clear();
         PairingFacts.Clear();
         ClearConnectionPreflight();
-        DiscoveryStatus = "Ready";
-        DiscoveryBrowserStatus = "Ready";
-        IsDiscoveryScanning = false;
-        PairingStatus = "Ready";
+        ApplyConnectionWorkspaceStatusPatch(
+            _connectionWorkspaceStateClient.BuildInputResetPatch(
+                ConnectionWorkspaceResetReason.DiscoveryInputChanged));
         OnPropertyChanged(nameof(DiscoveredPeerCount));
         OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
         OnPropertyChanged(nameof(PairingFactCount));
@@ -1427,7 +1469,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void ClearConnectionPreflight()
     {
         ConnectionPreflightFacts.Clear();
-        ConnectionPreflightStatus = "Ready";
+        ApplyConnectionWorkspaceStatusPatch(
+            _connectionWorkspaceStateClient.BuildInputResetPatch(
+                ConnectionWorkspaceResetReason.PreflightCleared));
         OnPropertyChanged(nameof(ConnectionPreflightFactCount));
     }
 }

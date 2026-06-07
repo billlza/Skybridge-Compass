@@ -49,6 +49,7 @@ $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Service
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
+$connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
@@ -59,7 +60,7 @@ $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/To
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -71,6 +72,7 @@ $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
+$connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceStatePath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
@@ -265,6 +267,33 @@ foreach ($topBarSignal in @(
     Assert-Contains -Text ($topBarStatus + $sessionViewModel + $mainWindow) -Needle $topBarSignal -Message "Top bar parity signal missing: $topBarSignal"
 }
 
+foreach ($connectionStateSignal in @(
+    "public interface IConnectionWorkspaceStateClient",
+    "public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateClient",
+    "BuildInputResetPatch",
+    "BuildErrorPatch",
+    "BuildDiscoveryBrowserResultPatch",
+    "BuildManualTargetPreparedPatch",
+    "BuildCrossNetworkPreparedPatch",
+    "BuildDiscoveryPeerValidatedPatch",
+    "BuildPairingValidatedPatch",
+    "BuildPreflightReadiness",
+    "BuildPreflightPreparedPatch",
+    "ConnectionWorkspaceResetReason",
+    "ConnectionWorkspaceStatusPatch",
+    "ConnectionWorkspacePreflightReadiness",
+    "DiscoveryInputChanged",
+    "ManualTargetInputChanged",
+    "CrossNetworkInputChanged",
+    "PairingInputChanged",
+    "PreflightCleared",
+    "Parse a Core-validated discovery TXT record before connection preflight.",
+    "Validate pairing material before connection preflight.",
+    "new ConnectionWorkspaceStateClient()"
+)) {
+    Assert-Contains -Text ($connectionWorkspaceState + $sessionViewModel + $mainWindow) -Needle $connectionStateSignal -Message "Connection workspace state signal missing: $connectionStateSignal"
+}
+
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',
     'Command="{Binding ParseAdvertisementCommand}"',
@@ -404,6 +433,7 @@ foreach ($discoverySignal in @(
     "Prepare Connection",
     "PairingFactView",
     "ConnectionPreflightFactView",
+    "ConnectionWorkspaceStateClient",
     "PairingMaterialClient",
     "ConnectionPreflightClient",
     "skybridge-pair:v1",
@@ -413,12 +443,13 @@ foreach ($discoverySignal in @(
     "Discovery pubKeyFP is verification input only",
     "Pairing code public key does not match pubKeyFP",
     "BuildReadOnlySnapshotAsync",
+    "BuildPreflightReadiness",
     "PlanConnectionAsync",
     "ComputeTransportBindingDigestAsync",
     "Transport binding digest",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $manualConnection + $crossNetwork + $pairing + $connectionPreflight) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionWorkspaceState) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
@@ -615,6 +646,7 @@ foreach ($docSignal in @(
     "Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings",
     "DashboardMetricsClient",
     "ConnectionPreflightClient",
+    "ConnectionWorkspaceStateClient",
     "Prepare Connection",
     "WindowsDiscoveryBrowserClient",
     "Start Scan",
