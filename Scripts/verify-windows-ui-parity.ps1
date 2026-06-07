@@ -292,6 +292,7 @@ foreach ($factBinding in @(
     "FileTransferSecurityFacts",
     "RemoteDesktopControlFacts",
     "CoreDiagnosticFacts",
+    "SystemMonitorOverview",
     "SystemMonitorDetails"
 )) {
     Assert-ItemsControlTemplate -Text $mainWindow -Binding $factBinding -ItemTemplate "WorkspaceFactRowTemplate"
