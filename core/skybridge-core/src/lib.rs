@@ -2,11 +2,13 @@
 //! Provides session management, stream pipelines, and crypto abstractions
 //! that the Windows client can bind to.
 
+pub mod cli;
 pub mod crypto;
 pub mod error;
 pub mod ffi;
 pub mod session;
 pub mod stream;
+pub mod transport;
 
 use crypto::SessionCryptoProvider;
 use session::{

@@ -5,9 +5,12 @@ use skybridge_core::ffi::{
     skybridge_engine_local_public_key, skybridge_engine_metrics, skybridge_engine_new,
     skybridge_engine_poll_events, skybridge_engine_reconnect, skybridge_engine_send_heartbeat,
     skybridge_engine_send_input, skybridge_engine_snapshot, skybridge_engine_state,
-    skybridge_engine_throttle_stream, SkybridgeBuffer, SkybridgeEngineSnapshot, SkybridgeErrorCode,
-    SkybridgeEvent, SkybridgeEventKind, SkybridgeFlowRate, SkybridgeSessionConfig,
-    SkybridgeSessionState, SkybridgeStreamMetrics, SKYBRIDGE_EVENT_CAPACITY,
+    skybridge_engine_throttle_stream, skybridge_select_transport, SkybridgeBuffer,
+    SkybridgeEngineSnapshot, SkybridgeErrorCode, SkybridgeEvent, SkybridgeEventKind,
+    SkybridgeFlowRate, SkybridgeNetworkPath, SkybridgePeerCapabilities, SkybridgePeerPlatform,
+    SkybridgeSessionConfig, SkybridgeSessionState, SkybridgeStreamMetrics,
+    SkybridgeTransportAuditCode, SkybridgeTransportKind, SkybridgeTransportSelection,
+    SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -260,4 +263,74 @@ fn ffi_event_queue_is_bounded_and_clearable() {
     assert!(event.data_ptr.is_null());
 
     unsafe { skybridge_engine_free(handle) };
+}
+
+#[test]
+fn ffi_transport_selector_exports_adr_defaults() {
+    let windows = SkybridgePeerCapabilities {
+        platform: SkybridgePeerPlatform::Windows,
+        supports_apple_native: 0,
+        supports_msquic: 1,
+        supports_skybridge_ice_msquic: 0,
+        supports_webrtc_data_channel: 1,
+        supports_tcp_fallback: 1,
+        supports_relay: 1,
+    };
+    let apple = SkybridgePeerCapabilities {
+        platform: SkybridgePeerPlatform::Apple,
+        supports_apple_native: 1,
+        supports_msquic: 0,
+        supports_skybridge_ice_msquic: 0,
+        supports_webrtc_data_channel: 1,
+        supports_tcp_fallback: 1,
+        supports_relay: 1,
+    };
+    let same_lan = SkybridgeNetworkPath {
+        same_lan: 1,
+        cross_nat: 0,
+    };
+    let cross_nat = SkybridgeNetworkPath {
+        same_lan: 0,
+        cross_nat: 1,
+    };
+    let mut selection = SkybridgeTransportSelection {
+        kind: SkybridgeTransportKind::Unsupported,
+        audit_code: SkybridgeTransportAuditCode::UnsupportedNoCompatibleTransport,
+        priority: 0,
+        relay_required: 0,
+        relay_allowed: 0,
+    };
+
+    let result = unsafe { skybridge_select_transport(windows, windows, same_lan, &mut selection) };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(selection.kind, SkybridgeTransportKind::WindowsNativeMsQuic);
+    assert_eq!(
+        selection.audit_code,
+        SkybridgeTransportAuditCode::WindowsNativeMsQuicSameLan
+    );
+    assert_eq!(selection.priority, 100);
+    assert_eq!(selection.relay_allowed, 0);
+
+    let result = unsafe { skybridge_select_transport(windows, apple, cross_nat, &mut selection) };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(selection.kind, SkybridgeTransportKind::WebRtcDataChannel);
+    assert_eq!(
+        selection.audit_code,
+        SkybridgeTransportAuditCode::WebRtcInterop
+    );
+    assert_eq!(selection.priority, 70);
+    assert_eq!(selection.relay_allowed, 1);
+    assert_eq!(selection.relay_required, 0);
+
+    let result = unsafe { skybridge_select_transport(apple, apple, same_lan, &mut selection) };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(selection.kind, SkybridgeTransportKind::AppleNative);
+    assert_eq!(
+        selection.audit_code,
+        SkybridgeTransportAuditCode::AppleNativeDefault
+    );
+
+    let null_result =
+        unsafe { skybridge_select_transport(windows, apple, cross_nat, ptr::null_mut()) };
+    assert_eq!(null_result, SkybridgeErrorCode::InvalidInput);
 }

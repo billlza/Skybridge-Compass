@@ -132,4 +132,6 @@ temp/
 core/skybridge-core/target
 **/bin/
 **/obj/
+!core/skybridge-core/src/bin/
+!core/skybridge-core/src/bin/*.rs
 

@@ -1,0 +1,74 @@
+use std::process::Command;
+
+fn skybridge() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_skybridge"))
+}
+
+#[test]
+fn cli_help_smoke() {
+    let output = skybridge().arg("--help").output().expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("skybridge command line"));
+    assert!(stdout.contains("transport select"));
+}
+
+#[test]
+fn cli_windows_same_lan_selects_msquic() {
+    let output = skybridge()
+        .args([
+            "transport",
+            "select",
+            "--local",
+            "windows",
+            "--remote",
+            "windows",
+            "--path",
+            "same-lan",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("kind=WindowsNativeMsQuic"));
+    assert!(stdout.contains("audit=WindowsNativeMsQuicSameLan"));
+    assert!(stdout.contains("priority=100"));
+}
+
+#[test]
+fn cli_windows_to_apple_selects_webrtc_interop() {
+    let output = skybridge()
+        .args([
+            "transport",
+            "select",
+            "--local",
+            "windows",
+            "--remote",
+            "macos",
+            "--path",
+            "cross-nat",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("kind=WebRtcDataChannel"));
+    assert!(stdout.contains("audit=WebRtcInterop"));
+    assert!(stdout.contains("relay_allowed=true"));
+}
+
+#[test]
+fn cli_rejects_incomplete_transport_command() {
+    let output = skybridge()
+        .args(["transport", "select", "--local", "windows"])
+        .output()
+        .expect("run cli");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--remote"));
+}

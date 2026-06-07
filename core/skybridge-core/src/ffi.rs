@@ -2,6 +2,10 @@ use crate::crypto::{P256KeyExchange, P256SessionCrypto, SessionCryptoProvider, S
 use crate::error::{CoreError, CoreResult};
 use crate::session::{AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState};
 use crate::stream::{FlowRate, StreamController, StreamMetrics};
+use crate::transport::{
+    NetworkPath, PeerCapabilities, PeerPlatform, RelayPolicy, SkyBridgeTransportKind,
+    TransportAuditReason, TransportSelector,
+};
 use crate::CoreEngine;
 use std::collections::VecDeque;
 use std::os::raw::c_char;
@@ -94,6 +98,67 @@ pub struct SkybridgeEngineSnapshot {
     pub has_secrets: bool,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgePeerPlatform {
+    Unknown = 0,
+    Apple = 1,
+    Windows = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeTransportKind {
+    Unsupported = 0,
+    AppleNative = 1,
+    WindowsNativeMsQuic = 2,
+    SkyBridgeIceMsQuic = 3,
+    WebRtcDataChannel = 4,
+    Relay = 5,
+    TcpFallback = 6,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeTransportAuditCode {
+    UnsupportedNoCompatibleTransport = 0,
+    AppleNativeDefault = 1,
+    WindowsNativeMsQuicSameLan = 2,
+    WindowsSkyBridgeIceMsQuic = 3,
+    WebRtcInterop = 4,
+    TcpFallbackSameLan = 5,
+    RelayFallback = 6,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgePeerCapabilities {
+    pub platform: SkybridgePeerPlatform,
+    pub supports_apple_native: u8,
+    pub supports_msquic: u8,
+    pub supports_skybridge_ice_msquic: u8,
+    pub supports_webrtc_data_channel: u8,
+    pub supports_tcp_fallback: u8,
+    pub supports_relay: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeNetworkPath {
+    pub same_lan: u8,
+    pub cross_nat: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkybridgeTransportSelection {
+    pub kind: SkybridgeTransportKind,
+    pub audit_code: SkybridgeTransportAuditCode,
+    pub priority: u8,
+    pub relay_required: u8,
+    pub relay_allowed: u8,
+}
+
 /// Maximum number of queued events retained by the engine handle.
 /// Older events are dropped once this capacity is reached so callers must poll
 /// regularly to avoid missing notifications.
@@ -127,6 +192,84 @@ fn map_session_state(state: SessionState) -> SkybridgeSessionState {
         SessionState::Reconnecting => SkybridgeSessionState::Reconnecting,
         SessionState::ShuttingDown => SkybridgeSessionState::ShuttingDown,
     }
+}
+
+fn ffi_flag(value: u8) -> bool {
+    value != 0
+}
+
+fn map_peer_platform(platform: SkybridgePeerPlatform) -> PeerPlatform {
+    match platform {
+        SkybridgePeerPlatform::Apple => PeerPlatform::Apple,
+        SkybridgePeerPlatform::Windows => PeerPlatform::Windows,
+        SkybridgePeerPlatform::Unknown => PeerPlatform::Unknown,
+    }
+}
+
+fn map_peer_capabilities(caps: SkybridgePeerCapabilities) -> PeerCapabilities {
+    PeerCapabilities {
+        platform: map_peer_platform(caps.platform),
+        supports_apple_native: ffi_flag(caps.supports_apple_native),
+        supports_msquic: ffi_flag(caps.supports_msquic),
+        supports_skybridge_ice_msquic: ffi_flag(caps.supports_skybridge_ice_msquic),
+        supports_webrtc_data_channel: ffi_flag(caps.supports_webrtc_data_channel),
+        supports_tcp_fallback: ffi_flag(caps.supports_tcp_fallback),
+        supports_relay: ffi_flag(caps.supports_relay),
+    }
+}
+
+fn map_network_path(path: SkybridgeNetworkPath) -> NetworkPath {
+    NetworkPath {
+        same_lan: ffi_flag(path.same_lan),
+        cross_nat: ffi_flag(path.cross_nat),
+    }
+}
+
+fn map_transport_kind(kind: Option<SkyBridgeTransportKind>) -> SkybridgeTransportKind {
+    match kind {
+        Some(SkyBridgeTransportKind::AppleNative) => SkybridgeTransportKind::AppleNative,
+        Some(SkyBridgeTransportKind::WindowsNativeMsQuic) => {
+            SkybridgeTransportKind::WindowsNativeMsQuic
+        }
+        Some(SkyBridgeTransportKind::SkyBridgeIceMsQuic) => {
+            SkybridgeTransportKind::SkyBridgeIceMsQuic
+        }
+        Some(SkyBridgeTransportKind::WebRtcDataChannel) => {
+            SkybridgeTransportKind::WebRtcDataChannel
+        }
+        Some(SkyBridgeTransportKind::Relay) => SkybridgeTransportKind::Relay,
+        Some(SkyBridgeTransportKind::TcpFallback) => SkybridgeTransportKind::TcpFallback,
+        None => SkybridgeTransportKind::Unsupported,
+    }
+}
+
+fn map_transport_audit(reason: TransportAuditReason) -> SkybridgeTransportAuditCode {
+    match reason {
+        TransportAuditReason::AppleNativeDefault => SkybridgeTransportAuditCode::AppleNativeDefault,
+        TransportAuditReason::WindowsNativeMsQuicSameLan => {
+            SkybridgeTransportAuditCode::WindowsNativeMsQuicSameLan
+        }
+        TransportAuditReason::WindowsSkyBridgeIceMsQuic => {
+            SkybridgeTransportAuditCode::WindowsSkyBridgeIceMsQuic
+        }
+        TransportAuditReason::WebRtcInterop => SkybridgeTransportAuditCode::WebRtcInterop,
+        TransportAuditReason::TcpFallbackSameLan => SkybridgeTransportAuditCode::TcpFallbackSameLan,
+        TransportAuditReason::RelayFallback => SkybridgeTransportAuditCode::RelayFallback,
+        TransportAuditReason::UnsupportedNoCompatibleTransport => {
+            SkybridgeTransportAuditCode::UnsupportedNoCompatibleTransport
+        }
+    }
+}
+
+fn map_relay_required(policy: RelayPolicy) -> u8 {
+    u8::from(matches!(policy, RelayPolicy::Required))
+}
+
+fn map_relay_allowed(policy: RelayPolicy) -> u8 {
+    u8::from(matches!(
+        policy,
+        RelayPolicy::Allowed | RelayPolicy::Required
+    ))
 }
 
 #[derive(Clone)]
@@ -383,6 +526,41 @@ impl SkybridgeEngineHandle {
 struct FfiEvent {
     kind: SkybridgeEventKind,
     payload: Vec<u8>,
+}
+
+#[no_mangle]
+/// Selects the Core-owned transport adapter for a peer pair.
+///
+/// # Safety
+/// `out_selection` must be a valid writable pointer. Unsupported pairs return
+/// `Ok` with `kind = Unsupported` so callers can surface an auditable reason.
+pub unsafe extern "C" fn skybridge_select_transport(
+    local: SkybridgePeerCapabilities,
+    remote: SkybridgePeerCapabilities,
+    path: SkybridgeNetworkPath,
+    out_selection: *mut SkybridgeTransportSelection,
+) -> SkybridgeErrorCode {
+    if out_selection.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+
+    let plan = TransportSelector::select(
+        map_peer_capabilities(local),
+        map_peer_capabilities(remote),
+        map_network_path(path),
+    );
+
+    unsafe {
+        *out_selection = SkybridgeTransportSelection {
+            kind: map_transport_kind(plan.kind),
+            audit_code: map_transport_audit(plan.audit_reason),
+            priority: plan.priority,
+            relay_required: map_relay_required(plan.relay_policy),
+            relay_allowed: map_relay_allowed(plan.relay_policy),
+        };
+    }
+
+    SkybridgeErrorCode::Ok
 }
 
 #[no_mangle]
