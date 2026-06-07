@@ -6,18 +6,26 @@ namespace Skybridge.WinClient.Services;
 
 public interface IDiscoveryBrowserClient
 {
+    DiscoveryBrowserInputPolicy BuildInputPolicy();
+
     Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request);
 }
 
 public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
 {
     private static readonly string[] DefaultQueryOrder = { "_skybridge._udp", "_skybridge._tcp" };
+    private const int ExtendedSearchDurationSeconds = 15;
     private readonly IDiscoveryClient _discoveryClient;
+
+    public static DiscoveryBrowserInputPolicy DefaultInputPolicy { get; } =
+        new(ExtendedSearchDurationSeconds, DefaultQueryOrder);
 
     public WindowsDiscoveryBrowserClient(IDiscoveryClient discoveryClient)
     {
         _discoveryClient = discoveryClient ?? throw new ArgumentNullException(nameof(discoveryClient));
     }
+
+    public DiscoveryBrowserInputPolicy BuildInputPolicy() => DefaultInputPolicy;
 
     public async Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request)
     {
@@ -118,6 +126,10 @@ public sealed record DiscoveryBrowserSnapshot(
     bool IsScanning,
     IReadOnlyList<DiscoveredPeer> Peers,
     IReadOnlyList<DiscoveryBrowserFact> Facts);
+
+public sealed record DiscoveryBrowserInputPolicy(
+    int ExtendedSearchSeconds,
+    IReadOnlyList<string> ServiceQueryOrder);
 
 public sealed record DiscoveryBrowserFact(
     string Label,

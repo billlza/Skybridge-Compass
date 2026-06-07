@@ -13,6 +13,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IDiscoveryBrowserClient _discoveryBrowserClient;
+    private readonly DiscoveryBrowserInputPolicy _discoveryBrowserInputPolicy;
     private readonly IDeviceDiscoveryInputDefaultsClient _deviceDiscoveryInputDefaultsClient;
     private readonly IManualConnectionClient _manualConnectionClient;
     private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
@@ -96,6 +97,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         _discoveryBrowserClient = discoveryBrowserClient ?? new UnavailableDiscoveryBrowserClient();
+        _discoveryBrowserInputPolicy = _discoveryBrowserClient.BuildInputPolicy();
         _deviceDiscoveryInputDefaultsClient = deviceDiscoveryInputDefaultsClient ?? new DeviceDiscoveryInputDefaultsClient();
         _manualConnectionClient = manualConnectionClient ?? new UnavailableManualConnectionClient();
         _crossNetworkConnectionClient = crossNetworkConnectionClient ?? new UnavailableCrossNetworkConnectionClient();
@@ -118,6 +120,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _manualConnectionPort = deviceDiscoveryInputDefaults.ManualConnectionPort;
         _discoveryTxtRecord = deviceDiscoveryInputDefaults.DiscoveryTxtRecord;
         _pairingConnectionCode = deviceDiscoveryInputDefaults.PairingConnectionCode;
+        _extendedSearchCountdown = _discoveryBrowserInputPolicy.ExtendedSearchSeconds;
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
@@ -792,7 +795,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private async Task RunExtendedDiscoveryAsync()
     {
-        ExtendedSearchCountdown = 15;
+        ExtendedSearchCountdown = _discoveryBrowserInputPolicy.ExtendedSearchSeconds;
         await RunDiscoveryBrowserAsync(DiscoveryBrowserAction.ExtendedSearch);
     }
 
@@ -1926,6 +1929,9 @@ internal sealed class UnavailableDiscoveryClient : IDiscoveryClient
 
 internal sealed class UnavailableDiscoveryBrowserClient : IDiscoveryBrowserClient
 {
+    public DiscoveryBrowserInputPolicy BuildInputPolicy() =>
+        WindowsDiscoveryBrowserClient.DefaultInputPolicy;
+
     public Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request)
     {
         throw new InvalidOperationException("Discovery browser client is not configured.");

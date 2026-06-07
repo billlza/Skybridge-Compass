@@ -190,6 +190,10 @@ Assert-Contains -Text $architecture -Needle "CoreDiscoveryClient" -Message "Arch
 foreach ($signal in @(
     "public interface IDiscoveryBrowserClient",
     "public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient",
+    "BuildInputPolicy",
+    "DiscoveryBrowserInputPolicy",
+    "DefaultInputPolicy",
+    "ExtendedSearchDurationSeconds",
     "BuildReadOnlySnapshotAsync",
     "DiscoveryBrowserRequest",
     "DiscoveryBrowserAction",

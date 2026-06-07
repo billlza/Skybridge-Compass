@@ -565,6 +565,20 @@ foreach ($deviceDiscoveryDefaultSignal in @(
 Assert-True -Condition (-not $sessionViewModel.Contains("SampleFingerprint")) -Message "SessionViewModel must not own Device Discovery sample fingerprints."
 Assert-True -Condition (-not $sessionViewModel.Contains("SamplePairingPublicKey")) -Message "SessionViewModel must not own Device Discovery sample pairing keys."
 
+foreach ($discoveryBrowserInputPolicySignal in @(
+    "BuildInputPolicy",
+    "DiscoveryBrowserInputPolicy",
+    "DefaultInputPolicy",
+    "ExtendedSearchDurationSeconds",
+    "ExtendedSearchSeconds",
+    "_discoveryBrowserInputPolicy",
+    "_discoveryBrowserInputPolicy.ExtendedSearchSeconds"
+)) {
+    Assert-Contains -Text ($discoveryBrowser + $sessionViewModel) -Needle $discoveryBrowserInputPolicySignal -Message "Discovery browser input policy signal missing: $discoveryBrowserInputPolicySignal"
+}
+
+Assert-True -Condition (-not $sessionViewModel.Contains("ExtendedSearchCountdown = 15")) -Message "SessionViewModel must source the Extended Search countdown from DiscoveryBrowserInputPolicy."
+
 foreach ($crossNetworkInputPolicySignal in @(
     "BuildCodeInputPolicy",
     "CrossNetworkCodeInputPolicy",
