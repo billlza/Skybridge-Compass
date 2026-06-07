@@ -3,7 +3,7 @@ use crate::transport::SkyBridgeChannel;
 
 const FRAME_MAGIC: &[u8; 4] = b"SBF1";
 const FRAME_VERSION: u8 = 1;
-const FRAME_HEADER_LEN: usize = 20;
+pub const FRAME_HEADER_LEN: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameFlags(u16);

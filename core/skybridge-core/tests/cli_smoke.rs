@@ -153,6 +153,38 @@ fn cli_frame_describe_reports_roundtrip_metadata() {
 }
 
 #[test]
+fn cli_connection_plan_reports_core_contract() {
+    let output = skybridge()
+        .args([
+            "connection",
+            "plan",
+            "--local",
+            "windows",
+            "--remote",
+            "macos",
+            "--path",
+            "cross-nat",
+            "--local-caps",
+            "xwing,mlkem,x25519",
+            "--remote-suites",
+            "0x1001,0x0101,0x0001",
+            "--allow-classic",
+            "--sbp2-fixed",
+            "512",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("transport=WebRtcDataChannel"));
+    assert!(stdout.contains("suite=x-wing-hybrid (0x0001)"));
+    assert!(stdout.contains("channel_count=5"));
+    assert!(stdout.contains("channel.realtime=WebRtcDataChannel:skybridge.realtime"));
+    assert!(stdout.contains("sbp2_enabled=true"));
+}
+
+#[test]
 fn cli_rejects_incomplete_transport_command() {
     let output = skybridge()
         .args(["transport", "select", "--local", "windows"])

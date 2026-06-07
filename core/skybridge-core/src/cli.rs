@@ -1,4 +1,5 @@
-use crate::channel::map_channel;
+use crate::channel::{map_channel, AdapterChannelBinding};
+use crate::connection::{plan_connection, ConnectionPlan, ConnectionRequest, TrafficPaddingPlan};
 use crate::frame::{
     decode_frame, decode_frame_payload, encode_frame, encode_sbp2_frame, CoreFrame, FrameFlags,
 };
@@ -22,6 +23,7 @@ USAGE:
   skybridge channel profile --channel <control|file|clipboard|telemetry|realtime>
   skybridge channel map --transport <apple-native|msquic|webrtc|relay|tcp> --channel <control|file|clipboard|telemetry|realtime>
   skybridge frame describe --channel <control|file|clipboard|telemetry|realtime> --sequence <n> --payload <text> [--sbp2-fixed <n>]
+  skybridge connection plan --local <apple|windows> --remote <apple|windows> --path <same-lan|cross-nat> --local-caps <xwing,mlkem,x25519,p256> --remote-suites <0x0001,0x1001> [--allow-classic] [--allow-legacy-p256] [--timeout-observed] [--sbp2-fixed <n>]
 ";
 
 pub fn run<I, S>(args: I, out: &mut impl Write, err: &mut impl Write) -> i32
@@ -54,6 +56,7 @@ fn execute(args: Vec<String>, out: &mut impl Write) -> Result<(), String> {
         "suite" => execute_suite(&args[1..], out),
         "channel" => execute_channel(&args[1..], out),
         "frame" => execute_frame(&args[1..], out),
+        "connection" => execute_connection(&args[1..], out),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -174,6 +177,32 @@ fn execute_frame(args: &[String], out: &mut impl Write) -> Result<(), String> {
     writeln!(out, "frame_len={}", encoded.len()).map_err(|err| err.to_string())?;
     writeln!(out, "payload_len={}", decoded_payload.len()).map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn execute_connection(args: &[String], out: &mut impl Write) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("plan") {
+        return Err("expected connection plan".into());
+    }
+
+    let traffic_padding = optional_option(args, "--sbp2-fixed")
+        .map(|value| parse_usize(value, "--sbp2-fixed"))
+        .transpose()?
+        .map(TrafficPaddingPlan::sbp2_fixed)
+        .unwrap_or_else(TrafficPaddingPlan::disabled);
+
+    let request = ConnectionRequest {
+        local: default_capabilities(parse_platform(required_option(args, "--local")?)?),
+        remote: default_capabilities(parse_platform(required_option(args, "--remote")?)?),
+        path: parse_path(required_option(args, "--path")?)?,
+        local_crypto: parse_crypto_caps(required_option(args, "--local-caps")?)?,
+        remote_suite_wire_ids: parse_suite_id_list(required_option(args, "--remote-suites")?)?,
+        suite_policy: parse_suite_policy(args),
+        traffic_padding,
+    };
+
+    let plan =
+        plan_connection(request).map_err(|err| format!("connection plan failed: {err:?}"))?;
+    print_connection_plan(&plan, out)
 }
 
 fn has_flag(args: &[String], name: &str) -> bool {
@@ -355,6 +384,84 @@ fn print_suites(suites: &[CryptoSuite], out: &mut impl Write) -> Result<(), Stri
     Ok(())
 }
 
+fn print_connection_plan(plan: &ConnectionPlan, out: &mut impl Write) -> Result<(), String> {
+    writeln!(out, "transport={:?}", plan.transport_kind).map_err(|err| err.to_string())?;
+    writeln!(out, "transport_audit={:?}", plan.transport.audit_reason)
+        .map_err(|err| err.to_string())?;
+    writeln!(out, "transport_priority={}", plan.transport.priority)
+        .map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "suite={} ({:#06x})",
+        plan.selected_suite.suite.name(),
+        plan.selected_suite.suite.wire_id()
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "suite_audit={:?}", plan.selected_suite.audit).map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "offered_suites={}",
+        format_suite_list(&plan.offered_suites)
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "sbp2_enabled={}", plan.traffic_padding.sbp2_enabled)
+        .map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "sbp2_fixed_payload_len={}",
+        plan.traffic_padding
+            .fixed_payload_len
+            .map(|len| len.to_string())
+            .unwrap_or_else(|| "none".into())
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "frame_header_len={}", plan.frame_header_len).map_err(|err| err.to_string())?;
+    writeln!(out, "channel_count={}", plan.channels.len()).map_err(|err| err.to_string())?;
+    for profile in &plan.channels {
+        writeln!(
+            out,
+            "channel.{}={}:{}:{}:head_of_line_isolated={}",
+            format_channel_key(profile.channel),
+            format_binding_kind(&profile.binding),
+            profile.binding.label(),
+            format_reliability(profile.reliability),
+            profile.binding.isolates_head_of_line_blocking()
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn format_suite_list(suites: &[CryptoSuite]) -> String {
+    suites
+        .iter()
+        .map(|suite| format!("{}:{:#06x}", suite.name(), suite.wire_id()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_channel_key(channel: SkyBridgeChannel) -> &'static str {
+    match channel {
+        SkyBridgeChannel::Control => "control",
+        SkyBridgeChannel::File => "file",
+        SkyBridgeChannel::Clipboard => "clipboard",
+        SkyBridgeChannel::Telemetry => "telemetry",
+        SkyBridgeChannel::Realtime => "realtime",
+    }
+}
+
+fn format_binding_kind(binding: &AdapterChannelBinding) -> &'static str {
+    match binding {
+        AdapterChannelBinding::AppleStream { .. } => "AppleStream",
+        AdapterChannelBinding::AppleDatagram { .. } => "AppleDatagram",
+        AdapterChannelBinding::MsQuicStream { .. } => "MsQuicStream",
+        AdapterChannelBinding::MsQuicDatagram { .. } => "MsQuicDatagram",
+        AdapterChannelBinding::WebRtcDataChannel { .. } => "WebRtcDataChannel",
+        AdapterChannelBinding::RelayStream { .. } => "RelayStream",
+        AdapterChannelBinding::TcpStream { .. } => "TcpStream",
+    }
+}
+
 fn format_reliability(reliability: SkyBridgeReliability) -> String {
     match reliability {
         SkyBridgeReliability::ReliableOrdered => "reliable-ordered".into(),
@@ -517,6 +624,48 @@ mod tests {
         assert!(stdout.contains("flags=0x0003"));
         assert!(stdout.contains("frame_len=60"));
         assert!(stdout.contains("payload_len=5"));
+    }
+
+    #[test]
+    fn connection_plan_reports_transport_suite_channels_and_padding() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let code = run(
+            [
+                "connection",
+                "plan",
+                "--local",
+                "windows",
+                "--remote",
+                "macos",
+                "--path",
+                "cross-nat",
+                "--local-caps",
+                "xwing,mlkem,x25519",
+                "--remote-suites",
+                "0x1001,0x0101,0x0001",
+                "--allow-classic",
+                "--sbp2-fixed",
+                "512",
+            ],
+            &mut out,
+            &mut err,
+        );
+
+        let stdout = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0);
+        assert!(err.is_empty());
+        assert!(stdout.contains("transport=WebRtcDataChannel"));
+        assert!(stdout.contains("transport_audit=WebRtcInterop"));
+        assert!(stdout.contains("suite=x-wing-hybrid (0x0001)"));
+        assert!(stdout.contains("suite_audit=HybridPqcPreferred"));
+        assert!(stdout.contains("sbp2_enabled=true"));
+        assert!(stdout.contains("sbp2_fixed_payload_len=512"));
+        assert!(stdout.contains("frame_header_len=20"));
+        assert!(stdout.contains(
+            "channel.control=WebRtcDataChannel:skybridge.control:reliable-ordered:head_of_line_isolated=true"
+        ));
     }
 
     #[test]
