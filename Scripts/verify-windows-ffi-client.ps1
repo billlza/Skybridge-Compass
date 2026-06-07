@@ -338,6 +338,21 @@ foreach ($signal in @(
 Assert-Contains -Text $architecture -Needle "CoreDiagnosticsClient" -Message "Architecture doc missing CoreDiagnosticsClient status."
 
 foreach ($signal in @(
+    "origin/tdsc-2026-01-0318-ios-sim-fix",
+    "Docs/CoreLayering.md",
+    "SkyBridgeProtocolCore",
+    "SkyBridgeAppleTransport",
+    "Docs/ProtocolAlignmentPlan.md",
+    "binary handshake path is the only wire protocol",
+    "legacy JSON handshake is no longer present",
+    "Docs/CrossPlatformDiscoveryDesign.md",
+    "lower precedence than the ADR",
+    "MsQuic v2.5.8"
+)) {
+    Assert-Contains -Text $architecture -Needle $signal -Message "Architecture doc missing TDSC source-hierarchy signal: $signal"
+}
+
+foreach ($signal in @(
     "public interface IFileTransferWorkspaceClient",
     "public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient",
     "BuildReadOnlySnapshotAsync",
