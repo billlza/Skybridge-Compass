@@ -10,7 +10,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - The Rust core also defines the ADR canonical crypto suite IDs (`0x0001`, `0x0101`, `0x1001`, `0x1002`) in `suite.rs`; offered suites are derived from runtime provider capabilities and classic fallback requires an explicit policy gate.
 - The Rust core provides SBP2 traffic-padding framing in `padding.rs` using the ADR wire shape (`SBP2` magic, `actual_len` u32be, payload, random padding). Transport adapters still need to call it after handshake policy enables padding.
 - `frame.rs` defines the Core channel frame envelope (`SBF1` magic, version, channel, flags, sequence, payload length, payload) so MsQuic/WebRTC/Relay adapters can carry the same framed payloads. SBP2-padded payloads are flagged in the frame rather than inferred by transport-specific code.
-- `connection.rs` combines transport selection, crypto suite negotiation, logical-channel binding, SBP2 policy, and frame metadata into one auditable Core connection plan. Windows adapters and UI should consume this plan instead of re-deriving protocol decisions in C#.
+- `connection.rs` combines transport selection, crypto suite negotiation, logical-channel binding, SBP2 policy, and frame metadata into one auditable Core connection plan. It is exposed through `skybridge_plan_connection` and `CoreBridge.PlanConnectionAsync` so Windows adapters and UI can consume this plan instead of re-deriving protocol decisions in C#.
 
 ## Technology stack check
 - **WinUI shell:** `net10.0-windows10.0.19041.0` with Windows App SDK `2.1.3`. Microsoft lists .NET 10 as active LTS through November 2028, and NuGet/Microsoft's Windows App SDK downloads page list `2.1.3` as the current stable package/runtime.
@@ -27,6 +27,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - Introduce a `FfiEngineClient` in `Services` that P/Invokes the C ABI exposed by `core/skybridge-core/src/ffi.rs` (e.g., `skybridge_engine_new`, `skybridge_engine_connect`, `skybridge_engine_shutdown`).
 - Use `CoreBridge.SelectTransportAsync` / `skybridge_select_transport` to choose Apple-native, Windows MsQuic, WebRTC interop, relay, or TCP fallback plans from peer capabilities and path facts.
 - Use `CoreBridge.MapChannelAsync` / `skybridge_map_channel` so Windows services consume Core logical-channel mappings instead of duplicating adapter policy in C#.
+- Use `CoreBridge.PlanConnectionAsync` / `skybridge_plan_connection` for the pre-adapter contract that combines selected transport, selected crypto suite, offered suites, channel bindings, frame header size, and SBP2 policy.
 - Use `skybridge transport select` for operator smoke checks against the same Rust selector before WinUI or native adapter wiring is available.
 - Use `skybridge channel map` to verify that each transport adapter uses channel-specific streams, datagrams, or DataChannels before real adapter wiring is enabled.
 - Use `skybridge frame describe` to verify Core channel frame metadata and SBP2 padding flags before real adapter wiring is enabled.
@@ -37,7 +38,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 
 ## Testing approach
 - UI logic remains in view models and services, enabling unit tests against `SessionViewModel` without a XAML runtime.
-- FFI glue can be validated with integration tests on Windows by mocking the Rust DLL exports or linking against the compiled core crate.
+- FFI glue is covered in Rust integration tests for engine lifecycle, transport selection, channel mapping, and connection planning; Windows C# bindings should add text-only/interop tests once the WinUI test harness is introduced.
 - Rust tests must cover transport selection defaults, channel reliability, transport binding digest changes, and FFI selector contracts.
 - Channel mapping tests must prove WebRTC uses distinct DataChannel labels, Windows MsQuic uses stream/datagram mappings, Apple native does not route Apple-to-Apple through WebRTC, and TCP fallback is visible as head-of-line blocking risk.
 - Suite tests must prove unknown suite IDs fail closed, offered suites come from actual capabilities, classic/P-256 fallback is policy-gated, and timeout cannot trigger crypto downgrade.

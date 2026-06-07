@@ -1,8 +1,15 @@
-use crate::channel::{map_channel, AdapterChannelBinding};
+use crate::channel::{map_channel, AdapterChannelBinding, ChannelProfile};
+use crate::connection::{
+    plan_connection, ConnectionPlan, ConnectionPlanError, ConnectionRequest, TrafficPaddingPlan,
+};
 use crate::crypto::{P256KeyExchange, P256SessionCrypto, SessionCryptoProvider, SessionSecrets};
 use crate::error::{CoreError, CoreResult};
 use crate::session::{AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState};
 use crate::stream::{FlowRate, StreamController, StreamMetrics};
+use crate::suite::{
+    CryptoProviderCapabilities, CryptoSuite, CryptoSuiteAudit, CryptoSuitePolicy,
+    CryptoSuiteSelectionError,
+};
 use crate::transport::{
     NetworkPath, PeerCapabilities, PeerPlatform, RelayPolicy, SkyBridgeChannel,
     SkyBridgeReliability, SkyBridgeTransportKind, TransportAuditReason, TransportSelector,
@@ -27,6 +34,10 @@ pub enum SkybridgeErrorCode {
     StreamError = 101,
     CryptoError = 102,
     InvalidInput = 200,
+    UnsupportedTransport = 201,
+    NoMutualCryptoSuite = 202,
+    UnknownCryptoSuite = 203,
+    TimeoutCannotDowngrade = 204,
 }
 
 #[repr(C)]
@@ -201,6 +212,67 @@ pub struct SkybridgeChannelMapping {
     pub head_of_line_isolated: u8,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeCryptoSuiteKind {
+    Unknown = 0,
+    XWingHybrid = 1,
+    MlKem768MlDsa65 = 2,
+    X25519Ed25519 = 3,
+    P256Ecdsa = 4,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeCryptoSuiteAuditCode {
+    None = 0,
+    HybridPqcPreferred = 1,
+    PurePqcPreferred = 2,
+    ClassicPolicyFallback = 3,
+    LegacyPolicyFallback = 4,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeCryptoProviderCapabilities {
+    pub supports_xwing_hybrid: u8,
+    pub supports_mlkem_768_mldsa_65: u8,
+    pub supports_x25519_ed25519: u8,
+    pub supports_p256_ecdsa: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeCryptoSuitePolicy {
+    pub allow_classic_fallback: u8,
+    pub allow_legacy_p256: u8,
+    pub timeout_observed: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeTrafficPaddingPlan {
+    pub sbp2_enabled: u8,
+    pub fixed_payload_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SkybridgeConnectionPlan {
+    pub transport: SkybridgeTransportSelection,
+    pub selected_suite: SkybridgeCryptoSuiteKind,
+    pub selected_suite_wire_id: u16,
+    pub suite_audit: SkybridgeCryptoSuiteAuditCode,
+    pub offered_suites: [SkybridgeCryptoSuiteKind; 4],
+    pub offered_suite_wire_ids: [u16; 4],
+    pub offered_suite_count: usize,
+    pub channel_mappings: [SkybridgeChannelMapping; 5],
+    pub channel_mapping_count: usize,
+    pub sbp2_enabled: u8,
+    pub sbp2_fixed_payload_len: usize,
+    pub frame_header_len: usize,
+}
+
 /// Maximum number of queued events retained by the engine handle.
 /// Older events are dropped once this capacity is reached so callers must poll
 /// regularly to avoid missing notifications.
@@ -348,6 +420,27 @@ fn map_binding_kind(binding: &AdapterChannelBinding) -> SkybridgeAdapterBindingK
     }
 }
 
+fn map_channel_profile(profile: &ChannelProfile) -> SkybridgeChannelMapping {
+    let (reliability, max_retransmits) = map_reliability(profile.reliability);
+    SkybridgeChannelMapping {
+        channel: map_channel_kind(profile.channel),
+        reliability,
+        max_retransmits,
+        binding_kind: map_binding_kind(&profile.binding),
+        head_of_line_isolated: u8::from(profile.binding.isolates_head_of_line_blocking()),
+    }
+}
+
+fn empty_channel_mapping() -> SkybridgeChannelMapping {
+    SkybridgeChannelMapping {
+        channel: SkybridgeChannelKind::Control,
+        reliability: SkybridgeReliabilityKind::ReliableOrdered,
+        max_retransmits: 0,
+        binding_kind: SkybridgeAdapterBindingKind::MsQuicStream,
+        head_of_line_isolated: 0,
+    }
+}
+
 fn map_transport_audit(reason: TransportAuditReason) -> SkybridgeTransportAuditCode {
     match reason {
         TransportAuditReason::AppleNativeDefault => SkybridgeTransportAuditCode::AppleNativeDefault,
@@ -375,6 +468,110 @@ fn map_relay_allowed(policy: RelayPolicy) -> u8 {
         policy,
         RelayPolicy::Allowed | RelayPolicy::Required
     ))
+}
+
+fn map_transport_selection(plan: crate::transport::TransportPlan) -> SkybridgeTransportSelection {
+    SkybridgeTransportSelection {
+        kind: map_transport_kind(plan.kind),
+        audit_code: map_transport_audit(plan.audit_reason),
+        priority: plan.priority,
+        relay_required: map_relay_required(plan.relay_policy),
+        relay_allowed: map_relay_allowed(plan.relay_policy),
+    }
+}
+
+fn map_crypto_provider_capabilities(
+    caps: SkybridgeCryptoProviderCapabilities,
+) -> CryptoProviderCapabilities {
+    CryptoProviderCapabilities {
+        supports_xwing_hybrid: ffi_flag(caps.supports_xwing_hybrid),
+        supports_mlkem_768_mldsa_65: ffi_flag(caps.supports_mlkem_768_mldsa_65),
+        supports_x25519_ed25519: ffi_flag(caps.supports_x25519_ed25519),
+        supports_p256_ecdsa: ffi_flag(caps.supports_p256_ecdsa),
+    }
+}
+
+fn map_crypto_suite_policy(policy: SkybridgeCryptoSuitePolicy) -> CryptoSuitePolicy {
+    CryptoSuitePolicy {
+        allow_classic_fallback: ffi_flag(policy.allow_classic_fallback),
+        allow_legacy_p256: ffi_flag(policy.allow_legacy_p256),
+        timeout_observed: ffi_flag(policy.timeout_observed),
+    }
+}
+
+fn map_traffic_padding_plan(plan: SkybridgeTrafficPaddingPlan) -> TrafficPaddingPlan {
+    if ffi_flag(plan.sbp2_enabled) {
+        TrafficPaddingPlan::sbp2_fixed(plan.fixed_payload_len)
+    } else {
+        TrafficPaddingPlan::disabled()
+    }
+}
+
+fn map_crypto_suite(suite: CryptoSuite) -> SkybridgeCryptoSuiteKind {
+    match suite {
+        CryptoSuite::XWingHybrid => SkybridgeCryptoSuiteKind::XWingHybrid,
+        CryptoSuite::MlKem768MlDsa65 => SkybridgeCryptoSuiteKind::MlKem768MlDsa65,
+        CryptoSuite::X25519Ed25519 => SkybridgeCryptoSuiteKind::X25519Ed25519,
+        CryptoSuite::P256Ecdsa => SkybridgeCryptoSuiteKind::P256Ecdsa,
+    }
+}
+
+fn map_crypto_suite_audit(audit: CryptoSuiteAudit) -> SkybridgeCryptoSuiteAuditCode {
+    match audit {
+        CryptoSuiteAudit::HybridPqcPreferred => SkybridgeCryptoSuiteAuditCode::HybridPqcPreferred,
+        CryptoSuiteAudit::PurePqcPreferred => SkybridgeCryptoSuiteAuditCode::PurePqcPreferred,
+        CryptoSuiteAudit::ClassicPolicyFallback => {
+            SkybridgeCryptoSuiteAuditCode::ClassicPolicyFallback
+        }
+        CryptoSuiteAudit::LegacyPolicyFallback => {
+            SkybridgeCryptoSuiteAuditCode::LegacyPolicyFallback
+        }
+    }
+}
+
+fn map_connection_plan(plan: ConnectionPlan) -> SkybridgeConnectionPlan {
+    let mut offered_suites = [SkybridgeCryptoSuiteKind::Unknown; 4];
+    let mut offered_suite_wire_ids = [0u16; 4];
+    for (index, suite) in plan.offered_suites.iter().take(4).enumerate() {
+        offered_suites[index] = map_crypto_suite(*suite);
+        offered_suite_wire_ids[index] = suite.wire_id();
+    }
+
+    let mut channel_mappings = [empty_channel_mapping(); 5];
+    for (index, profile) in plan.channels.iter().take(5).enumerate() {
+        channel_mappings[index] = map_channel_profile(profile);
+    }
+
+    SkybridgeConnectionPlan {
+        transport: map_transport_selection(plan.transport),
+        selected_suite: map_crypto_suite(plan.selected_suite.suite),
+        selected_suite_wire_id: plan.selected_suite.suite.wire_id(),
+        suite_audit: map_crypto_suite_audit(plan.selected_suite.audit),
+        offered_suites,
+        offered_suite_wire_ids,
+        offered_suite_count: plan.offered_suites.len().min(4),
+        channel_mappings,
+        channel_mapping_count: plan.channels.len().min(5),
+        sbp2_enabled: u8::from(plan.traffic_padding.sbp2_enabled),
+        sbp2_fixed_payload_len: plan.traffic_padding.fixed_payload_len.unwrap_or(0),
+        frame_header_len: plan.frame_header_len,
+    }
+}
+
+fn map_connection_plan_error(err: ConnectionPlanError) -> SkybridgeErrorCode {
+    match err {
+        ConnectionPlanError::UnsupportedTransport => SkybridgeErrorCode::UnsupportedTransport,
+        ConnectionPlanError::ChannelMapping(_) => SkybridgeErrorCode::InvalidInput,
+        ConnectionPlanError::CryptoSuite(CryptoSuiteSelectionError::NoMutualSuite) => {
+            SkybridgeErrorCode::NoMutualCryptoSuite
+        }
+        ConnectionPlanError::CryptoSuite(CryptoSuiteSelectionError::UnknownSuiteId(_)) => {
+            SkybridgeErrorCode::UnknownCryptoSuite
+        }
+        ConnectionPlanError::CryptoSuite(CryptoSuiteSelectionError::TimeoutCannotDowngrade) => {
+            SkybridgeErrorCode::TimeoutCannotDowngrade
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -656,16 +853,61 @@ pub unsafe extern "C" fn skybridge_select_transport(
     );
 
     unsafe {
-        *out_selection = SkybridgeTransportSelection {
-            kind: map_transport_kind(plan.kind),
-            audit_code: map_transport_audit(plan.audit_reason),
-            priority: plan.priority,
-            relay_required: map_relay_required(plan.relay_policy),
-            relay_allowed: map_relay_allowed(plan.relay_policy),
-        };
+        *out_selection = map_transport_selection(plan);
     }
 
     SkybridgeErrorCode::Ok
+}
+
+#[no_mangle]
+/// Builds the Core-owned pre-adapter connection plan for Windows and diagnostics.
+///
+/// # Safety
+/// `out_plan` must be a valid writable pointer. When `remote_suite_wire_ids_len > 0`,
+/// `remote_suite_wire_ids_ptr` must point to that many readable `u16` wire IDs.
+pub unsafe extern "C" fn skybridge_plan_connection(
+    local: SkybridgePeerCapabilities,
+    remote: SkybridgePeerCapabilities,
+    path: SkybridgeNetworkPath,
+    local_crypto: SkybridgeCryptoProviderCapabilities,
+    remote_suite_wire_ids_ptr: *const u16,
+    remote_suite_wire_ids_len: usize,
+    suite_policy: SkybridgeCryptoSuitePolicy,
+    traffic_padding: SkybridgeTrafficPaddingPlan,
+    out_plan: *mut SkybridgeConnectionPlan,
+) -> SkybridgeErrorCode {
+    if out_plan.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+    if remote_suite_wire_ids_len > 0 && remote_suite_wire_ids_ptr.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+
+    let remote_suite_wire_ids = if remote_suite_wire_ids_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(remote_suite_wire_ids_ptr, remote_suite_wire_ids_len) }
+            .to_vec()
+    };
+    let request = ConnectionRequest {
+        local: map_peer_capabilities(local),
+        remote: map_peer_capabilities(remote),
+        path: map_network_path(path),
+        local_crypto: map_crypto_provider_capabilities(local_crypto),
+        remote_suite_wire_ids,
+        suite_policy: map_crypto_suite_policy(suite_policy),
+        traffic_padding: map_traffic_padding_plan(traffic_padding),
+    };
+
+    match plan_connection(request) {
+        Ok(plan) => {
+            unsafe {
+                *out_plan = map_connection_plan(plan);
+            }
+            SkybridgeErrorCode::Ok
+        }
+        Err(err) => map_connection_plan_error(err),
+    }
 }
 
 #[no_mangle]
@@ -690,16 +932,9 @@ pub unsafe extern "C" fn skybridge_map_channel(
         Ok(profile) => profile,
         Err(_) => return SkybridgeErrorCode::InvalidInput,
     };
-    let (reliability, max_retransmits) = map_reliability(profile.reliability);
 
     unsafe {
-        *out_mapping = SkybridgeChannelMapping {
-            channel: map_channel_kind(profile.channel),
-            reliability,
-            max_retransmits,
-            binding_kind: map_binding_kind(&profile.binding),
-            head_of_line_isolated: u8::from(profile.binding.isolates_head_of_line_blocking()),
-        };
+        *out_mapping = map_channel_profile(&profile);
     }
 
     SkybridgeErrorCode::Ok
