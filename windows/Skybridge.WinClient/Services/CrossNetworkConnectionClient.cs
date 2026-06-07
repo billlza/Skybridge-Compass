@@ -12,6 +12,8 @@ public interface ICrossNetworkConnectionClient
 {
     CrossNetworkCodeInputPolicy BuildCodeInputPolicy();
 
+    string BuildPendingStatus(CrossNetworkConnectionAction action);
+
     Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request);
 }
 
@@ -32,6 +34,21 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         new(ShortCodeAlphabet, 6);
 
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() => DefaultCodeInputPolicy;
+
+    public string BuildPendingStatus(CrossNetworkConnectionAction action) =>
+        BuildDefaultPendingStatus(action);
+
+    public static string BuildDefaultPendingStatus(CrossNetworkConnectionAction action) =>
+        action switch
+        {
+            CrossNetworkConnectionAction.GenerateQrCode => "Generating...",
+            CrossNetworkConnectionAction.ScanQrCode => "Scanning...",
+            CrossNetworkConnectionAction.GenerateCode => "Generating...",
+            CrossNetworkConnectionAction.RegenerateCode => "Generating...",
+            CrossNetworkConnectionAction.CopyCode => "Copying...",
+            CrossNetworkConnectionAction.ConnectWithCode => "Connecting...",
+            _ => "Preparing..."
+        };
 
     public Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request)
     {

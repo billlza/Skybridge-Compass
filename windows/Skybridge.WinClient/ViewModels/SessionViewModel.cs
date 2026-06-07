@@ -808,7 +808,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            DiscoveryBrowserStatus = action == DiscoveryBrowserAction.Stop ? "Stopping..." : "Scanning...";
+            DiscoveryBrowserStatus = _discoveryBrowserClient.BuildPendingStatus(action);
             var snapshot = await _discoveryBrowserClient.BuildReadOnlySnapshotAsync(
                 new DiscoveryBrowserRequest(
                     action,
@@ -909,16 +909,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            CrossNetworkStatus = action switch
-            {
-                CrossNetworkConnectionAction.GenerateQrCode => "Generating...",
-                CrossNetworkConnectionAction.ScanQrCode => "Scanning...",
-                CrossNetworkConnectionAction.GenerateCode => "Generating...",
-                CrossNetworkConnectionAction.RegenerateCode => "Generating...",
-                CrossNetworkConnectionAction.CopyCode => "Copying...",
-                CrossNetworkConnectionAction.ConnectWithCode => "Connecting...",
-                _ => "Preparing..."
-            };
+            CrossNetworkStatus = _crossNetworkConnectionClient.BuildPendingStatus(action);
 
             var snapshot = await _crossNetworkConnectionClient.BuildReadOnlySnapshotAsync(
                 new CrossNetworkConnectionRequest(
@@ -1899,6 +1890,9 @@ internal sealed class UnavailableDiscoveryBrowserClient : IDiscoveryBrowserClien
     public DiscoveryBrowserPeerCandidate BuildPeerCandidate(DiscoveredPeer peer) =>
         WindowsDiscoveryBrowserClient.BuildDefaultPeerCandidate(peer);
 
+    public string BuildPendingStatus(DiscoveryBrowserAction action) =>
+        WindowsDiscoveryBrowserClient.BuildDefaultPendingStatus(action);
+
     public Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request)
     {
         throw new InvalidOperationException("Discovery browser client is not configured.");
@@ -1917,6 +1911,9 @@ internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkCon
 {
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() =>
         CrossNetworkConnectionClient.DefaultCodeInputPolicy;
+
+    public string BuildPendingStatus(CrossNetworkConnectionAction action) =>
+        CrossNetworkConnectionClient.BuildDefaultPendingStatus(action);
 
     public Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request)
     {

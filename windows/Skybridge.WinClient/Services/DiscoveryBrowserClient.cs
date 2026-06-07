@@ -10,6 +10,8 @@ public interface IDiscoveryBrowserClient
 
     DiscoveryBrowserPeerCandidate BuildPeerCandidate(DiscoveredPeer peer);
 
+    string BuildPendingStatus(DiscoveryBrowserAction action);
+
     Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request);
 }
 
@@ -31,6 +33,12 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
 
     public DiscoveryBrowserPeerCandidate BuildPeerCandidate(DiscoveredPeer peer) =>
         BuildDefaultPeerCandidate(peer);
+
+    public string BuildPendingStatus(DiscoveryBrowserAction action) =>
+        BuildDefaultPendingStatus(action);
+
+    public static string BuildDefaultPendingStatus(DiscoveryBrowserAction action) =>
+        action == DiscoveryBrowserAction.Stop ? "Stopping..." : "Scanning...";
 
     public static DiscoveryBrowserPeerCandidate BuildDefaultPeerCandidate(DiscoveredPeer peer)
     {

@@ -571,6 +571,8 @@ foreach ($discoveryBrowserInputPolicySignal in @(
     "DefaultInputPolicy",
     "ExtendedSearchDurationSeconds",
     "ExtendedSearchSeconds",
+    "BuildPendingStatus",
+    "BuildDefaultPendingStatus",
     "_discoveryBrowserInputPolicy",
     "_discoveryBrowserInputPolicy.ExtendedSearchSeconds"
 )) {
@@ -578,6 +580,7 @@ foreach ($discoveryBrowserInputPolicySignal in @(
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("ExtendedSearchCountdown = 15")) -Message "SessionViewModel must source the Extended Search countdown from DiscoveryBrowserInputPolicy."
+Assert-True -Condition (-not $sessionViewModel.Contains("DiscoveryBrowserStatus = action ==")) -Message "SessionViewModel must source Discovery Browser pending status from IDiscoveryBrowserClient."
 
 foreach ($discoveryBrowserPeerCandidateSignal in @(
     "BuildPeerCandidate",
@@ -600,6 +603,8 @@ foreach ($crossNetworkInputPolicySignal in @(
     "DefaultCodeInputPolicy",
     "CodeLength",
     "Alphabet",
+    "BuildPendingStatus",
+    "BuildDefaultPendingStatus",
     "_crossNetworkCodeInputPolicy",
     "NormalizeCrossNetworkCodeInput(value, _crossNetworkCodeInputPolicy)"
 )) {
@@ -607,6 +612,7 @@ foreach ($crossNetworkInputPolicySignal in @(
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeAlphabet")) -Message "SessionViewModel must not duplicate the Smart Connection Code alphabet."
+Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkStatus = action switch")) -Message "SessionViewModel must source Cross-network pending status from ICrossNetworkConnectionClient."
 
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',
