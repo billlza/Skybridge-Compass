@@ -254,6 +254,11 @@ Assert-Contains -Text $architecture -Needle "ManualConnectionClient" -Message "A
 foreach ($signal in @(
     "public interface ICrossNetworkConnectionClient",
     "public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient",
+    "BuildCodeInputPolicy",
+    "CrossNetworkCodeInputPolicy",
+    "DefaultCodeInputPolicy",
+    "CodeLength",
+    "Alphabet",
     "BuildReadOnlySnapshotAsync",
     "CrossNetworkConnectionAction",
     "GenerateQrCode",

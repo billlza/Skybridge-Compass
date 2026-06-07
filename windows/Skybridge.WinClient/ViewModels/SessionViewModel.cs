@@ -10,15 +10,13 @@ namespace Skybridge.WinClient.ViewModels;
 
 public sealed class SessionViewModel : INotifyPropertyChanged
 {
-    private const string CrossNetworkCodeAlphabet =
-        "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IDiscoveryBrowserClient _discoveryBrowserClient;
     private readonly IDeviceDiscoveryInputDefaultsClient _deviceDiscoveryInputDefaultsClient;
     private readonly IManualConnectionClient _manualConnectionClient;
     private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
+    private readonly CrossNetworkCodeInputPolicy _crossNetworkCodeInputPolicy;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionPreflightClient _connectionPreflightClient;
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
@@ -101,6 +99,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _deviceDiscoveryInputDefaultsClient = deviceDiscoveryInputDefaultsClient ?? new DeviceDiscoveryInputDefaultsClient();
         _manualConnectionClient = manualConnectionClient ?? new UnavailableManualConnectionClient();
         _crossNetworkConnectionClient = crossNetworkConnectionClient ?? new UnavailableCrossNetworkConnectionClient();
+        _crossNetworkCodeInputPolicy = _crossNetworkConnectionClient.BuildCodeInputPolicy();
         _pairingMaterialClient = pairingMaterialClient ?? new UnavailablePairingMaterialClient();
         _connectionPreflightClient = connectionPreflightClient ?? new UnavailableConnectionPreflightClient();
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
@@ -499,7 +498,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         get => _crossNetworkCodeInput;
         set
         {
-            var normalized = NormalizeCrossNetworkCodeInput(value);
+            var normalized = NormalizeCrossNetworkCodeInput(value, _crossNetworkCodeInputPolicy);
             if (SetField(ref _crossNetworkCodeInput, normalized))
             {
                 ApplyConnectionWorkspaceStatusPatch(
@@ -1698,18 +1697,20 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         return true;
     }
 
-    private static string NormalizeCrossNetworkCodeInput(string? value)
+    private static string NormalizeCrossNetworkCodeInput(
+        string? value,
+        CrossNetworkCodeInputPolicy inputPolicy)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
             return "";
         }
 
-        var normalized = new char[6];
+        var normalized = new char[inputPolicy.CodeLength];
         var count = 0;
         foreach (var current in value.ToUpperInvariant())
         {
-            if (!CrossNetworkCodeAlphabet.Contains(current))
+            if (!inputPolicy.Alphabet.Contains(current))
             {
                 continue;
             }
@@ -2042,6 +2043,9 @@ internal sealed class UnavailableManualConnectionClient : IManualConnectionClien
 
 internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkConnectionClient
 {
+    public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() =>
+        CrossNetworkConnectionClient.DefaultCodeInputPolicy;
+
     public Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request)
     {
         throw new InvalidOperationException("Cross-network connection client is not configured.");

@@ -10,6 +10,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface ICrossNetworkConnectionClient
 {
+    CrossNetworkCodeInputPolicy BuildCodeInputPolicy();
+
     Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request);
 }
 
@@ -25,6 +27,11 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
     private const int RawP256SignatureLengthBytes = 64;
     private const int P256PublicKeyFingerprintHexLength = 64;
     private const double QrSignatureChallengeLifetimeSeconds = 300;
+
+    public static CrossNetworkCodeInputPolicy DefaultCodeInputPolicy { get; } =
+        new(ShortCodeAlphabet, 6);
+
+    public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() => DefaultCodeInputPolicy;
 
     public Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request)
     {
@@ -764,3 +771,7 @@ public sealed record CrossNetworkConnectionFact(
     string Label,
     string Value,
     string Detail);
+
+public sealed record CrossNetworkCodeInputPolicy(
+    string Alphabet,
+    int CodeLength);

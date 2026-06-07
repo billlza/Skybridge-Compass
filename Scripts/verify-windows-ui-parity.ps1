@@ -532,6 +532,20 @@ foreach ($deviceDiscoveryDefaultSignal in @(
 Assert-True -Condition (-not $sessionViewModel.Contains("SampleFingerprint")) -Message "SessionViewModel must not own Device Discovery sample fingerprints."
 Assert-True -Condition (-not $sessionViewModel.Contains("SamplePairingPublicKey")) -Message "SessionViewModel must not own Device Discovery sample pairing keys."
 
+foreach ($crossNetworkInputPolicySignal in @(
+    "BuildCodeInputPolicy",
+    "CrossNetworkCodeInputPolicy",
+    "DefaultCodeInputPolicy",
+    "CodeLength",
+    "Alphabet",
+    "_crossNetworkCodeInputPolicy",
+    "NormalizeCrossNetworkCodeInput(value, _crossNetworkCodeInputPolicy)"
+)) {
+    Assert-Contains -Text ($crossNetwork + $sessionViewModel) -Needle $crossNetworkInputPolicySignal -Message "Cross-network input policy signal missing: $crossNetworkInputPolicySignal"
+}
+
+Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeAlphabet")) -Message "SessionViewModel must not duplicate the Smart Connection Code alphabet."
+
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',
     'ItemsSource="{Binding DeviceDiscoveryPrimaryActions}"',
@@ -776,6 +790,7 @@ foreach ($discoverySignal in @(
     "pending canonical verifier",
     "Scan Error",
     "Smart Connection Code",
+    "CrossNetworkCodeInputPolicy",
     "Generate Code",
     "Copy",
     "Regenerate",
