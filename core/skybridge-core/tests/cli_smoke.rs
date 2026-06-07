@@ -103,6 +103,29 @@ fn cli_suite_select_blocks_timeout_downgrade() {
 }
 
 #[test]
+fn cli_channel_map_reports_transport_binding() {
+    let output = skybridge()
+        .args([
+            "channel",
+            "map",
+            "--transport",
+            "msquic",
+            "--channel",
+            "telemetry",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("channel=Telemetry"));
+    assert!(stdout.contains("transport=WindowsNativeMsQuic"));
+    assert!(stdout.contains("binding=skybridge.telemetry"));
+    assert!(stdout.contains("reliability=reliable-unordered"));
+    assert!(stdout.contains("head_of_line_isolated=true"));
+}
+
+#[test]
 fn cli_rejects_incomplete_transport_command() {
     let output = skybridge()
         .args(["transport", "select", "--local", "windows"])

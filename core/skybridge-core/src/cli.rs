@@ -1,9 +1,10 @@
+use crate::channel::map_channel;
 use crate::suite::{
     negotiate_suite, offered_suites, CryptoProviderCapabilities, CryptoSuite, CryptoSuitePolicy,
 };
 use crate::transport::{
     NetworkPath, PeerCapabilities, PeerPlatform, SkyBridgeChannel, SkyBridgeReliability,
-    TransportPlan, TransportSelector,
+    SkyBridgeTransportKind, TransportPlan, TransportSelector,
 };
 use std::io::Write;
 
@@ -16,6 +17,7 @@ USAGE:
   skybridge suite offer --caps <xwing,mlkem,x25519,p256> [--allow-classic] [--allow-legacy-p256]
   skybridge suite select --local-caps <xwing,mlkem,x25519,p256> --remote-suites <0x0001,0x1001> [--allow-classic] [--allow-legacy-p256] [--timeout-observed]
   skybridge channel profile --channel <control|file|clipboard|telemetry|realtime>
+  skybridge channel map --transport <apple-native|msquic|webrtc|relay|tcp> --channel <control|file|clipboard|telemetry|realtime>
 ";
 
 pub fn run<I, S>(args: I, out: &mut impl Write, err: &mut impl Write) -> i32
@@ -95,17 +97,41 @@ fn execute_suite(args: &[String], out: &mut impl Write) -> Result<(), String> {
 }
 
 fn execute_channel(args: &[String], out: &mut impl Write) -> Result<(), String> {
-    if args.first().map(String::as_str) != Some("profile") {
-        return Err("expected channel profile".into());
+    match args.first().map(String::as_str) {
+        Some("profile") => {
+            let channel = parse_channel(required_option(args, "--channel")?)?;
+            let reliability = channel.default_reliability();
+
+            writeln!(out, "channel={channel:?}").map_err(|err| err.to_string())?;
+            writeln!(out, "reliability={}", format_reliability(reliability))
+                .map_err(|err| err.to_string())?;
+            Ok(())
+        }
+        Some("map") => {
+            let transport = parse_transport_kind(required_option(args, "--transport")?)?;
+            let channel = parse_channel(required_option(args, "--channel")?)?;
+            let profile = map_channel(transport, channel)
+                .map_err(|err| format!("channel map failed: {err:?}"))?;
+
+            writeln!(out, "channel={:?}", profile.channel).map_err(|err| err.to_string())?;
+            writeln!(out, "transport={transport:?}").map_err(|err| err.to_string())?;
+            writeln!(out, "binding={}", profile.binding.label()).map_err(|err| err.to_string())?;
+            writeln!(
+                out,
+                "reliability={}",
+                format_reliability(profile.reliability)
+            )
+            .map_err(|err| err.to_string())?;
+            writeln!(
+                out,
+                "head_of_line_isolated={}",
+                profile.binding.isolates_head_of_line_blocking()
+            )
+            .map_err(|err| err.to_string())?;
+            Ok(())
+        }
+        _ => Err("expected channel profile or channel map".into()),
     }
-
-    let channel = parse_channel(required_option(args, "--channel")?)?;
-    let reliability = channel.default_reliability();
-
-    writeln!(out, "channel={channel:?}").map_err(|err| err.to_string())?;
-    writeln!(out, "reliability={}", format_reliability(reliability))
-        .map_err(|err| err.to_string())?;
-    Ok(())
 }
 
 fn has_flag(args: &[String], name: &str) -> bool {
@@ -159,6 +185,22 @@ fn parse_channel(value: &str) -> Result<SkyBridgeChannel, String> {
         "telemetry" => Ok(SkyBridgeChannel::Telemetry),
         "realtime" | "real-time" => Ok(SkyBridgeChannel::Realtime),
         other => Err(format!("unsupported channel: {other}")),
+    }
+}
+
+fn parse_transport_kind(value: &str) -> Result<SkyBridgeTransportKind, String> {
+    match normalize(value).as_str() {
+        "apple-native" | "apple" => Ok(SkyBridgeTransportKind::AppleNative),
+        "msquic" | "windows-msquic" | "windows-native-msquic" => {
+            Ok(SkyBridgeTransportKind::WindowsNativeMsQuic)
+        }
+        "skybridge-ice-msquic" | "ice-msquic" => Ok(SkyBridgeTransportKind::SkyBridgeIceMsQuic),
+        "webrtc" | "webrtc-dc" | "webrtc-datachannel" => {
+            Ok(SkyBridgeTransportKind::WebRtcDataChannel)
+        }
+        "relay" => Ok(SkyBridgeTransportKind::Relay),
+        "tcp" | "tcp-fallback" => Ok(SkyBridgeTransportKind::TcpFallback),
+        other => Err(format!("unsupported transport: {other}")),
     }
 }
 
@@ -330,6 +372,33 @@ mod tests {
         assert_eq!(code, 0);
         assert!(stdout.contains("channel=Realtime"));
         assert!(stdout.contains("reliability=partial-reliable:1"));
+    }
+
+    #[test]
+    fn channel_map_reports_adapter_binding() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let code = run(
+            [
+                "channel",
+                "map",
+                "--transport",
+                "webrtc",
+                "--channel",
+                "file",
+            ],
+            &mut out,
+            &mut err,
+        );
+
+        let stdout = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0);
+        assert!(err.is_empty());
+        assert!(stdout.contains("channel=File"));
+        assert!(stdout.contains("transport=WebRtcDataChannel"));
+        assert!(stdout.contains("binding=skybridge.file"));
+        assert!(stdout.contains("head_of_line_isolated=true"));
     }
 
     #[test]

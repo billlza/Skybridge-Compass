@@ -6,6 +6,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - The mac reference ADR is `Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md` on `tdsc-2026-01-0318-ios-sim-fix-20260211-adr` (latest TDSC mac branch checked on 2026-06-07). It treats WebRTC, MsQuic, and Apple Network.framework as transport adapters. SkyBridge Core owns identity, pairing, trust, handshake, logical channels, transport selection, traffic padding, and audit semantics.
 - Windows-to-Windows same-LAN sessions must prefer `WindowsNativeMsQuicTransport`; Windows-to-Apple MVP interop should use `WebRTCInteropTransport`; Apple-to-Apple remains Apple native and must not be replaced by WebRTC by default.
 - The Rust core now exposes `transport` selection primitives plus `skybridge_select_transport` over FFI so the Windows UI can request an auditable plan instead of hardcoding protocol state.
+- `channel.rs` maps Core logical channels to adapter-specific channel names: MsQuic uses streams for control/file/clipboard and datagrams for telemetry/realtime; WebRTC uses separate DataChannel labels per logical channel; Apple native keeps the same Core names without switching Apple-to-Apple to WebRTC.
 - The Rust core also defines the ADR canonical crypto suite IDs (`0x0001`, `0x0101`, `0x1001`, `0x1002`) in `suite.rs`; offered suites are derived from runtime provider capabilities and classic fallback requires an explicit policy gate.
 - The Rust core provides SBP2 traffic-padding framing in `padding.rs` using the ADR wire shape (`SBP2` magic, `actual_len` u32be, payload, random padding). Transport adapters still need to call it after handshake policy enables padding.
 
@@ -13,7 +14,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - **WinUI shell:** `net10.0-windows10.0.19041.0` with Windows App SDK `2.1.3`. Microsoft lists .NET 10 as active LTS through November 2028, and NuGet/Microsoft's Windows App SDK downloads page list `2.1.3` as the current stable package/runtime.
 - **Windows native transport:** MsQuic remains the intended native QUIC adapter for Windows-to-Windows paths. It should sit below SkyBridge Core transport binding and emit ETW/EventSource-style diagnostics rather than owning session identity.
 - **WebRTC interop:** Use a native DataChannel adapter such as libdatachannel for Windows-to-Apple MVP interop. libdatachannel remains active in 2026, with GitHub releases showing v0.24.3 as latest, and supports Windows plus Apple platforms, making it suitable as an adapter candidate, not as the protocol authority.
-- **Rust core and CLI:** Keep the current Rust 2021 edition until a dedicated migration is scheduled. `src/cli.rs` and the `skybridge` binary are thin adapters over reusable Core functions; CLI smoke tests cover version, transport selection, crypto suite offer/select, channel profile, and invalid-command behavior. SBP2 padding has Core unit tests for fixed, bucketed, and malformed frame behavior.
+- **Rust core and CLI:** Keep the current Rust 2021 edition until a dedicated migration is scheduled. `src/cli.rs` and the `skybridge` binary are thin adapters over reusable Core functions; CLI smoke tests cover version, transport selection, channel profile/map, crypto suite offer/select, and invalid-command behavior. SBP2 padding has Core unit tests for fixed, bucketed, and malformed frame behavior.
 
 ## Layers
 - **ViewModels** (`windows/Skybridge.WinClient/ViewModels`): presentation logic and bindable state. `SessionViewModel` owns connection status, bitrate/framerate selections, async commands for connect/disconnect/heartbeat, and busy-state handling to keep the UI responsive.
@@ -24,6 +25,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - Introduce a `FfiEngineClient` in `Services` that P/Invokes the C ABI exposed by `core/skybridge-core/src/ffi.rs` (e.g., `skybridge_engine_new`, `skybridge_engine_connect`, `skybridge_engine_shutdown`).
 - Use `CoreBridge.SelectTransportAsync` / `skybridge_select_transport` to choose Apple-native, Windows MsQuic, WebRTC interop, relay, or TCP fallback plans from peer capabilities and path facts.
 - Use `skybridge transport select` for operator smoke checks against the same Rust selector before WinUI or native adapter wiring is available.
+- Use `skybridge channel map` to verify that each transport adapter uses channel-specific streams, datagrams, or DataChannels before real adapter wiring is enabled.
 - Use `skybridge suite offer` and `skybridge suite select` to verify provider-derived suite offers, remote wire ID parsing, and downgrade audit behavior before platform crypto provider wiring is available.
 - Map engine callbacks (state changes, input responses) to UI updates via events or observable properties on the view model.
 - Keep heavy work off the UI thread by continuing to use async commands for connect/heartbeat; the FFI layer should marshal any blocking calls to thread-pool threads when necessary.
@@ -32,6 +34,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - UI logic remains in view models and services, enabling unit tests against `SessionViewModel` without a XAML runtime.
 - FFI glue can be validated with integration tests on Windows by mocking the Rust DLL exports or linking against the compiled core crate.
 - Rust tests must cover transport selection defaults, channel reliability, transport binding digest changes, and FFI selector contracts.
+- Channel mapping tests must prove WebRTC uses distinct DataChannel labels, Windows MsQuic uses stream/datagram mappings, Apple native does not route Apple-to-Apple through WebRTC, and TCP fallback is visible as head-of-line blocking risk.
 - Suite tests must prove unknown suite IDs fail closed, offered suites come from actual capabilities, classic/P-256 fallback is policy-gated, and timeout cannot trigger crypto downgrade.
 - SBP2 tests must prove payload roundtrip, bucket selection, padding statistics, too-small target rejection, missing bucket rejection, bad magic rejection, and truncated frame rejection.
 - CLI smoke tests must launch the compiled `skybridge` binary and verify successful and failing basic commands.
