@@ -29,10 +29,11 @@ $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewMode
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
+$remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $coreDiagnosticsPath, $fileTransferPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -40,6 +41,7 @@ $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
+$remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 
@@ -87,6 +89,10 @@ foreach ($binding in @(
     "FileTransferHistory",
     "FileTransferSecurityFacts",
     "IsFileTransferSelected",
+    "RemoteDesktopStatus",
+    "RemoteDesktopSessions",
+    "RemoteDesktopControlFacts",
+    "IsRemoteDesktopSelected",
     "CoreDiagnosticsStatus",
     "CoreDiagnosticFacts",
     "IsQuantumSelected"
@@ -95,7 +101,7 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "RefreshFileTransferCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -141,6 +147,27 @@ foreach ($fileTransferSignal in @(
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", true)' -Message "File Transfer must be marked implemented once the queue/history workspace exists."
+
+foreach ($remoteDesktopSignal in @(
+    "Remote Desktop",
+    "Recommended Connect",
+    "Advanced Connect",
+    "Performance Overlay",
+    "Quality",
+    "Full Screen",
+    "Disconnect Session",
+    "Active Sessions",
+    "RemoteDesktopWorkspaceClient",
+    "BuildReadOnlySnapshotAsync",
+    "PlanConnectionAsync",
+    "CoreChannelKind.Realtime",
+    "CoreChannelKind.Telemetry",
+    "EncodeSbp2FrameAsync"
+)) {
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $remoteDesktop) -Needle $remoteDesktopSignal -Message "Remote Desktop parity signal missing: $remoteDesktopSignal"
+}
+
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", true)' -Message "Remote Desktop must be marked implemented once the read-only session workspace exists."
 
 foreach ($diagnosticSignal in @(
     "Quantum / Core Diagnostics",

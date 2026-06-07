@@ -30,6 +30,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IDiscoveryClient _discoveryClient;
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
+    private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoveryTxtRecord =
@@ -37,6 +38,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _discoveryStatus = "Ready";
     private string _coreDiagnosticsStatus = "Ready";
     private string _fileTransferStatus = "Ready";
+    private string _remoteDesktopStatus = "Ready";
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
@@ -47,12 +49,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IEngineClient engineClient,
         IDiscoveryClient? discoveryClient = null,
         ICoreDiagnosticsClient? coreDiagnosticsClient = null,
-        IFileTransferWorkspaceClient? fileTransferClient = null)
+        IFileTransferWorkspaceClient? fileTransferClient = null,
+        IRemoteDesktopWorkspaceClient? remoteDesktopClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
         _fileTransferClient = fileTransferClient ?? new UnavailableFileTransferWorkspaceClient();
+        _remoteDesktopClient = remoteDesktopClient ?? new UnavailableRemoteDesktopWorkspaceClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
@@ -61,6 +65,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         FileTransferQueue = new ObservableCollection<FileTransferQueueItemView>();
         FileTransferHistory = new ObservableCollection<FileTransferHistoryItemView>();
         FileTransferSecurityFacts = new ObservableCollection<FileTransferSecurityFactView>();
+        RemoteDesktopSessions = new ObservableCollection<RemoteDesktopSessionItemView>();
+        RemoteDesktopControlFacts = new ObservableCollection<RemoteDesktopControlFactView>();
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
@@ -68,6 +74,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ParseAdvertisementCommand = new AsyncRelayCommand(ParseAdvertisementAsync, CanParseAdvertisement);
         RunCoreDiagnosticsCommand = new AsyncRelayCommand(RunCoreDiagnosticsAsync, CanRunCoreDiagnostics);
         RefreshFileTransferCommand = new AsyncRelayCommand(RefreshFileTransferAsync, CanRefreshFileTransfer);
+        RefreshRemoteDesktopCommand = new AsyncRelayCommand(RefreshRemoteDesktopAsync, CanRefreshRemoteDesktop);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
     }
@@ -90,6 +97,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<FileTransferSecurityFactView> FileTransferSecurityFacts { get; }
 
+    public ObservableCollection<RemoteDesktopSessionItemView> RemoteDesktopSessions { get; }
+
+    public ObservableCollection<RemoteDesktopControlFactView> RemoteDesktopControlFacts { get; }
+
     public int OnlineDeviceCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
 
     public int ActiveSessionCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
@@ -107,6 +118,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             {
                 OnPropertyChanged(nameof(IsDeviceDiscoverySelected));
                 OnPropertyChanged(nameof(IsFileTransferSelected));
+                OnPropertyChanged(nameof(IsRemoteDesktopSelected));
                 OnPropertyChanged(nameof(IsQuantumSelected));
                 RefreshCommandStates();
             }
@@ -116,6 +128,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public bool IsDeviceDiscoverySelected => SelectedFeature.Id == FeatureEntryId.DeviceDiscovery;
 
     public bool IsFileTransferSelected => SelectedFeature.Id == FeatureEntryId.FileTransfer;
+
+    public bool IsRemoteDesktopSelected => SelectedFeature.Id == FeatureEntryId.RemoteDesktop;
 
     public bool IsQuantumSelected => SelectedFeature.Id == FeatureEntryId.Quantum;
 
@@ -203,6 +217,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public int FileTransferHistoryCount => FileTransferHistory.Count;
 
+    public string RemoteDesktopStatus
+    {
+        get => _remoteDesktopStatus;
+        private set => SetField(ref _remoteDesktopStatus, value);
+    }
+
+    public int RemoteDesktopSessionCount => RemoteDesktopSessions.Count;
+
     public BitrateProfile SelectedBitrate
     {
         get => _selectedBitrate;
@@ -238,6 +260,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RunCoreDiagnosticsCommand { get; }
 
     public ICommand RefreshFileTransferCommand { get; }
+
+    public ICommand RefreshRemoteDesktopCommand { get; }
 
     private async Task ConnectAsync()
     {
@@ -361,6 +385,37 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         });
     }
 
+    private async Task RefreshRemoteDesktopAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            RemoteDesktopStatus = "Refreshing...";
+            var snapshot = await _remoteDesktopClient.BuildReadOnlySnapshotAsync(
+                SelectedBitrate.ToString(),
+                SelectedFramerate.ToString());
+            RemoteDesktopSessions.Clear();
+            foreach (var item in snapshot.Sessions)
+            {
+                RemoteDesktopSessions.Add(RemoteDesktopSessionItemView.FromItem(item));
+            }
+
+            RemoteDesktopControlFacts.Clear();
+            foreach (var fact in snapshot.ControlFacts)
+            {
+                RemoteDesktopControlFacts.Add(RemoteDesktopControlFactView.FromFact(fact));
+            }
+
+            OnPropertyChanged(nameof(RemoteDesktopSessionCount));
+            RemoteDesktopStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
+            StatusMessage = "Remote desktop workspace updated";
+        });
+    }
+
     private bool CanConnect() => !IsBusy && ConnectionState == EngineConnectionState.Disconnected;
 
     private bool CanDisconnect() => !IsBusy && (ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting);
@@ -376,6 +431,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanRunCoreDiagnostics() => !IsBusy && IsQuantumSelected;
 
     private bool CanRefreshFileTransfer() => !IsBusy && IsFileTransferSelected;
+
+    private bool CanRefreshRemoteDesktop() => !IsBusy && IsRemoteDesktopSelected;
 
     private async Task RunWithBusyState(Func<Task> action)
     {
@@ -401,6 +458,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             {
                 FileTransferStatus = ex.Message;
             }
+
+            if (IsRemoteDesktopSelected)
+            {
+                RemoteDesktopStatus = ex.Message;
+            }
         }
         finally
         {
@@ -416,6 +478,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RunCoreDiagnosticsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshFileTransferCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
     }
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
@@ -447,6 +510,26 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+}
+
+public sealed record RemoteDesktopSessionItemView(
+    string TargetName,
+    string State,
+    string Transport,
+    string Quality,
+    string Detail)
+{
+    public static RemoteDesktopSessionItemView FromItem(RemoteDesktopSessionItem item) =>
+        new(item.TargetName, item.State, item.Transport, item.Quality, item.Detail);
+}
+
+public sealed record RemoteDesktopControlFactView(
+    string Label,
+    string Value,
+    string Detail)
+{
+    public static RemoteDesktopControlFactView FromFact(RemoteDesktopControlFact fact) =>
+        new(fact.Label, fact.Value, fact.Detail);
 }
 
 public sealed record FileTransferQueueItemView(
@@ -567,6 +650,16 @@ internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWork
     public Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("File transfer workspace client is not configured.");
+    }
+}
+
+internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
+{
+    public Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
+        string bitrateProfile,
+        string framerateProfile)
+    {
+        throw new InvalidOperationException("Remote desktop workspace client is not configured.");
     }
 }
 

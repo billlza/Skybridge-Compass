@@ -346,6 +346,122 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Spacing="4">
+                                    <TextBlock Text="Remote Desktop" FontSize="18" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding RemoteDesktopStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Command="{Binding RefreshRemoteDesktopCommand}" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE895;" FontSize="14" />
+                                        <TextBlock Text="Refresh Sessions" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE710;" FontSize="14" />
+                                        <TextBlock Text="Recommended Connect" />
+                                    </StackPanel>
+                                </Button>
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE8A7;" FontSize="14" />
+                                        <TextBlock Text="Advanced Connect" />
+                                    </StackPanel>
+                                </Button>
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE9D9;" FontSize="14" />
+                                        <TextBlock Text="Performance Overlay" />
+                                    </StackPanel>
+                                </Button>
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE713;" FontSize="14" />
+                                        <TextBlock Text="Settings" />
+                                    </StackPanel>
+                                </Button>
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE740;" FontSize="14" />
+                                        <TextBlock Text="Full Screen" />
+                                    </StackPanel>
+                                </Button>
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE711;" FontSize="14" />
+                                        <TextBlock Text="Disconnect Session" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+
+                            <Grid ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="2*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="Active Sessions" FontWeight="SemiBold" />
+                                    <ListView ItemsSource="{Binding RemoteDesktopSessions}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsRemoteDesktopSelected}">
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Padding="0,8" ColumnSpacing="12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="120" />
+                                                        <ColumnDefinition Width="180" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Spacing="2">
+                                                        <TextBlock Text="{Binding TargetName}" FontWeight="SemiBold" />
+                                                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                    </StackPanel>
+                                                    <TextBlock Grid.Column="1" Text="{Binding State}" />
+                                                    <StackPanel Grid.Column="2" Spacing="2">
+                                                        <TextBlock Text="{Binding Transport}" TextWrapping="Wrap" />
+                                                        <TextBlock Text="{Binding Quality}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="1" Spacing="8">
+                                    <TextBlock Text="Quality" FontWeight="SemiBold" />
+                                    <ComboBox ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                    <ComboBox ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" IsEnabled="{Binding IsRemoteDesktopSelected}" />
+                                </StackPanel>
+                            </Grid>
+
+                            <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="0,4" ColumnSpacing="12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="160" />
+                                                <ColumnDefinition Width="220" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                                            <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <StackPanel Spacing="14">
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="4">
                                     <TextBlock Text="Quantum / Core Diagnostics" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding CoreDiagnosticsStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
