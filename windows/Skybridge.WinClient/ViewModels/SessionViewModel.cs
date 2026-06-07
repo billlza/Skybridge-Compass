@@ -826,12 +826,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
             if (action != DiscoveryBrowserAction.Stop)
             {
-                _validatedDiscoveredPeer = snapshot.Peers.Count == 1 ? snapshot.Peers[0] : null;
+                _validatedDiscoveredPeer = snapshot.Peers.Count == 1 ? snapshot.Peers[0].Peer : null;
                 _validatedPairingMaterial = null;
                 DiscoveredPeers.Clear();
                 foreach (var peer in snapshot.Peers)
                 {
-                    DiscoveredPeers.Add(DiscoveredPeerView.FromPeer(peer));
+                    DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(peer));
                 }
 
                 PairingFacts.Clear();
@@ -963,7 +963,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _validatedDiscoveredPeer = peer;
             _validatedPairingMaterial = null;
             DiscoveredPeers.Clear();
-            DiscoveredPeers.Add(DiscoveredPeerView.FromPeer(peer));
+            DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(_discoveryBrowserClient.BuildPeerCandidate(peer)));
             PairingFacts.Clear();
             ClearConnectionPreflight();
             OnPropertyChanged(nameof(DiscoveredPeerCount));
@@ -1871,52 +1871,16 @@ public sealed record DiscoveredPeerView(
     string ProtocolVersion,
     string TrustSummary)
 {
-    public static DiscoveredPeerView FromPeer(DiscoveredPeer peer) =>
+    public static DiscoveredPeerView FromCandidate(DiscoveryBrowserPeerCandidate candidate) =>
         new(
-            peer.DeviceId,
-            peer.DisplayName,
-            peer.Platform.ToString(),
-            peer.ServiceKind.ToString(),
-            peer.PublicKeyFingerprint,
-            FormatCapabilities(peer.Capabilities),
-            peer.ProtocolVersion,
-            "pubKeyFP fingerprint only; pairing must provide the peer public key.");
-
-    private static string FormatCapabilities(PeerCapabilities capabilities)
-    {
-        var values = new Collection<string>();
-        if (capabilities.SupportsAppleNative)
-        {
-            values.Add("apple-native");
-        }
-
-        if (capabilities.SupportsMsQuic)
-        {
-            values.Add("msquic");
-        }
-
-        if (capabilities.SupportsSkyBridgeIceMsQuic)
-        {
-            values.Add("ice-msquic");
-        }
-
-        if (capabilities.SupportsWebRtcDataChannel)
-        {
-            values.Add("webrtc");
-        }
-
-        if (capabilities.SupportsTcpFallback)
-        {
-            values.Add("tcp");
-        }
-
-        if (capabilities.SupportsRelay)
-        {
-            values.Add("relay");
-        }
-
-        return values.Count == 0 ? "none" : string.Join(", ", values);
-    }
+            candidate.Peer.DeviceId,
+            candidate.Peer.DisplayName,
+            candidate.Peer.Platform.ToString(),
+            candidate.Peer.ServiceKind.ToString(),
+            candidate.Peer.PublicKeyFingerprint,
+            candidate.CapabilitiesSummary,
+            candidate.Peer.ProtocolVersion,
+            candidate.TrustSummary);
 }
 
 internal sealed class UnavailableDiscoveryClient : IDiscoveryClient
@@ -1931,6 +1895,9 @@ internal sealed class UnavailableDiscoveryBrowserClient : IDiscoveryBrowserClien
 {
     public DiscoveryBrowserInputPolicy BuildInputPolicy() =>
         WindowsDiscoveryBrowserClient.DefaultInputPolicy;
+
+    public DiscoveryBrowserPeerCandidate BuildPeerCandidate(DiscoveredPeer peer) =>
+        WindowsDiscoveryBrowserClient.BuildDefaultPeerCandidate(peer);
 
     public Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request)
     {

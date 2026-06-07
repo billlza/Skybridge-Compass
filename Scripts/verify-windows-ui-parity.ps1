@@ -579,6 +579,21 @@ foreach ($discoveryBrowserInputPolicySignal in @(
 
 Assert-True -Condition (-not $sessionViewModel.Contains("ExtendedSearchCountdown = 15")) -Message "SessionViewModel must source the Extended Search countdown from DiscoveryBrowserInputPolicy."
 
+foreach ($discoveryBrowserPeerCandidateSignal in @(
+    "BuildPeerCandidate",
+    "BuildDefaultPeerCandidate",
+    "DiscoveryBrowserPeerCandidate",
+    "CapabilitiesSummary",
+    "TrustSummary",
+    "DiscoveredPeerView.FromCandidate",
+    "pubKeyFP fingerprint only; pairing must provide the peer public key."
+)) {
+    Assert-Contains -Text ($discoveryBrowser + $sessionViewModel + $mainWindow) -Needle $discoveryBrowserPeerCandidateSignal -Message "Discovery browser peer candidate signal missing: $discoveryBrowserPeerCandidateSignal"
+}
+
+Assert-True -Condition (-not $sessionViewModel.Contains("FormatCapabilities")) -Message "SessionViewModel must not format discovered-peer capabilities inline."
+Assert-True -Condition (-not $sessionViewModel.Contains("pubKeyFP fingerprint only; pairing must provide the peer public key.")) -Message "SessionViewModel must source discovered-peer trust summary from DiscoveryBrowserPeerCandidate."
+
 foreach ($crossNetworkInputPolicySignal in @(
     "BuildCodeInputPolicy",
     "CrossNetworkCodeInputPolicy",

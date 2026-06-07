@@ -8,6 +8,8 @@ public interface IDiscoveryBrowserClient
 {
     DiscoveryBrowserInputPolicy BuildInputPolicy();
 
+    DiscoveryBrowserPeerCandidate BuildPeerCandidate(DiscoveredPeer peer);
+
     Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request);
 }
 
@@ -26,6 +28,19 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
     }
 
     public DiscoveryBrowserInputPolicy BuildInputPolicy() => DefaultInputPolicy;
+
+    public DiscoveryBrowserPeerCandidate BuildPeerCandidate(DiscoveredPeer peer) =>
+        BuildDefaultPeerCandidate(peer);
+
+    public static DiscoveryBrowserPeerCandidate BuildDefaultPeerCandidate(DiscoveredPeer peer)
+    {
+        ArgumentNullException.ThrowIfNull(peer);
+
+        return new DiscoveryBrowserPeerCandidate(
+            peer,
+            FormatCapabilities(peer.Capabilities),
+            "pubKeyFP fingerprint only; pairing must provide the peer public key.");
+    }
 
     public async Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request)
     {
@@ -56,10 +71,10 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
 
         if (request.Action == DiscoveryBrowserAction.Stop)
         {
-            return new DiscoveryBrowserSnapshot(DateTimeOffset.UtcNow, false, Array.Empty<DiscoveredPeer>(), facts);
+            return new DiscoveryBrowserSnapshot(DateTimeOffset.UtcNow, false, Array.Empty<DiscoveryBrowserPeerCandidate>(), facts);
         }
 
-        var peers = new List<DiscoveredPeer>();
+        var peers = new List<DiscoveryBrowserPeerCandidate>();
         if (string.IsNullOrWhiteSpace(request.TxtRecord))
         {
             facts.Add(new DiscoveryBrowserFact(
@@ -75,7 +90,7 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
         var peer = await _discoveryClient.ParseAdvertisementAsync(service, request.TxtRecord);
         if (MatchesSearch(peer, request.SearchText))
         {
-            peers.Add(peer);
+            peers.Add(BuildPeerCandidate(peer));
         }
 
         facts.Add(new DiscoveryBrowserFact(
@@ -103,6 +118,42 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
 
     private static bool Contains(string value, string needle) =>
         value.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
+    private static string FormatCapabilities(PeerCapabilities capabilities)
+    {
+        var values = new List<string>();
+        if (capabilities.SupportsAppleNative)
+        {
+            values.Add("apple-native");
+        }
+
+        if (capabilities.SupportsMsQuic)
+        {
+            values.Add("msquic");
+        }
+
+        if (capabilities.SupportsSkyBridgeIceMsQuic)
+        {
+            values.Add("ice-msquic");
+        }
+
+        if (capabilities.SupportsWebRtcDataChannel)
+        {
+            values.Add("webrtc");
+        }
+
+        if (capabilities.SupportsTcpFallback)
+        {
+            values.Add("tcp");
+        }
+
+        if (capabilities.SupportsRelay)
+        {
+            values.Add("relay");
+        }
+
+        return values.Count == 0 ? "none" : string.Join(", ", values);
+    }
 }
 
 public sealed record DiscoveryBrowserRequest(
@@ -124,12 +175,17 @@ public enum DiscoveryBrowserAction
 public sealed record DiscoveryBrowserSnapshot(
     DateTimeOffset CapturedAt,
     bool IsScanning,
-    IReadOnlyList<DiscoveredPeer> Peers,
+    IReadOnlyList<DiscoveryBrowserPeerCandidate> Peers,
     IReadOnlyList<DiscoveryBrowserFact> Facts);
 
 public sealed record DiscoveryBrowserInputPolicy(
     int ExtendedSearchSeconds,
     IReadOnlyList<string> ServiceQueryOrder);
+
+public sealed record DiscoveryBrowserPeerCandidate(
+    DiscoveredPeer Peer,
+    string CapabilitiesSummary,
+    string TrustSummary);
 
 public sealed record DiscoveryBrowserFact(
     string Label,
