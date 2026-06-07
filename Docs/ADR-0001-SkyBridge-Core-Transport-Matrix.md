@@ -1,10 +1,10 @@
 # ADR-0001: SkyBridge Core Transport Matrix
 
 **Status:** Proposed for implementation  
+**ADR Version:** 1.0  
 **Date:** 2026-06-07  
-**Revision:** 3  
-**Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop, TDSC artifact/reproducibility guardrails  
-**Related areas:** P2P discovery, transport selection, WebRTC, Windows native networking, Android Kotlin stack, Android Wi-Fi Aware/NSD, Linux Rust core, Linux Avahi/DNS-SD, Apple Network.framework, QUIC, PQC, trust/pairing, traffic padding, session audit, paper artifact discipline
+**Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop, branch hygiene, stale-paper boundary  
+**Related areas:** P2P discovery, transport selection, WebRTC, Windows native networking, Android Kotlin stack, Android Wi-Fi Aware/NSD, Linux Rust core, Linux Avahi/DNS-SD, Apple Network.framework, QUIC, PQC, trust/pairing, traffic padding, session audit, signaling/TURN deployment
 
 ---
 
@@ -43,24 +43,49 @@ WebRTC, MsQuic, Quinn, Android Wi-Fi Aware, Android NSD, Avahi, DNS-SD, and Netw
 
 ---
 
-## 2. TDSC Branch Guardrails
+## 2. Authority Boundary: README, Code, and Stale Paper Materials
 
-This ADR lives on a TDSC-derived branch. The branch is tied to paper reproduction, artifact review, and reviewer-facing claims. Architecture work must not obscure the artifact story.
+This ADR does **not** use the current paper draft as an architectural source of truth.
 
-### 2.1 Current Build Scope
+The paper material in this branch is known to be stale and may lag behind the current engineering direction. It should be treated as historical/reviewer-facing material awaiting a dedicated paper refresh pass, not as the technical authority for this ADR.
 
-The current repository build entry is macOS. The core protocol layer contains iOS-specific code paths guarded by `#if os(iOS)` and `@available(iOS ...)`, but Windows, Android, and Linux are architectural targets rather than current TDSC build targets.
+### 2.1 What This ADR May Rely On
+
+This ADR may rely on:
+
+- current source-code structure and implementation boundaries
+- current README operational constraints
+- current server deployment contract and signaling/TURN notes
+- current build constraints for the implemented Apple path
+- explicit architecture decisions made for Windows, Android, and Linux in this ADR
+
+### 2.2 What This ADR Must Not Rely On
+
+This ADR must not rely on:
+
+- stale paper claims
+- stale PDF contents
+- stale supplementary text
+- old artifact truth tags as architectural evidence
+- generated paper tables or figures as proof that a new platform is implemented
+- benchmark numbers from the paper to justify Windows/Android/Linux design choices
+
+The paper can later be updated to reflect the architecture after implementation and validation. The paper should follow the architecture and verified artifacts; the architecture should not be constrained by stale paper text.
+
+### 2.3 Current Implemented Build Scope
+
+The current repository build entry is macOS. The core protocol layer contains iOS-specific code paths guarded by `#if os(iOS)` and `@available(iOS ...)`, but Windows, Android, and Linux are architectural targets rather than current implemented build targets.
 
 Required wording discipline:
 
 ```text
-Current implemented/reviewer build entry: macOS
+Current implemented build entry: macOS
 Current portable code paths: iOS/macOS inside SkyBridgeCore
 Architecture targets in this ADR: Windows, Android, Linux
-Do not present Windows/Android/Linux as already included in the TDSC artifact build unless the artifact is updated and revalidated.
+Do not present Windows/Android/Linux as already included in the current build or artifact until implemented, tested, and documented separately.
 ```
 
-The current TDSC README lists the practical build environment as:
+The current README lists the practical build environment as:
 
 ```text
 macOS 14+
@@ -69,9 +94,9 @@ Xcode 26.2+
 Swift 6.2+
 ```
 
-Because the vendored XCFrameworks are arm64-only, Intel x86_64 Macs are out of scope for the current artifact build.
+Because the vendored XCFrameworks are arm64-only, Intel x86_64 Macs are out of scope for the current Apple build.
 
-### 2.2 Apple PQC Compile-Time Gate
+### 2.4 Apple PQC Compile-Time Gate
 
 Apple CryptoKit PQC paths for ML-KEM, ML-DSA, and X-Wing require compile-time enablement through `HAS_APPLE_PQC_SDK`. The repository uses `SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1` to enable that condition for Xcode/SDK 26+ release/distribution builds.
 
@@ -83,79 +108,45 @@ No Windows/Android/Linux provider selection should change Apple compile-time gat
 Scripts/build_with_widgets.sh and run_app.sh remain responsible for SDK detection on Apple builds.
 ```
 
-### 2.3 TDSC Artifact Identity and Immutability
+### 2.5 Paper Refresh Is A Separate Workstream
 
-The README currently identifies the reviewer artifact as:
+If the paper is later brought up to date, it must be handled as a separate documentation/artifact workstream.
 
-```text
-Tag:    artifact-v3
-Commit: c23a8b4a3d01acf71faf5615e184ee44594b7cae
-ZIP:    SHA256=c370f07da6fe825c2132f447db3287e0689d0344b26b4d97ff4f043d2cbac1e3
-TAR.GZ: SHA256=ff467cdc761a9a6528de871f0fd8663e788e0aa7a6af5b8883199a2be68642c9
-```
+A future paper refresh should:
 
-This ADR branch is not the paper artifact tag. If architecture documentation is added on a branch after the artifact tag, it must be described as post-artifact design guidance unless the paper artifact tag is deliberately advanced and all checksums, PDFs, CSVs, and README truth markers are regenerated.
+- state which platforms are implemented and benchmarked
+- keep macOS/iOS claims separate from future Windows/Android/Linux claims unless those platforms are implemented and measured
+- keep CSVs date-locked and platform-labeled
+- regenerate tables and figures only from verified CSVs
+- avoid mixing direct, relay, overlay, IPv6, and CGNAT-blocked paths
+- update README, paper, supplementary, checksums, and reproducibility commands together if a new artifact tag is created
+
+This ADR should not silently edit or reinterpret the paper.
+
+### 2.6 Reproducibility and Date-Lock Discipline
+
+Even though this ADR does not rely on the stale paper, the branch still contains reproducibility infrastructure that must not be damaged by architecture work.
 
 Rules:
-
-- Do not silently mutate artifact CSVs, generated tables, PDFs, or checksums while making architecture changes.
-- Do not mix the ADR branch commit SHA with the artifact commit SHA in reviewer instructions.
-- Any future artifact retag must update README, paper, supplementary, checksums, and reproducibility commands in one atomic documentation pass.
-- Reviewer-facing commands must use the artifact tag, not a transient architecture branch, unless the submission intentionally changes scope.
-
-### 2.4 README Consistency Issue To Resolve Before Reviewer Packaging
-
-The current README contains a consistency hazard: the main artifact section names `artifact-v3` and commit `c23a8b4a3d01acf71faf5615e184ee44594b7cae`, but the later "预期输出" block still mentions `8a68fa6e0fe78147d2b18d3287681f5d07c74afd` and `artifact-v1`.
-
-This ADR must not normalize or propagate that conflict. Before any reviewer package or release candidate is produced, the README should be corrected so all artifact truth markers agree.
-
-### 2.5 Reproducibility Date Locks
-
-The TDSC README uses date-locked artifacts and explicitly warns against mixing CSV prefixes from different experiment days.
-
-Current reproducibility convention:
-
-```bash
-ARTIFACT_DATE=2026-01-16 SKYBRIDGE_BENCH_BATCHES=5 bash Scripts/run_paper_eval.sh
-```
-
-Architecture work must preserve the following:
 
 - `ARTIFACT_DATE` should remain explicit when regenerating tables or supplementary artifacts.
 - `SKYBRIDGE_BENCH_BATCHES` means independent process batches, not per-test iterations.
 - Repeatability tables should only report cross-batch 95% CI when observed batch count `B >= 2`.
 - `Scripts/make_tables.py` date locking must not be bypassed by new platform work.
-- Windows/Android/Linux benchmarks must use separate labels and must not contaminate macOS artifact CSVs unless the paper scope is intentionally expanded.
-
-### 2.6 Paper Source and Generated Artifact Locations
-
-The README defines the paper source locations:
-
-```text
-Main paper:     Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex
-Supplementary: Docs/TDSC-2026-01-0318_supplementary.tex
-Compile script: ./compile_paper.sh
-CSV output:    Artifacts/*.csv
-Tables:        Docs/tables/, Docs/supp_tables/
-Figures:       figures/*.pdf and figures/*.png
-```
-
-Architecture changes should not rename these files or directories in the TDSC branch without a paper-maintenance reason.
+- Windows/Android/Linux benchmarks must use separate labels and must not contaminate Apple/macOS CSVs unless the artifact scope is intentionally expanded.
 
 ### 2.7 Real-Network Micro-Study Guardrails
 
-The README includes optional real-network validation for NAT, heterogeneous access networks, and mobility. This is part of the reviewer-facing external-validity story.
+Real-network validation rules remain useful engineering guardrails even if the paper text is stale.
 
 Required interpretation:
 
 - STUN probe scripts record network path state, whether a path is expensive/constrained, local UDP port, STUN-mapped endpoint, RTT distribution, and timeout/loss behavior.
-- The TCP micro-study uses fixed payload sizes that correspond to current handshake-size claims; the README currently uses `827` and `12163` bytes.
 - IPv4 port forwarding only works when the router WAN address is a reachable public IPv4 address.
 - WAN addresses in `192.168.x.x`, `10.x.x.x`, or `100.64.0.0/10` usually indicate double NAT, CGNAT, or DS-Lite and should not be described as direct-reachable IPv4.
 - IPv6 direct tests must note router IPv6 firewall requirements.
 - Overlay/relay paths must be labeled explicitly as `via overlay/relay`; do not report them as direct P2P.
-
-These rules should be reused for future Windows/Android/Linux real-network studies.
+- Future Windows/Android/Linux real-network studies must use platform-specific labels and must not be merged into Apple-only CSVs without explicit scope expansion.
 
 ### 2.8 Signaling/TURN Deployment Contract
 
@@ -170,7 +161,7 @@ TURN TLS:      5349/tcp
 TURN relay:    49152-65535/udp
 ```
 
-The TDSC branch also includes deployment assets under:
+The branch also includes deployment assets under:
 
 ```text
 Server/skybridge-signaling/deploy/README.md
@@ -184,15 +175,13 @@ Deployment must enforce `/api/turn/credentials` route semantics to avoid configu
 
 ### 2.9 Repository Hygiene
 
-The README states that build artifacts and sensitive configuration are not included in the repository and are ignored.
-
 Architecture work must preserve:
 
 - no committed TURN secrets
 - no committed private keys or certificates
 - no committed generated DMGs except explicitly documented release artifacts
 - no accidental inclusion of local `.env` production files
-- no reviewer artifact checksum changes without deliberate artifact revision
+- no accidental mutation of stale paper PDFs or generated paper artifacts as a side effect of platform architecture work
 
 ---
 
@@ -202,10 +191,10 @@ These are architectural constraints, not implementation suggestions:
 
 1. **Linux Core is Rust.** Linux UI is replaceable; Linux protocol, transport, routing, crypto-provider glue, SBP2, and audit logic are Rust.
 2. **Android application stack is Kotlin.** Android UI/service orchestration is Kotlin, preferably with Jetpack Compose for UI. SkyBridge protocol core is Rust and is exposed to Kotlin through JNI or UniFFI.
-3. **Windows UI shell is WinUI 3 / Windows App SDK.** .NET 10 is appropriate for the app shell, settings, diagnostics presentation, and selected Windows crypto access. The SkyBridge protocol core remains Rust.
+3. **Windows UI shell is WinUI 3 / Windows App SDK.** .NET 10 is appropriate for the app shell, settings, diagnostics, and selected Windows crypto access. The SkyBridge protocol core remains Rust.
 4. **Apple keeps Swift/Network.framework.** Apple-native behavior must not be weakened for cross-platform convenience.
 5. **WebRTC is not the architecture.** It is an interop and NAT-traversal adapter.
-6. **The TDSC artifact remains macOS-hosted unless explicitly revised.** Cross-platform expansion must not be implied as already reproduced in the current artifact.
+6. **The current paper is stale.** Do not use it as the architecture's source of truth.
 
 ---
 
@@ -450,7 +439,7 @@ Inputs:
 - relay availability
 - battery/power state on mobile platforms
 - permissions and runtime availability
-- TDSC artifact scope if running reviewer/bench scripts
+- current artifact scope if running reviewer/bench scripts
 
 Output:
 
@@ -668,7 +657,7 @@ Rules:
 - Offered suites must be derived from actual provider support, not static wish lists.
 - Unknown suite IDs must be rejected safely, not crash the session.
 - Android and Linux must pass the same test vectors as Apple and Windows.
-- TDSC artifact benchmarks must state the provider actually used and must not imply unmeasured provider parity.
+- Benchmark documentation must state the provider actually used and must not imply unmeasured provider parity.
 
 ---
 
@@ -696,7 +685,7 @@ Requirements:
 - Unwrap before decode/decrypt where appropriate.
 - Record padding statistics for benchmarking and audit.
 - Keep format identical across Swift, Rust, and any Kotlin-facing wrapper.
-- Preserve existing TDSC SBP2 sensitivity artifact logic and date locking.
+- Preserve existing SBP2 sensitivity and date-locking logic when benchmark artifacts are regenerated.
 
 ---
 
@@ -818,7 +807,7 @@ Expected changes:
 6. Add `TransportBinding` into handshake transcript.
 7. Keep SBP2 behavior wire-compatible.
 8. Add regression tests proving Apple ↔ Apple still selects Apple-native by default.
-9. Keep TDSC macOS artifact commands working unless a deliberate artifact revision is made.
+9. Keep current macOS build commands working unless a deliberate artifact/build revision is made.
 
 Avoid:
 
@@ -827,7 +816,7 @@ Avoid:
 - weakening current trust/pairing behavior for cross-platform convenience
 - changing suite IDs
 - changing SBP2 framing
-- changing paper artifact outputs as a side effect of platform architecture work
+- changing paper artifacts as a side effect of platform architecture work
 
 ---
 
@@ -902,14 +891,14 @@ Minimal signaling messages:
 
 ## 16. Implementation Phases
 
-### Phase 0: Freeze Apple/TDSC Regression Baseline
+### Phase 0: Freeze Apple/README Regression Baseline
 
 - Add tests proving macOS/iOS still use AppleNativeTransport by default.
 - Add tests for existing Bonjour service names.
 - Add tests for handshake suite selection.
 - Add SBP2 cross-platform test vectors.
-- Confirm `swift test`, `compile_paper.sh`, and `Scripts/run_paper_eval.sh` still run on the documented macOS/Apple Silicon/Xcode environment.
-- Confirm architecture-only changes do not change artifact CSV/PDF/checksum truth markers.
+- Confirm `swift test`, `compile_paper.sh`, and `Scripts/run_paper_eval.sh` still run on the documented macOS/Apple Silicon/Xcode environment when intentionally used.
+- Confirm architecture-only changes do not mutate stale paper PDFs/CSVs/checksums unintentionally.
 
 ### Phase 1: Core Abstractions
 
@@ -981,9 +970,8 @@ Required tests:
 | Area | Test |
 |---|---|
 | Apple regression | Apple ↔ Apple selects AppleNativeTransport |
-| TDSC reproducibility | macOS artifact commands remain valid and date-locked |
-| TDSC artifact hygiene | architecture changes do not mutate artifact checksums or CSV/PDF outputs unintentionally |
-| README consistency | reviewer artifact tag/commit/checksum references are internally consistent |
+| README/build consistency | macOS build commands remain valid and do not imply unimplemented platforms |
+| Stale paper boundary | ADR does not cite stale paper as architectural authority |
 | Apple PQC gating | old SDKs do not enable `HAS_APPLE_PQC_SDK`; SDK 26+ builds can enable it through the documented env path |
 | Windows native | Windows ↔ Windows same LAN selects WindowsNativeMsQuicTransport |
 | Android native | Android ↔ Android Wi-Fi Aware path wins when supported and nearby |
@@ -1004,7 +992,7 @@ Required tests:
 Acceptance criteria:
 
 - Mac/iOS behavior is not degraded by Windows/Android/Linux changes.
-- TDSC README artifact truth markers are not contradicted by ADR work.
+- The ADR does not depend on stale paper claims.
 - Windows has a native same-LAN path independent of WebRTC.
 - Android has a Kotlin app stack and a Rust protocol core.
 - Android has native nearby/LAN paths independent of WebRTC where available.
@@ -1026,8 +1014,9 @@ This ADR does not decide:
 - final account/device-cloud model
 - complete screen/video codec architecture
 - replacement of current Apple discovery implementation
-- immediate expansion of the current TDSC artifact to Windows/Android/Linux
+- immediate expansion of the current paper/artifact to Windows/Android/Linux
 - a new artifact tag or checksum set
+- stale paper corrections
 
 This ADR does decide:
 
@@ -1038,7 +1027,7 @@ This ADR does decide:
 - Apple ↔ Apple keeps Apple native best practice.
 - SkyBridge Core owns protocol/security/channel semantics.
 - All transport adapters must be subordinate to SkyBridge Core.
-- TDSC reproducibility and artifact truth must remain protected while architecture work proceeds.
+- Stale paper material must not be used as the architecture source of truth.
 
 ---
 
@@ -1074,7 +1063,7 @@ Sources/SkyBridgeCore/Config/ServerConfig.swift
 Server/skybridge-signaling/
 ```
 
-Do not casually refactor or rename these TDSC-sensitive paths:
+Do not casually refactor or rename these branch-sensitive paths:
 
 ```text
 Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex
@@ -1103,6 +1092,6 @@ Apple ↔ Apple should keep Apple-native best practices. Windows ↔ Windows sho
 
 All combinations must share SkyBridge Core identity, handshake, PQC/classic negotiation, channel semantics, padding, audit, and transport selection.
 
-The TDSC branch adds an additional constraint: architecture work must protect paper reproducibility, artifact identity, date-locked evaluation outputs, and reviewer-facing documentation consistency.
+The current paper is stale and must not be used as the source of truth for this ADR. Architecture should be driven by current code, README operational constraints, deployment requirements, and validated future implementation work.
 
 This is the architecture that prevents new platform support from weakening the mature macOS/iOS path while still allowing Windows, Android, and Linux to become first-class, high-performance platforms.
