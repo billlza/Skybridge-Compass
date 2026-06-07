@@ -2,9 +2,9 @@
 
 **Status:** Proposed for implementation  
 **Date:** 2026-06-07  
-**Revision:** 2  
-**Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop  
-**Related areas:** P2P discovery, transport selection, WebRTC, Windows native networking, Android Kotlin stack, Android Wi-Fi Aware/NSD, Linux Rust core, Linux Avahi/DNS-SD, Apple Network.framework, QUIC, PQC, trust/pairing, traffic padding, session audit
+**Revision:** 3  
+**Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop, TDSC artifact/reproducibility guardrails  
+**Related areas:** P2P discovery, transport selection, WebRTC, Windows native networking, Android Kotlin stack, Android Wi-Fi Aware/NSD, Linux Rust core, Linux Avahi/DNS-SD, Apple Network.framework, QUIC, PQC, trust/pairing, traffic padding, session audit, paper artifact discipline
 
 ---
 
@@ -43,7 +43,160 @@ WebRTC, MsQuic, Quinn, Android Wi-Fi Aware, Android NSD, Avahi, DNS-SD, and Netw
 
 ---
 
-## 2. Hard Platform Decisions
+## 2. TDSC Branch Guardrails
+
+This ADR lives on a TDSC-derived branch. The branch is tied to paper reproduction, artifact review, and reviewer-facing claims. Architecture work must not obscure the artifact story.
+
+### 2.1 Current Build Scope
+
+The current repository build entry is macOS. The core protocol layer contains iOS-specific code paths guarded by `#if os(iOS)` and `@available(iOS ...)`, but Windows, Android, and Linux are architectural targets rather than current TDSC build targets.
+
+Required wording discipline:
+
+```text
+Current implemented/reviewer build entry: macOS
+Current portable code paths: iOS/macOS inside SkyBridgeCore
+Architecture targets in this ADR: Windows, Android, Linux
+Do not present Windows/Android/Linux as already included in the TDSC artifact build unless the artifact is updated and revalidated.
+```
+
+The current TDSC README lists the practical build environment as:
+
+```text
+macOS 14+
+Apple Silicon arm64 Mac
+Xcode 26.2+
+Swift 6.2+
+```
+
+Because the vendored XCFrameworks are arm64-only, Intel x86_64 Macs are out of scope for the current artifact build.
+
+### 2.2 Apple PQC Compile-Time Gate
+
+Apple CryptoKit PQC paths for ML-KEM, ML-DSA, and X-Wing require compile-time enablement through `HAS_APPLE_PQC_SDK`. The repository uses `SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1` to enable that condition for Xcode/SDK 26+ release/distribution builds.
+
+Architecture changes must preserve this rule:
+
+```text
+No automatic Apple PQC enablement under old SDKs.
+No Windows/Android/Linux provider selection should change Apple compile-time gating.
+Scripts/build_with_widgets.sh and run_app.sh remain responsible for SDK detection on Apple builds.
+```
+
+### 2.3 TDSC Artifact Identity and Immutability
+
+The README currently identifies the reviewer artifact as:
+
+```text
+Tag:    artifact-v3
+Commit: c23a8b4a3d01acf71faf5615e184ee44594b7cae
+ZIP:    SHA256=c370f07da6fe825c2132f447db3287e0689d0344b26b4d97ff4f043d2cbac1e3
+TAR.GZ: SHA256=ff467cdc761a9a6528de871f0fd8663e788e0aa7a6af5b8883199a2be68642c9
+```
+
+This ADR branch is not the paper artifact tag. If architecture documentation is added on a branch after the artifact tag, it must be described as post-artifact design guidance unless the paper artifact tag is deliberately advanced and all checksums, PDFs, CSVs, and README truth markers are regenerated.
+
+Rules:
+
+- Do not silently mutate artifact CSVs, generated tables, PDFs, or checksums while making architecture changes.
+- Do not mix the ADR branch commit SHA with the artifact commit SHA in reviewer instructions.
+- Any future artifact retag must update README, paper, supplementary, checksums, and reproducibility commands in one atomic documentation pass.
+- Reviewer-facing commands must use the artifact tag, not a transient architecture branch, unless the submission intentionally changes scope.
+
+### 2.4 README Consistency Issue To Resolve Before Reviewer Packaging
+
+The current README contains a consistency hazard: the main artifact section names `artifact-v3` and commit `c23a8b4a3d01acf71faf5615e184ee44594b7cae`, but the later "预期输出" block still mentions `8a68fa6e0fe78147d2b18d3287681f5d07c74afd` and `artifact-v1`.
+
+This ADR must not normalize or propagate that conflict. Before any reviewer package or release candidate is produced, the README should be corrected so all artifact truth markers agree.
+
+### 2.5 Reproducibility Date Locks
+
+The TDSC README uses date-locked artifacts and explicitly warns against mixing CSV prefixes from different experiment days.
+
+Current reproducibility convention:
+
+```bash
+ARTIFACT_DATE=2026-01-16 SKYBRIDGE_BENCH_BATCHES=5 bash Scripts/run_paper_eval.sh
+```
+
+Architecture work must preserve the following:
+
+- `ARTIFACT_DATE` should remain explicit when regenerating tables or supplementary artifacts.
+- `SKYBRIDGE_BENCH_BATCHES` means independent process batches, not per-test iterations.
+- Repeatability tables should only report cross-batch 95% CI when observed batch count `B >= 2`.
+- `Scripts/make_tables.py` date locking must not be bypassed by new platform work.
+- Windows/Android/Linux benchmarks must use separate labels and must not contaminate macOS artifact CSVs unless the paper scope is intentionally expanded.
+
+### 2.6 Paper Source and Generated Artifact Locations
+
+The README defines the paper source locations:
+
+```text
+Main paper:     Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex
+Supplementary: Docs/TDSC-2026-01-0318_supplementary.tex
+Compile script: ./compile_paper.sh
+CSV output:    Artifacts/*.csv
+Tables:        Docs/tables/, Docs/supp_tables/
+Figures:       figures/*.pdf and figures/*.png
+```
+
+Architecture changes should not rename these files or directories in the TDSC branch without a paper-maintenance reason.
+
+### 2.7 Real-Network Micro-Study Guardrails
+
+The README includes optional real-network validation for NAT, heterogeneous access networks, and mobility. This is part of the reviewer-facing external-validity story.
+
+Required interpretation:
+
+- STUN probe scripts record network path state, whether a path is expensive/constrained, local UDP port, STUN-mapped endpoint, RTT distribution, and timeout/loss behavior.
+- The TCP micro-study uses fixed payload sizes that correspond to current handshake-size claims; the README currently uses `827` and `12163` bytes.
+- IPv4 port forwarding only works when the router WAN address is a reachable public IPv4 address.
+- WAN addresses in `192.168.x.x`, `10.x.x.x`, or `100.64.0.0/10` usually indicate double NAT, CGNAT, or DS-Lite and should not be described as direct-reachable IPv4.
+- IPv6 direct tests must note router IPv6 firewall requirements.
+- Overlay/relay paths must be labeled explicitly as `via overlay/relay`; do not report them as direct P2P.
+
+These rules should be reused for future Windows/Android/Linux real-network studies.
+
+### 2.8 Signaling/TURN Deployment Contract
+
+The README defines WebRTC + TURN as the zero-configuration cross-network path for ordinary users.
+
+Current server contract:
+
+```text
+WSS signaling: 8443/tcp
+STUN:          3478/udp, optionally 3478/tcp
+TURN TLS:      5349/tcp
+TURN relay:    49152-65535/udp
+```
+
+The TDSC branch also includes deployment assets under:
+
+```text
+Server/skybridge-signaling/deploy/README.md
+Server/skybridge-signaling/production.env.example
+Server/skybridge-signaling/deploy/scripts/deploy_remote.sh
+Server/skybridge-signaling/deploy/scripts/rollback_remote.sh
+Server/skybridge-signaling/deploy/scripts/smoke_local.sh
+```
+
+Deployment must enforce `/api/turn/credentials` route semantics to avoid configuration drift. Production clients must use short-lived TURN credentials and must not hardcode TURN username/password.
+
+### 2.9 Repository Hygiene
+
+The README states that build artifacts and sensitive configuration are not included in the repository and are ignored.
+
+Architecture work must preserve:
+
+- no committed TURN secrets
+- no committed private keys or certificates
+- no committed generated DMGs except explicitly documented release artifacts
+- no accidental inclusion of local `.env` production files
+- no reviewer artifact checksum changes without deliberate artifact revision
+
+---
+
+## 3. Hard Platform Decisions
 
 These are architectural constraints, not implementation suggestions:
 
@@ -52,10 +205,11 @@ These are architectural constraints, not implementation suggestions:
 3. **Windows UI shell is WinUI 3 / Windows App SDK.** .NET 10 is appropriate for the app shell, settings, diagnostics presentation, and selected Windows crypto access. The SkyBridge protocol core remains Rust.
 4. **Apple keeps Swift/Network.framework.** Apple-native behavior must not be weakened for cross-platform convenience.
 5. **WebRTC is not the architecture.** It is an interop and NAT-traversal adapter.
+6. **The TDSC artifact remains macOS-hosted unless explicitly revised.** Cross-platform expansion must not be implied as already reproduced in the current artifact.
 
 ---
 
-## 3. Current Technology Baseline
+## 4. Current Technology Baseline
 
 This ADR uses a stable-first baseline. Preview and experimental APIs are allowed only behind feature flags.
 
@@ -78,7 +232,7 @@ Rationale:
 
 ---
 
-## 4. Architectural Principle
+## 5. Architectural Principle
 
 SkyBridge Core owns the protocol. Platforms own their native network primitives.
 
@@ -126,9 +280,9 @@ The same SkyBridge handshake, identity model, channel model, traffic padding, an
 
 ---
 
-## 5. Transport Matrix
+## 6. Transport Matrix
 
-### 5.1 Apple ↔ Apple
+### 6.1 Apple ↔ Apple
 
 Default path:
 
@@ -149,7 +303,7 @@ Requirements:
 - Preserve current macOS/iOS QR, pairing, trust, and P2P behavior unless explicitly refactored into shared Core abstractions.
 - Keep Apple-specific optimizations behind `AppleNativeTransport`.
 
-### 5.2 Windows ↔ Windows
+### 6.2 Windows ↔ Windows
 
 Default path:
 
@@ -174,7 +328,7 @@ Rust core                 = protocol, transport, crypto provider glue, routing, 
 MsQuic                    = native same-LAN and managed-network transport
 ```
 
-### 5.3 Android ↔ Android
+### 6.3 Android ↔ Android
 
 Default path:
 
@@ -200,7 +354,7 @@ Android ↔ Android must not be treated as generic WebRTC by default. Android ha
 - Kotlin owns UI, lifecycle, permissions, foreground services, notifications, and Android integration.
 - Rust owns protocol framing, handshake, crypto-provider glue, SBP2, transport adapters, routing, and audit events.
 
-### 5.4 Linux ↔ Linux
+### 6.4 Linux ↔ Linux
 
 Default path:
 
@@ -225,7 +379,7 @@ Linux ↔ Linux should use native Linux service discovery and a Rust-first QUIC 
 - Flatpak is the preferred GUI distribution target; distro packages are appropriate for daemon/system integration.
 - Linux daemon/service mode should be possible without any GUI toolkit dependency.
 
-### 5.5 Windows ↔ Linux
+### 6.5 Windows ↔ Linux
 
 Default same-LAN path:
 
@@ -238,7 +392,7 @@ Fallback:    WebRTCInteropTransport if QUIC path fails or NAT blocks UDP
 
 Windows ↔ Linux can be more native than Windows ↔ Apple/Android because both sides can run the same SkyBridge QUIC framing with fewer platform policy constraints.
 
-### 5.6 Android ↔ Windows/Linux
+### 6.6 Android ↔ Windows/Linux
 
 Default same-LAN path:
 
@@ -250,7 +404,7 @@ Fallback:    WebRTCInteropTransport
 
 Default nearby Android path is still Android-native for Android ↔ Android. Mixed Android ↔ desktop can use native QUIC if capability and network binding checks pass; otherwise use WebRTC.
 
-### 5.7 Apple ↔ Windows/Android/Linux
+### 6.7 Apple ↔ Windows/Android/Linux
 
 Default MVP path:
 
@@ -278,7 +432,7 @@ WebRTC should remain an adapter, not the owner of session identity or encryption
 
 ---
 
-## 6. Transport Selection Policy
+## 7. Transport Selection Policy
 
 Transport selection must be capability/path/policy driven, not hardcoded only by platform.
 
@@ -296,6 +450,7 @@ Inputs:
 - relay availability
 - battery/power state on mobile platforms
 - permissions and runtime availability
+- TDSC artifact scope if running reviewer/bench scripts
 
 Output:
 
@@ -371,7 +526,7 @@ Priority table:
 
 ---
 
-## 7. SkyBridgeTransport Interface
+## 8. SkyBridgeTransport Interface
 
 Every transport adapter must expose the same logical interface.
 
@@ -415,7 +570,7 @@ The existing `DiscoveryTransport` abstraction used by `HandshakeDriver` should b
 
 ---
 
-## 8. Transport Binding
+## 9. Transport Binding
 
 SkyBridge Core must bind the selected transport into the session transcript.
 
@@ -449,7 +604,7 @@ This binding must enter the SkyBridge handshake transcript before session keys a
 
 ---
 
-## 9. Logical Channel Model
+## 10. Logical Channel Model
 
 SkyBridge channels are Core-level semantics. Transport adapters only map them to native primitives.
 
@@ -465,7 +620,7 @@ Do not put all traffic into a single reliable ordered stream. That causes head-o
 
 ---
 
-## 10. Crypto Provider Policy
+## 11. Crypto Provider Policy
 
 SkyBridge wire protocol owns suite identity. Platform crypto providers are implementation details.
 
@@ -513,10 +668,11 @@ Rules:
 - Offered suites must be derived from actual provider support, not static wish lists.
 - Unknown suite IDs must be rejected safely, not crash the session.
 - Android and Linux must pass the same test vectors as Apple and Windows.
+- TDSC artifact benchmarks must state the provider actually used and must not imply unmeasured provider parity.
 
 ---
 
-## 11. Traffic Padding / SBP2
+## 12. Traffic Padding / SBP2
 
 SBP2 is a SkyBridge Core feature and must exist on Apple, Windows, Android, and Linux.
 
@@ -540,12 +696,13 @@ Requirements:
 - Unwrap before decode/decrypt where appropriate.
 - Record padding statistics for benchmarking and audit.
 - Keep format identical across Swift, Rust, and any Kotlin-facing wrapper.
+- Preserve existing TDSC SBP2 sensitivity artifact logic and date locking.
 
 ---
 
-## 12. Platform Architecture Layouts
+## 13. Platform Architecture Layouts
 
-### 12.1 Windows
+### 13.1 Windows
 
 ```text
 windows/
@@ -578,7 +735,7 @@ SkyBridgeNative.SubscribeEvents(...)
 
 The Windows UI must not own P2P protocol state.
 
-### 12.2 Android
+### 13.2 Android
 
 ```text
 android/
@@ -613,7 +770,7 @@ SkyBridgeCore.sendFile(...)
 
 Kotlin owns Android UX and OS integration. Rust owns protocol correctness.
 
-### 12.3 Linux
+### 13.3 Linux
 
 ```text
 linux/
@@ -647,7 +804,7 @@ Linux packaging targets:
 
 ---
 
-## 13. macOS/iOS Refactor Scope
+## 14. macOS/iOS Refactor Scope
 
 The mature macOS/iOS path should be modified only to clarify boundaries and prepare for multi-transport selection.
 
@@ -661,6 +818,7 @@ Expected changes:
 6. Add `TransportBinding` into handshake transcript.
 7. Keep SBP2 behavior wire-compatible.
 8. Add regression tests proving Apple ↔ Apple still selects Apple-native by default.
+9. Keep TDSC macOS artifact commands working unless a deliberate artifact revision is made.
 
 Avoid:
 
@@ -669,10 +827,11 @@ Avoid:
 - weakening current trust/pairing behavior for cross-platform convenience
 - changing suite IDs
 - changing SBP2 framing
+- changing paper artifact outputs as a side effect of platform architecture work
 
 ---
 
-## 14. WebRTC Interop Scope
+## 15. WebRTC Interop and Signaling Scope
 
 WebRTC is required, but only as an adapter.
 
@@ -703,17 +862,14 @@ DataChannel mapping:
 
 WebRTC DTLS is transport encryption only. SkyBridge handshake still defines device identity, session keys, downgrade rules, and audit semantics above the DataChannel.
 
----
-
-## 15. TURN and Signaling
-
-Production requirements:
+Production signaling requirements:
 
 - No hardcoded TURN username/password in client code.
 - Use short-lived TURN credentials.
 - Signaling server exchanges offer/answer/ICE only.
 - Signaling server must not hold SkyBridge session keys.
 - TURN relay usage must be visible in transport metrics and audit events.
+- `/api/turn/credentials` must be smoke-tested during deployment.
 
 Minimal signaling messages:
 
@@ -746,12 +902,14 @@ Minimal signaling messages:
 
 ## 16. Implementation Phases
 
-### Phase 0: Freeze Apple Regression Baseline
+### Phase 0: Freeze Apple/TDSC Regression Baseline
 
 - Add tests proving macOS/iOS still use AppleNativeTransport by default.
 - Add tests for existing Bonjour service names.
 - Add tests for handshake suite selection.
 - Add SBP2 cross-platform test vectors.
+- Confirm `swift test`, `compile_paper.sh`, and `Scripts/run_paper_eval.sh` still run on the documented macOS/Apple Silicon/Xcode environment.
+- Confirm architecture-only changes do not change artifact CSV/PDF/checksum truth markers.
 
 ### Phase 1: Core Abstractions
 
@@ -797,6 +955,7 @@ Minimal signaling messages:
 - Validate Android ↔ Apple/Desktop fallback.
 - Validate Linux ↔ non-Linux fallback.
 - Validate Windows/Android/Linux cross-NAT fallback.
+- Validate `/api/turn/credentials` deployment semantics.
 
 ### Phase 6: Core Routing and Path Scoring
 
@@ -805,6 +964,7 @@ Minimal signaling messages:
 - Add path metrics.
 - Add relay policy.
 - Add transport downgrade audit.
+- Add explicit labels for direct, relayed, overlay, IPv6 direct, and CGNAT-blocked paths.
 
 ### Phase 7: Advanced SkyBridge Native Interop
 
@@ -821,13 +981,19 @@ Required tests:
 | Area | Test |
 |---|---|
 | Apple regression | Apple ↔ Apple selects AppleNativeTransport |
+| TDSC reproducibility | macOS artifact commands remain valid and date-locked |
+| TDSC artifact hygiene | architecture changes do not mutate artifact checksums or CSV/PDF outputs unintentionally |
+| README consistency | reviewer artifact tag/commit/checksum references are internally consistent |
+| Apple PQC gating | old SDKs do not enable `HAS_APPLE_PQC_SDK`; SDK 26+ builds can enable it through the documented env path |
 | Windows native | Windows ↔ Windows same LAN selects WindowsNativeMsQuicTransport |
 | Android native | Android ↔ Android Wi-Fi Aware path wins when supported and nearby |
 | Android LAN | Android ↔ Android same LAN selects AndroidLanQuicTransport when Wi-Fi Aware unavailable |
 | Linux native | Linux ↔ Linux same LAN selects LinuxNativeQuicTransport |
 | Desktop interop | Windows ↔ Linux same LAN selects SkyBridgeNativeQuicInteropTransport |
 | Interop | Apple ↔ Windows/Android/Linux selects WebRTCInteropTransport for MVP |
+| Signaling deploy | `/api/turn/credentials` smoke test passes in deploy scripts |
 | Fallback | TURN relay use emits audit/metrics |
+| Network labeling | CGNAT/DS-Lite, IPv6 direct, overlay, relay, and direct paths are labeled distinctly |
 | Security | timeout does not trigger crypto downgrade |
 | Suite negotiation | offered suites come from provider support |
 | Forward compatibility | unknown suite ID is rejected safely |
@@ -838,6 +1004,7 @@ Required tests:
 Acceptance criteria:
 
 - Mac/iOS behavior is not degraded by Windows/Android/Linux changes.
+- TDSC README artifact truth markers are not contradicted by ADR work.
 - Windows has a native same-LAN path independent of WebRTC.
 - Android has a Kotlin app stack and a Rust protocol core.
 - Android has native nearby/LAN paths independent of WebRTC where available.
@@ -859,6 +1026,8 @@ This ADR does not decide:
 - final account/device-cloud model
 - complete screen/video codec architecture
 - replacement of current Apple discovery implementation
+- immediate expansion of the current TDSC artifact to Windows/Android/Linux
+- a new artifact tag or checksum set
 
 This ADR does decide:
 
@@ -869,6 +1038,7 @@ This ADR does decide:
 - Apple ↔ Apple keeps Apple native best practice.
 - SkyBridge Core owns protocol/security/channel semantics.
 - All transport adapters must be subordinate to SkyBridge Core.
+- TDSC reproducibility and artifact truth must remain protected while architecture work proceeds.
 
 ---
 
@@ -901,6 +1071,22 @@ Sources/SkyBridgeCore/P2P/HandshakeDriver.swift
 Sources/SkyBridgeCore/P2P/CryptoProviderProtocol.swift
 Sources/SkyBridgeCore/P2P/TrafficPadding.swift
 Sources/SkyBridgeCore/Config/ServerConfig.swift
+Server/skybridge-signaling/
+```
+
+Do not casually refactor or rename these TDSC-sensitive paths:
+
+```text
+Docs/TDSC-2026-01-0318_IEEE_Paper_SkyBridge_Compass_patched.tex
+Docs/TDSC-2026-01-0318_supplementary.tex
+compile_paper.sh
+Scripts/run_paper_eval.sh
+Scripts/make_tables.py
+Scripts/generate_ieee_figures.py
+Artifacts/*.csv
+Docs/tables/
+Docs/supp_tables/
+figures/
 ```
 
 Special note:
@@ -916,5 +1102,7 @@ SkyBridge should evolve into a self-owned secure collaboration overlay protocol.
 Apple ↔ Apple should keep Apple-native best practices. Windows ↔ Windows should use Windows-native best practices. Android ↔ Android should use a Kotlin app stack with native Android discovery/connectivity and Rust protocol core. Linux ↔ Linux should use a Rust core with Avahi discovery and Rust-native QUIC by default. Mixed-platform sessions should use WebRTC/ICE as the practical interop path for MVP, with SkyBridge native QUIC interop as the longer-term target.
 
 All combinations must share SkyBridge Core identity, handshake, PQC/classic negotiation, channel semantics, padding, audit, and transport selection.
+
+The TDSC branch adds an additional constraint: architecture work must protect paper reproducibility, artifact identity, date-locked evaluation outputs, and reviewer-facing documentation consistency.
 
 This is the architecture that prevents new platform support from weakening the mature macOS/iOS path while still allowing Windows, Android, and Linux to become first-class, high-performance platforms.
