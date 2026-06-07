@@ -983,20 +983,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var expectedFingerprint = DiscoveredPeers.Count == 1
                 ? DiscoveredPeers[0].PublicKeyFingerprint
                 : null;
-            var material = await _pairingMaterialClient.ParseConnectionCodeAsync(
+            var snapshot = await _pairingMaterialClient.BuildReadOnlySnapshotAsync(
                 PairingConnectionCode,
                 expectedFingerprint);
+            var material = snapshot.Material;
             _validatedPairingMaterial = material;
             ClearConnectionPreflight();
             PairingFacts.Clear();
-            PairingFacts.Add(new PairingFactView("Device", material.DeviceId, $"{material.DisplayName} / {material.PlatformLabel}"));
-            PairingFacts.Add(new PairingFactView("Public key fingerprint", material.PublicKeyFingerprint, "Verified against connection-code public key bytes."));
-            PairingFacts.Add(new PairingFactView(
-                "Discovery fingerprint",
-                material.VerifiedAgainstDiscoveryFingerprint ? "matched" : "not provided",
-                "Discovery pubKeyFP is verification input only; it is never used as the peer public key."));
-            PairingFacts.Add(new PairingFactView("Peer key provider", "available", "Pairing material can create IPeerPublicKeyProvider for FfiEngineClient when native DLL deployment is explicit."));
-            PairingFacts.Add(new PairingFactView("Source", material.Source, "Manual validation only; no connection attempt is started."));
+            foreach (var fact in snapshot.Facts)
+            {
+                PairingFacts.Add(PairingFactView.FromFact(fact));
+            }
 
             OnPropertyChanged(nameof(PairingFactCount));
             ApplyConnectionWorkspaceStatusPatch(
@@ -1921,7 +1918,11 @@ public sealed record CoreDiagnosticFactView(
 public sealed record PairingFactView(
     string Label,
     string Value,
-    string Detail);
+    string Detail)
+{
+    public static PairingFactView FromFact(PairingFact fact) =>
+        new(fact.Label, fact.Value, fact.Detail);
+}
 
 public sealed record DiscoveryBrowserFactView(
     string Label,
@@ -2054,7 +2055,7 @@ internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkCon
 
 internal sealed class UnavailablePairingMaterialClient : IPairingMaterialClient
 {
-    public Task<PairingMaterial> ParseConnectionCodeAsync(
+    public Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,
         string? expectedPublicKeyFingerprint)
     {

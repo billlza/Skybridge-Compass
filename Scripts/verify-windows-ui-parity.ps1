@@ -835,6 +835,8 @@ foreach ($discoverySignal in @(
     "WorkspaceActionSurface.CrossNetworkCodePrimary",
     "WorkspaceActionSurface.CrossNetworkCodeConnect",
     "PairingFactView",
+    "PairingMaterialSnapshot",
+    "PairingFact",
     "ConnectionPreflightFactView",
     "ConnectionWorkspaceStateClient",
     "PairingMaterialClient",
@@ -845,6 +847,7 @@ foreach ($discoverySignal in @(
     "fingerprint only; pairing must provide the peer public key",
     "Discovery pubKeyFP is verification input only",
     "Pairing code public key does not match pubKeyFP",
+    "Peer key provider",
     "BuildReadOnlySnapshotAsync",
     "BuildPreflightReadiness",
     "PlanConnectionAsync",
@@ -854,6 +857,8 @@ foreach ($discoverySignal in @(
 )) {
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
+
+Assert-True -Condition (-not $sessionViewModel.Contains("PairingFacts.Add(new PairingFactView")) -Message "SessionViewModel must map pairing facts from PairingMaterialClient instead of constructing pairing/trust facts inline."
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
 

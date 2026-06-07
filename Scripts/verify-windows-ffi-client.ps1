@@ -316,7 +316,9 @@ Assert-Contains -Text $architecture -Needle "CrossNetworkConnectionClient" -Mess
 foreach ($signal in @(
     "public interface IPairingMaterialClient",
     "public sealed class PairingMaterialClient : IPairingMaterialClient",
-    "ParseConnectionCodeAsync",
+    "BuildReadOnlySnapshotAsync",
+    "PairingMaterialSnapshot",
+    "PairingFact",
     "skybridge-pair:v1",
     "pubKeyFP",
     "DecodeBase64Url",

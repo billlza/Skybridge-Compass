@@ -8,7 +8,7 @@ namespace Skybridge.WinClient.Services;
 
 public interface IPairingMaterialClient
 {
-    Task<PairingMaterial> ParseConnectionCodeAsync(
+    Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,
         string? expectedPublicKeyFingerprint);
 }
@@ -17,7 +17,7 @@ public sealed class PairingMaterialClient : IPairingMaterialClient
 {
     private const string Prefix = "skybridge-pair:v1";
 
-    public Task<PairingMaterial> ParseConnectionCodeAsync(
+    public Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,
         string? expectedPublicKeyFingerprint)
     {
@@ -63,14 +63,28 @@ public sealed class PairingMaterialClient : IPairingMaterialClient
             verifiedAgainstDiscovery = true;
         }
 
-        return Task.FromResult(new PairingMaterial(
+        var material = new PairingMaterial(
             deviceId,
             fields.GetValueOrDefault("name", deviceId),
             fields.GetValueOrDefault("platform", "unknown"),
             declaredFingerprint,
             peerPublicKey,
             verifiedAgainstDiscovery,
-            "manual connection code"));
+            "manual connection code");
+
+        return Task.FromResult(new PairingMaterialSnapshot(
+            material,
+            new List<PairingFact>
+            {
+                new("Device", material.DeviceId, $"{material.DisplayName} / {material.PlatformLabel}"),
+                new("Public key fingerprint", material.PublicKeyFingerprint, "Verified against connection-code public key bytes."),
+                new(
+                    "Discovery fingerprint",
+                    material.VerifiedAgainstDiscoveryFingerprint ? "matched" : "not provided",
+                    "Discovery pubKeyFP is verification input only; it is never used as the peer public key."),
+                new("Peer key provider", "available", "Pairing material can create IPeerPublicKeyProvider for FfiEngineClient when native DLL deployment is explicit."),
+                new("Source", material.Source, "Manual validation only; no connection attempt is started.")
+            }));
     }
 
     private static Dictionary<string, string> ParseFields(string connectionCode)
@@ -154,6 +168,15 @@ public sealed class PairingMaterialClient : IPairingMaterialClient
         return builder.ToString();
     }
 }
+
+public sealed record PairingMaterialSnapshot(
+    PairingMaterial Material,
+    IReadOnlyList<PairingFact> Facts);
+
+public sealed record PairingFact(
+    string Label,
+    string Value,
+    string Detail);
 
 public sealed record PairingMaterial(
     string DeviceId,
