@@ -141,6 +141,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
         FileTransferActions = new ObservableCollection<WorkspaceActionItemView>();
         RemoteDesktopActions = new ObservableCollection<WorkspaceActionItemView>();
+        SettingsToolbarActions = new ObservableCollection<WorkspaceActionItemView>();
+        SettingsMaintenanceActions = new ObservableCollection<WorkspaceActionItemView>();
         FileTransferQueue = new ObservableCollection<FileTransferQueueItemView>();
         FileTransferHistory = new ObservableCollection<FileTransferHistoryItemView>();
         FileTransferSecurityFacts = new ObservableCollection<FileTransferSecurityFactView>();
@@ -210,6 +212,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<WorkspaceActionItemView> FileTransferActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> SettingsToolbarActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> SettingsMaintenanceActions { get; }
 
     public ObservableCollection<FileTransferQueueItemView> FileTransferQueue { get; }
 
@@ -1375,22 +1381,23 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void LoadWorkspaceActions()
     {
-        var fileTransferSnapshot = _workspaceActionCatalogClient.BuildReadOnlySnapshot(
-            new WorkspaceActionCatalogRequest(WorkspaceActionSurface.FileTransfer));
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransfer, FileTransferActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktop, RemoteDesktopActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsToolbar, SettingsToolbarActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsMaintenance, SettingsMaintenanceActions);
+    }
 
-        FileTransferActions.Clear();
-        foreach (var action in fileTransferSnapshot.Actions)
+    private void LoadWorkspaceActionSurface(
+        WorkspaceActionSurface surface,
+        ObservableCollection<WorkspaceActionItemView> target)
+    {
+        var snapshot = _workspaceActionCatalogClient.BuildReadOnlySnapshot(
+            new WorkspaceActionCatalogRequest(surface));
+
+        target.Clear();
+        foreach (var action in snapshot.Actions)
         {
-            FileTransferActions.Add(WorkspaceActionItemView.FromItem(action));
-        }
-
-        var remoteDesktopSnapshot = _workspaceActionCatalogClient.BuildReadOnlySnapshot(
-            new WorkspaceActionCatalogRequest(WorkspaceActionSurface.RemoteDesktop));
-
-        RemoteDesktopActions.Clear();
-        foreach (var action in remoteDesktopSnapshot.Actions)
-        {
-            RemoteDesktopActions.Add(WorkspaceActionItemView.FromItem(action));
+            target.Add(WorkspaceActionItemView.FromItem(action));
         }
     }
 

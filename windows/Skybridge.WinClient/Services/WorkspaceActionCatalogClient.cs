@@ -18,6 +18,8 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             {
                 WorkspaceActionSurface.FileTransfer => BuildFileTransferActions(),
                 WorkspaceActionSurface.RemoteDesktop => BuildRemoteDesktopActions(),
+                WorkspaceActionSurface.SettingsToolbar => BuildSettingsToolbarActions(),
+                WorkspaceActionSurface.SettingsMaintenance => BuildSettingsMaintenanceActions(),
                 _ => new List<WorkspaceActionItem>()
             });
 
@@ -90,12 +92,72 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 false,
                 "Visible mac-parity quick action; no live session termination is wired.")
         };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildSettingsToolbarActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "ExportSettings",
+                "Export",
+                "\uE74E",
+                false,
+                "Visible mac-parity settings action; exporting user preferences is pending."),
+            new(
+                "ImportSettings",
+                "Import",
+                "\uE8B5",
+                false,
+                "Visible mac-parity settings action; importing preference files is pending validation."),
+            new(
+                "ResetSettings",
+                "Reset",
+                "\uE72C",
+                false,
+                "Visible mac-parity settings action; destructive preference reset requires confirmation."),
+            new(
+                "RequestPermission",
+                "Request Permission",
+                "\uE72E",
+                false,
+                "Visible mac-parity settings action; permission prompts remain explicit high-risk writes."),
+            new(
+                "OpenSystemPreferences",
+                "Open System Preferences",
+                "\uE8A7",
+                false,
+                "Visible mac-parity settings action; Windows Settings deep links require explicit wiring.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildSettingsMaintenanceActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "ApplySettings",
+                "Apply Settings",
+                "\uE930",
+                false,
+                "Visible mac-parity settings action; runtime preference application is pending."),
+            new(
+                "RestoreDefaults",
+                "Restore Defaults",
+                "\uE777",
+                false,
+                "Visible mac-parity settings action; restoring defaults is a destructive preference write."),
+            new(
+                "ResetMonitorData",
+                "Reset Monitor Data",
+                "\uE9D9",
+                false,
+                "Visible mac-parity settings action; monitor retention deletion requires confirmation.")
+        };
 }
 
 public enum WorkspaceActionSurface
 {
     FileTransfer,
-    RemoteDesktop
+    RemoteDesktop,
+    SettingsToolbar,
+    SettingsMaintenance
 }
 
 public sealed record WorkspaceActionCatalogRequest(

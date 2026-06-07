@@ -173,6 +173,8 @@ foreach ($binding in @(
     "SettingsStatus",
     "SettingsTabs",
     "SettingsActions",
+    "SettingsToolbarActions",
+    "SettingsMaintenanceActions",
     "SettingsDetails",
     "IsSettingsSelected",
     "CoreDiagnosticsStatus",
@@ -375,17 +377,33 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Remote Desktop action cat
 Assert-Ordered -Text $mainWindow -Context "Settings action order" -Needles @(
     '<TextBlock Text="Settings" FontSize="18"',
     '<TextBlock Text="Refresh Status"',
-    '<TextBlock Text="Export"',
-    '<TextBlock Text="Import"',
-    '<TextBlock Text="Reset"',
-    '<TextBlock Text="Request Permission"',
-    '<TextBlock Text="Open System Preferences"',
+    'ItemsSource="{Binding SettingsToolbarActions}"',
     '<TextBlock Text="Settings Tabs"',
     '<TextBlock Text="Settings Details"',
     '<TextBlock Text="Settings Actions"',
-    '<TextBlock Text="Apply Settings"',
-    '<TextBlock Text="Restore Defaults"',
-    '<TextBlock Text="Reset Monitor Data"'
+    'ItemsSource="{Binding SettingsMaintenanceActions}"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Settings toolbar action catalog order" -Needles @(
+    '"ExportSettings"',
+    '"Export"',
+    '"ImportSettings"',
+    '"Import"',
+    '"ResetSettings"',
+    '"Reset"',
+    '"RequestPermission"',
+    '"Request Permission"',
+    '"OpenSystemPreferences"',
+    '"Open System Preferences"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Settings maintenance action catalog order" -Needles @(
+    '"ApplySettings"',
+    '"Apply Settings"',
+    '"RestoreDefaults"',
+    '"Restore Defaults"',
+    '"ResetMonitorData"',
+    '"Reset Monitor Data"'
 )
 
 foreach ($discoverySignal in @(
@@ -607,6 +625,12 @@ foreach ($settingsSignal in @(
     "Apply Settings",
     "Restore Defaults",
     "Reset Monitor Data",
+    "SettingsToolbarActions",
+    "SettingsMaintenanceActions",
+    "WorkspaceActionCatalogClient",
+    "WorkspaceActionItemView",
+    "WorkspaceActionSurface.SettingsToolbar",
+    "WorkspaceActionSurface.SettingsMaintenance",
     "SettingsWorkspaceClient",
     "BuildReadOnlySnapshotAsync",
     "SettingsTabItem",
@@ -658,7 +682,7 @@ foreach ($settingsSignal in @(
     "PQC policy",
     "Disabled"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $settings) -Needle $settingsSignal -Message "Settings parity signal missing: $settingsSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $settings + $workspaceActionCatalog) -Needle $settingsSignal -Message "Settings parity signal missing: $settingsSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", true)' -Message "Settings must be marked implemented once the read-only preferences workspace exists."
