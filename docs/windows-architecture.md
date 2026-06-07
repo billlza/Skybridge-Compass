@@ -21,11 +21,11 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 ## Layers
 - **ViewModels** (`windows/Skybridge.WinClient/ViewModels`): presentation logic and bindable state. `SessionViewModel` owns connection status, bitrate/framerate selections, async commands for connect/disconnect/heartbeat, and busy-state handling to keep the UI responsive.
 - **UI parity contract** (`docs/windows-ui-parity-contract.md`): fixes the Windows side navigation, top bar, dashboard metrics, and current shell contract against the macOS `NavigationItem` order. `FeatureEntryContract` mirrors the macOS entry order so missing Windows feature pages stay visible and testable.
-- **Services** (`windows/Skybridge.WinClient/Services`): engine abstractions behind `IEngineClient`. The stub `DummyEngineClient` simulates connect/disconnect/heartbeat flows and raises state-change events; it will be replaced by a real FFI-backed implementation that calls into the Rust `ffi` module.
+- **Services** (`windows/Skybridge.WinClient/Services`): engine abstractions behind `IEngineClient`. The stub `DummyEngineClient` simulates connect/disconnect/heartbeat flows and remains the default shell dependency until native DLL deployment is explicit. `FfiEngineClient` implements the same interface over the Rust C ABI (`skybridge_engine_new`, local public key, connect, heartbeat, disconnect, state) so the UI can switch without moving connection logic into view models. It requires an `IPeerPublicKeyProvider` supplied by pairing/discovery and must not use the local public key as a fake peer key.
 - **Views** (`windows/Skybridge.WinClient/MainWindow.xaml`): XAML-only bindings with no business logic in code-behind. The window creates the view model and relies on commands/properties for interactions.
 
 ## Planned Rust FFI integration
-- Introduce a `FfiEngineClient` in `Services` that P/Invokes the C ABI exposed by `core/skybridge-core/src/ffi.rs` (e.g., `skybridge_engine_new`, `skybridge_engine_connect`, `skybridge_engine_shutdown`).
+- Wire `FfiEngineClient` into the app startup once the native `skybridge_core` DLL deployment path and pairing-derived `IPeerPublicKeyProvider` are defined; until then, keeping `DummyEngineClient` as the default prevents a missing DLL from breaking the text-only shell.
 - Use `CoreBridge.SelectTransportAsync` / `skybridge_select_transport` to choose Apple-native, Windows MsQuic, WebRTC interop, relay, or TCP fallback plans from peer capabilities and path facts.
 - Use `CoreBridge.MapChannelAsync` / `skybridge_map_channel` so Windows services consume Core logical-channel mappings instead of duplicating adapter policy in C#.
 - Use `CoreBridge.PlanConnectionAsync` / `skybridge_plan_connection` for the pre-adapter contract that combines selected transport, selected crypto suite, offered suites, channel bindings, frame header size, and SBP2 policy.
@@ -40,6 +40,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 ## Testing approach
 - UI logic remains in view models and services, enabling unit tests against `SessionViewModel` without a XAML runtime.
 - UI parity tests should compare `FeatureEntryContract.Entries` against the macOS navigation order and automate shell selection before adding deeper feature pages. `Scripts/verify-windows-ui-parity.ps1` is the current text-only gate for navigation order, shell bindings, command bindings, and parity-document signals.
+- Windows FFI client tests currently use `Scripts/verify-windows-ffi-client.ps1` as a text-only gate for `IEngineClient` coverage, required C ABI imports, explicit state refresh, and the no-silent-default-switch rule.
 - FFI glue is covered in Rust integration tests for engine lifecycle, transport selection, channel mapping, and connection planning; Windows C# bindings should add text-only/interop tests once the WinUI test harness is introduced.
 - Rust tests must cover transport selection defaults, channel reliability, transport binding digest changes, and FFI selector contracts.
 - Channel mapping tests must prove WebRTC uses distinct DataChannel labels, Windows MsQuic uses stream/datagram mappings, Apple native does not route Apple-to-Apple through WebRTC, and TCP fallback is visible as head-of-line blocking risk.
