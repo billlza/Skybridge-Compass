@@ -1649,21 +1649,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 PerformanceStatus,
                 SelectedFeature.Title));
 
-        TopBarConnectionStatus = GetTopBarStatusValue(snapshot, "Connection", ConnectionStatus);
-        TopBarDiagnosticsStatus = GetTopBarStatusValue(snapshot, "FPS / Diagnostics", PerformanceStatus);
-        TopBarNotificationsStatus = GetTopBarStatusValue(snapshot, "Notifications", "Off");
-        TopBarThemeStatus = GetTopBarStatusValue(snapshot, "Theme", "System");
+        TopBarConnectionStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Connection, ConnectionStatus);
+        TopBarDiagnosticsStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Diagnostics, PerformanceStatus);
+        TopBarNotificationsStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Notifications, "Off");
+        TopBarThemeStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Theme, "System");
         LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
     }
 
     private static string GetTopBarStatusValue(
         TopBarStatusSnapshot snapshot,
-        string label,
+        TopBarStatusSlot slot,
         string fallback)
     {
         foreach (var item in snapshot.Items)
         {
-            if (string.Equals(item.Label, label, StringComparison.Ordinal))
+            if (item.Slot == slot)
             {
                 return item.Value;
             }

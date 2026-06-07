@@ -461,6 +461,11 @@ foreach ($topBarSignal in @(
     "TopBarStatusRequest",
     "TopBarStatusSnapshot",
     "TopBarStatusItem",
+    "TopBarStatusSlot",
+    "TopBarStatusSlot.Connection",
+    "TopBarStatusSlot.Diagnostics",
+    "TopBarStatusSlot.Notifications",
+    "TopBarStatusSlot.Theme",
     "TopBarConnectionStatus",
     "TopBarDiagnosticsStatus",
     "TopBarNotificationsStatus",
@@ -479,6 +484,15 @@ foreach ($topBarSignal in @(
     "Visible mac-parity theme entry point"
 )) {
     Assert-Contains -Text ($topBarStatus + $sessionViewModel + $mainWindow + $workspaceActionCatalog) -Needle $topBarSignal -Message "Top bar parity signal missing: $topBarSignal"
+}
+
+foreach ($topBarLabelLookup in @(
+    'GetTopBarStatusValue(snapshot, "Connection"',
+    'GetTopBarStatusValue(snapshot, "FPS / Diagnostics"',
+    'GetTopBarStatusValue(snapshot, "Notifications"',
+    'GetTopBarStatusValue(snapshot, "Theme"'
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($topBarLabelLookup)) -Message "SessionViewModel must map top-bar scalar status by TopBarStatusSlot instead of display label: $topBarLabelLookup"
 }
 
 foreach ($connectionStateSignal in @(
@@ -1110,6 +1124,7 @@ foreach ($docSignal in @(
     "Notifications",
     "Theme",
     "TopBarStatusClient",
+    "TopBarStatusSlot",
     "WorkspaceActionCatalogClient",
     "WorkspaceActionButtonTemplate",
     "WorkspaceActionButtonWithDetailTemplate",
