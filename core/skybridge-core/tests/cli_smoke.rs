@@ -15,6 +15,15 @@ fn cli_help_smoke() {
 }
 
 #[test]
+fn cli_version_smoke() {
+    let output = skybridge().arg("version").output().expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("skybridge-core "));
+}
+
+#[test]
 fn cli_windows_same_lan_selects_msquic() {
     let output = skybridge()
         .args([
@@ -98,6 +107,38 @@ fn cli_transport_bind_reports_binding_digest() {
 }
 
 #[test]
+fn cli_transport_bind_accepts_relay_id() {
+    let output = skybridge()
+        .args([
+            "transport",
+            "bind",
+            "--transport",
+            "relay",
+            "--local-endpoint",
+            "relay-local",
+            "--remote-endpoint",
+            "relay-remote",
+            "--candidate-pair",
+            "relay/tcp",
+            "--secret-fp",
+            "secret-fingerprint",
+            "--capability-digest",
+            "capability-digest",
+            "--timestamp-window-ms",
+            "5000",
+            "--relay-id",
+            "relay-1",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("transport=Relay"));
+    assert!(stdout.contains("relay_id=relay-1"));
+}
+
+#[test]
 fn cli_suite_offer_lists_provider_derived_suites() {
     let output = skybridge()
         .args([
@@ -137,6 +178,19 @@ fn cli_suite_select_blocks_timeout_downgrade() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("TimeoutCannotDowngrade"));
+}
+
+#[test]
+fn cli_channel_profile_reports_default_reliability() {
+    let output = skybridge()
+        .args(["channel", "profile", "--channel", "clipboard"])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("channel=Clipboard"));
+    assert!(stdout.contains("reliability=reliable-ordered"));
 }
 
 #[test]
@@ -255,4 +309,14 @@ fn cli_rejects_incomplete_transport_command() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("--remote"));
+}
+
+#[test]
+fn cli_rejects_unknown_command() {
+    let output = skybridge().arg("bogus").output().expect("run cli");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unknown command: bogus"));
 }

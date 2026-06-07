@@ -586,6 +586,17 @@ fn normalize(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn run_cli(args: &[&str]) -> (i32, String, String) {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(args.iter().copied(), &mut out, &mut err);
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
     #[test]
     fn version_command_reports_package_version() {
         let mut out = Vec::new();
@@ -935,5 +946,286 @@ mod tests {
         assert_eq!(code, 2);
         assert!(out.is_empty());
         assert!(String::from_utf8(err).unwrap().contains("--remote"));
+    }
+
+    #[test]
+    fn help_and_subcommand_errors_fail_closed() {
+        let (code, stdout, stderr) = run_cli(&[]);
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        assert!(stdout.contains("skybridge command line"));
+
+        let (code, stdout, stderr) = run_cli(&["-h"]);
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        assert!(stdout.contains("discovery parse"));
+
+        for (args, expected) in [
+            (&["bogus"][..], "unknown command: bogus"),
+            (
+                &["transport"][..],
+                "expected transport select or transport bind",
+            ),
+            (&["suite"][..], "expected suite offer or suite select"),
+            (&["channel"][..], "expected channel profile or channel map"),
+            (&["frame"][..], "expected frame describe"),
+            (&["connection"][..], "expected connection plan"),
+            (&["discovery"][..], "expected discovery parse"),
+        ] {
+            let (code, stdout, stderr) = run_cli(args);
+            assert_eq!(code, 2);
+            assert!(stdout.is_empty());
+            assert!(stderr.contains(expected));
+        }
+    }
+
+    #[test]
+    fn parsers_reject_invalid_scalar_options() {
+        for (args, expected) in [
+            (
+                &[
+                    "transport",
+                    "select",
+                    "--local",
+                    "linux",
+                    "--remote",
+                    "apple",
+                    "--path",
+                    "same-lan",
+                ][..],
+                "unsupported platform: linux",
+            ),
+            (
+                &[
+                    "transport",
+                    "select",
+                    "--local",
+                    "windows",
+                    "--remote",
+                    "apple",
+                    "--path",
+                    "moon",
+                ][..],
+                "unsupported path: moon",
+            ),
+            (
+                &["channel", "profile", "--channel", "chat"][..],
+                "unsupported channel: chat",
+            ),
+            (
+                &[
+                    "channel",
+                    "map",
+                    "--transport",
+                    "carrier",
+                    "--channel",
+                    "control",
+                ][..],
+                "unsupported transport: carrier",
+            ),
+            (
+                &["suite", "offer", "--caps", "banana"][..],
+                "unsupported crypto capability: banana",
+            ),
+            (
+                &[
+                    "suite",
+                    "select",
+                    "--local-caps",
+                    "x25519",
+                    "--remote-suites",
+                    "0xzz",
+                ][..],
+                "invalid suite id: 0xzz",
+            ),
+            (
+                &[
+                    "transport",
+                    "bind",
+                    "--transport",
+                    "webrtc",
+                    "--local-endpoint",
+                    "a",
+                    "--remote-endpoint",
+                    "b",
+                    "--candidate-pair",
+                    "c",
+                    "--secret-fp",
+                    "d",
+                    "--capability-digest",
+                    "e",
+                    "--timestamp-window-ms",
+                    "soon",
+                ][..],
+                "invalid --timestamp-window-ms: soon",
+            ),
+            (
+                &[
+                    "frame",
+                    "describe",
+                    "--channel",
+                    "control",
+                    "--sequence",
+                    "nan",
+                    "--payload",
+                    "hello",
+                ][..],
+                "invalid --sequence: nan",
+            ),
+            (
+                &[
+                    "connection",
+                    "plan",
+                    "--local",
+                    "windows",
+                    "--remote",
+                    "macos",
+                    "--path",
+                    "cross-nat",
+                    "--local-caps",
+                    "xwing",
+                    "--remote-suites",
+                    "0x0001",
+                    "--sbp2-fixed",
+                    "tiny",
+                ][..],
+                "invalid --sbp2-fixed: tiny",
+            ),
+        ] {
+            let (code, stdout, stderr) = run_cli(args);
+            assert_eq!(code, 2);
+            assert!(stdout.is_empty());
+            assert!(stderr.contains(expected), "{stderr}");
+        }
+    }
+
+    #[test]
+    fn transport_aliases_and_binding_formatters_are_covered() {
+        let (code, stdout, stderr) = run_cli(&[
+            "transport",
+            "bind",
+            "--transport",
+            "relay",
+            "--local-endpoint",
+            "local",
+            "--remote-endpoint",
+            "remote",
+            "--candidate-pair",
+            "relay/tcp",
+            "--secret-fp",
+            "secret",
+            "--capability-digest",
+            "caps",
+            "--timestamp-window-ms",
+            "2500",
+            "--relay-id",
+            "relay-1",
+        ]);
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        assert!(stdout.contains("transport=Relay"));
+        assert!(stdout.contains("relay_id=relay-1"));
+
+        let (code, stdout, stderr) = run_cli(&[
+            "transport",
+            "bind",
+            "--transport",
+            "tcp",
+            "--local-endpoint",
+            "local",
+            "--remote-endpoint",
+            "remote",
+            "--candidate-pair",
+            "tcp",
+            "--secret-fp",
+            "secret",
+            "--capability-digest",
+            "caps",
+            "--timestamp-window-ms",
+            "2500",
+        ]);
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        assert!(stdout.contains("transport=TcpFallback"));
+        assert!(stdout.contains("relay_id=none"));
+
+        let apple_stream = map_channel(
+            SkyBridgeTransportKind::AppleNative,
+            SkyBridgeChannel::Control,
+        )
+        .unwrap();
+        let apple_datagram = map_channel(
+            SkyBridgeTransportKind::AppleNative,
+            SkyBridgeChannel::Telemetry,
+        )
+        .unwrap();
+        let msquic_stream = map_channel(
+            SkyBridgeTransportKind::WindowsNativeMsQuic,
+            SkyBridgeChannel::File,
+        )
+        .unwrap();
+        let msquic_datagram = map_channel(
+            SkyBridgeTransportKind::WindowsNativeMsQuic,
+            SkyBridgeChannel::Realtime,
+        )
+        .unwrap();
+        let relay_stream =
+            map_channel(SkyBridgeTransportKind::Relay, SkyBridgeChannel::Clipboard).unwrap();
+        let tcp_stream = map_channel(
+            SkyBridgeTransportKind::TcpFallback,
+            SkyBridgeChannel::Control,
+        )
+        .unwrap();
+
+        assert_eq!(format_binding_kind(&apple_stream.binding), "AppleStream");
+        assert_eq!(
+            format_binding_kind(&apple_datagram.binding),
+            "AppleDatagram"
+        );
+        assert_eq!(format_binding_kind(&msquic_stream.binding), "MsQuicStream");
+        assert_eq!(
+            format_binding_kind(&msquic_datagram.binding),
+            "MsQuicDatagram"
+        );
+        assert_eq!(format_binding_kind(&relay_stream.binding), "RelayStream");
+        assert_eq!(format_binding_kind(&tcp_stream.binding), "TcpStream");
+        assert_eq!(
+            format_reliability(SkyBridgeReliability::Unreliable),
+            "unreliable"
+        );
+    }
+
+    #[test]
+    fn suite_empty_offer_and_decimal_ids_are_reported() {
+        let (code, stdout, stderr) = run_cli(&["suite", "offer", "--caps", ""]);
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        assert_eq!(stdout, "suites=\n");
+
+        let (code, stdout, stderr) = run_cli(&[
+            "suite",
+            "select",
+            "--local-caps",
+            "x25519",
+            "--remote-suites",
+            "4097",
+            "--allow-classic",
+        ]);
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        assert!(stdout.contains("suite=x25519-ed25519 (0x1001)"));
+    }
+
+    #[test]
+    fn unknown_default_capabilities_are_disabled() {
+        let caps = default_capabilities(PeerPlatform::Unknown);
+
+        assert_eq!(caps.platform, PeerPlatform::Unknown);
+        assert!(!caps.supports_apple_native);
+        assert!(!caps.supports_msquic);
+        assert!(!caps.supports_skybridge_ice_msquic);
+        assert!(!caps.supports_webrtc_data_channel);
+        assert!(!caps.supports_tcp_fallback);
+        assert!(!caps.supports_relay);
     }
 }
