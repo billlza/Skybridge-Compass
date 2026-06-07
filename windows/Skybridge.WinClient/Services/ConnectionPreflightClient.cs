@@ -8,6 +8,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface IConnectionPreflightClient
 {
+    string BuildPendingStatus();
+
     Task<ConnectionPreflightSnapshot> BuildReadOnlySnapshotAsync(
         DiscoveredPeer discoveredPeer,
         PairingMaterial pairingMaterial);
@@ -21,6 +23,10 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
     {
         _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
     }
+
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Preparing...";
 
     public async Task<ConnectionPreflightSnapshot> BuildReadOnlySnapshotAsync(
         DiscoveredPeer discoveredPeer,

@@ -8,6 +8,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface IPairingMaterialClient
 {
+    string BuildPendingStatus();
+
     Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,
         string? expectedPublicKeyFingerprint);
@@ -16,6 +18,10 @@ public interface IPairingMaterialClient
 public sealed class PairingMaterialClient : IPairingMaterialClient
 {
     private const string Prefix = "skybridge-pair:v1";
+
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Validating...";
 
     public Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,

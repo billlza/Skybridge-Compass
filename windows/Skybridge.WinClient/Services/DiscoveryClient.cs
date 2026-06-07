@@ -5,6 +5,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface IDiscoveryClient
 {
+    string BuildPendingStatus();
+
     Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord);
 }
 
@@ -16,6 +18,10 @@ public sealed class CoreDiscoveryClient : IDiscoveryClient
     {
         _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
     }
+
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Parsing...";
 
     public async Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord)
     {

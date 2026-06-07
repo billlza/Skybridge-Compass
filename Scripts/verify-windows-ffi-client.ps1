@@ -175,6 +175,8 @@ Assert-Contains -Text $architecture -Needle "CoreBridge.EncodeFrameAsync" -Messa
 foreach ($signal in @(
     "public interface IDiscoveryClient",
     "public sealed class CoreDiscoveryClient : IDiscoveryClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "public sealed record DiscoveredPeer",
     "ParseDiscoveryAdvertisementAsync",
     "PublicKeyFingerprint",
@@ -245,6 +247,8 @@ Assert-Contains -Text $architecture -Needle "DeviceDiscoveryInputDefaultsClient"
 foreach ($signal in @(
     "public interface IManualConnectionClient",
     "public sealed class ManualConnectionClient : IManualConnectionClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "ManualConnectionRequest",
     "ManualConnectionTarget",
@@ -329,6 +333,8 @@ Assert-Contains -Text $architecture -Needle "CrossNetworkConnectionClient" -Mess
 foreach ($signal in @(
     "public interface IPairingMaterialClient",
     "public sealed class PairingMaterialClient : IPairingMaterialClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "PairingMaterialSnapshot",
     "PairingFact",
@@ -349,6 +355,8 @@ Assert-Contains -Text $architecture -Needle "PairingMaterialClient" -Message "Ar
 foreach ($signal in @(
     "public interface IConnectionPreflightClient",
     "public sealed class ConnectionPreflightClient : IConnectionPreflightClient",
+    "BuildPendingStatus",
+    "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "Pairing material must be validated against the discovered peer before connection preflight.",
     "PlanConnectionAsync",

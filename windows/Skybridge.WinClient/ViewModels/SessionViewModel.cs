@@ -858,7 +858,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            ManualConnectionStatus = "Preparing...";
+            ManualConnectionStatus = _manualConnectionClient.BuildPendingStatus();
             var snapshot = await _manualConnectionClient.BuildReadOnlySnapshotAsync(
                 new ManualConnectionRequest(
                     ManualConnectionHost,
@@ -949,7 +949,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            DiscoveryStatus = "Parsing...";
+            DiscoveryStatus = _discoveryClient.BuildPendingStatus();
             var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
             _validatedDiscoveredPeer = peer;
             _validatedPairingMaterial = null;
@@ -973,7 +973,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(async () =>
         {
-            PairingStatus = "Validating...";
+            PairingStatus = _pairingMaterialClient.BuildPendingStatus();
             var expectedFingerprint = DiscoveredPeers.Count == 1
                 ? DiscoveredPeers[0].PublicKeyFingerprint
                 : null;
@@ -1014,7 +1014,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 throw new InvalidOperationException(readiness.ErrorMessage);
             }
 
-            ConnectionPreflightStatus = "Preparing...";
+            ConnectionPreflightStatus = _connectionPreflightClient.BuildPendingStatus();
             var snapshot = await _connectionPreflightClient.BuildReadOnlySnapshotAsync(
                 discoveredPeer!,
                 pairingMaterial!);
@@ -1876,6 +1876,8 @@ public sealed record DiscoveredPeerView(
 
 internal sealed class UnavailableDiscoveryClient : IDiscoveryClient
 {
+    public string BuildPendingStatus() => CoreDiscoveryClient.DefaultPendingStatus;
+
     public Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord)
     {
         throw new InvalidOperationException("Discovery client is not configured.");
@@ -1901,6 +1903,8 @@ internal sealed class UnavailableDiscoveryBrowserClient : IDiscoveryBrowserClien
 
 internal sealed class UnavailableManualConnectionClient : IManualConnectionClient
 {
+    public string BuildPendingStatus() => ManualConnectionClient.DefaultPendingStatus;
+
     public Task<ManualConnectionSnapshot> BuildReadOnlySnapshotAsync(ManualConnectionRequest request)
     {
         throw new InvalidOperationException("Manual connection client is not configured.");
@@ -1923,6 +1927,8 @@ internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkCon
 
 internal sealed class UnavailablePairingMaterialClient : IPairingMaterialClient
 {
+    public string BuildPendingStatus() => PairingMaterialClient.DefaultPendingStatus;
+
     public Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,
         string? expectedPublicKeyFingerprint)
@@ -1933,6 +1939,8 @@ internal sealed class UnavailablePairingMaterialClient : IPairingMaterialClient
 
 internal sealed class UnavailableConnectionPreflightClient : IConnectionPreflightClient
 {
+    public string BuildPendingStatus() => ConnectionPreflightClient.DefaultPendingStatus;
+
     public Task<ConnectionPreflightSnapshot> BuildReadOnlySnapshotAsync(
         DiscoveredPeer discoveredPeer,
         PairingMaterial pairingMaterial)

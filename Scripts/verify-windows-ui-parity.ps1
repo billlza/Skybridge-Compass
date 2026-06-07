@@ -597,6 +597,28 @@ foreach ($discoveryBrowserPeerCandidateSignal in @(
 Assert-True -Condition (-not $sessionViewModel.Contains("FormatCapabilities")) -Message "SessionViewModel must not format discovered-peer capabilities inline."
 Assert-True -Condition (-not $sessionViewModel.Contains("pubKeyFP fingerprint only; pairing must provide the peer public key.")) -Message "SessionViewModel must source discovered-peer trust summary from DiscoveryBrowserPeerCandidate."
 
+foreach ($deviceDiscoveryPendingStatusSignal in @(
+    "_discoveryClient.BuildPendingStatus()",
+    "_manualConnectionClient.BuildPendingStatus()",
+    "_pairingMaterialClient.BuildPendingStatus()",
+    "_connectionPreflightClient.BuildPendingStatus()",
+    "CoreDiscoveryClient.DefaultPendingStatus",
+    "ManualConnectionClient.DefaultPendingStatus",
+    "PairingMaterialClient.DefaultPendingStatus",
+    "ConnectionPreflightClient.DefaultPendingStatus"
+)) {
+    Assert-Contains -Text ($discoveryClient + $manualConnection + $pairing + $connectionPreflight + $sessionViewModel) -Needle $deviceDiscoveryPendingStatusSignal -Message "Device Discovery pending status signal missing: $deviceDiscoveryPendingStatusSignal"
+}
+
+foreach ($viewModelPendingStatusLiteral in @(
+    'ManualConnectionStatus = "Preparing..."',
+    'DiscoveryStatus = "Parsing..."',
+    'PairingStatus = "Validating..."',
+    'ConnectionPreflightStatus = "Preparing..."'
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelPendingStatusLiteral)) -Message "SessionViewModel must source pending status from service boundary instead of literal: $viewModelPendingStatusLiteral"
+}
+
 foreach ($crossNetworkInputPolicySignal in @(
     "BuildCodeInputPolicy",
     "CrossNetworkCodeInputPolicy",

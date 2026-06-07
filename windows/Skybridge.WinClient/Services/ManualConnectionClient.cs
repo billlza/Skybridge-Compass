@@ -7,11 +7,17 @@ namespace Skybridge.WinClient.Services;
 
 public interface IManualConnectionClient
 {
+    string BuildPendingStatus();
+
     Task<ManualConnectionSnapshot> BuildReadOnlySnapshotAsync(ManualConnectionRequest request);
 }
 
 public sealed class ManualConnectionClient : IManualConnectionClient
 {
+    public string BuildPendingStatus() => DefaultPendingStatus;
+
+    public static string DefaultPendingStatus { get; } = "Preparing...";
+
     public Task<ManualConnectionSnapshot> BuildReadOnlySnapshotAsync(ManualConnectionRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
