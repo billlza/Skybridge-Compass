@@ -1463,13 +1463,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             new WorkspaceActionCatalogRequest(surface));
 
         target.Clear();
+        var gates = BuildWorkspaceActionGateSnapshot();
+        var details = BuildWorkspaceActionDetailSnapshot();
         foreach (var action in snapshot.Actions)
         {
             target.Add(WorkspaceActionItemView.FromItem(
                 action,
                 ResolveWorkspaceActionCommand(action.CommandId),
-                ResolveWorkspaceActionEnabled(action.GateId, action.IsEnabled),
-                ResolveWorkspaceActionDetail(action.DetailSlot, action.Detail)));
+                _workspaceActionCatalogClient.ResolveEnabled(action.GateId, gates, action.IsEnabled),
+                _workspaceActionCatalogClient.ResolveDetail(action.DetailSlot, details, action.Detail)));
         }
     }
 
@@ -1502,32 +1504,20 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _ => null
         };
 
-    private bool ResolveWorkspaceActionEnabled(
-        WorkspaceActionGateId gateId,
-        bool fallback) =>
-        gateId switch
-        {
-            WorkspaceActionGateId.CanConnect => CanConnect(),
-            WorkspaceActionGateId.CanDisconnect => CanDisconnect(),
-            WorkspaceActionGateId.CanSendHeartbeat => CanSendHeartbeat(),
-            WorkspaceActionGateId.CanRefreshUsbManagement => CanRefreshUsbManagement(),
-            WorkspaceActionGateId.CanRefreshFileTransfer => CanRefreshFileTransfer(),
-            WorkspaceActionGateId.CanRefreshRemoteDesktop => CanRefreshRemoteDesktop(),
-            WorkspaceActionGateId.CanRunCoreDiagnostics => CanRunCoreDiagnostics(),
-            WorkspaceActionGateId.CanRefreshSystemMonitor => CanRefreshSystemMonitor(),
-            WorkspaceActionGateId.CanRefreshSettings => CanRefreshSettings(),
-            _ => fallback
-        };
+    private WorkspaceActionGateSnapshot BuildWorkspaceActionGateSnapshot() =>
+        new(
+            CanConnect(),
+            CanDisconnect(),
+            CanSendHeartbeat(),
+            CanRefreshUsbManagement(),
+            CanRefreshFileTransfer(),
+            CanRefreshRemoteDesktop(),
+            CanRunCoreDiagnostics(),
+            CanRefreshSystemMonitor(),
+            CanRefreshSettings());
 
-    private string ResolveWorkspaceActionDetail(
-        WorkspaceActionDetailSlot detailSlot,
-        string fallback) =>
-        detailSlot switch
-        {
-            WorkspaceActionDetailSlot.TopBarNotifications => TopBarNotificationsStatus,
-            WorkspaceActionDetailSlot.TopBarTheme => TopBarThemeStatus,
-            _ => fallback
-        };
+    private WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot() =>
+        new(TopBarNotificationsStatus, TopBarThemeStatus);
 
     private void RefreshTopBarStatus()
     {

@@ -480,7 +480,10 @@ foreach ($topBarSignal in @(
     "WorkspaceActionGateId",
     "WorkspaceActionDetailSlot",
     "ResolveWorkspaceActionCommand",
-    "ResolveWorkspaceActionEnabled",
+    "ResolveEnabled",
+    "ResolveDetail",
+    "WorkspaceActionGateSnapshot",
+    "WorkspaceActionDetailSnapshot",
     "new TopBarStatusClient()",
     "WorkspaceActionCatalogClient",
     "Visible mac-parity notification entry point",
@@ -504,6 +507,8 @@ foreach ($workspaceActionRoleSignal in @(
 
 Assert-True -Condition (-not $sessionViewModel.Contains("string actionKey")) -Message "SessionViewModel must resolve workspace actions by catalog role ids, not action-key strings."
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionCommand(surface")) -Message "SessionViewModel must not pass surface/key pairs to action command resolution."
+Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionEnabled")) -Message "SessionViewModel must delegate workspace action gate resolution to WorkspaceActionCatalogClient."
+Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionDetail")) -Message "SessionViewModel must delegate workspace action detail resolution to WorkspaceActionCatalogClient."
 
 foreach ($topBarLabelLookup in @(
     'GetTopBarStatusValue(snapshot, "Connection"',

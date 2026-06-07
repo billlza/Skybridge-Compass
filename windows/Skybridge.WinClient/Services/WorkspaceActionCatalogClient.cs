@@ -6,6 +6,16 @@ namespace Skybridge.WinClient.Services;
 public interface IWorkspaceActionCatalogClient
 {
     WorkspaceActionCatalogSnapshot BuildReadOnlySnapshot(WorkspaceActionCatalogRequest request);
+
+    bool ResolveEnabled(
+        WorkspaceActionGateId gateId,
+        WorkspaceActionGateSnapshot gates,
+        bool fallback);
+
+    string ResolveDetail(
+        WorkspaceActionDetailSlot detailSlot,
+        WorkspaceActionDetailSnapshot details,
+        string fallback);
 }
 
 public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
@@ -37,6 +47,35 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 WorkspaceActionSurface.SettingsMaintenance => BuildSettingsMaintenanceActions(),
                 _ => new List<WorkspaceActionItem>()
             });
+
+    public bool ResolveEnabled(
+        WorkspaceActionGateId gateId,
+        WorkspaceActionGateSnapshot gates,
+        bool fallback) =>
+        gateId switch
+        {
+            WorkspaceActionGateId.CanConnect => gates.CanConnect,
+            WorkspaceActionGateId.CanDisconnect => gates.CanDisconnect,
+            WorkspaceActionGateId.CanSendHeartbeat => gates.CanSendHeartbeat,
+            WorkspaceActionGateId.CanRefreshUsbManagement => gates.CanRefreshUsbManagement,
+            WorkspaceActionGateId.CanRefreshFileTransfer => gates.CanRefreshFileTransfer,
+            WorkspaceActionGateId.CanRefreshRemoteDesktop => gates.CanRefreshRemoteDesktop,
+            WorkspaceActionGateId.CanRunCoreDiagnostics => gates.CanRunCoreDiagnostics,
+            WorkspaceActionGateId.CanRefreshSystemMonitor => gates.CanRefreshSystemMonitor,
+            WorkspaceActionGateId.CanRefreshSettings => gates.CanRefreshSettings,
+            _ => fallback
+        };
+
+    public string ResolveDetail(
+        WorkspaceActionDetailSlot detailSlot,
+        WorkspaceActionDetailSnapshot details,
+        string fallback) =>
+        detailSlot switch
+        {
+            WorkspaceActionDetailSlot.TopBarNotifications => details.TopBarNotificationsStatus,
+            WorkspaceActionDetailSlot.TopBarTheme => details.TopBarThemeStatus,
+            _ => fallback
+        };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildSidebarSessionActions() =>
         new List<WorkspaceActionItem>
@@ -547,6 +586,21 @@ public sealed record WorkspaceActionCatalogSnapshot(
     DateTimeOffset CapturedAt,
     WorkspaceActionSurface Surface,
     IReadOnlyList<WorkspaceActionItem> Actions);
+
+public sealed record WorkspaceActionGateSnapshot(
+    bool CanConnect,
+    bool CanDisconnect,
+    bool CanSendHeartbeat,
+    bool CanRefreshUsbManagement,
+    bool CanRefreshFileTransfer,
+    bool CanRefreshRemoteDesktop,
+    bool CanRunCoreDiagnostics,
+    bool CanRefreshSystemMonitor,
+    bool CanRefreshSettings);
+
+public sealed record WorkspaceActionDetailSnapshot(
+    string TopBarNotificationsStatus,
+    string TopBarThemeStatus);
 
 public sealed record WorkspaceActionItem(
     string Key,
