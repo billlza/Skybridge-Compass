@@ -1474,169 +1474,67 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             target.Add(WorkspaceActionItemView.FromItem(
                 action,
-                ResolveWorkspaceActionCommand(surface, action.Key),
-                ResolveWorkspaceActionEnabled(surface, action.Key, action.IsEnabled),
-                ResolveWorkspaceActionDetail(surface, action.Key, action.Detail)));
+                ResolveWorkspaceActionCommand(action.CommandId),
+                ResolveWorkspaceActionEnabled(action.GateId, action.IsEnabled),
+                ResolveWorkspaceActionDetail(action.DetailSlot, action.Detail)));
         }
     }
 
-    private ICommand? ResolveWorkspaceActionCommand(WorkspaceActionSurface surface, string actionKey) =>
-        surface switch
+    private ICommand? ResolveWorkspaceActionCommand(WorkspaceActionCommandId commandId) =>
+        commandId switch
         {
-            WorkspaceActionSurface.SidebarSession => actionKey switch
-            {
-                "Connect" => ConnectCommand,
-                "Disconnect" => DisconnectCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.TopBarActions => actionKey switch
-            {
-                "Heartbeat" => HeartbeatCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.SessionControls => actionKey switch
-            {
-                "Connect" => ConnectCommand,
-                "Heartbeat" => HeartbeatCommand,
-                "Disconnect" => DisconnectCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.DeviceDiscoveryPrimary => actionKey switch
-            {
-                "ParseTxt" => ParseAdvertisementCommand,
-                "ValidatePairing" => ValidatePairingCodeCommand,
-                "PrepareConnection" => PrepareConnectionCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.DeviceDiscoveryScan => actionKey switch
-            {
-                "ExtendedSearch" => RunExtendedDiscoveryCommand,
-                "ManualConnect" => PrepareManualConnectionCommand,
-                "StartScan" => StartDiscoveryCommand,
-                "StopScan" => StopDiscoveryCommand,
-                "Refresh" => RefreshDiscoveryCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.CrossNetworkQr => actionKey switch
-            {
-                "GenerateQrCode" => GenerateQRCodeCommand,
-                "ScanQrCode" => ScanQRCodeCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.CrossNetworkCodePrimary => actionKey switch
-            {
-                "GenerateCode" => GenerateConnectionCodeCommand,
-                "CopyCode" => CopyConnectionCodeCommand,
-                "RegenerateCode" => RegenerateConnectionCodeCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.CrossNetworkCodeConnect => actionKey switch
-            {
-                "ConnectWithCode" => ConnectConnectionCodeCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.UsbManagementHeader => actionKey switch
-            {
-                "RefreshDevices" => RefreshUsbManagementCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.FileTransferHeader => actionKey switch
-            {
-                "RefreshPlan" => RefreshFileTransferCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.RemoteDesktopHeader => actionKey switch
-            {
-                "RefreshSessions" => RefreshRemoteDesktopCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.QuantumDiagnosticsHeader => actionKey switch
-            {
-                "RunDiagnostics" => RunCoreDiagnosticsCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.SystemMonitorHeader => actionKey switch
-            {
-                "RefreshMetrics" => RefreshSystemMonitorCommand,
-                _ => null
-            },
-            WorkspaceActionSurface.SettingsHeader => actionKey switch
-            {
-                "RefreshStatus" => RefreshSettingsCommand,
-                _ => null
-            },
+            WorkspaceActionCommandId.Connect => ConnectCommand,
+            WorkspaceActionCommandId.Disconnect => DisconnectCommand,
+            WorkspaceActionCommandId.Heartbeat => HeartbeatCommand,
+            WorkspaceActionCommandId.ParseTxt => ParseAdvertisementCommand,
+            WorkspaceActionCommandId.ValidatePairing => ValidatePairingCodeCommand,
+            WorkspaceActionCommandId.PrepareConnection => PrepareConnectionCommand,
+            WorkspaceActionCommandId.RunExtendedDiscovery => RunExtendedDiscoveryCommand,
+            WorkspaceActionCommandId.PrepareManualConnection => PrepareManualConnectionCommand,
+            WorkspaceActionCommandId.StartDiscovery => StartDiscoveryCommand,
+            WorkspaceActionCommandId.StopDiscovery => StopDiscoveryCommand,
+            WorkspaceActionCommandId.RefreshDiscovery => RefreshDiscoveryCommand,
+            WorkspaceActionCommandId.GenerateQrCode => GenerateQRCodeCommand,
+            WorkspaceActionCommandId.ScanQrCode => ScanQRCodeCommand,
+            WorkspaceActionCommandId.GenerateConnectionCode => GenerateConnectionCodeCommand,
+            WorkspaceActionCommandId.CopyConnectionCode => CopyConnectionCodeCommand,
+            WorkspaceActionCommandId.RegenerateConnectionCode => RegenerateConnectionCodeCommand,
+            WorkspaceActionCommandId.ConnectConnectionCode => ConnectConnectionCodeCommand,
+            WorkspaceActionCommandId.RefreshUsbManagement => RefreshUsbManagementCommand,
+            WorkspaceActionCommandId.RefreshFileTransfer => RefreshFileTransferCommand,
+            WorkspaceActionCommandId.RefreshRemoteDesktop => RefreshRemoteDesktopCommand,
+            WorkspaceActionCommandId.RunCoreDiagnostics => RunCoreDiagnosticsCommand,
+            WorkspaceActionCommandId.RefreshSystemMonitor => RefreshSystemMonitorCommand,
+            WorkspaceActionCommandId.RefreshSettings => RefreshSettingsCommand,
             _ => null
         };
 
     private bool ResolveWorkspaceActionEnabled(
-        WorkspaceActionSurface surface,
-        string actionKey,
+        WorkspaceActionGateId gateId,
         bool fallback) =>
-        surface switch
+        gateId switch
         {
-            WorkspaceActionSurface.SidebarSession => actionKey switch
-            {
-                "Connect" => CanConnect(),
-                "Disconnect" => CanDisconnect(),
-                _ => fallback
-            },
-            WorkspaceActionSurface.TopBarActions => actionKey switch
-            {
-                "Heartbeat" => CanSendHeartbeat(),
-                _ => fallback
-            },
-            WorkspaceActionSurface.SessionControls => actionKey switch
-            {
-                "Connect" => CanConnect(),
-                "Heartbeat" => CanSendHeartbeat(),
-                "Disconnect" => CanDisconnect(),
-                _ => fallback
-            },
-            WorkspaceActionSurface.UsbManagementHeader => actionKey switch
-            {
-                "RefreshDevices" => CanRefreshUsbManagement(),
-                _ => fallback
-            },
-            WorkspaceActionSurface.FileTransferHeader => actionKey switch
-            {
-                "RefreshPlan" => CanRefreshFileTransfer(),
-                _ => fallback
-            },
-            WorkspaceActionSurface.RemoteDesktopHeader => actionKey switch
-            {
-                "RefreshSessions" => CanRefreshRemoteDesktop(),
-                _ => fallback
-            },
-            WorkspaceActionSurface.QuantumDiagnosticsHeader => actionKey switch
-            {
-                "RunDiagnostics" => CanRunCoreDiagnostics(),
-                _ => fallback
-            },
-            WorkspaceActionSurface.SystemMonitorHeader => actionKey switch
-            {
-                "RefreshMetrics" => CanRefreshSystemMonitor(),
-                _ => fallback
-            },
-            WorkspaceActionSurface.SettingsHeader => actionKey switch
-            {
-                "RefreshStatus" => CanRefreshSettings(),
-                _ => fallback
-            },
+            WorkspaceActionGateId.CanConnect => CanConnect(),
+            WorkspaceActionGateId.CanDisconnect => CanDisconnect(),
+            WorkspaceActionGateId.CanSendHeartbeat => CanSendHeartbeat(),
+            WorkspaceActionGateId.CanRefreshUsbManagement => CanRefreshUsbManagement(),
+            WorkspaceActionGateId.CanRefreshFileTransfer => CanRefreshFileTransfer(),
+            WorkspaceActionGateId.CanRefreshRemoteDesktop => CanRefreshRemoteDesktop(),
+            WorkspaceActionGateId.CanRunCoreDiagnostics => CanRunCoreDiagnostics(),
+            WorkspaceActionGateId.CanRefreshSystemMonitor => CanRefreshSystemMonitor(),
+            WorkspaceActionGateId.CanRefreshSettings => CanRefreshSettings(),
             _ => fallback
         };
 
     private string ResolveWorkspaceActionDetail(
-        WorkspaceActionSurface surface,
-        string actionKey,
+        WorkspaceActionDetailSlot detailSlot,
         string fallback) =>
-        surface == WorkspaceActionSurface.TopBarActions
-            ? actionKey switch
-            {
-                "Notifications" => TopBarNotificationsStatus,
-                "Theme" => TopBarThemeStatus,
-                _ => fallback
-            }
-            : fallback;
+        detailSlot switch
+        {
+            WorkspaceActionDetailSlot.TopBarNotifications => TopBarNotificationsStatus,
+            WorkspaceActionDetailSlot.TopBarTheme => TopBarThemeStatus,
+            _ => fallback
+        };
 
     private void RefreshTopBarStatus()
     {

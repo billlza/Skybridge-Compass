@@ -476,6 +476,9 @@ foreach ($topBarSignal in @(
     "WorkspaceActionSurface.SidebarSession",
     "WorkspaceActionSurface.TopBarActions",
     "WorkspaceActionSurface.SessionControls",
+    "WorkspaceActionCommandId",
+    "WorkspaceActionGateId",
+    "WorkspaceActionDetailSlot",
     "ResolveWorkspaceActionCommand",
     "ResolveWorkspaceActionEnabled",
     "new TopBarStatusClient()",
@@ -485,6 +488,22 @@ foreach ($topBarSignal in @(
 )) {
     Assert-Contains -Text ($topBarStatus + $sessionViewModel + $mainWindow + $workspaceActionCatalog) -Needle $topBarSignal -Message "Top bar parity signal missing: $topBarSignal"
 }
+
+foreach ($workspaceActionRoleSignal in @(
+    "WorkspaceActionCommandId.Connect",
+    "WorkspaceActionCommandId.Heartbeat",
+    "WorkspaceActionCommandId.ParseTxt",
+    "WorkspaceActionCommandId.RefreshSettings",
+    "WorkspaceActionGateId.CanConnect",
+    "WorkspaceActionGateId.CanRefreshSettings",
+    "WorkspaceActionDetailSlot.TopBarNotifications",
+    "WorkspaceActionDetailSlot.TopBarTheme"
+)) {
+    Assert-Contains -Text ($workspaceActionCatalog + $sessionViewModel) -Needle $workspaceActionRoleSignal -Message "Workspace action role signal missing: $workspaceActionRoleSignal"
+}
+
+Assert-True -Condition (-not $sessionViewModel.Contains("string actionKey")) -Message "SessionViewModel must resolve workspace actions by catalog role ids, not action-key strings."
+Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionCommand(surface")) -Message "SessionViewModel must not pass surface/key pairs to action command resolution."
 
 foreach ($topBarLabelLookup in @(
     'GetTopBarStatusValue(snapshot, "Connection"',
@@ -1130,6 +1149,9 @@ foreach ($docSignal in @(
     "Theme",
     "TopBarStatusClient",
     "TopBarStatusSlot",
+    "WorkspaceActionCommandId",
+    "WorkspaceActionGateId",
+    "WorkspaceActionDetailSlot",
     "WorkspaceActionCatalogClient",
     "WorkspaceActionButtonTemplate",
     "WorkspaceActionButtonWithDetailTemplate",
