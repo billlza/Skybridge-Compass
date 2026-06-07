@@ -61,6 +61,22 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
         </DataTemplate>
+        <DataTemplate x:Key="WorkspaceStateRowTemplate">
+            <Grid Padding="0,4" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="170" />
+                    <ColumnDefinition Width="220" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                <TextBlock Grid.Column="1" Text="{Binding State}" TextWrapping="Wrap" />
+                <TextBlock
+                    Grid.Column="2"
+                    Text="{Binding Detail}"
+                    TextWrapping="Wrap"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+        </DataTemplate>
     </Window.Resources>
 
     <Grid Background="{ThemeResource SolidBackgroundFillColorBase}">
@@ -706,22 +722,7 @@
 
                                 <StackPanel Grid.Column="1" Spacing="8">
                                     <TextBlock Text="Indicators" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding SystemMonitorIndicators}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}">
-                                        <ListView.ItemTemplate>
-                                            <DataTemplate>
-                                                <Grid Padding="0,8" ColumnSpacing="12">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="120" />
-                                                        <ColumnDefinition Width="140" />
-                                                        <ColumnDefinition Width="*" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                                    <TextBlock Grid.Column="1" Text="{Binding State}" />
-                                                    <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ListView.ItemTemplate>
-                                    </ListView>
+                                    <ListView ItemsSource="{Binding SystemMonitorIndicators}" ItemTemplate="{StaticResource WorkspaceStateRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}" />
                                 </StackPanel>
                             </Grid>
 

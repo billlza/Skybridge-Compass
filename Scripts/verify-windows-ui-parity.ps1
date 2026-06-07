@@ -248,6 +248,7 @@ foreach ($resourceSignal in @(
     'x:Key="WorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonWithDetailTemplate"',
     'x:Key="WorkspaceFactRowTemplate"',
+    'x:Key="WorkspaceStateRowTemplate"',
     'Command="{Binding Command}"',
     'IsEnabled="{Binding IsEnabled}"',
     'Text="{Binding Detail}"',
@@ -297,6 +298,8 @@ foreach ($factBinding in @(
 )) {
     Assert-ItemsControlTemplate -Text $mainWindow -Binding $factBinding -ItemTemplate "WorkspaceFactRowTemplate"
 }
+
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "SystemMonitorIndicators" -ItemTemplate "WorkspaceStateRowTemplate"
 
 foreach ($layoutSignal in @(
     "<ColumnDefinition Width=`"252`" />",
