@@ -20,6 +20,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 
 ## Layers
 - **ViewModels** (`windows/Skybridge.WinClient/ViewModels`): presentation logic and bindable state. `SessionViewModel` owns connection status, bitrate/framerate selections, async commands for connect/disconnect/heartbeat, and busy-state handling to keep the UI responsive.
+- **UI parity contract** (`docs/windows-ui-parity-contract.md`): fixes the Windows side navigation, top bar, dashboard metrics, and current shell contract against the macOS `NavigationItem` order. `FeatureEntryContract` mirrors the macOS entry order so missing Windows feature pages stay visible and testable.
 - **Services** (`windows/Skybridge.WinClient/Services`): engine abstractions behind `IEngineClient`. The stub `DummyEngineClient` simulates connect/disconnect/heartbeat flows and raises state-change events; it will be replaced by a real FFI-backed implementation that calls into the Rust `ffi` module.
 - **Views** (`windows/Skybridge.WinClient/MainWindow.xaml`): XAML-only bindings with no business logic in code-behind. The window creates the view model and relies on commands/properties for interactions.
 
@@ -38,6 +39,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 
 ## Testing approach
 - UI logic remains in view models and services, enabling unit tests against `SessionViewModel` without a XAML runtime.
+- UI parity tests should compare `FeatureEntryContract.Entries` against the macOS navigation order and automate shell selection before adding deeper feature pages.
 - FFI glue is covered in Rust integration tests for engine lifecycle, transport selection, channel mapping, and connection planning; Windows C# bindings should add text-only/interop tests once the WinUI test harness is introduced.
 - Rust tests must cover transport selection defaults, channel reliability, transport binding digest changes, and FFI selector contracts.
 - Channel mapping tests must prove WebRTC uses distinct DataChannel labels, Windows MsQuic uses stream/datagram mappings, Apple native does not route Apple-to-Apple through WebRTC, and TCP fallback is visible as head-of-line blocking risk.

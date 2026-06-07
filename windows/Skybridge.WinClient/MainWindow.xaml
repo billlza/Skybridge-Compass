@@ -8,32 +8,202 @@
     mc:Ignorable="d"
     d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
     <Grid Background="{ThemeResource SolidBackgroundFillColorBase}">
-        <StackPanel Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center" Width="360">
-            <TextBlock Text="Skybridge" FontSize="32" HorizontalAlignment="Center" />
-            <TextBlock Text="Session engine pending native binding" HorizontalAlignment="Center" />
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="252" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
 
-            <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-                <TextBlock Text="Connection:" />
-                <TextBlock Text="{Binding ConnectionStatus}" FontWeight="SemiBold" />
-            </StackPanel>
+        <Border
+            Grid.Column="0"
+            Background="{ThemeResource LayerFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="0,0,1,0">
+            <Grid Padding="20,18">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
 
-            <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-                <TextBlock Text="Bitrate" VerticalAlignment="Center" />
-                <ComboBox ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" Width="140" />
-            </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="Skybridge Compass" FontSize="20" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding ConnectionStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
 
-            <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-                <TextBlock Text="Framerate" VerticalAlignment="Center" />
-                <ComboBox ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" Width="140" />
-            </StackPanel>
+                <ListView
+                    Grid.Row="1"
+                    Margin="0,22,0,18"
+                    ItemsSource="{Binding NavigationItems}"
+                    SelectedItem="{Binding SelectedFeature, Mode=TwoWay}"
+                    SelectionMode="Single">
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid MinHeight="48" ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="28" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon
+                                    Grid.Column="0"
+                                    Glyph="{Binding Glyph}"
+                                    FontSize="16"
+                                    VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                                    <TextBlock
+                                        Text="{Binding Status}"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
 
-            <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-                <Button Content="Connect" Command="{Binding ConnectCommand}" Width="96" />
-                <Button Content="Heartbeat" Command="{Binding HeartbeatCommand}" Width="96" />
-                <Button Content="Disconnect" Command="{Binding DisconnectCommand}" Width="96" />
-            </StackPanel>
+                <StackPanel Grid.Row="2" Spacing="10">
+                    <Button Command="{Binding ConnectCommand}" HorizontalAlignment="Stretch">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE768;" FontSize="14" />
+                            <TextBlock Text="Connect" />
+                        </StackPanel>
+                    </Button>
+                    <Button Command="{Binding DisconnectCommand}" HorizontalAlignment="Stretch">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE711;" FontSize="14" />
+                            <TextBlock Text="Disconnect" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
 
-            <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" HorizontalAlignment="Center" />
-        </StackPanel>
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="72" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Border
+                Grid.Row="0"
+                Padding="24,14"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="0,0,0,1">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Spacing="2" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding SelectedFeature.Title}" FontSize="22" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding StatusMessage}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <Border
+                            Padding="12,7"
+                            CornerRadius="6"
+                            Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE9F5;" FontSize="12" />
+                                <TextBlock Text="{Binding ConnectionStatus}" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </Border>
+                        <Button Command="{Binding HeartbeatCommand}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE95B;" FontSize="14" />
+                                <TextBlock Text="Heartbeat" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <ScrollViewer Grid.Row="1">
+                <StackPanel Padding="24" Spacing="20">
+                    <Grid ColumnSpacing="14">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Online Devices" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding OnlineDeviceCount}" FontSize="28" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="1" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Active Sessions" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding ActiveSessionCount}" FontSize="28" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="2" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Transfer Tasks" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding TransferTaskCount}" FontSize="28" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="3" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Performance" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding PerformanceStatus}" FontSize="24" FontWeight="SemiBold" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <Grid ColumnSpacing="18">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="14">
+                                <TextBlock Text="{Binding SelectedFeature.Title}" FontSize="18" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding SelectedFeature.Status}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <Button Command="{Binding ConnectCommand}">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE768;" FontSize="14" />
+                                            <TextBlock Text="Connect" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Command="{Binding HeartbeatCommand}">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE95B;" FontSize="14" />
+                                            <TextBlock Text="Heartbeat" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Command="{Binding DisconnectCommand}">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE711;" FontSize="14" />
+                                            <TextBlock Text="Disconnect" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Grid.Column="1" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                            <StackPanel Spacing="14">
+                                <TextBlock Text="Session Controls" FontSize="18" FontWeight="SemiBold" />
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Bitrate" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ComboBox ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+                                </StackPanel>
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Framerate" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ComboBox ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
     </Grid>
 </Window>

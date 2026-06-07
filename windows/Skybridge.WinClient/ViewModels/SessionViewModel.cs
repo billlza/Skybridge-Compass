@@ -28,12 +28,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
+    private FeatureEntry _selectedFeature;
     private bool _isBusy;
 
     public SessionViewModel(IEngineClient engineClient)
     {
         _engineClient = engineClient;
         _connectionState = _engineClient.State;
+        NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
+        _selectedFeature = NavigationItems[0];
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
@@ -44,9 +47,25 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    public ObservableCollection<FeatureEntry> NavigationItems { get; }
+
     public ObservableCollection<BitrateProfile> BitrateProfiles { get; }
 
     public ObservableCollection<FramerateProfile> FramerateProfiles { get; }
+
+    public int OnlineDeviceCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
+
+    public int ActiveSessionCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
+
+    public int TransferTaskCount => 0;
+
+    public string PerformanceStatus => IsBusy ? "Busy" : "Nominal";
+
+    public FeatureEntry SelectedFeature
+    {
+        get => _selectedFeature;
+        set => SetField(ref _selectedFeature, value);
+    }
 
     public EngineConnectionState ConnectionState
     {
@@ -56,6 +75,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _connectionState, value))
             {
                 OnPropertyChanged(nameof(ConnectionStatus));
+                OnPropertyChanged(nameof(OnlineDeviceCount));
+                OnPropertyChanged(nameof(ActiveSessionCount));
                 RefreshCommandStates();
             }
         }
@@ -70,6 +91,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _isBusy, value))
             {
+                OnPropertyChanged(nameof(PerformanceStatus));
                 RefreshCommandStates();
             }
         }
