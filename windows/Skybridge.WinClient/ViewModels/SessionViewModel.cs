@@ -132,6 +132,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
+        SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();
+        TopBarActions = new ObservableCollection<WorkspaceActionItemView>();
+        SessionControlActions = new ObservableCollection<WorkspaceActionItemView>();
         DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
         DiscoveryBrowserFacts = new ObservableCollection<DiscoveryBrowserFactView>();
         ManualConnectionFacts = new ObservableCollection<ManualConnectionFactView>();
@@ -199,6 +202,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<BitrateProfile> BitrateProfiles { get; }
 
     public ObservableCollection<FramerateProfile> FramerateProfiles { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> SidebarSessionActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> TopBarActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> SessionControlActions { get; }
 
     public ObservableCollection<DiscoveredPeerView> DiscoveredPeers { get; }
 
@@ -1335,6 +1344,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSystemMonitorCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSettingsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        RefreshSessionActionStates();
+    }
+
+    private void RefreshSessionActionStates()
+    {
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession, SidebarSessionActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SessionControls, SessionControlActions);
     }
 
     private void ApplyConnectionWorkspaceStatusPatch(ConnectionWorkspaceStatusPatch patch)
@@ -1396,6 +1413,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void LoadWorkspaceActions()
     {
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession, SidebarSessionActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SessionControls, SessionControlActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.DeviceDiscoveryPrimary, DeviceDiscoveryPrimaryActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.DeviceDiscoveryScan, DeviceDiscoveryScanActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkQr, CrossNetworkQrActions);
@@ -1419,13 +1439,33 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             target.Add(WorkspaceActionItemView.FromItem(
                 action,
-                ResolveWorkspaceActionCommand(surface, action.Key)));
+                ResolveWorkspaceActionCommand(surface, action.Key),
+                ResolveWorkspaceActionEnabled(surface, action.Key, action.IsEnabled),
+                ResolveWorkspaceActionDetail(surface, action.Key, action.Detail)));
         }
     }
 
     private ICommand? ResolveWorkspaceActionCommand(WorkspaceActionSurface surface, string actionKey) =>
         surface switch
         {
+            WorkspaceActionSurface.SidebarSession => actionKey switch
+            {
+                "Connect" => ConnectCommand,
+                "Disconnect" => DisconnectCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.TopBarActions => actionKey switch
+            {
+                "Heartbeat" => HeartbeatCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.SessionControls => actionKey switch
+            {
+                "Connect" => ConnectCommand,
+                "Heartbeat" => HeartbeatCommand,
+                "Disconnect" => DisconnectCommand,
+                _ => null
+            },
             WorkspaceActionSurface.DeviceDiscoveryPrimary => actionKey switch
             {
                 "ParseTxt" => ParseAdvertisementCommand,
@@ -1463,6 +1503,46 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _ => null
         };
 
+    private bool ResolveWorkspaceActionEnabled(
+        WorkspaceActionSurface surface,
+        string actionKey,
+        bool fallback) =>
+        surface switch
+        {
+            WorkspaceActionSurface.SidebarSession => actionKey switch
+            {
+                "Connect" => CanConnect(),
+                "Disconnect" => CanDisconnect(),
+                _ => fallback
+            },
+            WorkspaceActionSurface.TopBarActions => actionKey switch
+            {
+                "Heartbeat" => CanSendHeartbeat(),
+                _ => fallback
+            },
+            WorkspaceActionSurface.SessionControls => actionKey switch
+            {
+                "Connect" => CanConnect(),
+                "Heartbeat" => CanSendHeartbeat(),
+                "Disconnect" => CanDisconnect(),
+                _ => fallback
+            },
+            _ => fallback
+        };
+
+    private string ResolveWorkspaceActionDetail(
+        WorkspaceActionSurface surface,
+        string actionKey,
+        string fallback) =>
+        surface == WorkspaceActionSurface.TopBarActions
+            ? actionKey switch
+            {
+                "Notifications" => TopBarNotificationsStatus,
+                "Theme" => TopBarThemeStatus,
+                _ => fallback
+            }
+            : fallback;
+
     private void RefreshTopBarStatus()
     {
         var snapshot = _topBarStatusClient.BuildReadOnlySnapshot(
@@ -1475,6 +1555,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         TopBarDiagnosticsStatus = GetTopBarStatusValue(snapshot, "FPS / Diagnostics", PerformanceStatus);
         TopBarNotificationsStatus = GetTopBarStatusValue(snapshot, "Notifications", "Off");
         TopBarThemeStatus = GetTopBarStatusValue(snapshot, "Theme", "System");
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
     }
 
     private static string GetTopBarStatusValue(
@@ -1711,8 +1792,12 @@ public sealed record WorkspaceActionItemView(
     string Detail,
     ICommand? Command = null)
 {
-    public static WorkspaceActionItemView FromItem(WorkspaceActionItem item, ICommand? command = null) =>
-        new(item.Key, item.Title, item.Glyph, item.IsEnabled, item.Detail, command);
+    public static WorkspaceActionItemView FromItem(
+        WorkspaceActionItem item,
+        ICommand? command = null,
+        bool? isEnabled = null,
+        string? detail = null) =>
+        new(item.Key, item.Title, item.Glyph, isEnabled ?? item.IsEnabled, detail ?? item.Detail, command);
 }
 
 public sealed record CoreDiagnosticFactView(

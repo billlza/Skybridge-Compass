@@ -16,6 +16,9 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             request.Surface,
             request.Surface switch
             {
+                WorkspaceActionSurface.SidebarSession => BuildSidebarSessionActions(),
+                WorkspaceActionSurface.TopBarActions => BuildTopBarActions(),
+                WorkspaceActionSurface.SessionControls => BuildSessionControlActions(),
                 WorkspaceActionSurface.DeviceDiscoveryPrimary => BuildDeviceDiscoveryPrimaryActions(),
                 WorkspaceActionSurface.DeviceDiscoveryScan => BuildDeviceDiscoveryScanActions(),
                 WorkspaceActionSurface.CrossNetworkQr => BuildCrossNetworkQrActions(),
@@ -27,6 +30,69 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 WorkspaceActionSurface.SettingsMaintenance => BuildSettingsMaintenanceActions(),
                 _ => new List<WorkspaceActionItem>()
             });
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildSidebarSessionActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "Connect",
+                "Connect",
+                "\uE768",
+                true,
+                "Global session action; command stays in SessionViewModel."),
+            new(
+                "Disconnect",
+                "Disconnect",
+                "\uE711",
+                true,
+                "Global session action; command stays in SessionViewModel.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildTopBarActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "Notifications",
+                "Notifications",
+                "\uEA8F",
+                false,
+                "Off"),
+            new(
+                "Theme",
+                "Theme",
+                "\uE771",
+                false,
+                "System"),
+            new(
+                "Heartbeat",
+                "Heartbeat",
+                "\uE95B",
+                true,
+                "")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildSessionControlActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "Connect",
+                "Connect",
+                "\uE768",
+                true,
+                "Global session action; command stays in SessionViewModel."),
+            new(
+                "Heartbeat",
+                "Heartbeat",
+                "\uE95B",
+                true,
+                "Global session action; command stays in SessionViewModel."),
+            new(
+                "Disconnect",
+                "Disconnect",
+                "\uE711",
+                true,
+                "Global session action; command stays in SessionViewModel.")
+        };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildDeviceDiscoveryPrimaryActions() =>
         new List<WorkspaceActionItem>
@@ -268,6 +334,9 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
 
 public enum WorkspaceActionSurface
 {
+    SidebarSession,
+    TopBarActions,
+    SessionControls,
     DeviceDiscoveryPrimary,
     DeviceDiscoveryScan,
     CrossNetworkQr,

@@ -60,20 +60,26 @@
                     </ListView.ItemTemplate>
                 </ListView>
 
-                <StackPanel Grid.Row="2" Spacing="10">
-                    <Button Command="{Binding ConnectCommand}" HorizontalAlignment="Stretch">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <FontIcon Glyph="&#xE768;" FontSize="14" />
-                            <TextBlock Text="Connect" />
-                        </StackPanel>
-                    </Button>
-                    <Button Command="{Binding DisconnectCommand}" HorizontalAlignment="Stretch">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <FontIcon Glyph="&#xE711;" FontSize="14" />
-                            <TextBlock Text="Disconnect" />
-                        </StackPanel>
-                    </Button>
-                </StackPanel>
+                <ItemsControl Grid.Row="2" ItemsSource="{Binding SidebarSessionActions}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="10" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Button
+                                Command="{Binding Command}"
+                                IsEnabled="{Binding IsEnabled}"
+                                HorizontalAlignment="Stretch">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                    <TextBlock Text="{Binding Title}" />
+                                </StackPanel>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </Grid>
         </Border>
 
@@ -119,26 +125,24 @@
                                 <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold" />
                             </StackPanel>
                         </Border>
-                        <Button IsEnabled="False">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <FontIcon Glyph="&#xEA8F;" FontSize="14" />
-                                <TextBlock Text="Notifications" />
-                                <TextBlock Text="{Binding TopBarNotificationsStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                        </Button>
-                        <Button IsEnabled="False">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <FontIcon Glyph="&#xE771;" FontSize="14" />
-                                <TextBlock Text="Theme" />
-                                <TextBlock Text="{Binding TopBarThemeStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                        </Button>
-                        <Button Command="{Binding HeartbeatCommand}">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <FontIcon Glyph="&#xE95B;" FontSize="14" />
-                                <TextBlock Text="Heartbeat" />
-                            </StackPanel>
-                        </Button>
+                        <ItemsControl ItemsSource="{Binding TopBarActions}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal" Spacing="10" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                            <TextBlock Text="{Binding Title}" />
+                                            <TextBlock Text="{Binding Detail}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </StackPanel>
+                                    </Button>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
                     </StackPanel>
                 </Grid>
             </Border>
@@ -1076,26 +1080,23 @@
                             <StackPanel Spacing="14">
                                 <TextBlock Text="{Binding SelectedFeature.Title}" FontSize="18" FontWeight="SemiBold" />
                                 <TextBlock Text="{Binding SelectedFeature.Status}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <StackPanel Orientation="Horizontal" Spacing="12">
-                                    <Button Command="{Binding ConnectCommand}">
-                                        <StackPanel Orientation="Horizontal" Spacing="8">
-                                            <FontIcon Glyph="&#xE768;" FontSize="14" />
-                                            <TextBlock Text="Connect" />
-                                        </StackPanel>
-                                    </Button>
-                                    <Button Command="{Binding HeartbeatCommand}">
-                                        <StackPanel Orientation="Horizontal" Spacing="8">
-                                            <FontIcon Glyph="&#xE95B;" FontSize="14" />
-                                            <TextBlock Text="Heartbeat" />
-                                        </StackPanel>
-                                    </Button>
-                                    <Button Command="{Binding DisconnectCommand}">
-                                        <StackPanel Orientation="Horizontal" Spacing="8">
-                                            <FontIcon Glyph="&#xE711;" FontSize="14" />
-                                            <TextBlock Text="Disconnect" />
-                                        </StackPanel>
-                                    </Button>
-                                </StackPanel>
+                                <ItemsControl ItemsSource="{Binding SessionControlActions}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="12" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Title}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </StackPanel>
                         </Border>
 

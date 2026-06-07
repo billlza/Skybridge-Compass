@@ -121,8 +121,9 @@ foreach ($binding in @(
     "PerformanceStatus",
     "TopBarConnectionStatus",
     "TopBarDiagnosticsStatus",
-    "TopBarNotificationsStatus",
-    "TopBarThemeStatus",
+    "SidebarSessionActions",
+    "TopBarActions",
+    "SessionControlActions",
     "BitrateProfiles",
     "FramerateProfiles",
     "DiscoveryService",
@@ -190,17 +191,17 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
 
-foreach ($command in @("StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
 }
 
-foreach ($migratedCommand in @("StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand")) {
-    Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated Device Discovery command: $migratedCommand"
+foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand")) {
+    Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
 
 foreach ($layoutSignal in @(
@@ -229,11 +230,46 @@ Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles
     '<TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold"',
     '<TextBlock Text="FPS / Diagnostics"',
     '<TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold"',
-    '<TextBlock Text="Notifications"',
-    '<TextBlock Text="{Binding TopBarNotificationsStatus}"',
-    '<TextBlock Text="Theme"',
-    '<TextBlock Text="{Binding TopBarThemeStatus}"',
-    'Command="{Binding HeartbeatCommand}"'
+    'ItemsSource="{Binding TopBarActions}"'
+)
+
+Assert-Ordered -Text $mainWindow -Context "Sidebar session action order" -Needles @(
+    'ItemsSource="{Binding NavigationItems}"',
+    'ItemsSource="{Binding SidebarSessionActions}"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Sidebar session action catalog order" -Needles @(
+    'BuildSidebarSessionActions',
+    '"Connect"',
+    '"Connect"',
+    '"Disconnect"',
+    '"Disconnect"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Top bar action catalog order" -Needles @(
+    'BuildTopBarActions',
+    '"Notifications"',
+    '"Notifications"',
+    '"Theme"',
+    '"Theme"',
+    '"Heartbeat"',
+    '"Heartbeat"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Session controls action catalog order" -Needles @(
+    'BuildSessionControlActions',
+    '"Connect"',
+    '"Connect"',
+    '"Heartbeat"',
+    '"Heartbeat"',
+    '"Disconnect"',
+    '"Disconnect"'
+)
+
+Assert-Ordered -Text $mainWindow -Context "Session controls action order" -Needles @(
+    '<TextBlock Text="{Binding SelectedFeature.Title}" FontSize="18"',
+    'ItemsSource="{Binding SessionControlActions}"',
+    '<TextBlock Text="Session Controls"'
 )
 
 Assert-Ordered -Text $dashboardMetrics -Context "Dashboard metrics service order" -Needles @(
@@ -279,11 +315,20 @@ foreach ($topBarSignal in @(
     "TopBarDiagnosticsStatus",
     "TopBarNotificationsStatus",
     "TopBarThemeStatus",
+    "SidebarSessionActions",
+    "TopBarActions",
+    "SessionControlActions",
+    "WorkspaceActionSurface.SidebarSession",
+    "WorkspaceActionSurface.TopBarActions",
+    "WorkspaceActionSurface.SessionControls",
+    "ResolveWorkspaceActionCommand",
+    "ResolveWorkspaceActionEnabled",
     "new TopBarStatusClient()",
+    "WorkspaceActionCatalogClient",
     "Visible mac-parity notification entry point",
     "Visible mac-parity theme entry point"
 )) {
-    Assert-Contains -Text ($topBarStatus + $sessionViewModel + $mainWindow) -Needle $topBarSignal -Message "Top bar parity signal missing: $topBarSignal"
+    Assert-Contains -Text ($topBarStatus + $sessionViewModel + $mainWindow + $workspaceActionCatalog) -Needle $topBarSignal -Message "Top bar parity signal missing: $topBarSignal"
 }
 
 foreach ($connectionStateSignal in @(
