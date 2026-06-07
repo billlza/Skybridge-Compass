@@ -16,12 +16,126 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             request.Surface,
             request.Surface switch
             {
+                WorkspaceActionSurface.DeviceDiscoveryPrimary => BuildDeviceDiscoveryPrimaryActions(),
+                WorkspaceActionSurface.DeviceDiscoveryScan => BuildDeviceDiscoveryScanActions(),
+                WorkspaceActionSurface.CrossNetworkQr => BuildCrossNetworkQrActions(),
+                WorkspaceActionSurface.CrossNetworkCodePrimary => BuildCrossNetworkCodePrimaryActions(),
+                WorkspaceActionSurface.CrossNetworkCodeConnect => BuildCrossNetworkCodeConnectActions(),
                 WorkspaceActionSurface.FileTransfer => BuildFileTransferActions(),
                 WorkspaceActionSurface.RemoteDesktop => BuildRemoteDesktopActions(),
                 WorkspaceActionSurface.SettingsToolbar => BuildSettingsToolbarActions(),
                 WorkspaceActionSurface.SettingsMaintenance => BuildSettingsMaintenanceActions(),
                 _ => new List<WorkspaceActionItem>()
             });
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildDeviceDiscoveryPrimaryActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "ParseTxt",
+                "Parse TXT",
+                "\uE8B9",
+                true,
+                "Mac-parity discovery parser action; command stays in SessionViewModel."),
+            new(
+                "ValidatePairing",
+                "Validate Pairing",
+                "\uE8D7",
+                true,
+                "Mac-parity pairing validation action; command stays in SessionViewModel."),
+            new(
+                "PrepareConnection",
+                "Prepare Connection",
+                "\uE768",
+                true,
+                "Mac-parity preflight action; command stays behind Core readiness gates.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildDeviceDiscoveryScanActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "ExtendedSearch",
+                "Extended Search",
+                "\uE7B3",
+                true,
+                "Mac-parity discovery scan action; command stays in SessionViewModel."),
+            new(
+                "ManualConnect",
+                "Manual Connect",
+                "\uE8D7",
+                true,
+                "Mac-parity manual target action; command validates host/port/code without connecting."),
+            new(
+                "StartScan",
+                "Start Scan",
+                "\uE768",
+                true,
+                "Mac-parity discovery scan action; command uses the read-only browser boundary."),
+            new(
+                "StopScan",
+                "Stop Scan",
+                "\uE71A",
+                true,
+                "Mac-parity discovery scan action; command only stops browser state."),
+            new(
+                "Refresh",
+                "Refresh",
+                "\uE72C",
+                true,
+                "Mac-parity discovery scan action; command refreshes the read-only browser snapshot.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildCrossNetworkQrActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "GenerateQrCode",
+                "Generate QR Code",
+                "\uE8EF",
+                true,
+                "Mac-parity cross-network QR action; command does not start signaling."),
+            new(
+                "ScanQrCode",
+                "Scan QR Code",
+                "\uE722",
+                true,
+                "Mac-parity cross-network QR action; command validates the QR envelope read-only.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildCrossNetworkCodePrimaryActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "GenerateCode",
+                "Generate Code",
+                "\uE710",
+                true,
+                "Mac-parity smart-code action; command does not register a signaling room."),
+            new(
+                "CopyCode",
+                "Copy",
+                "\uE8C8",
+                true,
+                "Mac-parity smart-code action; command keeps clipboard writes behind explicit availability."),
+            new(
+                "RegenerateCode",
+                "Regenerate",
+                "\uE72C",
+                true,
+                "Mac-parity smart-code action; command reuses the read-only code generation boundary.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildCrossNetworkCodeConnectActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "ConnectWithCode",
+                "Connect",
+                "\uE768",
+                true,
+                "Mac-parity smart-code action; command validates code shape without starting transport.")
+        };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildFileTransferActions() =>
         new List<WorkspaceActionItem>
@@ -154,6 +268,11 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
 
 public enum WorkspaceActionSurface
 {
+    DeviceDiscoveryPrimary,
+    DeviceDiscoveryScan,
+    CrossNetworkQr,
+    CrossNetworkCodePrimary,
+    CrossNetworkCodeConnect,
     FileTransfer,
     RemoteDesktop,
     SettingsToolbar,

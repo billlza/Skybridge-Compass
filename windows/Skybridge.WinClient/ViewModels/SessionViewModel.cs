@@ -139,6 +139,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PairingFacts = new ObservableCollection<PairingFactView>();
         ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
+        DeviceDiscoveryPrimaryActions = new ObservableCollection<WorkspaceActionItemView>();
+        DeviceDiscoveryScanActions = new ObservableCollection<WorkspaceActionItemView>();
+        CrossNetworkQrActions = new ObservableCollection<WorkspaceActionItemView>();
+        CrossNetworkCodePrimaryActions = new ObservableCollection<WorkspaceActionItemView>();
+        CrossNetworkCodeConnectActions = new ObservableCollection<WorkspaceActionItemView>();
         FileTransferActions = new ObservableCollection<WorkspaceActionItemView>();
         RemoteDesktopActions = new ObservableCollection<WorkspaceActionItemView>();
         SettingsToolbarActions = new ObservableCollection<WorkspaceActionItemView>();
@@ -208,6 +213,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<ConnectionPreflightFactView> ConnectionPreflightFacts { get; }
 
     public ObservableCollection<CoreDiagnosticFactView> CoreDiagnosticFacts { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> DeviceDiscoveryPrimaryActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> DeviceDiscoveryScanActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> CrossNetworkQrActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> CrossNetworkCodePrimaryActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> CrossNetworkCodeConnectActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> FileTransferActions { get; }
 
@@ -1381,6 +1396,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void LoadWorkspaceActions()
     {
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.DeviceDiscoveryPrimary, DeviceDiscoveryPrimaryActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.DeviceDiscoveryScan, DeviceDiscoveryScanActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkQr, CrossNetworkQrActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkCodePrimary, CrossNetworkCodePrimaryActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkCodeConnect, CrossNetworkCodeConnectActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransfer, FileTransferActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktop, RemoteDesktopActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsToolbar, SettingsToolbarActions);
@@ -1397,9 +1417,51 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         target.Clear();
         foreach (var action in snapshot.Actions)
         {
-            target.Add(WorkspaceActionItemView.FromItem(action));
+            target.Add(WorkspaceActionItemView.FromItem(
+                action,
+                ResolveWorkspaceActionCommand(surface, action.Key)));
         }
     }
+
+    private ICommand? ResolveWorkspaceActionCommand(WorkspaceActionSurface surface, string actionKey) =>
+        surface switch
+        {
+            WorkspaceActionSurface.DeviceDiscoveryPrimary => actionKey switch
+            {
+                "ParseTxt" => ParseAdvertisementCommand,
+                "ValidatePairing" => ValidatePairingCodeCommand,
+                "PrepareConnection" => PrepareConnectionCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.DeviceDiscoveryScan => actionKey switch
+            {
+                "ExtendedSearch" => RunExtendedDiscoveryCommand,
+                "ManualConnect" => PrepareManualConnectionCommand,
+                "StartScan" => StartDiscoveryCommand,
+                "StopScan" => StopDiscoveryCommand,
+                "Refresh" => RefreshDiscoveryCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.CrossNetworkQr => actionKey switch
+            {
+                "GenerateQrCode" => GenerateQRCodeCommand,
+                "ScanQrCode" => ScanQRCodeCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.CrossNetworkCodePrimary => actionKey switch
+            {
+                "GenerateCode" => GenerateConnectionCodeCommand,
+                "CopyCode" => CopyConnectionCodeCommand,
+                "RegenerateCode" => RegenerateConnectionCodeCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.CrossNetworkCodeConnect => actionKey switch
+            {
+                "ConnectWithCode" => ConnectConnectionCodeCommand,
+                _ => null
+            },
+            _ => null
+        };
 
     private void RefreshTopBarStatus()
     {
@@ -1646,10 +1708,11 @@ public sealed record WorkspaceActionItemView(
     string Title,
     string Glyph,
     bool IsEnabled,
-    string Detail)
+    string Detail,
+    ICommand? Command = null)
 {
-    public static WorkspaceActionItemView FromItem(WorkspaceActionItem item) =>
-        new(item.Key, item.Title, item.Glyph, item.IsEnabled, item.Detail);
+    public static WorkspaceActionItemView FromItem(WorkspaceActionItem item, ICommand? command = null) =>
+        new(item.Key, item.Title, item.Glyph, item.IsEnabled, item.Detail, command);
 }
 
 public sealed record CoreDiagnosticFactView(

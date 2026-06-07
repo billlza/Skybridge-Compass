@@ -149,6 +149,11 @@ foreach ($binding in @(
     "PairingFacts",
     "ConnectionPreflightStatus",
     "ConnectionPreflightFacts",
+    "DeviceDiscoveryPrimaryActions",
+    "DeviceDiscoveryScanActions",
+    "CrossNetworkQrActions",
+    "CrossNetworkCodePrimaryActions",
+    "CrossNetworkCodeConnectActions",
     "IsDeviceDiscoverySelected",
     "UsbManagementStatus",
     "UsbDeviceStats",
@@ -185,9 +190,17 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
+}
+
+foreach ($command in @("StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand")) {
+    Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
+}
+
+foreach ($migratedCommand in @("StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand")) {
+    Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated Device Discovery command: $migratedCommand"
 }
 
 foreach ($layoutSignal in @(
@@ -302,31 +315,62 @@ foreach ($connectionStateSignal in @(
 
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',
-    'Command="{Binding ParseAdvertisementCommand}"',
-    'Command="{Binding ValidatePairingCodeCommand}"',
-    'Command="{Binding PrepareConnectionCommand}"',
+    'ItemsSource="{Binding DeviceDiscoveryPrimaryActions}"',
     'Content="Compatibility Mode"',
-    'Command="{Binding RunExtendedDiscoveryCommand}"',
-    'Command="{Binding PrepareManualConnectionCommand}"',
-    'Command="{Binding StartDiscoveryCommand}"',
-    'Command="{Binding StopDiscoveryCommand}"',
-    'Command="{Binding RefreshDiscoveryCommand}"',
+    'ItemsSource="{Binding DeviceDiscoveryScanActions}"',
     'PlaceholderText="Search devices"',
     '<TextBlock Text="Manual Host / IP"',
     '<TextBlock Text="Port"',
     '<TextBlock Text="Code"',
     '<TextBlock Text="Dynamic Encrypted QR Code"',
-    'Command="{Binding GenerateQRCodeCommand}"',
-    'Command="{Binding ScanQRCodeCommand}"',
+    'ItemsSource="{Binding CrossNetworkQrActions}"',
     '<TextBlock Text="Smart Connection Code"',
-    'Command="{Binding GenerateConnectionCodeCommand}"',
-    'Command="{Binding CopyConnectionCodeCommand}"',
-    'Command="{Binding RegenerateConnectionCodeCommand}"',
+    'ItemsSource="{Binding CrossNetworkCodePrimaryActions}"',
     'Text="{Binding CrossNetworkCodeInput',
-    'Command="{Binding ConnectConnectionCodeCommand}"',
+    'ItemsSource="{Binding CrossNetworkCodeConnectActions}"',
     '<TextBlock Text="Service"',
     '<TextBlock Text="TXT record"',
     '<TextBlock Text="Pairing Code"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Device Discovery primary action catalog order" -Needles @(
+    '"ParseTxt"',
+    '"Parse TXT"',
+    '"ValidatePairing"',
+    '"Validate Pairing"',
+    '"PrepareConnection"',
+    '"Prepare Connection"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Device Discovery scan action catalog order" -Needles @(
+    '"ExtendedSearch"',
+    '"Extended Search"',
+    '"ManualConnect"',
+    '"Manual Connect"',
+    '"StartScan"',
+    '"Start Scan"',
+    '"StopScan"',
+    '"Stop Scan"',
+    '"Refresh"',
+    '"Refresh"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Cross-network QR action catalog order" -Needles @(
+    '"GenerateQrCode"',
+    '"Generate QR Code"',
+    '"ScanQrCode"',
+    '"Scan QR Code"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Cross-network smart-code action catalog order" -Needles @(
+    '"GenerateCode"',
+    '"Generate Code"',
+    '"CopyCode"',
+    '"Copy"',
+    '"RegenerateCode"',
+    '"Regenerate"',
+    '"ConnectWithCode"',
+    '"Connect"'
 )
 
 Assert-Ordered -Text $mainWindow -Context "USB Management action order" -Needles @(
@@ -469,6 +513,18 @@ foreach ($discoverySignal in @(
     "Pairing Code",
     "Validate Pairing",
     "Prepare Connection",
+    "DeviceDiscoveryPrimaryActions",
+    "DeviceDiscoveryScanActions",
+    "CrossNetworkQrActions",
+    "CrossNetworkCodePrimaryActions",
+    "CrossNetworkCodeConnectActions",
+    "WorkspaceActionCatalogClient",
+    "WorkspaceActionItemView",
+    "WorkspaceActionSurface.DeviceDiscoveryPrimary",
+    "WorkspaceActionSurface.DeviceDiscoveryScan",
+    "WorkspaceActionSurface.CrossNetworkQr",
+    "WorkspaceActionSurface.CrossNetworkCodePrimary",
+    "WorkspaceActionSurface.CrossNetworkCodeConnect",
     "PairingFactView",
     "ConnectionPreflightFactView",
     "ConnectionWorkspaceStateClient",
@@ -487,7 +543,7 @@ foreach ($discoverySignal in @(
     "Transport binding digest",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionWorkspaceState) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."

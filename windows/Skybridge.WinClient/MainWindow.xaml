@@ -190,34 +190,27 @@
                                     <TextBlock Text="Device Discovery" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding DiscoveryStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                                    <Button Command="{Binding ParseAdvertisementCommand}">
-                                        <StackPanel Orientation="Horizontal" Spacing="8">
-                                            <FontIcon Glyph="&#xE8B9;" FontSize="14" />
-                                            <TextBlock Text="Parse TXT" />
-                                        </StackPanel>
-                                    </Button>
-                                    <Button Command="{Binding ValidatePairingCodeCommand}">
-                                        <StackPanel Orientation="Horizontal" Spacing="8">
-                                            <FontIcon Glyph="&#xE8D7;" FontSize="14" />
-                                            <TextBlock Text="Validate Pairing" />
-                                        </StackPanel>
-                                    </Button>
-                                    <Button Command="{Binding PrepareConnectionCommand}">
-                                        <StackPanel Orientation="Horizontal" Spacing="8">
-                                            <FontIcon Glyph="&#xE768;" FontSize="14" />
-                                            <TextBlock Text="Prepare Connection" />
-                                        </StackPanel>
-                                    </Button>
-                                </StackPanel>
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding DeviceDiscoveryPrimaryActions}" VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="10" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Command="{Binding Command}">
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Title}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </Grid>
 
                             <Grid ColumnSpacing="12">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
@@ -226,39 +219,28 @@
                                     Content="Compatibility Mode"
                                     IsChecked="{Binding IsDiscoveryCompatibilityModeEnabled, Mode=TwoWay}"
                                     VerticalAlignment="Center" />
-                                <Button Grid.Column="1" Command="{Binding RunExtendedDiscoveryCommand}">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE7B3;" FontSize="14" />
-                                        <TextBlock Text="Extended Search" />
-                                        <TextBlock Text="{Binding ExtendedSearchCountdown}" />
-                                    </StackPanel>
-                                </Button>
-                                <Button Grid.Column="2" Command="{Binding PrepareManualConnectionCommand}">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE8D7;" FontSize="14" />
-                                        <TextBlock Text="Manual Connect" />
-                                    </StackPanel>
-                                </Button>
-                                <Button Grid.Column="3" Command="{Binding StartDiscoveryCommand}">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE768;" FontSize="14" />
-                                        <TextBlock Text="Start Scan" />
-                                    </StackPanel>
-                                </Button>
-                                <Button Grid.Column="4" Command="{Binding StopDiscoveryCommand}">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE71A;" FontSize="14" />
-                                        <TextBlock Text="Stop Scan" />
-                                    </StackPanel>
-                                </Button>
-                                <Button Grid.Column="5" Command="{Binding RefreshDiscoveryCommand}">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE72C;" FontSize="14" />
-                                        <TextBlock Text="Refresh" />
-                                    </StackPanel>
-                                </Button>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10">
+                                    <ItemsControl ItemsSource="{Binding DeviceDiscoveryScanActions}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <StackPanel Orientation="Horizontal" Spacing="10" />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Button Command="{Binding Command}">
+                                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                                        <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                        <TextBlock Text="{Binding Title}" />
+                                                    </StackPanel>
+                                                </Button>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="{Binding ExtendedSearchCountdown}" VerticalAlignment="Center" />
+                                </StackPanel>
                                 <TextBox
-                                    Grid.Column="6"
+                                    Grid.Column="2"
                                     Text="{Binding DiscoverySearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                     PlaceholderText="Search devices"
                                     HorizontalAlignment="Stretch" />
@@ -336,23 +318,27 @@
                                     <Grid ColumnSpacing="10">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
-                                        <Button Command="{Binding GenerateQRCodeCommand}">
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <FontIcon Glyph="&#xE8EF;" FontSize="14" />
-                                                <TextBlock Text="Generate QR Code" />
-                                            </StackPanel>
-                                        </Button>
-                                        <Button Grid.Column="1" Command="{Binding ScanQRCodeCommand}">
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <FontIcon Glyph="&#xE722;" FontSize="14" />
-                                                <TextBlock Text="Scan QR Code" />
-                                            </StackPanel>
-                                        </Button>
+                                        <ItemsControl ItemsSource="{Binding CrossNetworkQrActions}">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate>
+                                                    <StackPanel Orientation="Horizontal" Spacing="10" />
+                                                </ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Button Command="{Binding Command}">
+                                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                                            <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                            <TextBlock Text="{Binding Title}" />
+                                                        </StackPanel>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                         <TextBox
-                                            Grid.Column="2"
+                                            Grid.Column="1"
                                             Text="{Binding CrossNetworkQrInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                             PlaceholderText="skybridge://connect/&lt;base64url-json&gt;"
                                             HorizontalAlignment="Stretch" />
@@ -363,41 +349,49 @@
                                     <Grid ColumnSpacing="10">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="120" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <Button Command="{Binding GenerateConnectionCodeCommand}">
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <FontIcon Glyph="&#xE710;" FontSize="14" />
-                                                <TextBlock Text="Generate Code" />
-                                            </StackPanel>
-                                        </Button>
-                                        <Button Grid.Column="1" Command="{Binding CopyConnectionCodeCommand}">
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <FontIcon Glyph="&#xE8C8;" FontSize="14" />
-                                                <TextBlock Text="Copy" />
-                                            </StackPanel>
-                                        </Button>
-                                        <Button Grid.Column="2" Command="{Binding RegenerateConnectionCodeCommand}">
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <FontIcon Glyph="&#xE72C;" FontSize="14" />
-                                                <TextBlock Text="Regenerate" />
-                                            </StackPanel>
-                                        </Button>
+                                        <ItemsControl ItemsSource="{Binding CrossNetworkCodePrimaryActions}">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate>
+                                                    <StackPanel Orientation="Horizontal" Spacing="10" />
+                                                </ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Button Command="{Binding Command}">
+                                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                                            <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                            <TextBlock Text="{Binding Title}" />
+                                                        </StackPanel>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                         <TextBox
-                                            Grid.Column="3"
+                                            Grid.Column="1"
                                             Text="{Binding CrossNetworkCodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                             PlaceholderText="ABC234"
                                             MaxLength="6"
                                             HorizontalContentAlignment="Center" />
-                                        <Button Grid.Column="4" Command="{Binding ConnectConnectionCodeCommand}">
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <FontIcon Glyph="&#xE768;" FontSize="14" />
-                                                <TextBlock Text="Connect" />
-                                            </StackPanel>
-                                        </Button>
+                                        <ItemsControl Grid.Column="2" ItemsSource="{Binding CrossNetworkCodeConnectActions}">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate>
+                                                    <StackPanel Orientation="Horizontal" Spacing="10" />
+                                                </ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Button Command="{Binding Command}">
+                                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                                            <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                            <TextBlock Text="{Binding Title}" />
+                                                        </StackPanel>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                     </Grid>
                                     <TextBlock Text="{Binding CrossNetworkGeneratedCode}" FontSize="28" FontWeight="SemiBold" />
                                 </StackPanel>
