@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace Skybridge.WinClient.Services;
@@ -13,8 +16,15 @@ public interface ICrossNetworkConnectionClient
 public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
 {
     private const string DirectQrPrefix = "skybridge://connect/";
+    private const string QueryQrBase = "skybridge://connect?";
     private const string QueryQrPrefix = "skybridge://connect?data=";
     private const string ShortCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    private const int DynamicQrVersion = 2;
+    private const int DeviceFingerprintHexLength = 16;
+    private const int PublicKeyLengthBytes = 32;
+    private const int RawP256SignatureLengthBytes = 64;
+    private const int P256PublicKeyFingerprintHexLength = 64;
+    private const double QrSignatureChallengeLifetimeSeconds = 300;
 
     public Task<CrossNetworkConnectionSnapshot> BuildReadOnlySnapshotAsync(CrossNetworkConnectionRequest request)
     {
@@ -53,12 +63,19 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
 
     private static CrossNetworkConnectionSnapshot BuildQrScanSnapshot(string qrInput)
     {
-        var payload = ExtractQrPayload(qrInput);
+        var envelope = ExtractQrPayload(qrInput);
+        var decodedPayload = DecodeBase64Payload(envelope.Payload);
+        var analysis = AnalyzeQrPayload(decodedPayload, envelope);
         var facts = new List<CrossNetworkConnectionFact>
         {
             new("Scan QR Code", "accepted", "Input matches the mac cross-network QR URI envelope."),
             new("Accepted formats", $"{DirectQrPrefix} / {QueryQrPrefix}", "Windows accepts both direct path and data query forms before future scanner integration."),
-            new("Payload length", payload.Length.ToString(), "Payload is only envelope-checked here; signature and expiry verification remain required."),
+            new("QR schema", analysis.Schema, "Recognized mac QR payload shape before any transport action."),
+            new("Session ID", analysis.SessionId, "Session identifier is metadata only until trust and signaling are wired."),
+            new("Device", analysis.DeviceName, analysis.DeviceFingerprint),
+            new("Expires At", analysis.ExpiresAtUtc.ToString("O"), analysis.IsExpired ? "expired" : "valid"),
+            new("Signature", analysis.SignatureStatus, analysis.SignatureDetail),
+            new("Payload length", envelope.Payload.Length.ToString(), "Decoded payload is parsed locally; future adapters must still bind it into Core trust and transport transcripts."),
             new("Scan Error", "none", "Invalid envelopes fail closed before any transport action."),
             new("CrossNetworkReadiness", "idle", "No transportReady or handshakeComplete state is claimed by this read-only snapshot."),
             new("Safety", "no WebRTC answerer started", "No signaling WebSocket, ICE negotiation, DataChannel, HTTP file server, or FfiEngineClient connection is started.")
@@ -66,7 +83,7 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
 
         return new CrossNetworkConnectionSnapshot(
             DateTimeOffset.UtcNow,
-            "QR envelope validated",
+            analysis.SignatureVerified ? "QR signature verified" : "QR payload validated",
             null,
             facts);
     }
@@ -164,30 +181,31 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         return code;
     }
 
-    private static string ExtractQrPayload(string qrInput)
+    private static QrInputEnvelope ExtractQrPayload(string qrInput)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(qrInput);
         var trimmed = qrInput.Trim();
         string payload;
+        IReadOnlyDictionary<string, string> queryParameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (trimmed.StartsWith(DirectQrPrefix, StringComparison.Ordinal))
         {
             payload = trimmed[DirectQrPrefix.Length..];
             var queryStart = payload.IndexOf('?', StringComparison.Ordinal);
             if (queryStart >= 0)
             {
+                queryParameters = ParseQueryParameters(payload[(queryStart + 1)..]);
                 payload = payload[..queryStart];
             }
         }
-        else if (trimmed.StartsWith(QueryQrPrefix, StringComparison.Ordinal))
+        else if (trimmed.StartsWith(QueryQrBase, StringComparison.Ordinal))
         {
-            payload = trimmed[QueryQrPrefix.Length..];
-            var queryEnd = payload.IndexOf('&', StringComparison.Ordinal);
-            if (queryEnd >= 0)
+            queryParameters = ParseQueryParameters(trimmed[QueryQrBase.Length..]);
+            if (!queryParameters.TryGetValue("data", out var queryPayload))
             {
-                payload = payload[..queryEnd];
+                throw new InvalidOperationException("Scan Error: QR data query parameter is missing.");
             }
 
-            payload = Uri.UnescapeDataString(payload);
+            payload = queryPayload;
         }
         else
         {
@@ -195,7 +213,27 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         }
 
         ValidateQrPayload(payload);
-        return payload;
+        return new QrInputEnvelope(payload, queryParameters);
+    }
+
+    private static IReadOnlyDictionary<string, string> ParseQueryParameters(string query)
+    {
+        var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var separator = pair.IndexOf('=', StringComparison.Ordinal);
+            var rawName = separator >= 0 ? pair[..separator] : pair;
+            var rawValue = separator >= 0 ? pair[(separator + 1)..] : string.Empty;
+            var name = Uri.UnescapeDataString(rawName);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            parameters[name] = Uri.UnescapeDataString(rawValue);
+        }
+
+        return parameters;
     }
 
     private static void ValidateQrPayload(string payload)
@@ -215,7 +253,490 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             throw new InvalidOperationException("Scan Error: QR payload must be base64 or base64url text.");
         }
     }
+
+    private static byte[] DecodeBase64Payload(string raw)
+    {
+        var candidates = new List<string> { raw };
+        var unescaped = Uri.UnescapeDataString(raw);
+        if (!string.Equals(unescaped, raw, StringComparison.Ordinal))
+        {
+            candidates.Add(unescaped);
+        }
+
+        FormatException? lastError = null;
+        foreach (var candidate in candidates)
+        {
+            var padded = candidate
+                .Replace('-', '+')
+                .Replace('_', '/');
+            padded += new string('=', (4 - padded.Length % 4) % 4);
+            try
+            {
+                return Convert.FromBase64String(padded);
+            }
+            catch (FormatException ex)
+            {
+                lastError = ex;
+            }
+        }
+
+        throw new InvalidOperationException("Scan Error: QR payload could not be decoded as base64url JSON.", lastError);
+    }
+
+    private static CrossNetworkQrAnalysis AnalyzeQrPayload(byte[] decodedPayload, QrInputEnvelope envelope)
+    {
+        using var document = JsonDocument.Parse(decodedPayload);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidOperationException("Scan Error: QR payload must decode to a JSON object.");
+        }
+
+        if (root.TryGetProperty("payload", out var payload) && root.TryGetProperty("signature", out var legacySignature))
+        {
+            return AnalyzeSignedQrPayload(payload, legacySignature);
+        }
+
+        if (root.TryGetProperty("payload", out var signedEnvelopePayload)
+            && root.TryGetProperty("signatureBase64", out _)
+            && root.TryGetProperty("publicKeyBase64", out _)
+            && root.TryGetProperty("timestamp", out _)
+            && root.TryGetProperty("publicKeyFingerprint", out _))
+        {
+            return AnalyzeCanonicalQrPayload(
+                signedEnvelopePayload,
+                ReadRequiredString(root, "signatureBase64"),
+                ReadRequiredString(root, "publicKeyBase64"),
+                root.GetProperty("timestamp").GetRawText(),
+                ReadRequiredString(root, "publicKeyFingerprint"),
+                "QRCodeSignatureEnvelope");
+        }
+
+        if (TryGetQuerySignature(envelope, out var querySignature, out var queryPublicKey, out var queryTimestamp, out var queryFingerprint))
+        {
+            return AnalyzeCanonicalQrPayload(root, querySignature, queryPublicKey, queryTimestamp, queryFingerprint, "QRCodeSignatureQuery");
+        }
+
+        if (root.TryGetProperty("sessionID", out _)
+            && root.TryGetProperty("deviceFingerprint", out _)
+            && root.TryGetProperty("signingPublicKey", out _)
+            && root.TryGetProperty("signature", out _)
+            && root.TryGetProperty("signatureTimestamp", out _))
+        {
+            return AnalyzeDynamicQrCodeData(root);
+        }
+
+        throw new InvalidOperationException("Scan Error: QR payload is not SignedQRPayload, DynamicQRCodeData, or QRCodeSignature payload.");
+    }
+
+    private static CrossNetworkQrAnalysis AnalyzeSignedQrPayload(JsonElement payload, JsonElement signature)
+    {
+        var version = ReadRequiredInt32(payload, "version");
+        ValidateQrVersion(version);
+        var sessionId = ReadRequiredString(payload, "sessionID");
+        var deviceFingerprint = ReadRequiredString(payload, "deviceFingerprint");
+        ValidateDeviceFingerprint(deviceFingerprint);
+        var deviceName = ReadRequiredString(payload, "deviceName");
+        var publicKey = ReadRequiredString(payload, "publicKey");
+        var signingPublicKey = ReadRequiredString(payload, "signingPublicKey");
+        var localAddresses = ReadRequiredArray(payload, "localAddresses");
+        var port = ReadRequiredUInt16(payload, "port");
+        var expiresAt = ReadEpochDateTimeOffset(payload, "expiresAt");
+        ThrowIfExpired(expiresAt);
+
+        ValidateByteLength(ValidateBase64Bytes(publicKey, "publicKey"), PublicKeyLengthBytes, "publicKey");
+        var signingPublicKeyBytes = ValidateBase64Bytes(signingPublicKey, "signingPublicKey");
+        ValidateP256PublicKey(signingPublicKeyBytes);
+        var signatureBytes = ValidateBase64Bytes(ReadString(signature, "signature"), "signature");
+        ValidateByteLength(signatureBytes, RawP256SignatureLengthBytes, "signature");
+        var signatureVerified = VerifyP256RawSignature(
+            Encoding.UTF8.GetBytes(payload.GetRawText()),
+            signatureBytes,
+            signingPublicKeyBytes);
+        if (!signatureVerified)
+        {
+            throw new InvalidOperationException("Scan Error: QR signature verification failed.");
+        }
+
+        return new CrossNetworkQrAnalysis(
+            "SignedQRPayload",
+            sessionId,
+            deviceName,
+            deviceFingerprint,
+            expiresAt,
+            false,
+            "verified",
+            $"P256 raw signature verified; version={version}; localAddresses={localAddresses.Count}, port={port}.",
+            true);
+    }
+
+    private static CrossNetworkQrAnalysis AnalyzeCanonicalQrPayload(
+        JsonElement payload,
+        string signatureBase64,
+        string publicKeyBase64,
+        string timestampText,
+        string publicKeyFingerprint,
+        string schema)
+    {
+        var id = ReadRequiredString(payload, "id");
+        var name = ReadRequiredString(payload, "name");
+        var type = ReadRequiredString(payload, "type");
+        var address = ReadRequiredString(payload, "address");
+        var port = ReadRequiredUInt16(payload, "port");
+        var osVersion = ReadRequiredString(payload, "osVersion");
+        var capabilities = ReadRequiredArray(payload, "capabilities");
+        var timestamp = ParseUnixTimestamp(timestampText, "timestamp");
+        var expiresAt = DateTimeOffset.FromUnixTimeMilliseconds((long)((timestamp + QrSignatureChallengeLifetimeSeconds) * 1000));
+        ThrowIfExpired(expiresAt);
+
+        ValidateHex(publicKeyFingerprint, P256PublicKeyFingerprintHexLength, "publicKeyFingerprint");
+        var publicKeyBytes = ValidateBase64Bytes(publicKeyBase64, "publicKeyBase64");
+        ValidateP256PublicKey(publicKeyBytes);
+        ValidateFingerprint(publicKeyBytes, publicKeyFingerprint, "publicKeyFingerprint");
+        var signatureBytes = ValidateBase64Bytes(signatureBase64, "signatureBase64");
+        ValidateByteLength(signatureBytes, RawP256SignatureLengthBytes, "signatureBase64");
+
+        var canonical = $"id={id}|name={name}|type={type}|address={address}|port={port}|os={osVersion}|cap={string.Join(",", capabilities)}|ts={timestampText}|fp={publicKeyFingerprint}";
+        if (!VerifyP256RawSignature(Encoding.UTF8.GetBytes(canonical), signatureBytes, publicKeyBytes))
+        {
+            throw new InvalidOperationException("Scan Error: QR canonical signature verification failed.");
+        }
+
+        return new CrossNetworkQrAnalysis(
+            schema,
+            id,
+            name,
+            id,
+            expiresAt,
+            false,
+            "verified",
+            $"P256 canonical signature verified; challengeLifetime={QrSignatureChallengeLifetimeSeconds:0}s; type={type}; address={address}:{port}.",
+            true);
+    }
+
+    private static CrossNetworkQrAnalysis AnalyzeDynamicQrCodeData(JsonElement root)
+    {
+        var version = ReadRequiredInt32(root, "version");
+        ValidateQrVersion(version);
+        var sessionId = ReadRequiredString(root, "sessionID");
+        var deviceName = ReadRequiredString(root, "deviceName");
+        var deviceFingerprint = ReadRequiredString(root, "deviceFingerprint");
+        ValidateDeviceFingerprint(deviceFingerprint);
+        var publicKey = ReadRequiredString(root, "publicKey");
+        var signingPublicKey = ReadRequiredString(root, "signingPublicKey");
+        var signature = ReadRequiredString(root, "signature");
+        var signatureTimestamp = ReadRequiredDouble(root, "signatureTimestamp");
+        var iceServers = ReadRequiredArray(root, "iceServers");
+        var expiresAt = ReadAppleOrUnixDateTimeOffset(root, "expiresAt");
+        ThrowIfExpired(expiresAt);
+
+        ValidateByteLength(ValidateBase64Bytes(publicKey, "publicKey"), PublicKeyLengthBytes, "publicKey");
+        ValidateP256PublicKey(ValidateBase64Bytes(signingPublicKey, "signingPublicKey"));
+        ValidateByteLength(ValidateBase64Bytes(signature, "signature"), RawP256SignatureLengthBytes, "signature");
+        ValidateSignatureTimestamp(signatureTimestamp, "signatureTimestamp");
+
+        return new CrossNetworkQrAnalysis(
+            "DynamicQRCodeData",
+            sessionId,
+            deviceName,
+            deviceFingerprint,
+            expiresAt,
+            false,
+            "pending canonical verifier",
+            $"version={version}; signingPublicKey/signature present; iceServers={iceServers.Count}; P2PSecurityManager canonical payload must be matched before WebRTC.",
+            false);
+    }
+
+    private static bool TryGetQuerySignature(
+        QrInputEnvelope envelope,
+        out string signature,
+        out string publicKey,
+        out string timestamp,
+        out string fingerprint)
+    {
+        var query = envelope.QueryParameters;
+        if (query.TryGetValue("sig", out var querySignature)
+            && query.TryGetValue("pk", out var queryPublicKey)
+            && query.TryGetValue("ts", out var queryTimestamp)
+            && query.TryGetValue("fp", out var queryFingerprint)
+            && !string.IsNullOrWhiteSpace(querySignature)
+            && !string.IsNullOrWhiteSpace(queryPublicKey)
+            && !string.IsNullOrWhiteSpace(queryTimestamp)
+            && !string.IsNullOrWhiteSpace(queryFingerprint))
+        {
+            signature = querySignature;
+            publicKey = queryPublicKey;
+            timestamp = queryTimestamp;
+            fingerprint = queryFingerprint;
+            return true;
+        }
+
+        signature = string.Empty;
+        publicKey = string.Empty;
+        timestamp = string.Empty;
+        fingerprint = string.Empty;
+        return false;
+    }
+
+    private static string ReadRequiredString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property))
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload missing {propertyName}.");
+        }
+
+        var value = ReadString(property, propertyName);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} is empty.");
+        }
+
+        return value;
+    }
+
+    private static string ReadString(JsonElement element, string propertyName)
+    {
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be a string.");
+        }
+
+        return element.GetString() ?? string.Empty;
+    }
+
+    private static int ReadRequiredInt32(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || !property.TryGetInt32(out var value))
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be an integer.");
+        }
+
+        return value;
+    }
+
+    private static double ReadRequiredDouble(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || !property.TryGetDouble(out var value))
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be numeric.");
+        }
+
+        return value;
+    }
+
+    private static ushort ReadRequiredUInt16(JsonElement element, string propertyName)
+    {
+        var value = ReadRequiredInt32(element, propertyName);
+        if (value is < 1 or > 65535)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be between 1 and 65535.");
+        }
+
+        return (ushort)value;
+    }
+
+    private static IReadOnlyList<string> ReadRequiredArray(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be an array.");
+        }
+
+        var values = new List<string>();
+        foreach (var current in property.EnumerateArray())
+        {
+            if (current.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidOperationException($"Scan Error: QR payload {propertyName} items must be strings.");
+            }
+
+            var value = current.GetString() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                throw new InvalidOperationException($"Scan Error: QR payload {propertyName} items must not be empty.");
+            }
+
+            values.Add(value);
+        }
+
+        return values;
+    }
+
+    private static DateTimeOffset ReadEpochDateTimeOffset(JsonElement element, string propertyName)
+    {
+        var value = ReadRequiredDouble(element, propertyName);
+        return DateTimeOffset.FromUnixTimeMilliseconds((long)(value * 1000));
+    }
+
+    private static DateTimeOffset ReadAppleOrUnixDateTimeOffset(JsonElement element, string propertyName)
+    {
+        var value = ReadRequiredDouble(element, propertyName);
+        var unixSeconds = value < 1_000_000_000 ? value + 978_307_200 : value;
+        return DateTimeOffset.FromUnixTimeMilliseconds((long)(unixSeconds * 1000));
+    }
+
+    private static void ThrowIfExpired(DateTimeOffset expiresAtUtc)
+    {
+        if (expiresAtUtc <= DateTimeOffset.UtcNow)
+        {
+            throw new InvalidOperationException("Scan Error: QR code expired.");
+        }
+    }
+
+    private static void ValidateQrVersion(int version)
+    {
+        if (version != DynamicQrVersion)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload version must be {DynamicQrVersion}.");
+        }
+    }
+
+    private static void ValidateDeviceFingerprint(string value)
+    {
+        ValidateHex(value, DeviceFingerprintHexLength, "deviceFingerprint");
+    }
+
+    private static void ValidateHex(string value, int expectedLength, string propertyName)
+    {
+        if (value.Length != expectedLength)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be {expectedLength} hex characters.");
+        }
+
+        foreach (var current in value)
+        {
+            if (!Uri.IsHexDigit(current))
+            {
+                throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be hex.");
+            }
+        }
+    }
+
+    private static void ValidateByteLength(byte[] value, int expectedLength, string propertyName)
+    {
+        if (value.Length != expectedLength)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must decode to {expectedLength} bytes.");
+        }
+    }
+
+    private static void ValidateFingerprint(byte[] publicKeyBytes, string expectedFingerprint, string propertyName)
+    {
+        var actual = Convert.ToHexString(SHA256.HashData(publicKeyBytes)).ToLowerInvariant();
+        if (!string.Equals(actual, expectedFingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} does not match the signing public key.");
+        }
+    }
+
+    private static double ParseUnixTimestamp(string value, string propertyName)
+    {
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var timestamp) || timestamp <= 0)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be a positive Unix timestamp.");
+        }
+
+        return timestamp;
+    }
+
+    private static void ValidateSignatureTimestamp(double timestamp, string propertyName)
+    {
+        if (timestamp <= 0)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be positive.");
+        }
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        if (Math.Abs(now - timestamp) > QrSignatureChallengeLifetimeSeconds)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} is outside the {QrSignatureChallengeLifetimeSeconds:0}-second challenge window.");
+        }
+    }
+
+    private static byte[] ValidateBase64Bytes(string value, string propertyName)
+    {
+        try
+        {
+            var bytes = Convert.FromBase64String(value);
+            if (bytes.Length == 0)
+            {
+                throw new InvalidOperationException($"Scan Error: QR payload {propertyName} is empty.");
+            }
+
+            return bytes;
+        }
+        catch (FormatException ex)
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be base64.", ex);
+        }
+    }
+
+    private static bool VerifyP256RawSignature(byte[] payload, byte[] signature, byte[] signingPublicKey)
+    {
+        using var ecdsa = ECDsa.Create(BuildP256Parameters(signingPublicKey));
+        return ecdsa.VerifyData(
+            payload,
+            signature,
+            HashAlgorithmName.SHA256,
+            DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+    }
+
+    private static void ValidateP256PublicKey(byte[] signingPublicKey)
+    {
+        using var ecdsa = ECDsa.Create(BuildP256Parameters(signingPublicKey));
+        if (ecdsa.KeySize != 256)
+        {
+            throw new InvalidOperationException("Scan Error: QR signingPublicKey must be a P256 raw public key.");
+        }
+    }
+
+    private static ECParameters BuildP256Parameters(byte[] signingPublicKey)
+    {
+        var key = signingPublicKey;
+        if (key.Length == 65 && key[0] == 0x04)
+        {
+            return new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                Q = new ECPoint
+                {
+                    X = key[1..33],
+                    Y = key[33..65]
+                }
+            };
+        }
+
+        if (key.Length == 64)
+        {
+            return new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                Q = new ECPoint
+                {
+                    X = key[..32],
+                    Y = key[32..64]
+                }
+            };
+        }
+
+        throw new InvalidOperationException("Scan Error: QR signingPublicKey must be a P256 raw public key.");
+    }
 }
+
+internal sealed record QrInputEnvelope(
+    string Payload,
+    IReadOnlyDictionary<string, string> QueryParameters);
+
+internal sealed record CrossNetworkQrAnalysis(
+    string Schema,
+    string SessionId,
+    string DeviceName,
+    string DeviceFingerprint,
+    DateTimeOffset ExpiresAtUtc,
+    bool IsExpired,
+    string SignatureStatus,
+    string SignatureDetail,
+    bool SignatureVerified);
 
 public enum CrossNetworkConnectionAction
 {
