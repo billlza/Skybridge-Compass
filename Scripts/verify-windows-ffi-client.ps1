@@ -46,11 +46,12 @@ $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/S
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
+$unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $unavailableClientStubsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -75,6 +76,7 @@ $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
+$unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
@@ -436,6 +438,31 @@ Assert-Contains -Text $architecture -Needle "WorkspaceErrorStatusClient" -Messag
 Assert-True -Condition (-not $workspaceErrorStatus.Contains("FfiEngineClient")) -Message "WorkspaceErrorStatusClient must not call or reference FfiEngineClient."
 Assert-True -Condition (-not $workspaceErrorStatus.Contains("WebRTC")) -Message "WorkspaceErrorStatusClient must not start or own WebRTC adapters."
 Assert-True -Condition (-not $workspaceErrorStatus.Contains("signaling")) -Message "WorkspaceErrorStatusClient must not own signaling side effects."
+
+foreach ($signal in @(
+    "internal sealed class UnavailableDiscoveryClient",
+    "internal sealed class UnavailableDiscoveryBrowserClient",
+    "internal sealed class UnavailableManualConnectionClient",
+    "internal sealed class UnavailableCrossNetworkConnectionClient",
+    "internal sealed class UnavailablePairingMaterialClient",
+    "internal sealed class UnavailableConnectionPreflightClient",
+    "internal sealed class UnavailableCoreDiagnosticsClient",
+    "internal sealed class UnavailableFileTransferWorkspaceClient",
+    "internal sealed class UnavailableRemoteDesktopWorkspaceClient",
+    "internal sealed class UnavailableSystemMonitorWorkspaceClient",
+    "internal sealed class UnavailableUsbManagementWorkspaceClient",
+    "internal sealed class UnavailableSettingsWorkspaceClient",
+    "Discovery client is not configured.",
+    "Settings workspace client is not configured."
+)) {
+    Assert-Contains -Text $unavailableClientStubs -Needle $signal -Message "UnavailableClientStubs missing fallback signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "UnavailableClientStubs" -Message "Architecture doc missing UnavailableClientStubs status."
+Assert-True -Condition (-not $unavailableClientStubs.Contains("DummyEngineClient")) -Message "UnavailableClientStubs must not switch to DummyEngineClient."
+Assert-True -Condition (-not $unavailableClientStubs.Contains("FfiEngineClient")) -Message "UnavailableClientStubs must not call or reference FfiEngineClient."
+Assert-True -Condition (-not $unavailableClientStubs.Contains("WebRTC")) -Message "UnavailableClientStubs must not start or own WebRTC adapters."
+Assert-True -Condition (-not $unavailableClientStubs.Contains("signaling")) -Message "UnavailableClientStubs must not own signaling side effects."
 
 foreach ($signal in @(
     "public interface IUsbManagementWorkspaceClient",

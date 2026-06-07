@@ -107,10 +107,11 @@ $remoteDesktopProfileCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinCli
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
+$unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -134,6 +135,7 @@ $remoteDesktopProfileCatalog = Get-Content -Raw -LiteralPath $remoteDesktopProfi
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
+$unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 
@@ -574,6 +576,27 @@ Assert-True -Condition (-not $sessionViewModel.Contains("_connectionWorkspaceSta
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("BuildErrorPatch")) -Message "ConnectionWorkspaceStateClient must not own busy-state error routing; use WorkspaceErrorStatusClient."
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModel, "catch \(Exception ex\)[\s\S]*?if \(IsDeviceDiscoverySelected\)[\s\S]*?BuildErrorPatch\(ex\.Message\)")) -Message "RunWithBusyState catch must not route errors by currently selected feature."
 
+foreach ($unavailableSignal in @(
+    "internal sealed class UnavailableDiscoveryClient",
+    "internal sealed class UnavailableDiscoveryBrowserClient",
+    "internal sealed class UnavailableManualConnectionClient",
+    "internal sealed class UnavailableCrossNetworkConnectionClient",
+    "internal sealed class UnavailablePairingMaterialClient",
+    "internal sealed class UnavailableConnectionPreflightClient",
+    "internal sealed class UnavailableCoreDiagnosticsClient",
+    "internal sealed class UnavailableFileTransferWorkspaceClient",
+    "internal sealed class UnavailableRemoteDesktopWorkspaceClient",
+    "internal sealed class UnavailableSystemMonitorWorkspaceClient",
+    "internal sealed class UnavailableUsbManagementWorkspaceClient",
+    "internal sealed class UnavailableSettingsWorkspaceClient",
+    "Discovery client is not configured.",
+    "Settings workspace client is not configured."
+)) {
+    Assert-Contains -Text $unavailableClientStubs -Needle $unavailableSignal -Message "Unavailable client stub signal missing: $unavailableSignal"
+}
+
+Assert-True -Condition (-not $sessionViewModel.Contains("internal sealed class Unavailable")) -Message "SessionViewModel must not define unavailable service clients; keep fallback clients in Services/UnavailableClientStubs.cs."
+
 foreach ($deviceDiscoveryDefaultSignal in @(
     "public interface IDeviceDiscoveryInputDefaultsClient",
     "public sealed class DeviceDiscoveryInputDefaultsClient : IDeviceDiscoveryInputDefaultsClient",
@@ -648,7 +671,7 @@ foreach ($deviceDiscoveryPendingStatusSignal in @(
     "PairingMaterialClient.DefaultPendingStatus",
     "ConnectionPreflightClient.DefaultPendingStatus"
 )) {
-    Assert-Contains -Text ($discoveryClient + $manualConnection + $pairing + $connectionPreflight + $sessionViewModel) -Needle $deviceDiscoveryPendingStatusSignal -Message "Device Discovery pending status signal missing: $deviceDiscoveryPendingStatusSignal"
+    Assert-Contains -Text ($discoveryClient + $manualConnection + $pairing + $connectionPreflight + $unavailableClientStubs + $sessionViewModel) -Needle $deviceDiscoveryPendingStatusSignal -Message "Device Discovery pending status signal missing: $deviceDiscoveryPendingStatusSignal"
 }
 
 foreach ($viewModelPendingStatusLiteral in @(
@@ -687,7 +710,7 @@ foreach ($workspaceRefreshPendingStatusSignal in @(
     "SystemMonitorWorkspaceClient.DefaultPendingStatus",
     "SettingsWorkspaceClient.DefaultPendingStatus"
 )) {
-    Assert-Contains -Text ($coreDiagnostics + $fileTransfer + $usbManagement + $remoteDesktop + $systemMonitor + $settings + $sessionViewModel) -Needle $workspaceRefreshPendingStatusSignal -Message "Workspace refresh pending status signal missing: $workspaceRefreshPendingStatusSignal"
+    Assert-Contains -Text ($coreDiagnostics + $fileTransfer + $usbManagement + $remoteDesktop + $systemMonitor + $settings + $unavailableClientStubs + $sessionViewModel) -Needle $workspaceRefreshPendingStatusSignal -Message "Workspace refresh pending status signal missing: $workspaceRefreshPendingStatusSignal"
 }
 
 foreach ($viewModelWorkspacePendingStatusLiteral in @(
