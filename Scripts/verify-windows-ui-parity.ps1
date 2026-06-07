@@ -28,6 +28,7 @@ function Assert-Contains {
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
+$manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
@@ -39,13 +40,14 @@ $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Settin
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $discoveryBrowserPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $discoveryBrowserPath, $manualConnectionPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
 $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
+$manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
@@ -101,6 +103,11 @@ foreach ($binding in @(
     "DiscoveryBrowserFacts",
     "IsDiscoveryCompatibilityModeEnabled",
     "ExtendedSearchCountdown",
+    "ManualConnectionHost",
+    "ManualConnectionPort",
+    "ManualConnectionCode",
+    "ManualConnectionStatus",
+    "ManualConnectionFacts",
     "DiscoveredPeers",
     "PairingConnectionCode",
     "PairingStatus",
@@ -139,7 +146,7 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -168,6 +175,15 @@ foreach ($discoverySignal in @(
     "DiscoveryBrowserFactView",
     "WindowsDiscoveryBrowserClient",
     "DnsServiceBrowse",
+    "Manual Host / IP",
+    "Port",
+    "11550",
+    "Code",
+    "Manual Connect",
+    "ManualConnectionClient",
+    "ManualConnectionFactView",
+    "Manual connection port must be between 1 and 65535",
+    "no connection started",
     "DiscoveredPeerView",
     "Pairing Code",
     "Validate Pairing",
@@ -188,7 +204,7 @@ foreach ($discoverySignal in @(
     "Transport binding digest",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $pairing + $connectionPreflight) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $manualConnection + $pairing + $connectionPreflight) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
@@ -383,6 +399,7 @@ foreach ($docSignal in @(
     "Prepare Connection",
     "WindowsDiscoveryBrowserClient",
     "Start Scan",
+    "Manual Connect",
     "CoreBridge.PlanConnectionAsync",
     "Visual QA"
 )) {

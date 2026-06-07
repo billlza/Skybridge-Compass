@@ -29,6 +29,7 @@ $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngin
 $coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
 $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
+$manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
@@ -41,7 +42,7 @@ $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngi
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $manualConnectionPath, $pairingPath, $connectionPreflightPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -49,6 +50,7 @@ $client = Get-Content -Raw -LiteralPath $clientPath
 $coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
 $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
+$manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
@@ -99,6 +101,7 @@ Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architec
 Assert-Contains -Text $mainWindow -Needle "var coreBridge = new CoreBridge();" -Message "MainWindow should create one explicit CoreBridge for manual Core tools."
 Assert-Contains -Text $mainWindow -Needle "var discoveryClient = new CoreDiscoveryClient(coreBridge);" -Message "MainWindow should create one explicit CoreDiscoveryClient for discovery parsing and browsing."
 Assert-Contains -Text $mainWindow -Needle "new WindowsDiscoveryBrowserClient(discoveryClient)" -Message "MainWindow should wire WindowsDiscoveryBrowserClient for explicit DNS-SD browse boundary snapshots."
+Assert-Contains -Text $mainWindow -Needle "new ManualConnectionClient()" -Message "MainWindow should wire ManualConnectionClient for explicit manual target validation."
 Assert-Contains -Text $mainWindow -Needle "new PairingMaterialClient()" -Message "MainWindow should wire PairingMaterialClient for explicit manual pairing-code validation."
 Assert-Contains -Text $mainWindow -Needle "new ConnectionPreflightClient(coreBridge)" -Message "MainWindow should wire ConnectionPreflightClient for explicit connection preflight."
 Assert-Contains -Text $mainWindow -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "MainWindow should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
@@ -184,6 +187,26 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "WindowsDiscoveryBrowserClient" -Message "Architecture doc missing WindowsDiscoveryBrowserClient status."
+
+foreach ($signal in @(
+    "public interface IManualConnectionClient",
+    "public sealed class ManualConnectionClient : IManualConnectionClient",
+    "BuildReadOnlySnapshotAsync",
+    "ManualConnectionRequest",
+    "ManualConnectionTarget",
+    "ManualConnectionSnapshot",
+    "NormalizeHost",
+    "ParsePort",
+    "11550",
+    "_skybridge._tcp",
+    "Code is routing or pairing input only; it is never treated as a peer public key.",
+    "no connection started",
+    "FfiEngineClient"
+)) {
+    Assert-Contains -Text $manualConnection -Needle $signal -Message "ManualConnectionClient missing manual boundary signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "ManualConnectionClient" -Message "Architecture doc missing ManualConnectionClient status."
 
 foreach ($signal in @(
     "public interface IPairingMaterialClient",

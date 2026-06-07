@@ -32,6 +32,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IDiscoveryBrowserClient _discoveryBrowserClient;
+    private readonly IManualConnectionClient _manualConnectionClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionPreflightClient _connectionPreflightClient;
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
@@ -43,12 +44,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoverySearchText = "";
+    private string _manualConnectionHost = "";
+    private string _manualConnectionPort = "11550";
+    private string _manualConnectionCode = "";
     private string _discoveryTxtRecord =
         $"deviceId=mac-1;pubKeyFP={SampleFingerprint};platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1";
     private string _pairingConnectionCode =
         $"skybridge-pair:v1;deviceId=mac-1;pubKey={SamplePairingPublicKey};pubKeyFP={SampleFingerprint};platform=macOS;name=Desk%20Mac;version=v1";
     private string _discoveryStatus = "Ready";
     private string _discoveryBrowserStatus = "Ready";
+    private string _manualConnectionStatus = "Ready";
     private string _pairingStatus = "Ready";
     private string _connectionPreflightStatus = "Ready";
     private string _coreDiagnosticsStatus = "Ready";
@@ -72,6 +77,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IEngineClient engineClient,
         IDiscoveryClient? discoveryClient = null,
         IDiscoveryBrowserClient? discoveryBrowserClient = null,
+        IManualConnectionClient? manualConnectionClient = null,
         IPairingMaterialClient? pairingMaterialClient = null,
         IConnectionPreflightClient? connectionPreflightClient = null,
         ICoreDiagnosticsClient? coreDiagnosticsClient = null,
@@ -84,6 +90,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         _discoveryBrowserClient = discoveryBrowserClient ?? new UnavailableDiscoveryBrowserClient();
+        _manualConnectionClient = manualConnectionClient ?? new UnavailableManualConnectionClient();
         _pairingMaterialClient = pairingMaterialClient ?? new UnavailablePairingMaterialClient();
         _connectionPreflightClient = connectionPreflightClient ?? new UnavailableConnectionPreflightClient();
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
@@ -97,6 +104,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _selectedFeature = NavigationItems[0];
         DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
         DiscoveryBrowserFacts = new ObservableCollection<DiscoveryBrowserFactView>();
+        ManualConnectionFacts = new ObservableCollection<ManualConnectionFactView>();
         PairingFacts = new ObservableCollection<PairingFactView>();
         ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
@@ -121,6 +129,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         StopDiscoveryCommand = new AsyncRelayCommand(StopDiscoveryAsync, CanUseDiscoveryBrowser);
         RefreshDiscoveryCommand = new AsyncRelayCommand(RefreshDiscoveryAsync, CanUseDiscoveryBrowser);
         RunExtendedDiscoveryCommand = new AsyncRelayCommand(RunExtendedDiscoveryAsync, CanUseDiscoveryBrowser);
+        PrepareManualConnectionCommand = new AsyncRelayCommand(PrepareManualConnectionAsync, CanPrepareManualConnection);
         ParseAdvertisementCommand = new AsyncRelayCommand(ParseAdvertisementAsync, CanParseAdvertisement);
         ValidatePairingCodeCommand = new AsyncRelayCommand(ValidatePairingCodeAsync, CanValidatePairingCode);
         PrepareConnectionCommand = new AsyncRelayCommand(PrepareConnectionAsync, CanPrepareConnection);
@@ -145,6 +154,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<DiscoveredPeerView> DiscoveredPeers { get; }
 
     public ObservableCollection<DiscoveryBrowserFactView> DiscoveryBrowserFacts { get; }
+
+    public ObservableCollection<ManualConnectionFactView> ManualConnectionFacts { get; }
 
     public ObservableCollection<PairingFactView> PairingFacts { get; }
 
@@ -280,6 +291,51 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
+    public string ManualConnectionHost
+    {
+        get => _manualConnectionHost;
+        set
+        {
+            if (SetField(ref _manualConnectionHost, value))
+            {
+                ManualConnectionFacts.Clear();
+                ManualConnectionStatus = "Ready";
+                OnPropertyChanged(nameof(ManualConnectionFactCount));
+                RefreshCommandStates();
+            }
+        }
+    }
+
+    public string ManualConnectionPort
+    {
+        get => _manualConnectionPort;
+        set
+        {
+            if (SetField(ref _manualConnectionPort, value))
+            {
+                ManualConnectionFacts.Clear();
+                ManualConnectionStatus = "Ready";
+                OnPropertyChanged(nameof(ManualConnectionFactCount));
+                RefreshCommandStates();
+            }
+        }
+    }
+
+    public string ManualConnectionCode
+    {
+        get => _manualConnectionCode;
+        set
+        {
+            if (SetField(ref _manualConnectionCode, value))
+            {
+                ManualConnectionFacts.Clear();
+                ManualConnectionStatus = "Ready";
+                OnPropertyChanged(nameof(ManualConnectionFactCount));
+                RefreshCommandStates();
+            }
+        }
+    }
+
     public string DiscoveryTxtRecord
     {
         get => _discoveryTxtRecord;
@@ -322,6 +378,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set => SetField(ref _discoveryBrowserStatus, value);
     }
 
+    public string ManualConnectionStatus
+    {
+        get => _manualConnectionStatus;
+        private set => SetField(ref _manualConnectionStatus, value);
+    }
+
     public bool IsDiscoveryScanning
     {
         get => _isDiscoveryScanning;
@@ -355,6 +417,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public int DiscoveredPeerCount => DiscoveredPeers.Count;
 
     public int DiscoveryBrowserFactCount => DiscoveryBrowserFacts.Count;
+
+    public int ManualConnectionFactCount => ManualConnectionFacts.Count;
 
     public int PairingFactCount => PairingFacts.Count;
 
@@ -445,6 +509,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RefreshDiscoveryCommand { get; }
 
     public ICommand RunExtendedDiscoveryCommand { get; }
+
+    public ICommand PrepareManualConnectionCommand { get; }
 
     public ICommand ParseAdvertisementCommand { get; }
 
@@ -576,6 +642,41 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     : $"Validated {snapshot.Peers.Count} peer(s)";
             PairingStatus = action == DiscoveryBrowserAction.Stop ? PairingStatus : "Ready";
             StatusMessage = "Discovery browser snapshot updated";
+        });
+    }
+
+    private async Task PrepareManualConnectionAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            ManualConnectionStatus = "Preparing...";
+            var snapshot = await _manualConnectionClient.BuildReadOnlySnapshotAsync(
+                new ManualConnectionRequest(
+                    ManualConnectionHost,
+                    ManualConnectionPort,
+                    ManualConnectionCode));
+            ManualConnectionFacts.Clear();
+            foreach (var fact in snapshot.Facts)
+            {
+                ManualConnectionFacts.Add(ManualConnectionFactView.FromFact(fact));
+            }
+
+            _validatedDiscoveredPeer = null;
+            _validatedPairingMaterial = null;
+            PairingFacts.Clear();
+            ClearConnectionPreflight();
+            OnPropertyChanged(nameof(ManualConnectionFactCount));
+            OnPropertyChanged(nameof(PairingFactCount));
+            ManualConnectionStatus = $"Prepared {snapshot.Target.Host}:{snapshot.Target.Port}";
+            DiscoveryService = snapshot.Target.Service;
+            DiscoveryStatus = "Manual target prepared";
+            PairingStatus = "Ready";
+            StatusMessage = "Manual connection target prepared";
         });
     }
 
@@ -870,6 +971,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool CanUseDiscoveryBrowser() => !IsBusy && IsDeviceDiscoverySelected;
 
+    private bool CanPrepareManualConnection() =>
+        !IsBusy
+        && IsDeviceDiscoverySelected
+        && !string.IsNullOrWhiteSpace(ManualConnectionHost)
+        && !string.IsNullOrWhiteSpace(ManualConnectionPort);
+
     private bool CanParseAdvertisement() =>
         !IsBusy
         && IsDeviceDiscoverySelected
@@ -913,6 +1020,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             {
                 DiscoveryStatus = ex.Message;
                 DiscoveryBrowserStatus = ex.Message;
+                ManualConnectionStatus = ex.Message;
                 PairingStatus = ex.Message;
                 ConnectionPreflightStatus = ex.Message;
             }
@@ -962,6 +1070,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (StopDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RunExtendedDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (PrepareManualConnectionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ValidatePairingCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (PrepareConnectionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
@@ -1178,6 +1287,15 @@ public sealed record DiscoveryBrowserFactView(
         new(fact.Label, fact.Value, fact.Detail);
 }
 
+public sealed record ManualConnectionFactView(
+    string Label,
+    string Value,
+    string Detail)
+{
+    public static ManualConnectionFactView FromFact(ManualConnectionFact fact) =>
+        new(fact.Label, fact.Value, fact.Detail);
+}
+
 public sealed record ConnectionPreflightFactView(
     string Label,
     string Value,
@@ -1258,6 +1376,14 @@ internal sealed class UnavailableDiscoveryBrowserClient : IDiscoveryBrowserClien
     public Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request)
     {
         throw new InvalidOperationException("Discovery browser client is not configured.");
+    }
+}
+
+internal sealed class UnavailableManualConnectionClient : IManualConnectionClient
+{
+    public Task<ManualConnectionSnapshot> BuildReadOnlySnapshotAsync(ManualConnectionRequest request)
+    {
+        throw new InvalidOperationException("Manual connection client is not configured.");
     }
 }
 

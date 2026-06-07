@@ -17,6 +17,7 @@ public sealed partial class MainWindow : Window
             new DummyEngineClient(),
             discoveryClient,
             new WindowsDiscoveryBrowserClient(discoveryClient),
+            new ManualConnectionClient(),
             new PairingMaterialClient(),
             new ConnectionPreflightClient(coreBridge),
             new CoreDiagnosticsClient(coreBridge),
