@@ -102,6 +102,28 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
         </DataTemplate>
+        <DataTemplate x:Key="DiscoveredPeerItemTemplate">
+            <Grid Padding="0,8" ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="2*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="3">
+                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding DeviceId}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="3">
+                    <TextBlock Text="{Binding Platform}" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding ServiceKind}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <StackPanel Grid.Column="2" Spacing="3">
+                    <TextBlock Text="{Binding CapabilitiesSummary}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding PublicKeyFingerprint}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding TrustSummary}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
         <DataTemplate x:Key="WorkspaceStateRowTemplate">
             <Grid Padding="0,4" ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
@@ -420,32 +442,7 @@
                                 </StackPanel>
                             </Grid>
 
-                            <ListView ItemsSource="{Binding DiscoveredPeers}" MinHeight="86" SelectionMode="None">
-                                <ListView.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Padding="0,8" ColumnSpacing="16">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="2*" />
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="2*" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Spacing="3">
-                                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
-                                                <TextBlock Text="{Binding DeviceId}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="1" Spacing="3">
-                                                <TextBlock Text="{Binding Platform}" FontWeight="SemiBold" />
-                                                <TextBlock Text="{Binding ServiceKind}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="2" Spacing="3">
-                                                <TextBlock Text="{Binding CapabilitiesSummary}" TextWrapping="Wrap" />
-                                                <TextBlock Text="{Binding PublicKeyFingerprint}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                <TextBlock Text="{Binding TrustSummary}" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            </StackPanel>
-                                        </Grid>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
-                            </ListView>
+                            <ListView ItemsSource="{Binding DiscoveredPeers}" ItemTemplate="{StaticResource DiscoveredPeerItemTemplate}" MinHeight="86" SelectionMode="None" />
 
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>

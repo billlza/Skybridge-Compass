@@ -273,6 +273,7 @@ foreach ($resourceSignal in @(
     'x:Key="WorkspaceMetricCardItemsPanel"',
     'x:Key="WorkspaceMetricCardTemplate"',
     'x:Key="WorkspaceFactRowTemplate"',
+    'x:Key="DiscoveredPeerItemTemplate"',
     'x:Key="WorkspaceStateRowTemplate"',
     'x:Key="SettingsDetailRowTemplate"',
     'x:Key="SettingsActionRowTemplate"',
@@ -292,6 +293,7 @@ Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -I
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "NavigationItems" -ItemTemplate "NavigationItemTemplate"
 Assert-ItemsControlResources -Text $mainWindow -Binding "DashboardMetrics" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 Assert-ItemsControlResources -Text $mainWindow -Binding "UsbDeviceStats" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "DiscoveredPeers" -ItemTemplate "DiscoveredPeerItemTemplate"
 
 foreach ($actionBinding in @(
     "DeviceDiscoveryPrimaryActions",
@@ -1034,6 +1036,7 @@ foreach ($docSignal in @(
     "WorkspaceActionButtonWithDetailTemplate",
     "SidebarWorkspaceActionButtonTemplate",
     "ItemsPanelTemplate",
+    "DiscoveredPeerItemTemplate",
     "UsbManagementHeaderActions",
     "FileTransferHeaderActions",
     "RemoteDesktopHeaderActions",
