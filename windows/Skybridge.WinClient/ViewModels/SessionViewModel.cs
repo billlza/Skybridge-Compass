@@ -10,18 +10,13 @@ namespace Skybridge.WinClient.ViewModels;
 
 public sealed class SessionViewModel : INotifyPropertyChanged
 {
-    private const string SampleFingerprint =
-        "f50924465c15480c8d06de12140f20c69bd2312eeec840c5372f7ce32ffd4009";
-
-    private const string SamplePairingPublicKey =
-        "c2FtcGxlLXBlZXItcHVibGljLWtleQ==";
-
     private const string CrossNetworkCodeAlphabet =
         "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IDiscoveryBrowserClient _discoveryBrowserClient;
+    private readonly IDeviceDiscoveryInputDefaultsClient _deviceDiscoveryInputDefaultsClient;
     private readonly IManualConnectionClient _manualConnectionClient;
     private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
@@ -38,18 +33,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
     private readonly IWorkspaceActionCatalogClient _workspaceActionCatalogClient;
     private string _statusMessage = "Idle";
-    private string _discoveryService = "_skybridge._udp";
+    private string _discoveryService = "";
     private string _discoverySearchText = "";
     private string _manualConnectionHost = "";
-    private string _manualConnectionPort = "11550";
+    private string _manualConnectionPort = "";
     private string _manualConnectionCode = "";
     private string _crossNetworkQrInput = "";
     private string _crossNetworkCodeInput = "";
     private string _crossNetworkGeneratedCode = "";
-    private string _discoveryTxtRecord =
-        $"deviceId=mac-1;pubKeyFP={SampleFingerprint};platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1";
-    private string _pairingConnectionCode =
-        $"skybridge-pair:v1;deviceId=mac-1;pubKey={SamplePairingPublicKey};pubKeyFP={SampleFingerprint};platform=macOS;name=Desk%20Mac;version=v1";
+    private string _discoveryTxtRecord = "";
+    private string _pairingConnectionCode = "";
     private string _discoveryStatus = "Ready";
     private string _discoveryBrowserStatus = "Ready";
     private string _manualConnectionStatus = "Ready";
@@ -85,6 +78,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IEngineClient engineClient,
         IDiscoveryClient? discoveryClient = null,
         IDiscoveryBrowserClient? discoveryBrowserClient = null,
+        IDeviceDiscoveryInputDefaultsClient? deviceDiscoveryInputDefaultsClient = null,
         IManualConnectionClient? manualConnectionClient = null,
         ICrossNetworkConnectionClient? crossNetworkConnectionClient = null,
         IPairingMaterialClient? pairingMaterialClient = null,
@@ -104,6 +98,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         _discoveryBrowserClient = discoveryBrowserClient ?? new UnavailableDiscoveryBrowserClient();
+        _deviceDiscoveryInputDefaultsClient = deviceDiscoveryInputDefaultsClient ?? new DeviceDiscoveryInputDefaultsClient();
         _manualConnectionClient = manualConnectionClient ?? new UnavailableManualConnectionClient();
         _crossNetworkConnectionClient = crossNetworkConnectionClient ?? new UnavailableCrossNetworkConnectionClient();
         _pairingMaterialClient = pairingMaterialClient ?? new UnavailablePairingMaterialClient();
@@ -119,6 +114,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _topBarStatusClient = topBarStatusClient ?? new TopBarStatusClient();
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient ?? new ConnectionWorkspaceStateClient();
         _workspaceActionCatalogClient = workspaceActionCatalogClient ?? new WorkspaceActionCatalogClient();
+        var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
+        _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
+        _manualConnectionPort = deviceDiscoveryInputDefaults.ManualConnectionPort;
+        _discoveryTxtRecord = deviceDiscoveryInputDefaults.DiscoveryTxtRecord;
+        _pairingConnectionCode = deviceDiscoveryInputDefaults.PairingConnectionCode;
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];

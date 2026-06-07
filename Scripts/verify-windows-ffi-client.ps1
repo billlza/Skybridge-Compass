@@ -29,6 +29,7 @@ $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngin
 $coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
 $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
+$deviceDiscoveryInputDefaultsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DeviceDiscoveryInputDefaultsClient.cs"
 $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
@@ -48,7 +49,7 @@ $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngi
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -56,6 +57,7 @@ $client = Get-Content -Raw -LiteralPath $clientPath
 $coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
 $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
+$deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
 $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
@@ -113,6 +115,7 @@ Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architec
 Assert-Contains -Text $mainWindow -Needle "var coreBridge = new CoreBridge();" -Message "MainWindow should create one explicit CoreBridge for manual Core tools."
 Assert-Contains -Text $mainWindow -Needle "var discoveryClient = new CoreDiscoveryClient(coreBridge);" -Message "MainWindow should create one explicit CoreDiscoveryClient for discovery parsing and browsing."
 Assert-Contains -Text $mainWindow -Needle "new WindowsDiscoveryBrowserClient(discoveryClient)" -Message "MainWindow should wire WindowsDiscoveryBrowserClient for explicit DNS-SD browse boundary snapshots."
+Assert-Contains -Text $mainWindow -Needle "new DeviceDiscoveryInputDefaultsClient()" -Message "MainWindow should wire DeviceDiscoveryInputDefaultsClient for explicit Device Discovery default inputs."
 Assert-Contains -Text $mainWindow -Needle "new ManualConnectionClient()" -Message "MainWindow should wire ManualConnectionClient for explicit manual target validation."
 Assert-Contains -Text $mainWindow -Needle "new CrossNetworkConnectionClient()" -Message "MainWindow should wire CrossNetworkConnectionClient for explicit QR/code envelope validation."
 Assert-Contains -Text $mainWindow -Needle "new PairingMaterialClient()" -Message "MainWindow should wire PairingMaterialClient for explicit manual pairing-code validation."
@@ -205,6 +208,28 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "WindowsDiscoveryBrowserClient" -Message "Architecture doc missing WindowsDiscoveryBrowserClient status."
+
+foreach ($signal in @(
+    "public interface IDeviceDiscoveryInputDefaultsClient",
+    "public sealed class DeviceDiscoveryInputDefaultsClient : IDeviceDiscoveryInputDefaultsClient",
+    "BuildReadOnlySnapshot",
+    "DeviceDiscoveryInputDefaultsSnapshot",
+    "DiscoveryService",
+    "ManualConnectionPort",
+    "DiscoveryTxtRecord",
+    "PairingConnectionCode",
+    "_skybridge._udp",
+    "11550",
+    "deviceId=mac-1",
+    "Desk Mac",
+    "skybridge-pair:v1",
+    "SampleFingerprint",
+    "SamplePairingPublicKey"
+)) {
+    Assert-Contains -Text $deviceDiscoveryInputDefaults -Needle $signal -Message "DeviceDiscoveryInputDefaultsClient missing default-input signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "DeviceDiscoveryInputDefaultsClient" -Message "Architecture doc missing DeviceDiscoveryInputDefaultsClient status."
 
 foreach ($signal in @(
     "public interface IManualConnectionClient",

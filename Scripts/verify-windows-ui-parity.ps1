@@ -91,6 +91,7 @@ $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewMode
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
+$deviceDiscoveryInputDefaultsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DeviceDiscoveryInputDefaultsClient.cs"
 $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
@@ -108,7 +109,7 @@ $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/To
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -116,6 +117,7 @@ $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
+$deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
 $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
@@ -506,6 +508,30 @@ foreach ($connectionStateSignal in @(
     Assert-Contains -Text ($connectionWorkspaceState + $sessionViewModel + $mainWindow) -Needle $connectionStateSignal -Message "Connection workspace state signal missing: $connectionStateSignal"
 }
 
+foreach ($deviceDiscoveryDefaultSignal in @(
+    "public interface IDeviceDiscoveryInputDefaultsClient",
+    "public sealed class DeviceDiscoveryInputDefaultsClient : IDeviceDiscoveryInputDefaultsClient",
+    "DeviceDiscoveryInputDefaultsSnapshot",
+    "BuildReadOnlySnapshot",
+    "DiscoveryService",
+    "ManualConnectionPort",
+    "DiscoveryTxtRecord",
+    "PairingConnectionCode",
+    "_skybridge._udp",
+    "11550",
+    "deviceId=mac-1",
+    "Desk Mac",
+    "skybridge-pair:v1",
+    "SampleFingerprint",
+    "SamplePairingPublicKey",
+    "new DeviceDiscoveryInputDefaultsClient()"
+)) {
+    Assert-Contains -Text ($deviceDiscoveryInputDefaults + $sessionViewModel) -Needle $deviceDiscoveryDefaultSignal -Message "Device Discovery default-input signal missing: $deviceDiscoveryDefaultSignal"
+}
+
+Assert-True -Condition (-not $sessionViewModel.Contains("SampleFingerprint")) -Message "SessionViewModel must not own Device Discovery sample fingerprints."
+Assert-True -Condition (-not $sessionViewModel.Contains("SamplePairingPublicKey")) -Message "SessionViewModel must not own Device Discovery sample pairing keys."
+
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',
     'ItemsSource="{Binding DeviceDiscoveryPrimaryActions}"',
@@ -717,6 +743,7 @@ foreach ($discoverySignal in @(
     "Search devices",
     "DiscoveryBrowserFactView",
     "WindowsDiscoveryBrowserClient",
+    "DeviceDiscoveryInputDefaultsClient",
     "DnsServiceBrowse",
     "Manual Host / IP",
     "Port",
@@ -796,7 +823,7 @@ foreach ($discoverySignal in @(
     "Transport binding digest",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
@@ -1061,6 +1088,7 @@ foreach ($docSignal in @(
     "ConnectionWorkspaceStateClient",
     "Prepare Connection",
     "WindowsDiscoveryBrowserClient",
+    "DeviceDiscoveryInputDefaultsClient",
     "Start Scan",
     "Manual Connect",
     "FPS / Diagnostics",
