@@ -157,15 +157,18 @@ foreach ($binding in @(
     "CrossNetworkCodeConnectActions",
     "IsDeviceDiscoverySelected",
     "UsbManagementStatus",
+    "UsbManagementHeaderActions",
     "UsbDeviceStats",
     "UsbDevices",
     "IsUsbManagementSelected",
+    "FileTransferHeaderActions",
     "FileTransferActions",
     "FileTransferStatus",
     "FileTransferQueue",
     "FileTransferHistory",
     "FileTransferSecurityFacts",
     "IsFileTransferSelected",
+    "RemoteDesktopHeaderActions",
     "RemoteDesktopActions",
     "RemoteDesktopStatus",
     "RemoteDesktopSessions",
@@ -179,6 +182,7 @@ foreach ($binding in @(
     "SystemMonitorIndicators",
     "IsSystemMonitorSelected",
     "SettingsStatus",
+    "SettingsHeaderActions",
     "SettingsTabs",
     "SettingsActions",
     "SettingsToolbarActions",
@@ -186,6 +190,7 @@ foreach ($binding in @(
     "SettingsDetails",
     "IsSettingsSelected",
     "CoreDiagnosticsStatus",
+    "QuantumDiagnosticsHeaderActions",
     "CoreDiagnosticFacts",
     "IsQuantumSelected"
 )) {
@@ -194,15 +199,14 @@ foreach ($binding in @(
 }
 
 foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
-    Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshSystemMonitorCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
 }
 
-foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshSystemMonitorCommand")) {
+foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand")) {
     Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
 
@@ -422,17 +426,30 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Cross-network smart-code 
 
 Assert-Ordered -Text $mainWindow -Context "USB Management action order" -Needles @(
     '<TextBlock Text="USB Management"',
-    'Command="{Binding RefreshUsbManagementCommand}"',
+    'ItemsSource="{Binding UsbManagementHeaderActions}"',
     'ItemsSource="{Binding UsbDeviceStats}"',
     'ItemsSource="{Binding UsbDevices}"'
 )
 
+Assert-Ordered -Text $workspaceActionCatalog -Context "USB Management header action catalog order" -Needles @(
+    'BuildUsbManagementHeaderActions',
+    '"RefreshDevices"',
+    '"Refresh Devices"'
+)
+
 Assert-Ordered -Text $mainWindow -Context "File Transfer action order" -Needles @(
     '<TextBlock Text="File Transfer"',
+    'ItemsSource="{Binding FileTransferHeaderActions}"',
     'ItemsSource="{Binding FileTransferActions}"',
     '<TextBlock Text="Transfer Queue"',
     '<TextBlock Text="Transfer History"',
     '<TextBlock Text="File Transfer Security"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "File Transfer header action catalog order" -Needles @(
+    'BuildFileTransferHeaderActions',
+    '"RefreshPlan"',
+    '"Refresh Plan"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "File Transfer action catalog order" -Needles @(
@@ -446,8 +463,15 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "File Transfer action cata
 
 Assert-Ordered -Text $mainWindow -Context "Remote Desktop action order" -Needles @(
     '<TextBlock Text="Remote Desktop"',
+    'ItemsSource="{Binding RemoteDesktopHeaderActions}"',
     'ItemsSource="{Binding RemoteDesktopActions}"',
     '<TextBlock Text="Active Sessions"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Remote Desktop header action catalog order" -Needles @(
+    'BuildRemoteDesktopHeaderActions',
+    '"RefreshSessions"',
+    '"Refresh Sessions"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Remote Desktop action catalog order" -Needles @(
@@ -465,14 +489,32 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Remote Desktop action cat
     '"Disconnect Session"'
 )
 
+Assert-Ordered -Text $mainWindow -Context "Quantum diagnostics action order" -Needles @(
+    '<TextBlock Text="Quantum / Core Diagnostics"',
+    'ItemsSource="{Binding QuantumDiagnosticsHeaderActions}"',
+    'ItemsSource="{Binding CoreDiagnosticFacts}"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Quantum diagnostics header action catalog order" -Needles @(
+    'BuildQuantumDiagnosticsHeaderActions',
+    '"RunDiagnostics"',
+    '"Run Diagnostics"'
+)
+
 Assert-Ordered -Text $mainWindow -Context "Settings action order" -Needles @(
     '<TextBlock Text="Settings" FontSize="18"',
-    '<TextBlock Text="Refresh Status"',
+    'ItemsSource="{Binding SettingsHeaderActions}"',
     'ItemsSource="{Binding SettingsToolbarActions}"',
     '<TextBlock Text="Settings Tabs"',
     '<TextBlock Text="Settings Details"',
     '<TextBlock Text="Settings Actions"',
     'ItemsSource="{Binding SettingsMaintenanceActions}"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Settings header action catalog order" -Needles @(
+    'BuildSettingsHeaderActions',
+    '"RefreshStatus"',
+    '"Refresh Status"'
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Settings toolbar action catalog order" -Needles @(
@@ -598,6 +640,9 @@ Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscove
 foreach ($usbSignal in @(
     "USB Management",
     "Refresh Devices",
+    "UsbManagementHeaderActions",
+    "WorkspaceActionSurface.UsbManagementHeader",
+    "RefreshDevices",
     "MFi Certified",
     "Android Devices",
     "Storage Devices",
@@ -614,20 +659,24 @@ foreach ($usbSignal in @(
     "DriveInfo.GetDrives",
     "provider pending"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $usbManagement) -Needle $usbSignal -Message "USB Management parity signal missing: $usbSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $usbManagement + $workspaceActionCatalog) -Needle $usbSignal -Message "USB Management parity signal missing: $usbSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.UsbManagement, "USB Management", "\uE88E", "Device routing", true)' -Message "USB Management must be marked implemented once the read-only device workspace exists."
 
 foreach ($fileTransferSignal in @(
     "File Transfer",
+    "Refresh Plan",
+    "FileTransferHeaderActions",
     "Select Files",
     "Select Folder",
     "Generate QR",
     "FileTransferActions",
     "WorkspaceActionCatalogClient",
     "WorkspaceActionItemView",
+    "WorkspaceActionSurface.FileTransferHeader",
     "WorkspaceActionSurface.FileTransfer",
+    "RefreshPlan",
     "Transfer Queue",
     "Transfer History",
     "HMAC",
@@ -644,6 +693,8 @@ Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.FileTransfer,
 
 foreach ($remoteDesktopSignal in @(
     "Remote Desktop",
+    "Refresh Sessions",
+    "RemoteDesktopHeaderActions",
     "Recommended Connect",
     "Advanced Connect",
     "Performance Overlay",
@@ -651,7 +702,9 @@ foreach ($remoteDesktopSignal in @(
     "Full Screen",
     "Disconnect Session",
     "RemoteDesktopActions",
+    "WorkspaceActionSurface.RemoteDesktopHeader",
     "WorkspaceActionSurface.RemoteDesktop",
+    "RefreshSessions",
     "Active Sessions",
     "RemoteDesktopWorkspaceClient",
     "BuildReadOnlySnapshotAsync",
@@ -668,6 +721,11 @@ Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.RemoteDesktop
 foreach ($diagnosticSignal in @(
     "Quantum / Core Diagnostics",
     "Run Diagnostics",
+    "QuantumDiagnosticsHeaderActions",
+    "WorkspaceActionSurface.QuantumDiagnosticsHeader",
+    "RunDiagnostics",
+    "WorkspaceActionCatalogClient",
+    "WorkspaceActionItemView",
     "CoreDiagnosticFactView",
     "CoreDiagnosticsClient",
     "BuildInteropSnapshotAsync",
@@ -677,7 +735,7 @@ foreach ($diagnosticSignal in @(
     "EncodeSbp2FrameAsync",
     "DecodeFrameMetadataAsync"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $coreDiagnostics) -Needle $diagnosticSignal -Message "Quantum diagnostics parity signal missing: $diagnosticSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $coreDiagnostics + $workspaceActionCatalog) -Needle $diagnosticSignal -Message "Quantum diagnostics parity signal missing: $diagnosticSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true)' -Message "Quantum must be marked implemented once the Core diagnostics panel exists."
@@ -740,6 +798,7 @@ Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.SystemMonitor
 foreach ($settingsSignal in @(
     "Settings",
     "Refresh Status",
+    "SettingsHeaderActions",
     "Export",
     "Import",
     "Reset",
@@ -763,8 +822,10 @@ foreach ($settingsSignal in @(
     "SettingsMaintenanceActions",
     "WorkspaceActionCatalogClient",
     "WorkspaceActionItemView",
+    "WorkspaceActionSurface.SettingsHeader",
     "WorkspaceActionSurface.SettingsToolbar",
     "WorkspaceActionSurface.SettingsMaintenance",
+    "RefreshStatus",
     "SettingsWorkspaceClient",
     "BuildReadOnlySnapshotAsync",
     "SettingsTabItem",
@@ -840,6 +901,11 @@ foreach ($docSignal in @(
     "Theme",
     "TopBarStatusClient",
     "WorkspaceActionCatalogClient",
+    "UsbManagementHeaderActions",
+    "FileTransferHeaderActions",
+    "RemoteDesktopHeaderActions",
+    "QuantumDiagnosticsHeaderActions",
+    "SettingsHeaderActions",
     "CrossNetworkConnectionClient",
     "Generate QR Code",
     "Smart Connection Code",

@@ -147,8 +147,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         CrossNetworkQrActions = new ObservableCollection<WorkspaceActionItemView>();
         CrossNetworkCodePrimaryActions = new ObservableCollection<WorkspaceActionItemView>();
         CrossNetworkCodeConnectActions = new ObservableCollection<WorkspaceActionItemView>();
+        UsbManagementHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
+        FileTransferHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         FileTransferActions = new ObservableCollection<WorkspaceActionItemView>();
+        RemoteDesktopHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         RemoteDesktopActions = new ObservableCollection<WorkspaceActionItemView>();
+        QuantumDiagnosticsHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
+        SettingsHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
         SettingsToolbarActions = new ObservableCollection<WorkspaceActionItemView>();
         SettingsMaintenanceActions = new ObservableCollection<WorkspaceActionItemView>();
         FileTransferQueue = new ObservableCollection<FileTransferQueueItemView>();
@@ -235,9 +240,19 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<WorkspaceActionItemView> CrossNetworkCodeConnectActions { get; }
 
+    public ObservableCollection<WorkspaceActionItemView> UsbManagementHeaderActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> FileTransferHeaderActions { get; }
+
     public ObservableCollection<WorkspaceActionItemView> FileTransferActions { get; }
 
+    public ObservableCollection<WorkspaceActionItemView> RemoteDesktopHeaderActions { get; }
+
     public ObservableCollection<WorkspaceActionItemView> RemoteDesktopActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> QuantumDiagnosticsHeaderActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> SettingsHeaderActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> SettingsToolbarActions { get; }
 
@@ -1358,7 +1373,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession, SidebarSessionActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SessionControls, SessionControlActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader, UsbManagementHeaderActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransferHeader, FileTransferHeaderActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktopHeader, RemoteDesktopHeaderActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.QuantumDiagnosticsHeader, QuantumDiagnosticsHeaderActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorHeader, SystemMonitorHeaderActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsHeader, SettingsHeaderActions);
     }
 
     private void ApplyConnectionWorkspaceStatusPatch(ConnectionWorkspaceStatusPatch patch)
@@ -1428,10 +1448,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkQr, CrossNetworkQrActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkCodePrimary, CrossNetworkCodePrimaryActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkCodeConnect, CrossNetworkCodeConnectActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader, UsbManagementHeaderActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransferHeader, FileTransferHeaderActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransfer, FileTransferActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktopHeader, RemoteDesktopHeaderActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktop, RemoteDesktopActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.QuantumDiagnosticsHeader, QuantumDiagnosticsHeaderActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorHeader, SystemMonitorHeaderActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorControls, SystemMonitorActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsHeader, SettingsHeaderActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsToolbar, SettingsToolbarActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsMaintenance, SettingsMaintenanceActions);
     }
@@ -1509,9 +1534,34 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 "ConnectWithCode" => ConnectConnectionCodeCommand,
                 _ => null
             },
+            WorkspaceActionSurface.UsbManagementHeader => actionKey switch
+            {
+                "RefreshDevices" => RefreshUsbManagementCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.FileTransferHeader => actionKey switch
+            {
+                "RefreshPlan" => RefreshFileTransferCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.RemoteDesktopHeader => actionKey switch
+            {
+                "RefreshSessions" => RefreshRemoteDesktopCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.QuantumDiagnosticsHeader => actionKey switch
+            {
+                "RunDiagnostics" => RunCoreDiagnosticsCommand,
+                _ => null
+            },
             WorkspaceActionSurface.SystemMonitorHeader => actionKey switch
             {
                 "RefreshMetrics" => RefreshSystemMonitorCommand,
+                _ => null
+            },
+            WorkspaceActionSurface.SettingsHeader => actionKey switch
+            {
+                "RefreshStatus" => RefreshSettingsCommand,
                 _ => null
             },
             _ => null
@@ -1541,9 +1591,34 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 "Disconnect" => CanDisconnect(),
                 _ => fallback
             },
+            WorkspaceActionSurface.UsbManagementHeader => actionKey switch
+            {
+                "RefreshDevices" => CanRefreshUsbManagement(),
+                _ => fallback
+            },
+            WorkspaceActionSurface.FileTransferHeader => actionKey switch
+            {
+                "RefreshPlan" => CanRefreshFileTransfer(),
+                _ => fallback
+            },
+            WorkspaceActionSurface.RemoteDesktopHeader => actionKey switch
+            {
+                "RefreshSessions" => CanRefreshRemoteDesktop(),
+                _ => fallback
+            },
+            WorkspaceActionSurface.QuantumDiagnosticsHeader => actionKey switch
+            {
+                "RunDiagnostics" => CanRunCoreDiagnostics(),
+                _ => fallback
+            },
             WorkspaceActionSurface.SystemMonitorHeader => actionKey switch
             {
                 "RefreshMetrics" => CanRefreshSystemMonitor(),
+                _ => fallback
+            },
+            WorkspaceActionSurface.SettingsHeader => actionKey switch
+            {
+                "RefreshStatus" => CanRefreshSettings(),
                 _ => fallback
             },
             _ => fallback

@@ -24,10 +24,15 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 WorkspaceActionSurface.CrossNetworkQr => BuildCrossNetworkQrActions(),
                 WorkspaceActionSurface.CrossNetworkCodePrimary => BuildCrossNetworkCodePrimaryActions(),
                 WorkspaceActionSurface.CrossNetworkCodeConnect => BuildCrossNetworkCodeConnectActions(),
+                WorkspaceActionSurface.UsbManagementHeader => BuildUsbManagementHeaderActions(),
+                WorkspaceActionSurface.FileTransferHeader => BuildFileTransferHeaderActions(),
                 WorkspaceActionSurface.FileTransfer => BuildFileTransferActions(),
+                WorkspaceActionSurface.RemoteDesktopHeader => BuildRemoteDesktopHeaderActions(),
                 WorkspaceActionSurface.RemoteDesktop => BuildRemoteDesktopActions(),
+                WorkspaceActionSurface.QuantumDiagnosticsHeader => BuildQuantumDiagnosticsHeaderActions(),
                 WorkspaceActionSurface.SystemMonitorHeader => BuildSystemMonitorHeaderActions(),
                 WorkspaceActionSurface.SystemMonitorControls => BuildSystemMonitorControlActions(),
+                WorkspaceActionSurface.SettingsHeader => BuildSettingsHeaderActions(),
                 WorkspaceActionSurface.SettingsToolbar => BuildSettingsToolbarActions(),
                 WorkspaceActionSurface.SettingsMaintenance => BuildSettingsMaintenanceActions(),
                 _ => new List<WorkspaceActionItem>()
@@ -205,6 +210,28 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Mac-parity smart-code action; command validates code shape without starting transport.")
         };
 
+    private static IReadOnlyList<WorkspaceActionItem> BuildUsbManagementHeaderActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "RefreshDevices",
+                "Refresh Devices",
+                "\uE895",
+                true,
+                "Mac-parity USB Management refresh action; command stays in SessionViewModel.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildFileTransferHeaderActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "RefreshPlan",
+                "Refresh Plan",
+                "\uE895",
+                true,
+                "Mac-parity File Transfer header action; command refreshes the read-only Core plan.")
+        };
+
     private static IReadOnlyList<WorkspaceActionItem> BuildFileTransferActions() =>
         new List<WorkspaceActionItem>
         {
@@ -226,6 +253,17 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "\uE97E",
                 false,
                 "Visible mac-parity quick action; live share QR generation is pending.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildRemoteDesktopHeaderActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "RefreshSessions",
+                "Refresh Sessions",
+                "\uE895",
+                true,
+                "Mac-parity Remote Desktop header action; command refreshes the read-only session plan.")
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildRemoteDesktopActions() =>
@@ -275,6 +313,17 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Visible mac-parity quick action; no live session termination is wired.")
         };
 
+    private static IReadOnlyList<WorkspaceActionItem> BuildQuantumDiagnosticsHeaderActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "RunDiagnostics",
+                "Run Diagnostics",
+                "\uE9D9",
+                true,
+                "Mac-parity Quantum/Core diagnostics header action; command stays in SessionViewModel.")
+        };
+
     private static IReadOnlyList<WorkspaceActionItem> BuildSystemMonitorHeaderActions() =>
         new List<WorkspaceActionItem>
         {
@@ -307,6 +356,17 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "\uE72E",
                 false,
                 "Visible mac-parity monitoring action; helper installation and elevation remain pending.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildSettingsHeaderActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "RefreshStatus",
+                "Refresh Status",
+                "\uE895",
+                true,
+                "Mac-parity Settings header action; command refreshes the read-only settings snapshot.")
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildSettingsToolbarActions() =>
@@ -378,10 +438,15 @@ public enum WorkspaceActionSurface
     CrossNetworkQr,
     CrossNetworkCodePrimary,
     CrossNetworkCodeConnect,
+    UsbManagementHeader,
+    FileTransferHeader,
     FileTransfer,
+    RemoteDesktopHeader,
     RemoteDesktop,
+    QuantumDiagnosticsHeader,
     SystemMonitorHeader,
     SystemMonitorControls,
+    SettingsHeader,
     SettingsToolbar,
     SettingsMaintenance
 }

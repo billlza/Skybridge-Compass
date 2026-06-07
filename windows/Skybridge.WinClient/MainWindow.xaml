@@ -534,12 +534,23 @@
                                     <TextBlock Text="USB Management" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding UsbManagementStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Command="{Binding RefreshUsbManagementCommand}" VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE895;" FontSize="14" />
-                                        <TextBlock Text="Refresh Devices" />
-                                    </StackPanel>
-                                </Button>
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding UsbManagementHeaderActions}" VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="10" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Title}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </Grid>
 
                             <ItemsControl ItemsSource="{Binding UsbDeviceStats}">
@@ -608,12 +619,23 @@
                                     <TextBlock Text="File Transfer" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding FileTransferStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Command="{Binding RefreshFileTransferCommand}" VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE895;" FontSize="14" />
-                                        <TextBlock Text="Refresh Plan" />
-                                    </StackPanel>
-                                </Button>
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding FileTransferHeaderActions}" VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="10" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Title}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </Grid>
 
                             <ItemsControl ItemsSource="{Binding FileTransferActions}">
@@ -718,12 +740,23 @@
                                     <TextBlock Text="Remote Desktop" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding RemoteDesktopStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Command="{Binding RefreshRemoteDesktopCommand}" VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE895;" FontSize="14" />
-                                        <TextBlock Text="Refresh Sessions" />
-                                    </StackPanel>
-                                </Button>
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding RemoteDesktopHeaderActions}" VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="10" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Title}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </Grid>
 
                             <ItemsControl ItemsSource="{Binding RemoteDesktopActions}">
@@ -813,12 +846,23 @@
                                     <TextBlock Text="Quantum / Core Diagnostics" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding CoreDiagnosticsStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Command="{Binding RunCoreDiagnosticsCommand}" VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE9D9;" FontSize="14" />
-                                        <TextBlock Text="Run Diagnostics" />
-                                    </StackPanel>
-                                </Button>
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding QuantumDiagnosticsHeaderActions}" VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="10" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Title}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </Grid>
 
                             <ListView ItemsSource="{Binding CoreDiagnosticFacts}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsQuantumSelected}">
@@ -968,12 +1012,23 @@
                                     <TextBlock Text="Settings" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding SettingsStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Command="{Binding RefreshSettingsCommand}" VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE895;" FontSize="14" />
-                                        <TextBlock Text="Refresh Status" />
-                                    </StackPanel>
-                                </Button>
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding SettingsHeaderActions}" VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="10" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Title}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </Grid>
 
                             <ItemsControl ItemsSource="{Binding SettingsToolbarActions}">
