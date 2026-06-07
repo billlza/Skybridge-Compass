@@ -72,13 +72,18 @@ foreach ($binding in @(
     "TransferTaskCount",
     "PerformanceStatus",
     "BitrateProfiles",
-    "FramerateProfiles"
+    "FramerateProfiles",
+    "DiscoveryService",
+    "DiscoveryTxtRecord",
+    "DiscoveryStatus",
+    "DiscoveredPeers",
+    "IsDeviceDiscoverySelected"
 )) {
     Assert-Contains -Text $mainWindow -Needle $binding -Message "MainWindow.xaml missing binding: $binding"
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -91,6 +96,20 @@ foreach ($layoutSignal in @(
 )) {
     Assert-Contains -Text $mainWindow -Needle $layoutSignal -Message "MainWindow.xaml missing shell layout signal: $layoutSignal"
 }
+
+foreach ($discoverySignal in @(
+    "Device Discovery",
+    "_skybridge._udp",
+    "pubKeyFP",
+    "Core TXT parse",
+    "DiscoveredPeerView",
+    "PublicKeyFingerprint",
+    "fingerprint only; pairing must provide the peer public key"
+)) {
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+}
+
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
 
 foreach ($docSignal in @(
     "Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings",

@@ -11,7 +11,9 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        ViewModel = new SessionViewModel(new DummyEngineClient());
+        ViewModel = new SessionViewModel(
+            new DummyEngineClient(),
+            new CoreDiscoveryClient(new CoreBridge()));
         DataContext = ViewModel;
     }
 }

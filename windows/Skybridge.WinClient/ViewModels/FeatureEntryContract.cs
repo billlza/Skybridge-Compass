@@ -27,7 +27,7 @@ public static class FeatureEntryContract
         new List<FeatureEntry>
         {
             new(FeatureEntryId.Dashboard, "Dashboard", "\uE80F", "Live overview", true),
-            new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Scan and pair", false),
+            new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true),
             new(FeatureEntryId.UsbManagement, "USB Management", "\uE88E", "Device routing", false),
             new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", false),
             new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", false),

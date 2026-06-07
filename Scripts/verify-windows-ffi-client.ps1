@@ -78,6 +78,7 @@ Assert-True -Condition (-not $client.Contains("var peerPublicKey = ReadLocalPubl
 Assert-Contains -Text $mainWindow -Needle "new DummyEngineClient()" -Message "MainWindow should keep the dummy client until native DLL deployment is explicit."
 Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not silently switch to FfiEngineClient before native DLL deployment."
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
+Assert-Contains -Text $mainWindow -Needle "new CoreDiscoveryClient(new CoreBridge())" -Message "MainWindow should wire CoreDiscoveryClient for explicit manual discovery parsing."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",

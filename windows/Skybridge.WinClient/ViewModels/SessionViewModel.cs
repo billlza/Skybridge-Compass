@@ -23,24 +23,35 @@ public enum FramerateProfile
 
 public sealed class SessionViewModel : INotifyPropertyChanged
 {
+    private const string SampleFingerprint =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     private readonly IEngineClient _engineClient;
+    private readonly IDiscoveryClient _discoveryClient;
     private string _statusMessage = "Idle";
+    private string _discoveryService = "_skybridge._udp";
+    private string _discoveryTxtRecord =
+        $"deviceId=mac-1;pubKeyFP={SampleFingerprint};platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1";
+    private string _discoveryStatus = "Ready";
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
     private bool _isBusy;
 
-    public SessionViewModel(IEngineClient engineClient)
+    public SessionViewModel(IEngineClient engineClient, IDiscoveryClient? discoveryClient = null)
     {
         _engineClient = engineClient;
+        _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
+        DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
         HeartbeatCommand = new AsyncRelayCommand(SendHeartbeatAsync, CanSendHeartbeat);
+        ParseAdvertisementCommand = new AsyncRelayCommand(ParseAdvertisementAsync, CanParseAdvertisement);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
     }
@@ -53,6 +64,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<FramerateProfile> FramerateProfiles { get; }
 
+    public ObservableCollection<DiscoveredPeerView> DiscoveredPeers { get; }
+
     public int OnlineDeviceCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
 
     public int ActiveSessionCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
@@ -64,8 +77,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public FeatureEntry SelectedFeature
     {
         get => _selectedFeature;
-        set => SetField(ref _selectedFeature, value);
+        set
+        {
+            if (SetField(ref _selectedFeature, value))
+            {
+                OnPropertyChanged(nameof(IsDeviceDiscoverySelected));
+                RefreshCommandStates();
+            }
+        }
     }
+
+    public bool IsDeviceDiscoverySelected => SelectedFeature.Id == FeatureEntryId.DeviceDiscovery;
 
     public EngineConnectionState ConnectionState
     {
@@ -103,6 +125,38 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set => SetField(ref _statusMessage, value);
     }
 
+    public string DiscoveryService
+    {
+        get => _discoveryService;
+        set
+        {
+            if (SetField(ref _discoveryService, value))
+            {
+                RefreshCommandStates();
+            }
+        }
+    }
+
+    public string DiscoveryTxtRecord
+    {
+        get => _discoveryTxtRecord;
+        set
+        {
+            if (SetField(ref _discoveryTxtRecord, value))
+            {
+                RefreshCommandStates();
+            }
+        }
+    }
+
+    public string DiscoveryStatus
+    {
+        get => _discoveryStatus;
+        private set => SetField(ref _discoveryStatus, value);
+    }
+
+    public int DiscoveredPeerCount => DiscoveredPeers.Count;
+
     public BitrateProfile SelectedBitrate
     {
         get => _selectedBitrate;
@@ -132,6 +186,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand DisconnectCommand { get; }
 
     public ICommand HeartbeatCommand { get; }
+
+    public ICommand ParseAdvertisementCommand { get; }
 
     private async Task ConnectAsync()
     {
@@ -177,11 +233,36 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         });
     }
 
+    private async Task ParseAdvertisementAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            DiscoveryStatus = "Parsing...";
+            var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
+            DiscoveredPeers.Clear();
+            DiscoveredPeers.Add(DiscoveredPeerView.FromPeer(peer));
+            OnPropertyChanged(nameof(DiscoveredPeerCount));
+            DiscoveryStatus = $"Validated {peer.DeviceId}";
+            StatusMessage = "Discovery advertisement validated";
+        });
+    }
+
     private bool CanConnect() => !IsBusy && ConnectionState == EngineConnectionState.Disconnected;
 
     private bool CanDisconnect() => !IsBusy && (ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting);
 
     private bool CanSendHeartbeat() => !IsBusy && ConnectionState == EngineConnectionState.Connected;
+
+    private bool CanParseAdvertisement() =>
+        !IsBusy
+        && IsDeviceDiscoverySelected
+        && !string.IsNullOrWhiteSpace(DiscoveryService)
+        && !string.IsNullOrWhiteSpace(DiscoveryTxtRecord);
 
     private async Task RunWithBusyState(Func<Task> action)
     {
@@ -193,6 +274,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         catch (Exception ex)
         {
             StatusMessage = ex.Message;
+            if (IsDeviceDiscoverySelected)
+            {
+                DiscoveryStatus = ex.Message;
+            }
         }
         finally
         {
@@ -205,6 +290,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (ConnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (DisconnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (HeartbeatCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
     }
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
@@ -235,6 +321,72 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+}
+
+public sealed record DiscoveredPeerView(
+    string DeviceId,
+    string DisplayName,
+    string Platform,
+    string ServiceKind,
+    string PublicKeyFingerprint,
+    string CapabilitiesSummary,
+    string ProtocolVersion,
+    string TrustSummary)
+{
+    public static DiscoveredPeerView FromPeer(DiscoveredPeer peer) =>
+        new(
+            peer.DeviceId,
+            peer.DisplayName,
+            peer.Platform.ToString(),
+            peer.ServiceKind.ToString(),
+            peer.PublicKeyFingerprint,
+            FormatCapabilities(peer.Capabilities),
+            peer.ProtocolVersion,
+            "pubKeyFP fingerprint only; pairing must provide the peer public key.");
+
+    private static string FormatCapabilities(PeerCapabilities capabilities)
+    {
+        var values = new Collection<string>();
+        if (capabilities.SupportsAppleNative)
+        {
+            values.Add("apple-native");
+        }
+
+        if (capabilities.SupportsMsQuic)
+        {
+            values.Add("msquic");
+        }
+
+        if (capabilities.SupportsSkyBridgeIceMsQuic)
+        {
+            values.Add("ice-msquic");
+        }
+
+        if (capabilities.SupportsWebRtcDataChannel)
+        {
+            values.Add("webrtc");
+        }
+
+        if (capabilities.SupportsTcpFallback)
+        {
+            values.Add("tcp");
+        }
+
+        if (capabilities.SupportsRelay)
+        {
+            values.Add("relay");
+        }
+
+        return values.Count == 0 ? "none" : string.Join(", ", values);
+    }
+}
+
+internal sealed class UnavailableDiscoveryClient : IDiscoveryClient
+{
+    public Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord)
+    {
+        throw new InvalidOperationException("Discovery client is not configured.");
     }
 }
 
