@@ -31,6 +31,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
     private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
+    private readonly ISystemMonitorWorkspaceClient _systemMonitorClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoveryTxtRecord =
@@ -39,6 +40,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _coreDiagnosticsStatus = "Ready";
     private string _fileTransferStatus = "Ready";
     private string _remoteDesktopStatus = "Ready";
+    private string _systemMonitorStatus = "Ready";
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
@@ -50,13 +52,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IDiscoveryClient? discoveryClient = null,
         ICoreDiagnosticsClient? coreDiagnosticsClient = null,
         IFileTransferWorkspaceClient? fileTransferClient = null,
-        IRemoteDesktopWorkspaceClient? remoteDesktopClient = null)
+        IRemoteDesktopWorkspaceClient? remoteDesktopClient = null,
+        ISystemMonitorWorkspaceClient? systemMonitorClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
         _fileTransferClient = fileTransferClient ?? new UnavailableFileTransferWorkspaceClient();
         _remoteDesktopClient = remoteDesktopClient ?? new UnavailableRemoteDesktopWorkspaceClient();
+        _systemMonitorClient = systemMonitorClient ?? new UnavailableSystemMonitorWorkspaceClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
@@ -67,6 +71,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         FileTransferSecurityFacts = new ObservableCollection<FileTransferSecurityFactView>();
         RemoteDesktopSessions = new ObservableCollection<RemoteDesktopSessionItemView>();
         RemoteDesktopControlFacts = new ObservableCollection<RemoteDesktopControlFactView>();
+        SystemMonitorOverview = new ObservableCollection<SystemMonitorMetricView>();
+        SystemMonitorDetails = new ObservableCollection<SystemMonitorMetricView>();
+        SystemMonitorIndicators = new ObservableCollection<SystemMonitorIndicatorView>();
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
@@ -75,6 +82,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RunCoreDiagnosticsCommand = new AsyncRelayCommand(RunCoreDiagnosticsAsync, CanRunCoreDiagnostics);
         RefreshFileTransferCommand = new AsyncRelayCommand(RefreshFileTransferAsync, CanRefreshFileTransfer);
         RefreshRemoteDesktopCommand = new AsyncRelayCommand(RefreshRemoteDesktopAsync, CanRefreshRemoteDesktop);
+        RefreshSystemMonitorCommand = new AsyncRelayCommand(RefreshSystemMonitorAsync, CanRefreshSystemMonitor);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
     }
@@ -101,6 +109,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<RemoteDesktopControlFactView> RemoteDesktopControlFacts { get; }
 
+    public ObservableCollection<SystemMonitorMetricView> SystemMonitorOverview { get; }
+
+    public ObservableCollection<SystemMonitorMetricView> SystemMonitorDetails { get; }
+
+    public ObservableCollection<SystemMonitorIndicatorView> SystemMonitorIndicators { get; }
+
     public int OnlineDeviceCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
 
     public int ActiveSessionCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
@@ -120,6 +134,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 OnPropertyChanged(nameof(IsFileTransferSelected));
                 OnPropertyChanged(nameof(IsRemoteDesktopSelected));
                 OnPropertyChanged(nameof(IsQuantumSelected));
+                OnPropertyChanged(nameof(IsSystemMonitorSelected));
                 RefreshCommandStates();
             }
         }
@@ -132,6 +147,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public bool IsRemoteDesktopSelected => SelectedFeature.Id == FeatureEntryId.RemoteDesktop;
 
     public bool IsQuantumSelected => SelectedFeature.Id == FeatureEntryId.Quantum;
+
+    public bool IsSystemMonitorSelected => SelectedFeature.Id == FeatureEntryId.SystemMonitor;
 
     public EngineConnectionState ConnectionState
     {
@@ -225,6 +242,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public int RemoteDesktopSessionCount => RemoteDesktopSessions.Count;
 
+    public string SystemMonitorStatus
+    {
+        get => _systemMonitorStatus;
+        private set => SetField(ref _systemMonitorStatus, value);
+    }
+
+    public int SystemMonitorMetricCount => SystemMonitorOverview.Count;
+
     public BitrateProfile SelectedBitrate
     {
         get => _selectedBitrate;
@@ -262,6 +287,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RefreshFileTransferCommand { get; }
 
     public ICommand RefreshRemoteDesktopCommand { get; }
+
+    public ICommand RefreshSystemMonitorCommand { get; }
 
     private async Task ConnectAsync()
     {
@@ -416,6 +443,41 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         });
     }
 
+    private async Task RefreshSystemMonitorAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            SystemMonitorStatus = "Refreshing...";
+            var snapshot = await _systemMonitorClient.BuildReadOnlySnapshotAsync();
+            SystemMonitorOverview.Clear();
+            foreach (var metric in snapshot.Overview)
+            {
+                SystemMonitorOverview.Add(SystemMonitorMetricView.FromMetric(metric));
+            }
+
+            SystemMonitorDetails.Clear();
+            foreach (var metric in snapshot.Details)
+            {
+                SystemMonitorDetails.Add(SystemMonitorMetricView.FromMetric(metric));
+            }
+
+            SystemMonitorIndicators.Clear();
+            foreach (var indicator in snapshot.Indicators)
+            {
+                SystemMonitorIndicators.Add(SystemMonitorIndicatorView.FromIndicator(indicator));
+            }
+
+            OnPropertyChanged(nameof(SystemMonitorMetricCount));
+            SystemMonitorStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
+            StatusMessage = "System monitor workspace updated";
+        });
+    }
+
     private bool CanConnect() => !IsBusy && ConnectionState == EngineConnectionState.Disconnected;
 
     private bool CanDisconnect() => !IsBusy && (ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting);
@@ -433,6 +495,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanRefreshFileTransfer() => !IsBusy && IsFileTransferSelected;
 
     private bool CanRefreshRemoteDesktop() => !IsBusy && IsRemoteDesktopSelected;
+
+    private bool CanRefreshSystemMonitor() => !IsBusy && IsSystemMonitorSelected;
 
     private async Task RunWithBusyState(Func<Task> action)
     {
@@ -463,6 +527,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             {
                 RemoteDesktopStatus = ex.Message;
             }
+
+            if (IsSystemMonitorSelected)
+            {
+                SystemMonitorStatus = ex.Message;
+            }
         }
         finally
         {
@@ -479,6 +548,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (RunCoreDiagnosticsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshFileTransferCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (RefreshSystemMonitorCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
     }
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
@@ -510,6 +580,24 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+}
+
+public sealed record SystemMonitorMetricView(
+    string Label,
+    string Value,
+    string Detail)
+{
+    public static SystemMonitorMetricView FromMetric(SystemMonitorMetric metric) =>
+        new(metric.Label, metric.Value, metric.Detail);
+}
+
+public sealed record SystemMonitorIndicatorView(
+    string Label,
+    string State,
+    string Detail)
+{
+    public static SystemMonitorIndicatorView FromIndicator(SystemMonitorIndicator indicator) =>
+        new(indicator.Label, indicator.State, indicator.Detail);
 }
 
 public sealed record RemoteDesktopSessionItemView(
@@ -660,6 +748,14 @@ internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWo
         string framerateProfile)
     {
         throw new InvalidOperationException("Remote desktop workspace client is not configured.");
+    }
+}
+
+internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
+{
+    public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
+    {
+        throw new InvalidOperationException("System monitor workspace client is not configured.");
     }
 }
 

@@ -492,6 +492,115 @@
                         </StackPanel>
                     </Border>
 
+                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                        <StackPanel Spacing="14">
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="System Monitor" FontSize="18" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding SystemMonitorStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Command="{Binding RefreshSystemMonitorCommand}" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE895;" FontSize="14" />
+                                        <TextBlock Text="Refresh Metrics" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xF16B;" FontSize="14" />
+                                        <TextBlock Text="Monitoring" />
+                                    </StackPanel>
+                                </Button>
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE71A;" FontSize="14" />
+                                        <TextBlock Text="Stop Monitoring" />
+                                    </StackPanel>
+                                </Button>
+                                <Button IsEnabled="False">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE72E;" FontSize="14" />
+                                        <TextBlock Text="Enable Advanced Monitoring" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+
+                            <Grid ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="Overview" FontWeight="SemiBold" />
+                                    <ListView ItemsSource="{Binding SystemMonitorOverview}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}">
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Padding="0,8" ColumnSpacing="12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="140" />
+                                                        <ColumnDefinition Width="140" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding Value}" />
+                                                    <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="1" Spacing="8">
+                                    <TextBlock Text="Indicators" FontWeight="SemiBold" />
+                                    <ListView ItemsSource="{Binding SystemMonitorIndicators}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsSystemMonitorSelected}">
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Padding="0,8" ColumnSpacing="12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="120" />
+                                                        <ColumnDefinition Width="140" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding State}" />
+                                                    <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </StackPanel>
+                            </Grid>
+
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Detailed Monitoring" FontWeight="SemiBold" />
+                                <ItemsControl ItemsSource="{Binding SystemMonitorDetails}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Padding="0,4" ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="160" />
+                                                    <ColumnDefinition Width="240" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                                                <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
                     <Grid ColumnSpacing="18">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="2*" />

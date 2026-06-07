@@ -32,7 +32,7 @@ public static class FeatureEntryContract
             new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", true),
             new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", true),
             new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true),
-            new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", false),
+            new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", true),
             new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", false)
         }.AsReadOnly();
 }

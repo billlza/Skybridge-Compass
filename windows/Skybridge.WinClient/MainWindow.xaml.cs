@@ -17,7 +17,8 @@ public sealed partial class MainWindow : Window
             new CoreDiscoveryClient(coreBridge),
             new CoreDiagnosticsClient(coreBridge),
             new FileTransferWorkspaceClient(coreBridge),
-            new RemoteDesktopWorkspaceClient(coreBridge));
+            new RemoteDesktopWorkspaceClient(coreBridge),
+            new SystemMonitorWorkspaceClient());
         DataContext = ViewModel;
     }
 }

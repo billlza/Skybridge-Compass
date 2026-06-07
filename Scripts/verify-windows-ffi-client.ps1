@@ -31,11 +31,12 @@ $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
+$systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -45,6 +46,7 @@ $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
+$systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
@@ -89,6 +91,7 @@ Assert-Contains -Text $mainWindow -Needle "new CoreDiscoveryClient(coreBridge)" 
 Assert-Contains -Text $mainWindow -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "MainWindow should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "MainWindow should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "MainWindow should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
+Assert-Contains -Text $mainWindow -Needle "new SystemMonitorWorkspaceClient()" -Message "MainWindow should wire SystemMonitorWorkspaceClient for explicit System Monitor diagnostics."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",
@@ -181,5 +184,22 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "RemoteDesktopWorkspaceClient" -Message "Architecture doc missing RemoteDesktopWorkspaceClient status."
+
+foreach ($signal in @(
+    "public interface ISystemMonitorWorkspaceClient",
+    "public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient",
+    "BuildReadOnlySnapshotAsync",
+    "Process.GetCurrentProcess",
+    "GC.GetGCMemoryInfo",
+    "DriveInfo.GetDrives",
+    "NetworkInterface.GetAllNetworkInterfaces",
+    "RuntimeInformation",
+    "SystemMonitorMetric",
+    "SystemMonitorIndicator"
+)) {
+    Assert-Contains -Text $systemMonitor -Needle $signal -Message "SystemMonitorWorkspaceClient missing Windows diagnostics signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "SystemMonitorWorkspaceClient" -Message "Architecture doc missing SystemMonitorWorkspaceClient status."
 
 Write-Output "windows-ffi-client: ok"

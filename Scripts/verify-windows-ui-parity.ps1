@@ -30,10 +30,11 @@ $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewMod
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
+$systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -42,6 +43,7 @@ $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
+$systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 
@@ -93,6 +95,11 @@ foreach ($binding in @(
     "RemoteDesktopSessions",
     "RemoteDesktopControlFacts",
     "IsRemoteDesktopSelected",
+    "SystemMonitorStatus",
+    "SystemMonitorOverview",
+    "SystemMonitorDetails",
+    "SystemMonitorIndicators",
+    "IsSystemMonitorSelected",
     "CoreDiagnosticsStatus",
     "CoreDiagnosticFacts",
     "IsQuantumSelected"
@@ -101,7 +108,7 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -182,6 +189,30 @@ foreach ($diagnosticSignal in @(
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true)' -Message "Quantum must be marked implemented once the Core diagnostics panel exists."
+
+foreach ($systemMonitorSignal in @(
+    "System Monitor",
+    "Refresh Metrics",
+    "Monitoring",
+    "Stop Monitoring",
+    "Enable Advanced Monitoring",
+    "Overview",
+    "Indicators",
+    "Detailed Monitoring",
+    "CPU",
+    "Memory",
+    "GPU",
+    "Thermal",
+    "Helper",
+    "SystemMonitorWorkspaceClient",
+    "BuildReadOnlySnapshotAsync",
+    "SystemMonitorMetric",
+    "SystemMonitorIndicator"
+)) {
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $systemMonitor) -Needle $systemMonitorSignal -Message "System Monitor parity signal missing: $systemMonitorSignal"
+}
+
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", true)' -Message "System Monitor must be marked implemented once the read-only metrics workspace exists."
 
 foreach ($docSignal in @(
     "Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings",
