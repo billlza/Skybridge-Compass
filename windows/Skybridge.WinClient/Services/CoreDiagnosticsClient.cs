@@ -37,6 +37,16 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
             remoteSuites,
             suitePolicy,
             padding);
+        var bindingDigest = await _coreBridge.ComputeTransportBindingDigestAsync(
+            new TransportBindingMaterial(
+                plan.Transport.Kind,
+                "windows-diagnostic.local:443",
+                "apple-diagnostic.local:443",
+                "webrtc/host-udp",
+                Encoding.UTF8.GetBytes("diagnostic-transport-secret-fingerprint"),
+                null,
+                10_000,
+                Encoding.UTF8.GetBytes("windows,apple,webrtc,tcp")));
         var realtime = await _coreBridge.MapChannelAsync(plan.Transport.Kind, CoreChannelKind.Realtime);
         var frame = await _coreBridge.EncodeSbp2FrameAsync(
             CoreChannelKind.Control,
@@ -50,6 +60,7 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
         {
             new("Interop path", $"{local.Platform} -> {remote.Platform}", "Windows-to-Apple cross-NAT diagnostic plan"),
             new("Transport", plan.Transport.Kind.ToString(), plan.Transport.AuditCode.ToString()),
+            new("Transport binding digest", FormatHex(bindingDigest), "diagnostic-only binding material; live adapters must provide endpoint, candidate, exporter, relay, timestamp, and capability inputs"),
             new("Selected suite", plan.SelectedSuite.ToString(), $"wire=0x{plan.SelectedSuiteWireId:x4}; audit={plan.SuiteAudit}"),
             new("SBP2", plan.Sbp2Enabled ? "enabled" : "disabled", $"fixed_payload_len={plan.Sbp2FixedPayloadLen}"),
             new("Frame header", $"{plan.FrameHeaderLen} bytes", "Core SBF1 envelope"),
@@ -59,6 +70,17 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
         };
 
         return new CoreDiagnosticsSnapshot(DateTimeOffset.UtcNow, facts);
+    }
+
+    private static string FormatHex(byte[] bytes)
+    {
+        var builder = new StringBuilder(bytes.Length * 2);
+        foreach (var value in bytes)
+        {
+            builder.Append(value.ToString("x2"));
+        }
+
+        return builder.ToString();
     }
 }
 

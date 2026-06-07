@@ -175,6 +175,8 @@ foreach ($signal in @(
     "public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient",
     "BuildInteropSnapshotAsync",
     "PlanConnectionAsync",
+    "ComputeTransportBindingDigestAsync",
+    "Transport binding digest",
     "MapChannelAsync",
     "EncodeSbp2FrameAsync",
     "DecodeFrameMetadataAsync",

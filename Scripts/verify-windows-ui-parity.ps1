@@ -221,6 +221,9 @@ foreach ($diagnosticSignal in @(
     "CoreDiagnosticFactView",
     "CoreDiagnosticsClient",
     "BuildInteropSnapshotAsync",
+    "ComputeTransportBindingDigestAsync",
+    "Transport binding digest",
+    "diagnostic-only binding material",
     "EncodeSbp2FrameAsync",
     "DecodeFrameMetadataAsync"
 )) {
