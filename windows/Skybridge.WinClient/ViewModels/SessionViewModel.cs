@@ -32,6 +32,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
     private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
     private readonly ISystemMonitorWorkspaceClient _systemMonitorClient;
+    private readonly IUsbManagementWorkspaceClient _usbManagementClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoveryTxtRecord =
@@ -41,6 +42,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _fileTransferStatus = "Ready";
     private string _remoteDesktopStatus = "Ready";
     private string _systemMonitorStatus = "Ready";
+    private string _usbManagementStatus = "Ready";
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
@@ -53,7 +55,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ICoreDiagnosticsClient? coreDiagnosticsClient = null,
         IFileTransferWorkspaceClient? fileTransferClient = null,
         IRemoteDesktopWorkspaceClient? remoteDesktopClient = null,
-        ISystemMonitorWorkspaceClient? systemMonitorClient = null)
+        ISystemMonitorWorkspaceClient? systemMonitorClient = null,
+        IUsbManagementWorkspaceClient? usbManagementClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -61,6 +64,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _fileTransferClient = fileTransferClient ?? new UnavailableFileTransferWorkspaceClient();
         _remoteDesktopClient = remoteDesktopClient ?? new UnavailableRemoteDesktopWorkspaceClient();
         _systemMonitorClient = systemMonitorClient ?? new UnavailableSystemMonitorWorkspaceClient();
+        _usbManagementClient = usbManagementClient ?? new UnavailableUsbManagementWorkspaceClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
@@ -74,6 +78,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SystemMonitorOverview = new ObservableCollection<SystemMonitorMetricView>();
         SystemMonitorDetails = new ObservableCollection<SystemMonitorMetricView>();
         SystemMonitorIndicators = new ObservableCollection<SystemMonitorIndicatorView>();
+        UsbDeviceStats = new ObservableCollection<UsbDeviceStatView>();
+        UsbDevices = new ObservableCollection<UsbDeviceItemView>();
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
@@ -83,6 +89,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshFileTransferCommand = new AsyncRelayCommand(RefreshFileTransferAsync, CanRefreshFileTransfer);
         RefreshRemoteDesktopCommand = new AsyncRelayCommand(RefreshRemoteDesktopAsync, CanRefreshRemoteDesktop);
         RefreshSystemMonitorCommand = new AsyncRelayCommand(RefreshSystemMonitorAsync, CanRefreshSystemMonitor);
+        RefreshUsbManagementCommand = new AsyncRelayCommand(RefreshUsbManagementAsync, CanRefreshUsbManagement);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
     }
@@ -115,6 +122,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<SystemMonitorIndicatorView> SystemMonitorIndicators { get; }
 
+    public ObservableCollection<UsbDeviceStatView> UsbDeviceStats { get; }
+
+    public ObservableCollection<UsbDeviceItemView> UsbDevices { get; }
+
     public int OnlineDeviceCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
 
     public int ActiveSessionCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
@@ -131,6 +142,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _selectedFeature, value))
             {
                 OnPropertyChanged(nameof(IsDeviceDiscoverySelected));
+                OnPropertyChanged(nameof(IsUsbManagementSelected));
                 OnPropertyChanged(nameof(IsFileTransferSelected));
                 OnPropertyChanged(nameof(IsRemoteDesktopSelected));
                 OnPropertyChanged(nameof(IsQuantumSelected));
@@ -141,6 +153,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     }
 
     public bool IsDeviceDiscoverySelected => SelectedFeature.Id == FeatureEntryId.DeviceDiscovery;
+
+    public bool IsUsbManagementSelected => SelectedFeature.Id == FeatureEntryId.UsbManagement;
 
     public bool IsFileTransferSelected => SelectedFeature.Id == FeatureEntryId.FileTransfer;
 
@@ -250,6 +264,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public int SystemMonitorMetricCount => SystemMonitorOverview.Count;
 
+    public string UsbManagementStatus
+    {
+        get => _usbManagementStatus;
+        private set => SetField(ref _usbManagementStatus, value);
+    }
+
+    public int UsbDeviceCount => UsbDevices.Count;
+
     public BitrateProfile SelectedBitrate
     {
         get => _selectedBitrate;
@@ -289,6 +311,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RefreshRemoteDesktopCommand { get; }
 
     public ICommand RefreshSystemMonitorCommand { get; }
+
+    public ICommand RefreshUsbManagementCommand { get; }
 
     private async Task ConnectAsync()
     {
@@ -412,6 +436,35 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         });
     }
 
+    private async Task RefreshUsbManagementAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            UsbManagementStatus = "Refreshing...";
+            var snapshot = await _usbManagementClient.BuildReadOnlySnapshotAsync();
+            UsbDeviceStats.Clear();
+            foreach (var stat in snapshot.Stats)
+            {
+                UsbDeviceStats.Add(UsbDeviceStatView.FromStat(stat));
+            }
+
+            UsbDevices.Clear();
+            foreach (var device in snapshot.Devices)
+            {
+                UsbDevices.Add(UsbDeviceItemView.FromItem(device));
+            }
+
+            OnPropertyChanged(nameof(UsbDeviceCount));
+            UsbManagementStatus = $"Last scan {snapshot.CapturedAt:HH:mm:ss} UTC";
+            StatusMessage = "USB management workspace updated";
+        });
+    }
+
     private async Task RefreshRemoteDesktopAsync()
     {
         if (IsBusy)
@@ -490,6 +543,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         && !string.IsNullOrWhiteSpace(DiscoveryService)
         && !string.IsNullOrWhiteSpace(DiscoveryTxtRecord);
 
+    private bool CanRefreshUsbManagement() => !IsBusy && IsUsbManagementSelected;
+
     private bool CanRunCoreDiagnostics() => !IsBusy && IsQuantumSelected;
 
     private bool CanRefreshFileTransfer() => !IsBusy && IsFileTransferSelected;
@@ -511,6 +566,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (IsDeviceDiscoverySelected)
             {
                 DiscoveryStatus = ex.Message;
+            }
+
+            if (IsUsbManagementSelected)
+            {
+                UsbManagementStatus = ex.Message;
             }
 
             if (IsQuantumSelected)
@@ -545,6 +605,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (DisconnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (HeartbeatCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (RefreshUsbManagementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RunCoreDiagnosticsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshFileTransferCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
@@ -580,6 +641,37 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+}
+
+public sealed record UsbDeviceStatView(
+    string Title,
+    string Value,
+    string Detail)
+{
+    public static UsbDeviceStatView FromStat(UsbDeviceStat stat) =>
+        new(stat.Title, stat.Value, stat.Detail);
+}
+
+public sealed record UsbDeviceItemView(
+    string Name,
+    string DeviceId,
+    string DeviceType,
+    string VendorId,
+    string ProductId,
+    string SerialNumber,
+    string ConnectionInterface,
+    string Capabilities)
+{
+    public static UsbDeviceItemView FromItem(UsbDeviceItem item) =>
+        new(
+            item.Name,
+            item.DeviceId,
+            item.DeviceType,
+            item.VendorId,
+            item.ProductId,
+            item.SerialNumber,
+            item.ConnectionInterface,
+            item.Capabilities);
 }
 
 public sealed record SystemMonitorMetricView(
@@ -756,6 +848,14 @@ internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWo
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("System monitor workspace client is not configured.");
+    }
+}
+
+internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWorkspaceClient
+{
+    public Task<UsbManagementWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
+    {
+        throw new InvalidOperationException("USB management workspace client is not configured.");
     }
 }
 
