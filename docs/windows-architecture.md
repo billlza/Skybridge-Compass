@@ -6,7 +6,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - The mac reference ADR is `Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md` on `tdsc-2026-01-0318-ios-sim-fix-20260211-adr` (latest TDSC mac branch checked on 2026-06-07). It treats WebRTC, MsQuic, and Apple Network.framework as transport adapters. SkyBridge Core owns identity, pairing, trust, handshake, logical channels, transport selection, traffic padding, and audit semantics.
 - Windows-to-Windows same-LAN sessions must prefer `WindowsNativeMsQuicTransport`; Windows-to-Apple MVP interop should use `WebRTCInteropTransport`; Apple-to-Apple remains Apple native and must not be replaced by WebRTC by default.
 - The Rust core now exposes `transport` selection primitives plus `skybridge_select_transport` over FFI so the Windows UI can request an auditable plan instead of hardcoding protocol state.
-- `channel.rs` maps Core logical channels to adapter-specific channel names: MsQuic uses streams for control/file/clipboard and datagrams for telemetry/realtime; WebRTC uses separate DataChannel labels per logical channel; Apple native keeps the same Core names without switching Apple-to-Apple to WebRTC.
+- `channel.rs` maps Core logical channels to adapter-specific channel names and exposes them through `skybridge_map_channel` / `CoreBridge.MapChannelAsync`: MsQuic uses streams for control/file/clipboard and datagrams for telemetry/realtime; WebRTC uses separate DataChannel labels per logical channel; Apple native keeps the same Core names without switching Apple-to-Apple to WebRTC.
 - The Rust core also defines the ADR canonical crypto suite IDs (`0x0001`, `0x0101`, `0x1001`, `0x1002`) in `suite.rs`; offered suites are derived from runtime provider capabilities and classic fallback requires an explicit policy gate.
 - The Rust core provides SBP2 traffic-padding framing in `padding.rs` using the ADR wire shape (`SBP2` magic, `actual_len` u32be, payload, random padding). Transport adapters still need to call it after handshake policy enables padding.
 
@@ -24,6 +24,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 ## Planned Rust FFI integration
 - Introduce a `FfiEngineClient` in `Services` that P/Invokes the C ABI exposed by `core/skybridge-core/src/ffi.rs` (e.g., `skybridge_engine_new`, `skybridge_engine_connect`, `skybridge_engine_shutdown`).
 - Use `CoreBridge.SelectTransportAsync` / `skybridge_select_transport` to choose Apple-native, Windows MsQuic, WebRTC interop, relay, or TCP fallback plans from peer capabilities and path facts.
+- Use `CoreBridge.MapChannelAsync` / `skybridge_map_channel` so Windows services consume Core logical-channel mappings instead of duplicating adapter policy in C#.
 - Use `skybridge transport select` for operator smoke checks against the same Rust selector before WinUI or native adapter wiring is available.
 - Use `skybridge channel map` to verify that each transport adapter uses channel-specific streams, datagrams, or DataChannels before real adapter wiring is enabled.
 - Use `skybridge suite offer` and `skybridge suite select` to verify provider-derived suite offers, remote wire ID parsing, and downgrade audit behavior before platform crypto provider wiring is available.

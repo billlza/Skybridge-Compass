@@ -1,10 +1,11 @@
+use crate::channel::{map_channel, AdapterChannelBinding};
 use crate::crypto::{P256KeyExchange, P256SessionCrypto, SessionCryptoProvider, SessionSecrets};
 use crate::error::{CoreError, CoreResult};
 use crate::session::{AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState};
 use crate::stream::{FlowRate, StreamController, StreamMetrics};
 use crate::transport::{
-    NetworkPath, PeerCapabilities, PeerPlatform, RelayPolicy, SkyBridgeTransportKind,
-    TransportAuditReason, TransportSelector,
+    NetworkPath, PeerCapabilities, PeerPlatform, RelayPolicy, SkyBridgeChannel,
+    SkyBridgeReliability, SkyBridgeTransportKind, TransportAuditReason, TransportSelector,
 };
 use crate::CoreEngine;
 use std::collections::VecDeque;
@@ -159,6 +160,47 @@ pub struct SkybridgeTransportSelection {
     pub relay_allowed: u8,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeChannelKind {
+    Control = 1,
+    File = 2,
+    Clipboard = 3,
+    Telemetry = 4,
+    Realtime = 5,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeReliabilityKind {
+    ReliableOrdered = 1,
+    ReliableUnordered = 2,
+    PartialReliable = 3,
+    Unreliable = 4,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkybridgeAdapterBindingKind {
+    AppleStream = 1,
+    AppleDatagram = 2,
+    MsQuicStream = 3,
+    MsQuicDatagram = 4,
+    WebRtcDataChannel = 5,
+    RelayStream = 6,
+    TcpStream = 7,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkybridgeChannelMapping {
+    pub channel: SkybridgeChannelKind,
+    pub reliability: SkybridgeReliabilityKind,
+    pub max_retransmits: u16,
+    pub binding_kind: SkybridgeAdapterBindingKind,
+    pub head_of_line_isolated: u8,
+}
+
 /// Maximum number of queued events retained by the engine handle.
 /// Older events are dropped once this capacity is reached so callers must poll
 /// regularly to avoid missing notifications.
@@ -240,6 +282,69 @@ fn map_transport_kind(kind: Option<SkyBridgeTransportKind>) -> SkybridgeTranspor
         Some(SkyBridgeTransportKind::Relay) => SkybridgeTransportKind::Relay,
         Some(SkyBridgeTransportKind::TcpFallback) => SkybridgeTransportKind::TcpFallback,
         None => SkybridgeTransportKind::Unsupported,
+    }
+}
+
+fn map_ffi_transport_kind(kind: SkybridgeTransportKind) -> Option<SkyBridgeTransportKind> {
+    match kind {
+        SkybridgeTransportKind::AppleNative => Some(SkyBridgeTransportKind::AppleNative),
+        SkybridgeTransportKind::WindowsNativeMsQuic => {
+            Some(SkyBridgeTransportKind::WindowsNativeMsQuic)
+        }
+        SkybridgeTransportKind::SkyBridgeIceMsQuic => {
+            Some(SkyBridgeTransportKind::SkyBridgeIceMsQuic)
+        }
+        SkybridgeTransportKind::WebRtcDataChannel => {
+            Some(SkyBridgeTransportKind::WebRtcDataChannel)
+        }
+        SkybridgeTransportKind::Relay => Some(SkyBridgeTransportKind::Relay),
+        SkybridgeTransportKind::TcpFallback => Some(SkyBridgeTransportKind::TcpFallback),
+        SkybridgeTransportKind::Unsupported => None,
+    }
+}
+
+fn map_ffi_channel_kind(channel: SkybridgeChannelKind) -> SkyBridgeChannel {
+    match channel {
+        SkybridgeChannelKind::Control => SkyBridgeChannel::Control,
+        SkybridgeChannelKind::File => SkyBridgeChannel::File,
+        SkybridgeChannelKind::Clipboard => SkyBridgeChannel::Clipboard,
+        SkybridgeChannelKind::Telemetry => SkyBridgeChannel::Telemetry,
+        SkybridgeChannelKind::Realtime => SkyBridgeChannel::Realtime,
+    }
+}
+
+fn map_channel_kind(channel: SkyBridgeChannel) -> SkybridgeChannelKind {
+    match channel {
+        SkyBridgeChannel::Control => SkybridgeChannelKind::Control,
+        SkyBridgeChannel::File => SkybridgeChannelKind::File,
+        SkyBridgeChannel::Clipboard => SkybridgeChannelKind::Clipboard,
+        SkyBridgeChannel::Telemetry => SkybridgeChannelKind::Telemetry,
+        SkyBridgeChannel::Realtime => SkybridgeChannelKind::Realtime,
+    }
+}
+
+fn map_reliability(reliability: SkyBridgeReliability) -> (SkybridgeReliabilityKind, u16) {
+    match reliability {
+        SkyBridgeReliability::ReliableOrdered => (SkybridgeReliabilityKind::ReliableOrdered, 0),
+        SkyBridgeReliability::ReliableUnordered => (SkybridgeReliabilityKind::ReliableUnordered, 0),
+        SkyBridgeReliability::PartialReliable { max_retransmits } => {
+            (SkybridgeReliabilityKind::PartialReliable, max_retransmits)
+        }
+        SkyBridgeReliability::Unreliable => (SkybridgeReliabilityKind::Unreliable, 0),
+    }
+}
+
+fn map_binding_kind(binding: &AdapterChannelBinding) -> SkybridgeAdapterBindingKind {
+    match binding {
+        AdapterChannelBinding::AppleStream { .. } => SkybridgeAdapterBindingKind::AppleStream,
+        AdapterChannelBinding::AppleDatagram { .. } => SkybridgeAdapterBindingKind::AppleDatagram,
+        AdapterChannelBinding::MsQuicStream { .. } => SkybridgeAdapterBindingKind::MsQuicStream,
+        AdapterChannelBinding::MsQuicDatagram { .. } => SkybridgeAdapterBindingKind::MsQuicDatagram,
+        AdapterChannelBinding::WebRtcDataChannel { .. } => {
+            SkybridgeAdapterBindingKind::WebRtcDataChannel
+        }
+        AdapterChannelBinding::RelayStream { .. } => SkybridgeAdapterBindingKind::RelayStream,
+        AdapterChannelBinding::TcpStream { .. } => SkybridgeAdapterBindingKind::TcpStream,
     }
 }
 
@@ -557,6 +662,43 @@ pub unsafe extern "C" fn skybridge_select_transport(
             priority: plan.priority,
             relay_required: map_relay_required(plan.relay_policy),
             relay_allowed: map_relay_allowed(plan.relay_policy),
+        };
+    }
+
+    SkybridgeErrorCode::Ok
+}
+
+#[no_mangle]
+/// Maps a Core logical channel to the adapter-specific binding selected by Core.
+///
+/// # Safety
+/// `out_mapping` must be a valid writable pointer.
+pub unsafe extern "C" fn skybridge_map_channel(
+    transport: SkybridgeTransportKind,
+    channel: SkybridgeChannelKind,
+    out_mapping: *mut SkybridgeChannelMapping,
+) -> SkybridgeErrorCode {
+    if out_mapping.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+
+    let Some(transport) = map_ffi_transport_kind(transport) else {
+        return SkybridgeErrorCode::InvalidInput;
+    };
+
+    let profile = match map_channel(transport, map_ffi_channel_kind(channel)) {
+        Ok(profile) => profile,
+        Err(_) => return SkybridgeErrorCode::InvalidInput,
+    };
+    let (reliability, max_retransmits) = map_reliability(profile.reliability);
+
+    unsafe {
+        *out_mapping = SkybridgeChannelMapping {
+            channel: map_channel_kind(profile.channel),
+            reliability,
+            max_retransmits,
+            binding_kind: map_binding_kind(&profile.binding),
+            head_of_line_isolated: u8::from(profile.binding.isolates_head_of_line_blocking()),
         };
     }
 

@@ -52,6 +52,20 @@ public sealed class CoreBridge
         });
     }
 
+    public Task<ChannelMapping> MapChannelAsync(CoreTransportKind transport, CoreChannelKind channel)
+    {
+        return Task.Run(() =>
+        {
+            var result = NativeMethods.MapChannel(transport, channel, out var mapping);
+            if (result != SkybridgeErrorCode.Ok)
+            {
+                throw new InvalidOperationException($"Channel mapping failed: {result}");
+            }
+
+            return ChannelMapping.FromNative(mapping);
+        });
+    }
+
     private static class NativeMethods
     {
         [DllImport("skybridge_core", EntryPoint = "skybridge_engine_new")]
@@ -66,6 +80,12 @@ public sealed class CoreBridge
             NativePeerCapabilities remote,
             NativeNetworkPath path,
             out NativeTransportSelection selection);
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_map_channel")]
+        public static extern SkybridgeErrorCode MapChannel(
+            CoreTransportKind transport,
+            CoreChannelKind channel,
+            out NativeChannelMapping mapping);
     }
 }
 
@@ -96,6 +116,34 @@ public enum CoreTransportAuditCode
     WebRtcInterop = 4,
     TcpFallbackSameLan = 5,
     RelayFallback = 6
+}
+
+public enum CoreChannelKind
+{
+    Control = 1,
+    File = 2,
+    Clipboard = 3,
+    Telemetry = 4,
+    Realtime = 5
+}
+
+public enum CoreReliabilityKind
+{
+    ReliableOrdered = 1,
+    ReliableUnordered = 2,
+    PartialReliable = 3,
+    Unreliable = 4
+}
+
+public enum CoreAdapterBindingKind
+{
+    AppleStream = 1,
+    AppleDatagram = 2,
+    MsQuicStream = 3,
+    MsQuicDatagram = 4,
+    WebRtcDataChannel = 5,
+    RelayStream = 6,
+    TcpStream = 7
 }
 
 public sealed record PeerCapabilities(
@@ -158,6 +206,22 @@ public sealed record TransportSelection(
             selection.RelayAllowed != 0);
 }
 
+public sealed record ChannelMapping(
+    CoreChannelKind Channel,
+    CoreReliabilityKind Reliability,
+    ushort MaxRetransmits,
+    CoreAdapterBindingKind BindingKind,
+    bool HeadOfLineIsolated)
+{
+    internal static ChannelMapping FromNative(NativeChannelMapping mapping) =>
+        new(
+            mapping.Channel,
+            mapping.Reliability,
+            mapping.MaxRetransmits,
+            mapping.BindingKind,
+            mapping.HeadOfLineIsolated != 0);
+}
+
 internal enum SkybridgeErrorCode
 {
     Ok = 0,
@@ -199,4 +263,14 @@ internal struct NativeTransportSelection
     public byte Priority;
     public byte RelayRequired;
     public byte RelayAllowed;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeChannelMapping
+{
+    public CoreChannelKind Channel;
+    public CoreReliabilityKind Reliability;
+    public ushort MaxRetransmits;
+    public CoreAdapterBindingKind BindingKind;
+    public byte HeadOfLineIsolated;
 }

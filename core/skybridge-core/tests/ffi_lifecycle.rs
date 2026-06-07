@@ -5,12 +5,13 @@ use skybridge_core::ffi::{
     skybridge_engine_local_public_key, skybridge_engine_metrics, skybridge_engine_new,
     skybridge_engine_poll_events, skybridge_engine_reconnect, skybridge_engine_send_heartbeat,
     skybridge_engine_send_input, skybridge_engine_snapshot, skybridge_engine_state,
-    skybridge_engine_throttle_stream, skybridge_select_transport, SkybridgeBuffer,
+    skybridge_engine_throttle_stream, skybridge_map_channel, skybridge_select_transport,
+    SkybridgeAdapterBindingKind, SkybridgeBuffer, SkybridgeChannelKind, SkybridgeChannelMapping,
     SkybridgeEngineSnapshot, SkybridgeErrorCode, SkybridgeEvent, SkybridgeEventKind,
     SkybridgeFlowRate, SkybridgeNetworkPath, SkybridgePeerCapabilities, SkybridgePeerPlatform,
-    SkybridgeSessionConfig, SkybridgeSessionState, SkybridgeStreamMetrics,
-    SkybridgeTransportAuditCode, SkybridgeTransportKind, SkybridgeTransportSelection,
-    SKYBRIDGE_EVENT_CAPACITY,
+    SkybridgeReliabilityKind, SkybridgeSessionConfig, SkybridgeSessionState,
+    SkybridgeStreamMetrics, SkybridgeTransportAuditCode, SkybridgeTransportKind,
+    SkybridgeTransportSelection, SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -332,5 +333,87 @@ fn ffi_transport_selector_exports_adr_defaults() {
 
     let null_result =
         unsafe { skybridge_select_transport(windows, apple, cross_nat, ptr::null_mut()) };
+    assert_eq!(null_result, SkybridgeErrorCode::InvalidInput);
+}
+
+#[test]
+fn ffi_channel_mapping_exports_adapter_contracts() {
+    let mut mapping = SkybridgeChannelMapping {
+        channel: SkybridgeChannelKind::Control,
+        reliability: SkybridgeReliabilityKind::ReliableOrdered,
+        max_retransmits: 0,
+        binding_kind: SkybridgeAdapterBindingKind::MsQuicStream,
+        head_of_line_isolated: 0,
+    };
+
+    let result = unsafe {
+        skybridge_map_channel(
+            SkybridgeTransportKind::WindowsNativeMsQuic,
+            SkybridgeChannelKind::Telemetry,
+            &mut mapping,
+        )
+    };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(mapping.channel, SkybridgeChannelKind::Telemetry);
+    assert_eq!(
+        mapping.reliability,
+        SkybridgeReliabilityKind::ReliableUnordered
+    );
+    assert_eq!(
+        mapping.binding_kind,
+        SkybridgeAdapterBindingKind::MsQuicDatagram
+    );
+    assert_eq!(mapping.head_of_line_isolated, 1);
+
+    let result = unsafe {
+        skybridge_map_channel(
+            SkybridgeTransportKind::WebRtcDataChannel,
+            SkybridgeChannelKind::File,
+            &mut mapping,
+        )
+    };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(mapping.channel, SkybridgeChannelKind::File);
+    assert_eq!(
+        mapping.reliability,
+        SkybridgeReliabilityKind::ReliableOrdered
+    );
+    assert_eq!(
+        mapping.binding_kind,
+        SkybridgeAdapterBindingKind::WebRtcDataChannel
+    );
+
+    let result = unsafe {
+        skybridge_map_channel(
+            SkybridgeTransportKind::TcpFallback,
+            SkybridgeChannelKind::Realtime,
+            &mut mapping,
+        )
+    };
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(
+        mapping.reliability,
+        SkybridgeReliabilityKind::PartialReliable
+    );
+    assert_eq!(mapping.max_retransmits, 1);
+    assert_eq!(mapping.binding_kind, SkybridgeAdapterBindingKind::TcpStream);
+    assert_eq!(mapping.head_of_line_isolated, 0);
+
+    let bad_transport = unsafe {
+        skybridge_map_channel(
+            SkybridgeTransportKind::Unsupported,
+            SkybridgeChannelKind::Control,
+            &mut mapping,
+        )
+    };
+    assert_eq!(bad_transport, SkybridgeErrorCode::InvalidInput);
+
+    let null_result = unsafe {
+        skybridge_map_channel(
+            SkybridgeTransportKind::WindowsNativeMsQuic,
+            SkybridgeChannelKind::Control,
+            ptr::null_mut(),
+        )
+    };
     assert_eq!(null_result, SkybridgeErrorCode::InvalidInput);
 }
