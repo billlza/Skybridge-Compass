@@ -25,6 +25,22 @@ function Assert-Contains {
     Assert-True -Condition ($Text.Contains($Needle)) -Message $Message
 }
 
+function Assert-Ordered {
+    param(
+        [string]$Text,
+        [string[]]$Needles,
+        [string]$Context
+    )
+
+    $lastIndex = -1
+    foreach ($needle in $Needles) {
+        $index = $Text.IndexOf($needle, $lastIndex + 1, [StringComparison]::Ordinal)
+        Assert-True -Condition ($index -ge 0) -Message "$Context missing ordered signal after index ${lastIndex}: $needle"
+        Assert-True -Condition ($index -gt $lastIndex) -Message "$Context order regression: $needle"
+        $lastIndex = $index
+    }
+}
+
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -166,6 +182,91 @@ foreach ($layoutSignal in @(
 )) {
     Assert-Contains -Text $mainWindow -Needle $layoutSignal -Message "MainWindow.xaml missing shell layout signal: $layoutSignal"
 }
+
+Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order" -Needles @(
+    '<TextBlock Text="Device Discovery"',
+    '<TextBlock Text="USB Management"',
+    '<TextBlock Text="File Transfer"',
+    '<TextBlock Text="Remote Desktop"',
+    '<TextBlock Text="Quantum / Core Diagnostics"',
+    '<TextBlock Text="System Monitor"',
+    '<TextBlock Text="Settings"',
+    '<TextBlock Text="Session Controls"'
+)
+
+Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
+    '<TextBlock Text="Device Discovery"',
+    'Command="{Binding ParseAdvertisementCommand}"',
+    'Command="{Binding ValidatePairingCodeCommand}"',
+    'Command="{Binding PrepareConnectionCommand}"',
+    'Content="Compatibility Mode"',
+    'Command="{Binding RunExtendedDiscoveryCommand}"',
+    'Command="{Binding PrepareManualConnectionCommand}"',
+    'Command="{Binding StartDiscoveryCommand}"',
+    'Command="{Binding StopDiscoveryCommand}"',
+    'Command="{Binding RefreshDiscoveryCommand}"',
+    'PlaceholderText="Search devices"',
+    '<TextBlock Text="Manual Host / IP"',
+    '<TextBlock Text="Port"',
+    '<TextBlock Text="Code"',
+    '<TextBlock Text="Dynamic Encrypted QR Code"',
+    'Command="{Binding GenerateQRCodeCommand}"',
+    'Command="{Binding ScanQRCodeCommand}"',
+    '<TextBlock Text="Smart Connection Code"',
+    'Command="{Binding GenerateConnectionCodeCommand}"',
+    'Command="{Binding CopyConnectionCodeCommand}"',
+    'Command="{Binding RegenerateConnectionCodeCommand}"',
+    'Text="{Binding CrossNetworkCodeInput',
+    'Command="{Binding ConnectConnectionCodeCommand}"',
+    '<TextBlock Text="Service"',
+    '<TextBlock Text="TXT record"',
+    '<TextBlock Text="Pairing Code"'
+)
+
+Assert-Ordered -Text $mainWindow -Context "USB Management action order" -Needles @(
+    '<TextBlock Text="USB Management"',
+    'Command="{Binding RefreshUsbManagementCommand}"',
+    'ItemsSource="{Binding UsbDeviceStats}"',
+    'ItemsSource="{Binding UsbDevices}"'
+)
+
+Assert-Ordered -Text $mainWindow -Context "File Transfer action order" -Needles @(
+    '<TextBlock Text="File Transfer"',
+    '<TextBlock Text="Select Files"',
+    '<TextBlock Text="Select Folder"',
+    '<TextBlock Text="Generate QR"',
+    '<TextBlock Text="Transfer Queue"',
+    '<TextBlock Text="Transfer History"',
+    '<TextBlock Text="File Transfer Security"'
+)
+
+Assert-Ordered -Text $mainWindow -Context "Remote Desktop action order" -Needles @(
+    '<TextBlock Text="Remote Desktop"',
+    '<TextBlock Text="Recommended Connect"',
+    '<TextBlock Text="Advanced Connect"',
+    '<TextBlock Text="Performance Overlay"',
+    '<TextBlock Text="Quality"',
+    '<TextBlock Text="Settings"',
+    '<TextBlock Text="Full Screen"',
+    '<TextBlock Text="Disconnect Session"',
+    '<TextBlock Text="Active Sessions"'
+)
+
+Assert-Ordered -Text $mainWindow -Context "Settings action order" -Needles @(
+    '<TextBlock Text="Settings" FontSize="18"',
+    '<TextBlock Text="Refresh Status"',
+    '<TextBlock Text="Export"',
+    '<TextBlock Text="Import"',
+    '<TextBlock Text="Reset"',
+    '<TextBlock Text="Request Permission"',
+    '<TextBlock Text="Open System Preferences"',
+    '<TextBlock Text="Settings Tabs"',
+    '<TextBlock Text="Settings Details"',
+    '<TextBlock Text="Settings Actions"',
+    '<TextBlock Text="Apply Settings"',
+    '<TextBlock Text="Restore Defaults"',
+    '<TextBlock Text="Reset Monitor Data"'
+)
 
 foreach ($discoverySignal in @(
     "Device Discovery",
