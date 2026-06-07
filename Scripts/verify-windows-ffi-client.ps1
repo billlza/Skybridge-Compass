@@ -28,6 +28,7 @@ function Assert-Contains {
 $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngineClient.cs"
 $coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
 $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryClient.cs"
+$pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
@@ -38,13 +39,14 @@ $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngi
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $pairingPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
 $client = Get-Content -Raw -LiteralPath $clientPath
 $coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
 $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
+$pairing = Get-Content -Raw -LiteralPath $pairingPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
@@ -92,6 +94,7 @@ Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Mes
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
 Assert-Contains -Text $mainWindow -Needle "var coreBridge = new CoreBridge();" -Message "MainWindow should create one explicit CoreBridge for manual Core tools."
 Assert-Contains -Text $mainWindow -Needle "new CoreDiscoveryClient(coreBridge)" -Message "MainWindow should wire CoreDiscoveryClient for explicit manual discovery parsing."
+Assert-Contains -Text $mainWindow -Needle "new PairingMaterialClient()" -Message "MainWindow should wire PairingMaterialClient for explicit manual pairing-code validation."
 Assert-Contains -Text $mainWindow -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "MainWindow should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "MainWindow should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "MainWindow should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
@@ -153,6 +156,24 @@ foreach ($signal in @(
 Assert-True -Condition (-not $discoveryClient.Contains("GetPeerPublicKeyAsync")) -Message "DiscoveryClient must not treat pubKeyFP as the peer public key."
 Assert-True -Condition (-not $discoveryClient.Contains("StaticPeerPublicKeyProvider")) -Message "DiscoveryClient must not create static peer-key providers from discovery fingerprints."
 Assert-Contains -Text $architecture -Needle "CoreDiscoveryClient" -Message "Architecture doc missing CoreDiscoveryClient status."
+
+foreach ($signal in @(
+    "public interface IPairingMaterialClient",
+    "public sealed class PairingMaterialClient : IPairingMaterialClient",
+    "ParseConnectionCodeAsync",
+    "skybridge-pair:v1",
+    "pubKeyFP",
+    "DecodeBase64Url",
+    "SHA256.HashData",
+    "expectedPublicKeyFingerprint",
+    "Pairing code public key does not match pubKeyFP.",
+    "ToPeerPublicKeyProvider",
+    "StaticPeerPublicKeyProvider"
+)) {
+    Assert-Contains -Text $pairing -Needle $signal -Message "PairingMaterialClient missing pairing signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "PairingMaterialClient" -Message "Architecture doc missing PairingMaterialClient status."
 
 foreach ($signal in @(
     "public interface IUsbManagementWorkspaceClient",

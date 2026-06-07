@@ -166,12 +166,20 @@
                                     <TextBlock Text="Device Discovery" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding DiscoveryStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Command="{Binding ParseAdvertisementCommand}" VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE8B9;" FontSize="14" />
-                                        <TextBlock Text="Parse TXT" />
-                                    </StackPanel>
-                                </Button>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                                    <Button Command="{Binding ParseAdvertisementCommand}">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE8B9;" FontSize="14" />
+                                            <TextBlock Text="Parse TXT" />
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Command="{Binding ValidatePairingCodeCommand}">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <FontIcon Glyph="&#xE8D7;" FontSize="14" />
+                                            <TextBlock Text="Validate Pairing" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
                             </Grid>
 
                             <Grid ColumnSpacing="14">
@@ -223,6 +231,41 @@
                                     </DataTemplate>
                                 </ListView.ItemTemplate>
                             </ListView>
+
+                            <Grid ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="320" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Pairing Code" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBox
+                                        Text="{Binding PairingConnectionCode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        IsEnabled="{Binding IsDeviceDiscoverySelected}"
+                                        AcceptsReturn="True"
+                                        TextWrapping="Wrap"
+                                        MinHeight="96" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="8">
+                                    <TextBlock Text="{Binding PairingStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ItemsControl ItemsSource="{Binding PairingFacts}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Padding="0,4" ColumnSpacing="12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="170" />
+                                                        <ColumnDefinition Width="220" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
+                                                    <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Grid>
                         </StackPanel>
                     </Border>
 

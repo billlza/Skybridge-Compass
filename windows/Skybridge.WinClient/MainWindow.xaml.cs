@@ -15,6 +15,7 @@ public sealed partial class MainWindow : Window
         ViewModel = new SessionViewModel(
             new DummyEngineClient(),
             new CoreDiscoveryClient(coreBridge),
+            new PairingMaterialClient(),
             new CoreDiagnosticsClient(coreBridge),
             new FileTransferWorkspaceClient(coreBridge),
             new RemoteDesktopWorkspaceClient(coreBridge),
