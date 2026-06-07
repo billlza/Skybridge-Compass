@@ -1,0 +1,28 @@
+#!/bin/sh
+
+remote_name="$1"
+remote_url="$2"
+
+block_https_url() {
+    value="$1"
+
+    case "$value" in
+        https://github.com/*|http://github.com/*)
+            echo "pre-push: refusing GitHub HTTPS remote URL to avoid git-remote-https.exe on Windows." >&2
+            echo "pre-push: run Scripts/ensure-github-ssh-remote.ps1, then push over SSH." >&2
+            exit 1
+            ;;
+    esac
+}
+
+block_https_url "$remote_url"
+
+if [ -n "$remote_name" ]; then
+    fetch_url="$(git config --get "remote.$remote_name.url" 2>/dev/null || true)"
+    push_url="$(git config --get "remote.$remote_name.pushurl" 2>/dev/null || true)"
+
+    block_https_url "$fetch_url"
+    block_https_url "$push_url"
+fi
+
+exit 0
