@@ -7,6 +7,10 @@ use crate::discovery::{
     parse_service_kind, parse_txt_advertisement, DiscoveryServiceKind, PeerAdvertisement,
 };
 use crate::error::{CoreError, CoreResult};
+use crate::frame::{
+    decode_frame, decode_frame_payload as core_decode_frame_payload, encode_frame,
+    encode_sbp2_frame, CoreFrame, FrameFlags, FRAME_HEADER_LEN,
+};
 use crate::session::{AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState};
 use crate::stream::{FlowRate, StreamController, StreamMetrics};
 use crate::suite::{
@@ -260,6 +264,18 @@ pub struct SkybridgeTrafficPaddingPlan {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkybridgeFrameMetadata {
+    pub channel: SkybridgeChannelKind,
+    pub sequence: u64,
+    pub flags: u16,
+    pub frame_header_len: usize,
+    pub encoded_len: usize,
+    pub payload_len: usize,
+    pub decoded_payload_len: usize,
+}
+
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SkybridgeConnectionPlan {
     pub transport: SkybridgeTransportSelection,
@@ -482,6 +498,23 @@ fn map_channel_profile(profile: &ChannelProfile) -> SkybridgeChannelMapping {
     }
 }
 
+fn map_frame_metadata(
+    frame: &CoreFrame,
+    encoded_len: usize,
+) -> Result<SkybridgeFrameMetadata, SkybridgeErrorCode> {
+    Ok(SkybridgeFrameMetadata {
+        channel: map_channel_kind(frame.channel),
+        sequence: frame.sequence,
+        flags: frame.flags.bits(),
+        frame_header_len: FRAME_HEADER_LEN,
+        encoded_len,
+        payload_len: frame.payload.len(),
+        decoded_payload_len: core_decode_frame_payload(frame)
+            .map_err(|_| SkybridgeErrorCode::InvalidInput)?
+            .len(),
+    })
+}
+
 fn empty_channel_mapping() -> SkybridgeChannelMapping {
     SkybridgeChannelMapping {
         channel: SkybridgeChannelKind::Control,
@@ -696,6 +729,48 @@ unsafe fn read_utf8<'a>(ptr: *const u8, len: usize) -> Result<&'a str, Skybridge
         unsafe { std::slice::from_raw_parts(ptr, len) }
     };
     from_utf8(bytes).map_err(|_| SkybridgeErrorCode::InvalidInput)
+}
+
+unsafe fn read_bytes<'a>(ptr: *const u8, len: usize) -> Result<&'a [u8], SkybridgeErrorCode> {
+    if len > 0 && ptr.is_null() {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+
+    if len == 0 {
+        Ok(&[])
+    } else {
+        Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
+}
+
+unsafe fn write_bytes(
+    out_ptr: *mut u8,
+    out_capacity: usize,
+    data: &[u8],
+    out_written_len: *mut usize,
+) -> SkybridgeErrorCode {
+    if out_written_len.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+
+    unsafe {
+        *out_written_len = data.len();
+    }
+
+    if data.len() > out_capacity {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+    if data.is_empty() {
+        return SkybridgeErrorCode::Ok;
+    }
+    if out_ptr.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(data.as_ptr(), out_ptr, data.len());
+    }
+    SkybridgeErrorCode::Ok
 }
 
 #[derive(Clone)]
@@ -1062,6 +1137,150 @@ pub unsafe extern "C" fn skybridge_map_channel(
     }
 
     SkybridgeErrorCode::Ok
+}
+
+#[no_mangle]
+/// Encodes a Core channel frame into the caller-provided output buffer.
+///
+/// # Safety
+/// `payload_ptr` must point to `payload_len` readable bytes when non-empty.
+/// `out_written_len` must be writable. `out_frame_ptr` must be writable for
+/// `out_frame_capacity` bytes when the encoded frame is non-empty.
+pub unsafe extern "C" fn skybridge_encode_frame(
+    channel: SkybridgeChannelKind,
+    sequence: u64,
+    payload_ptr: *const u8,
+    payload_len: usize,
+    end_of_message: u8,
+    out_frame_ptr: *mut u8,
+    out_frame_capacity: usize,
+    out_written_len: *mut usize,
+) -> SkybridgeErrorCode {
+    let payload = match unsafe { read_bytes(payload_ptr, payload_len) } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let flags = if ffi_flag(end_of_message) {
+        FrameFlags::END_OF_MESSAGE
+    } else {
+        FrameFlags::NONE
+    };
+    let encoded = match encode_frame(&CoreFrame {
+        channel: map_ffi_channel_kind(channel),
+        sequence,
+        flags,
+        payload: payload.to_vec(),
+    }) {
+        Ok(value) => value,
+        Err(_) => return SkybridgeErrorCode::InvalidInput,
+    };
+
+    unsafe { write_bytes(out_frame_ptr, out_frame_capacity, &encoded, out_written_len) }
+}
+
+#[no_mangle]
+/// Encodes a Core channel frame whose payload is wrapped in SBP2 padding.
+///
+/// # Safety
+/// `payload_ptr` must point to `payload_len` readable bytes when non-empty.
+/// `out_written_len` must be writable. `out_frame_ptr` must be writable for
+/// `out_frame_capacity` bytes when the encoded frame is non-empty.
+pub unsafe extern "C" fn skybridge_encode_sbp2_frame(
+    channel: SkybridgeChannelKind,
+    sequence: u64,
+    payload_ptr: *const u8,
+    payload_len: usize,
+    padded_payload_len: usize,
+    out_frame_ptr: *mut u8,
+    out_frame_capacity: usize,
+    out_written_len: *mut usize,
+) -> SkybridgeErrorCode {
+    let payload = match unsafe { read_bytes(payload_ptr, payload_len) } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let encoded = match encode_sbp2_frame(
+        map_ffi_channel_kind(channel),
+        sequence,
+        payload,
+        padded_payload_len,
+    ) {
+        Ok(value) => value,
+        Err(_) => return SkybridgeErrorCode::InvalidInput,
+    };
+
+    unsafe { write_bytes(out_frame_ptr, out_frame_capacity, &encoded, out_written_len) }
+}
+
+#[no_mangle]
+/// Decodes frame metadata without returning the frame payload.
+///
+/// # Safety
+/// `frame_ptr` must point to `frame_len` readable bytes. `out_metadata` must
+/// be a valid writable pointer.
+pub unsafe extern "C" fn skybridge_decode_frame_metadata(
+    frame_ptr: *const u8,
+    frame_len: usize,
+    out_metadata: *mut SkybridgeFrameMetadata,
+) -> SkybridgeErrorCode {
+    if out_metadata.is_null() {
+        return SkybridgeErrorCode::InvalidInput;
+    }
+
+    let encoded = match unsafe { read_bytes(frame_ptr, frame_len) } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let frame = match decode_frame(encoded) {
+        Ok(value) => value,
+        Err(_) => return SkybridgeErrorCode::InvalidInput,
+    };
+    let metadata = match map_frame_metadata(&frame, frame_len) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    unsafe {
+        *out_metadata = metadata;
+    }
+    SkybridgeErrorCode::Ok
+}
+
+#[no_mangle]
+/// Decodes the application payload from a Core frame, unwrapping SBP2 when set.
+///
+/// # Safety
+/// `frame_ptr` must point to `frame_len` readable bytes. `out_written_len` must
+/// be writable. `out_payload_ptr` must be writable for `out_payload_capacity`
+/// bytes when the decoded payload is non-empty.
+pub unsafe extern "C" fn skybridge_decode_frame_payload(
+    frame_ptr: *const u8,
+    frame_len: usize,
+    out_payload_ptr: *mut u8,
+    out_payload_capacity: usize,
+    out_written_len: *mut usize,
+) -> SkybridgeErrorCode {
+    let encoded = match unsafe { read_bytes(frame_ptr, frame_len) } {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let frame = match decode_frame(encoded) {
+        Ok(value) => value,
+        Err(_) => return SkybridgeErrorCode::InvalidInput,
+    };
+    let payload = match core_decode_frame_payload(&frame) {
+        Ok(value) => value,
+        Err(_) => return SkybridgeErrorCode::InvalidInput,
+    };
+
+    unsafe {
+        write_bytes(
+            out_payload_ptr,
+            out_payload_capacity,
+            &payload,
+            out_written_len,
+        )
+    }
 }
 
 #[no_mangle]

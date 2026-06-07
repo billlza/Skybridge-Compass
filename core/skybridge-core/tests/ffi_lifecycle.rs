@@ -1,6 +1,7 @@
 use skybridge_core::ffi::{
-    skybridge_engine_check_liveness, skybridge_engine_clear_events, skybridge_engine_connect,
-    skybridge_engine_decrypt_payload, skybridge_engine_disconnect,
+    skybridge_decode_frame_metadata, skybridge_decode_frame_payload, skybridge_encode_frame,
+    skybridge_encode_sbp2_frame, skybridge_engine_check_liveness, skybridge_engine_clear_events,
+    skybridge_engine_connect, skybridge_engine_decrypt_payload, skybridge_engine_disconnect,
     skybridge_engine_encrypt_payload, skybridge_engine_free, skybridge_engine_last_input_len,
     skybridge_engine_local_public_key, skybridge_engine_metrics, skybridge_engine_new,
     skybridge_engine_poll_events, skybridge_engine_reconnect, skybridge_engine_send_heartbeat,
@@ -11,10 +12,11 @@ use skybridge_core::ffi::{
     SkybridgeConnectionPlan, SkybridgeCryptoProviderCapabilities, SkybridgeCryptoSuiteAuditCode,
     SkybridgeCryptoSuiteKind, SkybridgeCryptoSuitePolicy, SkybridgeDiscoveryAdvertisement,
     SkybridgeDiscoveryServiceKind, SkybridgeEngineSnapshot, SkybridgeErrorCode, SkybridgeEvent,
-    SkybridgeEventKind, SkybridgeFlowRate, SkybridgeNetworkPath, SkybridgePeerCapabilities,
-    SkybridgePeerPlatform, SkybridgeReliabilityKind, SkybridgeSessionConfig, SkybridgeSessionState,
-    SkybridgeStreamMetrics, SkybridgeTrafficPaddingPlan, SkybridgeTransportAuditCode,
-    SkybridgeTransportKind, SkybridgeTransportSelection, SKYBRIDGE_EVENT_CAPACITY,
+    SkybridgeEventKind, SkybridgeFlowRate, SkybridgeFrameMetadata, SkybridgeNetworkPath,
+    SkybridgePeerCapabilities, SkybridgePeerPlatform, SkybridgeReliabilityKind,
+    SkybridgeSessionConfig, SkybridgeSessionState, SkybridgeStreamMetrics,
+    SkybridgeTrafficPaddingPlan, SkybridgeTransportAuditCode, SkybridgeTransportKind,
+    SkybridgeTransportSelection, SKYBRIDGE_EVENT_CAPACITY,
 };
 use std::os::raw::c_char;
 use std::ptr;
@@ -51,6 +53,18 @@ fn empty_discovery_advertisement() -> SkybridgeDiscoveryAdvertisement {
 
 fn fixed_utf8<const N: usize>(buffer: &[u8; N], len: usize) -> &str {
     std::str::from_utf8(&buffer[..len]).expect("valid utf-8")
+}
+
+fn empty_frame_metadata() -> SkybridgeFrameMetadata {
+    SkybridgeFrameMetadata {
+        channel: SkybridgeChannelKind::Control,
+        sequence: 0,
+        flags: 0,
+        frame_header_len: 0,
+        encoded_len: 0,
+        payload_len: 0,
+        decoded_payload_len: 0,
+    }
 }
 
 #[test]
@@ -608,6 +622,119 @@ fn ffi_channel_mapping_exports_adapter_contracts() {
         )
     };
     assert_eq!(null_result, SkybridgeErrorCode::InvalidInput);
+}
+
+#[test]
+fn ffi_frame_codec_exports_plain_and_sbp2_contracts() {
+    let payload = b"file-chunk";
+    let mut encoded = [0u8; 64];
+    let mut written = 0usize;
+
+    let plain_result = unsafe {
+        skybridge_encode_frame(
+            SkybridgeChannelKind::File,
+            42,
+            payload.as_ptr(),
+            payload.len(),
+            1,
+            encoded.as_mut_ptr(),
+            encoded.len(),
+            &mut written,
+        )
+    };
+
+    assert_eq!(plain_result, SkybridgeErrorCode::Ok);
+    assert_eq!(written, 20 + payload.len());
+
+    let frame = &encoded[..written];
+    let mut metadata = empty_frame_metadata();
+    let metadata_result =
+        unsafe { skybridge_decode_frame_metadata(frame.as_ptr(), frame.len(), &mut metadata) };
+    assert_eq!(metadata_result, SkybridgeErrorCode::Ok);
+    assert_eq!(metadata.channel, SkybridgeChannelKind::File);
+    assert_eq!(metadata.sequence, 42);
+    assert_eq!(metadata.flags, 0x0002);
+    assert_eq!(metadata.frame_header_len, 20);
+    assert_eq!(metadata.encoded_len, written);
+    assert_eq!(metadata.payload_len, payload.len());
+    assert_eq!(metadata.decoded_payload_len, payload.len());
+
+    let mut decoded = [0u8; 16];
+    let mut decoded_len = 0usize;
+    let decode_payload_result = unsafe {
+        skybridge_decode_frame_payload(
+            frame.as_ptr(),
+            frame.len(),
+            decoded.as_mut_ptr(),
+            decoded.len(),
+            &mut decoded_len,
+        )
+    };
+    assert_eq!(decode_payload_result, SkybridgeErrorCode::Ok);
+    assert_eq!(&decoded[..decoded_len], payload);
+
+    let mut tiny = [0u8; 4];
+    let mut required_len = 0usize;
+    let small_buffer_result = unsafe {
+        skybridge_encode_frame(
+            SkybridgeChannelKind::Control,
+            1,
+            payload.as_ptr(),
+            payload.len(),
+            1,
+            tiny.as_mut_ptr(),
+            tiny.len(),
+            &mut required_len,
+        )
+    };
+    assert_eq!(small_buffer_result, SkybridgeErrorCode::InvalidInput);
+    assert_eq!(required_len, 20 + payload.len());
+
+    let sbp2_payload = b"hello";
+    let mut sbp2_encoded = [0u8; 96];
+    let mut sbp2_written = 0usize;
+    let sbp2_result = unsafe {
+        skybridge_encode_sbp2_frame(
+            SkybridgeChannelKind::Realtime,
+            7,
+            sbp2_payload.as_ptr(),
+            sbp2_payload.len(),
+            32,
+            sbp2_encoded.as_mut_ptr(),
+            sbp2_encoded.len(),
+            &mut sbp2_written,
+        )
+    };
+    assert_eq!(sbp2_result, SkybridgeErrorCode::Ok);
+    assert_eq!(sbp2_written, 20 + 8 + 32);
+
+    let sbp2_frame = &sbp2_encoded[..sbp2_written];
+    let sbp2_metadata = unsafe {
+        let mut value = empty_frame_metadata();
+        let result =
+            skybridge_decode_frame_metadata(sbp2_frame.as_ptr(), sbp2_frame.len(), &mut value);
+        assert_eq!(result, SkybridgeErrorCode::Ok);
+        value
+    };
+    assert_eq!(sbp2_metadata.channel, SkybridgeChannelKind::Realtime);
+    assert_eq!(sbp2_metadata.sequence, 7);
+    assert_eq!(sbp2_metadata.flags, 0x0003);
+    assert_eq!(sbp2_metadata.payload_len, 8 + 32);
+    assert_eq!(sbp2_metadata.decoded_payload_len, sbp2_payload.len());
+
+    let mut unpadded = [0u8; 16];
+    let mut unpadded_len = 0usize;
+    let sbp2_decode_result = unsafe {
+        skybridge_decode_frame_payload(
+            sbp2_frame.as_ptr(),
+            sbp2_frame.len(),
+            unpadded.as_mut_ptr(),
+            unpadded.len(),
+            &mut unpadded_len,
+        )
+    };
+    assert_eq!(sbp2_decode_result, SkybridgeErrorCode::Ok);
+    assert_eq!(&unpadded[..unpadded_len], sbp2_payload);
 }
 
 #[test]

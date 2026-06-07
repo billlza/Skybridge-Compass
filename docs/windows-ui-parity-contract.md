@@ -26,4 +26,4 @@ This contract fixes the Windows shell entry points against the macOS reference s
 - UI automation: each navigation entry can be selected and updates the selected-feature heading.
 - UI automation: connect, heartbeat, and disconnect buttons enable/disable according to `EngineConnectionState`.
 - Visual QA: left navigation order, top status bar, metric row, and session controls remain in stable positions across desktop window sizes.
-- Diagnostic UI: expose `CoreBridge.PlanConnectionAsync`, transport selection, channel mapping, suite negotiation, engine snapshot, metrics, and event queue output without silent fallback.
+- Diagnostic UI: expose `CoreBridge.PlanConnectionAsync`, transport selection, channel mapping, frame codec metadata, suite negotiation, engine snapshot, metrics, and event queue output without silent fallback.

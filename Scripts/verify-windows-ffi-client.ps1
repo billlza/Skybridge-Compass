@@ -92,6 +92,23 @@ foreach ($signal in @(
 Assert-Contains -Text $architecture -Needle "CoreBridge.ParseDiscoveryAdvertisementAsync" -Message "Architecture doc missing discovery CoreBridge contract."
 
 foreach ($signal in @(
+    "EncodeFrameAsync",
+    "EncodeSbp2FrameAsync",
+    "DecodeFrameMetadataAsync",
+    "DecodeFramePayloadAsync",
+    "FrameMetadata",
+    "NativeFrameMetadata",
+    "skybridge_encode_frame",
+    "skybridge_encode_sbp2_frame",
+    "skybridge_decode_frame_metadata",
+    "skybridge_decode_frame_payload"
+)) {
+    Assert-Contains -Text $coreBridge -Needle $signal -Message "CoreBridge missing frame codec signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "CoreBridge.EncodeFrameAsync" -Message "Architecture doc missing frame CoreBridge contract."
+
+foreach ($signal in @(
     "public interface IDiscoveryClient",
     "public sealed class CoreDiscoveryClient : IDiscoveryClient",
     "public sealed record DiscoveredPeer",

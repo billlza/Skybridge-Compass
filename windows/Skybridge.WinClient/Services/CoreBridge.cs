@@ -10,6 +10,9 @@ namespace Skybridge.WinClient.Services;
 /// </summary>
 public sealed class CoreBridge
 {
+    private const int FrameHeaderLen = 20;
+    private const int Sbp2HeaderLen = 8;
+
     public Task<bool> InitializeAsync()
     {
         return Task.Run(() =>
@@ -100,6 +103,183 @@ public sealed class CoreBridge
         });
     }
 
+    public Task<byte[]> EncodeFrameAsync(
+        CoreChannelKind channel,
+        ulong sequence,
+        byte[] payload,
+        bool endOfMessage = true)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+
+        return Task.Run(() =>
+        {
+            var output = new byte[checked(FrameHeaderLen + payload.Length)];
+            var payloadHandle = payload.Length == 0
+                ? default
+                : GCHandle.Alloc(payload, GCHandleType.Pinned);
+            var outputHandle = GCHandle.Alloc(output, GCHandleType.Pinned);
+
+            try
+            {
+                var result = NativeMethods.EncodeFrame(
+                    channel,
+                    sequence,
+                    payload.Length == 0 ? nint.Zero : payloadHandle.AddrOfPinnedObject(),
+                    (nuint)payload.Length,
+                    endOfMessage ? (byte)1 : (byte)0,
+                    outputHandle.AddrOfPinnedObject(),
+                    (nuint)output.Length,
+                    out var writtenLen);
+
+                if (result != SkybridgeErrorCode.Ok)
+                {
+                    throw new InvalidOperationException($"Frame encode failed: {result}");
+                }
+
+                return SliceOutput(output, writtenLen);
+            }
+            finally
+            {
+                if (payloadHandle.IsAllocated)
+                {
+                    payloadHandle.Free();
+                }
+
+                outputHandle.Free();
+            }
+        });
+    }
+
+    public Task<byte[]> EncodeSbp2FrameAsync(
+        CoreChannelKind channel,
+        ulong sequence,
+        byte[] payload,
+        nuint paddedPayloadLen)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        if (paddedPayloadLen > (nuint)(int.MaxValue - FrameHeaderLen - Sbp2HeaderLen))
+        {
+            throw new ArgumentOutOfRangeException(nameof(paddedPayloadLen), "Padded payload is too large for this client to marshal.");
+        }
+
+        return Task.Run(() =>
+        {
+            var output = new byte[FrameHeaderLen + Sbp2HeaderLen + (int)paddedPayloadLen];
+            var payloadHandle = payload.Length == 0
+                ? default
+                : GCHandle.Alloc(payload, GCHandleType.Pinned);
+            var outputHandle = GCHandle.Alloc(output, GCHandleType.Pinned);
+
+            try
+            {
+                var result = NativeMethods.EncodeSbp2Frame(
+                    channel,
+                    sequence,
+                    payload.Length == 0 ? nint.Zero : payloadHandle.AddrOfPinnedObject(),
+                    (nuint)payload.Length,
+                    paddedPayloadLen,
+                    outputHandle.AddrOfPinnedObject(),
+                    (nuint)output.Length,
+                    out var writtenLen);
+
+                if (result != SkybridgeErrorCode.Ok)
+                {
+                    throw new InvalidOperationException($"SBP2 frame encode failed: {result}");
+                }
+
+                return SliceOutput(output, writtenLen);
+            }
+            finally
+            {
+                if (payloadHandle.IsAllocated)
+                {
+                    payloadHandle.Free();
+                }
+
+                outputHandle.Free();
+            }
+        });
+    }
+
+    public Task<FrameMetadata> DecodeFrameMetadataAsync(byte[] encodedFrame)
+    {
+        ArgumentNullException.ThrowIfNull(encodedFrame);
+
+        return Task.Run(() =>
+        {
+            var frameHandle = encodedFrame.Length == 0
+                ? default
+                : GCHandle.Alloc(encodedFrame, GCHandleType.Pinned);
+
+            try
+            {
+                var result = NativeMethods.DecodeFrameMetadata(
+                    encodedFrame.Length == 0 ? nint.Zero : frameHandle.AddrOfPinnedObject(),
+                    (nuint)encodedFrame.Length,
+                    out var metadata);
+
+                if (result != SkybridgeErrorCode.Ok)
+                {
+                    throw new InvalidOperationException($"Frame metadata decode failed: {result}");
+                }
+
+                return FrameMetadata.FromNative(metadata);
+            }
+            finally
+            {
+                if (frameHandle.IsAllocated)
+                {
+                    frameHandle.Free();
+                }
+            }
+        });
+    }
+
+    public Task<byte[]> DecodeFramePayloadAsync(byte[] encodedFrame)
+    {
+        ArgumentNullException.ThrowIfNull(encodedFrame);
+
+        return Task.Run(() =>
+        {
+            var output = new byte[encodedFrame.Length];
+            var frameHandle = encodedFrame.Length == 0
+                ? default
+                : GCHandle.Alloc(encodedFrame, GCHandleType.Pinned);
+            var outputHandle = output.Length == 0
+                ? default
+                : GCHandle.Alloc(output, GCHandleType.Pinned);
+
+            try
+            {
+                var result = NativeMethods.DecodeFramePayload(
+                    encodedFrame.Length == 0 ? nint.Zero : frameHandle.AddrOfPinnedObject(),
+                    (nuint)encodedFrame.Length,
+                    output.Length == 0 ? nint.Zero : outputHandle.AddrOfPinnedObject(),
+                    (nuint)output.Length,
+                    out var writtenLen);
+
+                if (result != SkybridgeErrorCode.Ok)
+                {
+                    throw new InvalidOperationException($"Frame payload decode failed: {result}");
+                }
+
+                return SliceOutput(output, writtenLen);
+            }
+            finally
+            {
+                if (frameHandle.IsAllocated)
+                {
+                    frameHandle.Free();
+                }
+
+                if (outputHandle.IsAllocated)
+                {
+                    outputHandle.Free();
+                }
+            }
+        });
+    }
+
     public Task<DiscoveryAdvertisement> ParseDiscoveryAdvertisementAsync(string service, string txt)
     {
         ArgumentNullException.ThrowIfNull(service);
@@ -187,6 +367,59 @@ public sealed class CoreBridge
             nint txtPtr,
             nuint txtLen,
             out NativeDiscoveryAdvertisement advertisement);
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_encode_frame")]
+        public static extern SkybridgeErrorCode EncodeFrame(
+            CoreChannelKind channel,
+            ulong sequence,
+            nint payloadPtr,
+            nuint payloadLen,
+            byte endOfMessage,
+            nint outFramePtr,
+            nuint outFrameCapacity,
+            out nuint writtenLen);
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_encode_sbp2_frame")]
+        public static extern SkybridgeErrorCode EncodeSbp2Frame(
+            CoreChannelKind channel,
+            ulong sequence,
+            nint payloadPtr,
+            nuint payloadLen,
+            nuint paddedPayloadLen,
+            nint outFramePtr,
+            nuint outFrameCapacity,
+            out nuint writtenLen);
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_decode_frame_metadata")]
+        public static extern SkybridgeErrorCode DecodeFrameMetadata(
+            nint framePtr,
+            nuint frameLen,
+            out NativeFrameMetadata metadata);
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_decode_frame_payload")]
+        public static extern SkybridgeErrorCode DecodeFramePayload(
+            nint framePtr,
+            nuint frameLen,
+            nint outPayloadPtr,
+            nuint outPayloadCapacity,
+            out nuint writtenLen);
+    }
+
+    private static byte[] SliceOutput(byte[] output, nuint writtenLen)
+    {
+        if (writtenLen > (nuint)output.Length)
+        {
+            throw new InvalidOperationException("skybridge_core wrote more bytes than the caller-provided buffer.");
+        }
+
+        if (writtenLen == (nuint)output.Length)
+        {
+            return output;
+        }
+
+        var result = new byte[(int)writtenLen];
+        Buffer.BlockCopy(output, 0, result, 0, result.Length);
+        return result;
     }
 }
 
@@ -391,6 +624,30 @@ public sealed record ChannelMapping(
             mapping.HeadOfLineIsolated != 0);
 }
 
+public sealed record FrameMetadata(
+    CoreChannelKind Channel,
+    ulong Sequence,
+    ushort Flags,
+    nuint FrameHeaderLen,
+    nuint EncodedLen,
+    nuint PayloadLen,
+    nuint DecodedPayloadLen)
+{
+    public bool IsSbp2Padded => (Flags & 0x0001) != 0;
+
+    public bool IsEndOfMessage => (Flags & 0x0002) != 0;
+
+    internal static FrameMetadata FromNative(NativeFrameMetadata metadata) =>
+        new(
+            metadata.Channel,
+            metadata.Sequence,
+            metadata.Flags,
+            metadata.FrameHeaderLen,
+            metadata.EncodedLen,
+            metadata.PayloadLen,
+            metadata.DecodedPayloadLen);
+}
+
 public sealed record CryptoProviderCapabilities(
     bool SupportsXWingHybrid,
     bool SupportsMlKem768MlDsa65,
@@ -551,6 +808,18 @@ internal struct NativeChannelMapping
     public ushort MaxRetransmits;
     public CoreAdapterBindingKind BindingKind;
     public byte HeadOfLineIsolated;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeFrameMetadata
+{
+    public CoreChannelKind Channel;
+    public ulong Sequence;
+    public ushort Flags;
+    public nuint FrameHeaderLen;
+    public nuint EncodedLen;
+    public nuint PayloadLen;
+    public nuint DecodedPayloadLen;
 }
 
 [StructLayout(LayoutKind.Sequential)]
