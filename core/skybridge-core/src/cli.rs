@@ -1,4 +1,7 @@
 use crate::channel::map_channel;
+use crate::frame::{
+    decode_frame, decode_frame_payload, encode_frame, encode_sbp2_frame, CoreFrame, FrameFlags,
+};
 use crate::suite::{
     negotiate_suite, offered_suites, CryptoProviderCapabilities, CryptoSuite, CryptoSuitePolicy,
 };
@@ -18,6 +21,7 @@ USAGE:
   skybridge suite select --local-caps <xwing,mlkem,x25519,p256> --remote-suites <0x0001,0x1001> [--allow-classic] [--allow-legacy-p256] [--timeout-observed]
   skybridge channel profile --channel <control|file|clipboard|telemetry|realtime>
   skybridge channel map --transport <apple-native|msquic|webrtc|relay|tcp> --channel <control|file|clipboard|telemetry|realtime>
+  skybridge frame describe --channel <control|file|clipboard|telemetry|realtime> --sequence <n> --payload <text> [--sbp2-fixed <n>]
 ";
 
 pub fn run<I, S>(args: I, out: &mut impl Write, err: &mut impl Write) -> i32
@@ -49,6 +53,7 @@ fn execute(args: Vec<String>, out: &mut impl Write) -> Result<(), String> {
         "transport" => execute_transport(&args[1..], out),
         "suite" => execute_suite(&args[1..], out),
         "channel" => execute_channel(&args[1..], out),
+        "frame" => execute_frame(&args[1..], out),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -134,8 +139,51 @@ fn execute_channel(args: &[String], out: &mut impl Write) -> Result<(), String> 
     }
 }
 
+fn execute_frame(args: &[String], out: &mut impl Write) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("describe") {
+        return Err("expected frame describe".into());
+    }
+
+    let channel = parse_channel(required_option(args, "--channel")?)?;
+    let sequence = parse_u64(required_option(args, "--sequence")?, "--sequence")?;
+    let payload = required_option(args, "--payload")?.as_bytes().to_vec();
+    let encoded = if let Some(padded) = optional_option(args, "--sbp2-fixed") {
+        encode_sbp2_frame(
+            channel,
+            sequence,
+            &payload,
+            parse_usize(padded, "--sbp2-fixed")?,
+        )
+        .map_err(|err| format!("frame encode failed: {err:?}"))?
+    } else {
+        encode_frame(&CoreFrame {
+            channel,
+            sequence,
+            flags: FrameFlags::END_OF_MESSAGE,
+            payload,
+        })
+        .map_err(|err| format!("frame encode failed: {err:?}"))?
+    };
+    let decoded = decode_frame(&encoded).map_err(|err| format!("frame decode failed: {err:?}"))?;
+    let decoded_payload =
+        decode_frame_payload(&decoded).map_err(|err| format!("payload decode failed: {err:?}"))?;
+
+    writeln!(out, "channel={:?}", decoded.channel).map_err(|err| err.to_string())?;
+    writeln!(out, "sequence={}", decoded.sequence).map_err(|err| err.to_string())?;
+    writeln!(out, "flags={:#06x}", decoded.flags.bits()).map_err(|err| err.to_string())?;
+    writeln!(out, "frame_len={}", encoded.len()).map_err(|err| err.to_string())?;
+    writeln!(out, "payload_len={}", decoded_payload.len()).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|arg| arg == name)
+}
+
+fn optional_option<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|window| window[0] == name)
+        .map(|window| window[1].as_str())
 }
 
 fn required_option<'a>(args: &'a [String], name: &str) -> Result<&'a str, String> {
@@ -143,6 +191,18 @@ fn required_option<'a>(args: &'a [String], name: &str) -> Result<&'a str, String
         .find(|window| window[0] == name)
         .map(|window| window[1].as_str())
         .ok_or_else(|| format!("missing required option: {name}"))
+}
+
+fn parse_u64(value: &str, name: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("invalid {name}: {value}"))
+}
+
+fn parse_usize(value: &str, name: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid {name}: {value}"))
 }
 
 fn parse_platform(value: &str) -> Result<PeerPlatform, String> {
@@ -399,6 +459,64 @@ mod tests {
         assert!(stdout.contains("transport=WebRtcDataChannel"));
         assert!(stdout.contains("binding=skybridge.file"));
         assert!(stdout.contains("head_of_line_isolated=true"));
+    }
+
+    #[test]
+    fn frame_describe_roundtrips_plain_payload() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let code = run(
+            [
+                "frame",
+                "describe",
+                "--channel",
+                "control",
+                "--sequence",
+                "12",
+                "--payload",
+                "hello",
+            ],
+            &mut out,
+            &mut err,
+        );
+
+        let stdout = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0);
+        assert!(err.is_empty());
+        assert!(stdout.contains("channel=Control"));
+        assert!(stdout.contains("sequence=12"));
+        assert!(stdout.contains("flags=0x0002"));
+        assert!(stdout.contains("payload_len=5"));
+    }
+
+    #[test]
+    fn frame_describe_roundtrips_sbp2_payload() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let code = run(
+            [
+                "frame",
+                "describe",
+                "--channel",
+                "control",
+                "--sequence",
+                "12",
+                "--payload",
+                "hello",
+                "--sbp2-fixed",
+                "32",
+            ],
+            &mut out,
+            &mut err,
+        );
+
+        let stdout = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0);
+        assert!(stdout.contains("flags=0x0003"));
+        assert!(stdout.contains("frame_len=60"));
+        assert!(stdout.contains("payload_len=5"));
     }
 
     #[test]

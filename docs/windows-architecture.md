@@ -9,12 +9,13 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - `channel.rs` maps Core logical channels to adapter-specific channel names and exposes them through `skybridge_map_channel` / `CoreBridge.MapChannelAsync`: MsQuic uses streams for control/file/clipboard and datagrams for telemetry/realtime; WebRTC uses separate DataChannel labels per logical channel; Apple native keeps the same Core names without switching Apple-to-Apple to WebRTC.
 - The Rust core also defines the ADR canonical crypto suite IDs (`0x0001`, `0x0101`, `0x1001`, `0x1002`) in `suite.rs`; offered suites are derived from runtime provider capabilities and classic fallback requires an explicit policy gate.
 - The Rust core provides SBP2 traffic-padding framing in `padding.rs` using the ADR wire shape (`SBP2` magic, `actual_len` u32be, payload, random padding). Transport adapters still need to call it after handshake policy enables padding.
+- `frame.rs` defines the Core channel frame envelope (`SBF1` magic, version, channel, flags, sequence, payload length, payload) so MsQuic/WebRTC/Relay adapters can carry the same framed payloads. SBP2-padded payloads are flagged in the frame rather than inferred by transport-specific code.
 
 ## Technology stack check
 - **WinUI shell:** `net10.0-windows10.0.19041.0` with Windows App SDK `2.1.3`. Microsoft lists .NET 10 as active LTS through November 2028, and NuGet/Microsoft's Windows App SDK downloads page list `2.1.3` as the current stable package/runtime.
 - **Windows native transport:** MsQuic remains the intended native QUIC adapter for Windows-to-Windows paths. It should sit below SkyBridge Core transport binding and emit ETW/EventSource-style diagnostics rather than owning session identity.
 - **WebRTC interop:** Use a native DataChannel adapter such as libdatachannel for Windows-to-Apple MVP interop. libdatachannel remains active in 2026, with GitHub releases showing v0.24.3 as latest, and supports Windows plus Apple platforms, making it suitable as an adapter candidate, not as the protocol authority.
-- **Rust core and CLI:** Keep the current Rust 2021 edition until a dedicated migration is scheduled. `src/cli.rs` and the `skybridge` binary are thin adapters over reusable Core functions; CLI smoke tests cover version, transport selection, channel profile/map, crypto suite offer/select, and invalid-command behavior. SBP2 padding has Core unit tests for fixed, bucketed, and malformed frame behavior.
+- **Rust core and CLI:** Keep the current Rust 2021 edition until a dedicated migration is scheduled. `src/cli.rs` and the `skybridge` binary are thin adapters over reusable Core functions; CLI smoke tests cover version, transport selection, channel profile/map, frame describe, crypto suite offer/select, and invalid-command behavior. SBP2 padding has Core unit tests for fixed, bucketed, and malformed frame behavior.
 
 ## Layers
 - **ViewModels** (`windows/Skybridge.WinClient/ViewModels`): presentation logic and bindable state. `SessionViewModel` owns connection status, bitrate/framerate selections, async commands for connect/disconnect/heartbeat, and busy-state handling to keep the UI responsive.
@@ -27,6 +28,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - Use `CoreBridge.MapChannelAsync` / `skybridge_map_channel` so Windows services consume Core logical-channel mappings instead of duplicating adapter policy in C#.
 - Use `skybridge transport select` for operator smoke checks against the same Rust selector before WinUI or native adapter wiring is available.
 - Use `skybridge channel map` to verify that each transport adapter uses channel-specific streams, datagrams, or DataChannels before real adapter wiring is enabled.
+- Use `skybridge frame describe` to verify Core channel frame metadata and SBP2 padding flags before real adapter wiring is enabled.
 - Use `skybridge suite offer` and `skybridge suite select` to verify provider-derived suite offers, remote wire ID parsing, and downgrade audit behavior before platform crypto provider wiring is available.
 - Map engine callbacks (state changes, input responses) to UI updates via events or observable properties on the view model.
 - Keep heavy work off the UI thread by continuing to use async commands for connect/heartbeat; the FFI layer should marshal any blocking calls to thread-pool threads when necessary.
@@ -38,6 +40,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - Channel mapping tests must prove WebRTC uses distinct DataChannel labels, Windows MsQuic uses stream/datagram mappings, Apple native does not route Apple-to-Apple through WebRTC, and TCP fallback is visible as head-of-line blocking risk.
 - Suite tests must prove unknown suite IDs fail closed, offered suites come from actual capabilities, classic/P-256 fallback is policy-gated, and timeout cannot trigger crypto downgrade.
 - SBP2 tests must prove payload roundtrip, bucket selection, padding statistics, too-small target rejection, missing bucket rejection, bad magic rejection, and truncated frame rejection.
+- Frame tests must prove plain and SBP2-padded frame roundtrip, version/magic/channel/flag validation, truncated payload rejection, and CLI smoke coverage.
 - CLI smoke tests must launch the compiled `skybridge` binary and verify successful and failing basic commands.
 
 ## Sources checked on 2026-06-07

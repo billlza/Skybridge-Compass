@@ -126,6 +126,33 @@ fn cli_channel_map_reports_transport_binding() {
 }
 
 #[test]
+fn cli_frame_describe_reports_roundtrip_metadata() {
+    let output = skybridge()
+        .args([
+            "frame",
+            "describe",
+            "--channel",
+            "control",
+            "--sequence",
+            "8",
+            "--payload",
+            "hello",
+            "--sbp2-fixed",
+            "32",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("channel=Control"));
+    assert!(stdout.contains("sequence=8"));
+    assert!(stdout.contains("flags=0x0003"));
+    assert!(stdout.contains("frame_len=60"));
+    assert!(stdout.contains("payload_len=5"));
+}
+
+#[test]
 fn cli_rejects_incomplete_transport_command() {
     let output = skybridge()
         .args(["transport", "select", "--local", "windows"])
