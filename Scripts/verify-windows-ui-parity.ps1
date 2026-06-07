@@ -276,6 +276,7 @@ foreach ($resourceSignal in @(
     'x:Key="WorkspaceStateRowTemplate"',
     'x:Key="SettingsDetailRowTemplate"',
     'x:Key="SettingsActionRowTemplate"',
+    'x:Key="SettingsTabItemTemplate"',
     'Command="{Binding Command}"',
     'IsEnabled="{Binding IsEnabled}"',
     'Text="{Binding Detail}"',
@@ -331,6 +332,7 @@ foreach ($factBinding in @(
 }
 
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "SystemMonitorIndicators" -ItemTemplate "WorkspaceStateRowTemplate"
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "SettingsTabs" -ItemTemplate "SettingsTabItemTemplate"
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "SettingsDetails" -ItemTemplate "SettingsDetailRowTemplate"
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "SettingsActions" -ItemTemplate "SettingsActionRowTemplate"
 

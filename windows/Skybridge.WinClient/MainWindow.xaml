@@ -154,6 +154,16 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
         </DataTemplate>
+        <DataTemplate x:Key="SettingsTabItemTemplate">
+            <StackPanel Padding="0,8" Spacing="2">
+                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                <TextBlock
+                    Text="{Binding Detail}"
+                    TextWrapping="Wrap"
+                    FontSize="12"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+        </DataTemplate>
     </Window.Resources>
 
     <Grid Background="{ThemeResource SolidBackgroundFillColorBase}">
@@ -777,16 +787,7 @@
 
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="Settings Tabs" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding SettingsTabs}" MinHeight="220" SelectionMode="None" IsEnabled="{Binding IsSettingsSelected}">
-                                        <ListView.ItemTemplate>
-                                            <DataTemplate>
-                                                <StackPanel Padding="0,8" Spacing="2">
-                                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
-                                                    <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </StackPanel>
-                                            </DataTemplate>
-                                        </ListView.ItemTemplate>
-                                    </ListView>
+                                    <ListView ItemsSource="{Binding SettingsTabs}" ItemTemplate="{StaticResource SettingsTabItemTemplate}" MinHeight="220" SelectionMode="None" IsEnabled="{Binding IsSettingsSelected}" />
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="1" Spacing="12">
