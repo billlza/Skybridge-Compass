@@ -3,9 +3,9 @@
 This contract fixes the Windows shell entry points against the macOS reference so the port can add functionality without drifting from the existing product shape.
 
 ## Reference evidence
-- macOS navigation order comes from `origin/main:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift`: Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings.
-- macOS dashboard routing is implemented in `origin/main:Sources/SkyBridgeCompassApp/Dashboard/DashboardView.swift`.
-- macOS top bar includes connection state, FPS/diagnostics, notifications, theme, and manual connection entry points in `origin/main:Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift`.
+- macOS navigation order comes from `origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift`: Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings.
+- macOS dashboard routing is implemented in `origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Sources/SkyBridgeCompassApp/Dashboard/DashboardView.swift`.
+- macOS top bar includes connection state, FPS/diagnostics, notifications, theme, and manual connection entry points in `origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift`.
 - macOS feature surfaces also include device discovery modes, file transfer actions/history, remote desktop session controls, system monitoring, settings tabs, security/trust/approval, and menu bar quick actions.
 
 ## Windows shell contract

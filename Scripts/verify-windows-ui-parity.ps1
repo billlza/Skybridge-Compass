@@ -74,6 +74,8 @@ for ($index = 0; $index -lt $expectedEntries.Count; $index++) {
     Assert-True -Condition ($actualEntries[$index] -eq $expectedEntries[$index]) -Message "Feature entry order mismatch at index ${index}: expected $($expectedEntries[$index]), got $($actualEntries[$index])."
 }
 
+Assert-True -Condition (-not $featureContract.Contains(", false)")) -Message "All mac parity navigation entries must remain implemented once read-only workspaces exist."
+
 foreach ($binding in @(
     "NavigationItems",
     "SelectedFeature",
@@ -330,6 +332,7 @@ foreach ($settingsSignal in @(
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", true)' -Message "Settings must be marked implemented once the read-only preferences workspace exists."
 
 foreach ($docSignal in @(
+    "origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
     "Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings",
     "CoreBridge.PlanConnectionAsync",
     "Visual QA"
