@@ -851,34 +851,42 @@
                                     <TextBlock Text="System Monitor" FontSize="18" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding SystemMonitorStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Command="{Binding RefreshSystemMonitorCommand}" VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE895;" FontSize="14" />
-                                        <TextBlock Text="Refresh Metrics" />
-                                    </StackPanel>
-                                </Button>
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding SystemMonitorHeaderActions}" VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="10" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                    <TextBlock Text="{Binding Title}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </Grid>
 
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xF16B;" FontSize="14" />
-                                        <TextBlock Text="Monitoring" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE71A;" FontSize="14" />
-                                        <TextBlock Text="Stop Monitoring" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE72E;" FontSize="14" />
-                                        <TextBlock Text="Enable Advanced Monitoring" />
-                                    </StackPanel>
-                                </Button>
-                            </StackPanel>
+                            <ItemsControl ItemsSource="{Binding SystemMonitorActions}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" Spacing="10" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button IsEnabled="{Binding IsEnabled}">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                <TextBlock Text="{Binding Title}" />
+                                            </StackPanel>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
 
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>

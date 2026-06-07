@@ -26,6 +26,8 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 WorkspaceActionSurface.CrossNetworkCodeConnect => BuildCrossNetworkCodeConnectActions(),
                 WorkspaceActionSurface.FileTransfer => BuildFileTransferActions(),
                 WorkspaceActionSurface.RemoteDesktop => BuildRemoteDesktopActions(),
+                WorkspaceActionSurface.SystemMonitorHeader => BuildSystemMonitorHeaderActions(),
+                WorkspaceActionSurface.SystemMonitorControls => BuildSystemMonitorControlActions(),
                 WorkspaceActionSurface.SettingsToolbar => BuildSettingsToolbarActions(),
                 WorkspaceActionSurface.SettingsMaintenance => BuildSettingsMaintenanceActions(),
                 _ => new List<WorkspaceActionItem>()
@@ -273,6 +275,40 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Visible mac-parity quick action; no live session termination is wired.")
         };
 
+    private static IReadOnlyList<WorkspaceActionItem> BuildSystemMonitorHeaderActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "RefreshMetrics",
+                "Refresh Metrics",
+                "\uE895",
+                true,
+                "Mac-parity System Monitor refresh action; command stays in SessionViewModel.")
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildSystemMonitorControlActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "Monitoring",
+                "Monitoring",
+                "\uF16B",
+                false,
+                "Visible mac-parity monitoring action; live ETW/EventSource sampling is pending."),
+            new(
+                "StopMonitoring",
+                "Stop Monitoring",
+                "\uE71A",
+                false,
+                "Visible mac-parity monitoring action; no background sampler is running."),
+            new(
+                "EnableAdvancedMonitoring",
+                "Enable Advanced Monitoring",
+                "\uE72E",
+                false,
+                "Visible mac-parity monitoring action; helper installation and elevation remain pending.")
+        };
+
     private static IReadOnlyList<WorkspaceActionItem> BuildSettingsToolbarActions() =>
         new List<WorkspaceActionItem>
         {
@@ -344,6 +380,8 @@ public enum WorkspaceActionSurface
     CrossNetworkCodeConnect,
     FileTransfer,
     RemoteDesktop,
+    SystemMonitorHeader,
+    SystemMonitorControls,
     SettingsToolbar,
     SettingsMaintenance
 }

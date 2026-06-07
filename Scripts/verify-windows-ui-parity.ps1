@@ -172,6 +172,8 @@ foreach ($binding in @(
     "RemoteDesktopControlFacts",
     "IsRemoteDesktopSelected",
     "SystemMonitorStatus",
+    "SystemMonitorHeaderActions",
+    "SystemMonitorActions",
     "SystemMonitorOverview",
     "SystemMonitorDetails",
     "SystemMonitorIndicators",
@@ -191,16 +193,16 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshSystemMonitorCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
 }
 
-foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand")) {
+foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshSystemMonitorCommand")) {
     Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
 
@@ -680,12 +682,43 @@ foreach ($diagnosticSignal in @(
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true)' -Message "Quantum must be marked implemented once the Core diagnostics panel exists."
 
+Assert-Ordered -Text $mainWindow -Context "System Monitor action order" -Needles @(
+    '<TextBlock Text="System Monitor" FontSize="18"',
+    'ItemsSource="{Binding SystemMonitorHeaderActions}"',
+    'ItemsSource="{Binding SystemMonitorActions}"',
+    '<TextBlock Text="Overview"',
+    '<TextBlock Text="Indicators"',
+    '<TextBlock Text="Detailed Monitoring"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "System Monitor header action catalog order" -Needles @(
+    'BuildSystemMonitorHeaderActions',
+    '"RefreshMetrics"',
+    '"Refresh Metrics"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "System Monitor control action catalog order" -Needles @(
+    'BuildSystemMonitorControlActions',
+    '"Monitoring"',
+    '"Monitoring"',
+    '"StopMonitoring"',
+    '"Stop Monitoring"',
+    '"EnableAdvancedMonitoring"',
+    '"Enable Advanced Monitoring"'
+)
+
 foreach ($systemMonitorSignal in @(
     "System Monitor",
     "Refresh Metrics",
     "Monitoring",
     "Stop Monitoring",
     "Enable Advanced Monitoring",
+    "SystemMonitorHeaderActions",
+    "SystemMonitorActions",
+    "WorkspaceActionCatalogClient",
+    "WorkspaceActionItemView",
+    "WorkspaceActionSurface.SystemMonitorHeader",
+    "WorkspaceActionSurface.SystemMonitorControls",
     "Overview",
     "Indicators",
     "Detailed Monitoring",
@@ -699,7 +732,7 @@ foreach ($systemMonitorSignal in @(
     "SystemMonitorMetric",
     "SystemMonitorIndicator"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $systemMonitor) -Needle $systemMonitorSignal -Message "System Monitor parity signal missing: $systemMonitorSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $systemMonitor + $workspaceActionCatalog) -Needle $systemMonitorSignal -Message "System Monitor parity signal missing: $systemMonitorSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", true)' -Message "System Monitor must be marked implemented once the read-only metrics workspace exists."

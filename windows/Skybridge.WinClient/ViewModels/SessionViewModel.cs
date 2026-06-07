@@ -156,6 +156,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         FileTransferSecurityFacts = new ObservableCollection<FileTransferSecurityFactView>();
         RemoteDesktopSessions = new ObservableCollection<RemoteDesktopSessionItemView>();
         RemoteDesktopControlFacts = new ObservableCollection<RemoteDesktopControlFactView>();
+        SystemMonitorHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
+        SystemMonitorActions = new ObservableCollection<WorkspaceActionItemView>();
         SystemMonitorOverview = new ObservableCollection<SystemMonitorMetricView>();
         SystemMonitorDetails = new ObservableCollection<SystemMonitorMetricView>();
         SystemMonitorIndicators = new ObservableCollection<SystemMonitorIndicatorView>();
@@ -250,6 +252,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<RemoteDesktopSessionItemView> RemoteDesktopSessions { get; }
 
     public ObservableCollection<RemoteDesktopControlFactView> RemoteDesktopControlFacts { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> SystemMonitorHeaderActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> SystemMonitorActions { get; }
 
     public ObservableCollection<SystemMonitorMetricView> SystemMonitorOverview { get; }
 
@@ -1344,14 +1350,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSystemMonitorCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSettingsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        RefreshSessionActionStates();
+        RefreshDynamicWorkspaceActionStates();
     }
 
-    private void RefreshSessionActionStates()
+    private void RefreshDynamicWorkspaceActionStates()
     {
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession, SidebarSessionActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SessionControls, SessionControlActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorHeader, SystemMonitorHeaderActions);
     }
 
     private void ApplyConnectionWorkspaceStatusPatch(ConnectionWorkspaceStatusPatch patch)
@@ -1423,6 +1430,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkCodeConnect, CrossNetworkCodeConnectActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransfer, FileTransferActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktop, RemoteDesktopActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorHeader, SystemMonitorHeaderActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorControls, SystemMonitorActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsToolbar, SettingsToolbarActions);
         LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsMaintenance, SettingsMaintenanceActions);
     }
@@ -1500,6 +1509,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 "ConnectWithCode" => ConnectConnectionCodeCommand,
                 _ => null
             },
+            WorkspaceActionSurface.SystemMonitorHeader => actionKey switch
+            {
+                "RefreshMetrics" => RefreshSystemMonitorCommand,
+                _ => null
+            },
             _ => null
         };
 
@@ -1525,6 +1539,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 "Connect" => CanConnect(),
                 "Heartbeat" => CanSendHeartbeat(),
                 "Disconnect" => CanDisconnect(),
+                _ => fallback
+            },
+            WorkspaceActionSurface.SystemMonitorHeader => actionKey switch
+            {
+                "RefreshMetrics" => CanRefreshSystemMonitor(),
                 _ => fallback
             },
             _ => fallback
