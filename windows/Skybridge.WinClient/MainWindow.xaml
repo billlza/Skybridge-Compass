@@ -124,6 +124,79 @@
                 </StackPanel>
             </Grid>
         </DataTemplate>
+        <DataTemplate x:Key="UsbDeviceItemTemplate">
+            <Grid Padding="0,8" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="180" />
+                    <ColumnDefinition Width="220" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="3">
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding DeviceType}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding Capabilities}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="3">
+                    <TextBlock Text="Device ID" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding DeviceId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding ConnectionInterface}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <StackPanel Grid.Column="2" Spacing="3">
+                    <TextBlock Text="Vendor / Product" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding VendorId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding ProductId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding SerialNumber}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+        <DataTemplate x:Key="FileTransferQueueItemTemplate">
+            <Grid Padding="0,8" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="120" />
+                    <ColumnDefinition Width="160" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding Size}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <TextBlock Grid.Column="1" Text="{Binding State}" />
+                <TextBlock Grid.Column="2" Text="{Binding Binding}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+        </DataTemplate>
+        <DataTemplate x:Key="FileTransferHistoryItemTemplate">
+            <Grid Padding="0,8" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="120" />
+                    <ColumnDefinition Width="160" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                <TextBlock Grid.Column="1" Text="{Binding Result}" />
+                <StackPanel Grid.Column="2" Spacing="2">
+                    <TextBlock Text="{Binding Hmac}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="{Binding Signature}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+        <DataTemplate x:Key="RemoteDesktopSessionItemTemplate">
+            <Grid Padding="0,8" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="120" />
+                    <ColumnDefinition Width="180" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{Binding TargetName}" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <TextBlock Grid.Column="1" Text="{Binding State}" />
+                <StackPanel Grid.Column="2" Spacing="2">
+                    <TextBlock Text="{Binding Transport}" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding Quality}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
         <DataTemplate x:Key="WorkspaceStateRowTemplate">
             <Grid Padding="0,4" ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
@@ -498,35 +571,7 @@
 
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Connected Devices" FontWeight="SemiBold" />
-                                <ListView ItemsSource="{Binding UsbDevices}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsUsbManagementSelected}">
-                                    <ListView.ItemTemplate>
-                                        <DataTemplate>
-                                            <Grid Padding="0,8" ColumnSpacing="12">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="180" />
-                                                    <ColumnDefinition Width="220" />
-                                                </Grid.ColumnDefinitions>
-                                                <StackPanel Spacing="3">
-                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                                                    <TextBlock Text="{Binding DeviceType}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                    <TextBlock Text="{Binding Capabilities}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </StackPanel>
-                                                <StackPanel Grid.Column="1" Spacing="3">
-                                                    <TextBlock Text="Device ID" FontWeight="SemiBold" />
-                                                    <TextBlock Text="{Binding DeviceId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                    <TextBlock Text="{Binding ConnectionInterface}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </StackPanel>
-                                                <StackPanel Grid.Column="2" Spacing="3">
-                                                    <TextBlock Text="Vendor / Product" FontWeight="SemiBold" />
-                                                    <TextBlock Text="{Binding VendorId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                    <TextBlock Text="{Binding ProductId}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                    <TextBlock Text="{Binding SerialNumber}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </StackPanel>
-                                            </Grid>
-                                        </DataTemplate>
-                                    </ListView.ItemTemplate>
-                                </ListView>
+                                <ListView ItemsSource="{Binding UsbDevices}" ItemTemplate="{StaticResource UsbDeviceItemTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsUsbManagementSelected}" />
                                 <TextBlock Text="No USB devices detected. Connect a device and refresh, or check the cable and port." TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </StackPanel>
@@ -564,48 +609,12 @@
 
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="Transfer Queue" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding FileTransferQueue}" MinHeight="112" SelectionMode="None" IsEnabled="{Binding IsFileTransferSelected}">
-                                        <ListView.ItemTemplate>
-                                            <DataTemplate>
-                                                <Grid Padding="0,8" ColumnSpacing="12">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="120" />
-                                                        <ColumnDefinition Width="160" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <StackPanel Spacing="2">
-                                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                                                        <TextBlock Text="{Binding Size}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                    </StackPanel>
-                                                    <TextBlock Grid.Column="1" Text="{Binding State}" />
-                                                    <TextBlock Grid.Column="2" Text="{Binding Binding}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ListView.ItemTemplate>
-                                    </ListView>
+                                    <ListView ItemsSource="{Binding FileTransferQueue}" ItemTemplate="{StaticResource FileTransferQueueItemTemplate}" MinHeight="112" SelectionMode="None" IsEnabled="{Binding IsFileTransferSelected}" />
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="1" Spacing="8">
                                     <TextBlock Text="Transfer History" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding FileTransferHistory}" MinHeight="112" SelectionMode="None" IsEnabled="{Binding IsFileTransferSelected}">
-                                        <ListView.ItemTemplate>
-                                            <DataTemplate>
-                                                <Grid Padding="0,8" ColumnSpacing="12">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="120" />
-                                                        <ColumnDefinition Width="160" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                                                    <TextBlock Grid.Column="1" Text="{Binding Result}" />
-                                                    <StackPanel Grid.Column="2" Spacing="2">
-                                                        <TextBlock Text="{Binding Hmac}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                        <TextBlock Text="{Binding Signature}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                    </StackPanel>
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ListView.ItemTemplate>
-                                    </ListView>
+                                    <ListView ItemsSource="{Binding FileTransferHistory}" ItemTemplate="{StaticResource FileTransferHistoryItemTemplate}" MinHeight="112" SelectionMode="None" IsEnabled="{Binding IsFileTransferSelected}" />
                                 </StackPanel>
                             </Grid>
 
@@ -646,28 +655,7 @@
 
                                 <StackPanel Spacing="8">
                                     <TextBlock Text="Active Sessions" FontWeight="SemiBold" />
-                                    <ListView ItemsSource="{Binding RemoteDesktopSessions}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsRemoteDesktopSelected}">
-                                        <ListView.ItemTemplate>
-                                            <DataTemplate>
-                                                <Grid Padding="0,8" ColumnSpacing="12">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="120" />
-                                                        <ColumnDefinition Width="180" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <StackPanel Spacing="2">
-                                                        <TextBlock Text="{Binding TargetName}" FontWeight="SemiBold" />
-                                                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                    </StackPanel>
-                                                    <TextBlock Grid.Column="1" Text="{Binding State}" />
-                                                    <StackPanel Grid.Column="2" Spacing="2">
-                                                        <TextBlock Text="{Binding Transport}" TextWrapping="Wrap" />
-                                                        <TextBlock Text="{Binding Quality}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                                    </StackPanel>
-                                                </Grid>
-                                            </DataTemplate>
-                                        </ListView.ItemTemplate>
-                                    </ListView>
+                                    <ListView ItemsSource="{Binding RemoteDesktopSessions}" ItemTemplate="{StaticResource RemoteDesktopSessionItemTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsRemoteDesktopSelected}" />
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="1" Spacing="8">

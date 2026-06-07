@@ -274,6 +274,10 @@ foreach ($resourceSignal in @(
     'x:Key="WorkspaceMetricCardTemplate"',
     'x:Key="WorkspaceFactRowTemplate"',
     'x:Key="DiscoveredPeerItemTemplate"',
+    'x:Key="UsbDeviceItemTemplate"',
+    'x:Key="FileTransferQueueItemTemplate"',
+    'x:Key="FileTransferHistoryItemTemplate"',
+    'x:Key="RemoteDesktopSessionItemTemplate"',
     'x:Key="WorkspaceStateRowTemplate"',
     'x:Key="SettingsDetailRowTemplate"',
     'x:Key="SettingsActionRowTemplate"',
@@ -294,6 +298,11 @@ Assert-ItemsControlTemplate -Text $mainWindow -Binding "NavigationItems" -ItemTe
 Assert-ItemsControlResources -Text $mainWindow -Binding "DashboardMetrics" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 Assert-ItemsControlResources -Text $mainWindow -Binding "UsbDeviceStats" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "DiscoveredPeers" -ItemTemplate "DiscoveredPeerItemTemplate"
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "UsbDevices" -ItemTemplate "UsbDeviceItemTemplate"
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "FileTransferQueue" -ItemTemplate "FileTransferQueueItemTemplate"
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "FileTransferHistory" -ItemTemplate "FileTransferHistoryItemTemplate"
+Assert-ItemsControlTemplate -Text $mainWindow -Binding "RemoteDesktopSessions" -ItemTemplate "RemoteDesktopSessionItemTemplate"
+Assert-True -Condition (-not $mainWindow.Contains("<ListView.ItemTemplate>")) -Message "MainWindow.xaml must not use inline ListView item templates; add a named Window.Resources template instead."
 
 foreach ($actionBinding in @(
     "DeviceDiscoveryPrimaryActions",
@@ -1037,6 +1046,10 @@ foreach ($docSignal in @(
     "SidebarWorkspaceActionButtonTemplate",
     "ItemsPanelTemplate",
     "DiscoveredPeerItemTemplate",
+    "UsbDeviceItemTemplate",
+    "FileTransferQueueItemTemplate",
+    "FileTransferHistoryItemTemplate",
+    "RemoteDesktopSessionItemTemplate",
     "UsbManagementHeaderActions",
     "FileTransferHeaderActions",
     "RemoteDesktopHeaderActions",
