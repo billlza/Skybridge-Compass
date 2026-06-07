@@ -41,6 +41,22 @@ function Assert-Ordered {
     }
 }
 
+function Assert-ActionItemsControlResources {
+    param(
+        [string]$Text,
+        [string]$Binding,
+        [string]$ItemsPanel,
+        [string]$ItemTemplate
+    )
+
+    $bindingPattern = [regex]::Escape("ItemsSource=`"{Binding $Binding}`"")
+    $panelPattern = [regex]::Escape("ItemsPanel=`"{StaticResource $ItemsPanel}`"")
+    $templatePattern = [regex]::Escape("ItemTemplate=`"{StaticResource $ItemTemplate}`"")
+    $pattern = "<ItemsControl\b(?=[^>]*$bindingPattern)(?=[^>]*$panelPattern)(?=[^>]*$templatePattern)[^>]*/>"
+
+    Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml action surface must use shared resources: $Binding"
+}
+
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
@@ -209,6 +225,46 @@ foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand"
 foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand")) {
     Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
+
+foreach ($resourceSignal in @(
+    'x:Key="VerticalWorkspaceActionItemsPanel"',
+    'x:Key="HorizontalWorkspaceActionItemsPanel"',
+    'x:Key="SessionWorkspaceActionItemsPanel"',
+    'x:Key="SidebarWorkspaceActionButtonTemplate"',
+    'x:Key="WorkspaceActionButtonTemplate"',
+    'x:Key="WorkspaceActionButtonWithDetailTemplate"',
+    'Command="{Binding Command}"',
+    'IsEnabled="{Binding IsEnabled}"',
+    'Text="{Binding Detail}"'
+)) {
+    Assert-Contains -Text $mainWindow -Needle $resourceSignal -Message "MainWindow.xaml missing shared action resource signal: $resourceSignal"
+}
+
+Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionActions" -ItemsPanel "VerticalWorkspaceActionItemsPanel" -ItemTemplate "SidebarWorkspaceActionButtonTemplate"
+Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
+
+foreach ($actionBinding in @(
+    "DeviceDiscoveryPrimaryActions",
+    "DeviceDiscoveryScanActions",
+    "CrossNetworkQrActions",
+    "CrossNetworkCodePrimaryActions",
+    "CrossNetworkCodeConnectActions",
+    "UsbManagementHeaderActions",
+    "FileTransferHeaderActions",
+    "FileTransferActions",
+    "RemoteDesktopHeaderActions",
+    "RemoteDesktopActions",
+    "QuantumDiagnosticsHeaderActions",
+    "SystemMonitorHeaderActions",
+    "SystemMonitorActions",
+    "SettingsHeaderActions",
+    "SettingsToolbarActions",
+    "SettingsMaintenanceActions"
+)) {
+    Assert-ActionItemsControlResources -Text $mainWindow -Binding $actionBinding -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonTemplate"
+}
+
+Assert-ActionItemsControlResources -Text $mainWindow -Binding "SessionControlActions" -ItemsPanel "SessionWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonTemplate"
 
 foreach ($layoutSignal in @(
     "<ColumnDefinition Width=`"252`" />",
@@ -901,6 +957,10 @@ foreach ($docSignal in @(
     "Theme",
     "TopBarStatusClient",
     "WorkspaceActionCatalogClient",
+    "WorkspaceActionButtonTemplate",
+    "WorkspaceActionButtonWithDetailTemplate",
+    "SidebarWorkspaceActionButtonTemplate",
+    "ItemsPanelTemplate",
     "UsbManagementHeaderActions",
     "FileTransferHeaderActions",
     "RemoteDesktopHeaderActions",
