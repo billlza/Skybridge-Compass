@@ -32,10 +32,11 @@ $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
+$settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -46,6 +47,7 @@ $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
+$settings = Get-Content -Raw -LiteralPath $settingsPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 
@@ -106,6 +108,11 @@ foreach ($binding in @(
     "SystemMonitorDetails",
     "SystemMonitorIndicators",
     "IsSystemMonitorSelected",
+    "SettingsStatus",
+    "SettingsTabs",
+    "SettingsActions",
+    "SettingsDetails",
+    "IsSettingsSelected",
     "CoreDiagnosticsStatus",
     "CoreDiagnosticFacts",
     "IsQuantumSelected"
@@ -114,7 +121,7 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -243,6 +250,84 @@ foreach ($systemMonitorSignal in @(
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", true)' -Message "System Monitor must be marked implemented once the read-only metrics workspace exists."
+
+foreach ($settingsSignal in @(
+    "Settings",
+    "Refresh Status",
+    "Export",
+    "Import",
+    "Reset",
+    "Request Permission",
+    "Open System Preferences",
+    "Settings Tabs",
+    "Settings Details",
+    "Settings Actions",
+    "General",
+    "Network",
+    "Devices",
+    "File Transfer",
+    "Remote Desktop",
+    "System Monitor",
+    "Permissions",
+    "Advanced",
+    "Apply Settings",
+    "Restore Defaults",
+    "Reset Monitor Data",
+    "SettingsWorkspaceClient",
+    "BuildReadOnlySnapshotAsync",
+    "SettingsTabItem",
+    "SettingsActionItem",
+    "SettingsDetailItem",
+    "ExportSettings",
+    "ImportSettings",
+    "ResetSettings",
+    "ApplyFileTransferSettings",
+    "ApplyRemoteDesktopSettings",
+    "ResetMonitorData",
+    "ClearHistoryData",
+    "defaultTransferPath",
+    "maxConcurrentConnections",
+    "transferBufferSize",
+    "autoRetryFailedTransfers",
+    "keepTransferHistory",
+    "keepSystemAwakeDuringTransfer",
+    "scanTransferFilesForVirus",
+    "scanLevel",
+    "encryptionAlgorithm",
+    "currentConfig",
+    "optimized / needsAdjust",
+    "estimatedRate",
+    "resolution 1080p/2k/4k/5k",
+    "framerate 30/60/120 fps",
+    "preset balanced/highPerformance/highQuality/lowLatency",
+    "compression none/fast/balanced/maximum",
+    "videoQuality",
+    "compressionLevel",
+    "refreshRate",
+    "enableAdaptiveQuality",
+    "fullScreenMode",
+    "clipboardSync",
+    "audioRedirection",
+    "trackpadGestures",
+    "mouseSensitivity",
+    "doubleClickInterval",
+    "enableUDP",
+    "bandwidthLimit",
+    "bufferSize",
+    "refreshInterval",
+    "enableAutoRefresh",
+    "showTrendIndicators/history",
+    "enablePerformanceAlerts",
+    "retentionDays/maxHistoryPoints",
+    "CPU/Memory/Disk/Network/Temperature/FanSpeed",
+    "enableSoundAlerts/enableNotifications",
+    "PQC policy",
+    "Disabled"
+)) {
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $settings) -Needle $settingsSignal -Message "Settings parity signal missing: $settingsSignal"
+}
+
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", true)' -Message "Settings must be marked implemented once the read-only preferences workspace exists."
 
 foreach ($docSignal in @(
     "Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings",

@@ -33,6 +33,6 @@ public static class FeatureEntryContract
             new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", true),
             new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true),
             new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", true),
-            new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", false)
+            new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", true)
         }.AsReadOnly();
 }

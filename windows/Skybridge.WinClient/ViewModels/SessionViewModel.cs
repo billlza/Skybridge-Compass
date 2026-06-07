@@ -33,6 +33,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
     private readonly ISystemMonitorWorkspaceClient _systemMonitorClient;
     private readonly IUsbManagementWorkspaceClient _usbManagementClient;
+    private readonly ISettingsWorkspaceClient _settingsClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoveryTxtRecord =
@@ -43,6 +44,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _remoteDesktopStatus = "Ready";
     private string _systemMonitorStatus = "Ready";
     private string _usbManagementStatus = "Ready";
+    private string _settingsStatus = "Ready";
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
@@ -56,7 +58,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IFileTransferWorkspaceClient? fileTransferClient = null,
         IRemoteDesktopWorkspaceClient? remoteDesktopClient = null,
         ISystemMonitorWorkspaceClient? systemMonitorClient = null,
-        IUsbManagementWorkspaceClient? usbManagementClient = null)
+        IUsbManagementWorkspaceClient? usbManagementClient = null,
+        ISettingsWorkspaceClient? settingsClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -65,6 +68,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _remoteDesktopClient = remoteDesktopClient ?? new UnavailableRemoteDesktopWorkspaceClient();
         _systemMonitorClient = systemMonitorClient ?? new UnavailableSystemMonitorWorkspaceClient();
         _usbManagementClient = usbManagementClient ?? new UnavailableUsbManagementWorkspaceClient();
+        _settingsClient = settingsClient ?? new UnavailableSettingsWorkspaceClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
@@ -80,6 +84,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SystemMonitorIndicators = new ObservableCollection<SystemMonitorIndicatorView>();
         UsbDeviceStats = new ObservableCollection<UsbDeviceStatView>();
         UsbDevices = new ObservableCollection<UsbDeviceItemView>();
+        SettingsTabs = new ObservableCollection<SettingsTabItemView>();
+        SettingsActions = new ObservableCollection<SettingsActionItemView>();
+        SettingsDetails = new ObservableCollection<SettingsDetailItemView>();
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
@@ -90,6 +97,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshRemoteDesktopCommand = new AsyncRelayCommand(RefreshRemoteDesktopAsync, CanRefreshRemoteDesktop);
         RefreshSystemMonitorCommand = new AsyncRelayCommand(RefreshSystemMonitorAsync, CanRefreshSystemMonitor);
         RefreshUsbManagementCommand = new AsyncRelayCommand(RefreshUsbManagementAsync, CanRefreshUsbManagement);
+        RefreshSettingsCommand = new AsyncRelayCommand(RefreshSettingsAsync, CanRefreshSettings);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
     }
@@ -126,6 +134,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ObservableCollection<UsbDeviceItemView> UsbDevices { get; }
 
+    public ObservableCollection<SettingsTabItemView> SettingsTabs { get; }
+
+    public ObservableCollection<SettingsActionItemView> SettingsActions { get; }
+
+    public ObservableCollection<SettingsDetailItemView> SettingsDetails { get; }
+
     public int OnlineDeviceCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
 
     public int ActiveSessionCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
@@ -147,6 +161,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 OnPropertyChanged(nameof(IsRemoteDesktopSelected));
                 OnPropertyChanged(nameof(IsQuantumSelected));
                 OnPropertyChanged(nameof(IsSystemMonitorSelected));
+                OnPropertyChanged(nameof(IsSettingsSelected));
                 RefreshCommandStates();
             }
         }
@@ -163,6 +178,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public bool IsQuantumSelected => SelectedFeature.Id == FeatureEntryId.Quantum;
 
     public bool IsSystemMonitorSelected => SelectedFeature.Id == FeatureEntryId.SystemMonitor;
+
+    public bool IsSettingsSelected => SelectedFeature.Id == FeatureEntryId.Settings;
 
     public EngineConnectionState ConnectionState
     {
@@ -272,6 +289,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public int UsbDeviceCount => UsbDevices.Count;
 
+    public string SettingsStatus
+    {
+        get => _settingsStatus;
+        private set => SetField(ref _settingsStatus, value);
+    }
+
+    public int SettingsActionCount => SettingsActions.Count;
+
     public BitrateProfile SelectedBitrate
     {
         get => _selectedBitrate;
@@ -313,6 +338,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RefreshSystemMonitorCommand { get; }
 
     public ICommand RefreshUsbManagementCommand { get; }
+
+    public ICommand RefreshSettingsCommand { get; }
 
     private async Task ConnectAsync()
     {
@@ -531,6 +558,41 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         });
     }
 
+    private async Task RefreshSettingsAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            SettingsStatus = "Refreshing...";
+            var snapshot = await _settingsClient.BuildReadOnlySnapshotAsync();
+            SettingsTabs.Clear();
+            foreach (var tab in snapshot.Tabs)
+            {
+                SettingsTabs.Add(SettingsTabItemView.FromItem(tab));
+            }
+
+            SettingsActions.Clear();
+            foreach (var action in snapshot.Actions)
+            {
+                SettingsActions.Add(SettingsActionItemView.FromItem(action));
+            }
+
+            SettingsDetails.Clear();
+            foreach (var detail in snapshot.Details)
+            {
+                SettingsDetails.Add(SettingsDetailItemView.FromItem(detail));
+            }
+
+            OnPropertyChanged(nameof(SettingsActionCount));
+            SettingsStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
+            StatusMessage = "Settings workspace updated";
+        });
+    }
+
     private bool CanConnect() => !IsBusy && ConnectionState == EngineConnectionState.Disconnected;
 
     private bool CanDisconnect() => !IsBusy && (ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting);
@@ -552,6 +614,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanRefreshRemoteDesktop() => !IsBusy && IsRemoteDesktopSelected;
 
     private bool CanRefreshSystemMonitor() => !IsBusy && IsSystemMonitorSelected;
+
+    private bool CanRefreshSettings() => !IsBusy && IsSettingsSelected;
 
     private async Task RunWithBusyState(Func<Task> action)
     {
@@ -592,6 +656,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             {
                 SystemMonitorStatus = ex.Message;
             }
+
+            if (IsSettingsSelected)
+            {
+                SettingsStatus = ex.Message;
+            }
         }
         finally
         {
@@ -610,6 +679,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (RefreshFileTransferCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (RefreshSystemMonitorCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (RefreshSettingsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
     }
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
@@ -641,6 +711,34 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+}
+
+public sealed record SettingsTabItemView(
+    string Title,
+    string Detail)
+{
+    public static SettingsTabItemView FromItem(SettingsTabItem item) =>
+        new(item.Title, item.Detail);
+}
+
+public sealed record SettingsActionItemView(
+    string Key,
+    string Title,
+    string State,
+    string Detail)
+{
+    public static SettingsActionItemView FromItem(SettingsActionItem item) =>
+        new(item.Key, item.Title, item.State, item.Detail);
+}
+
+public sealed record SettingsDetailItemView(
+    string Section,
+    string Label,
+    string Value,
+    string Detail)
+{
+    public static SettingsDetailItemView FromItem(SettingsDetailItem item) =>
+        new(item.Section, item.Label, item.Value, item.Detail);
 }
 
 public sealed record UsbDeviceStatView(
@@ -856,6 +954,14 @@ internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWo
     public Task<UsbManagementWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("USB management workspace client is not configured.");
+    }
+}
+
+internal sealed class UnavailableSettingsWorkspaceClient : ISettingsWorkspaceClient
+{
+    public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
+    {
+        throw new InvalidOperationException("Settings workspace client is not configured.");
     }
 }
 

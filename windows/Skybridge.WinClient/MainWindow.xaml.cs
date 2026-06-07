@@ -19,7 +19,8 @@ public sealed partial class MainWindow : Window
             new FileTransferWorkspaceClient(coreBridge),
             new RemoteDesktopWorkspaceClient(coreBridge),
             new SystemMonitorWorkspaceClient(),
-            new UsbManagementWorkspaceClient());
+            new UsbManagementWorkspaceClient(),
+            new SettingsWorkspaceClient());
         DataContext = ViewModel;
     }
 }

@@ -33,11 +33,12 @@ $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services
 $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
+$settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $remoteDesktopPath, $systemMonitorPath, $settingsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -49,6 +50,7 @@ $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
+$settings = Get-Content -Raw -LiteralPath $settingsPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
@@ -95,6 +97,7 @@ Assert-Contains -Text $mainWindow -Needle "new FileTransferWorkspaceClient(coreB
 Assert-Contains -Text $mainWindow -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "MainWindow should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new SystemMonitorWorkspaceClient()" -Message "MainWindow should wire SystemMonitorWorkspaceClient for explicit System Monitor diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new UsbManagementWorkspaceClient()" -Message "MainWindow should wire UsbManagementWorkspaceClient for explicit USB Management diagnostics."
+Assert-Contains -Text $mainWindow -Needle "new SettingsWorkspaceClient()" -Message "MainWindow should wire SettingsWorkspaceClient for explicit Settings diagnostics."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",
@@ -220,5 +223,38 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "SystemMonitorWorkspaceClient" -Message "Architecture doc missing SystemMonitorWorkspaceClient status."
+
+foreach ($signal in @(
+    "public interface ISettingsWorkspaceClient",
+    "public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient",
+    "BuildReadOnlySnapshotAsync",
+    "SettingsWorkspaceSnapshot",
+    "SettingsTabItem",
+    "SettingsActionItem",
+    "SettingsDetailItem",
+    "ExportSettings",
+    "ImportSettings",
+    "ResetSettings",
+    "ApplyFileTransferSettings",
+    "ApplyRemoteDesktopSettings",
+    "RestoreDefaults",
+    "ResetMonitorData",
+    "ClearHistoryData",
+    "defaultTransferPath",
+    "maxConcurrentConnections",
+    "currentConfig",
+    "videoQuality",
+    "refreshInterval",
+    "Disabled",
+    "Request Permission",
+    "Open System Preferences",
+    "Restore Defaults",
+    "PQC policy",
+    "Rust Core"
+)) {
+    Assert-Contains -Text $settings -Needle $signal -Message "SettingsWorkspaceClient missing Settings signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "SettingsWorkspaceClient" -Message "Architecture doc missing SettingsWorkspaceClient status."
 
 Write-Output "windows-ffi-client: ok"
