@@ -185,6 +185,29 @@ fn cli_connection_plan_reports_core_contract() {
 }
 
 #[test]
+fn cli_discovery_parse_accepts_mac_bonjour_txt() {
+    let output = skybridge()
+        .args([
+            "discovery",
+            "parse",
+            "--service",
+            "_skybridge._udp",
+            "--txt",
+            "deviceId=mac-1;pubKeyFP=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("service=_skybridge._udp"));
+    assert!(stdout.contains("device_id=mac-1"));
+    assert!(stdout.contains("platform=Apple"));
+    assert!(stdout.contains("supports_apple_native=true"));
+    assert!(stdout.contains("supports_webrtc_data_channel=true"));
+}
+
+#[test]
 fn cli_rejects_incomplete_transport_command() {
     let output = skybridge()
         .args(["transport", "select", "--local", "windows"])

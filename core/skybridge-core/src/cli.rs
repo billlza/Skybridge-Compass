@@ -1,5 +1,6 @@
 use crate::channel::{map_channel, AdapterChannelBinding};
 use crate::connection::{plan_connection, ConnectionPlan, ConnectionRequest, TrafficPaddingPlan};
+use crate::discovery::{parse_service_kind, parse_txt_advertisement, DiscoveryServiceKind};
 use crate::frame::{
     decode_frame, decode_frame_payload, encode_frame, encode_sbp2_frame, CoreFrame, FrameFlags,
 };
@@ -24,6 +25,7 @@ USAGE:
   skybridge channel map --transport <apple-native|msquic|webrtc|relay|tcp> --channel <control|file|clipboard|telemetry|realtime>
   skybridge frame describe --channel <control|file|clipboard|telemetry|realtime> --sequence <n> --payload <text> [--sbp2-fixed <n>]
   skybridge connection plan --local <apple|windows> --remote <apple|windows> --path <same-lan|cross-nat> --local-caps <xwing,mlkem,x25519,p256> --remote-suites <0x0001,0x1001> [--allow-classic] [--allow-legacy-p256] [--timeout-observed] [--sbp2-fixed <n>]
+  skybridge discovery parse --service <udp|tcp|_skybridge._udp|_skybridge._tcp> --txt <deviceId=...;pubKeyFP=...;platform=...;capabilities=...;name=...;version=...>
 ";
 
 pub fn run<I, S>(args: I, out: &mut impl Write, err: &mut impl Write) -> i32
@@ -57,6 +59,7 @@ fn execute(args: Vec<String>, out: &mut impl Write) -> Result<(), String> {
         "channel" => execute_channel(&args[1..], out),
         "frame" => execute_frame(&args[1..], out),
         "connection" => execute_connection(&args[1..], out),
+        "discovery" => execute_discovery(&args[1..], out),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -203,6 +206,57 @@ fn execute_connection(args: &[String], out: &mut impl Write) -> Result<(), Strin
     let plan =
         plan_connection(request).map_err(|err| format!("connection plan failed: {err:?}"))?;
     print_connection_plan(&plan, out)
+}
+
+fn execute_discovery(args: &[String], out: &mut impl Write) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("parse") {
+        return Err("expected discovery parse".into());
+    }
+
+    let service = parse_service_kind(required_option(args, "--service")?)
+        .ok_or_else(|| "unsupported discovery service".to_string())?;
+    let advertisement = parse_txt_advertisement(required_option(args, "--txt")?)
+        .map_err(|err| format!("discovery TXT parse failed: {err:?}"))?;
+    let capabilities = advertisement.peer_capabilities();
+
+    writeln!(out, "service={}", format_service(service)).map_err(|err| err.to_string())?;
+    writeln!(out, "device_id={}", advertisement.device_id).map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "public_key_fingerprint={}",
+        advertisement.public_key_fingerprint
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "platform={:?}", advertisement.platform).map_err(|err| err.to_string())?;
+    writeln!(out, "platform_label={}", advertisement.platform_label)
+        .map_err(|err| err.to_string())?;
+    writeln!(out, "name={}", advertisement.name).map_err(|err| err.to_string())?;
+    writeln!(out, "version={}", advertisement.protocol_version).map_err(|err| err.to_string())?;
+    writeln!(out, "capabilities={}", advertisement.capabilities.join(","))
+        .map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "supports_apple_native={}",
+        capabilities.supports_apple_native
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "supports_msquic={}", capabilities.supports_msquic)
+        .map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "supports_webrtc_data_channel={}",
+        capabilities.supports_webrtc_data_channel
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "supports_tcp_fallback={}",
+        capabilities.supports_tcp_fallback
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "supports_relay={}", capabilities.supports_relay)
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 fn has_flag(args: &[String], name: &str) -> bool {
@@ -462,6 +516,10 @@ fn format_binding_kind(binding: &AdapterChannelBinding) -> &'static str {
     }
 }
 
+fn format_service(service: DiscoveryServiceKind) -> &'static str {
+    service.service_type()
+}
+
 fn format_reliability(reliability: SkyBridgeReliability) -> String {
     match reliability {
         SkyBridgeReliability::ReliableOrdered => "reliable-ordered".into(),
@@ -666,6 +724,35 @@ mod tests {
         assert!(stdout.contains(
             "channel.control=WebRtcDataChannel:skybridge.control:reliable-ordered:head_of_line_isolated=true"
         ));
+    }
+
+    #[test]
+    fn discovery_parse_reports_mac_txt_capabilities() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let txt = "deviceId=mac-1;pubKeyFP=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1";
+
+        let code = run(
+            [
+                "discovery",
+                "parse",
+                "--service",
+                "_skybridge._udp",
+                "--txt",
+                txt,
+            ],
+            &mut out,
+            &mut err,
+        );
+
+        let stdout = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0);
+        assert!(err.is_empty());
+        assert!(stdout.contains("service=_skybridge._udp"));
+        assert!(stdout.contains("device_id=mac-1"));
+        assert!(stdout.contains("platform=Apple"));
+        assert!(stdout.contains("supports_apple_native=true"));
+        assert!(stdout.contains("supports_webrtc_data_channel=true"));
     }
 
     #[test]

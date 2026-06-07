@@ -6,6 +6,7 @@ pub mod channel;
 pub mod cli;
 pub mod connection;
 pub mod crypto;
+pub mod discovery;
 pub mod error;
 pub mod ffi;
 pub mod frame;
