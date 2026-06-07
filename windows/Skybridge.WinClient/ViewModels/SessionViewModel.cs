@@ -31,6 +31,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
+    private readonly IDiscoveryBrowserClient _discoveryBrowserClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionPreflightClient _connectionPreflightClient;
     private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
@@ -41,11 +42,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ISettingsWorkspaceClient _settingsClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
+    private string _discoverySearchText = "";
     private string _discoveryTxtRecord =
         $"deviceId=mac-1;pubKeyFP={SampleFingerprint};platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1";
     private string _pairingConnectionCode =
         $"skybridge-pair:v1;deviceId=mac-1;pubKey={SamplePairingPublicKey};pubKeyFP={SampleFingerprint};platform=macOS;name=Desk%20Mac;version=v1";
     private string _discoveryStatus = "Ready";
+    private string _discoveryBrowserStatus = "Ready";
     private string _pairingStatus = "Ready";
     private string _connectionPreflightStatus = "Ready";
     private string _coreDiagnosticsStatus = "Ready";
@@ -60,11 +63,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private FeatureEntry _selectedFeature;
     private DiscoveredPeer? _validatedDiscoveredPeer;
     private PairingMaterial? _validatedPairingMaterial;
+    private bool _isDiscoveryScanning;
+    private bool _isDiscoveryCompatibilityModeEnabled;
+    private int _extendedSearchCountdown;
     private bool _isBusy;
 
     public SessionViewModel(
         IEngineClient engineClient,
         IDiscoveryClient? discoveryClient = null,
+        IDiscoveryBrowserClient? discoveryBrowserClient = null,
         IPairingMaterialClient? pairingMaterialClient = null,
         IConnectionPreflightClient? connectionPreflightClient = null,
         ICoreDiagnosticsClient? coreDiagnosticsClient = null,
@@ -76,6 +83,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
+        _discoveryBrowserClient = discoveryBrowserClient ?? new UnavailableDiscoveryBrowserClient();
         _pairingMaterialClient = pairingMaterialClient ?? new UnavailablePairingMaterialClient();
         _connectionPreflightClient = connectionPreflightClient ?? new UnavailableConnectionPreflightClient();
         _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
@@ -88,6 +96,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
         DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
+        DiscoveryBrowserFacts = new ObservableCollection<DiscoveryBrowserFactView>();
         PairingFacts = new ObservableCollection<PairingFactView>();
         ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
@@ -108,6 +117,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
         HeartbeatCommand = new AsyncRelayCommand(SendHeartbeatAsync, CanSendHeartbeat);
+        StartDiscoveryCommand = new AsyncRelayCommand(StartDiscoveryAsync, CanUseDiscoveryBrowser);
+        StopDiscoveryCommand = new AsyncRelayCommand(StopDiscoveryAsync, CanUseDiscoveryBrowser);
+        RefreshDiscoveryCommand = new AsyncRelayCommand(RefreshDiscoveryAsync, CanUseDiscoveryBrowser);
+        RunExtendedDiscoveryCommand = new AsyncRelayCommand(RunExtendedDiscoveryAsync, CanUseDiscoveryBrowser);
         ParseAdvertisementCommand = new AsyncRelayCommand(ParseAdvertisementAsync, CanParseAdvertisement);
         ValidatePairingCodeCommand = new AsyncRelayCommand(ValidatePairingCodeAsync, CanValidatePairingCode);
         PrepareConnectionCommand = new AsyncRelayCommand(PrepareConnectionAsync, CanPrepareConnection);
@@ -130,6 +143,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<FramerateProfile> FramerateProfiles { get; }
 
     public ObservableCollection<DiscoveredPeerView> DiscoveredPeers { get; }
+
+    public ObservableCollection<DiscoveryBrowserFactView> DiscoveryBrowserFacts { get; }
 
     public ObservableCollection<PairingFactView> PairingFacts { get; }
 
@@ -253,6 +268,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
+    public string DiscoverySearchText
+    {
+        get => _discoverySearchText;
+        set
+        {
+            if (SetField(ref _discoverySearchText, value))
+            {
+                RefreshCommandStates();
+            }
+        }
+    }
+
     public string DiscoveryTxtRecord
     {
         get => _discoveryTxtRecord;
@@ -289,6 +316,30 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set => SetField(ref _discoveryStatus, value);
     }
 
+    public string DiscoveryBrowserStatus
+    {
+        get => _discoveryBrowserStatus;
+        private set => SetField(ref _discoveryBrowserStatus, value);
+    }
+
+    public bool IsDiscoveryScanning
+    {
+        get => _isDiscoveryScanning;
+        private set => SetField(ref _isDiscoveryScanning, value);
+    }
+
+    public bool IsDiscoveryCompatibilityModeEnabled
+    {
+        get => _isDiscoveryCompatibilityModeEnabled;
+        set => SetField(ref _isDiscoveryCompatibilityModeEnabled, value);
+    }
+
+    public int ExtendedSearchCountdown
+    {
+        get => _extendedSearchCountdown;
+        private set => SetField(ref _extendedSearchCountdown, value);
+    }
+
     public string PairingStatus
     {
         get => _pairingStatus;
@@ -302,6 +353,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     }
 
     public int DiscoveredPeerCount => DiscoveredPeers.Count;
+
+    public int DiscoveryBrowserFactCount => DiscoveryBrowserFacts.Count;
 
     public int PairingFactCount => PairingFacts.Count;
 
@@ -385,6 +438,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ICommand HeartbeatCommand { get; }
 
+    public ICommand StartDiscoveryCommand { get; }
+
+    public ICommand StopDiscoveryCommand { get; }
+
+    public ICommand RefreshDiscoveryCommand { get; }
+
+    public ICommand RunExtendedDiscoveryCommand { get; }
+
     public ICommand ParseAdvertisementCommand { get; }
 
     public ICommand ValidatePairingCodeCommand { get; }
@@ -444,6 +505,77 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             await _engineClient.SendHeartbeatAsync();
             StatusMessage = "Heartbeat acknowledged";
+        });
+    }
+
+    private Task StartDiscoveryAsync() =>
+        RunDiscoveryBrowserAsync(DiscoveryBrowserAction.Start);
+
+    private Task StopDiscoveryAsync() =>
+        RunDiscoveryBrowserAsync(DiscoveryBrowserAction.Stop);
+
+    private Task RefreshDiscoveryAsync() =>
+        RunDiscoveryBrowserAsync(DiscoveryBrowserAction.Refresh);
+
+    private async Task RunExtendedDiscoveryAsync()
+    {
+        ExtendedSearchCountdown = 15;
+        await RunDiscoveryBrowserAsync(DiscoveryBrowserAction.ExtendedSearch);
+    }
+
+    private async Task RunDiscoveryBrowserAsync(DiscoveryBrowserAction action)
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            DiscoveryBrowserStatus = action == DiscoveryBrowserAction.Stop ? "Stopping..." : "Scanning...";
+            var snapshot = await _discoveryBrowserClient.BuildReadOnlySnapshotAsync(
+                new DiscoveryBrowserRequest(
+                    action,
+                    DiscoveryService,
+                    DiscoveryTxtRecord,
+                    DiscoverySearchText,
+                    IsDiscoveryCompatibilityModeEnabled,
+                    ExtendedSearchCountdown));
+
+            IsDiscoveryScanning = snapshot.IsScanning;
+            DiscoveryBrowserFacts.Clear();
+            foreach (var fact in snapshot.Facts)
+            {
+                DiscoveryBrowserFacts.Add(DiscoveryBrowserFactView.FromFact(fact));
+            }
+
+            if (action != DiscoveryBrowserAction.Stop)
+            {
+                _validatedDiscoveredPeer = snapshot.Peers.Count == 1 ? snapshot.Peers[0] : null;
+                _validatedPairingMaterial = null;
+                DiscoveredPeers.Clear();
+                foreach (var peer in snapshot.Peers)
+                {
+                    DiscoveredPeers.Add(DiscoveredPeerView.FromPeer(peer));
+                }
+
+                PairingFacts.Clear();
+                ClearConnectionPreflight();
+                OnPropertyChanged(nameof(DiscoveredPeerCount));
+                OnPropertyChanged(nameof(PairingFactCount));
+            }
+
+            OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
+            DiscoveryBrowserStatus = snapshot.IsScanning
+                ? $"Scanning {snapshot.CapturedAt:HH:mm:ss} UTC"
+                : $"Stopped {snapshot.CapturedAt:HH:mm:ss} UTC";
+            DiscoveryStatus = action == DiscoveryBrowserAction.Stop
+                ? "Discovery stopped"
+                : snapshot.Peers.Count == 0
+                    ? "No Core-validated peers"
+                    : $"Validated {snapshot.Peers.Count} peer(s)";
+            PairingStatus = action == DiscoveryBrowserAction.Stop ? PairingStatus : "Ready";
+            StatusMessage = "Discovery browser snapshot updated";
         });
     }
 
@@ -736,6 +868,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool CanSendHeartbeat() => !IsBusy && ConnectionState == EngineConnectionState.Connected;
 
+    private bool CanUseDiscoveryBrowser() => !IsBusy && IsDeviceDiscoverySelected;
+
     private bool CanParseAdvertisement() =>
         !IsBusy
         && IsDeviceDiscoverySelected
@@ -778,6 +912,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (IsDeviceDiscoverySelected)
             {
                 DiscoveryStatus = ex.Message;
+                DiscoveryBrowserStatus = ex.Message;
                 PairingStatus = ex.Message;
                 ConnectionPreflightStatus = ex.Message;
             }
@@ -823,6 +958,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (ConnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (DisconnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (HeartbeatCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (StartDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (StopDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (RefreshDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (RunExtendedDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ValidatePairingCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (PrepareConnectionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
@@ -869,11 +1008,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _validatedDiscoveredPeer = null;
         _validatedPairingMaterial = null;
         DiscoveredPeers.Clear();
+        DiscoveryBrowserFacts.Clear();
         PairingFacts.Clear();
         ClearConnectionPreflight();
         DiscoveryStatus = "Ready";
+        DiscoveryBrowserStatus = "Ready";
+        IsDiscoveryScanning = false;
         PairingStatus = "Ready";
         OnPropertyChanged(nameof(DiscoveredPeerCount));
+        OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
         OnPropertyChanged(nameof(PairingFactCount));
     }
 
@@ -1026,6 +1169,15 @@ public sealed record PairingFactView(
     string Value,
     string Detail);
 
+public sealed record DiscoveryBrowserFactView(
+    string Label,
+    string Value,
+    string Detail)
+{
+    public static DiscoveryBrowserFactView FromFact(DiscoveryBrowserFact fact) =>
+        new(fact.Label, fact.Value, fact.Detail);
+}
+
 public sealed record ConnectionPreflightFactView(
     string Label,
     string Value,
@@ -1098,6 +1250,14 @@ internal sealed class UnavailableDiscoveryClient : IDiscoveryClient
     public Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord)
     {
         throw new InvalidOperationException("Discovery client is not configured.");
+    }
+}
+
+internal sealed class UnavailableDiscoveryBrowserClient : IDiscoveryBrowserClient
+{
+    public Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request)
+    {
+        throw new InvalidOperationException("Discovery browser client is not configured.");
     }
 }
 

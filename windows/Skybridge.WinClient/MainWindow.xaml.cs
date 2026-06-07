@@ -12,9 +12,11 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         var coreBridge = new CoreBridge();
+        var discoveryClient = new CoreDiscoveryClient(coreBridge);
         ViewModel = new SessionViewModel(
             new DummyEngineClient(),
-            new CoreDiscoveryClient(coreBridge),
+            discoveryClient,
+            new WindowsDiscoveryBrowserClient(discoveryClient),
             new PairingMaterialClient(),
             new ConnectionPreflightClient(coreBridge),
             new CoreDiagnosticsClient(coreBridge),
