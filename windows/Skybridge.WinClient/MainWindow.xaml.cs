@@ -15,7 +15,8 @@ public sealed partial class MainWindow : Window
         ViewModel = new SessionViewModel(
             new DummyEngineClient(),
             new CoreDiscoveryClient(coreBridge),
-            new CoreDiagnosticsClient(coreBridge));
+            new CoreDiagnosticsClient(coreBridge),
+            new FileTransferWorkspaceClient(coreBridge));
         DataContext = ViewModel;
     }
 }

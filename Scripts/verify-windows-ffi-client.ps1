@@ -29,11 +29,12 @@ $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngin
 $coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
 $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryClient.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
+$fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $coreDiagnosticsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $coreDiagnosticsPath, $fileTransferPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -41,6 +42,7 @@ $client = Get-Content -Raw -LiteralPath $clientPath
 $coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
 $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
+$fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
@@ -83,6 +85,7 @@ Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architec
 Assert-Contains -Text $mainWindow -Needle "var coreBridge = new CoreBridge();" -Message "MainWindow should create one explicit CoreBridge for manual Core tools."
 Assert-Contains -Text $mainWindow -Needle "new CoreDiscoveryClient(coreBridge)" -Message "MainWindow should wire CoreDiscoveryClient for explicit manual discovery parsing."
 Assert-Contains -Text $mainWindow -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "MainWindow should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
+Assert-Contains -Text $mainWindow -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "MainWindow should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",
@@ -142,5 +145,21 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "CoreDiagnosticsClient" -Message "Architecture doc missing CoreDiagnosticsClient status."
+
+foreach ($signal in @(
+    "public interface IFileTransferWorkspaceClient",
+    "public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient",
+    "BuildReadOnlySnapshotAsync",
+    "MapChannelAsync",
+    "EncodeFrameAsync",
+    "DecodeFrameMetadataAsync",
+    "FileTransferSecurityFact",
+    "HMAC",
+    "Signature"
+)) {
+    Assert-Contains -Text $fileTransfer -Needle $signal -Message "FileTransferWorkspaceClient missing Core file-transfer signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "FileTransferWorkspaceClient" -Message "Architecture doc missing FileTransferWorkspaceClient status."
 
 Write-Output "windows-ffi-client: ok"

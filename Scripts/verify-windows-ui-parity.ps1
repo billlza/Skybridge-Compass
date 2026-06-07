@@ -28,16 +28,18 @@ function Assert-Contains {
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
+$fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $coreDiagnosticsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $coreDiagnosticsPath, $fileTransferPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
 $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
+$fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 
@@ -80,6 +82,11 @@ foreach ($binding in @(
     "DiscoveryStatus",
     "DiscoveredPeers",
     "IsDeviceDiscoverySelected",
+    "FileTransferStatus",
+    "FileTransferQueue",
+    "FileTransferHistory",
+    "FileTransferSecurityFacts",
+    "IsFileTransferSelected",
     "CoreDiagnosticsStatus",
     "CoreDiagnosticFacts",
     "IsQuantumSelected"
@@ -88,7 +95,7 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "ParseAdvertisementCommand", "RefreshFileTransferCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $mainWindow -Needle "Command=`"{Binding $command}`"" -Message "MainWindow.xaml missing command binding: $command"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -115,6 +122,25 @@ foreach ($discoverySignal in @(
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.DeviceDiscovery, "Device Discovery", "\uE8B9", "Core TXT parse", true)' -Message "Device Discovery must be marked implemented once the Core-validated parser panel exists."
+
+foreach ($fileTransferSignal in @(
+    "File Transfer",
+    "Select Files",
+    "Select Folder",
+    "Generate QR",
+    "Transfer Queue",
+    "Transfer History",
+    "HMAC",
+    "Signature",
+    "FileTransferWorkspaceClient",
+    "BuildReadOnlySnapshotAsync",
+    "MapChannelAsync",
+    "EncodeFrameAsync"
+)) {
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
+}
+
+Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", true)' -Message "File Transfer must be marked implemented once the queue/history workspace exists."
 
 foreach ($diagnosticSignal in @(
     "Quantum / Core Diagnostics",
