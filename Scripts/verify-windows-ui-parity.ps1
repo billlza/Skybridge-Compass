@@ -161,10 +161,7 @@ foreach ($binding in @(
     "SelectedFeature",
     "ConnectionStatus",
     "StatusMessage",
-    "OnlineDeviceCount",
-    "ActiveSessionCount",
-    "TransferTaskCount",
-    "PerformanceStatus",
+    "DashboardMetrics",
     "TopBarConnectionStatus",
     "TopBarDiagnosticsStatus",
     "SidebarSessionActions",
@@ -244,6 +241,15 @@ foreach ($binding in @(
     Assert-Contains -Text $sessionViewModel -Needle $binding -Message "SessionViewModel.cs missing property or source: $binding"
 }
 
+foreach ($dashboardScalar in @(
+    "OnlineDeviceCount",
+    "ActiveSessionCount",
+    "TransferTaskCount",
+    "PerformanceStatus"
+)) {
+    Assert-Contains -Text ($sessionViewModel + $dashboardMetrics) -Needle $dashboardScalar -Message "Dashboard scalar status signal missing: $dashboardScalar"
+}
+
 foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
@@ -279,6 +285,7 @@ foreach ($resourceSignal in @(
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionActions" -ItemsPanel "VerticalWorkspaceActionItemsPanel" -ItemTemplate "SidebarWorkspaceActionButtonTemplate"
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
 
+Assert-ItemsControlResources -Text $mainWindow -Binding "DashboardMetrics" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 Assert-ItemsControlResources -Text $mainWindow -Binding "UsbDeviceStats" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
 
 foreach ($actionBinding in @(
@@ -403,6 +410,9 @@ foreach ($dashboardSignal in @(
     "DashboardMetricsRequest",
     "DashboardMetricsSnapshot",
     "DashboardMetric",
+    "DashboardMetricView",
+    "DashboardMetricCount",
+    "DashboardMetrics",
     "OnlineDeviceCount",
     "ActiveSessionCount",
     "TransferTaskCount",

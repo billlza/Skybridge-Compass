@@ -213,39 +213,10 @@
 
             <ScrollViewer Grid.Row="1">
                 <StackPanel Padding="24" Spacing="20">
-                    <Grid ColumnSpacing="14">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-
-                        <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="Online Devices" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Text="{Binding OnlineDeviceCount}" FontSize="28" FontWeight="SemiBold" />
-                            </StackPanel>
-                        </Border>
-                        <Border Grid.Column="1" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="Active Sessions" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Text="{Binding ActiveSessionCount}" FontSize="28" FontWeight="SemiBold" />
-                            </StackPanel>
-                        </Border>
-                        <Border Grid.Column="2" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="Transfer Tasks" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Text="{Binding TransferTaskCount}" FontSize="28" FontWeight="SemiBold" />
-                            </StackPanel>
-                        </Border>
-                        <Border Grid.Column="3" Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="Performance" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Text="{Binding PerformanceStatus}" FontSize="24" FontWeight="SemiBold" />
-                            </StackPanel>
-                        </Border>
-                    </Grid>
+                    <ItemsControl
+                        ItemsSource="{Binding DashboardMetrics}"
+                        ItemsPanel="{StaticResource WorkspaceMetricCardItemsPanel}"
+                        ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
 
                     <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">

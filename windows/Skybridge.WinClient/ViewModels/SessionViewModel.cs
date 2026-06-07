@@ -132,6 +132,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
+        DashboardMetrics = new ObservableCollection<DashboardMetricView>();
         SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();
         TopBarActions = new ObservableCollection<WorkspaceActionItemView>();
         SessionControlActions = new ObservableCollection<WorkspaceActionItemView>();
@@ -205,6 +206,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public ObservableCollection<FeatureEntry> NavigationItems { get; }
+
+    public ObservableCollection<DashboardMetricView> DashboardMetrics { get; }
 
     public ObservableCollection<BitrateProfile> BitrateProfiles { get; }
 
@@ -621,6 +624,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public int PairingFactCount => PairingFacts.Count;
 
     public int ConnectionPreflightFactCount => ConnectionPreflightFacts.Count;
+
+    public int DashboardMetricCount => DashboardMetrics.Count;
 
     public string CoreDiagnosticsStatus
     {
@@ -1436,6 +1441,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ActiveSessionCount = snapshot.ActiveSessionCount;
         TransferTaskCount = snapshot.TransferTaskCount;
         PerformanceStatus = snapshot.PerformanceStatus;
+        DashboardMetrics.Clear();
+        foreach (var metric in snapshot.Metrics)
+        {
+            DashboardMetrics.Add(DashboardMetricView.FromMetric(metric));
+        }
+
+        OnPropertyChanged(nameof(DashboardMetricCount));
     }
 
     private void LoadWorkspaceActions()
@@ -1757,6 +1769,15 @@ public sealed record SettingsTabItemView(
 {
     public static SettingsTabItemView FromItem(SettingsTabItem item) =>
         new(item.Title, item.Detail);
+}
+
+public sealed record DashboardMetricView(
+    string Title,
+    string Value,
+    string Detail)
+{
+    public static DashboardMetricView FromMetric(DashboardMetric metric) =>
+        new(metric.Label, metric.Value, metric.Detail);
 }
 
 public sealed record SettingsActionItemView(
