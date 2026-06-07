@@ -6,6 +6,7 @@ pub mod cli;
 pub mod crypto;
 pub mod error;
 pub mod ffi;
+pub mod padding;
 pub mod session;
 pub mod stream;
 pub mod suite;
