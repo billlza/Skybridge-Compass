@@ -7,6 +7,8 @@ public interface IDiscoveryClient
 {
     string BuildPendingStatus();
 
+    bool CanParseAdvertisement(string service, string txtRecord);
+
     Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord);
 }
 
@@ -22,6 +24,13 @@ public sealed class CoreDiscoveryClient : IDiscoveryClient
     public string BuildPendingStatus() => DefaultPendingStatus;
 
     public static string DefaultPendingStatus { get; } = "Parsing...";
+
+    public bool CanParseAdvertisement(string service, string txtRecord) =>
+        HasParseInputs(service, txtRecord);
+
+    public static bool HasParseInputs(string service, string txtRecord) =>
+        !string.IsNullOrWhiteSpace(service)
+        && !string.IsNullOrWhiteSpace(txtRecord);
 
     public async Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord)
     {

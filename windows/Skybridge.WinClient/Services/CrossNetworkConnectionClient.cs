@@ -12,6 +12,10 @@ public interface ICrossNetworkConnectionClient
 {
     CrossNetworkCodeInputPolicy BuildCodeInputPolicy();
 
+    bool CanScanQrCode(string qrInput);
+
+    bool CanCopyCode(string generatedCode);
+
     bool CanConnectWithCode(string codeInput);
 
     string BuildPendingStatus(CrossNetworkConnectionAction action);
@@ -36,6 +40,18 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         new(ShortCodeAlphabet, 6);
 
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() => DefaultCodeInputPolicy;
+
+    public bool CanScanQrCode(string qrInput) =>
+        HasQrInput(qrInput);
+
+    public static bool HasQrInput(string qrInput) =>
+        !string.IsNullOrWhiteSpace(qrInput);
+
+    public bool CanCopyCode(string generatedCode) =>
+        HasGeneratedCode(generatedCode);
+
+    public static bool HasGeneratedCode(string generatedCode) =>
+        !string.IsNullOrWhiteSpace(generatedCode);
 
     public bool CanConnectWithCode(string codeInput) =>
         CanConnectWithDefaultCodePolicy(codeInput);

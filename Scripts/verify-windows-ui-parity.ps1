@@ -602,6 +602,12 @@ foreach ($deviceDiscoveryPendingStatusSignal in @(
     "_manualConnectionClient.BuildPendingStatus()",
     "_pairingMaterialClient.BuildPendingStatus()",
     "_connectionPreflightClient.BuildPendingStatus()",
+    "_discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord)",
+    "_manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort)",
+    "_pairingMaterialClient.CanValidate(PairingConnectionCode)",
+    "CoreDiscoveryClient.HasParseInputs",
+    "ManualConnectionClient.HasManualTargetInputs",
+    "PairingMaterialClient.HasConnectionCode",
     "CoreDiscoveryClient.DefaultPendingStatus",
     "ManualConnectionClient.DefaultPendingStatus",
     "PairingMaterialClient.DefaultPendingStatus",
@@ -617,6 +623,16 @@ foreach ($viewModelPendingStatusLiteral in @(
     'ConnectionPreflightStatus = "Preparing..."'
 )) {
     Assert-True -Condition (-not $sessionViewModel.Contains($viewModelPendingStatusLiteral)) -Message "SessionViewModel must source pending status from service boundary instead of literal: $viewModelPendingStatusLiteral"
+}
+
+foreach ($viewModelInputGateLiteral in @(
+    "&& !string.IsNullOrWhiteSpace(ManualConnectionHost)",
+    "&& !string.IsNullOrWhiteSpace(ManualConnectionPort)",
+    "&& !string.IsNullOrWhiteSpace(DiscoveryService)",
+    "&& !string.IsNullOrWhiteSpace(DiscoveryTxtRecord)",
+    "&& !string.IsNullOrWhiteSpace(PairingConnectionCode)"
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelInputGateLiteral)) -Message "SessionViewModel must source Device Discovery input readiness from service boundary instead of literal: $viewModelInputGateLiteral"
 }
 
 foreach ($workspaceRefreshPendingStatusSignal in @(
@@ -654,7 +670,11 @@ foreach ($crossNetworkInputPolicySignal in @(
     "CodeLength",
     "Alphabet",
     "CanConnectWithCode",
+    "CanScanQrCode",
+    "CanCopyCode",
     "CanConnectWithDefaultCodePolicy",
+    "HasQrInput",
+    "HasGeneratedCode",
     "TryNormalizeConnectionCode",
     "BuildPendingStatus",
     "BuildDefaultPendingStatus",
@@ -667,6 +687,8 @@ foreach ($crossNetworkInputPolicySignal in @(
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeAlphabet")) -Message "SessionViewModel must not duplicate the Smart Connection Code alphabet."
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkStatus = action switch")) -Message "SessionViewModel must source Cross-network pending status from ICrossNetworkConnectionClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeInput.Length == 6")) -Message "SessionViewModel must source Smart Connection Code readiness from ICrossNetworkConnectionClient."
+Assert-True -Condition (-not $sessionViewModel.Contains("!string.IsNullOrWhiteSpace(CrossNetworkQrInput)")) -Message "SessionViewModel must source QR scan readiness from ICrossNetworkConnectionClient."
+Assert-True -Condition (-not $sessionViewModel.Contains("!string.IsNullOrWhiteSpace(CrossNetworkGeneratedCode)")) -Message "SessionViewModel must source generated-code copy readiness from ICrossNetworkConnectionClient."
 
 Assert-Ordered -Text $mainWindow -Context "Device Discovery action order" -Needles @(
     '<TextBlock Text="Device Discovery"',

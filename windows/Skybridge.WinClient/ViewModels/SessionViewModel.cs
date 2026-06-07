@@ -1230,18 +1230,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanPrepareManualConnection() =>
         !IsBusy
         && IsDeviceDiscoverySelected
-        && !string.IsNullOrWhiteSpace(ManualConnectionHost)
-        && !string.IsNullOrWhiteSpace(ManualConnectionPort);
+        && _manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort);
 
     private bool CanUseCrossNetworkConnection() => !IsBusy && IsDeviceDiscoverySelected;
 
     private bool CanScanQRCode() =>
         CanUseCrossNetworkConnection()
-        && !string.IsNullOrWhiteSpace(CrossNetworkQrInput);
+        && _crossNetworkConnectionClient.CanScanQrCode(CrossNetworkQrInput);
 
     private bool CanCopyConnectionCode() =>
         CanUseCrossNetworkConnection()
-        && !string.IsNullOrWhiteSpace(CrossNetworkGeneratedCode);
+        && _crossNetworkConnectionClient.CanCopyCode(CrossNetworkGeneratedCode);
 
     private bool CanConnectConnectionCode() =>
         CanUseCrossNetworkConnection()
@@ -1250,13 +1249,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanParseAdvertisement() =>
         !IsBusy
         && IsDeviceDiscoverySelected
-        && !string.IsNullOrWhiteSpace(DiscoveryService)
-        && !string.IsNullOrWhiteSpace(DiscoveryTxtRecord);
+        && _discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord);
 
     private bool CanValidatePairingCode() =>
         !IsBusy
         && IsDeviceDiscoverySelected
-        && !string.IsNullOrWhiteSpace(PairingConnectionCode);
+        && _pairingMaterialClient.CanValidate(PairingConnectionCode);
 
     private bool CanPrepareConnection() =>
         !IsBusy
@@ -1878,6 +1876,9 @@ internal sealed class UnavailableDiscoveryClient : IDiscoveryClient
 {
     public string BuildPendingStatus() => CoreDiscoveryClient.DefaultPendingStatus;
 
+    public bool CanParseAdvertisement(string service, string txtRecord) =>
+        CoreDiscoveryClient.HasParseInputs(service, txtRecord);
+
     public Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord)
     {
         throw new InvalidOperationException("Discovery client is not configured.");
@@ -1905,6 +1906,9 @@ internal sealed class UnavailableManualConnectionClient : IManualConnectionClien
 {
     public string BuildPendingStatus() => ManualConnectionClient.DefaultPendingStatus;
 
+    public bool CanPrepareTarget(string host, string port) =>
+        ManualConnectionClient.HasManualTargetInputs(host, port);
+
     public Task<ManualConnectionSnapshot> BuildReadOnlySnapshotAsync(ManualConnectionRequest request)
     {
         throw new InvalidOperationException("Manual connection client is not configured.");
@@ -1915,6 +1919,12 @@ internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkCon
 {
     public CrossNetworkCodeInputPolicy BuildCodeInputPolicy() =>
         CrossNetworkConnectionClient.DefaultCodeInputPolicy;
+
+    public bool CanScanQrCode(string qrInput) =>
+        CrossNetworkConnectionClient.HasQrInput(qrInput);
+
+    public bool CanCopyCode(string generatedCode) =>
+        CrossNetworkConnectionClient.HasGeneratedCode(generatedCode);
 
     public bool CanConnectWithCode(string codeInput) =>
         CrossNetworkConnectionClient.CanConnectWithDefaultCodePolicy(codeInput);
@@ -1931,6 +1941,9 @@ internal sealed class UnavailableCrossNetworkConnectionClient : ICrossNetworkCon
 internal sealed class UnavailablePairingMaterialClient : IPairingMaterialClient
 {
     public string BuildPendingStatus() => PairingMaterialClient.DefaultPendingStatus;
+
+    public bool CanValidate(string connectionCode) =>
+        PairingMaterialClient.HasConnectionCode(connectionCode);
 
     public Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,

@@ -10,6 +10,8 @@ public interface IPairingMaterialClient
 {
     string BuildPendingStatus();
 
+    bool CanValidate(string connectionCode);
+
     Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,
         string? expectedPublicKeyFingerprint);
@@ -22,6 +24,12 @@ public sealed class PairingMaterialClient : IPairingMaterialClient
     public string BuildPendingStatus() => DefaultPendingStatus;
 
     public static string DefaultPendingStatus { get; } = "Validating...";
+
+    public bool CanValidate(string connectionCode) =>
+        HasConnectionCode(connectionCode);
+
+    public static bool HasConnectionCode(string connectionCode) =>
+        !string.IsNullOrWhiteSpace(connectionCode);
 
     public Task<PairingMaterialSnapshot> BuildReadOnlySnapshotAsync(
         string connectionCode,

@@ -9,6 +9,8 @@ public interface IManualConnectionClient
 {
     string BuildPendingStatus();
 
+    bool CanPrepareTarget(string host, string port);
+
     Task<ManualConnectionSnapshot> BuildReadOnlySnapshotAsync(ManualConnectionRequest request);
 }
 
@@ -17,6 +19,13 @@ public sealed class ManualConnectionClient : IManualConnectionClient
     public string BuildPendingStatus() => DefaultPendingStatus;
 
     public static string DefaultPendingStatus { get; } = "Preparing...";
+
+    public bool CanPrepareTarget(string host, string port) =>
+        HasManualTargetInputs(host, port);
+
+    public static bool HasManualTargetInputs(string host, string port) =>
+        !string.IsNullOrWhiteSpace(host)
+        && !string.IsNullOrWhiteSpace(port);
 
     public Task<ManualConnectionSnapshot> BuildReadOnlySnapshotAsync(ManualConnectionRequest request)
     {
