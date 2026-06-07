@@ -61,6 +61,48 @@ fn cli_windows_to_apple_selects_webrtc_interop() {
 }
 
 #[test]
+fn cli_suite_offer_lists_provider_derived_suites() {
+    let output = skybridge()
+        .args([
+            "suite",
+            "offer",
+            "--caps",
+            "xwing,x25519,p256",
+            "--allow-classic",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("x-wing-hybrid=0x0001"));
+    assert!(stdout.contains("x25519-ed25519=0x1001"));
+    assert!(!stdout.contains("p256-ecdsa"));
+}
+
+#[test]
+fn cli_suite_select_blocks_timeout_downgrade() {
+    let output = skybridge()
+        .args([
+            "suite",
+            "select",
+            "--local-caps",
+            "x25519",
+            "--remote-suites",
+            "0x1001",
+            "--allow-classic",
+            "--timeout-observed",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("TimeoutCannotDowngrade"));
+}
+
+#[test]
 fn cli_rejects_incomplete_transport_command() {
     let output = skybridge()
         .args(["transport", "select", "--local", "windows"])

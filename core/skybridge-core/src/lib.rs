@@ -8,6 +8,7 @@ pub mod error;
 pub mod ffi;
 pub mod session;
 pub mod stream;
+pub mod suite;
 pub mod transport;
 
 use crypto::SessionCryptoProvider;
