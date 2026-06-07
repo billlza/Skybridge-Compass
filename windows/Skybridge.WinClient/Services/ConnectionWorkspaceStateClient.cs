@@ -23,6 +23,10 @@ public interface IConnectionWorkspaceStateClient
         DiscoveredPeer? discoveredPeer,
         PairingMaterial? pairingMaterial);
 
+    bool CanPreparePreflight(
+        DiscoveredPeer? discoveredPeer,
+        PairingMaterial? pairingMaterial);
+
     ConnectionWorkspaceStatusPatch BuildPreflightPreparedPatch(ConnectionPreflightSnapshot snapshot);
 }
 
@@ -118,6 +122,11 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
 
         return new(true, "");
     }
+
+    public bool CanPreparePreflight(
+        DiscoveredPeer? discoveredPeer,
+        PairingMaterial? pairingMaterial) =>
+        BuildPreflightReadiness(discoveredPeer, pairingMaterial).IsReady;
 
     public ConnectionWorkspaceStatusPatch BuildPreflightPreparedPatch(ConnectionPreflightSnapshot snapshot) =>
         new(

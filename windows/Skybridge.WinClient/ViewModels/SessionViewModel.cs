@@ -1259,8 +1259,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanPrepareConnection() =>
         !IsBusy
         && IsDeviceDiscoverySelected
-        && _validatedDiscoveredPeer is not null
-        && _validatedPairingMaterial is not null;
+        && _connectionWorkspaceStateClient.CanPreparePreflight(
+            _validatedDiscoveredPeer,
+            _validatedPairingMaterial);
 
     private bool CanRefreshUsbManagement() => !IsBusy && IsUsbManagementSelected;
 

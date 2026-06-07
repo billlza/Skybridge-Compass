@@ -605,9 +605,11 @@ foreach ($deviceDiscoveryPendingStatusSignal in @(
     "_discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord)",
     "_manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort)",
     "_pairingMaterialClient.CanValidate(PairingConnectionCode)",
+    "_connectionWorkspaceStateClient.CanPreparePreflight",
     "CoreDiscoveryClient.HasParseInputs",
     "ManualConnectionClient.HasManualTargetInputs",
     "PairingMaterialClient.HasConnectionCode",
+    "CanPreparePreflight",
     "CoreDiscoveryClient.DefaultPendingStatus",
     "ManualConnectionClient.DefaultPendingStatus",
     "PairingMaterialClient.DefaultPendingStatus",
@@ -634,6 +636,9 @@ foreach ($viewModelInputGateLiteral in @(
 )) {
     Assert-True -Condition (-not $sessionViewModel.Contains($viewModelInputGateLiteral)) -Message "SessionViewModel must source Device Discovery input readiness from service boundary instead of literal: $viewModelInputGateLiteral"
 }
+
+Assert-True -Condition (-not $sessionViewModel.Contains("&& _validatedDiscoveredPeer is not null")) -Message "SessionViewModel must source Prepare Connection readiness from ConnectionWorkspaceStateClient."
+Assert-True -Condition (-not $sessionViewModel.Contains("&& _validatedPairingMaterial is not null")) -Message "SessionViewModel must source Prepare Connection readiness from ConnectionWorkspaceStateClient."
 
 foreach ($workspaceRefreshPendingStatusSignal in @(
     "_coreDiagnosticsClient.BuildPendingStatus()",

@@ -396,6 +396,7 @@ foreach ($signal in @(
     "BuildDiscoveryPeerValidatedPatch",
     "BuildPairingValidatedPatch",
     "BuildPreflightReadiness",
+    "CanPreparePreflight",
     "BuildPreflightPreparedPatch",
     "ConnectionWorkspaceResetReason",
     "ConnectionWorkspaceStatusPatch",
