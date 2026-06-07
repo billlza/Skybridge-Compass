@@ -728,50 +728,23 @@
                                 </Button>
                             </Grid>
 
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE710;" FontSize="14" />
-                                        <TextBlock Text="Recommended Connect" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE8A7;" FontSize="14" />
-                                        <TextBlock Text="Advanced Connect" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE9D9;" FontSize="14" />
-                                        <TextBlock Text="Performance Overlay" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE7F4;" FontSize="14" />
-                                        <TextBlock Text="Quality" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE713;" FontSize="14" />
-                                        <TextBlock Text="Settings" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE740;" FontSize="14" />
-                                        <TextBlock Text="Full Screen" />
-                                    </StackPanel>
-                                </Button>
-                                <Button IsEnabled="False">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <FontIcon Glyph="&#xE711;" FontSize="14" />
-                                        <TextBlock Text="Disconnect Session" />
-                                    </StackPanel>
-                                </Button>
-                            </StackPanel>
+                            <ItemsControl ItemsSource="{Binding RemoteDesktopActions}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" Spacing="10" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button IsEnabled="{Binding IsEnabled}">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                                                <TextBlock Text="{Binding Title}" />
+                                            </StackPanel>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
 
                             <Grid ColumnSpacing="14">
                                 <Grid.ColumnDefinitions>

@@ -140,6 +140,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
         FileTransferActions = new ObservableCollection<WorkspaceActionItemView>();
+        RemoteDesktopActions = new ObservableCollection<WorkspaceActionItemView>();
         FileTransferQueue = new ObservableCollection<FileTransferQueueItemView>();
         FileTransferHistory = new ObservableCollection<FileTransferHistoryItemView>();
         FileTransferSecurityFacts = new ObservableCollection<FileTransferSecurityFactView>();
@@ -207,6 +208,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<CoreDiagnosticFactView> CoreDiagnosticFacts { get; }
 
     public ObservableCollection<WorkspaceActionItemView> FileTransferActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> RemoteDesktopActions { get; }
 
     public ObservableCollection<FileTransferQueueItemView> FileTransferQueue { get; }
 
@@ -1379,6 +1382,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         foreach (var action in fileTransferSnapshot.Actions)
         {
             FileTransferActions.Add(WorkspaceActionItemView.FromItem(action));
+        }
+
+        var remoteDesktopSnapshot = _workspaceActionCatalogClient.BuildReadOnlySnapshot(
+            new WorkspaceActionCatalogRequest(WorkspaceActionSurface.RemoteDesktop));
+
+        RemoteDesktopActions.Clear();
+        foreach (var action in remoteDesktopSnapshot.Actions)
+        {
+            RemoteDesktopActions.Add(WorkspaceActionItemView.FromItem(action));
         }
     }
 

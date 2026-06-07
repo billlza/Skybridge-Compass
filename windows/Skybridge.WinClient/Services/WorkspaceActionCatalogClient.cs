@@ -17,6 +17,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             request.Surface switch
             {
                 WorkspaceActionSurface.FileTransfer => BuildFileTransferActions(),
+                WorkspaceActionSurface.RemoteDesktop => BuildRemoteDesktopActions(),
                 _ => new List<WorkspaceActionItem>()
             });
 
@@ -42,11 +43,59 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 false,
                 "Visible mac-parity quick action; live share QR generation is pending.")
         };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildRemoteDesktopActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "RecommendedConnect",
+                "Recommended Connect",
+                "\uE710",
+                false,
+                "Visible mac-parity quick action; live recommended session launch is pending."),
+            new(
+                "AdvancedConnect",
+                "Advanced Connect",
+                "\uE8A7",
+                false,
+                "Visible mac-parity quick action; advanced endpoint selection is pending."),
+            new(
+                "PerformanceOverlay",
+                "Performance Overlay",
+                "\uE9D9",
+                false,
+                "Visible mac-parity quick action; live overlay telemetry is pending."),
+            new(
+                "Quality",
+                "Quality",
+                "\uE7F4",
+                false,
+                "Visible mac-parity quick action; live encoder quality application is pending."),
+            new(
+                "Settings",
+                "Settings",
+                "\uE713",
+                false,
+                "Visible mac-parity quick action; Remote Desktop runtime settings remain read-only."),
+            new(
+                "FullScreen",
+                "Full Screen",
+                "\uE740",
+                false,
+                "Visible mac-parity quick action; live session windowing is pending."),
+            new(
+                "DisconnectSession",
+                "Disconnect Session",
+                "\uE711",
+                false,
+                "Visible mac-parity quick action; no live session termination is wired.")
+        };
 }
 
 public enum WorkspaceActionSurface
 {
-    FileTransfer
+    FileTransfer,
+    RemoteDesktop
 }
 
 public sealed record WorkspaceActionCatalogRequest(

@@ -160,6 +160,7 @@ foreach ($binding in @(
     "FileTransferHistory",
     "FileTransferSecurityFacts",
     "IsFileTransferSelected",
+    "RemoteDesktopActions",
     "RemoteDesktopStatus",
     "RemoteDesktopSessions",
     "RemoteDesktopControlFacts",
@@ -352,14 +353,23 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "File Transfer action cata
 
 Assert-Ordered -Text $mainWindow -Context "Remote Desktop action order" -Needles @(
     '<TextBlock Text="Remote Desktop"',
-    '<TextBlock Text="Recommended Connect"',
-    '<TextBlock Text="Advanced Connect"',
-    '<TextBlock Text="Performance Overlay"',
-    '<TextBlock Text="Quality"',
-    '<TextBlock Text="Settings"',
-    '<TextBlock Text="Full Screen"',
-    '<TextBlock Text="Disconnect Session"',
+    'ItemsSource="{Binding RemoteDesktopActions}"',
     '<TextBlock Text="Active Sessions"'
+)
+
+Assert-Ordered -Text $workspaceActionCatalog -Context "Remote Desktop action catalog order" -Needles @(
+    '"RecommendedConnect"',
+    '"Recommended Connect"',
+    '"AdvancedConnect"',
+    '"Advanced Connect"',
+    '"PerformanceOverlay"',
+    '"Performance Overlay"',
+    '"Quality"',
+    '"Settings"',
+    '"FullScreen"',
+    '"Full Screen"',
+    '"DisconnectSession"',
+    '"Disconnect Session"'
 )
 
 Assert-Ordered -Text $mainWindow -Context "Settings action order" -Needles @(
@@ -519,6 +529,8 @@ foreach ($remoteDesktopSignal in @(
     "Quality",
     "Full Screen",
     "Disconnect Session",
+    "RemoteDesktopActions",
+    "WorkspaceActionSurface.RemoteDesktop",
     "Active Sessions",
     "RemoteDesktopWorkspaceClient",
     "BuildReadOnlySnapshotAsync",
@@ -527,7 +539,7 @@ foreach ($remoteDesktopSignal in @(
     "CoreChannelKind.Telemetry",
     "EncodeSbp2FrameAsync"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $remoteDesktop) -Needle $remoteDesktopSignal -Message "Remote Desktop parity signal missing: $remoteDesktopSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $remoteDesktop + $workspaceActionCatalog) -Needle $remoteDesktopSignal -Message "Remote Desktop parity signal missing: $remoteDesktopSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", true)' -Message "Remote Desktop must be marked implemented once the read-only session workspace exists."

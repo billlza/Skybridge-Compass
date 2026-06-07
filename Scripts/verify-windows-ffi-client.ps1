@@ -411,6 +411,7 @@ foreach ($signal in @(
     "public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient",
     "BuildReadOnlySnapshot",
     "WorkspaceActionSurface.FileTransfer",
+    "WorkspaceActionSurface.RemoteDesktop",
     "WorkspaceActionCatalogRequest",
     "WorkspaceActionCatalogSnapshot",
     "WorkspaceActionItem",
@@ -420,6 +421,16 @@ foreach ($signal in @(
     "Select Folder",
     "GenerateQr",
     "Generate QR",
+    "RecommendedConnect",
+    "Recommended Connect",
+    "AdvancedConnect",
+    "Advanced Connect",
+    "PerformanceOverlay",
+    "Performance Overlay",
+    "FullScreen",
+    "Full Screen",
+    "DisconnectSession",
+    "Disconnect Session",
     "Visible mac-parity quick action"
 )) {
     Assert-Contains -Text $workspaceActionCatalog -Needle $signal -Message "WorkspaceActionCatalogClient missing action-catalog signal: $signal"
