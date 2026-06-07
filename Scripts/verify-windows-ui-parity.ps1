@@ -66,7 +66,7 @@ function Assert-ItemsControlTemplate {
 
     $bindingPattern = [regex]::Escape("ItemsSource=`"{Binding $Binding}`"")
     $templatePattern = [regex]::Escape("ItemTemplate=`"{StaticResource $ItemTemplate}`"")
-    $pattern = "<ItemsControl\b(?=[^>]*$bindingPattern)(?=[^>]*$templatePattern)[^>]*/>"
+    $pattern = "<(?:ItemsControl|ListView)\b(?=[^>]*$bindingPattern)(?=[^>]*$templatePattern)[^>]*/>"
 
     Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml item source must use shared template: $Binding"
 }
@@ -288,7 +288,11 @@ foreach ($factBinding in @(
     "ManualConnectionFacts",
     "CrossNetworkConnectionFacts",
     "PairingFacts",
-    "ConnectionPreflightFacts"
+    "ConnectionPreflightFacts",
+    "FileTransferSecurityFacts",
+    "RemoteDesktopControlFacts",
+    "CoreDiagnosticFacts",
+    "SystemMonitorDetails"
 )) {
     Assert-ItemsControlTemplate -Text $mainWindow -Binding $factBinding -ItemTemplate "WorkspaceFactRowTemplate"
 }

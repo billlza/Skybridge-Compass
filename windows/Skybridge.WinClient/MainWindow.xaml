@@ -575,22 +575,7 @@
                             </Grid>
 
                             <TextBlock Text="File Transfer Security" FontWeight="SemiBold" />
-                            <ItemsControl ItemsSource="{Binding FileTransferSecurityFacts}">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Padding="0,4" ColumnSpacing="12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="140" />
-                                                <ColumnDefinition Width="200" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                            <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            <ItemsControl ItemsSource="{Binding FileTransferSecurityFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                         </StackPanel>
                     </Border>
 
@@ -657,22 +642,7 @@
                                 </StackPanel>
                             </Grid>
 
-                            <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Padding="0,4" ColumnSpacing="12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="160" />
-                                                <ColumnDefinition Width="220" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                            <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            <ItemsControl ItemsSource="{Binding RemoteDesktopControlFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                         </StackPanel>
                     </Border>
 
@@ -695,22 +665,7 @@
                                     VerticalAlignment="Center" />
                             </Grid>
 
-                            <ListView ItemsSource="{Binding CoreDiagnosticFacts}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsQuantumSelected}">
-                                <ListView.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Padding="0,8" ColumnSpacing="14">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="190" />
-                                                <ColumnDefinition Width="240" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                            <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
-                            </ListView>
+                            <ListView ItemsSource="{Binding CoreDiagnosticFacts}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" MinHeight="118" SelectionMode="None" IsEnabled="{Binding IsQuantumSelected}" />
                         </StackPanel>
                     </Border>
 
@@ -787,22 +742,7 @@
 
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Detailed Monitoring" FontWeight="SemiBold" />
-                                <ItemsControl ItemsSource="{Binding SystemMonitorDetails}">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Grid Padding="0,4" ColumnSpacing="12">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="160" />
-                                                    <ColumnDefinition Width="240" />
-                                                    <ColumnDefinition Width="*" />
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding Label}" FontWeight="SemiBold" />
-                                                <TextBlock Grid.Column="1" Text="{Binding Value}" TextWrapping="Wrap" />
-                                                <TextBlock Grid.Column="2" Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            </Grid>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                <ItemsControl ItemsSource="{Binding SystemMonitorDetails}" ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
                             </StackPanel>
                         </StackPanel>
                     </Border>
