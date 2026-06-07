@@ -28,30 +28,38 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private readonly IEngineClient _engineClient;
     private readonly IDiscoveryClient _discoveryClient;
+    private readonly ICoreDiagnosticsClient _coreDiagnosticsClient;
     private string _statusMessage = "Idle";
     private string _discoveryService = "_skybridge._udp";
     private string _discoveryTxtRecord =
         $"deviceId=mac-1;pubKeyFP={SampleFingerprint};platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1";
     private string _discoveryStatus = "Ready";
+    private string _coreDiagnosticsStatus = "Ready";
     private BitrateProfile _selectedBitrate = BitrateProfile.Medium;
     private FramerateProfile _selectedFramerate = FramerateProfile.Fps60;
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
     private bool _isBusy;
 
-    public SessionViewModel(IEngineClient engineClient, IDiscoveryClient? discoveryClient = null)
+    public SessionViewModel(
+        IEngineClient engineClient,
+        IDiscoveryClient? discoveryClient = null,
+        ICoreDiagnosticsClient? coreDiagnosticsClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
+        _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
         _connectionState = _engineClient.State;
         NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
         _selectedFeature = NavigationItems[0];
         DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
+        CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
         HeartbeatCommand = new AsyncRelayCommand(SendHeartbeatAsync, CanSendHeartbeat);
         ParseAdvertisementCommand = new AsyncRelayCommand(ParseAdvertisementAsync, CanParseAdvertisement);
+        RunCoreDiagnosticsCommand = new AsyncRelayCommand(RunCoreDiagnosticsAsync, CanRunCoreDiagnostics);
         BitrateProfiles = new ObservableCollection<BitrateProfile>((BitrateProfile[])Enum.GetValues(typeof(BitrateProfile)));
         FramerateProfiles = new ObservableCollection<FramerateProfile>((FramerateProfile[])Enum.GetValues(typeof(FramerateProfile)));
     }
@@ -65,6 +73,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<FramerateProfile> FramerateProfiles { get; }
 
     public ObservableCollection<DiscoveredPeerView> DiscoveredPeers { get; }
+
+    public ObservableCollection<CoreDiagnosticFactView> CoreDiagnosticFacts { get; }
 
     public int OnlineDeviceCount => ConnectionState == EngineConnectionState.Connected ? 1 : 0;
 
@@ -82,12 +92,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             if (SetField(ref _selectedFeature, value))
             {
                 OnPropertyChanged(nameof(IsDeviceDiscoverySelected));
+                OnPropertyChanged(nameof(IsQuantumSelected));
                 RefreshCommandStates();
             }
         }
     }
 
     public bool IsDeviceDiscoverySelected => SelectedFeature.Id == FeatureEntryId.DeviceDiscovery;
+
+    public bool IsQuantumSelected => SelectedFeature.Id == FeatureEntryId.Quantum;
 
     public EngineConnectionState ConnectionState
     {
@@ -157,6 +170,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public int DiscoveredPeerCount => DiscoveredPeers.Count;
 
+    public string CoreDiagnosticsStatus
+    {
+        get => _coreDiagnosticsStatus;
+        private set => SetField(ref _coreDiagnosticsStatus, value);
+    }
+
+    public int CoreDiagnosticFactCount => CoreDiagnosticFacts.Count;
+
     public BitrateProfile SelectedBitrate
     {
         get => _selectedBitrate;
@@ -188,6 +209,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand HeartbeatCommand { get; }
 
     public ICommand ParseAdvertisementCommand { get; }
+
+    public ICommand RunCoreDiagnosticsCommand { get; }
 
     private async Task ConnectAsync()
     {
@@ -252,6 +275,29 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         });
     }
 
+    private async Task RunCoreDiagnosticsAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(async () =>
+        {
+            CoreDiagnosticsStatus = "Running...";
+            var snapshot = await _coreDiagnosticsClient.BuildInteropSnapshotAsync();
+            CoreDiagnosticFacts.Clear();
+            foreach (var fact in snapshot.Facts)
+            {
+                CoreDiagnosticFacts.Add(CoreDiagnosticFactView.FromFact(fact));
+            }
+
+            OnPropertyChanged(nameof(CoreDiagnosticFactCount));
+            CoreDiagnosticsStatus = $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
+            StatusMessage = "Core diagnostics updated";
+        });
+    }
+
     private bool CanConnect() => !IsBusy && ConnectionState == EngineConnectionState.Disconnected;
 
     private bool CanDisconnect() => !IsBusy && (ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting);
@@ -263,6 +309,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         && IsDeviceDiscoverySelected
         && !string.IsNullOrWhiteSpace(DiscoveryService)
         && !string.IsNullOrWhiteSpace(DiscoveryTxtRecord);
+
+    private bool CanRunCoreDiagnostics() => !IsBusy && IsQuantumSelected;
 
     private async Task RunWithBusyState(Func<Task> action)
     {
@@ -278,6 +326,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             {
                 DiscoveryStatus = ex.Message;
             }
+
+            if (IsQuantumSelected)
+            {
+                CoreDiagnosticsStatus = ex.Message;
+            }
         }
         finally
         {
@@ -291,6 +344,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         (DisconnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (HeartbeatCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        (RunCoreDiagnosticsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
     }
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
@@ -322,6 +376,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+}
+
+public sealed record CoreDiagnosticFactView(
+    string Label,
+    string Value,
+    string Detail)
+{
+    public static CoreDiagnosticFactView FromFact(CoreDiagnosticFact fact) =>
+        new(fact.Label, fact.Value, fact.Detail);
 }
 
 public sealed record DiscoveredPeerView(
@@ -387,6 +450,14 @@ internal sealed class UnavailableDiscoveryClient : IDiscoveryClient
     public Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord)
     {
         throw new InvalidOperationException("Discovery client is not configured.");
+    }
+}
+
+internal sealed class UnavailableCoreDiagnosticsClient : ICoreDiagnosticsClient
+{
+    public Task<CoreDiagnosticsSnapshot> BuildInteropSnapshotAsync()
+    {
+        throw new InvalidOperationException("Core diagnostics client is not configured.");
     }
 }
 

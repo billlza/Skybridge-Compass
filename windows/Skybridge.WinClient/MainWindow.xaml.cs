@@ -11,9 +11,11 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        var coreBridge = new CoreBridge();
         ViewModel = new SessionViewModel(
             new DummyEngineClient(),
-            new CoreDiscoveryClient(new CoreBridge()));
+            new CoreDiscoveryClient(coreBridge),
+            new CoreDiagnosticsClient(coreBridge));
         DataContext = ViewModel;
     }
 }

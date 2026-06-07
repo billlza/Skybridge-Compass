@@ -14,15 +14,15 @@ This contract fixes the Windows shell entry points against the macOS reference s
 - The top bar must surface the selected feature, Core status, and connection controls from the shared session view model.
 - Unimplemented feature pages may show a disabled or placeholder workspace, but their navigation entry must remain present so parity gaps are visible and testable. Device Discovery is no longer a pure placeholder: it has a manual Core-validated Bonjour service/TXT parser while real DNS-SD browsing and pairing remain pending.
 - Connection, heartbeat, and disconnect commands must stay bound to `SessionViewModel` and must not invent per-page state.
-- Runtime protocol facts must come from Rust Core contracts: transport selection, channel mapping, connection planning, suite selection, frame metadata, and engine diagnostics.
+- Runtime protocol facts must come from Rust Core contracts: transport selection, channel mapping, connection planning, suite selection, frame metadata, and engine diagnostics. Quantum/Core diagnostics must call `CoreDiagnosticsClient` over `CoreBridge`, not re-derive protocol state in XAML or view-model code.
 
 ## Current Windows implementation
 - `windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs` defines the fixed feature entry order.
-- `windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs` exposes `NavigationItems`, `SelectedFeature`, session status, basic dashboard metrics, Device Discovery parser state/results, and existing connect/heartbeat/disconnect commands.
-- `windows/Skybridge.WinClient/MainWindow.xaml` uses the contract as a shell skeleton with left navigation, top status bar, dashboard metrics, a Device Discovery service/TXT parser workspace, selected-feature workspace, and session controls.
+- `windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs` exposes `NavigationItems`, `SelectedFeature`, session status, basic dashboard metrics, Device Discovery parser state/results, Quantum/Core diagnostics state/results, and existing connect/heartbeat/disconnect commands.
+- `windows/Skybridge.WinClient/MainWindow.xaml` uses the contract as a shell skeleton with left navigation, top status bar, dashboard metrics, a Device Discovery service/TXT parser workspace, a Quantum/Core diagnostics workspace, selected-feature workspace, and session controls.
 
 ## Acceptance checks to add
-- Static test: run `Scripts/verify-windows-ui-parity.ps1` to verify `FeatureEntryContract.Entries` matches the macOS navigation IDs and order, and that the shell exposes the required bindings, Device Discovery parser signals, and commands.
+- Static test: run `Scripts/verify-windows-ui-parity.ps1` to verify `FeatureEntryContract.Entries` matches the macOS navigation IDs and order, and that the shell exposes the required bindings, Device Discovery parser signals, Quantum/Core diagnostics signals, and commands.
 - UI automation: each navigation entry can be selected and updates the selected-feature heading.
 - UI automation: connect, heartbeat, and disconnect buttons enable/disable according to `EngineConnectionState`.
 - Visual QA: left navigation order, top status bar, metric row, and session controls remain in stable positions across desktop window sizes.

@@ -31,7 +31,7 @@ public static class FeatureEntryContract
             new(FeatureEntryId.UsbManagement, "USB Management", "\uE88E", "Device routing", false),
             new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", false),
             new(FeatureEntryId.RemoteDesktop, "Remote Desktop", "\uE7F4", "Sessions", false),
-            new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Suite policy", false),
+            new(FeatureEntryId.Quantum, "Quantum", "\uE72E", "Core diagnostics", true),
             new(FeatureEntryId.SystemMonitor, "System Monitor", "\uE9D9", "Metrics", false),
             new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", false)
         }.AsReadOnly();

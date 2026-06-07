@@ -28,17 +28,19 @@ function Assert-Contains {
 $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngineClient.cs"
 $coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
 $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryClient.cs"
+$coreDiagnosticsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreDiagnosticsClient.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $coreDiagnosticsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
 $client = Get-Content -Raw -LiteralPath $clientPath
 $coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
 $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
+$coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
@@ -78,7 +80,9 @@ Assert-True -Condition (-not $client.Contains("var peerPublicKey = ReadLocalPubl
 Assert-Contains -Text $mainWindow -Needle "new DummyEngineClient()" -Message "MainWindow should keep the dummy client until native DLL deployment is explicit."
 Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not silently switch to FfiEngineClient before native DLL deployment."
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
-Assert-Contains -Text $mainWindow -Needle "new CoreDiscoveryClient(new CoreBridge())" -Message "MainWindow should wire CoreDiscoveryClient for explicit manual discovery parsing."
+Assert-Contains -Text $mainWindow -Needle "var coreBridge = new CoreBridge();" -Message "MainWindow should create one explicit CoreBridge for manual Core tools."
+Assert-Contains -Text $mainWindow -Needle "new CoreDiscoveryClient(coreBridge)" -Message "MainWindow should wire CoreDiscoveryClient for explicit manual discovery parsing."
+Assert-Contains -Text $mainWindow -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "MainWindow should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",
@@ -123,5 +127,20 @@ foreach ($signal in @(
 Assert-True -Condition (-not $discoveryClient.Contains("GetPeerPublicKeyAsync")) -Message "DiscoveryClient must not treat pubKeyFP as the peer public key."
 Assert-True -Condition (-not $discoveryClient.Contains("StaticPeerPublicKeyProvider")) -Message "DiscoveryClient must not create static peer-key providers from discovery fingerprints."
 Assert-Contains -Text $architecture -Needle "CoreDiscoveryClient" -Message "Architecture doc missing CoreDiscoveryClient status."
+
+foreach ($signal in @(
+    "public interface ICoreDiagnosticsClient",
+    "public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient",
+    "BuildInteropSnapshotAsync",
+    "PlanConnectionAsync",
+    "MapChannelAsync",
+    "EncodeSbp2FrameAsync",
+    "DecodeFrameMetadataAsync",
+    "DecodeFramePayloadAsync"
+)) {
+    Assert-Contains -Text $coreDiagnostics -Needle $signal -Message "CoreDiagnosticsClient missing Core diagnostic signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "CoreDiagnosticsClient" -Message "Architecture doc missing CoreDiagnosticsClient status."
 
 Write-Output "windows-ffi-client: ok"
