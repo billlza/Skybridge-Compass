@@ -37,6 +37,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
     private readonly WorkspaceActionSurfaceTargets _workspaceActionSurfaceTargets;
+    private readonly WorkspaceActionSurfaceLoader _workspaceActionSurfaceLoader;
     private readonly WorkspaceStatusPatchApplier _workspaceStatusPatchApplier;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
@@ -333,6 +334,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshUsbManagementCommand = commandBindings.RefreshUsbManagementCommand;
         RefreshSettingsCommand = commandBindings.RefreshSettingsCommand;
         _workspaceCommandRegistry = commandBindings.Registry;
+        _workspaceActionSurfaceLoader = new WorkspaceActionSurfaceLoader(
+            _workspaceActionCatalogClient,
+            _workspaceActionSurfaceTargets,
+            _workspaceCommandRegistry);
         var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
@@ -1331,11 +1336,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshDynamicWorkspaceActionStates()
     {
-        var renderContext = BuildWorkspaceActionRenderContext();
-        foreach (var surface in _workspaceActionCatalogClient.BuildDynamicRefreshSurfaces())
-        {
-            LoadWorkspaceActionSurface(surface, renderContext);
-        }
+        _workspaceActionSurfaceLoader.RefreshDynamicSurfaces(BuildWorkspaceActionRenderContext());
     }
 
     private void RefreshDashboardMetrics()
@@ -1357,29 +1358,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void LoadWorkspaceActions()
     {
-        var renderContext = BuildWorkspaceActionRenderContext();
-        foreach (var surface in _workspaceActionCatalogClient.BuildInitialSurfaces())
-        {
-            LoadWorkspaceActionSurface(surface, renderContext);
-        }
-    }
-
-    private void LoadWorkspaceActionSurface(
-        WorkspaceActionSurface surface,
-        WorkspaceActionRenderContext renderContext)
-    {
-        var snapshot = _workspaceActionCatalogClient.BuildResolvedSnapshot(
-            new WorkspaceActionCatalogRequest(surface),
-            renderContext.Gates,
-            renderContext.Details);
-        var target = _workspaceActionSurfaceTargets.Resolve(surface);
-
-        WorkspaceCollectionProjector.Replace(
-            target,
-            snapshot.Actions,
-            action => WorkspaceActionItemView.FromItem(
-                action,
-                _workspaceCommandRegistry.Resolve(action.CommandId)));
+        _workspaceActionSurfaceLoader.LoadInitialSurfaces(BuildWorkspaceActionRenderContext());
     }
 
     private WorkspaceActionGateSnapshot BuildWorkspaceActionGateSnapshot() =>
@@ -1408,7 +1387,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         TopBarDiagnosticsStatus = update.ResolvedStatus.DiagnosticsStatus;
         TopBarNotificationsStatus = update.ResolvedStatus.NotificationsStatus;
         TopBarThemeStatus = update.ResolvedStatus.ThemeStatus;
-        LoadWorkspaceActionSurface(
+        _workspaceActionSurfaceLoader.LoadSurface(
             WorkspaceActionSurface.TopBarActions,
             BuildWorkspaceActionRenderContext(update.ActionDetails));
     }
