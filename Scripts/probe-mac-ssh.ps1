@@ -87,6 +87,16 @@ function Test-IsPrivateIPv4Address {
     return $Address -match "^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)"
 }
 
+function Get-NonProxyLanIPv4Addresses {
+    @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -and
+            $_.IPAddress -notmatch "^(127\.|169\.254\.)" -and
+            -not (Test-IsProxySourceAddress -Address $_.IPAddress)
+        } |
+        Sort-Object InterfaceAlias, IPAddress)
+}
+
 function Test-IsSameIPv4Subnet {
     param(
         [string]$LeftAddress,
@@ -165,14 +175,7 @@ function Write-LanRouteDiagnostics {
         return
     }
 
-    $lanAddresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.IPAddress -and
-            $_.IPAddress -notmatch "^(127\.|169\.254\.)" -and
-            -not (Test-IsProxySourceAddress -Address $_.IPAddress)
-        } |
-        Sort-Object InterfaceAlias, IPAddress)
-
+    $lanAddresses = @(Get-NonProxyLanIPv4Addresses)
     if ($lanAddresses.Count -eq 0) {
         Write-Probe "lan warning: no non-proxy IPv4 interface was found on Windows"
         return
@@ -200,6 +203,55 @@ function Write-LanRouteDiagnostics {
     }
 
     $script:HostProbeHasSameSubnetLanCandidate = $sameSubnet
+}
+
+function Write-DirectSourceDiagnostics {
+    param([string]$TargetAddress)
+
+    if ([string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
+        return
+    }
+
+    $script:HostProbeDirectSourceIsValid = $false
+
+    if (-not (Test-IsIPv4Address -Address $DirectSourceAddress)) {
+        Write-Probe "direct-source warning: $DirectSourceAddress is not an IPv4 address"
+        return
+    }
+
+    if (Test-IsProxySourceAddress -Address $DirectSourceAddress) {
+        Write-Probe "direct-source warning: $DirectSourceAddress is in 198.18.0.0/15; choose a non-proxy Windows LAN IPv4"
+        return
+    }
+
+    if (-not (Test-IsIPv4Address -Address $TargetAddress)) {
+        Write-Probe "direct-source warning: cannot validate $DirectSourceAddress because the target address is not IPv4"
+        return
+    }
+
+    $matches = @(Get-NonProxyLanIPv4Addresses |
+        Where-Object { $_.IPAddress -eq $DirectSourceAddress })
+
+    if ($matches.Count -eq 0) {
+        Write-Probe "direct-source warning: $DirectSourceAddress is not assigned to a non-proxy Windows IPv4 interface"
+        return
+    }
+
+    foreach ($address in $matches) {
+        $isSameSubnet = Test-IsSameIPv4Subnet `
+            -LeftAddress $TargetAddress `
+            -RightAddress $address.IPAddress `
+            -PrefixLength ([int]$address.PrefixLength)
+
+        Write-Probe "direct-source candidate: source=$($address.IPAddress)/$($address.PrefixLength) interface=$($address.InterfaceAlias) sameSubnet=$isSameSubnet"
+        if ($isSameSubnet) {
+            $script:HostProbeDirectSourceIsValid = $true
+        }
+    }
+
+    if (-not $script:HostProbeDirectSourceIsValid) {
+        Write-Probe "direct-source warning: $DirectSourceAddress is not in the same subnet as $TargetAddress"
+    }
 }
 
 function Invoke-SshCommand {
@@ -291,6 +343,14 @@ function Test-IsReadyProbeResult {
     return ($lines -contains $Probe.UserName) -and ($lines.Count -ge 3)
 }
 
+function Write-RouteFirstActionIfNeeded {
+    param([string]$UserName)
+
+    if ($script:HostProbeUsesProxySourceRoute -or -not $script:HostProbeHasSameSubnetLanCandidate) {
+        Write-Probe "$UserName route action: fix the direct LAN route or proxy bypass before treating this as an SSH key, Rust CLI, or product defect"
+    }
+}
+
 function Invoke-HostReadinessProbe {
     param([string]$CandidateHostName)
 
@@ -300,6 +360,7 @@ function Invoke-HostReadinessProbe {
     $script:HostProbeHostName = $script:CurrentHostName
     $script:HostProbeHasSameSubnetLanCandidate = $false
     $script:HostProbeUsesProxySourceRoute = $false
+    $script:HostProbeDirectSourceIsValid = [string]::IsNullOrWhiteSpace($DirectSourceAddress)
 
     Write-Probe "candidate: host=$script:CurrentHostName port=$Port"
     Write-NameResolutionDiagnostics
@@ -328,6 +389,7 @@ function Invoke-HostReadinessProbe {
         if ($targetAddress) {
             Write-Probe "target: address=$targetAddress"
             Write-LanRouteDiagnostics -TargetAddress $targetAddress -SourceAddress $sourceAddress
+            Write-DirectSourceDiagnostics -TargetAddress $targetAddress
         }
 
         if (Test-IsProxySourceAddress -Address $sourceAddress) {
@@ -344,6 +406,11 @@ function Invoke-HostReadinessProbe {
 
         if ($script:HostProbeUsesProxySourceRoute -and [string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
             Write-Probe "direct-lan required: current route uses a 198.18.0.0/15 proxy source; pass -DirectSourceAddress with the same-subnet Windows LAN IPv4 after bypassing the proxy route"
+            return
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($DirectSourceAddress) -and -not $script:HostProbeDirectSourceIsValid) {
+            Write-Probe "direct-lan required: direct source address is not a validated same-subnet Windows LAN IPv4"
             return
         }
     }
@@ -365,14 +432,19 @@ function Invoke-HostReadinessProbe {
             continue
         }
 
-        if ($probe.ExitCode -eq 0) {
-            Write-Probe "$($probe.UserName) failed readiness transcript: $($probe.Text)"
-        }
-        elseif ($probe.Text -match "Permission denied \(publickey\)") {
+        if ($probe.Text -match "Permission denied \(publickey\)") {
             Write-Probe "$($probe.UserName) not authorized: add the public key or check the username"
         }
         elseif ($probe.Text -match "timed out during banner exchange") {
             Write-Probe "$($probe.UserName) banner timeout: TCP accepts connections but sshd did not send an SSH banner"
+            Write-RouteFirstActionIfNeeded -UserName $probe.UserName
+        }
+        elseif ($probe.Text -match "Connection closed by") {
+            Write-Probe "$($probe.UserName) connection closed: $($probe.Text)"
+            Write-RouteFirstActionIfNeeded -UserName $probe.UserName
+        }
+        elseif ($probe.ExitCode -eq 0) {
+            Write-Probe "$($probe.UserName) failed readiness transcript: $($probe.Text)"
         }
         elseif ($probe.Text -match "Connection timed out") {
             Write-Probe "$($probe.UserName) timeout"

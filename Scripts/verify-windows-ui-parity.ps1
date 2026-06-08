@@ -4398,8 +4398,13 @@ foreach ($macSshProbeSignal in @(
     'Test-IsProxySourceAddress',
     'Test-IsSameIPv4Subnet',
     'Test-IsPrivateIPv4Address',
+    'Get-NonProxyLanIPv4Addresses',
+    'Write-DirectSourceDiagnostics',
     'Get-TcpRemoteAddress',
     'Write-LanRouteDiagnostics',
+    'direct-source warning:',
+    'direct-source candidate:',
+    'direct source address is not a validated same-subnet Windows LAN IPv4',
     'lan candidate: source=',
     'sameSubnet=',
     'lan warning: target',
@@ -4408,7 +4413,9 @@ foreach ($macSshProbeSignal in @(
     'direct bind: ssh will use source=',
     '-b',
     '198.18.0.0/15',
-    'timed out during banner exchange'
+    'timed out during banner exchange',
+    'Write-RouteFirstActionIfNeeded',
+    'route action: fix the direct LAN route or proxy bypass'
 )) {
     Assert-Contains -Text $macSshProbe -Needle $macSshProbeSignal -Message "probe-mac-ssh.ps1 missing LAN route diagnostic signal: $macSshProbeSignal"
 }
