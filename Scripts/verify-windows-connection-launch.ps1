@@ -215,6 +215,45 @@ await engine.SendHeartbeatAsync();
 await engine.DisconnectAsync();
 AssertEqual(EngineConnectionState.Disconnected, engine.State, "dummy disconnect state");
 
+using (var ffiEngine = new FfiEngineClient())
+using (var ffiPeerEngine = new FfiEngineClient())
+{
+    var ffiStates = new List<EngineConnectionState>();
+    ffiEngine.ConnectionStateChanged += (_, state) => ffiStates.Add(state);
+    var ffiPeerPublicKey = await ffiPeerEngine.GetLocalPublicKeyAsync();
+    var ffiFingerprint = Convert.ToHexString(SHA256.HashData(ffiPeerPublicKey)).ToLowerInvariant();
+    var ffiPairingMaterial = pairingMaterial with
+    {
+        PublicKeyFingerprint = ffiFingerprint,
+        PeerPublicKey = ffiPeerPublicKey,
+        Source = "ffi live smoke"
+    };
+    var ffiPairedState = stateClient.BuildPairingValidatedState(discoveredState, ffiPairingMaterial);
+    var ffiLiveState = stateClient.BuildPreflightValidatedState(
+        ffiPairedState,
+        BuildSnapshot(BuildPlan(
+            peerDeviceId: "mac-1",
+            fingerprint: ffiFingerprint,
+            liveReady: true,
+            adapterBinding: "ffi smoke live adapter",
+            localEndpoint: "windows-ffi.example:5443",
+            remoteEndpoint: "mac-ffi.example:5443",
+            selectedCandidatePair: "webrtc/ffi-smoke-selected",
+            relayId: "ffi-relay",
+            timestampWindowMs: 12_000)));
+    var ffiLiveRequest = stateClient.BuildConnectionLaunchRequest(ffiLiveState);
+
+    await ffiEngine.ConnectAsync(ffiLiveRequest);
+    AssertEqual(EngineConnectionState.Connected, ffiEngine.State, "ffi live adapter state");
+    await ffiEngine.SendHeartbeatAsync();
+    AssertEqual(EngineConnectionState.Connected, ffiEngine.State, "ffi heartbeat state");
+    await ffiEngine.DisconnectAsync();
+    AssertEqual(EngineConnectionState.Disconnected, ffiEngine.State, "ffi disconnect state");
+    AssertEqual(true, ffiStates.Contains(EngineConnectionState.Connecting), "ffi connecting event");
+    AssertEqual(true, ffiStates.Contains(EngineConnectionState.Connected), "ffi connected event");
+    AssertEqual(true, ffiStates.Contains(EngineConnectionState.Disconnected), "ffi disconnected event");
+}
+
 var recordingDiscovery = new RecordingDiscoveryClient(peer);
 var recordingDnsSd = new RecordingDnsSdBrowseClient(new WindowsDnsSdBrowseSnapshot(
     new[]
