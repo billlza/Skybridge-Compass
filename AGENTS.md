@@ -24,6 +24,7 @@ These instructions apply to the entire repository. More specific `AGENTS.md` fil
 - Target WinUI 3 + .NET 10 with `net10.0-windows10.0.19041.0`, Windows App SDK `2.1.3`, and Windows SDK BuildTools `10.0.28000.1839`.
 - Keep bindings ready for Rust FFI integration without moving Core transport, identity, pairing, or AppleNative routing policy into the Windows ViewModel layer.
 - Run `Scripts/verify-windows-stack-freshness.ps1` after changing project stack declarations, package versions, or stack documentation.
+- Before Windows-to-Mac Rust CLI co-debugging, run `Scripts/probe-mac-ssh.ps1` or `Scripts/verify-windows-portability-smoke.ps1 -RequireMacSshReady` so proxy routes, `.local` resolution, username/key authorization, and SSH banner timeout are visible before any remote command is started.
 
 ## Web dashboard
 - Do **not** modify `web-dashboard/` unless the task explicitly mentions it (e.g., React/TypeScript/frontend/web-dashboard).

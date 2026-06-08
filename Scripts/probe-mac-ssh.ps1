@@ -1,9 +1,10 @@
 param(
     [string]$HostName = "192.168.0.102",
     [int]$Port = 22,
-    [string[]]$UserNames = @("Lza", "bill"),
+    [string[]]$UserNames = @("bill", "Lza"),
     [string]$KeyPath = (Join-Path $env:USERPROFILE ".ssh\skybridge_mac_debug_ed25519"),
     [string]$KnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
+    [string]$ExpectedHostAddress = "",
     [string]$DirectSourceAddress = "",
     [int]$ConnectTimeoutSeconds = 5,
     [switch]$RequireReady
@@ -82,6 +83,42 @@ function Get-TcpRemoteAddress {
     return ""
 }
 
+function Write-NameResolutionDiagnostics {
+    if (Test-IsIPv4Address -Address $HostName) {
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedHostAddress) -and $HostName -ne $ExpectedHostAddress) {
+            Write-Probe "host warning: target $HostName does not match expected Mac address $ExpectedHostAddress"
+        }
+
+        return
+    }
+
+    try {
+        $records = @(Resolve-DnsName -Name $HostName -Type A -ErrorAction Stop |
+            Where-Object { $_.IPAddress } |
+            ForEach-Object { [string]$_.IPAddress })
+    }
+    catch {
+        Write-Probe "resolve warning: could not resolve $HostName as an IPv4 host: $($_.Exception.Message)"
+        return
+    }
+
+    if ($records.Count -eq 0) {
+        Write-Probe "resolve warning: $HostName returned no IPv4 A records"
+        return
+    }
+
+    foreach ($address in $records) {
+        Write-Probe "resolve: $HostName -> $address"
+        if (Test-IsProxySourceAddress -Address $address) {
+            Write-Probe "resolve warning: $HostName resolved to $address in 198.18.0.0/15; prefer the Mac private LAN IPv4 for Rust CLI co-debugging"
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedHostAddress) -and -not ($records -contains $ExpectedHostAddress)) {
+        Write-Probe "resolve warning: expected Mac address $ExpectedHostAddress was not returned for $HostName"
+    }
+}
+
 function Write-LanRouteDiagnostics {
     param(
         [string]$TargetAddress,
@@ -158,23 +195,43 @@ function Invoke-SshCommand {
     }
 }
 
+function Test-IsReadyProbeResult {
+    param($Probe)
+
+    if ($Probe.ExitCode -ne 0) {
+        return $false
+    }
+
+    if ($Probe.Text -match "Connection closed by") {
+        return $false
+    }
+
+    $lines = @($Probe.Text -split "\r?\n" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+    return ($lines -contains $Probe.UserName) -and ($lines.Count -ge 3)
+}
+
 if (-not (Test-Path -LiteralPath $KeyPath)) {
     Write-Probe "missing SSH key: $KeyPath"
     if ($RequireReady) {
-        exit 2
+        throw "Mac SSH probe missing SSH key: $KeyPath"
     }
 
-    exit 0
+    return
 }
+
+Write-NameResolutionDiagnostics
 
 $tcp = Test-NetConnection -ComputerName $HostName -Port $Port -WarningAction SilentlyContinue
 if (-not $tcp.TcpTestSucceeded) {
     Write-Probe "tcp not ready: ${HostName}:$Port"
     if ($RequireReady) {
-        exit 2
+        throw "Mac SSH TCP endpoint is not ready: ${HostName}:$Port"
     }
 
-    exit 0
+    return
 }
 
 Write-Probe "tcp ready: ${HostName}:$Port"
@@ -208,14 +265,17 @@ if (-not [string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
 $ready = $false
 foreach ($userName in $UserNames) {
     $probe = Invoke-SshCommand -UserName $userName
-    if ($probe.ExitCode -eq 0) {
+    if (Test-IsReadyProbeResult -Probe $probe) {
         $ready = $true
         Write-Probe "$($probe.UserName) ready"
         Write-Output $probe.Text
         continue
     }
 
-    if ($probe.Text -match "Permission denied \(publickey\)") {
+    if ($probe.ExitCode -eq 0) {
+        Write-Probe "$($probe.UserName) failed readiness transcript: $($probe.Text)"
+    }
+    elseif ($probe.Text -match "Permission denied \(publickey\)") {
         Write-Probe "$($probe.UserName) not authorized: add the public key or check the username"
     }
     elseif ($probe.Text -match "timed out during banner exchange") {
@@ -231,10 +291,10 @@ foreach ($userName in $UserNames) {
 
 if ($ready) {
     Write-Probe "ready"
-    exit 0
+    return
 }
 
 Write-Probe "not ready"
 if ($RequireReady) {
-    exit 2
+    throw "Mac SSH probe is not ready"
 }

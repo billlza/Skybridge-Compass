@@ -4,10 +4,19 @@ param(
     [switch]$IncludeRustCliCoverage,
     [switch]$IncludeNativeDnsSdAcceptance,
     [switch]$CheckOnlineStackFreshness,
+    [switch]$ProbeMacSsh,
+    [switch]$RequireMacSshReady,
     [switch]$RequireNativeDnsSdPeer,
     [string]$ExpectedDeviceId = "",
     [string]$ExpectedFingerprint = "",
     [string]$SearchText = "",
+    [string]$MacHostName = "192.168.0.102",
+    [int]$MacPort = 22,
+    [string[]]$MacUserNames = @("bill", "Lza"),
+    [string]$MacSshKeyPath = (Join-Path $env:USERPROFILE ".ssh\skybridge_mac_debug_ed25519"),
+    [string]$MacKnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
+    [string]$MacExpectedHostAddress = "192.168.0.102",
+    [string]$MacDirectSourceAddress = "",
     [ValidateRange(1, 30)]
     [int]$ExtendedSearchSeconds = 2,
     [switch]$RequireGitRemoteAccess
@@ -37,7 +46,9 @@ function Invoke-SmokeGate {
     Assert-True -Condition (Test-Path -LiteralPath $scriptPath) -Message "Missing smoke gate script: $scriptPath"
 
     Write-Output "windows-portability-smoke: running $Name"
+    $LASTEXITCODE = 0
     & $scriptPath @Parameters
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Smoke gate failed: $Name exitCode=$LASTEXITCODE"
     Write-Output "windows-portability-smoke: passed $Name"
 }
 
@@ -102,6 +113,33 @@ Invoke-SmokeGate `
     -Name "windows-connection-launch" `
     -RelativeScriptPath "Scripts/verify-windows-connection-launch.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
+
+if ($ProbeMacSsh -or $RequireMacSshReady) {
+    $macSshParameters = @{
+        HostName = $MacHostName
+        Port = $MacPort
+        UserNames = $MacUserNames
+        KeyPath = $MacSshKeyPath
+        KnownHostsPath = $MacKnownHostsPath
+        ExpectedHostAddress = $MacExpectedHostAddress
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($MacDirectSourceAddress)) {
+        $macSshParameters.DirectSourceAddress = $MacDirectSourceAddress
+    }
+
+    if ($RequireMacSshReady) {
+        $macSshParameters.RequireReady = $true
+    }
+
+    Invoke-SmokeGate `
+        -Name "mac-ssh-readiness" `
+        -RelativeScriptPath "Scripts/probe-mac-ssh.ps1" `
+        -Parameters $macSshParameters
+}
+else {
+    Write-Output "windows-portability-smoke: skipped mac-ssh-readiness; pass -ProbeMacSsh for diagnostics or -RequireMacSshReady before Rust CLI co-debugging."
+}
 
 if ($IncludeNativeDnsSdAcceptance -or $RequireNativeDnsSdPeer) {
     $dnsSdParameters = @{
