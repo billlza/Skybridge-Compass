@@ -6,6 +6,7 @@ internal static class WorkspaceShellNotificationCatalog
 {
     public static IReadOnlyList<string> SelectedFeaturePropertyNames { get; } = new[]
     {
+        nameof(SessionViewModel.IsDashboardSelected),
         nameof(SessionViewModel.IsDeviceDiscoverySelected),
         nameof(SessionViewModel.IsUsbManagementSelected),
         nameof(SessionViewModel.IsFileTransferSelected),

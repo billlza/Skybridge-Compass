@@ -128,6 +128,7 @@ $crossNetworkCodeInputCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.W
 $connectionWorkspaceInputCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ConnectionWorkspaceInputCoordinator.cs"
 $connectionWorkspaceResultProjectorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ConnectionWorkspaceResultProjector.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
+$booleanToVisibilityConverterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/BooleanToVisibilityConverter.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
 $deviceDiscoveryInputDefaultsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DeviceDiscoveryInputDefaultsClient.cs"
@@ -156,7 +157,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -202,6 +203,7 @@ $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connection
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $remoteDesktopProfileSelectionCoordinator = Get-Content -Raw -LiteralPath $remoteDesktopProfileSelectionCoordinatorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
+$booleanToVisibilityConverter = Get-Content -Raw -LiteralPath $booleanToVisibilityConverterPath
 $sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceInputChangeRouter + $workspaceShellNotificationCatalog + $workspaceShellStateAccessor + $workspaceShellStateSource + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceDeferredRefreshAction + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
@@ -298,6 +300,7 @@ foreach ($featureCatalogSignal in @(
     "private bool IsFeatureSelected(FeatureEntryId featureId)",
     "_workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId)",
     "_featureCatalogClient.IsSelected(selectedFeature, featureId)",
+    "IsFeatureSelected(FeatureEntryId.Dashboard)",
     "IsFeatureSelected(FeatureEntryId.DeviceDiscovery)",
     "IsFeatureSelected(FeatureEntryId.Settings)",
     "new FeatureCatalogClient()"
@@ -642,6 +645,7 @@ foreach ($binding in @(
     "CrossNetworkQrActions",
     "CrossNetworkCodePrimaryActions",
     "CrossNetworkCodeConnectActions",
+    "IsDashboardSelected",
     "IsDeviceDiscoverySelected",
     "UsbManagementStatus",
     "UsbManagementHeaderActions",
@@ -714,6 +718,7 @@ foreach ($resourceSignal in @(
     'x:Key="SidebarWorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonWithDetailTemplate"',
+    'x:Key="BoolToVisibilityConverter"',
     'x:Key="WorkspaceMetricCardItemsPanel"',
     'x:Key="WorkspaceMetricCardTemplate"',
     'x:Key="WorkspaceFactRowTemplate"',
@@ -735,6 +740,29 @@ foreach ($resourceSignal in @(
     '<ColumnDefinition Width="220" />'
 )) {
     Assert-Contains -Text $mainWindow -Needle $resourceSignal -Message "MainWindow.xaml missing shared action resource signal: $resourceSignal"
+}
+
+foreach ($booleanToVisibilitySignal in @(
+    "public sealed class BooleanToVisibilityConverter : IValueConverter",
+    "Visibility.Visible",
+    "Visibility.Collapsed",
+    "ConvertBack("
+)) {
+    Assert-Contains -Text $booleanToVisibilityConverter -Needle $booleanToVisibilitySignal -Message "BooleanToVisibilityConverter contract missing: $booleanToVisibilitySignal"
+}
+
+foreach ($workspaceVisibilitySignal in @(
+    '<vm:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />',
+    'Visibility="{Binding IsDashboardSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
+    'Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}"',
+    'Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
+    'Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
+    'Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
+    'Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
+    'Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}"',
+    'Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}"'
+)) {
+    Assert-Contains -Text $mainWindow -Needle $workspaceVisibilitySignal -Message "MainWindow.xaml must gate each main workspace feature section through selected-feature Visibility: $workspaceVisibilitySignal"
 }
 
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionActions" -ItemsPanel "VerticalWorkspaceActionItemsPanel" -ItemTemplate "SidebarWorkspaceActionButtonTemplate"
@@ -818,6 +846,7 @@ foreach ($layoutSignal in @(
 }
 
 Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order" -Needles @(
+    'ItemsSource="{Binding DashboardMetrics}"',
     '<TextBlock Text="Device Discovery"',
     '<TextBlock Text="USB Management"',
     '<TextBlock Text="File Transfer"',
@@ -1153,6 +1182,7 @@ foreach ($workspaceInputChangeRouterSignal in @(
 foreach ($shellNotificationCatalogSignal in @(
     "internal static class WorkspaceShellNotificationCatalog",
     "public static IReadOnlyList<string> SelectedFeaturePropertyNames",
+    "nameof(SessionViewModel.IsDashboardSelected)",
     "nameof(SessionViewModel.IsDeviceDiscoverySelected)",
     "nameof(SessionViewModel.IsUsbManagementSelected)",
     "nameof(SessionViewModel.IsFileTransferSelected)",
@@ -1192,6 +1222,7 @@ foreach ($sessionViewModelForwardingShellRefreshWrapper in @(
     Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingShellRefreshWrapper)) -Message "SessionViewModel must call WorkspaceShellRefreshCoordinator directly instead of reintroducing forwarding shell refresh wrappers: $sessionViewModelForwardingShellRefreshWrapper"
 }
 foreach ($sessionViewModelDirectShellRefreshSignal in @(
+    "nameof(IsDashboardSelected)",
     "nameof(IsDeviceDiscoverySelected)",
     "nameof(IsUsbManagementSelected)",
     "nameof(IsFileTransferSelected)",
@@ -3090,6 +3121,8 @@ foreach ($docSignal in @(
     "RemoteDesktopProfileCatalogClient",
     "QuantumDiagnosticsHeaderActions",
     "SettingsHeaderActions",
+    "BoolToVisibilityConverter",
+    "selected-feature visibility gates",
     "CrossNetworkConnectionClient",
     "Generate QR Code",
     "Smart Connection Code",

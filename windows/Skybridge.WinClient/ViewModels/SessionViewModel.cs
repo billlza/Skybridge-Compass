@@ -633,6 +633,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
+    public bool IsDashboardSelected =>
+        IsFeatureSelected(FeatureEntryId.Dashboard);
+
     public bool IsDeviceDiscoverySelected =>
         IsFeatureSelected(FeatureEntryId.DeviceDiscovery);
 

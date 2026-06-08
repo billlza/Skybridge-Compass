@@ -11,6 +11,7 @@
         Background="{ThemeResource SolidBackgroundFillColorBase}"
         d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
         <Grid.Resources>
+        <vm:BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -378,11 +379,12 @@
             <ScrollViewer Grid.Row="1">
                 <StackPanel Padding="24" Spacing="20">
                     <ItemsControl
+                        Visibility="{Binding IsDashboardSelected, Converter={StaticResource BoolToVisibilityConverter}}"
                         ItemsSource="{Binding DashboardMetrics}"
                         ItemsPanel="{StaticResource WorkspaceMetricCardItemsPanel}"
                         ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
 
-                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -570,7 +572,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsUsbManagementSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -602,7 +604,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsFileTransferSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -648,7 +650,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsRemoteDesktopSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -694,7 +696,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsQuantumSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -717,7 +719,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsSystemMonitorSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
@@ -765,7 +767,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Border Visibility="{Binding IsSettingsSelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions>
