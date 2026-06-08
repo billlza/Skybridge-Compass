@@ -10,6 +10,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
     private const string NativeRuntimeMode = "native";
     private const string TransportAdapterVariable = "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER";
     private const string ExternalTransportAdapterMode = "external";
+    private const string VerifiedWebRtcTransportAdapterMode = "webrtc-verified";
     private const string SettingsSystemPreferencesVariable = "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES";
     private const string EnabledMode = "enabled";
 
@@ -60,22 +61,35 @@ internal static class WindowsNativeRuntimeDependencyFactory
     private static IWindowsTransportAdapterClient CreateTransportAdapterFromEnvironment()
     {
         var mode = Environment.GetEnvironmentVariable(TransportAdapterVariable);
-        if (!string.Equals(mode, ExternalTransportAdapterMode, StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(mode))
         {
             return new PendingWindowsTransportAdapterClient();
         }
 
-        return new ExternalWindowsTransportAdapterClient(
-            new WindowsExternalTransportAdapterOptions(
-                ReadAdapterKind(),
-                Required("SKYBRIDGE_WINDOWS_ADAPTER_BINDING"),
-                Required("SKYBRIDGE_WINDOWS_LOCAL_ENDPOINT"),
-                Required("SKYBRIDGE_WINDOWS_REMOTE_ENDPOINT"),
-                Required("SKYBRIDGE_WINDOWS_SELECTED_CANDIDATE_PAIR"),
-                RequiredHex32("SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX"),
-                RequiredHex32("SKYBRIDGE_WINDOWS_CAPABILITY_DIGEST_HEX"),
-                Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_RELAY_ID"),
-                ReadTimestampWindowMs()));
+        if (string.Equals(mode, ExternalTransportAdapterMode, StringComparison.OrdinalIgnoreCase))
+        {
+            return new ExternalWindowsTransportAdapterClient(
+                new WindowsExternalTransportAdapterOptions(
+                    ReadAdapterKind(),
+                    Required("SKYBRIDGE_WINDOWS_ADAPTER_BINDING", ExternalTransportAdapterMode),
+                    Required("SKYBRIDGE_WINDOWS_LOCAL_ENDPOINT", ExternalTransportAdapterMode),
+                    Required("SKYBRIDGE_WINDOWS_REMOTE_ENDPOINT", ExternalTransportAdapterMode),
+                    Required("SKYBRIDGE_WINDOWS_SELECTED_CANDIDATE_PAIR", ExternalTransportAdapterMode),
+                    RequiredHex32("SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX", ExternalTransportAdapterMode),
+                    RequiredHex32("SKYBRIDGE_WINDOWS_CAPABILITY_DIGEST_HEX", ExternalTransportAdapterMode),
+                    Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_RELAY_ID"),
+                    ReadTimestampWindowMs()));
+        }
+
+        if (string.Equals(mode, VerifiedWebRtcTransportAdapterMode, StringComparison.OrdinalIgnoreCase))
+        {
+            return new VerifiedWebRtcDataChannelTransportAdapterClient(
+                new WindowsVerifiedWebRtcDataChannelOptions(
+                    Required("SKYBRIDGE_WINDOWS_WEBRTC_PROOF_PATH", VerifiedWebRtcTransportAdapterMode),
+                    ReadWebRtcProofMaxAgeMs()));
+        }
+
+        throw new InvalidOperationException("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER must be external or webrtc-verified when set.");
     }
 
     private static bool IsEnabled(string variable) =>
@@ -116,20 +130,36 @@ internal static class WindowsNativeRuntimeDependencyFactory
         throw new InvalidOperationException("SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS must be a positive unsigned integer.");
     }
 
-    private static string Required(string variable)
+    private static ulong ReadWebRtcProofMaxAgeMs()
+    {
+        var raw = Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_PROOF_MAX_AGE_MS");
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return 60_000;
+        }
+
+        if (ulong.TryParse(raw, out var value) && value > 0)
+        {
+            return value;
+        }
+
+        throw new InvalidOperationException("SKYBRIDGE_WINDOWS_WEBRTC_PROOF_MAX_AGE_MS must be a positive unsigned integer.");
+    }
+
+    private static string Required(string variable, string mode)
     {
         var value = Environment.GetEnvironmentVariable(variable);
         if (string.IsNullOrWhiteSpace(value))
         {
-            throw new InvalidOperationException($"{variable} is required when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER=external.");
+            throw new InvalidOperationException($"{variable} is required when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER={mode}.");
         }
 
         return value;
     }
 
-    private static byte[] RequiredHex32(string variable)
+    private static byte[] RequiredHex32(string variable, string mode)
     {
-        var raw = Required(variable);
+        var raw = Required(variable, mode);
         if (raw.Length != 64)
         {
             throw new InvalidOperationException($"{variable} must be 64 lowercase hex characters.");

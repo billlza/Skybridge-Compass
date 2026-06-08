@@ -382,6 +382,61 @@ AssertEqual(32, externalAdapter.CapabilityDigest.Length, "external adapter capab
 var externalBindingMaterial = externalAdapter.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel);
 AssertEqual("windows.example:5443", externalBindingMaterial.LocalEndpoint, "external binding local endpoint");
 
+var verifiedProofPath = WriteVerifiedWebRtcProof("webrtc-proof-valid.json", Fingerprint);
+var verifiedAdapter = await new VerifiedWebRtcDataChannelTransportAdapterClient(
+    new WindowsVerifiedWebRtcDataChannelOptions(verifiedProofPath, 60_000))
+    .PrepareAsync(adapterRequest);
+AssertEqual(true, verifiedAdapter.IsLiveAdapterReady, "verified WebRTC adapter live readiness");
+AssertEqual(ConnectionLaunchAdapterKind.WebRtcDataChannel, verifiedAdapter.AdapterKind, "verified WebRTC adapter kind");
+AssertEqual("verified webrtc datachannel helper", verifiedAdapter.AdapterBinding, "verified WebRTC adapter binding");
+AssertEqual("windows.lan:5443", verifiedAdapter.LocalEndpoint, "verified WebRTC local endpoint");
+AssertEqual("mac.lan:5443", verifiedAdapter.RemoteEndpoint, "verified WebRTC remote endpoint");
+AssertEqual("webrtc/dtls/sctp/helper-selected", verifiedAdapter.SelectedCandidatePair, "verified WebRTC selected candidate pair");
+AssertEqual("relay-helper", verifiedAdapter.RelayId, "verified WebRTC relay");
+AssertEqual((ulong)15_000, verifiedAdapter.TimestampWindowMs, "verified WebRTC timestamp window");
+AssertContains(verifiedAdapter.Facts[0].Detail, "SBF1", "verified WebRTC SBF1 proof fact");
+var verifiedBindingMaterial = verifiedAdapter.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel);
+AssertEqual("windows.lan:5443", verifiedBindingMaterial.LocalEndpoint, "verified WebRTC binding local endpoint");
+
+await ExpectThrowsAsync<InvalidOperationException>(
+    () => new VerifiedWebRtcDataChannelTransportAdapterClient(
+        new WindowsVerifiedWebRtcDataChannelOptions(verifiedProofPath, 60_000))
+        .PrepareAsync(
+            adapterRequest with
+            {
+                TransportKind = CoreTransportKind.AppleNative,
+                TransportAudit = CoreTransportAuditCode.AppleNativeDefault
+            }),
+    "Windows verified WebRTC adapter must not select AppleNative");
+
+await ExpectThrowsAsync<InvalidOperationException>(
+    () => new VerifiedWebRtcDataChannelTransportAdapterClient(
+        new WindowsVerifiedWebRtcDataChannelOptions(
+            WriteVerifiedWebRtcProof("webrtc-proof-stale.json", Fingerprint, capturedAtUnixMs: DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeMilliseconds()),
+            1_000))
+        .PrepareAsync(adapterRequest),
+    "Windows verified WebRTC adapter proof is stale or from the future.");
+
+await ExpectThrowsAsync<InvalidOperationException>(
+    () => new VerifiedWebRtcDataChannelTransportAdapterClient(
+        new WindowsVerifiedWebRtcDataChannelOptions(
+            WriteVerifiedWebRtcProof("webrtc-proof-bad-fingerprint.json", new string('f', 64)),
+            60_000))
+        .PrepareAsync(adapterRequest),
+    "Windows verified WebRTC adapter proof fingerprint does not match pairing material.");
+
+await ExpectThrowsAsync<InvalidOperationException>(
+    () => new VerifiedWebRtcDataChannelTransportAdapterClient(
+        new WindowsVerifiedWebRtcDataChannelOptions(
+            WriteVerifiedWebRtcProof("webrtc-proof-no-sbf1.json", Fingerprint, sbf1EchoVerified: false),
+            60_000))
+        .PrepareAsync(adapterRequest),
+    "Windows verified WebRTC adapter proof must confirm an SBF1 echo frame.");
+
+ExpectThrows<InvalidOperationException>(
+    () => new WindowsVerifiedWebRtcDataChannelOptions("", 60_000),
+    "Windows verified WebRTC adapter requires a proof file path.");
+
 ExpectThrows<InvalidOperationException>(
     () => new WindowsExternalTransportAdapterOptions(
         ConnectionLaunchAdapterKind.AppleNative,
@@ -504,6 +559,38 @@ Console.WriteLine("windows-connection-launch-smoke: ok");
 
 static ConnectionPreflightSnapshot BuildSnapshot(ConnectionPreflightPlan plan) =>
     new(DateTimeOffset.UnixEpoch, plan, Array.Empty<ConnectionPreflightFact>());
+
+static string WriteVerifiedWebRtcProof(
+    string fileName,
+    string fingerprint,
+    bool dataChannelOpen = true,
+    bool sbf1EchoVerified = true,
+    long? capturedAtUnixMs = null)
+{
+    var proofPath = Path.Combine(AppContext.BaseDirectory, fileName);
+    File.WriteAllText(
+        proofPath,
+        $$"""
+        {
+          "helperName": "skybridge-webrtc-helper-smoke",
+          "peerDeviceId": "mac-1",
+          "peerPublicKeyFingerprint": "{{fingerprint}}",
+          "dataChannelOpen": {{dataChannelOpen.ToString().ToLowerInvariant()}},
+          "sbf1EchoVerified": {{sbf1EchoVerified.ToString().ToLowerInvariant()}},
+          "sbf1FrameMagic": "SBF1",
+          "adapterBinding": "verified webrtc datachannel helper",
+          "localEndpoint": "windows.lan:5443",
+          "remoteEndpoint": "mac.lan:5443",
+          "selectedCandidatePair": "webrtc/dtls/sctp/helper-selected",
+          "transportSecretFingerprintHex": "{{new string('6', 64)}}",
+          "capabilityDigestHex": "{{new string('7', 64)}}",
+          "relayId": "relay-helper",
+          "timestampWindowMs": 15000,
+          "capturedAtUnixMs": {{capturedAtUnixMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}}
+        }
+        """);
+    return proofPath;
+}
 
 static ConnectionPreflightPlan BuildPlan(
     string peerDeviceId,

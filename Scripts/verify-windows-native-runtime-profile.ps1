@@ -80,6 +80,8 @@ var runtimeVariables = new[]
     "SKYBRIDGE_WINDOWS_RELAY_ID",
     "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
     "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
+    "SKYBRIDGE_WINDOWS_WEBRTC_PROOF_PATH",
+    "SKYBRIDGE_WINDOWS_WEBRTC_PROOF_MAX_AGE_MS",
     "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES"
 };
 
@@ -251,6 +253,68 @@ try
     AssertNestedType<NativeWindowsDnsSdBrowseClient>(nativePendingDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "native DNS-SD provider");
     AssertNestedType<PendingWindowsTransportAdapterClient>(nativePendingDependencies.ConnectionPreflightClient, "_transportAdapterClient", "native pending adapter");
 
+    var verifiedProofPath = WriteVerifiedWebRtcProof("webrtc-proof-valid.json");
+    ConfigureVerifiedWebRtcEnvironment(verifiedProofPath);
+    var verifiedDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<FfiEngineClient>(verifiedDependencies.EngineClient, "verified WebRTC engine");
+    AssertNestedType<NativeWindowsDnsSdBrowseClient>(verifiedDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "verified WebRTC DNS-SD provider");
+    var verifiedAdapter = GetNested<IWindowsTransportAdapterClient>(verifiedDependencies.ConnectionPreflightClient, "_transportAdapterClient");
+    AssertType<VerifiedWebRtcDataChannelTransportAdapterClient>(verifiedAdapter, "verified WebRTC transport adapter");
+    var verifiedSnapshot = await verifiedAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.WebRtcDataChannel, CoreTransportAuditCode.WebRtcInterop));
+    AssertEqual(true, verifiedSnapshot.IsLiveAdapterReady, "verified WebRTC adapter live readiness");
+    AssertEqual(ConnectionLaunchAdapterKind.WebRtcDataChannel, verifiedSnapshot.AdapterKind, "verified WebRTC adapter kind");
+    AssertEqual("verified webrtc datachannel helper", verifiedSnapshot.AdapterBinding, "verified WebRTC adapter binding");
+    AssertEqual("windows.lan:5443", verifiedSnapshot.LocalEndpoint, "verified WebRTC local endpoint");
+    AssertEqual("mac.lan:5443", verifiedSnapshot.RemoteEndpoint, "verified WebRTC remote endpoint");
+    AssertEqual("webrtc/dtls/sctp/helper-selected", verifiedSnapshot.SelectedCandidatePair, "verified WebRTC candidate pair");
+    AssertEqual("relay-helper", verifiedSnapshot.RelayId, "verified WebRTC relay id");
+    AssertEqual((ulong)15000, verifiedSnapshot.TimestampWindowMs, "verified WebRTC timestamp window");
+    AssertEqual(32, verifiedSnapshot.TransportSecretFingerprint.Length, "verified WebRTC transport secret length");
+    AssertEqual(32, verifiedSnapshot.CapabilityDigest.Length, "verified WebRTC capability digest length");
+    AssertEqual("relay-helper", verifiedSnapshot.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel).RelayId, "verified WebRTC binding relay id");
+    AssertContains(verifiedSnapshot.Facts[0].Detail, "SBF1", "verified WebRTC proof fact should mention SBF1");
+
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => verifiedAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.AppleNative, CoreTransportAuditCode.AppleNativeDefault)),
+        "Windows verified WebRTC adapter must not select AppleNative");
+
+    ConfigureVerifiedWebRtcEnvironment(WriteVerifiedWebRtcProof("webrtc-proof-stale.json", capturedAtUnixMs: DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeMilliseconds()), maxAgeMs: "1000");
+    var staleAdapter = GetNested<IWindowsTransportAdapterClient>(SessionViewModelDependencyFactory.CreateConfigured().ConnectionPreflightClient, "_transportAdapterClient");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => staleAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.WebRtcDataChannel, CoreTransportAuditCode.WebRtcInterop)),
+        "Windows verified WebRTC adapter proof is stale or from the future.");
+
+    ConfigureVerifiedWebRtcEnvironment(WriteVerifiedWebRtcProof("webrtc-proof-fingerprint-mismatch.json", fingerprint: new string('f', 64)));
+    var mismatchProofAdapter = GetNested<IWindowsTransportAdapterClient>(SessionViewModelDependencyFactory.CreateConfigured().ConnectionPreflightClient, "_transportAdapterClient");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => mismatchProofAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.WebRtcDataChannel, CoreTransportAuditCode.WebRtcInterop)),
+        "Windows verified WebRTC adapter proof fingerprint does not match pairing material.");
+
+    ConfigureVerifiedWebRtcEnvironment(WriteVerifiedWebRtcProof("webrtc-proof-no-sbf1.json", sbf1EchoVerified: false));
+    var missingSbf1Adapter = GetNested<IWindowsTransportAdapterClient>(SessionViewModelDependencyFactory.CreateConfigured().ConnectionPreflightClient, "_transportAdapterClient");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => missingSbf1Adapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.WebRtcDataChannel, CoreTransportAuditCode.WebRtcInterop)),
+        "Windows verified WebRTC adapter proof must confirm an SBF1 echo frame.");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "webrtc-verified");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_WEBRTC_PROOF_PATH is required when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER=webrtc-verified.");
+
+    ConfigureVerifiedWebRtcEnvironment(verifiedProofPath, maxAgeMs: "0");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_WEBRTC_PROOF_MAX_AGE_MS must be a positive unsigned integer.");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "carrier");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER must be external or webrtc-verified when set.");
+
     ConfigureExternalEnvironment();
     var externalDependencies = SessionViewModelDependencyFactory.CreateConfigured();
     AssertType<FfiEngineClient>(externalDependencies.EngineClient, "external engine");
@@ -344,6 +408,47 @@ void ConfigureExternalEnvironment(
     }
 
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS", timestampWindowMs);
+}
+
+void ConfigureVerifiedWebRtcEnvironment(string proofPath, string maxAgeMs = "60000")
+{
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "webrtc-verified");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_PROOF_PATH", proofPath);
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_PROOF_MAX_AGE_MS", maxAgeMs);
+}
+
+string WriteVerifiedWebRtcProof(
+    string fileName,
+    string? fingerprint = null,
+    bool dataChannelOpen = true,
+    bool sbf1EchoVerified = true,
+    long? capturedAtUnixMs = null)
+{
+    var proofPath = Path.Combine(AppContext.BaseDirectory, fileName);
+    File.WriteAllText(
+        proofPath,
+        $$"""
+        {
+          "helperName": "skybridge-webrtc-helper-smoke",
+          "peerDeviceId": "mac-1",
+          "peerPublicKeyFingerprint": "{{fingerprint ?? new string('0', 64)}}",
+          "dataChannelOpen": {{dataChannelOpen.ToString().ToLowerInvariant()}},
+          "sbf1EchoVerified": {{sbf1EchoVerified.ToString().ToLowerInvariant()}},
+          "sbf1FrameMagic": "SBF1",
+          "adapterBinding": "verified webrtc datachannel helper",
+          "localEndpoint": "windows.lan:5443",
+          "remoteEndpoint": "mac.lan:5443",
+          "selectedCandidatePair": "webrtc/dtls/sctp/helper-selected",
+          "transportSecretFingerprintHex": "{{new string('6', 64)}}",
+          "capabilityDigestHex": "{{new string('7', 64)}}",
+          "relayId": "relay-helper",
+          "timestampWindowMs": 15000,
+          "capturedAtUnixMs": {{capturedAtUnixMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}}
+        }
+        """);
+    return proofPath;
 }
 
 void ClearRuntimeEnvironment()

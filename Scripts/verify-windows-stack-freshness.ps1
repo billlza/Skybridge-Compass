@@ -92,6 +92,7 @@ foreach ($architectureSignal in @(
     'MsQuic v2.5.8',
     'libdatachannel',
     'v0.24.4',
+    'SIPSorcery `10.0.9`',
     'Rust 2021 edition',
     'verify-windows-stack-freshness.ps1',
     'Sources checked on 2026-06-09'
@@ -126,6 +127,9 @@ if ($CheckOnline) {
 
     $latestQrCoder = Get-LatestStableNuGetVersion -PackageId "QRCoder"
     Assert-True -Condition ($latestQrCoder -eq $qrCoderVersion) -Message "QRCoder package is not current stable: project=$qrCoderVersion latest=$latestQrCoder"
+
+    $latestSipsorcery = Get-LatestStableNuGetVersion -PackageId "SIPSorcery"
+    Assert-True -Condition ($latestSipsorcery -eq "10.0.9") -Message "SIPSorcery latest stable changed: $latestSipsorcery"
 
     $msquicLatest = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/msquic/releases/latest"
     Assert-True -Condition ($msquicLatest.tag_name -eq "v2.5.8") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"
