@@ -93,6 +93,7 @@ $sessionViewModelDependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $sessionViewModelDependenciesPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModelDependencies.cs"
 $asyncRelayCommandPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/AsyncRelayCommand.cs"
+$workspaceCommandBindingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandBindings.cs"
 $workspaceCommandRegistryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandRegistry.cs"
 $workspaceActionSurfaceTargetsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionSurfaceTargets.cs"
 $workspaceStatusPatchApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStatusPatchApplier.cs"
@@ -124,7 +125,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -134,12 +135,13 @@ $sessionViewModelDependencyFactory = Get-Content -Raw -LiteralPath $sessionViewM
 $sessionViewModelSource = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $sessionViewModelDependencies = Get-Content -Raw -LiteralPath $sessionViewModelDependenciesPath
 $asyncRelayCommand = Get-Content -Raw -LiteralPath $asyncRelayCommandPath
+$workspaceCommandBindings = Get-Content -Raw -LiteralPath $workspaceCommandBindingsPath
 $workspaceCommandRegistry = Get-Content -Raw -LiteralPath $workspaceCommandRegistryPath
 $workspaceActionSurfaceTargets = Get-Content -Raw -LiteralPath $workspaceActionSurfaceTargetsPath
 $workspaceStatusPatchApplier = Get-Content -Raw -LiteralPath $workspaceStatusPatchApplierPath
 $workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceStatusPatchApplier + $workspaceCountNotifier
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceStatusPatchApplier + $workspaceCountNotifier
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -292,6 +294,18 @@ foreach ($asyncRelayCommandSignal in @(
 }
 Assert-True -Condition (-not $sessionViewModelSource.Contains("public sealed class AsyncRelayCommand")) -Message "SessionViewModel.cs must not own the reusable AsyncRelayCommand adapter."
 
+foreach ($commandBindingsSignal in @(
+    "internal sealed class WorkspaceCommandBindings",
+    "new AsyncRelayCommand(connectAsync, canConnect)",
+    "new AsyncRelayCommand(refreshSettingsAsync, canRefreshSettings)",
+    "Registry = WorkspaceCommandRegistry.Create(",
+    "WorkspaceActionCommandId.Connect",
+    "WorkspaceActionCommandId.RefreshSettings",
+    "public WorkspaceCommandRegistry Registry { get; }"
+)) {
+    Assert-Contains -Text $workspaceCommandBindings -Needle $commandBindingsSignal -Message "WorkspaceCommandBindings contract missing: $commandBindingsSignal"
+}
+
 foreach ($commandRegistrySignal in @(
     "public sealed class WorkspaceCommandRegistry",
     "WorkspaceCommandRegistration",
@@ -304,7 +318,8 @@ foreach ($commandRegistrySignal in @(
 
 foreach ($commandRefreshSignal in @(
     "private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;",
-    "_workspaceCommandRegistry = WorkspaceCommandRegistry.Create(",
+    "new WorkspaceCommandBindings(",
+    "_workspaceCommandRegistry = commandBindings.Registry;",
     "foreach (var command in _workspaceCommandRegistry.RefreshableCommands)",
     "_workspaceCommandRegistry.Resolve(action.CommandId)"
 )) {
@@ -312,6 +327,8 @@ foreach ($commandRefreshSignal in @(
 }
 Assert-True -Condition (-not $sessionViewModelSource.Contains("(ConnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();")) -Message "SessionViewModel must refresh command states through _refreshableCommands instead of per-command cast calls."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_refreshableCommands")) -Message "SessionViewModel must source refreshable commands from WorkspaceCommandRegistry."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("new AsyncRelayCommand(")) -Message "SessionViewModel must create bindable commands through WorkspaceCommandBindings."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("WorkspaceCommandRegistry.Create(")) -Message "SessionViewModel must source the command registry from WorkspaceCommandBindings."
 
 foreach ($binding in @(
     "NavigationItems",
@@ -1799,6 +1816,7 @@ foreach ($docSignal in @(
     "CanUseDeviceDiscoveryAction",
     "CanUseCrossNetworkConnectionAction",
     "CanUseSelectedWorkspaceFeature",
+    "WorkspaceCommandBindings",
     "WorkspaceActionCommandId",
     "WorkspaceActionGateId",
     "WorkspaceActionDetailSlot",

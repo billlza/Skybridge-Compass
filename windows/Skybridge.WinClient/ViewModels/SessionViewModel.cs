@@ -266,53 +266,72 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SettingsActions = new ObservableCollection<SettingsActionItemView>();
         SettingsDetails = new ObservableCollection<SettingsDetailItemView>();
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
-        ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
-        DisconnectCommand = new AsyncRelayCommand(DisconnectAsync, CanDisconnect);
-        HeartbeatCommand = new AsyncRelayCommand(SendHeartbeatAsync, CanSendHeartbeat);
-        StartDiscoveryCommand = new AsyncRelayCommand(StartDiscoveryAsync, CanUseDiscoveryBrowser);
-        StopDiscoveryCommand = new AsyncRelayCommand(StopDiscoveryAsync, CanUseDiscoveryBrowser);
-        RefreshDiscoveryCommand = new AsyncRelayCommand(RefreshDiscoveryAsync, CanUseDiscoveryBrowser);
-        RunExtendedDiscoveryCommand = new AsyncRelayCommand(RunExtendedDiscoveryAsync, CanUseDiscoveryBrowser);
-        PrepareManualConnectionCommand = new AsyncRelayCommand(PrepareManualConnectionAsync, CanPrepareManualConnection);
-        GenerateQRCodeCommand = new AsyncRelayCommand(GenerateQRCodeAsync, CanUseCrossNetworkConnection);
-        ScanQRCodeCommand = new AsyncRelayCommand(ScanQRCodeAsync, CanScanQRCode);
-        GenerateConnectionCodeCommand = new AsyncRelayCommand(GenerateConnectionCodeAsync, CanUseCrossNetworkConnection);
-        RegenerateConnectionCodeCommand = new AsyncRelayCommand(RegenerateConnectionCodeAsync, CanUseCrossNetworkConnection);
-        CopyConnectionCodeCommand = new AsyncRelayCommand(CopyConnectionCodeAsync, CanCopyConnectionCode);
-        ConnectConnectionCodeCommand = new AsyncRelayCommand(ConnectConnectionCodeAsync, CanConnectConnectionCode);
-        ParseAdvertisementCommand = new AsyncRelayCommand(ParseAdvertisementAsync, CanParseAdvertisement);
-        ValidatePairingCodeCommand = new AsyncRelayCommand(ValidatePairingCodeAsync, CanValidatePairingCode);
-        PrepareConnectionCommand = new AsyncRelayCommand(PrepareConnectionAsync, CanPrepareConnection);
-        RunCoreDiagnosticsCommand = new AsyncRelayCommand(RunCoreDiagnosticsAsync, CanRunCoreDiagnostics);
-        RefreshFileTransferCommand = new AsyncRelayCommand(RefreshFileTransferAsync, CanRefreshFileTransfer);
-        RefreshRemoteDesktopCommand = new AsyncRelayCommand(RefreshRemoteDesktopAsync, CanRefreshRemoteDesktop);
-        RefreshSystemMonitorCommand = new AsyncRelayCommand(RefreshSystemMonitorAsync, CanRefreshSystemMonitor);
-        RefreshUsbManagementCommand = new AsyncRelayCommand(RefreshUsbManagementAsync, CanRefreshUsbManagement);
-        RefreshSettingsCommand = new AsyncRelayCommand(RefreshSettingsAsync, CanRefreshSettings);
-        _workspaceCommandRegistry = WorkspaceCommandRegistry.Create(
-            new(WorkspaceActionCommandId.Connect, ConnectCommand),
-            new(WorkspaceActionCommandId.Disconnect, DisconnectCommand),
-            new(WorkspaceActionCommandId.Heartbeat, HeartbeatCommand),
-            new(WorkspaceActionCommandId.StartDiscovery, StartDiscoveryCommand),
-            new(WorkspaceActionCommandId.StopDiscovery, StopDiscoveryCommand),
-            new(WorkspaceActionCommandId.RefreshDiscovery, RefreshDiscoveryCommand),
-            new(WorkspaceActionCommandId.RunExtendedDiscovery, RunExtendedDiscoveryCommand),
-            new(WorkspaceActionCommandId.PrepareManualConnection, PrepareManualConnectionCommand),
-            new(WorkspaceActionCommandId.GenerateQrCode, GenerateQRCodeCommand),
-            new(WorkspaceActionCommandId.ScanQrCode, ScanQRCodeCommand),
-            new(WorkspaceActionCommandId.GenerateConnectionCode, GenerateConnectionCodeCommand),
-            new(WorkspaceActionCommandId.RegenerateConnectionCode, RegenerateConnectionCodeCommand),
-            new(WorkspaceActionCommandId.CopyConnectionCode, CopyConnectionCodeCommand),
-            new(WorkspaceActionCommandId.ConnectConnectionCode, ConnectConnectionCodeCommand),
-            new(WorkspaceActionCommandId.ParseTxt, ParseAdvertisementCommand),
-            new(WorkspaceActionCommandId.ValidatePairing, ValidatePairingCodeCommand),
-            new(WorkspaceActionCommandId.PrepareConnection, PrepareConnectionCommand),
-            new(WorkspaceActionCommandId.RunCoreDiagnostics, RunCoreDiagnosticsCommand),
-            new(WorkspaceActionCommandId.RefreshFileTransfer, RefreshFileTransferCommand),
-            new(WorkspaceActionCommandId.RefreshRemoteDesktop, RefreshRemoteDesktopCommand),
-            new(WorkspaceActionCommandId.RefreshSystemMonitor, RefreshSystemMonitorCommand),
-            new(WorkspaceActionCommandId.RefreshUsbManagement, RefreshUsbManagementCommand),
-            new(WorkspaceActionCommandId.RefreshSettings, RefreshSettingsCommand));
+        var commandBindings = new WorkspaceCommandBindings(
+            ConnectAsync,
+            CanConnect,
+            DisconnectAsync,
+            CanDisconnect,
+            SendHeartbeatAsync,
+            CanSendHeartbeat,
+            StartDiscoveryAsync,
+            CanUseDiscoveryBrowser,
+            StopDiscoveryAsync,
+            RefreshDiscoveryAsync,
+            RunExtendedDiscoveryAsync,
+            PrepareManualConnectionAsync,
+            CanPrepareManualConnection,
+            GenerateQRCodeAsync,
+            CanUseCrossNetworkConnection,
+            ScanQRCodeAsync,
+            CanScanQRCode,
+            GenerateConnectionCodeAsync,
+            RegenerateConnectionCodeAsync,
+            CopyConnectionCodeAsync,
+            CanCopyConnectionCode,
+            ConnectConnectionCodeAsync,
+            CanConnectConnectionCode,
+            ParseAdvertisementAsync,
+            CanParseAdvertisement,
+            ValidatePairingCodeAsync,
+            CanValidatePairingCode,
+            PrepareConnectionAsync,
+            CanPrepareConnection,
+            RunCoreDiagnosticsAsync,
+            CanRunCoreDiagnostics,
+            RefreshFileTransferAsync,
+            CanRefreshFileTransfer,
+            RefreshRemoteDesktopAsync,
+            CanRefreshRemoteDesktop,
+            RefreshSystemMonitorAsync,
+            CanRefreshSystemMonitor,
+            RefreshUsbManagementAsync,
+            CanRefreshUsbManagement,
+            RefreshSettingsAsync,
+            CanRefreshSettings);
+        ConnectCommand = commandBindings.ConnectCommand;
+        DisconnectCommand = commandBindings.DisconnectCommand;
+        HeartbeatCommand = commandBindings.HeartbeatCommand;
+        StartDiscoveryCommand = commandBindings.StartDiscoveryCommand;
+        StopDiscoveryCommand = commandBindings.StopDiscoveryCommand;
+        RefreshDiscoveryCommand = commandBindings.RefreshDiscoveryCommand;
+        RunExtendedDiscoveryCommand = commandBindings.RunExtendedDiscoveryCommand;
+        PrepareManualConnectionCommand = commandBindings.PrepareManualConnectionCommand;
+        GenerateQRCodeCommand = commandBindings.GenerateQRCodeCommand;
+        ScanQRCodeCommand = commandBindings.ScanQRCodeCommand;
+        GenerateConnectionCodeCommand = commandBindings.GenerateConnectionCodeCommand;
+        RegenerateConnectionCodeCommand = commandBindings.RegenerateConnectionCodeCommand;
+        CopyConnectionCodeCommand = commandBindings.CopyConnectionCodeCommand;
+        ConnectConnectionCodeCommand = commandBindings.ConnectConnectionCodeCommand;
+        ParseAdvertisementCommand = commandBindings.ParseAdvertisementCommand;
+        ValidatePairingCodeCommand = commandBindings.ValidatePairingCodeCommand;
+        PrepareConnectionCommand = commandBindings.PrepareConnectionCommand;
+        RunCoreDiagnosticsCommand = commandBindings.RunCoreDiagnosticsCommand;
+        RefreshFileTransferCommand = commandBindings.RefreshFileTransferCommand;
+        RefreshRemoteDesktopCommand = commandBindings.RefreshRemoteDesktopCommand;
+        RefreshSystemMonitorCommand = commandBindings.RefreshSystemMonitorCommand;
+        RefreshUsbManagementCommand = commandBindings.RefreshUsbManagementCommand;
+        RefreshSettingsCommand = commandBindings.RefreshSettingsCommand;
+        _workspaceCommandRegistry = commandBindings.Registry;
         var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
