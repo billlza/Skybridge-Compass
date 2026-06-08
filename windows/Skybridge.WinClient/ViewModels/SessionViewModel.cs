@@ -320,6 +320,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _settingsWorkspaceActions = new SettingsWorkspaceActions(
             _workspaceBusyCoordinator,
             _settingsClient,
+            _readOnlyWorkspaceRefreshActions.RefreshSettingsActionSnapshotAsync,
             value => SettingsStatus = value,
             value => StatusMessage = value);
         _topBarWorkspaceActions = new TopBarWorkspaceActions(

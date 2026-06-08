@@ -2873,6 +2873,7 @@ foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "_systemMonitorWorkspaceActions,",
     "_settingsWorkspaceActions,",
     "_topBarWorkspaceActions,",
+    "_readOnlyWorkspaceRefreshActions.RefreshSettingsActionSnapshotAsync",
     "_readOnlyWorkspaceRefreshActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshActions: $sessionViewModelReadOnlyRefreshSignal"
@@ -4087,6 +4088,9 @@ foreach ($settingsSignal in @(
     "ISettingsActionIntentClient",
     "InMemorySettingsActionIntentClient",
     "SettingsWorkspaceActions",
+    "_applySettingsSnapshotAsync",
+    "await _applySettingsSnapshotAsync();",
+    "RefreshSettingsActionSnapshotAsync",
     "BuildReadOnlySnapshotAsync",
     "CanExportSettings",
     "CanImportSettings",

@@ -117,4 +117,11 @@ internal sealed class ReadOnlyWorkspaceRefreshCoordinator
             _settingsClient.BuildCompletedStatusMessage,
             setWorkspaceStatus,
             setStatusMessage);
+
+    public async Task RefreshSettingsActionSnapshotAsync(
+        Action<SettingsWorkspaceSnapshot> applySnapshot)
+    {
+        var snapshot = await _settingsClient.BuildReadOnlySnapshotAsync();
+        applySnapshot(snapshot);
+    }
 }

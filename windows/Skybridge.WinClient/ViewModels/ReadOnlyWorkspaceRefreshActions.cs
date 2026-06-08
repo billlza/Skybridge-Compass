@@ -80,4 +80,8 @@ internal sealed class ReadOnlyWorkspaceRefreshActions
             _snapshotHandlers.ApplySettings,
             _setSettingsStatus,
             _setStatusMessage);
+
+    public Task RefreshSettingsActionSnapshotAsync() =>
+        _refreshCoordinator.RefreshSettingsActionSnapshotAsync(
+            _snapshotHandlers.ApplySettings);
 }

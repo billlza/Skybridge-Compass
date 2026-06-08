@@ -8,17 +8,20 @@ internal sealed class SettingsWorkspaceActions
 {
     private readonly WorkspaceBusyCoordinator _busyCoordinator;
     private readonly ISettingsWorkspaceClient _settingsClient;
+    private readonly Func<Task> _applySettingsSnapshotAsync;
     private readonly Action<string> _setSettingsStatus;
     private readonly Action<string> _setStatusMessage;
 
     public SettingsWorkspaceActions(
         WorkspaceBusyCoordinator busyCoordinator,
         ISettingsWorkspaceClient settingsClient,
+        Func<Task> applySettingsSnapshotAsync,
         Action<string> setSettingsStatus,
         Action<string> setStatusMessage)
     {
         _busyCoordinator = busyCoordinator ?? throw new ArgumentNullException(nameof(busyCoordinator));
         _settingsClient = settingsClient ?? throw new ArgumentNullException(nameof(settingsClient));
+        _applySettingsSnapshotAsync = applySettingsSnapshotAsync ?? throw new ArgumentNullException(nameof(applySettingsSnapshotAsync));
         _setSettingsStatus = setSettingsStatus ?? throw new ArgumentNullException(nameof(setSettingsStatus));
         _setStatusMessage = setStatusMessage ?? throw new ArgumentNullException(nameof(setStatusMessage));
     }
@@ -74,5 +77,6 @@ internal sealed class SettingsWorkspaceActions
                 var result = await buildActionAsync();
                 _setSettingsStatus(result.Status);
                 _setStatusMessage(result.Message);
+                await _applySettingsSnapshotAsync();
             });
 }
