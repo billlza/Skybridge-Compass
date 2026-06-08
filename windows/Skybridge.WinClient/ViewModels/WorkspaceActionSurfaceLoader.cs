@@ -48,6 +48,7 @@ internal sealed class WorkspaceActionSurfaceLoader
             target,
             snapshot.Actions,
             action => WorkspaceActionItemView.FromItem(
+                surface,
                 action,
                 _commandRegistry.Resolve(action.CommandId)));
     }

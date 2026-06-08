@@ -25,6 +25,8 @@
         </ItemsPanelTemplate>
         <DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">
             <Button
+                AutomationProperties.AutomationId="{Binding AutomationId}"
+                AutomationProperties.Name="{Binding Title}"
                 Command="{Binding Command}"
                 IsEnabled="{Binding IsEnabled}"
                 HorizontalAlignment="Stretch">
@@ -35,7 +37,11 @@
             </Button>
         </DataTemplate>
         <DataTemplate x:Key="NavigationItemTemplate">
-            <Grid MinHeight="48" ColumnSpacing="12">
+            <Grid
+                MinHeight="48"
+                ColumnSpacing="12"
+                AutomationProperties.AutomationId="{Binding Id}"
+                AutomationProperties.Name="{Binding Title}">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="28" />
                     <ColumnDefinition Width="*" />
@@ -55,7 +61,11 @@
             </Grid>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceActionButtonTemplate">
-            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+            <Button
+                AutomationProperties.AutomationId="{Binding AutomationId}"
+                AutomationProperties.Name="{Binding Title}"
+                Command="{Binding Command}"
+                IsEnabled="{Binding IsEnabled}">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
                     <TextBlock Text="{Binding Title}" />
@@ -63,7 +73,11 @@
             </Button>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceActionButtonWithDetailTemplate">
-            <Button Command="{Binding Command}" IsEnabled="{Binding IsEnabled}">
+            <Button
+                AutomationProperties.AutomationId="{Binding AutomationId}"
+                AutomationProperties.Name="{Binding Title}"
+                Command="{Binding Command}"
+                IsEnabled="{Binding IsEnabled}">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
                     <TextBlock Text="{Binding Title}" />
@@ -287,6 +301,7 @@
 
                 <ListView
                     Grid.Row="1"
+                    AutomationProperties.AutomationId="Skybridge.Navigation.List"
                     Margin="0,22,0,18"
                     ItemsSource="{Binding NavigationItems}"
                     ItemTemplate="{StaticResource NavigationItemTemplate}"
@@ -295,6 +310,7 @@
 
                 <ItemsControl
                     Grid.Row="2"
+                    AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"
                     ItemsSource="{Binding SidebarSessionActions}"
                     ItemsPanel="{StaticResource VerticalWorkspaceActionItemsPanel}"
                     ItemTemplate="{StaticResource SidebarWorkspaceActionButtonTemplate}" />
@@ -319,8 +335,15 @@
                     </Grid.ColumnDefinitions>
 
                     <StackPanel Spacing="2" VerticalAlignment="Center">
-                        <TextBlock Text="{Binding SelectedFeature.Title}" FontSize="22" FontWeight="SemiBold" />
-                        <TextBlock Text="{Binding StatusMessage}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock
+                            AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"
+                            Text="{Binding SelectedFeature.Title}"
+                            FontSize="22"
+                            FontWeight="SemiBold" />
+                        <TextBlock
+                            AutomationProperties.AutomationId="Skybridge.Status.Message"
+                            Text="{Binding StatusMessage}"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
@@ -344,6 +367,7 @@
                             </StackPanel>
                         </Border>
                         <ItemsControl
+                            AutomationProperties.AutomationId="Skybridge.Actions.TopBar"
                             ItemsSource="{Binding TopBarActions}"
                             ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
                             ItemTemplate="{StaticResource WorkspaceActionButtonWithDetailTemplate}" />
@@ -801,9 +825,14 @@
 
                         <Border Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                             <StackPanel Spacing="14">
-                                <TextBlock Text="{Binding SelectedFeature.Title}" FontSize="18" FontWeight="SemiBold" />
+                                <TextBlock
+                                    AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"
+                                    Text="{Binding SelectedFeature.Title}"
+                                    FontSize="18"
+                                    FontWeight="SemiBold" />
                                 <TextBlock Text="{Binding SelectedFeature.Status}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 <ItemsControl
+                                    AutomationProperties.AutomationId="Skybridge.Actions.SessionControls"
                                     ItemsSource="{Binding SessionControlActions}"
                                     ItemsPanel="{StaticResource SessionWorkspaceActionItemsPanel}"
                                     ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}" />
@@ -815,11 +844,19 @@
                                 <TextBlock Text="Session Controls" FontSize="18" FontWeight="SemiBold" />
                                 <StackPanel Spacing="6">
                                     <TextBlock Text="Bitrate" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                    <ComboBox ItemsSource="{Binding BitrateProfiles}" SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+                                    <ComboBox
+                                        AutomationProperties.AutomationId="Skybridge.SessionControls.Bitrate"
+                                        ItemsSource="{Binding BitrateProfiles}"
+                                        SelectedItem="{Binding SelectedBitrate, Mode=TwoWay}"
+                                        HorizontalAlignment="Stretch" />
                                 </StackPanel>
                                 <StackPanel Spacing="6">
                                     <TextBlock Text="Framerate" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                    <ComboBox ItemsSource="{Binding FramerateProfiles}" SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}" HorizontalAlignment="Stretch" />
+                                    <ComboBox
+                                        AutomationProperties.AutomationId="Skybridge.SessionControls.Framerate"
+                                        ItemsSource="{Binding FramerateProfiles}"
+                                        SelectedItem="{Binding SelectedFramerate, Mode=TwoWay}"
+                                        HorizontalAlignment="Stretch" />
                                 </StackPanel>
                             </StackPanel>
                         </Border>

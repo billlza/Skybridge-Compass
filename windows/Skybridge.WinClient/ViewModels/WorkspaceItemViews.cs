@@ -145,14 +145,28 @@ public sealed record WorkspaceActionItemView(
     string Glyph,
     bool IsEnabled,
     string Detail,
+    string AutomationId,
     ICommand? Command = null)
 {
     public static WorkspaceActionItemView FromItem(
+        WorkspaceActionSurface surface,
         WorkspaceActionItem item,
         ICommand? command = null,
         bool? isEnabled = null,
         string? detail = null) =>
-        new(item.Key, item.Title, item.Glyph, isEnabled ?? item.IsEnabled, detail ?? item.Detail, command);
+        new(
+            item.Key,
+            item.Title,
+            item.Glyph,
+            isEnabled ?? item.IsEnabled,
+            detail ?? item.Detail,
+            BuildAutomationId(surface, item.Key),
+            command);
+
+    private static string BuildAutomationId(
+        WorkspaceActionSurface surface,
+        string key) =>
+        $"WorkspaceAction.{surface}.{key}";
 }
 
 public sealed record CoreDiagnosticFactView(

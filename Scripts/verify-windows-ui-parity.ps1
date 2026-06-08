@@ -335,6 +335,9 @@ foreach ($workspaceItemViewSignal in @(
     "public sealed record ConnectionPreflightFactView",
     "public sealed record PairingFactView",
     "public sealed record CoreDiagnosticFactView",
+    "string AutomationId",
+    "BuildAutomationId(",
+    '$"WorkspaceAction.{surface}.{key}"',
     "FromItem",
     "FromFact",
     "FromCandidate"
@@ -725,6 +728,8 @@ foreach ($resourceSignal in @(
     'x:Key="SettingsTabItemTemplate"',
     'Command="{Binding Command}"',
     'IsEnabled="{Binding IsEnabled}"',
+    'AutomationProperties.AutomationId="{Binding AutomationId}"',
+    'AutomationProperties.Name="{Binding Title}"',
     'Text="{Binding Detail}"',
     '<ColumnDefinition Width="170" />',
     '<ColumnDefinition Width="220" />'
@@ -768,6 +773,21 @@ foreach ($actionBinding in @(
 
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "SessionControlActions" -ItemsPanel "SessionWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonTemplate"
 
+foreach ($automationSignal in @(
+    'AutomationProperties.AutomationId="Skybridge.Navigation.List"',
+    'AutomationProperties.AutomationId="{Binding Id}"',
+    'AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"',
+    'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
+    'AutomationProperties.AutomationId="Skybridge.Status.Message"',
+    'AutomationProperties.AutomationId="Skybridge.Actions.TopBar"',
+    'AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"',
+    'AutomationProperties.AutomationId="Skybridge.Actions.SessionControls"',
+    'AutomationProperties.AutomationId="Skybridge.SessionControls.Bitrate"',
+    'AutomationProperties.AutomationId="Skybridge.SessionControls.Framerate"'
+)) {
+    Assert-Contains -Text $mainWindow -Needle $automationSignal -Message "MainWindow.xaml missing UI automation anchor: $automationSignal"
+}
+
 foreach ($factBinding in @(
     "DiscoveryBrowserFacts",
     "ManualConnectionFacts",
@@ -809,8 +829,8 @@ Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order"
 )
 
 Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles @(
-    '<TextBlock Text="{Binding SelectedFeature.Title}"',
-    '<TextBlock Text="{Binding StatusMessage}"',
+    'Text="{Binding SelectedFeature.Title}"',
+    'Text="{Binding StatusMessage}"',
     '<TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold"',
     '<TextBlock Text="FPS / Diagnostics"',
     '<TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold"',
@@ -851,7 +871,7 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Session controls action c
 )
 
 Assert-Ordered -Text $mainWindow -Context "Session controls action order" -Needles @(
-    '<TextBlock Text="{Binding SelectedFeature.Title}" FontSize="18"',
+    'AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"',
     'ItemsSource="{Binding SessionControlActions}"',
     '<TextBlock Text="Session Controls"'
 )
@@ -1578,6 +1598,8 @@ foreach ($surfaceLoaderSignal in @(
     "_actionCatalogClient.BuildResolvedSnapshot(",
     "_surfaceTargets.Resolve(surface)",
     "WorkspaceCollectionProjector.Replace(",
+    "WorkspaceActionItemView.FromItem(",
+    "surface,",
     "_commandRegistry.Resolve(action.CommandId)"
 )) {
     Assert-Contains -Text $workspaceActionSurfaceLoader -Needle $surfaceLoaderSignal -Message "WorkspaceActionSurfaceLoader contract missing: $surfaceLoaderSignal"
