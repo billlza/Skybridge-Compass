@@ -109,11 +109,12 @@ $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/S
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
 $sessionStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionStatusClient.cs"
+$sessionCommandStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionCommandStateClient.cs"
 $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -139,6 +140,7 @@ $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
 $sessionStatus = Get-Content -Raw -LiteralPath $sessionStatusPath
+$sessionCommandState = Get-Content -Raw -LiteralPath $sessionCommandStatePath
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
@@ -558,6 +560,31 @@ foreach ($viewModelSessionStatusLiteral in @(
     'StatusMessage = newState switch'
 )) {
     Assert-True -Condition (-not $sessionViewModel.Contains($viewModelSessionStatusLiteral)) -Message "SessionViewModel must source session status text from SessionStatusClient instead of literal: $viewModelSessionStatusLiteral"
+}
+
+foreach ($sessionCommandStateSignal in @(
+    "public interface ISessionCommandStateClient",
+    "public sealed class SessionCommandStateClient : ISessionCommandStateClient",
+    "CanConnect",
+    "CanDisconnect",
+    "CanSendHeartbeat",
+    "EngineConnectionState.Disconnected",
+    "EngineConnectionState.Connected",
+    "EngineConnectionState.Reconnecting",
+    "new SessionCommandStateClient()",
+    "_sessionCommandStateClient.CanConnect(ConnectionState, IsBusy)",
+    "_sessionCommandStateClient.CanDisconnect(ConnectionState, IsBusy)",
+    "_sessionCommandStateClient.CanSendHeartbeat(ConnectionState, IsBusy)"
+)) {
+    Assert-Contains -Text ($sessionCommandState + $sessionViewModel) -Needle $sessionCommandStateSignal -Message "Session command state service signal missing: $sessionCommandStateSignal"
+}
+
+foreach ($viewModelSessionCommandGate in @(
+    "ConnectionState == EngineConnectionState.Disconnected",
+    "ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting",
+    "ConnectionState == EngineConnectionState.Connected"
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelSessionCommandGate)) -Message "SessionViewModel must source connect/disconnect/heartbeat enablement from SessionCommandStateClient instead of inline gate: $viewModelSessionCommandGate"
 }
 
 foreach ($workspaceActionRoleSignal in @(

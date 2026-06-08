@@ -33,6 +33,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IWorkspaceErrorStatusClient _workspaceErrorStatusClient;
     private readonly ISessionStatusClient _sessionStatusClient;
     private readonly IFeatureCatalogClient _featureCatalogClient;
+    private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -97,7 +98,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null,
         IWorkspaceErrorStatusClient? workspaceErrorStatusClient = null,
         ISessionStatusClient? sessionStatusClient = null,
-        IFeatureCatalogClient? featureCatalogClient = null)
+        IFeatureCatalogClient? featureCatalogClient = null,
+        ISessionCommandStateClient? sessionCommandStateClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -122,6 +124,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceErrorStatusClient = workspaceErrorStatusClient ?? new WorkspaceErrorStatusClient();
         _sessionStatusClient = sessionStatusClient ?? new SessionStatusClient();
         _featureCatalogClient = featureCatalogClient ?? new FeatureCatalogClient();
+        _sessionCommandStateClient = sessionCommandStateClient ?? new SessionCommandStateClient();
         _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
         _topBarNotificationsStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications);
         _topBarThemeStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme);
@@ -1244,11 +1247,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         });
     }
 
-    private bool CanConnect() => !IsBusy && ConnectionState == EngineConnectionState.Disconnected;
+    private bool CanConnect() => _sessionCommandStateClient.CanConnect(ConnectionState, IsBusy);
 
-    private bool CanDisconnect() => !IsBusy && (ConnectionState == EngineConnectionState.Connected || ConnectionState == EngineConnectionState.Reconnecting);
+    private bool CanDisconnect() => _sessionCommandStateClient.CanDisconnect(ConnectionState, IsBusy);
 
-    private bool CanSendHeartbeat() => !IsBusy && ConnectionState == EngineConnectionState.Connected;
+    private bool CanSendHeartbeat() => _sessionCommandStateClient.CanSendHeartbeat(ConnectionState, IsBusy);
 
     private bool CanUseDiscoveryBrowser() => !IsBusy && IsDeviceDiscoverySelected;
 

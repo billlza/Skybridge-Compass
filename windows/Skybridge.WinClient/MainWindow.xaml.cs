@@ -35,7 +35,8 @@ public sealed partial class MainWindow : Window
             new WorkspaceActionCatalogClient(),
             new WorkspaceErrorStatusClient(),
             new SessionStatusClient(),
-            new FeatureCatalogClient());
+            new FeatureCatalogClient(),
+            new SessionCommandStateClient());
         DataContext = ViewModel;
     }
 }
