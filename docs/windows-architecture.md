@@ -122,6 +122,7 @@ The WinUI client is organized to keep UI binding, engine integration, and platfo
 - Connection-plan tests must prove Windows-to-Apple interop selects WebRTC with distinct channels, Apple-to-Apple remains Apple native, unsupported peers fail closed, and timeout cannot create a classic crypto fallback plan.
 - Discovery tests must prove `_skybridge._udp` and `_skybridge._tcp` service names remain stable, required TXT fields are enforced, `pubKeyFP` is exactly 64 lowercase hex characters, and macOS/iOS platform labels map to Apple capabilities without replacing Apple-to-Apple native transport.
 - CLI smoke tests must launch the compiled `skybridge` binary and verify successful and failing basic commands. `Scripts/verify-rust-cli-coverage.ps1` is the Rust gate for this Windows parity branch: it runs `cargo test`, requires total line coverage to be at least 90%, and also requires `cli.rs` line coverage to be at least 90% so CLI reuse cannot regress behind broad Core coverage.
+- Local branch upload should run `Scripts/verify-git-ssh-remote.ps1 -RequireConfiguredSshCommand` before `git push`; this rejects HTTPS remotes so Windows does not invoke `git-remote-https.exe`, and it verifies the configured SSH command fails fast with the intended identity.
 
 ## Sources checked on 2026-06-07
 - Current TDSC mac branch at `23ba063`: https://github.com/billlza/Skybridge-Compass/tree/tdsc-2026-01-0318-ios-sim-fix
