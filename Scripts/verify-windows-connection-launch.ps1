@@ -29,6 +29,7 @@ $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs",
     "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs",
     "windows/Skybridge.WinClient/Services/ConnectionLaunchRequest.cs",
+    "windows/Skybridge.WinClient/Services/WindowsTransportAdapterClient.cs",
     "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs",
     "windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs"
 ) | ForEach-Object { Join-Path $RepoRoot $_ }
@@ -128,6 +129,20 @@ ExpectThrows<InvalidOperationException>(
             BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, digestLength: 31)))),
     "Connection launch requires a 32-byte transport binding digest from Core preflight.");
 
+ExpectThrows<InvalidOperationException>(
+    () => stateClient.BuildConnectionLaunchRequest(
+        stateClient.BuildPreflightValidatedState(
+            pairedState,
+            BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, localEndpoint: "")))),
+    "Connection launch requires a local transport endpoint.");
+
+ExpectThrows<InvalidOperationException>(
+    () => stateClient.BuildConnectionLaunchRequest(
+        stateClient.BuildPreflightValidatedState(
+            pairedState,
+            BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, timestampWindowMs: 0)))),
+    "Connection launch requires a non-zero transport timestamp window.");
+
 var preflightOnlyRequest = stateClient.BuildConnectionLaunchRequest(
     stateClient.BuildPreflightValidatedState(
         pairedState,
@@ -189,6 +204,26 @@ AssertContains(
     "desk-mac.local:11550",
     "Core TXT parse fact source");
 
+var pendingAdapter = await new PendingWindowsTransportAdapterClient().PrepareAsync(
+    new WindowsTransportAdapterRequest(
+        peer,
+        pairingMaterial,
+        CoreTransportKind.WebRtcDataChannel,
+        CoreTransportAuditCode.WebRtcInterop,
+        RelayRequired: false,
+        RelayAllowed: true,
+        PeerCapabilities.Windows(),
+        peer.Capabilities,
+        NetworkPath.CrossNatPath()));
+AssertEqual(false, pendingAdapter.IsLiveAdapterReady, "pending adapter live readiness");
+AssertEqual("adapter pending", pendingAdapter.AdapterBinding, "pending adapter binding");
+AssertEqual("windows-preflight.local:443", pendingAdapter.LocalEndpoint, "pending adapter local endpoint");
+AssertEqual("WebRtcDataChannel/preflight-candidate", pendingAdapter.SelectedCandidatePair, "pending adapter candidate");
+AssertEqual(32, pendingAdapter.TransportSecretFingerprint.Length, "pending adapter secret fingerprint length");
+AssertEqual(32, pendingAdapter.CapabilityDigest.Length, "pending adapter capability digest length");
+var pendingBindingMaterial = pendingAdapter.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel);
+AssertEqual("windows-preflight.local:443", pendingBindingMaterial.LocalEndpoint, "pending binding local endpoint");
+
 Console.WriteLine("windows-connection-launch-smoke: ok");
 
 static ConnectionPreflightSnapshot BuildSnapshot(ConnectionPreflightPlan plan) =>
@@ -199,7 +234,12 @@ static ConnectionPreflightPlan BuildPlan(
     string fingerprint,
     bool liveReady,
     int digestLength = 32,
-    string adapterBinding = "adapter pending") =>
+    string adapterBinding = "adapter pending",
+    string localEndpoint = "windows-preflight.local:443",
+    string remoteEndpoint = "mac-1.skybridge-preflight.local:443",
+    string selectedCandidatePair = "WebRtcDataChannel/preflight-candidate",
+    string? relayId = null,
+    ulong timestampWindowMs = 10_000) =>
     new(
         peerDeviceId,
         fingerprint,
@@ -216,7 +256,12 @@ static ConnectionPreflightPlan BuildPlan(
         Enumerable.Range(0, digestLength).Select(value => (byte)value).ToArray(),
         ConnectionLaunchAdapterKind.WebRtcDataChannel,
         liveReady,
-        adapterBinding);
+        adapterBinding,
+        localEndpoint,
+        remoteEndpoint,
+        selectedCandidatePair,
+        relayId,
+        timestampWindowMs);
 
 static void ExpectThrows<T>(Action action, string messageFragment)
     where T : Exception

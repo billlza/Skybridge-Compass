@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -18,10 +17,19 @@ public interface IConnectionPreflightClient
 public sealed class ConnectionPreflightClient : IConnectionPreflightClient
 {
     private readonly CoreBridge _coreBridge;
+    private readonly IWindowsTransportAdapterClient _transportAdapterClient;
 
     public ConnectionPreflightClient(CoreBridge coreBridge)
+        : this(coreBridge, new PendingWindowsTransportAdapterClient())
+    {
+    }
+
+    public ConnectionPreflightClient(
+        CoreBridge coreBridge,
+        IWindowsTransportAdapterClient transportAdapterClient)
     {
         _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
+        _transportAdapterClient = transportAdapterClient ?? throw new ArgumentNullException(nameof(transportAdapterClient));
     }
 
     public string BuildPendingStatus() => DefaultPendingStatus;
@@ -55,10 +63,11 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
 
         var local = PeerCapabilities.Windows();
         var remote = discoveredPeer.Capabilities;
+        var path = SelectPreflightPath(discoveredPeer);
         var plan = await _coreBridge.PlanConnectionAsync(
             local,
             remote,
-            SelectPreflightPath(discoveredPeer),
+            path,
             CryptoProviderCapabilities.ResearchAll(),
             new ushort[] { 0x0001, 0x0101, 0x1001 },
             CryptoSuitePolicy.Compatibility(),
@@ -67,16 +76,19 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
         var file = await _coreBridge.MapChannelAsync(plan.Transport.Kind, CoreChannelKind.File);
         var telemetry = await _coreBridge.MapChannelAsync(plan.Transport.Kind, CoreChannelKind.Telemetry);
         var realtime = await _coreBridge.MapChannelAsync(plan.Transport.Kind, CoreChannelKind.Realtime);
-        var bindingDigest = await _coreBridge.ComputeTransportBindingDigestAsync(
-            new TransportBindingMaterial(
+        var adapterSnapshot = await _transportAdapterClient.PrepareAsync(
+            new WindowsTransportAdapterRequest(
+                discoveredPeer,
+                pairingMaterial,
                 plan.Transport.Kind,
-                "windows-preflight.local:443",
-                $"{EndpointToken(pairingMaterial.DeviceId)}.skybridge-preflight.local:443",
-                $"{plan.Transport.Kind}/preflight-candidate",
-                PreflightTransportSecretFingerprint(pairingMaterial),
-                plan.Transport.RelayRequired ? "preflight-relay" : null,
-                10_000,
-                CapabilityDigest(local, remote, discoveredPeer, pairingMaterial)));
+                plan.Transport.AuditCode,
+                plan.Transport.RelayRequired,
+                plan.Transport.RelayAllowed,
+                local,
+                remote,
+                path));
+        var bindingDigest = await _coreBridge.ComputeTransportBindingDigestAsync(
+            adapterSnapshot.BuildTransportBindingMaterial(plan.Transport.Kind));
         var provider = pairingMaterial.ToPeerPublicKeyProvider();
         var launchPlan = new ConnectionPreflightPlan(
             discoveredPeer.DeviceId,
@@ -92,9 +104,14 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
             plan.Sbp2FixedPayloadLen,
             plan.FrameHeaderLen,
             bindingDigest,
-            ConnectionPreflightPlan.ResolveAdapterKind(plan.Transport.Kind),
-            false,
-            "adapter pending");
+            adapterSnapshot.AdapterKind,
+            adapterSnapshot.IsLiveAdapterReady,
+            adapterSnapshot.AdapterBinding,
+            adapterSnapshot.LocalEndpoint,
+            adapterSnapshot.RemoteEndpoint,
+            adapterSnapshot.SelectedCandidatePair,
+            adapterSnapshot.RelayId,
+            adapterSnapshot.TimestampWindowMs);
 
         var facts = new List<ConnectionPreflightFact>
         {
@@ -113,7 +130,13 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
             new(
                 "Transport binding digest",
                 FormatHex(bindingDigest),
-                "Preflight-only binding material; live adapters must replace endpoint, candidate, exporter, relay, timestamp, and capability inputs before the handshake transcript."),
+                adapterSnapshot.IsLiveAdapterReady
+                    ? "Live adapter binding material is ready for the handshake transcript."
+                    : "Preflight-only binding material; live adapters must replace endpoint, candidate, exporter, relay, timestamp, and capability inputs before the handshake transcript."),
+            new(
+                "Adapter binding",
+                adapterSnapshot.AdapterBinding,
+                $"{adapterSnapshot.LocalEndpoint} -> {adapterSnapshot.RemoteEndpoint}; candidate={adapterSnapshot.SelectedCandidatePair}; relay={adapterSnapshot.RelayId ?? "none"}; window={adapterSnapshot.TimestampWindowMs}ms"),
             new(
                 "Selected suite",
                 plan.SelectedSuite.ToString(),
@@ -131,44 +154,15 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
                 provider.GetType().Name,
                 "No connection attempt is started; FfiEngineClient remains behind explicit native DLL deployment.")
         };
+        facts.AddRange(adapterSnapshot.Facts);
 
         return new ConnectionPreflightSnapshot(DateTimeOffset.UtcNow, launchPlan, facts);
     }
-
-    private static byte[] PreflightTransportSecretFingerprint(PairingMaterial pairingMaterial) =>
-        SHA256.HashData(Encoding.UTF8.GetBytes($"preflight transport placeholder:{pairingMaterial.PublicKeyFingerprint}"));
 
     private static NetworkPath SelectPreflightPath(DiscoveredPeer discoveredPeer) =>
         discoveredPeer.Platform == CorePeerPlatform.Windows
             ? NetworkPath.SameLanPath()
             : NetworkPath.CrossNatPath();
-
-    private static byte[] CapabilityDigest(
-        PeerCapabilities local,
-        PeerCapabilities remote,
-        DiscoveredPeer discoveredPeer,
-        PairingMaterial pairingMaterial)
-    {
-        var material =
-            $"local={FormatCapabilities(local)};remote={FormatCapabilities(remote)};peer={discoveredPeer.DeviceId};fingerprint={pairingMaterial.PublicKeyFingerprint}";
-        return SHA256.HashData(Encoding.UTF8.GetBytes(material));
-    }
-
-    private static string FormatCapabilities(PeerCapabilities capabilities) =>
-        $"{capabilities.Platform},{capabilities.SupportsAppleNative},{capabilities.SupportsMsQuic},{capabilities.SupportsSkyBridgeIceMsQuic},{capabilities.SupportsWebRtcDataChannel},{capabilities.SupportsTcpFallback},{capabilities.SupportsRelay}";
-
-    private static string EndpointToken(string value)
-    {
-        var builder = new StringBuilder(value.Length);
-        foreach (var ch in value)
-        {
-            var isAsciiLetter = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
-            var isAsciiDigit = ch >= '0' && ch <= '9';
-            builder.Append(isAsciiLetter || isAsciiDigit || ch == '-' ? ch : '-');
-        }
-
-        return builder.Length == 0 ? "peer" : builder.ToString();
-    }
 
     private static string FormatHex(byte[] bytes)
     {

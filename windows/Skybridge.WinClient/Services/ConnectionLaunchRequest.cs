@@ -36,7 +36,12 @@ public sealed record ConnectionPreflightPlan(
     byte[] TransportBindingDigest,
     ConnectionLaunchAdapterKind AdapterKind,
     bool IsLiveAdapterReady,
-    string AdapterBinding)
+    string AdapterBinding,
+    string LocalEndpoint,
+    string RemoteEndpoint,
+    string SelectedCandidatePair,
+    string? RelayId,
+    ulong TimestampWindowMs)
 {
     public static ConnectionLaunchAdapterKind ResolveAdapterKind(CoreTransportKind transportKind) =>
         transportKind switch
@@ -58,6 +63,31 @@ public sealed record ConnectionPreflightPlan(
         if (AdapterKind == ConnectionLaunchAdapterKind.None)
         {
             throw new InvalidOperationException("Connection launch requires a concrete transport adapter kind.");
+        }
+
+        if (string.IsNullOrWhiteSpace(AdapterBinding))
+        {
+            throw new InvalidOperationException("Connection launch requires an adapter binding description.");
+        }
+
+        if (string.IsNullOrWhiteSpace(LocalEndpoint))
+        {
+            throw new InvalidOperationException("Connection launch requires a local transport endpoint.");
+        }
+
+        if (string.IsNullOrWhiteSpace(RemoteEndpoint))
+        {
+            throw new InvalidOperationException("Connection launch requires a remote transport endpoint.");
+        }
+
+        if (string.IsNullOrWhiteSpace(SelectedCandidatePair))
+        {
+            throw new InvalidOperationException("Connection launch requires a selected transport candidate pair.");
+        }
+
+        if (TimestampWindowMs == 0)
+        {
+            throw new InvalidOperationException("Connection launch requires a non-zero transport timestamp window.");
         }
 
         if (TransportBindingDigest.Length != 32)

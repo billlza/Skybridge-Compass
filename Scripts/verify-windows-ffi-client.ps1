@@ -36,6 +36,7 @@ $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Cr
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
 $connectionLaunchRequestPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionLaunchRequest.cs"
+$windowsTransportAdapterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WindowsTransportAdapterClient.cs"
 $connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs"
 $workspaceErrorStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceErrorStatusClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
@@ -60,7 +61,7 @@ $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -75,6 +76,7 @@ $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $connectionLaunchRequest = Get-Content -Raw -LiteralPath $connectionLaunchRequestPath
+$windowsTransportAdapter = Get-Content -Raw -LiteralPath $windowsTransportAdapterPath
 $connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceStatePath
 $workspaceErrorStatus = Get-Content -Raw -LiteralPath $workspaceErrorStatusPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
@@ -148,7 +150,14 @@ foreach ($signal in @(
     "TransportBindingDigest",
     "IsLiveAdapterReady",
     "AdapterBinding",
+    "LocalEndpoint",
+    "RemoteEndpoint",
+    "SelectedCandidatePair",
+    "TimestampWindowMs",
     "Connection launch requires a concrete transport adapter kind.",
+    "Connection launch requires a local transport endpoint.",
+    "Connection launch requires a selected transport candidate pair.",
+    "Connection launch requires a non-zero transport timestamp window.",
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
     "Connection launch request peer does not match pairing material.",
     "Connection launch request fingerprint does not match pairing material."
@@ -164,7 +173,13 @@ foreach ($signal in @(
     "Connection launch request peer does not match pairing material.",
     "Connection launch request fingerprint does not match pairing material.",
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
+    "Connection launch requires a local transport endpoint.",
+    "Connection launch requires a non-zero transport timestamp window.",
     "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
+    "PendingWindowsTransportAdapterClient",
+    "WindowsTransportAdapterRequest",
+    "BuildTransportBindingMaterial",
+    "pending adapter local endpoint",
     "IWindowsDnsSdBrowseClient",
     "RecordingDnsSdBrowseClient",
     "RecordingDiscoveryClient",
@@ -502,6 +517,13 @@ foreach ($signal in @(
     "BuildReadOnlySnapshotAsync",
     "Pairing material must be validated against the discovered peer before connection preflight.",
     "ConnectionPreflightPlan",
+    "IWindowsTransportAdapterClient",
+    "PendingWindowsTransportAdapterClient",
+    "_transportAdapterClient.PrepareAsync",
+    "WindowsTransportAdapterRequest",
+    "WindowsTransportAdapterSnapshot",
+    "Adapter binding",
+    "BuildTransportBindingMaterial",
     "ConnectionLaunchAdapterKind",
     "ResolveAdapterKind",
     "PlanConnectionAsync",
@@ -510,12 +532,30 @@ foreach ($signal in @(
     "TransportBindingDigest",
     "IsLiveAdapterReady",
     "adapter pending",
+    "LocalEndpoint",
+    "RemoteEndpoint",
+    "SelectedCandidatePair",
+    "TimestampWindowMs",
     "MapChannelAsync",
     "TrafficPaddingPlan.Sbp2Fixed",
     "ToPeerPublicKeyProvider",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($connectionPreflight + $connectionLaunchRequest) -Needle $signal -Message "ConnectionPreflightClient missing preflight signal: $signal"
+    Assert-Contains -Text ($connectionPreflight + $connectionLaunchRequest + $windowsTransportAdapter) -Needle $signal -Message "ConnectionPreflightClient missing preflight signal: $signal"
+}
+foreach ($signal in @(
+    "public interface IWindowsTransportAdapterClient",
+    "public sealed class PendingWindowsTransportAdapterClient : IWindowsTransportAdapterClient",
+    "public sealed record WindowsTransportAdapterRequest",
+    "public sealed record WindowsTransportAdapterSnapshot",
+    "BuildTransportBindingMaterial",
+    "No WebRTC, MsQuic, relay, or TCP adapter has supplied live endpoint",
+    "windows-preflight.local:443",
+    "TransportSecretFingerprint",
+    "CapabilityDigest",
+    "ConnectionPreflightPlan.ResolveAdapterKind"
+)) {
+    Assert-Contains -Text $windowsTransportAdapter -Needle $signal -Message "WindowsTransportAdapterClient missing adapter boundary signal: $signal"
 }
 
 Assert-Contains -Text $architecture -Needle "ConnectionPreflightClient" -Message "Architecture doc missing ConnectionPreflightClient status."
