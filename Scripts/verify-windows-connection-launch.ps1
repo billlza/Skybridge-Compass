@@ -353,6 +353,31 @@ await ExpectThrowsAsync<InvalidOperationException>(
             "")),
     "QR dynamic canonical signature verification failed.");
 
+AssertEqual("Validating code...", crossNetworkClient.BuildPendingStatus(CrossNetworkConnectionAction.ConnectWithCode), "smart-code connect pending status");
+AssertEqual(true, crossNetworkClient.CanConnectWithCode("abc234"), "smart-code connect readiness");
+AssertEqual(false, crossNetworkClient.CanConnectWithCode("abc23"), "short smart-code connect readiness");
+var codeConnectSnapshot = await crossNetworkClient.BuildReadOnlySnapshotAsync(
+    new CrossNetworkConnectionRequest(
+        CrossNetworkConnectionAction.ConnectWithCode,
+        "",
+        "abc234",
+        ""));
+AssertEqual("Code envelope validated", codeConnectSnapshot.Status, "smart-code connect status");
+AssertEqual("ABC234", codeConnectSnapshot.GeneratedCode, "smart-code connect normalized code");
+AssertEqual("idle", Fact(codeConnectSnapshot, "CrossNetworkReadiness").Value, "smart-code connect readiness fact");
+AssertContains(Fact(codeConnectSnapshot, "CrossNetworkReadiness").Detail, "No transportReady", "smart-code connect readiness detail");
+AssertContains(Fact(codeConnectSnapshot, "Connect").Detail, "no WebRTC join is started", "smart-code connect detail");
+AssertContains(Fact(codeConnectSnapshot, "Safety").Detail, "No signaling room join", "smart-code connect safety");
+AssertContains(Fact(codeConnectSnapshot, "Safety").Detail, "FfiEngineClient", "smart-code connect ffi safety");
+await ExpectThrowsAsync<InvalidOperationException>(
+    () => crossNetworkClient.BuildReadOnlySnapshotAsync(
+        new CrossNetworkConnectionRequest(
+            CrossNetworkConnectionAction.ConnectWithCode,
+            "",
+            "abc23",
+            "")),
+    "Connection Code must be exactly 6 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789.");
+
 Console.WriteLine("windows-connection-launch-smoke: ok");
 
 static ConnectionPreflightSnapshot BuildSnapshot(ConnectionPreflightPlan plan) =>

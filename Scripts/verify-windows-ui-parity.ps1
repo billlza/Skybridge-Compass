@@ -2657,6 +2657,7 @@ foreach ($crossNetworkInputPolicySignal in @(
     "TryNormalizeConnectionCode",
     "BuildPendingStatus",
     "BuildDefaultPendingStatus",
+    "Validating code...",
     "_crossNetworkConnectionClient.NormalizeCodeInput(proposedValue)",
     "_crossNetworkCodeInputCoordinator.BuildInputUpdate("
 )) {
@@ -3026,6 +3027,10 @@ foreach ($discoverySignal in @(
     "CrossNetworkConnectionClient",
     "CrossNetworkConnectionFactView",
     "CrossNetworkReadiness",
+    "Code envelope validated",
+    "no WebRTC join is started",
+    "No signaling room join",
+    "Connection Code must be exactly 6 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789.",
     "no WebRTC offerer started",
     "no WebRTC answerer started",
     "no signaling room registered",

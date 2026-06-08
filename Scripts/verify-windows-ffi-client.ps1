@@ -229,7 +229,15 @@ foreach ($signal in @(
     "dynamic QR verified status",
     "dynamic QR unverifiable status",
     "generator osVersion",
-    "QR dynamic canonical signature verification failed."
+    "QR dynamic canonical signature verification failed.",
+    "Validating code...",
+    "smart-code connect status",
+    "Code envelope validated",
+    "No transportReady",
+    "no WebRTC join is started",
+    "No signaling room join",
+    "FfiEngineClient",
+    "Connection Code must be exactly 6 characters from ABCDEFGHJKLMNPQRSTUVWXYZ23456789."
 )) {
     Assert-Contains -Text $connectionLaunchSmoke -Needle $signal -Message "Windows connection launch smoke missing signal: $signal"
 }

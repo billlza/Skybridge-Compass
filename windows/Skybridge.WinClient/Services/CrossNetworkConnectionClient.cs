@@ -109,7 +109,7 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             CrossNetworkConnectionAction.GenerateCode => "Generating...",
             CrossNetworkConnectionAction.RegenerateCode => "Generating...",
             CrossNetworkConnectionAction.CopyCode => "Copying...",
-            CrossNetworkConnectionAction.ConnectWithCode => "Connecting...",
+            CrossNetworkConnectionAction.ConnectWithCode => "Validating code...",
             _ => "Preparing..."
         };
 
