@@ -94,6 +94,7 @@ $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewMod
 $sessionViewModelDependenciesPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModelDependencies.cs"
 $asyncRelayCommandPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/AsyncRelayCommand.cs"
 $workspaceCommandGateCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandGateCoordinator.cs"
+$workspaceCommandAvailabilityPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandAvailability.cs"
 $workspaceCommandBindingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandBindings.cs"
 $workspaceCommandRegistryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandRegistry.cs"
 $workspaceActionSurfaceTargetsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionSurfaceTargets.cs"
@@ -140,7 +141,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -151,6 +152,7 @@ $sessionViewModelSource = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $sessionViewModelDependencies = Get-Content -Raw -LiteralPath $sessionViewModelDependenciesPath
 $asyncRelayCommand = Get-Content -Raw -LiteralPath $asyncRelayCommandPath
 $workspaceCommandGateCoordinator = Get-Content -Raw -LiteralPath $workspaceCommandGateCoordinatorPath
+$workspaceCommandAvailability = Get-Content -Raw -LiteralPath $workspaceCommandAvailabilityPath
 $workspaceCommandBindings = Get-Content -Raw -LiteralPath $workspaceCommandBindingsPath
 $workspaceCommandRegistry = Get-Content -Raw -LiteralPath $workspaceCommandRegistryPath
 $workspaceActionSurfaceTargets = Get-Content -Raw -LiteralPath $workspaceActionSurfaceTargetsPath
@@ -171,7 +173,7 @@ $topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
 $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connectionWorkspaceInputCoordinatorPath
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -997,7 +999,7 @@ foreach ($sessionCommandStateSignal in @(
     "EngineConnectionState.Connected",
     "EngineConnectionState.Reconnecting",
     "new SessionCommandStateClient()",
-    "_workspaceCommandGateCoordinator.CanConnect(BuildWorkspaceCommandGateState())",
+    "_workspaceCommandAvailability.CanConnect()",
     "_sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy)",
     "_sessionCommandStateClient.CanDisconnect(state.ConnectionState, state.IsBusy)",
     "_sessionCommandStateClient.CanSendHeartbeat(state.ConnectionState, state.IsBusy)",
@@ -1029,8 +1031,9 @@ foreach ($workspaceCommandStateSignal in @(
     "BuildActionGateSnapshot",
     "new WorkspaceCommandStateClient()",
     "WorkspaceCommandGateCoordinator",
+    "WorkspaceCommandAvailability",
     "WorkspaceCommandGateState",
-    "_workspaceCommandGateCoordinator.CanUseDiscoveryBrowser(BuildWorkspaceCommandGateState())",
+    "_workspaceCommandAvailability.CanUseDiscoveryBrowser()",
     "CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnection(",
@@ -1073,21 +1076,67 @@ foreach ($workspaceGateCoordinatorSignal in @(
     Assert-Contains -Text $workspaceCommandGateCoordinator -Needle $workspaceGateCoordinatorSignal -Message "WorkspaceCommandGateCoordinator contract missing: $workspaceGateCoordinatorSignal"
 }
 
+foreach ($workspaceCommandAvailabilitySignal in @(
+    "internal sealed class WorkspaceCommandAvailability",
+    "WorkspaceCommandGateCoordinator coordinator",
+    "Func<WorkspaceCommandGateState> buildState",
+    "private WorkspaceCommandGateState BuildState() => _buildState();",
+    "_coordinator.CanConnect(BuildState())",
+    "_coordinator.CanDisconnect(BuildState())",
+    "_coordinator.CanSendHeartbeat(BuildState())",
+    "_coordinator.CanUseDiscoveryBrowser(BuildState())",
+    "_coordinator.CanPrepareManualConnection(BuildState())",
+    "_coordinator.CanUseCrossNetworkConnection(BuildState())",
+    "_coordinator.CanScanQrCode(BuildState())",
+    "_coordinator.CanCopyConnectionCode(BuildState())",
+    "_coordinator.CanConnectConnectionCode(BuildState())",
+    "_coordinator.CanParseAdvertisement(BuildState())",
+    "_coordinator.CanValidatePairingCode(BuildState())",
+    "_coordinator.CanPrepareConnection(BuildState())",
+    "_coordinator.CanRefreshUsbManagement(BuildState())",
+    "_coordinator.CanRunCoreDiagnostics(BuildState())",
+    "_coordinator.CanRefreshFileTransfer(BuildState())",
+    "_coordinator.CanRefreshRemoteDesktop(BuildState())",
+    "_coordinator.CanRefreshSystemMonitor(BuildState())",
+    "_coordinator.CanRefreshSettings(BuildState())"
+)) {
+    Assert-Contains -Text $workspaceCommandAvailability -Needle $workspaceCommandAvailabilitySignal -Message "WorkspaceCommandAvailability contract missing: $workspaceCommandAvailabilitySignal"
+}
+
 foreach ($sessionViewModelGateSignal in @(
     "new WorkspaceCommandGateCoordinator(",
+    "new WorkspaceCommandAvailability(",
     "BuildWorkspaceCommandGateState()",
-    "_workspaceCommandGateCoordinator.CanConnect(BuildWorkspaceCommandGateState())",
-    "_workspaceCommandGateCoordinator.CanDisconnect(BuildWorkspaceCommandGateState())",
-    "_workspaceCommandGateCoordinator.CanSendHeartbeat(BuildWorkspaceCommandGateState())",
+    "_workspaceCommandAvailability.CanConnect()",
+    "_workspaceCommandAvailability.CanDisconnect()",
+    "_workspaceCommandAvailability.CanSendHeartbeat()",
     "_workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId)",
-    "_workspaceCommandGateCoordinator.CanPrepareManualConnection(BuildWorkspaceCommandGateState())",
-    "_workspaceCommandGateCoordinator.CanUseCrossNetworkConnection(BuildWorkspaceCommandGateState())",
-    "_workspaceCommandGateCoordinator.CanPrepareConnection(BuildWorkspaceCommandGateState())"
+    "_workspaceCommandAvailability.CanPrepareManualConnection()",
+    "_workspaceCommandAvailability.CanUseCrossNetworkConnection()",
+    "_workspaceCommandAvailability.CanPrepareConnection()"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelGateSignal -Message "SessionViewModel must delegate command gates through WorkspaceCommandGateCoordinator: $sessionViewModelGateSignal"
 }
 
 foreach ($sessionViewModelDirectGateSignal in @(
+    "_workspaceCommandGateCoordinator.CanConnect(",
+    "_workspaceCommandGateCoordinator.CanDisconnect(",
+    "_workspaceCommandGateCoordinator.CanSendHeartbeat(",
+    "_workspaceCommandGateCoordinator.CanUseDiscoveryBrowser(",
+    "_workspaceCommandGateCoordinator.CanPrepareManualConnection(",
+    "_workspaceCommandGateCoordinator.CanUseCrossNetworkConnection(",
+    "_workspaceCommandGateCoordinator.CanScanQrCode(",
+    "_workspaceCommandGateCoordinator.CanCopyConnectionCode(",
+    "_workspaceCommandGateCoordinator.CanConnectConnectionCode(",
+    "_workspaceCommandGateCoordinator.CanParseAdvertisement(",
+    "_workspaceCommandGateCoordinator.CanValidatePairingCode(",
+    "_workspaceCommandGateCoordinator.CanPrepareConnection(",
+    "_workspaceCommandGateCoordinator.CanRefreshUsbManagement(",
+    "_workspaceCommandGateCoordinator.CanRunCoreDiagnostics(",
+    "_workspaceCommandGateCoordinator.CanRefreshFileTransfer(",
+    "_workspaceCommandGateCoordinator.CanRefreshRemoteDesktop(",
+    "_workspaceCommandGateCoordinator.CanRefreshSystemMonitor(",
+    "_workspaceCommandGateCoordinator.CanRefreshSettings(",
     "_sessionCommandStateClient.CanConnect(",
     "_sessionCommandStateClient.CanDisconnect(",
     "_sessionCommandStateClient.CanSendHeartbeat(",
@@ -2331,6 +2380,7 @@ foreach ($docSignal in @(
     "DashboardMetricsUpdater",
     "WorkspaceShellRefreshCoordinator",
     "WorkspaceCommandGateCoordinator",
+    "WorkspaceCommandAvailability",
     "WorkspaceViewStateBuilder",
     "WorkspaceStartupStateBuilder",
     "ConnectionPreflightClient",

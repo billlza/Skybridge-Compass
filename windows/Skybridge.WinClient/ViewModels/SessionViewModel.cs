@@ -34,6 +34,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
     private readonly WorkspaceCommandGateCoordinator _workspaceCommandGateCoordinator;
+    private readonly WorkspaceCommandAvailability _workspaceCommandAvailability;
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
     private readonly WorkspaceActionSurfaceTargets _workspaceActionSurfaceTargets;
     private readonly WorkspaceActionSurfaceLoader _workspaceActionSurfaceLoader;
@@ -178,6 +179,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _pairingMaterialClient,
             _connectionWorkspaceStateClient);
         _workspaceViewStateBuilder = new WorkspaceViewStateBuilder();
+        _workspaceCommandAvailability = new WorkspaceCommandAvailability(
+            _workspaceCommandGateCoordinator,
+            BuildWorkspaceCommandGateState);
         var workspaceStartupStateBuilder = new WorkspaceStartupStateBuilder(
             _engineClient,
             _discoveryBrowserClient,
@@ -1173,63 +1177,63 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             SettingsDetails);
 
     private bool CanConnect() =>
-        _workspaceCommandGateCoordinator.CanConnect(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanConnect();
 
     private bool CanDisconnect() =>
-        _workspaceCommandGateCoordinator.CanDisconnect(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanDisconnect();
 
     private bool CanSendHeartbeat() =>
-        _workspaceCommandGateCoordinator.CanSendHeartbeat(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanSendHeartbeat();
 
     private bool IsFeatureSelected(FeatureEntryId featureId) =>
         _workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId);
 
     private bool CanUseDeviceDiscovery() =>
-        _workspaceCommandGateCoordinator.CanUseDiscoveryBrowser(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanUseDiscoveryBrowser();
 
     private bool CanUseDiscoveryBrowser() => CanUseDeviceDiscovery();
 
     private bool CanPrepareManualConnection() =>
-        _workspaceCommandGateCoordinator.CanPrepareManualConnection(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanPrepareManualConnection();
 
     private bool CanUseCrossNetworkConnection() =>
-        _workspaceCommandGateCoordinator.CanUseCrossNetworkConnection(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanUseCrossNetworkConnection();
 
     private bool CanScanQRCode() =>
-        _workspaceCommandGateCoordinator.CanScanQrCode(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanScanQrCode();
 
     private bool CanCopyConnectionCode() =>
-        _workspaceCommandGateCoordinator.CanCopyConnectionCode(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanCopyConnectionCode();
 
     private bool CanConnectConnectionCode() =>
-        _workspaceCommandGateCoordinator.CanConnectConnectionCode(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanConnectConnectionCode();
 
     private bool CanParseAdvertisement() =>
-        _workspaceCommandGateCoordinator.CanParseAdvertisement(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanParseAdvertisement();
 
     private bool CanValidatePairingCode() =>
-        _workspaceCommandGateCoordinator.CanValidatePairingCode(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanValidatePairingCode();
 
     private bool CanPrepareConnection() =>
-        _workspaceCommandGateCoordinator.CanPrepareConnection(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanPrepareConnection();
 
     private bool CanRefreshUsbManagement() =>
-        _workspaceCommandGateCoordinator.CanRefreshUsbManagement(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanRefreshUsbManagement();
 
     private bool CanRunCoreDiagnostics() =>
-        _workspaceCommandGateCoordinator.CanRunCoreDiagnostics(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanRunCoreDiagnostics();
 
     private bool CanRefreshFileTransfer() =>
-        _workspaceCommandGateCoordinator.CanRefreshFileTransfer(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanRefreshFileTransfer();
 
     private bool CanRefreshRemoteDesktop() =>
-        _workspaceCommandGateCoordinator.CanRefreshRemoteDesktop(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanRefreshRemoteDesktop();
 
     private bool CanRefreshSystemMonitor() =>
-        _workspaceCommandGateCoordinator.CanRefreshSystemMonitor(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanRefreshSystemMonitor();
 
     private bool CanRefreshSettings() =>
-        _workspaceCommandGateCoordinator.CanRefreshSettings(BuildWorkspaceCommandGateState());
+        _workspaceCommandAvailability.CanRefreshSettings();
 
     private async Task RunSessionEngineActionAsync(
         SessionStatusAction action,
