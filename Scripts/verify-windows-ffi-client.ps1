@@ -45,6 +45,7 @@ $remoteDesktopProfileCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinCli
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
+$featureCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FeatureCatalogClient.cs"
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
 $sessionStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionStatusClient.cs"
 $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
@@ -52,7 +53,7 @@ $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngi
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $sessionStatusPath, $unavailableClientStubsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $unavailableClientStubsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -76,6 +77,7 @@ $remoteDesktopProfileCatalog = Get-Content -Raw -LiteralPath $remoteDesktopProfi
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
+$featureCatalog = Get-Content -Raw -LiteralPath $featureCatalogPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
 $sessionStatus = Get-Content -Raw -LiteralPath $sessionStatusPath
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
@@ -137,6 +139,7 @@ Assert-Contains -Text $mainWindow -Needle "new SystemMonitorWorkspaceClient()" -
 Assert-Contains -Text $mainWindow -Needle "new UsbManagementWorkspaceClient()" -Message "MainWindow should wire UsbManagementWorkspaceClient for explicit USB Management diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new SettingsWorkspaceClient()" -Message "MainWindow should wire SettingsWorkspaceClient for explicit Settings diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new DashboardMetricsClient()" -Message "MainWindow should wire DashboardMetricsClient for explicit dashboard metrics parity."
+Assert-Contains -Text $mainWindow -Needle "new FeatureCatalogClient()" -Message "MainWindow should wire FeatureCatalogClient for explicit navigation parity."
 Assert-Contains -Text $mainWindow -Needle "new TopBarStatusClient()" -Message "MainWindow should wire TopBarStatusClient for explicit top-bar status parity."
 Assert-Contains -Text $mainWindow -Needle "new SessionStatusClient()" -Message "MainWindow should wire SessionStatusClient for explicit session status text."
 
@@ -819,6 +822,27 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "DashboardMetricsClient" -Message "Architecture doc missing DashboardMetricsClient status."
+
+foreach ($signal in @(
+    "public interface IFeatureCatalogClient",
+    "public sealed class FeatureCatalogClient : IFeatureCatalogClient",
+    "BuildReadOnlySnapshot",
+    "FeatureEntryId",
+    "public sealed record FeatureEntry",
+    "Entries",
+    "FeatureEntryId.Dashboard",
+    "FeatureEntryId.DeviceDiscovery",
+    "FeatureEntryId.UsbManagement",
+    "FeatureEntryId.FileTransfer",
+    "FeatureEntryId.RemoteDesktop",
+    "FeatureEntryId.Quantum",
+    "FeatureEntryId.SystemMonitor",
+    "FeatureEntryId.Settings"
+)) {
+    Assert-Contains -Text $featureCatalog -Needle $signal -Message "FeatureCatalogClient missing navigation parity signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "FeatureCatalogClient" -Message "Architecture doc missing FeatureCatalogClient status."
 
 foreach ($signal in @(
     "public interface ITopBarStatusClient",

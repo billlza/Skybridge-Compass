@@ -32,6 +32,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IWorkspaceActionCatalogClient _workspaceActionCatalogClient;
     private readonly IWorkspaceErrorStatusClient _workspaceErrorStatusClient;
     private readonly ISessionStatusClient _sessionStatusClient;
+    private readonly IFeatureCatalogClient _featureCatalogClient;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -95,7 +96,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null,
         IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null,
         IWorkspaceErrorStatusClient? workspaceErrorStatusClient = null,
-        ISessionStatusClient? sessionStatusClient = null)
+        ISessionStatusClient? sessionStatusClient = null,
+        IFeatureCatalogClient? featureCatalogClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -119,6 +121,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceActionCatalogClient = workspaceActionCatalogClient ?? new WorkspaceActionCatalogClient();
         _workspaceErrorStatusClient = workspaceErrorStatusClient ?? new WorkspaceErrorStatusClient();
         _sessionStatusClient = sessionStatusClient ?? new SessionStatusClient();
+        _featureCatalogClient = featureCatalogClient ?? new FeatureCatalogClient();
         _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
         _topBarNotificationsStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications);
         _topBarThemeStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme);
@@ -143,7 +146,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _pairingConnectionCode = deviceDiscoveryInputDefaults.PairingConnectionCode;
         _extendedSearchCountdown = _discoveryBrowserInputPolicy.ExtendedSearchSeconds;
         _connectionState = _engineClient.State;
-        NavigationItems = new ObservableCollection<FeatureEntry>(FeatureEntryContract.Entries);
+        NavigationItems = new ObservableCollection<FeatureEntry>(_featureCatalogClient.BuildReadOnlySnapshot());
         _selectedFeature = NavigationItems[0];
         DashboardMetrics = new ObservableCollection<DashboardMetricView>();
         SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();

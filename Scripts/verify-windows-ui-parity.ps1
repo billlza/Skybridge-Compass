@@ -87,7 +87,8 @@ function Assert-ItemsControlTemplate {
     Assert-True -Condition ([regex]::IsMatch($Text, $pattern)) -Message "MainWindow.xaml item source must use shared template: $Binding"
 }
 
-$featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
+$featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FeatureCatalogClient.cs"
+$legacyFeatureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -115,6 +116,7 @@ $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
+Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
 
 $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
@@ -165,6 +167,20 @@ for ($index = 0; $index -lt $expectedEntries.Count; $index++) {
 }
 
 Assert-True -Condition (-not $featureContract.Contains(", false)")) -Message "All mac parity navigation entries must remain implemented once read-only workspaces exist."
+
+foreach ($featureCatalogSignal in @(
+    "public interface IFeatureCatalogClient",
+    "public sealed class FeatureCatalogClient : IFeatureCatalogClient",
+    "BuildReadOnlySnapshot",
+    "FeatureEntryId",
+    "public sealed record FeatureEntry",
+    "Entries",
+    "_featureCatalogClient.BuildReadOnlySnapshot()",
+    "new FeatureCatalogClient()"
+)) {
+    Assert-Contains -Text ($featureContract + $sessionViewModel) -Needle $featureCatalogSignal -Message "Feature catalog service signal missing: $featureCatalogSignal"
+}
+Assert-True -Condition (-not $sessionViewModel.Contains("FeatureEntryContract")) -Message "SessionViewModel must source navigation entries from FeatureCatalogClient instead of FeatureEntryContract."
 
 foreach ($binding in @(
     "NavigationItems",
