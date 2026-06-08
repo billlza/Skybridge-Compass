@@ -619,13 +619,16 @@ foreach ($sessionCommandStateSignal in @(
     "CanConnect",
     "CanDisconnect",
     "CanSendHeartbeat",
+    "BuildGateSnapshot",
+    "SessionCommandGateSnapshot",
     "EngineConnectionState.Disconnected",
     "EngineConnectionState.Connected",
     "EngineConnectionState.Reconnecting",
     "new SessionCommandStateClient()",
     "_sessionCommandStateClient.CanConnect(ConnectionState, IsBusy)",
     "_sessionCommandStateClient.CanDisconnect(ConnectionState, IsBusy)",
-    "_sessionCommandStateClient.CanSendHeartbeat(ConnectionState, IsBusy)"
+    "_sessionCommandStateClient.CanSendHeartbeat(ConnectionState, IsBusy)",
+    "_sessionCommandStateClient.BuildGateSnapshot(ConnectionState, IsBusy)"
 )) {
     Assert-Contains -Text ($sessionCommandState + $sessionViewModel) -Needle $sessionCommandStateSignal -Message "Session command state service signal missing: $sessionCommandStateSignal"
 }
@@ -642,6 +645,8 @@ foreach ($workspaceCommandStateSignal in @(
     "public interface IWorkspaceCommandStateClient",
     "public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient",
     "WorkspaceCommandGateRequest",
+    "SessionCommandGateSnapshot",
+    "SessionGates",
     "CanUseDeviceDiscovery",
     "CanUseDeviceDiscoveryAction",
     "CanUseCrossNetworkConnection",
@@ -674,6 +679,9 @@ foreach ($viewModelWorkspaceCommandGate in @(
 
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "CanUseDeviceDiscovery\(\)\s*&&")) -Message "SessionViewModel must let WorkspaceCommandStateClient compose Device Discovery action readiness with busy/selection state."
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "CanUseCrossNetworkConnection\(\)\s*&&")) -Message "SessionViewModel must let WorkspaceCommandStateClient compose Cross-network action readiness with busy/selection state."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "new WorkspaceCommandGateRequest\([\s\S]*?CanConnect\(\)")) -Message "SessionViewModel must pass SessionCommandStateClient.BuildGateSnapshot into workspace action gates instead of scattered session command booleans."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "new WorkspaceCommandGateRequest\([\s\S]*?CanDisconnect\(\)")) -Message "SessionViewModel must pass SessionCommandStateClient.BuildGateSnapshot into workspace action gates instead of scattered session command booleans."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "new WorkspaceCommandGateRequest\([\s\S]*?CanSendHeartbeat\(\)")) -Message "SessionViewModel must pass SessionCommandStateClient.BuildGateSnapshot into workspace action gates instead of scattered session command booleans."
 
 foreach ($workspaceActionRoleSignal in @(
     "BuildInitialSurfaces",

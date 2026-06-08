@@ -46,9 +46,9 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
 
     public WorkspaceActionGateSnapshot BuildActionGateSnapshot(WorkspaceCommandGateRequest request) =>
         new(
-            request.CanConnect,
-            request.CanDisconnect,
-            request.CanSendHeartbeat,
+            request.SessionGates.CanConnect,
+            request.SessionGates.CanDisconnect,
+            request.SessionGates.CanSendHeartbeat,
             CanUseWorkspaceFeature(request.IsBusy, request.IsUsbManagementSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsFileTransferSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsRemoteDesktopSelected),
@@ -65,6 +65,4 @@ public sealed record WorkspaceCommandGateRequest(
     bool IsQuantumSelected,
     bool IsSystemMonitorSelected,
     bool IsSettingsSelected,
-    bool CanConnect,
-    bool CanDisconnect,
-    bool CanSendHeartbeat);
+    SessionCommandGateSnapshot SessionGates);

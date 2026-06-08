@@ -7,6 +7,8 @@ public interface ISessionCommandStateClient
     bool CanDisconnect(EngineConnectionState state, bool isBusy);
 
     bool CanSendHeartbeat(EngineConnectionState state, bool isBusy);
+
+    SessionCommandGateSnapshot BuildGateSnapshot(EngineConnectionState state, bool isBusy);
 }
 
 public sealed class SessionCommandStateClient : ISessionCommandStateClient
@@ -19,4 +21,15 @@ public sealed class SessionCommandStateClient : ISessionCommandStateClient
 
     public bool CanSendHeartbeat(EngineConnectionState state, bool isBusy) =>
         !isBusy && state == EngineConnectionState.Connected;
+
+    public SessionCommandGateSnapshot BuildGateSnapshot(EngineConnectionState state, bool isBusy) =>
+        new(
+            CanConnect(state, isBusy),
+            CanDisconnect(state, isBusy),
+            CanSendHeartbeat(state, isBusy));
 }
+
+public sealed record SessionCommandGateSnapshot(
+    bool CanConnect,
+    bool CanDisconnect,
+    bool CanSendHeartbeat);

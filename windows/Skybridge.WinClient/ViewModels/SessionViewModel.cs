@@ -1585,9 +1585,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 IsQuantumSelected,
                 IsSystemMonitorSelected,
                 IsSettingsSelected,
-                CanConnect(),
-                CanDisconnect(),
-                CanSendHeartbeat()));
+                _sessionCommandStateClient.BuildGateSnapshot(ConnectionState, IsBusy)));
 
     private WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot() =>
         _topBarStatusClient.BuildWorkspaceActionDetailSnapshot(

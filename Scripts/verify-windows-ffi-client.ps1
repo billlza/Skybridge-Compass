@@ -914,6 +914,8 @@ foreach ($signal in @(
     "CanConnect",
     "CanDisconnect",
     "CanSendHeartbeat",
+    "BuildGateSnapshot",
+    "SessionCommandGateSnapshot",
     "EngineConnectionState.Disconnected",
     "EngineConnectionState.Connected",
     "EngineConnectionState.Reconnecting"
@@ -927,6 +929,8 @@ foreach ($signal in @(
     "public interface IWorkspaceCommandStateClient",
     "public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient",
     "WorkspaceCommandGateRequest",
+    "SessionCommandGateSnapshot",
+    "SessionGates",
     "CanUseDeviceDiscovery",
     "CanUseDeviceDiscoveryAction",
     "CanUseCrossNetworkConnection",
