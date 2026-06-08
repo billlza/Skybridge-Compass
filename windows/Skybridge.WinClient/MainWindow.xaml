@@ -349,6 +349,7 @@
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                         <Border
+                            AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"
                             Padding="12,7"
                             CornerRadius="6"
                             Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
@@ -358,6 +359,7 @@
                             </StackPanel>
                         </Border>
                         <Border
+                            AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"
                             Padding="12,7"
                             CornerRadius="6"
                             Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">

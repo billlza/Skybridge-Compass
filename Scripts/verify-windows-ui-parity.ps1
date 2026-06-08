@@ -807,6 +807,8 @@ foreach ($automationSignal in @(
     'AutomationProperties.AutomationId="Skybridge.Actions.SidebarSession"',
     'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
     'AutomationProperties.AutomationId="Skybridge.Status.Message"',
+    'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
+    'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
     'AutomationProperties.AutomationId="Skybridge.Actions.TopBar"',
     'AutomationProperties.AutomationId="Skybridge.Session.SelectedFeature.Title"',
     'AutomationProperties.AutomationId="Skybridge.Actions.SessionControls"',
@@ -860,7 +862,9 @@ Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order"
 Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles @(
     'Text="{Binding SelectedFeature.Title}"',
     'Text="{Binding StatusMessage}"',
+    'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
     '<TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold"',
+    'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
     '<TextBlock Text="FPS / Diagnostics"',
     '<TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold"',
     'ItemsSource="{Binding TopBarActions}"'
