@@ -15,9 +15,28 @@ Set-StrictMode -Version Latest
 function Invoke-RepositoryGit {
     param([string[]]$Arguments)
 
-    $output = & git -C $RepoRoot @Arguments 2>&1
+    $nativeErrorPreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    if ($nativeErrorPreference) {
+        Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local
+    }
+
+    try {
+        $output = & git -C $RepoRoot @Arguments 2>&1
+        $gitExitCode = $LASTEXITCODE
+    }
+    catch {
+        $lastNativeExitCode = $LASTEXITCODE
+        $gitExitCode = if ($lastNativeExitCode -ne 0) { $lastNativeExitCode } else { 1 }
+        $output = @($_.Exception.Message)
+    }
+    finally {
+        if ($nativeErrorPreference) {
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativeErrorPreference.Value -Scope Local
+        }
+    }
+
     return [pscustomobject]@{
-        ExitCode = $LASTEXITCODE
+        ExitCode = $gitExitCode
         Text = ($output -join [Environment]::NewLine).Trim()
     }
 }

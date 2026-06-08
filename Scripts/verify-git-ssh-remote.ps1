@@ -19,12 +19,44 @@ function Invoke-RepositoryGit {
         [string[]]$GitArgs
     )
 
-    $output = & git -C $RepoRoot @GitArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw ($output -join [Environment]::NewLine)
+    $result = Invoke-RepositoryGitRaw -GitArgs $GitArgs
+    if ($result.ExitCode -ne 0) {
+        throw $result.Text
     }
 
-    return ($output -join [Environment]::NewLine).Trim()
+    return $result.Text
+}
+
+function Invoke-RepositoryGitRaw {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$GitArgs
+    )
+
+    $nativeErrorPreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    if ($nativeErrorPreference) {
+        Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local
+    }
+
+    try {
+        $output = & git -C $RepoRoot @GitArgs 2>&1
+        $gitExitCode = $LASTEXITCODE
+    }
+    catch {
+        $lastNativeExitCode = $LASTEXITCODE
+        $gitExitCode = if ($lastNativeExitCode -ne 0) { $lastNativeExitCode } else { 1 }
+        $output = @($_.Exception.Message)
+    }
+    finally {
+        if ($nativeErrorPreference) {
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativeErrorPreference.Value -Scope Local
+        }
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $gitExitCode
+        Text = ($output -join [Environment]::NewLine).Trim()
+    }
 }
 
 function Assert-RemoteIsSsh {
@@ -99,9 +131,9 @@ if ($RequireCredentialHelperReset) {
 }
 
 if ($RequireRemoteAccess) {
-    $output = & git -C $RepoRoot ls-remote --exit-code $Remote HEAD 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $text = ($output -join [Environment]::NewLine)
+    $remoteAccess = Invoke-RepositoryGitRaw -GitArgs @("ls-remote", "--exit-code", $Remote, "HEAD")
+    if ($remoteAccess.ExitCode -ne 0) {
+        $text = $remoteAccess.Text
         if ($text -match 'Permission denied \(publickey\)') {
             throw "GitHub SSH transport is stable, but this SSH key is not authorized for $Remote. Add the public key from ~/.ssh/skybridge_zk_reverse_ed25519.pub or grant this deploy key write access."
         }
