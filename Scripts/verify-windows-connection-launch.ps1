@@ -209,17 +209,17 @@ AssertContains(
     "desk-mac.local:11550",
     "Core TXT parse fact source");
 
-var pendingAdapter = await new PendingWindowsTransportAdapterClient().PrepareAsync(
-    new WindowsTransportAdapterRequest(
-        peer,
-        pairingMaterial,
-        CoreTransportKind.WebRtcDataChannel,
-        CoreTransportAuditCode.WebRtcInterop,
-        RelayRequired: false,
-        RelayAllowed: true,
-        PeerCapabilities.Windows(),
-        peer.Capabilities,
-        NetworkPath.CrossNatPath()));
+var adapterRequest = new WindowsTransportAdapterRequest(
+    peer,
+    pairingMaterial,
+    CoreTransportKind.WebRtcDataChannel,
+    CoreTransportAuditCode.WebRtcInterop,
+    RelayRequired: false,
+    RelayAllowed: true,
+    PeerCapabilities.Windows(),
+    peer.Capabilities,
+    NetworkPath.CrossNatPath());
+var pendingAdapter = await new PendingWindowsTransportAdapterClient().PrepareAsync(adapterRequest);
 AssertEqual(false, pendingAdapter.IsLiveAdapterReady, "pending adapter live readiness");
 AssertEqual("adapter pending", pendingAdapter.AdapterBinding, "pending adapter binding");
 AssertEqual("windows-preflight.local:443", pendingAdapter.LocalEndpoint, "pending adapter local endpoint");
@@ -228,6 +228,61 @@ AssertEqual(32, pendingAdapter.TransportSecretFingerprint.Length, "pending adapt
 AssertEqual(32, pendingAdapter.CapabilityDigest.Length, "pending adapter capability digest length");
 var pendingBindingMaterial = pendingAdapter.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel);
 AssertEqual("windows-preflight.local:443", pendingBindingMaterial.LocalEndpoint, "pending binding local endpoint");
+
+var externalAdapter = await new ExternalWindowsTransportAdapterClient(
+    new WindowsExternalTransportAdapterOptions(
+        ConnectionLaunchAdapterKind.WebRtcDataChannel,
+        "external webrtc datachannel",
+        "windows.example:5443",
+        "mac.example:5443",
+        "webrtc/dtls/sctp-selected",
+        Enumerable.Repeat((byte)0x42, 32).ToArray(),
+        Enumerable.Repeat((byte)0x24, 32).ToArray(),
+        "relay-1",
+        12_000)).PrepareAsync(adapterRequest);
+AssertEqual(true, externalAdapter.IsLiveAdapterReady, "external adapter live readiness");
+AssertEqual("external webrtc datachannel", externalAdapter.AdapterBinding, "external adapter binding");
+AssertEqual("windows.example:5443", externalAdapter.LocalEndpoint, "external adapter local endpoint");
+AssertEqual("mac.example:5443", externalAdapter.RemoteEndpoint, "external adapter remote endpoint");
+AssertEqual("webrtc/dtls/sctp-selected", externalAdapter.SelectedCandidatePair, "external adapter candidate");
+AssertEqual("relay-1", externalAdapter.RelayId, "external adapter relay");
+AssertEqual((ulong)12_000, externalAdapter.TimestampWindowMs, "external adapter timestamp window");
+AssertEqual(32, externalAdapter.TransportSecretFingerprint.Length, "external adapter secret fingerprint length");
+AssertEqual(32, externalAdapter.CapabilityDigest.Length, "external adapter capability digest length");
+var externalBindingMaterial = externalAdapter.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel);
+AssertEqual("windows.example:5443", externalBindingMaterial.LocalEndpoint, "external binding local endpoint");
+
+ExpectThrows<InvalidOperationException>(
+    () => new WindowsExternalTransportAdapterOptions(
+        ConnectionLaunchAdapterKind.AppleNative,
+        "apple native is forbidden",
+        "windows.example:5443",
+        "mac.example:5443",
+        "apple-native",
+        Enumerable.Repeat((byte)0x42, 32).ToArray(),
+        Enumerable.Repeat((byte)0x24, 32).ToArray(),
+        null,
+        12_000),
+    "Windows external adapter must not select AppleNative");
+
+await ExpectThrowsAsync<InvalidOperationException>(
+    () => new ExternalWindowsTransportAdapterClient(
+        new WindowsExternalTransportAdapterOptions(
+            ConnectionLaunchAdapterKind.None,
+            "apple native selected by core is forbidden",
+            "windows.example:5443",
+            "mac.example:5443",
+            "apple-native",
+            Enumerable.Repeat((byte)0x42, 32).ToArray(),
+            Enumerable.Repeat((byte)0x24, 32).ToArray(),
+            null,
+            12_000)).PrepareAsync(
+                adapterRequest with
+                {
+                    TransportKind = CoreTransportKind.AppleNative,
+                    TransportAudit = CoreTransportAuditCode.AppleNativeDefault
+                }),
+    "Windows external adapter must not select AppleNative");
 
 var crossNetworkClient = new CrossNetworkConnectionClient();
 var verifiedDynamicSnapshot = await crossNetworkClient.BuildReadOnlySnapshotAsync(

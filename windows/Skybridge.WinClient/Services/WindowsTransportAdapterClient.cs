@@ -70,6 +70,139 @@ public sealed class PendingWindowsTransportAdapterClient : IWindowsTransportAdap
     }
 }
 
+public sealed class ExternalWindowsTransportAdapterClient : IWindowsTransportAdapterClient
+{
+    private readonly WindowsExternalTransportAdapterOptions _options;
+
+    public ExternalWindowsTransportAdapterClient(WindowsExternalTransportAdapterOptions options)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+    }
+
+    public Task<WindowsTransportAdapterSnapshot> PrepareAsync(WindowsTransportAdapterRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var adapterKind = ConnectionPreflightPlan.ResolveAdapterKind(request.TransportKind);
+        if (adapterKind == ConnectionLaunchAdapterKind.AppleNative)
+        {
+            throw new InvalidOperationException("Windows external adapter must not select AppleNative; Apple-to-Apple remains on the Apple native path.");
+        }
+
+        if (_options.AdapterKind != ConnectionLaunchAdapterKind.None
+            && _options.AdapterKind != adapterKind)
+        {
+            throw new InvalidOperationException("External Windows transport adapter kind must match the Core-selected transport.");
+        }
+
+        var facts = new[]
+        {
+            new ConnectionPreflightFact(
+                "Windows adapter",
+                "external verified",
+                "Explicit runtime adapter binding material was supplied outside the UI and is ready for the Core handshake transcript.")
+        };
+
+        return Task.FromResult(new WindowsTransportAdapterSnapshot(
+            adapterKind,
+            IsLiveAdapterReady: true,
+            _options.AdapterBinding,
+            _options.LocalEndpoint,
+            _options.RemoteEndpoint,
+            _options.SelectedCandidatePair,
+            (byte[])_options.TransportSecretFingerprint.Clone(),
+            _options.RelayId,
+            _options.TimestampWindowMs,
+            (byte[])_options.CapabilityDigest.Clone(),
+            facts));
+    }
+}
+
+public sealed class WindowsExternalTransportAdapterOptions
+{
+    public WindowsExternalTransportAdapterOptions(
+        ConnectionLaunchAdapterKind adapterKind,
+        string adapterBinding,
+        string localEndpoint,
+        string remoteEndpoint,
+        string selectedCandidatePair,
+        byte[] transportSecretFingerprint,
+        byte[] capabilityDigest,
+        string? relayId,
+        ulong timestampWindowMs)
+    {
+        if (adapterKind == ConnectionLaunchAdapterKind.AppleNative)
+        {
+            throw new InvalidOperationException("Windows external adapter must not select AppleNative; Apple-to-Apple remains on the Apple native path.");
+        }
+
+        if (string.IsNullOrWhiteSpace(adapterBinding))
+        {
+            throw new InvalidOperationException("External Windows transport adapter requires an adapter binding description.");
+        }
+
+        if (string.IsNullOrWhiteSpace(localEndpoint))
+        {
+            throw new InvalidOperationException("External Windows transport adapter requires a local endpoint.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            throw new InvalidOperationException("External Windows transport adapter requires a remote endpoint.");
+        }
+
+        if (string.IsNullOrWhiteSpace(selectedCandidatePair))
+        {
+            throw new InvalidOperationException("External Windows transport adapter requires a selected candidate pair.");
+        }
+
+        if (timestampWindowMs == 0)
+        {
+            throw new InvalidOperationException("External Windows transport adapter requires a non-zero timestamp window.");
+        }
+
+        ValidateDigest(transportSecretFingerprint, "transport secret fingerprint");
+        ValidateDigest(capabilityDigest, "capability digest");
+
+        AdapterKind = adapterKind;
+        AdapterBinding = adapterBinding.Trim();
+        LocalEndpoint = localEndpoint.Trim();
+        RemoteEndpoint = remoteEndpoint.Trim();
+        SelectedCandidatePair = selectedCandidatePair.Trim();
+        TransportSecretFingerprint = (byte[])transportSecretFingerprint.Clone();
+        CapabilityDigest = (byte[])capabilityDigest.Clone();
+        RelayId = string.IsNullOrWhiteSpace(relayId) ? null : relayId.Trim();
+        TimestampWindowMs = timestampWindowMs;
+    }
+
+    public ConnectionLaunchAdapterKind AdapterKind { get; }
+
+    public string AdapterBinding { get; }
+
+    public string LocalEndpoint { get; }
+
+    public string RemoteEndpoint { get; }
+
+    public string SelectedCandidatePair { get; }
+
+    public byte[] TransportSecretFingerprint { get; }
+
+    public byte[] CapabilityDigest { get; }
+
+    public string? RelayId { get; }
+
+    public ulong TimestampWindowMs { get; }
+
+    private static void ValidateDigest(byte[] value, string label)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.Length != 32)
+        {
+            throw new InvalidOperationException($"External Windows transport adapter {label} must be 32 bytes.");
+        }
+    }
+}
+
 public sealed record WindowsTransportAdapterRequest(
     DiscoveredPeer DiscoveredPeer,
     PairingMaterial PairingMaterial,

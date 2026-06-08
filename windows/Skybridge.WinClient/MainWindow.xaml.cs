@@ -10,7 +10,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        ViewModel = new SessionViewModel(SessionViewModelDependencyFactory.CreateDefault());
+        ViewModel = new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured());
         RootShell.DataContext = ViewModel;
     }
 }

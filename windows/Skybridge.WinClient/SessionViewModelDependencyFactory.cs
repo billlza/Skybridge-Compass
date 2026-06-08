@@ -5,6 +5,11 @@ namespace Skybridge.WinClient;
 
 internal static class SessionViewModelDependencyFactory
 {
+    public static SessionViewModelDependencies CreateConfigured() =>
+        WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested()
+            ? WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment()
+            : CreateDefault();
+
     public static SessionViewModelDependencies CreateDefault()
     {
         var coreBridge = new CoreBridge();

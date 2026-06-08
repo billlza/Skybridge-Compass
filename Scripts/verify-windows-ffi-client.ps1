@@ -56,12 +56,13 @@ $workspaceCommandStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Se
 $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $dependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/SessionViewModelDependencyFactory.cs"
+$nativeRuntimeFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/WindowsNativeRuntimeDependencyFactory.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -96,6 +97,7 @@ $workspaceCommandState = Get-Content -Raw -LiteralPath $workspaceCommandStatePat
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $dependencyFactory = Get-Content -Raw -LiteralPath $dependencyFactoryPath
+$nativeRuntimeFactory = Get-Content -Raw -LiteralPath $nativeRuntimeFactoryPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
@@ -188,6 +190,11 @@ foreach ($signal in @(
     "DnsServiceBrowse/DnsServiceResolve",
     "desk-mac.local:11550",
     "DummyEngineClient().ConnectAsync",
+    "ExternalWindowsTransportAdapterClient",
+    "WindowsExternalTransportAdapterOptions",
+    "external adapter live readiness",
+    "external adapter binding",
+    "Windows external adapter must not select AppleNative",
     "adapter pending",
     "digestLength: 31",
     "smoke live adapter",
@@ -200,15 +207,40 @@ foreach ($signal in @(
 )) {
     Assert-Contains -Text $connectionLaunchSmoke -Needle $signal -Message "Windows connection launch smoke missing signal: $signal"
 }
-Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateDefault()" -Message "MainWindow should create SessionViewModel through the dependency factory."
+Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateConfigured()" -Message "MainWindow should create SessionViewModel through the configured dependency factory."
+Assert-Contains -Text $dependencyFactory -Needle "CreateConfigured()" -Message "Dependency factory should expose explicit configured runtime selection."
+Assert-Contains -Text $dependencyFactory -Needle "CreateDefault()" -Message "Dependency factory should retain the safe default runtime."
+Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested()" -Message "Dependency factory should require an explicit native runtime request."
 Assert-Contains -Text $dependencyFactory -Needle "new DummyEngineClient()" -Message "Default dependency factory should keep the dummy client until native DLL deployment is explicit."
 Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not silently switch to FfiEngineClient before native DLL deployment."
 Assert-True -Condition (-not $dependencyFactory.Contains("new FfiEngineClient()")) -Message "Default dependency factory must not silently switch to FfiEngineClient before native DLL deployment."
+Assert-True -Condition (-not $dependencyFactory.Contains("new NativeWindowsDnsSdBrowseClient()")) -Message "Default dependency factory must not silently switch to the live DNS-SD provider before local-network acceptance."
+foreach ($nativeRuntimeSignal in @(
+    "WindowsNativeRuntimeDependencyFactory",
+    "SKYBRIDGE_WINDOWS_RUNTIME",
+    "native",
+    "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER",
+    "external",
+    "SKYBRIDGE_WINDOWS_ADAPTER_BINDING",
+    "SKYBRIDGE_WINDOWS_LOCAL_ENDPOINT",
+    "SKYBRIDGE_WINDOWS_REMOTE_ENDPOINT",
+    "SKYBRIDGE_WINDOWS_SELECTED_CANDIDATE_PAIR",
+    "SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX",
+    "SKYBRIDGE_WINDOWS_CAPABILITY_DIGEST_HEX",
+    "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
+    "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
+    "new FfiEngineClient()",
+    "new NativeWindowsDnsSdBrowseClient()",
+    "new ExternalWindowsTransportAdapterClient",
+    "new PendingWindowsTransportAdapterClient()",
+    "ConnectionPreflightClient(coreBridge, transportAdapterClient)"
+)) {
+    Assert-Contains -Text $nativeRuntimeFactory -Needle $nativeRuntimeSignal -Message "Native runtime factory missing explicit runtime signal: $nativeRuntimeSignal"
+}
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
 Assert-Contains -Text $dependencyFactory -Needle "var coreBridge = new CoreBridge();" -Message "Default dependency factory should create one explicit CoreBridge for manual Core tools."
 Assert-Contains -Text $dependencyFactory -Needle "var discoveryClient = new CoreDiscoveryClient(coreBridge);" -Message "Default dependency factory should create one explicit CoreDiscoveryClient for discovery parsing and browsing."
 Assert-Contains -Text $dependencyFactory -Needle "new WindowsDiscoveryBrowserClient(discoveryClient)" -Message "Default dependency factory should wire WindowsDiscoveryBrowserClient for explicit DNS-SD browse boundary snapshots."
-Assert-True -Condition (-not $dependencyFactory.Contains("new NativeWindowsDnsSdBrowseClient()")) -Message "Default dependency factory must not silently switch to the live DNS-SD provider before local-network acceptance."
 Assert-Contains -Text $dependencyFactory -Needle "new DeviceDiscoveryInputDefaultsClient()" -Message "Default dependency factory should wire DeviceDiscoveryInputDefaultsClient for explicit Device Discovery default inputs."
 Assert-Contains -Text $dependencyFactory -Needle "new ManualConnectionClient()" -Message "Default dependency factory should wire ManualConnectionClient for explicit manual target validation."
 Assert-Contains -Text $dependencyFactory -Needle "new CrossNetworkConnectionClient()" -Message "Default dependency factory should wire CrossNetworkConnectionClient for explicit QR/code envelope validation."
