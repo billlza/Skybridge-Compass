@@ -36,7 +36,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IFeatureCatalogClient _featureCatalogClient;
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
-    private readonly IReadOnlyList<ICommand> _refreshableCommands;
+    private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -219,32 +219,30 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshSystemMonitorCommand = new AsyncRelayCommand(RefreshSystemMonitorAsync, CanRefreshSystemMonitor);
         RefreshUsbManagementCommand = new AsyncRelayCommand(RefreshUsbManagementAsync, CanRefreshUsbManagement);
         RefreshSettingsCommand = new AsyncRelayCommand(RefreshSettingsAsync, CanRefreshSettings);
-        _refreshableCommands = new[]
-        {
-            ConnectCommand,
-            DisconnectCommand,
-            HeartbeatCommand,
-            StartDiscoveryCommand,
-            StopDiscoveryCommand,
-            RefreshDiscoveryCommand,
-            RunExtendedDiscoveryCommand,
-            PrepareManualConnectionCommand,
-            GenerateQRCodeCommand,
-            ScanQRCodeCommand,
-            GenerateConnectionCodeCommand,
-            RegenerateConnectionCodeCommand,
-            CopyConnectionCodeCommand,
-            ConnectConnectionCodeCommand,
-            ParseAdvertisementCommand,
-            ValidatePairingCodeCommand,
-            PrepareConnectionCommand,
-            RunCoreDiagnosticsCommand,
-            RefreshFileTransferCommand,
-            RefreshRemoteDesktopCommand,
-            RefreshSystemMonitorCommand,
-            RefreshUsbManagementCommand,
-            RefreshSettingsCommand
-        };
+        _workspaceCommandRegistry = WorkspaceCommandRegistry.Create(
+            new(WorkspaceActionCommandId.Connect, ConnectCommand),
+            new(WorkspaceActionCommandId.Disconnect, DisconnectCommand),
+            new(WorkspaceActionCommandId.Heartbeat, HeartbeatCommand),
+            new(WorkspaceActionCommandId.StartDiscovery, StartDiscoveryCommand),
+            new(WorkspaceActionCommandId.StopDiscovery, StopDiscoveryCommand),
+            new(WorkspaceActionCommandId.RefreshDiscovery, RefreshDiscoveryCommand),
+            new(WorkspaceActionCommandId.RunExtendedDiscovery, RunExtendedDiscoveryCommand),
+            new(WorkspaceActionCommandId.PrepareManualConnection, PrepareManualConnectionCommand),
+            new(WorkspaceActionCommandId.GenerateQrCode, GenerateQRCodeCommand),
+            new(WorkspaceActionCommandId.ScanQrCode, ScanQRCodeCommand),
+            new(WorkspaceActionCommandId.GenerateConnectionCode, GenerateConnectionCodeCommand),
+            new(WorkspaceActionCommandId.RegenerateConnectionCode, RegenerateConnectionCodeCommand),
+            new(WorkspaceActionCommandId.CopyConnectionCode, CopyConnectionCodeCommand),
+            new(WorkspaceActionCommandId.ConnectConnectionCode, ConnectConnectionCodeCommand),
+            new(WorkspaceActionCommandId.ParseTxt, ParseAdvertisementCommand),
+            new(WorkspaceActionCommandId.ValidatePairing, ValidatePairingCodeCommand),
+            new(WorkspaceActionCommandId.PrepareConnection, PrepareConnectionCommand),
+            new(WorkspaceActionCommandId.RunCoreDiagnostics, RunCoreDiagnosticsCommand),
+            new(WorkspaceActionCommandId.RefreshFileTransfer, RefreshFileTransferCommand),
+            new(WorkspaceActionCommandId.RefreshRemoteDesktop, RefreshRemoteDesktopCommand),
+            new(WorkspaceActionCommandId.RefreshSystemMonitor, RefreshSystemMonitorCommand),
+            new(WorkspaceActionCommandId.RefreshUsbManagement, RefreshUsbManagementCommand),
+            new(WorkspaceActionCommandId.RefreshSettings, RefreshSettingsCommand));
         var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
@@ -1282,7 +1280,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshCommandStates()
     {
-        foreach (var command in _refreshableCommands)
+        foreach (var command in _workspaceCommandRegistry.RefreshableCommands)
         {
             (command as AsyncRelayCommand)?.RaiseCanExecuteChanged();
         }
@@ -1424,7 +1422,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             snapshot.Actions,
             action => WorkspaceActionItemView.FromItem(
                 action,
-                ResolveWorkspaceActionCommand(action.CommandId)));
+                _workspaceCommandRegistry.Resolve(action.CommandId)));
     }
 
     private ObservableCollection<WorkspaceActionItemView> GetWorkspaceActionSurfaceTarget(
@@ -1451,35 +1449,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             WorkspaceActionSurface.SettingsToolbar => SettingsToolbarActions,
             WorkspaceActionSurface.SettingsMaintenance => SettingsMaintenanceActions,
             _ => throw new InvalidOperationException()
-        };
-
-    private ICommand? ResolveWorkspaceActionCommand(WorkspaceActionCommandId commandId) =>
-        commandId switch
-        {
-            WorkspaceActionCommandId.Connect => ConnectCommand,
-            WorkspaceActionCommandId.Disconnect => DisconnectCommand,
-            WorkspaceActionCommandId.Heartbeat => HeartbeatCommand,
-            WorkspaceActionCommandId.ParseTxt => ParseAdvertisementCommand,
-            WorkspaceActionCommandId.ValidatePairing => ValidatePairingCodeCommand,
-            WorkspaceActionCommandId.PrepareConnection => PrepareConnectionCommand,
-            WorkspaceActionCommandId.RunExtendedDiscovery => RunExtendedDiscoveryCommand,
-            WorkspaceActionCommandId.PrepareManualConnection => PrepareManualConnectionCommand,
-            WorkspaceActionCommandId.StartDiscovery => StartDiscoveryCommand,
-            WorkspaceActionCommandId.StopDiscovery => StopDiscoveryCommand,
-            WorkspaceActionCommandId.RefreshDiscovery => RefreshDiscoveryCommand,
-            WorkspaceActionCommandId.GenerateQrCode => GenerateQRCodeCommand,
-            WorkspaceActionCommandId.ScanQrCode => ScanQRCodeCommand,
-            WorkspaceActionCommandId.GenerateConnectionCode => GenerateConnectionCodeCommand,
-            WorkspaceActionCommandId.CopyConnectionCode => CopyConnectionCodeCommand,
-            WorkspaceActionCommandId.RegenerateConnectionCode => RegenerateConnectionCodeCommand,
-            WorkspaceActionCommandId.ConnectConnectionCode => ConnectConnectionCodeCommand,
-            WorkspaceActionCommandId.RefreshUsbManagement => RefreshUsbManagementCommand,
-            WorkspaceActionCommandId.RefreshFileTransfer => RefreshFileTransferCommand,
-            WorkspaceActionCommandId.RefreshRemoteDesktop => RefreshRemoteDesktopCommand,
-            WorkspaceActionCommandId.RunCoreDiagnostics => RunCoreDiagnosticsCommand,
-            WorkspaceActionCommandId.RefreshSystemMonitor => RefreshSystemMonitorCommand,
-            WorkspaceActionCommandId.RefreshSettings => RefreshSettingsCommand,
-            _ => null
         };
 
     private WorkspaceActionGateSnapshot BuildWorkspaceActionGateSnapshot() =>
