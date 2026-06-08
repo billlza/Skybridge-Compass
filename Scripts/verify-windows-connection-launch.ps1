@@ -247,6 +247,31 @@ AssertContains(
     "desk-mac.local:11550",
     "Core TXT parse fact source");
 
+var macDiscoveredState = stateClient.BuildDiscoveryPeerValidatedState(browserSnapshot.Peers[0].Peer);
+var macPairedState = stateClient.BuildPairingValidatedState(macDiscoveredState, pairingMaterial);
+var macPreflightSnapshot = await new ConnectionPreflightClient(new CoreBridge())
+    .BuildReadOnlySnapshotAsync(browserSnapshot.Peers[0].Peer, pairingMaterial);
+AssertEqual(CoreTransportKind.WebRtcDataChannel, macPreflightSnapshot.Plan.TransportKind, "mac DNS-SD preflight transport");
+AssertEqual(CoreTransportAuditCode.WebRtcInterop, macPreflightSnapshot.Plan.TransportAudit, "mac DNS-SD preflight transport audit");
+AssertEqual(ConnectionLaunchAdapterKind.WebRtcDataChannel, macPreflightSnapshot.Plan.AdapterKind, "mac DNS-SD preflight adapter");
+AssertEqual(false, macPreflightSnapshot.Plan.IsLiveAdapterReady, "mac DNS-SD preflight live adapter");
+AssertEqual("adapter pending", macPreflightSnapshot.Plan.AdapterBinding, "mac DNS-SD preflight adapter binding");
+AssertEqual(5, macPreflightSnapshot.Plan.ChannelMappings.Count, "mac DNS-SD preflight channel mapping count");
+AssertEqual(
+    false,
+    macPreflightSnapshot.Plan.ChannelMappings.Any(mapping =>
+        mapping.BindingKind == CoreAdapterBindingKind.AppleStream
+        || mapping.BindingKind == CoreAdapterBindingKind.AppleDatagram),
+    "mac DNS-SD preflight Apple-native channel mapping");
+AssertContains(PreflightFact(macPreflightSnapshot, "Transport plan").Detail, "WebRtcInterop", "mac DNS-SD preflight transport fact");
+var macLaunchState = stateClient.BuildPreflightValidatedState(macPairedState, macPreflightSnapshot);
+var macLaunchReadiness = stateClient.BuildLiveConnectionLaunchReadiness(macLaunchState);
+AssertEqual(false, macLaunchReadiness.IsReady, "mac DNS-SD live adapter launch readiness");
+AssertEqual(
+    "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
+    macLaunchReadiness.ErrorMessage,
+    "mac DNS-SD live adapter launch readiness message");
+
 var adapterRequest = new WindowsTransportAdapterRequest(
     peer,
     pairingMaterial,
@@ -522,6 +547,9 @@ static string Base64UrlEncode(byte[] value) =>
 static CrossNetworkConnectionFact Fact(CrossNetworkConnectionSnapshot snapshot, string label) =>
     snapshot.Facts.Single(fact => string.Equals(fact.Label, label, StringComparison.Ordinal));
 
+static ConnectionPreflightFact PreflightFact(ConnectionPreflightSnapshot snapshot, string label) =>
+    snapshot.Facts.Single(fact => string.Equals(fact.Label, label, StringComparison.Ordinal));
+
 static void ExpectThrows<T>(Action action, string messageFragment)
     where T : Exception
 {
@@ -620,11 +648,28 @@ sealed class RecordingDiscoveryClient : IDiscoveryClient
 }
 '@
 
+    $nativeCoreManifest = Join-Path $RepoRoot "core/skybridge-core/Cargo.toml"
+    $nativeCoreDebugDir = Join-Path $RepoRoot "core/skybridge-core/target/debug"
+    $nativeCoreDll = Join-Path $nativeCoreDebugDir "skybridge_core.dll"
+    Assert-True -Condition (Test-Path -LiteralPath $nativeCoreManifest) -Message "Missing Rust core manifest: $nativeCoreManifest"
+    if (-not (Test-Path -LiteralPath $nativeCoreDll)) {
+        & cargo build --manifest-path $nativeCoreManifest
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Rust core native DLL build failed."
+        Assert-True -Condition (Test-Path -LiteralPath $nativeCoreDll) -Message "Rust core native DLL missing after build: $nativeCoreDll"
+    }
+
     & dotnet restore $testProject
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke restore failed."
 
-    & dotnet run --project $testProject --no-restore
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke run failed."
+    $oldPath = $env:PATH
+    try {
+        $env:PATH = "$nativeCoreDebugDir;$oldPath"
+        & dotnet run --project $testProject --no-restore
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows connection launch smoke run failed."
+    }
+    finally {
+        $env:PATH = $oldPath
+    }
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {
