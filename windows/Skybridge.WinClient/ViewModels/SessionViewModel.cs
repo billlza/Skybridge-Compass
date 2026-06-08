@@ -42,6 +42,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
+    private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -77,7 +78,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _selectedFramerate = "";
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
-    private ConnectionWorkspaceValidatedState _connectionValidatedState;
     private bool _isDiscoveryScanning;
     private bool _isDiscoveryCompatibilityModeEnabled;
     private int _extendedSearchCountdown;
@@ -196,7 +196,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => SettingsStatus = value);
         _workspaceCountNotifier = new WorkspaceCountNotifier(OnPropertyChanged);
         _workspaceSnapshotApplier = new WorkspaceSnapshotApplier(_workspaceCountNotifier, RefreshDashboardMetrics);
-        _connectionValidatedState = _connectionWorkspaceStateClient.BuildInputInvalidatedState();
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
         _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
         _manualConnectionPort = deviceDiscoveryInputDefaults.ManualConnectionPort;
@@ -225,6 +224,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         CrossNetworkConnectionFacts = new ObservableCollection<CrossNetworkConnectionFactView>();
         PairingFacts = new ObservableCollection<PairingFactView>();
         ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
+        _connectionInputCoordinator = new ConnectionWorkspaceInputCoordinator(
+            _connectionWorkspaceStateClient,
+            _workspaceStatusPatchApplier,
+            _workspaceCountNotifier,
+            DiscoveredPeers,
+            DiscoveryBrowserFacts,
+            ManualConnectionFacts,
+            PairingFacts,
+            ConnectionPreflightFacts);
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
         DeviceDiscoveryPrimaryActions = new ObservableCollection<WorkspaceActionItemView>();
         DeviceDiscoveryScanActions = new ObservableCollection<WorkspaceActionItemView>();
@@ -571,7 +579,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoveryService, value))
             {
-                ApplyWorkspaceInputChange(InvalidatePairingAndPreflight);
+                ApplyWorkspaceInputChange(_connectionInputCoordinator.InvalidatePairingAndPreflight);
             }
         }
     }
@@ -595,7 +603,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionHost, value))
             {
-                ApplyWorkspaceInputChange(ResetManualConnectionInput);
+                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetManualConnectionInput);
             }
         }
     }
@@ -607,7 +615,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionPort, value))
             {
-                ApplyWorkspaceInputChange(ResetManualConnectionInput);
+                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetManualConnectionInput);
             }
         }
     }
@@ -619,7 +627,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionCode, value))
             {
-                ApplyWorkspaceInputChange(ResetManualConnectionInput);
+                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetManualConnectionInput);
             }
         }
     }
@@ -631,7 +639,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _crossNetworkQrInput, value))
             {
-                ApplyWorkspaceInputChange(ResetCrossNetworkInput);
+                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetCrossNetworkInput);
             }
         }
     }
@@ -644,7 +652,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var normalized = _crossNetworkConnectionClient.NormalizeCodeInput(value);
             if (SetField(ref _crossNetworkCodeInput, normalized))
             {
-                ApplyWorkspaceInputChange(ResetCrossNetworkInput);
+                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetCrossNetworkInput);
             }
             else if (!string.Equals(value, normalized, StringComparison.Ordinal))
             {
@@ -666,7 +674,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoveryTxtRecord, value))
             {
-                ApplyWorkspaceInputChange(InvalidatePairingAndPreflight);
+                ApplyWorkspaceInputChange(_connectionInputCoordinator.InvalidatePairingAndPreflight);
             }
         }
     }
@@ -678,7 +686,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _pairingConnectionCode, value))
             {
-                ApplyWorkspaceInputChange(ResetPairingInput);
+                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetPairingInput);
             }
         }
     }
@@ -911,11 +919,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
             if (action != DiscoveryBrowserAction.Stop)
             {
-                ApplyConnectionValidatedState(
+                _connectionInputCoordinator.ApplyValidatedState(
                     _connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot));
                 WorkspaceCollectionProjector.Replace(DiscoveredPeers, snapshot.Peers, DiscoveredPeerView.FromCandidate);
 
-                ClearPairingAndPreflight();
+                _connectionInputCoordinator.ClearPairingAndPreflight();
                 _workspaceCountNotifier.DiscoveredPeersChanged();
             }
 
@@ -940,7 +948,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     ManualConnectionCode));
             WorkspaceCollectionProjector.Replace(ManualConnectionFacts, snapshot.Facts, ManualConnectionFactView.FromFact);
 
-            ApplyConnectionInputInvalidation();
+            _connectionInputCoordinator.ApplyInputInvalidation();
             _workspaceCountNotifier.ManualConnectionFactsChanged();
             DiscoveryService = snapshot.Target.Service;
             _workspaceStatusPatchApplier.Apply(
@@ -989,7 +997,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 CrossNetworkGeneratedCode = snapshot.GeneratedCode;
             }
 
-            ApplyConnectionInputInvalidation();
+            _connectionInputCoordinator.ApplyInputInvalidation();
             _workspaceCountNotifier.CrossNetworkConnectionFactsChanged();
             _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildCrossNetworkPreparedPatch(snapshot));
@@ -1002,11 +1010,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             DiscoveryStatus = _discoveryClient.BuildPendingStatus();
             var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
-            ApplyConnectionValidatedState(
+            _connectionInputCoordinator.ApplyValidatedState(
                 _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer));
             DiscoveredPeers.Clear();
             DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(_discoveryBrowserClient.BuildPeerCandidate(peer)));
-            ClearPairingAndPreflight();
+            _connectionInputCoordinator.ClearPairingAndPreflight();
             _workspaceCountNotifier.DiscoveredPeersChanged();
             _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedPatch(peer));
@@ -1025,11 +1033,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 PairingConnectionCode,
                 expectedFingerprint);
             var material = snapshot.Material;
-            ApplyConnectionValidatedState(
+            _connectionInputCoordinator.ApplyValidatedState(
                 _connectionWorkspaceStateClient.BuildPairingValidatedState(
-                    _connectionValidatedState,
+                    _connectionInputCoordinator.ValidatedState,
                     material));
-            ClearConnectionPreflight();
+            _connectionInputCoordinator.ClearConnectionPreflight();
             WorkspaceCollectionProjector.Replace(PairingFacts, snapshot.Facts, PairingFactView.FromFact);
 
             _workspaceCountNotifier.PairingFactsChanged();
@@ -1042,8 +1050,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         await RunDeviceDiscoveryActionAsync(async () =>
         {
-            var discoveredPeer = _connectionValidatedState.DiscoveredPeer;
-            var pairingMaterial = _connectionValidatedState.PairingMaterial;
+            var discoveredPeer = _connectionInputCoordinator.ValidatedState.DiscoveredPeer;
+            var pairingMaterial = _connectionInputCoordinator.ValidatedState.PairingMaterial;
             var readiness = _connectionWorkspaceStateClient.BuildPreflightReadiness(
                 discoveredPeer,
                 pairingMaterial);
@@ -1200,8 +1208,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanPrepareConnection() =>
         CanUseDeviceDiscoveryAction(
             _connectionWorkspaceStateClient.CanPreparePreflight(
-                _connectionValidatedState.DiscoveredPeer,
-                _connectionValidatedState.PairingMaterial));
+                _connectionInputCoordinator.ValidatedState.DiscoveredPeer,
+                _connectionInputCoordinator.ValidatedState.PairingMaterial));
 
     private bool CanRefreshUsbManagement() =>
         CanUseSelectedWorkspaceFeature(IsUsbManagementSelected);
@@ -1422,71 +1430,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
 
-    private void ApplyConnectionValidatedState(ConnectionWorkspaceValidatedState state)
-    {
-        _connectionValidatedState = state;
-    }
-
-    private void ApplyConnectionInputInvalidation()
-    {
-        ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
-        ClearPairingAndPreflight();
-    }
-
-    private void ClearPairingAndPreflight()
-    {
-        PairingFacts.Clear();
-        ClearConnectionPreflight();
-        _workspaceCountNotifier.PairingFactsChanged();
-    }
-
-    private void InvalidatePairingAndPreflight()
-    {
-        ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
-        DiscoveredPeers.Clear();
-        DiscoveryBrowserFacts.Clear();
-        ClearPairingAndPreflight();
-        _workspaceStatusPatchApplier.Apply(
-            _connectionWorkspaceStateClient.BuildInputResetPatch(
-                ConnectionWorkspaceResetReason.DiscoveryInputChanged));
-        _workspaceCountNotifier.DiscoveredPeersChanged();
-        _workspaceCountNotifier.DiscoveryBrowserFactsChanged();
-    }
-
-    private void ResetManualConnectionInput()
-    {
-        ManualConnectionFacts.Clear();
-        _workspaceStatusPatchApplier.Apply(
-            _connectionWorkspaceStateClient.BuildInputResetPatch(
-                ConnectionWorkspaceResetReason.ManualTargetInputChanged));
-        _workspaceCountNotifier.ManualConnectionFactsChanged();
-    }
-
-    private void ResetCrossNetworkInput()
-    {
-        _workspaceStatusPatchApplier.Apply(
-            _connectionWorkspaceStateClient.BuildInputResetPatch(
-                ConnectionWorkspaceResetReason.CrossNetworkInputChanged));
-    }
-
-    private void ResetPairingInput()
-    {
-        ApplyConnectionValidatedState(
-            _connectionWorkspaceStateClient.BuildPairingInputResetState(_connectionValidatedState));
-        ClearPairingAndPreflight();
-        _workspaceStatusPatchApplier.Apply(
-            _connectionWorkspaceStateClient.BuildInputResetPatch(
-                ConnectionWorkspaceResetReason.PairingInputChanged));
-    }
-
-    private void ClearConnectionPreflight()
-    {
-        ConnectionPreflightFacts.Clear();
-        _workspaceStatusPatchApplier.Apply(
-            _connectionWorkspaceStateClient.BuildInputResetPatch(
-                ConnectionWorkspaceResetReason.PreflightCleared));
-        _workspaceCountNotifier.ConnectionPreflightFactsChanged();
-    }
 }
 
 internal sealed record WorkspaceActionRenderContext(

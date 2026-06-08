@@ -103,6 +103,7 @@ $workspaceCollectionProjectorPath = Join-Path $RepoRoot "windows/Skybridge.WinCl
 $workspaceSnapshotApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceSnapshotApplier.cs"
 $dashboardMetricsUpdaterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/DashboardMetricsUpdater.cs"
 $topBarStatusUpdaterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/TopBarStatusUpdater.cs"
+$connectionWorkspaceInputCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ConnectionWorkspaceInputCoordinator.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -130,7 +131,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -150,8 +151,9 @@ $workspaceCollectionProjector = Get-Content -Raw -LiteralPath $workspaceCollecti
 $workspaceSnapshotApplier = Get-Content -Raw -LiteralPath $workspaceSnapshotApplierPath
 $dashboardMetricsUpdater = Get-Content -Raw -LiteralPath $dashboardMetricsUpdaterPath
 $topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
+$connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connectionWorkspaceInputCoordinatorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceStatusPatchApplier + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceStatusPatchApplier + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -246,10 +248,10 @@ Assert-True -Condition ($sessionViewModelSource.Contains("RefreshSelectedFeature
 Assert-True -Condition ($sessionViewModelSource.Contains("RefreshConnectionState();")) -Message "ConnectionState setter must delegate shell refresh to RefreshConnectionState."
 Assert-True -Condition ($sessionViewModelSource.Contains("RefreshShellRuntimeState();")) -Message "Runtime shell refresh must be centralized through RefreshShellRuntimeState."
 foreach ($inputChangeSignal in @(
-    "ApplyWorkspaceInputChange(InvalidatePairingAndPreflight)",
-    "ApplyWorkspaceInputChange(ResetManualConnectionInput)",
-    "ApplyWorkspaceInputChange(ResetCrossNetworkInput)",
-    "ApplyWorkspaceInputChange(ResetPairingInput)"
+    "ApplyWorkspaceInputChange(_connectionInputCoordinator.InvalidatePairingAndPreflight)",
+    "ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetManualConnectionInput)",
+    "ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetCrossNetworkInput)",
+    "ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetPairingInput)"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $inputChangeSignal -Message "Workspace input change helper missing signal: $inputChangeSignal"
 }
@@ -1002,6 +1004,9 @@ foreach ($connectionStateSignal in @(
     "ConnectionWorkspaceStatusPatch",
     "WorkspaceStatusPatchApplier",
     "_workspaceStatusPatchApplier.Apply(",
+    "ConnectionWorkspaceInputCoordinator",
+    "_connectionInputCoordinator.ValidatedState",
+    "ApplyInputInvalidation",
     "ConnectionWorkspaceValidatedState",
     "ConnectionWorkspacePreflightReadiness",
     "DiscoveryInputChanged",
@@ -1012,13 +1017,10 @@ foreach ($connectionStateSignal in @(
     "Parse a Core-validated discovery TXT record before connection preflight.",
     "Validate pairing material before connection preflight.",
     "_connectionWorkspaceStateClient.BuildInitialStatusPatch()",
-    "_connectionWorkspaceStateClient.BuildInputInvalidatedState()",
-    "ApplyConnectionInputInvalidation",
     "ClearPairingAndPreflight",
     "_connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot)",
     "_connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer)",
     "_connectionWorkspaceStateClient.BuildPairingValidatedState(",
-    "_connectionWorkspaceStateClient.BuildPairingInputResetState(_connectionValidatedState)",
     "new ConnectionWorkspaceStateClient()"
 )) {
     Assert-Contains -Text ($connectionWorkspaceState + $sessionViewModel + $mainWindow) -Needle $connectionStateSignal -Message "Connection workspace state signal missing: $connectionStateSignal"
@@ -1028,25 +1030,56 @@ Assert-True -Condition (-not $sessionViewModelSource.Contains("_validatedPairing
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("FfiEngineClient")) -Message "ConnectionWorkspaceStateClient must not call or reference FfiEngineClient."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("WebRTC")) -Message "ConnectionWorkspaceStateClient must not start or own WebRTC adapters."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("signaling")) -Message "ConnectionWorkspaceStateClient must not own signaling side effects."
-$inputInvalidatedMatches = [regex]::Matches($sessionViewModelSource, [regex]::Escape("_connectionWorkspaceStateClient.BuildInputInvalidatedState()"))
-Assert-True -Condition ($inputInvalidatedMatches.Count -le 3) -Message "SessionViewModel must centralize input invalidation through constructor initialization, ApplyConnectionInputInvalidation, and the discovery-input reset helper."
-$pairingFactsClearMatches = [regex]::Matches($sessionViewModelSource, [regex]::Escape("PairingFacts.Clear()"))
-Assert-True -Condition ($pairingFactsClearMatches.Count -eq 1) -Message "SessionViewModel must clear pairing facts only through ClearPairingAndPreflight."
+$inputInvalidatedMatches = [regex]::Matches($connectionWorkspaceInputCoordinator, [regex]::Escape("_connectionWorkspaceStateClient.BuildInputInvalidatedState()"))
+Assert-True -Condition ($inputInvalidatedMatches.Count -ge 1) -Message "ConnectionWorkspaceInputCoordinator must centralize input invalidation."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_connectionWorkspaceStateClient.BuildInputInvalidatedState()")) -Message "SessionViewModel must not call BuildInputInvalidatedState directly; use ConnectionWorkspaceInputCoordinator."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("ConnectionWorkspaceResetReason.")) -Message "SessionViewModel must not own connection workspace reset reasons; use ConnectionWorkspaceInputCoordinator."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("PairingFacts.Clear()")) -Message "SessionViewModel must not clear pairing facts directly; use ConnectionWorkspaceInputCoordinator."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("ConnectionPreflightFacts.Clear()")) -Message "SessionViewModel must not clear preflight facts directly; use ConnectionWorkspaceInputCoordinator."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("ManualConnectionFacts.Clear()")) -Message "SessionViewModel must not clear manual connection facts directly; use ConnectionWorkspaceInputCoordinator."
 
-foreach ($inputResetSignal in @(
+foreach ($inputCoordinatorSignal in @(
+    "internal sealed class ConnectionWorkspaceInputCoordinator",
+    "public ConnectionWorkspaceValidatedState ValidatedState { get; private set; }",
+    "BuildInputInvalidatedState()",
+    "ApplyInputInvalidation",
+    "ClearPairingAndPreflight",
     "ResetManualConnectionInput",
     "ResetCrossNetworkInput",
-    "ResetPairingInput"
+    "ResetPairingInput",
+    "ClearConnectionPreflight",
+    "ConnectionWorkspaceResetReason.DiscoveryInputChanged",
+    "ConnectionWorkspaceResetReason.ManualTargetInputChanged",
+    "ConnectionWorkspaceResetReason.CrossNetworkInputChanged",
+    "ConnectionWorkspaceResetReason.PairingInputChanged",
+    "ConnectionWorkspaceResetReason.PreflightCleared",
+    "_pairingFacts.Clear()",
+    "_connectionPreflightFacts.Clear()",
+    "_manualConnectionFacts.Clear()",
+    "_countNotifier.PairingFactsChanged()",
+    "_countNotifier.ConnectionPreflightFactsChanged()"
 )) {
-    Assert-Contains -Text $sessionViewModelSource -Needle $inputResetSignal -Message "SessionViewModel input reset helper missing: $inputResetSignal"
+    Assert-Contains -Text $connectionWorkspaceInputCoordinator -Needle $inputCoordinatorSignal -Message "ConnectionWorkspaceInputCoordinator contract missing: $inputCoordinatorSignal"
+}
+foreach ($inputResetSignal in @(
+    "_connectionInputCoordinator.ResetManualConnectionInput",
+    "_connectionInputCoordinator.ResetCrossNetworkInput",
+    "_connectionInputCoordinator.ResetPairingInput",
+    "_connectionInputCoordinator.ApplyInputInvalidation",
+    "_connectionInputCoordinator.ClearPairingAndPreflight",
+    "_connectionInputCoordinator.ClearConnectionPreflight"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $inputResetSignal -Message "SessionViewModel must call input coordinator: $inputResetSignal"
 }
 foreach ($inputResetReason in @(
     "ConnectionWorkspaceResetReason.ManualTargetInputChanged",
     "ConnectionWorkspaceResetReason.CrossNetworkInputChanged",
-    "ConnectionWorkspaceResetReason.PairingInputChanged"
+    "ConnectionWorkspaceResetReason.PairingInputChanged",
+    "ConnectionWorkspaceResetReason.DiscoveryInputChanged",
+    "ConnectionWorkspaceResetReason.PreflightCleared"
 )) {
-    $matches = [regex]::Matches($sessionViewModelSource, [regex]::Escape($inputResetReason))
-    Assert-True -Condition ($matches.Count -eq 1) -Message "SessionViewModel must centralize $inputResetReason in one reset helper."
+    $matches = [regex]::Matches($connectionWorkspaceInputCoordinator, [regex]::Escape($inputResetReason))
+    Assert-True -Condition ($matches.Count -eq 1) -Message "ConnectionWorkspaceInputCoordinator must centralize $inputResetReason in one reset helper."
 }
 
 foreach ($workspaceErrorSignal in @(
@@ -1904,7 +1937,8 @@ foreach ($docSignal in @(
     "DashboardMetricsUpdater",
     "ConnectionPreflightClient",
     "ConnectionWorkspaceStateClient",
-    "ApplyConnectionInputInvalidation",
+    "ConnectionWorkspaceInputCoordinator",
+    "ApplyInputInvalidation",
     "ClearPairingAndPreflight",
     "WorkspaceCollectionProjector.Replace",
     "RefreshReadOnlyWorkspaceAsync",
