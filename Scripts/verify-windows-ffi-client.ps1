@@ -565,6 +565,10 @@ Assert-Contains -Text $architecture -Needle "FileTransferWorkspaceClient" -Messa
 foreach ($signal in @(
     "public interface IWorkspaceActionCatalogClient",
     "public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient",
+    "BuildInitialSurfaces",
+    "BuildDynamicRefreshSurfaces",
+    "InitialSurfaces",
+    "DynamicRefreshSurfaces",
     "BuildReadOnlySnapshot",
     "ResolveEnabled",
     "ResolveDetail",

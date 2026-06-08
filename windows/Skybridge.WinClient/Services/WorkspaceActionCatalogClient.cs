@@ -5,6 +5,10 @@ namespace Skybridge.WinClient.Services;
 
 public interface IWorkspaceActionCatalogClient
 {
+    IReadOnlyList<WorkspaceActionSurface> BuildInitialSurfaces();
+
+    IReadOnlyList<WorkspaceActionSurface> BuildDynamicRefreshSurfaces();
+
     WorkspaceActionCatalogSnapshot BuildReadOnlySnapshot(WorkspaceActionCatalogRequest request);
 
     bool ResolveEnabled(
@@ -20,6 +24,46 @@ public interface IWorkspaceActionCatalogClient
 
 public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
 {
+    private static readonly WorkspaceActionSurface[] InitialSurfaces =
+    {
+        WorkspaceActionSurface.SidebarSession,
+        WorkspaceActionSurface.TopBarActions,
+        WorkspaceActionSurface.SessionControls,
+        WorkspaceActionSurface.DeviceDiscoveryPrimary,
+        WorkspaceActionSurface.DeviceDiscoveryScan,
+        WorkspaceActionSurface.CrossNetworkQr,
+        WorkspaceActionSurface.CrossNetworkCodePrimary,
+        WorkspaceActionSurface.CrossNetworkCodeConnect,
+        WorkspaceActionSurface.UsbManagementHeader,
+        WorkspaceActionSurface.FileTransferHeader,
+        WorkspaceActionSurface.FileTransfer,
+        WorkspaceActionSurface.RemoteDesktopHeader,
+        WorkspaceActionSurface.RemoteDesktop,
+        WorkspaceActionSurface.QuantumDiagnosticsHeader,
+        WorkspaceActionSurface.SystemMonitorHeader,
+        WorkspaceActionSurface.SystemMonitorControls,
+        WorkspaceActionSurface.SettingsHeader,
+        WorkspaceActionSurface.SettingsToolbar,
+        WorkspaceActionSurface.SettingsMaintenance
+    };
+
+    private static readonly WorkspaceActionSurface[] DynamicRefreshSurfaces =
+    {
+        WorkspaceActionSurface.SidebarSession,
+        WorkspaceActionSurface.TopBarActions,
+        WorkspaceActionSurface.SessionControls,
+        WorkspaceActionSurface.UsbManagementHeader,
+        WorkspaceActionSurface.FileTransferHeader,
+        WorkspaceActionSurface.RemoteDesktopHeader,
+        WorkspaceActionSurface.QuantumDiagnosticsHeader,
+        WorkspaceActionSurface.SystemMonitorHeader,
+        WorkspaceActionSurface.SettingsHeader
+    };
+
+    public IReadOnlyList<WorkspaceActionSurface> BuildInitialSurfaces() => InitialSurfaces;
+
+    public IReadOnlyList<WorkspaceActionSurface> BuildDynamicRefreshSurfaces() => DynamicRefreshSurfaces;
+
     public WorkspaceActionCatalogSnapshot BuildReadOnlySnapshot(WorkspaceActionCatalogRequest request) =>
         new(
             DateTimeOffset.UtcNow,

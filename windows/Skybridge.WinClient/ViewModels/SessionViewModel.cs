@@ -1346,15 +1346,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshDynamicWorkspaceActionStates()
     {
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession, SidebarSessionActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SessionControls, SessionControlActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader, UsbManagementHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransferHeader, FileTransferHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktopHeader, RemoteDesktopHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.QuantumDiagnosticsHeader, QuantumDiagnosticsHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorHeader, SystemMonitorHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsHeader, SettingsHeaderActions);
+        foreach (var surface in _workspaceActionCatalogClient.BuildDynamicRefreshSurfaces())
+        {
+            LoadWorkspaceActionSurface(surface);
+        }
     }
 
     private void ApplyConnectionWorkspaceStatusPatch(ConnectionWorkspaceStatusPatch patch)
@@ -1466,33 +1461,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void LoadWorkspaceActions()
     {
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession, SidebarSessionActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SessionControls, SessionControlActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.DeviceDiscoveryPrimary, DeviceDiscoveryPrimaryActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.DeviceDiscoveryScan, DeviceDiscoveryScanActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkQr, CrossNetworkQrActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkCodePrimary, CrossNetworkCodePrimaryActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.CrossNetworkCodeConnect, CrossNetworkCodeConnectActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader, UsbManagementHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransferHeader, FileTransferHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.FileTransfer, FileTransferActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktopHeader, RemoteDesktopHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.RemoteDesktop, RemoteDesktopActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.QuantumDiagnosticsHeader, QuantumDiagnosticsHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorHeader, SystemMonitorHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SystemMonitorControls, SystemMonitorActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsHeader, SettingsHeaderActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsToolbar, SettingsToolbarActions);
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.SettingsMaintenance, SettingsMaintenanceActions);
+        foreach (var surface in _workspaceActionCatalogClient.BuildInitialSurfaces())
+        {
+            LoadWorkspaceActionSurface(surface);
+        }
     }
 
-    private void LoadWorkspaceActionSurface(
-        WorkspaceActionSurface surface,
-        ObservableCollection<WorkspaceActionItemView> target)
+    private void LoadWorkspaceActionSurface(WorkspaceActionSurface surface)
     {
         var snapshot = _workspaceActionCatalogClient.BuildReadOnlySnapshot(
             new WorkspaceActionCatalogRequest(surface));
+        var target = GetWorkspaceActionSurfaceTarget(surface);
 
         target.Clear();
         var gates = BuildWorkspaceActionGateSnapshot();
@@ -1506,6 +1485,32 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 _workspaceActionCatalogClient.ResolveDetail(action.DetailSlot, details, action.Detail)));
         }
     }
+
+    private ObservableCollection<WorkspaceActionItemView> GetWorkspaceActionSurfaceTarget(
+        WorkspaceActionSurface surface) =>
+        surface switch
+        {
+            WorkspaceActionSurface.SidebarSession => SidebarSessionActions,
+            WorkspaceActionSurface.TopBarActions => TopBarActions,
+            WorkspaceActionSurface.SessionControls => SessionControlActions,
+            WorkspaceActionSurface.DeviceDiscoveryPrimary => DeviceDiscoveryPrimaryActions,
+            WorkspaceActionSurface.DeviceDiscoveryScan => DeviceDiscoveryScanActions,
+            WorkspaceActionSurface.CrossNetworkQr => CrossNetworkQrActions,
+            WorkspaceActionSurface.CrossNetworkCodePrimary => CrossNetworkCodePrimaryActions,
+            WorkspaceActionSurface.CrossNetworkCodeConnect => CrossNetworkCodeConnectActions,
+            WorkspaceActionSurface.UsbManagementHeader => UsbManagementHeaderActions,
+            WorkspaceActionSurface.FileTransferHeader => FileTransferHeaderActions,
+            WorkspaceActionSurface.FileTransfer => FileTransferActions,
+            WorkspaceActionSurface.RemoteDesktopHeader => RemoteDesktopHeaderActions,
+            WorkspaceActionSurface.RemoteDesktop => RemoteDesktopActions,
+            WorkspaceActionSurface.QuantumDiagnosticsHeader => QuantumDiagnosticsHeaderActions,
+            WorkspaceActionSurface.SystemMonitorHeader => SystemMonitorHeaderActions,
+            WorkspaceActionSurface.SystemMonitorControls => SystemMonitorActions,
+            WorkspaceActionSurface.SettingsHeader => SettingsHeaderActions,
+            WorkspaceActionSurface.SettingsToolbar => SettingsToolbarActions,
+            WorkspaceActionSurface.SettingsMaintenance => SettingsMaintenanceActions,
+            _ => throw new InvalidOperationException()
+        };
 
     private ICommand? ResolveWorkspaceActionCommand(WorkspaceActionCommandId commandId) =>
         commandId switch
@@ -1575,7 +1580,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             snapshot,
             TopBarStatusSlot.Theme,
             _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme));
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions);
     }
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
