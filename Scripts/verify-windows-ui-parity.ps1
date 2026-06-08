@@ -95,6 +95,7 @@ $sessionViewModelDependenciesPath = Join-Path $RepoRoot "windows/Skybridge.WinCl
 $sessionEngineActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionEngineActions.cs"
 $sessionEngineStateProjectorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionEngineStateProjector.cs"
 $discoveryBrowserActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/DiscoveryBrowserActions.cs"
+$crossNetworkConnectionActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/CrossNetworkConnectionActions.cs"
 $asyncRelayCommandPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/AsyncRelayCommand.cs"
 $workspaceCommandGateCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandGateCoordinator.cs"
 $workspaceCommandAvailabilityPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandAvailability.cs"
@@ -149,7 +150,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $discoveryBrowserActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -161,6 +162,7 @@ $sessionViewModelDependencies = Get-Content -Raw -LiteralPath $sessionViewModelD
 $sessionEngineActions = Get-Content -Raw -LiteralPath $sessionEngineActionsPath
 $sessionEngineStateProjector = Get-Content -Raw -LiteralPath $sessionEngineStateProjectorPath
 $discoveryBrowserActions = Get-Content -Raw -LiteralPath $discoveryBrowserActionsPath
+$crossNetworkConnectionActions = Get-Content -Raw -LiteralPath $crossNetworkConnectionActionsPath
 $asyncRelayCommand = Get-Content -Raw -LiteralPath $asyncRelayCommandPath
 $workspaceCommandGateCoordinator = Get-Content -Raw -LiteralPath $workspaceCommandGateCoordinatorPath
 $workspaceCommandAvailability = Get-Content -Raw -LiteralPath $workspaceCommandAvailabilityPath
@@ -189,7 +191,7 @@ $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connection
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $remoteDesktopProfileSelectionCoordinator = Get-Content -Raw -LiteralPath $remoteDesktopProfileSelectionCoordinatorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $discoveryBrowserActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $discoveryBrowserActions + $crossNetworkConnectionActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -940,7 +942,6 @@ foreach ($viewStateBuilderSignal in @(
 foreach ($sessionViewModelViewStateSignal in @(
     "new WorkspaceViewStateBuilder()",
     "_workspaceViewStateBuilder.BuildManualConnectionRequest(",
-    "_workspaceViewStateBuilder.BuildCrossNetworkConnectionRequest(",
     "_workspaceViewStateBuilder.BuildDashboardMetricsRequest(",
     "_workspaceViewStateBuilder.BuildCommandGateState(",
     "_workspaceViewStateBuilder.BuildActionRenderState("
@@ -948,6 +949,7 @@ foreach ($sessionViewModelViewStateSignal in @(
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelViewStateSignal -Message "SessionViewModel must delegate request/state construction through WorkspaceViewStateBuilder: $sessionViewModelViewStateSignal"
 }
 Assert-Contains -Text $discoveryBrowserActions -Needle "_viewStateBuilder.BuildDiscoveryBrowserRequest(" -Message "DiscoveryBrowserActions must build browser requests through WorkspaceViewStateBuilder."
+Assert-Contains -Text $crossNetworkConnectionActions -Needle "_viewStateBuilder.BuildCrossNetworkConnectionRequest(" -Message "CrossNetworkConnectionActions must build cross-network requests through WorkspaceViewStateBuilder."
 foreach ($sessionViewModelDirectViewStateConstructionPattern in @(
     "new\s+DiscoveryBrowserRequest\s*\(",
     "new\s+ManualConnectionRequest\s*\(",
@@ -2034,6 +2036,7 @@ foreach ($viewModelWorkspaceCompletedStatusLiteral in @(
 }
 
 foreach ($crossNetworkInputPolicySignal in @(
+    "internal sealed class CrossNetworkConnectionActions",
     "internal sealed class CrossNetworkCodeInputCoordinator",
     "internal sealed record CrossNetworkCodeInputUpdate",
     "BuildCodeInputPolicy",
@@ -2070,6 +2073,52 @@ foreach ($crossNetworkCodeInputCoordinatorSignal in @(
     "bool ShouldNotifyNormalizedValue"
 )) {
     Assert-Contains -Text $crossNetworkCodeInputCoordinator -Needle $crossNetworkCodeInputCoordinatorSignal -Message "CrossNetworkCodeInputCoordinator contract missing: $crossNetworkCodeInputCoordinatorSignal"
+}
+
+foreach ($crossNetworkConnectionActionsSignal in @(
+    "internal sealed class CrossNetworkConnectionActions",
+    "WorkspaceBusyCoordinator busyCoordinator",
+    "ICrossNetworkConnectionClient crossNetworkConnectionClient",
+    "WorkspaceViewStateBuilder viewStateBuilder",
+    "ConnectionWorkspaceResultProjector connectionResultProjector",
+    "GenerateQrCodeAsync()",
+    "RunAsync(CrossNetworkConnectionAction.GenerateQrCode)",
+    "ScanQrCodeAsync()",
+    "RunAsync(CrossNetworkConnectionAction.ScanQrCode)",
+    "GenerateCodeAsync()",
+    "RunAsync(CrossNetworkConnectionAction.GenerateCode)",
+    "RegenerateCodeAsync()",
+    "RunAsync(CrossNetworkConnectionAction.RegenerateCode)",
+    "CopyCodeAsync()",
+    "RunAsync(CrossNetworkConnectionAction.CopyCode)",
+    "ConnectWithCodeAsync()",
+    "RunAsync(CrossNetworkConnectionAction.ConnectWithCode)",
+    "_busyCoordinator.RunAsync(WorkspaceErrorScope.DeviceDiscovery",
+    "_setCrossNetworkStatus(_crossNetworkConnectionClient.BuildPendingStatus(action))",
+    "_crossNetworkConnectionClient.BuildReadOnlySnapshotAsync(",
+    "_viewStateBuilder.BuildCrossNetworkConnectionRequest(",
+    "_connectionResultProjector.ApplyCrossNetworkPrepared("
+)) {
+    Assert-Contains -Text $crossNetworkConnectionActions -Needle $crossNetworkConnectionActionsSignal -Message "CrossNetworkConnectionActions contract missing: $crossNetworkConnectionActionsSignal"
+}
+foreach ($sessionViewModelCrossNetworkActionSignal in @(
+    "new CrossNetworkConnectionActions(",
+    "_crossNetworkConnectionActions.GenerateQrCodeAsync()",
+    "_crossNetworkConnectionActions.ScanQrCodeAsync()",
+    "_crossNetworkConnectionActions.GenerateCodeAsync()",
+    "_crossNetworkConnectionActions.RegenerateCodeAsync()",
+    "_crossNetworkConnectionActions.CopyCodeAsync()",
+    "_crossNetworkConnectionActions.ConnectWithCodeAsync()"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelCrossNetworkActionSignal -Message "SessionViewModel must delegate cross-network actions through CrossNetworkConnectionActions: $sessionViewModelCrossNetworkActionSignal"
+}
+foreach ($sessionViewModelDirectCrossNetworkActionSignal in @(
+    "RunCrossNetworkConnectionAsync",
+    "_crossNetworkConnectionClient.BuildPendingStatus(action)",
+    "_crossNetworkConnectionClient.BuildReadOnlySnapshotAsync(",
+    "ApplyCrossNetworkPrepared("
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelDirectCrossNetworkActionSignal)) -Message "SessionViewModel must not compose cross-network actions directly: $sessionViewModelDirectCrossNetworkActionSignal"
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("CrossNetworkCodeAlphabet")) -Message "SessionViewModel must not duplicate the Smart Connection Code alphabet."
@@ -2701,6 +2750,7 @@ foreach ($docSignal in @(
     "SessionEngineActions",
     "SessionEngineStateProjector",
     "DiscoveryBrowserActions",
+    "CrossNetworkConnectionActions",
     "RunDeviceDiscoveryActionAsync",
     "ApplyWorkspaceInputChange",
     "RefreshSelectedFeatureState",

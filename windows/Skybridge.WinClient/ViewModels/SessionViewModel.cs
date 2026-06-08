@@ -54,6 +54,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly RemoteDesktopProfileSelectionCoordinator _remoteDesktopProfileSelectionCoordinator;
     private readonly CrossNetworkCodeInputCoordinator _crossNetworkCodeInputCoordinator;
     private readonly DiscoveryBrowserActions _discoveryBrowserActions;
+    private readonly CrossNetworkConnectionActions _crossNetworkConnectionActions;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
     private string _statusMessage = "";
@@ -342,6 +343,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             () => PairingStatus,
             value => ExtendedSearchCountdown = value,
             value => DiscoveryBrowserStatus = value);
+        _crossNetworkConnectionActions = new CrossNetworkConnectionActions(
+            _workspaceBusyCoordinator,
+            _crossNetworkConnectionClient,
+            _workspaceViewStateBuilder,
+            _connectionResultProjector,
+            () => CrossNetworkQrInput,
+            () => CrossNetworkCodeInput,
+            () => CrossNetworkGeneratedCode,
+            value => CrossNetworkStatus = value,
+            value => CrossNetworkGeneratedCode = value);
         CoreDiagnosticFacts = collections.CoreDiagnosticFacts;
         DeviceDiscoveryPrimaryActions = collections.DeviceDiscoveryPrimaryActions;
         DeviceDiscoveryScanActions = collections.DeviceDiscoveryScanActions;
@@ -1019,41 +1030,22 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     }
 
     private Task GenerateQRCodeAsync() =>
-        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.GenerateQrCode);
+        _crossNetworkConnectionActions.GenerateQrCodeAsync();
 
     private Task ScanQRCodeAsync() =>
-        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.ScanQrCode);
+        _crossNetworkConnectionActions.ScanQrCodeAsync();
 
     private Task GenerateConnectionCodeAsync() =>
-        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.GenerateCode);
+        _crossNetworkConnectionActions.GenerateCodeAsync();
 
     private Task RegenerateConnectionCodeAsync() =>
-        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.RegenerateCode);
+        _crossNetworkConnectionActions.RegenerateCodeAsync();
 
     private Task CopyConnectionCodeAsync() =>
-        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.CopyCode);
+        _crossNetworkConnectionActions.CopyCodeAsync();
 
     private Task ConnectConnectionCodeAsync() =>
-        RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction.ConnectWithCode);
-
-    private async Task RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction action)
-    {
-        await RunDeviceDiscoveryActionAsync(async () =>
-        {
-            CrossNetworkStatus = _crossNetworkConnectionClient.BuildPendingStatus(action);
-
-            var snapshot = await _crossNetworkConnectionClient.BuildReadOnlySnapshotAsync(
-                _workspaceViewStateBuilder.BuildCrossNetworkConnectionRequest(
-                    action,
-                    CrossNetworkQrInput,
-                    CrossNetworkCodeInput,
-                    CrossNetworkGeneratedCode));
-
-            _connectionResultProjector.ApplyCrossNetworkPrepared(
-                snapshot,
-                value => CrossNetworkGeneratedCode = value);
-        });
-    }
+        _crossNetworkConnectionActions.ConnectWithCodeAsync();
 
     private async Task ParseAdvertisementAsync()
     {
