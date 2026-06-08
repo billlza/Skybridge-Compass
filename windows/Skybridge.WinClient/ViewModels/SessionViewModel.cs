@@ -460,10 +460,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _connectionState, value))
             {
-                OnPropertyChanged(nameof(ConnectionStatus));
-                RefreshDashboardMetrics();
-                RefreshTopBarStatus();
-                RefreshCommandStates();
+                RefreshConnectionState();
             }
         }
     }
@@ -477,9 +474,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _isBusy, value))
             {
-                RefreshDashboardMetrics();
-                RefreshTopBarStatus();
-                RefreshCommandStates();
+                RefreshShellRuntimeState();
             }
         }
     }
@@ -1289,6 +1284,19 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(IsQuantumSelected));
         OnPropertyChanged(nameof(IsSystemMonitorSelected));
         OnPropertyChanged(nameof(IsSettingsSelected));
+        RefreshTopBarStatus();
+        RefreshCommandStates();
+    }
+
+    private void RefreshConnectionState()
+    {
+        OnPropertyChanged(nameof(ConnectionStatus));
+        RefreshShellRuntimeState();
+    }
+
+    private void RefreshShellRuntimeState()
+    {
+        RefreshDashboardMetrics();
         RefreshTopBarStatus();
         RefreshCommandStates();
     }
