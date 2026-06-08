@@ -133,6 +133,7 @@ $fileTransferPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Fi
 $workspaceActionCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceActionCatalogClient.cs"
 $remoteDesktopPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopWorkspaceClient.cs"
 $remoteDesktopProfileCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/RemoteDesktopProfileCatalogClient.cs"
+$remoteDesktopProfileSelectionCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/RemoteDesktopProfileSelectionCoordinator.cs"
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
@@ -144,7 +145,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -178,8 +179,9 @@ $dashboardMetricsUpdater = Get-Content -Raw -LiteralPath $dashboardMetricsUpdate
 $topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
 $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connectionWorkspaceInputCoordinatorPath
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
+$remoteDesktopProfileSelectionCoordinator = Get-Content -Raw -LiteralPath $remoteDesktopProfileSelectionCoordinatorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -2095,17 +2097,31 @@ Assert-Ordered -Text $remoteDesktopProfileCatalog -Context "Remote Desktop profi
 foreach ($profileCatalogSignal in @(
     "public interface IRemoteDesktopProfileCatalogClient",
     "public sealed class RemoteDesktopProfileCatalogClient : IRemoteDesktopProfileCatalogClient",
+    "internal sealed class RemoteDesktopProfileSelectionCoordinator",
     "RemoteDesktopProfileCatalogSnapshot",
     "BuildReadOnlySnapshot",
     "DefaultBitrateProfile",
     "DefaultFramerateProfile",
     "BuildBitrateSelectionStatus",
     "BuildFramerateSelectionStatus",
-    "_remoteDesktopProfileCatalogClient.BuildBitrateSelectionStatus(value)",
-    "_remoteDesktopProfileCatalogClient.BuildFramerateSelectionStatus(value)",
+    "_profileCatalogClient.BuildBitrateSelectionStatus(value)",
+    "_profileCatalogClient.BuildFramerateSelectionStatus(value)",
+    "_remoteDesktopProfileSelectionCoordinator.ApplyBitrateSelection(value)",
+    "_remoteDesktopProfileSelectionCoordinator.ApplyFramerateSelection(value)",
     "new RemoteDesktopProfileCatalogClient()"
 )) {
     Assert-Contains -Text ($remoteDesktopProfileCatalog + $sessionViewModel + $mainWindow) -Needle $profileCatalogSignal -Message "Remote Desktop profile catalog signal missing: $profileCatalogSignal"
+}
+foreach ($profileSelectionCoordinatorSignal in @(
+    "internal sealed class RemoteDesktopProfileSelectionCoordinator",
+    "IRemoteDesktopProfileCatalogClient profileCatalogClient",
+    "Action<string> setStatusMessage",
+    "ApplyBitrateSelection(string value)",
+    "_setStatusMessage(_profileCatalogClient.BuildBitrateSelectionStatus(value))",
+    "ApplyFramerateSelection(string value)",
+    "_setStatusMessage(_profileCatalogClient.BuildFramerateSelectionStatus(value))"
+)) {
+    Assert-Contains -Text $remoteDesktopProfileSelectionCoordinator -Needle $profileSelectionCoordinatorSignal -Message "RemoteDesktopProfileSelectionCoordinator contract missing: $profileSelectionCoordinatorSignal"
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("Enum.GetValues")) -Message "SessionViewModel must not build Remote Desktop profile lists from local enum reflection."
@@ -2113,6 +2129,8 @@ Assert-True -Condition (-not $sessionViewModel.Contains('_selectedBitrate = "Med
 Assert-True -Condition (-not $sessionViewModel.Contains('_selectedFramerate = "Fps60"')) -Message "SessionViewModel must source default framerate profile from RemoteDesktopProfileCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains('StatusMessage = $"Bitrate set to {value}"')) -Message "SessionViewModel must source bitrate selection status from RemoteDesktopProfileCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains('StatusMessage = $"Framerate set to {value}"')) -Message "SessionViewModel must source framerate selection status from RemoteDesktopProfileCatalogClient."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_remoteDesktopProfileCatalogClient.BuildBitrateSelectionStatus(value)")) -Message "SessionViewModel must update bitrate selection status through RemoteDesktopProfileSelectionCoordinator."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_remoteDesktopProfileCatalogClient.BuildFramerateSelectionStatus(value)")) -Message "SessionViewModel must update framerate selection status through RemoteDesktopProfileSelectionCoordinator."
 
 Assert-Ordered -Text $mainWindow -Context "Quantum diagnostics action order" -Needles @(
     '<TextBlock Text="Quantum / Core Diagnostics"',
@@ -2542,6 +2560,7 @@ foreach ($docSignal in @(
     "ReadOnlyWorkspaceRefreshCoordinator",
     "ReadOnlyWorkspaceRefreshActions",
     "ReadOnlyWorkspaceSnapshotHandlers",
+    "RemoteDesktopProfileSelectionCoordinator",
     "WorkspaceCollectionProjector.Replace",
     "RefreshReadOnlyWorkspaceAsync",
     "Prepare Connection",

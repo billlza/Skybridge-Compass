@@ -49,6 +49,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
     private readonly WorkspaceViewStateBuilder _workspaceViewStateBuilder;
+    private readonly RemoteDesktopProfileSelectionCoordinator _remoteDesktopProfileSelectionCoordinator;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
     private string _statusMessage = "";
@@ -183,6 +184,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceCommandAvailability = new WorkspaceCommandAvailability(
             _workspaceCommandGateCoordinator,
             BuildWorkspaceCommandGateState);
+        _remoteDesktopProfileSelectionCoordinator = new RemoteDesktopProfileSelectionCoordinator(
+            _remoteDesktopProfileCatalogClient,
+            value => StatusMessage = value);
         var workspaceStartupStateBuilder = new WorkspaceStartupStateBuilder(
             _engineClient,
             _discoveryBrowserClient,
@@ -883,7 +887,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _selectedBitrate, value))
             {
-                StatusMessage = _remoteDesktopProfileCatalogClient.BuildBitrateSelectionStatus(value);
+                _remoteDesktopProfileSelectionCoordinator.ApplyBitrateSelection(value);
             }
         }
     }
@@ -895,7 +899,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _selectedFramerate, value))
             {
-                StatusMessage = _remoteDesktopProfileCatalogClient.BuildFramerateSelectionStatus(value);
+                _remoteDesktopProfileSelectionCoordinator.ApplyFramerateSelection(value);
             }
         }
     }
