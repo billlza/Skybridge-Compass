@@ -34,6 +34,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
     private readonly SessionEngineActions _sessionEngineActions;
+    private readonly SessionEngineStateProjector _sessionEngineStateProjector;
     private readonly WorkspaceCommandGateCoordinator _workspaceCommandGateCoordinator;
     private readonly WorkspaceCommandAvailability _workspaceCommandAvailability;
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
@@ -242,6 +243,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _engineClient,
             _workspaceBusyCoordinator,
             _sessionStatusClient,
+            value => StatusMessage = value);
+        _sessionEngineStateProjector = new SessionEngineStateProjector(
+            _sessionStatusClient,
+            value => ConnectionState = value,
             value => StatusMessage = value);
         var readOnlyWorkspaceRefreshCoordinator = new ReadOnlyWorkspaceRefreshCoordinator(
             _workspaceBusyCoordinator,
@@ -1244,8 +1249,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
     {
-        ConnectionState = newState;
-        StatusMessage = _sessionStatusClient.BuildEngineStateStatus(newState);
+        _sessionEngineStateProjector.Apply(newState);
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
