@@ -545,6 +545,22 @@
                                             PlaceholderText="skybridge://connect/&lt;base64url-json&gt;"
                                             HorizontalAlignment="Stretch" />
                                     </Grid>
+                                    <Border
+                                        AutomationProperties.AutomationId="CrossNetworkGeneratedQrCodePreview"
+                                        Width="168"
+                                        Height="168"
+                                        Padding="10"
+                                        HorizontalAlignment="Left"
+                                        Visibility="{Binding IsCrossNetworkGeneratedQrCodeVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                                        Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="8">
+                                        <Image
+                                            AutomationProperties.AutomationId="CrossNetworkGeneratedQrCodeImage"
+                                            Source="{Binding CrossNetworkGeneratedQrCodeImage}"
+                                            Stretch="Uniform" />
+                                    </Border>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Spacing="10">
                                     <TextBlock Text="Smart Connection Code" FontWeight="SemiBold" />

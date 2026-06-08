@@ -3,7 +3,10 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Skybridge.WinClient.Services;
+using Windows.Storage.Streams;
 
 namespace Skybridge.WinClient.ViewModels;
 
@@ -73,6 +76,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _crossNetworkQrInput = "";
     private string _crossNetworkCodeInput = "";
     private string _crossNetworkGeneratedCode = "";
+    private ImageSource? _crossNetworkGeneratedQrCodeImage;
     private string _discoveryTxtRecord = "";
     private string _pairingConnectionCode = "";
     private string _discoveryStatus = "";
@@ -396,7 +400,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             () => CrossNetworkCodeInput,
             () => CrossNetworkGeneratedCode,
             value => CrossNetworkStatus = value,
-            value => CrossNetworkGeneratedCode = value);
+            value => CrossNetworkGeneratedCode = value,
+            value => CrossNetworkGeneratedQrCodeImage = BuildQrCodeImageSource(value));
         _connectionWorkspaceActions = new ConnectionWorkspaceActions(
             _workspaceBusyCoordinator,
             _manualConnectionClient,
@@ -866,6 +871,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set => SetField(ref _crossNetworkGeneratedCode, value);
     }
 
+    public ImageSource? CrossNetworkGeneratedQrCodeImage
+    {
+        get => _crossNetworkGeneratedQrCodeImage;
+        private set
+        {
+            if (SetField(ref _crossNetworkGeneratedQrCodeImage, value))
+            {
+                OnPropertyChanged(nameof(IsCrossNetworkGeneratedQrCodeVisible));
+            }
+        }
+    }
+
+    public bool IsCrossNetworkGeneratedQrCodeVisible =>
+        CrossNetworkGeneratedQrCodeImage is not null;
+
     public string DiscoveryTxtRecord
     {
         get => _discoveryTxtRecord;
@@ -1126,6 +1146,28 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool IsFeatureSelected(FeatureEntryId featureId) =>
         _workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId);
+
+    private static ImageSource? BuildQrCodeImageSource(string? pngBase64)
+    {
+        if (string.IsNullOrWhiteSpace(pngBase64))
+        {
+            return null;
+        }
+
+        var bytes = Convert.FromBase64String(pngBase64);
+        var image = new BitmapImage();
+        using var stream = new InMemoryRandomAccessStream();
+        using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
+        {
+            writer.WriteBytes(bytes);
+            writer.StoreAsync().AsTask().GetAwaiter().GetResult();
+            writer.DetachStream();
+        }
+
+        stream.Seek(0);
+        image.SetSource(stream);
+        return image;
+    }
 
     internal ConnectionWorkspaceValidatedState ValidatedConnectionState =>
         _connectionInputCoordinator.ValidatedState;

@@ -66,6 +66,9 @@ try {
   <ItemGroup>
 $compileItemText
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+  </ItemGroup>
 </Project>
 "@
 
@@ -412,6 +415,36 @@ await ExpectThrowsAsync<InvalidOperationException>(
     "Windows external adapter must not select AppleNative");
 
 var crossNetworkClient = new CrossNetworkConnectionClient();
+var generatedQrSnapshot = await crossNetworkClient.BuildReadOnlySnapshotAsync(
+    new CrossNetworkConnectionRequest(
+        CrossNetworkConnectionAction.GenerateQrCode,
+        "",
+        "",
+        ""));
+AssertEqual("Waiting for connection...", generatedQrSnapshot.Status, "generated QR status");
+AssertEqual(true, !string.IsNullOrWhiteSpace(generatedQrSnapshot.GeneratedQrCodePayload), "generated QR payload");
+AssertEqual(true, generatedQrSnapshot.GeneratedQrCodePayload!.StartsWith("skybridge://connect?data=", StringComparison.Ordinal), "generated QR payload URI");
+AssertEqual(true, !string.IsNullOrWhiteSpace(generatedQrSnapshot.GeneratedQrCodePngBase64), "generated QR PNG base64");
+var generatedQrPng = Convert.FromBase64String(generatedQrSnapshot.GeneratedQrCodePngBase64!);
+AssertEqual(true, generatedQrPng.Length > 32, "generated QR PNG length");
+AssertEqual((byte)0x89, generatedQrPng[0], "generated QR PNG signature byte 0");
+AssertEqual((byte)0x50, generatedQrPng[1], "generated QR PNG signature byte 1");
+AssertEqual((byte)0x4E, generatedQrPng[2], "generated QR PNG signature byte 2");
+AssertEqual((byte)0x47, generatedQrPng[3], "generated QR PNG signature byte 3");
+AssertEqual("ready", Fact(generatedQrSnapshot, "Dynamic Encrypted QR Code").Value, "generated QR readiness fact");
+AssertContains(Fact(generatedQrSnapshot, "QR bitmap").Detail, "QRCoder", "generated QR bitmap detail");
+AssertEqual("idle", Fact(generatedQrSnapshot, "CrossNetworkReadiness").Value, "generated QR transport readiness");
+AssertContains(Fact(generatedQrSnapshot, "Safety").Detail, "No signaling WebSocket", "generated QR safety");
+var scannedGeneratedQrSnapshot = await crossNetworkClient.BuildReadOnlySnapshotAsync(
+    new CrossNetworkConnectionRequest(
+        CrossNetworkConnectionAction.ScanQrCode,
+        generatedQrSnapshot.GeneratedQrCodePayload!,
+        "",
+        ""));
+AssertEqual("QR signature verified", scannedGeneratedQrSnapshot.Status, "generated QR scan status");
+AssertEqual("QRCodeSignatureEnvelope", Fact(scannedGeneratedQrSnapshot, "QR schema").Value, "generated QR scan schema");
+AssertEqual("verified", Fact(scannedGeneratedQrSnapshot, "Signature").Value, "generated QR scan signature fact");
+
 var verifiedDynamicSnapshot = await crossNetworkClient.BuildReadOnlySnapshotAsync(
     new CrossNetworkConnectionRequest(
         CrossNetworkConnectionAction.ScanQrCode,

@@ -65,6 +65,7 @@ $project = [xml](Get-Content -Raw -LiteralPath $winClientProjectPath)
 $targetFramework = [string]$project.Project.PropertyGroup.TargetFramework
 $windowsAppSdkVersion = Get-PackageReferenceVersion -Project $project -PackageId "Microsoft.WindowsAppSDK"
 $buildToolsVersion = Get-PackageReferenceVersion -Project $project -PackageId "Microsoft.Windows.SDK.BuildTools"
+$qrCoderVersion = Get-PackageReferenceVersion -Project $project -PackageId "QRCoder"
 $cargoManifest = Get-Content -Raw -LiteralPath $cargoManifestPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $agents = Get-Content -Raw -LiteralPath $agentsPath
@@ -72,6 +73,7 @@ $agents = Get-Content -Raw -LiteralPath $agentsPath
 Assert-True -Condition ($targetFramework -eq "net10.0-windows10.0.19041.0") -Message "Windows client must target net10.0-windows10.0.19041.0, got $targetFramework"
 Assert-True -Condition ($windowsAppSdkVersion -eq "2.1.3") -Message "Windows App SDK must stay on latest stable 2.1.3, got $windowsAppSdkVersion"
 Assert-True -Condition ($buildToolsVersion -eq "10.0.28000.1839") -Message "Windows SDK BuildTools must stay on latest stable 10.0.28000.1839, got $buildToolsVersion"
+Assert-True -Condition ($qrCoderVersion -eq "1.8.0") -Message "QRCoder must stay on latest stable 1.8.0, got $qrCoderVersion"
 Assert-Contains -Text $cargoManifest -Needle 'edition = "2021"' -Message "Rust core must stay on Rust 2021 edition until a dedicated migration is scheduled."
 Assert-Contains -Text $cargoManifest -Needle 'crate-type = ["rlib", "cdylib"]' -Message "Rust core must build both reusable rlib and native cdylib artifacts."
 
@@ -80,6 +82,7 @@ foreach ($architectureSignal in @(
     'net10.0-windows10.0.19041.0',
     'Windows App SDK `2.1.3`',
     'Windows SDK BuildTools `10.0.28000.1839`',
+    'QRCoder `1.8.0`',
     '.NET 10',
     '10.0.8',
     'November 14, 2028',
@@ -98,6 +101,7 @@ foreach ($agentSignal in @(
     'net10.0-windows10.0.19041.0',
     'Windows App SDK `2.1.3`',
     'Windows SDK BuildTools `10.0.28000.1839`',
+    'QRCoder `1.8.0`',
     'verify-windows-stack-freshness.ps1'
 )) {
     Assert-Contains -Text $agents -Needle $agentSignal -Message "AGENTS.md stack guidance missing signal: $agentSignal"
@@ -116,6 +120,9 @@ if ($CheckOnline) {
 
     $latestBuildTools = Get-LatestStableNuGetVersion -PackageId "Microsoft.Windows.SDK.BuildTools"
     Assert-True -Condition ($latestBuildTools -eq $buildToolsVersion) -Message "Microsoft.Windows.SDK.BuildTools package is not current stable: project=$buildToolsVersion latest=$latestBuildTools"
+
+    $latestQrCoder = Get-LatestStableNuGetVersion -PackageId "QRCoder"
+    Assert-True -Condition ($latestQrCoder -eq $qrCoderVersion) -Message "QRCoder package is not current stable: project=$qrCoderVersion latest=$latestQrCoder"
 
     $msquicLatest = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/msquic/releases/latest"
     Assert-True -Condition ($msquicLatest.tag_name -eq "v2.5.8") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"

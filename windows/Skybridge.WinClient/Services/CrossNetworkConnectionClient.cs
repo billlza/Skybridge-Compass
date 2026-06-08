@@ -4,7 +4,9 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using QRCoder;
 
 namespace Skybridge.WinClient.Services;
 
@@ -38,9 +40,13 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
     private const int P256PublicKeyFingerprintHexLength = 64;
     private const double QrSignatureChallengeLifetimeSeconds = 300;
     private const string DynamicQrDeviceType = "macOS";
+    private const string GeneratedQrDeviceType = "Windows";
     private const string DynamicQrAddress = "0.0.0.0";
     private const ushort DynamicQrPort = 0;
+    private const ushort GeneratedQrPort = 0;
+    private const int GeneratedQrPixelsPerModule = 8;
     private static readonly IReadOnlyList<string> DynamicQrCapabilities = new[] { "p2p", "cross-network" };
+    private static readonly JsonSerializerOptions QrJsonOptions = new(JsonSerializerDefaults.Web);
 
     public static CrossNetworkCodeInputPolicy DefaultCodeInputPolicy { get; } =
         new(ShortCodeAlphabet, 6);
@@ -131,12 +137,15 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
 
     private static CrossNetworkConnectionSnapshot BuildQrGenerationSnapshot()
     {
+        var generatedQr = BuildSignedGeneratedQrCode();
         var facts = new List<CrossNetworkConnectionFact>
         {
-            new("Dynamic Encrypted QR Code", "Generate QR Code", "Windows keeps the mac QR entry point visible while native QR bitmap generation is pending."),
+            new("Dynamic Encrypted QR Code", "ready", "Windows generates a signed QR URI and renders it as a PNG bitmap for the mac-compatible QR entry point."),
+            new("QR bitmap", $"{generatedQr.PngByteLength} bytes", "Rendered with QRCoder PngByteQRCodeHelper and bound to the Windows QR preview image."),
             new("URI format", $"{DirectQrPrefix}<base64url-json>", $"Scanner input must also accept {QueryQrPrefix}<base64url-json>."),
             new("Validity", "5 minutes", "Matches the mac discovery.qrCode.description validity window."),
-            new("Signature", "sig/pk/ts/fp required", "QR payload signature verification must pass before any future WebRTC answerer starts."),
+            new("Session ID", generatedQr.SessionId, "Generated metadata only; no signaling room has been registered for this preview."),
+            new("Signature", generatedQr.PublicKeyFingerprint, "sig/pk/ts/fp required by query form; QRCodeSignatureEnvelope embeds signatureBase64/publicKeyBase64/timestamp/publicKeyFingerprint and can be verified by the scanner path."),
             new("CrossNetworkReadiness", "idle", "No transportReady or handshakeComplete state is claimed by this read-only snapshot."),
             new("Safety", "no WebRTC offerer started", "No signaling WebSocket, ICE negotiation, DataChannel, HTTP file server, or FfiEngineClient connection is started.")
         };
@@ -145,8 +154,83 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             DateTimeOffset.UtcNow,
             "Waiting for connection...",
             null,
-            facts);
+            facts,
+            generatedQr.Uri,
+            generatedQr.PngBase64);
     }
+
+    private static GeneratedQrCode BuildSignedGeneratedQrCode()
+    {
+        using var signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var publicKey = ExportRawP256PublicKey(signingKey);
+        var publicKeyBase64 = Convert.ToBase64String(publicKey);
+        var publicKeyFingerprint = Convert.ToHexString(SHA256.HashData(publicKey)).ToLowerInvariant();
+        var sessionId = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        var timestamp = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0)
+            .ToString("0.###", CultureInfo.InvariantCulture);
+        var payload = new CanonicalQrPayload(
+            sessionId,
+            Environment.MachineName,
+            GeneratedQrDeviceType,
+            DynamicQrAddress,
+            GeneratedQrPort,
+            Environment.OSVersion.VersionString,
+            DynamicQrCapabilities);
+        var canonical = BuildQrCanonicalSignaturePayload(
+            payload.Id,
+            payload.Name,
+            payload.Type,
+            payload.Address,
+            payload.Port,
+            payload.OsVersion,
+            payload.Capabilities,
+            timestamp,
+            publicKeyFingerprint);
+        var signature = signingKey.SignData(
+            Encoding.UTF8.GetBytes(canonical),
+            HashAlgorithmName.SHA256,
+            DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        var envelope = new CanonicalQrEnvelope(
+            payload,
+            Convert.ToBase64String(signature),
+            publicKeyBase64,
+            timestamp,
+            publicKeyFingerprint);
+        var envelopeJson = JsonSerializer.Serialize(envelope, QrJsonOptions);
+        var uri = $"{QueryQrPrefix}{Base64UrlEncode(Encoding.UTF8.GetBytes(envelopeJson))}";
+        var pngBytes = PngByteQRCodeHelper.GetQRCode(
+            uri,
+            QRCodeGenerator.ECCLevel.Q,
+            GeneratedQrPixelsPerModule);
+
+        return new GeneratedQrCode(
+            uri,
+            Convert.ToBase64String(pngBytes),
+            pngBytes.Length,
+            publicKeyFingerprint,
+            sessionId);
+    }
+
+    private static byte[] ExportRawP256PublicKey(ECDsa signingKey)
+    {
+        var publicParameters = signingKey.ExportParameters(false);
+        if (publicParameters.Q.X is not { Length: 32 } x
+            || publicParameters.Q.Y is not { Length: 32 } y)
+        {
+            throw new InvalidOperationException("QR signing key export must produce a raw P256 public key.");
+        }
+
+        var publicKey = new byte[64];
+        Buffer.BlockCopy(x, 0, publicKey, 0, x.Length);
+        Buffer.BlockCopy(y, 0, publicKey, x.Length, y.Length);
+        return publicKey;
+    }
+
+    private static string Base64UrlEncode(byte[] bytes) =>
+        Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
 
     private static CrossNetworkConnectionSnapshot BuildQrScanSnapshot(string qrInput)
     {
@@ -387,7 +471,7 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
                 signedEnvelopePayload,
                 ReadRequiredString(root, "signatureBase64"),
                 ReadRequiredString(root, "publicKeyBase64"),
-                root.GetProperty("timestamp").GetRawText(),
+                ReadCanonicalTimestampText(root.GetProperty("timestamp"), "timestamp"),
                 ReadRequiredString(root, "publicKeyFingerprint"),
                 "QRCodeSignatureEnvelope");
         }
@@ -462,7 +546,7 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         var name = ReadRequiredString(payload, "name");
         var type = ReadRequiredString(payload, "type");
         var address = ReadRequiredString(payload, "address");
-        var port = ReadRequiredUInt16(payload, "port");
+        var port = ReadRequiredUInt16(payload, "port", allowZero: true);
         var osVersion = ReadRequiredString(payload, "osVersion");
         var capabilities = ReadRequiredArray(payload, "capabilities");
         var timestamp = ParseUnixTimestamp(timestampText, "timestamp");
@@ -685,6 +769,14 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         return element.GetString() ?? string.Empty;
     }
 
+    private static string ReadCanonicalTimestampText(JsonElement element, string propertyName) =>
+        element.ValueKind switch
+        {
+            JsonValueKind.Number => element.GetRawText(),
+            JsonValueKind.String => ReadString(element, propertyName),
+            _ => throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be numeric or a numeric string.")
+        };
+
     private static int ReadRequiredInt32(JsonElement element, string propertyName)
     {
         if (!element.TryGetProperty(propertyName, out var property) || !property.TryGetInt32(out var value))
@@ -705,12 +797,13 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         return value;
     }
 
-    private static ushort ReadRequiredUInt16(JsonElement element, string propertyName)
+    private static ushort ReadRequiredUInt16(JsonElement element, string propertyName, bool allowZero = false)
     {
         var value = ReadRequiredInt32(element, propertyName);
-        if (value is < 1 or > 65535)
+        var lowerBound = allowZero ? 0 : 1;
+        if (value < lowerBound || value > 65535)
         {
-            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be between 1 and 65535.");
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} must be between {lowerBound} and 65535.");
         }
 
         return (ushort)value;
@@ -939,7 +1032,9 @@ public sealed record CrossNetworkConnectionSnapshot(
     DateTimeOffset CapturedAt,
     string Status,
     string? GeneratedCode,
-    IReadOnlyList<CrossNetworkConnectionFact> Facts);
+    IReadOnlyList<CrossNetworkConnectionFact> Facts,
+    string? GeneratedQrCodePayload = null,
+    string? GeneratedQrCodePngBase64 = null);
 
 public sealed record CrossNetworkConnectionFact(
     string Label,
@@ -949,3 +1044,26 @@ public sealed record CrossNetworkConnectionFact(
 public sealed record CrossNetworkCodeInputPolicy(
     string Alphabet,
     int CodeLength);
+
+internal sealed record GeneratedQrCode(
+    string Uri,
+    string PngBase64,
+    int PngByteLength,
+    string PublicKeyFingerprint,
+    string SessionId);
+
+internal sealed record CanonicalQrPayload(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("type")] string Type,
+    [property: JsonPropertyName("address")] string Address,
+    [property: JsonPropertyName("port")] ushort Port,
+    [property: JsonPropertyName("osVersion")] string OsVersion,
+    [property: JsonPropertyName("capabilities")] IReadOnlyList<string> Capabilities);
+
+internal sealed record CanonicalQrEnvelope(
+    [property: JsonPropertyName("payload")] CanonicalQrPayload Payload,
+    [property: JsonPropertyName("signatureBase64")] string SignatureBase64,
+    [property: JsonPropertyName("publicKeyBase64")] string PublicKeyBase64,
+    [property: JsonPropertyName("timestamp")] string Timestamp,
+    [property: JsonPropertyName("publicKeyFingerprint")] string PublicKeyFingerprint);

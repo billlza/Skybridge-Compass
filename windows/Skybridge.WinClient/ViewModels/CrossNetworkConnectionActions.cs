@@ -15,6 +15,7 @@ internal sealed class CrossNetworkConnectionActions
     private readonly Func<string> _getCrossNetworkGeneratedCode;
     private readonly Action<string> _setCrossNetworkStatus;
     private readonly Action<string> _setCrossNetworkGeneratedCode;
+    private readonly Action<string?> _setCrossNetworkGeneratedQrCodePngBase64;
 
     public CrossNetworkConnectionActions(
         WorkspaceBusyCoordinator busyCoordinator,
@@ -25,7 +26,8 @@ internal sealed class CrossNetworkConnectionActions
         Func<string> getCrossNetworkCodeInput,
         Func<string> getCrossNetworkGeneratedCode,
         Action<string> setCrossNetworkStatus,
-        Action<string> setCrossNetworkGeneratedCode)
+        Action<string> setCrossNetworkGeneratedCode,
+        Action<string?> setCrossNetworkGeneratedQrCodePngBase64)
     {
         _busyCoordinator = busyCoordinator;
         _crossNetworkConnectionClient = crossNetworkConnectionClient;
@@ -36,6 +38,7 @@ internal sealed class CrossNetworkConnectionActions
         _getCrossNetworkGeneratedCode = getCrossNetworkGeneratedCode;
         _setCrossNetworkStatus = setCrossNetworkStatus;
         _setCrossNetworkGeneratedCode = setCrossNetworkGeneratedCode;
+        _setCrossNetworkGeneratedQrCodePngBase64 = setCrossNetworkGeneratedQrCodePngBase64;
     }
 
     public Task GenerateQrCodeAsync() =>
@@ -70,6 +73,7 @@ internal sealed class CrossNetworkConnectionActions
 
             _connectionResultProjector.ApplyCrossNetworkPrepared(
                 snapshot,
-                _setCrossNetworkGeneratedCode);
+                _setCrossNetworkGeneratedCode,
+                _setCrossNetworkGeneratedQrCodePngBase64);
         });
 }

@@ -55,6 +55,9 @@ try {
   <ItemGroup>
 $compileItemText
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+  </ItemGroup>
 </Project>
 "@
 

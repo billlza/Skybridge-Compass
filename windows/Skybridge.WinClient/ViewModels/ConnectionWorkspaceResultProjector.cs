@@ -90,7 +90,8 @@ internal sealed class ConnectionWorkspaceResultProjector
 
     public void ApplyCrossNetworkPrepared(
         CrossNetworkConnectionSnapshot snapshot,
-        Action<string> setGeneratedCode)
+        Action<string> setGeneratedCode,
+        Action<string?> setGeneratedQrCodePngBase64)
     {
         WorkspaceCollectionProjector.Replace(
             _crossNetworkConnectionFacts,
@@ -102,6 +103,7 @@ internal sealed class ConnectionWorkspaceResultProjector
             setGeneratedCode(snapshot.GeneratedCode);
         }
 
+        setGeneratedQrCodePngBase64(snapshot.GeneratedQrCodePngBase64);
         _connectionInputCoordinator.ApplyInputInvalidation();
         _countNotifier.CrossNetworkConnectionFactsChanged();
         _statusPatchApplier.Apply(

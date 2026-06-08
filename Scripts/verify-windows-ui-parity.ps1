@@ -3695,6 +3695,16 @@ foreach ($discoverySignal in @(
     "Dynamic Encrypted QR Code",
     "Generate QR Code",
     "Scan QR Code",
+    "QRCoder",
+    "PngByteQRCodeHelper",
+    "BuildSignedGeneratedQrCode",
+    "Base64UrlEncode",
+    "GeneratedQrCodePayload",
+    "GeneratedQrCodePngBase64",
+    "CrossNetworkGeneratedQrCodeImage",
+    "IsCrossNetworkGeneratedQrCodeVisible",
+    "CrossNetworkGeneratedQrCodePreview",
+    "QR bitmap",
     "QR URI",
     "skybridge://connect/",
     "skybridge://connect?data=",
@@ -3795,7 +3805,7 @@ foreach ($discoverySignal in @(
     "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $nativeDnsSdBrowse + $nativeDnsSdAcceptance + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionLaunchRequest + $windowsTransportAdapter + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $nativeDnsSdBrowse + $nativeDnsSdAcceptance + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionLaunchRequest + $windowsTransportAdapter + $connectionWorkspaceState + $workspaceActionCatalog + $winClientProject) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("PairingFacts.Add(new PairingFactView")) -Message "SessionViewModel must map pairing facts from PairingMaterialClient instead of constructing pairing/trust facts inline."
