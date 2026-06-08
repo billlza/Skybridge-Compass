@@ -37,7 +37,9 @@ internal sealed class WorkspaceCommandGateCoordinator
         _featureCatalogClient.IsSelected(selectedFeature, featureId);
 
     public bool CanConnect(WorkspaceCommandGateState state) =>
-        _sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy);
+        _sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy)
+            && _connectionWorkspaceStateClient.BuildConnectionLaunchReadiness(
+                state.ValidatedState).IsReady;
 
     public bool CanDisconnect(WorkspaceCommandGateState state) =>
         _sessionCommandStateClient.CanDisconnect(state.ConnectionState, state.IsBusy);
@@ -115,8 +117,17 @@ internal sealed class WorkspaceCommandGateCoordinator
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.Settings);
 
     public WorkspaceActionGateSnapshot BuildActionGateSnapshot(
-        WorkspaceCommandGateState state) =>
-        _workspaceCommandStateClient.BuildActionGateSnapshot(
+        WorkspaceCommandGateState state)
+    {
+        var sessionGates = _sessionCommandStateClient.BuildGateSnapshot(
+            state.ConnectionState,
+            state.IsBusy);
+        var launchAwareSessionGates = sessionGates with
+        {
+            CanConnect = CanConnect(state)
+        };
+
+        return _workspaceCommandStateClient.BuildActionGateSnapshot(
             new WorkspaceCommandGateRequest(
                 state.IsBusy,
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.UsbManagement),
@@ -125,9 +136,7 @@ internal sealed class WorkspaceCommandGateCoordinator
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.Quantum),
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.SystemMonitor),
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.Settings),
-                _sessionCommandStateClient.BuildGateSnapshot(
-                    state.ConnectionState,
-                    state.IsBusy),
+                launchAwareSessionGates,
                 CanUseDiscoveryBrowser(state),
                 CanPrepareManualConnection(state),
                 CanParseAdvertisement(state),
@@ -137,6 +146,7 @@ internal sealed class WorkspaceCommandGateCoordinator
                 CanScanQrCode(state),
                 CanCopyConnectionCode(state),
                 CanConnectConnectionCode(state)));
+    }
 
     private bool CanUseDeviceDiscoveryAction(
         WorkspaceCommandGateState state,
