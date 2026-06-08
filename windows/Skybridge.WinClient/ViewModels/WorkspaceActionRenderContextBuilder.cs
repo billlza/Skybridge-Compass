@@ -4,33 +4,23 @@ namespace Skybridge.WinClient.ViewModels;
 
 internal sealed class WorkspaceActionRenderContextBuilder
 {
-    private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
-    private readonly ISessionCommandStateClient _sessionCommandStateClient;
+    private readonly WorkspaceCommandGateCoordinator _workspaceCommandGateCoordinator;
+    private readonly Func<WorkspaceCommandGateState> _buildCommandGateState;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
 
     public WorkspaceActionRenderContextBuilder(
-        IWorkspaceCommandStateClient workspaceCommandStateClient,
-        ISessionCommandStateClient sessionCommandStateClient,
+        WorkspaceCommandGateCoordinator workspaceCommandGateCoordinator,
+        Func<WorkspaceCommandGateState> buildCommandGateState,
         TopBarStatusUpdater topBarStatusUpdater)
     {
-        _workspaceCommandStateClient = workspaceCommandStateClient;
-        _sessionCommandStateClient = sessionCommandStateClient;
+        _workspaceCommandGateCoordinator = workspaceCommandGateCoordinator;
+        _buildCommandGateState = buildCommandGateState;
         _topBarStatusUpdater = topBarStatusUpdater;
     }
 
     public WorkspaceActionGateSnapshot BuildGateSnapshot(WorkspaceActionRenderState state) =>
-        _workspaceCommandStateClient.BuildActionGateSnapshot(
-            new WorkspaceCommandGateRequest(
-                state.IsBusy,
-                state.IsUsbManagementSelected,
-                state.IsFileTransferSelected,
-                state.IsRemoteDesktopSelected,
-                state.IsQuantumSelected,
-                state.IsSystemMonitorSelected,
-                state.IsSettingsSelected,
-                _sessionCommandStateClient.BuildGateSnapshot(
-                    state.ConnectionState,
-                    state.IsBusy)));
+        _workspaceCommandGateCoordinator.BuildActionGateSnapshot(
+            _buildCommandGateState());
 
     public TopBarStatusRequest BuildTopBarStatusRequest(WorkspaceActionRenderState state) =>
         new(

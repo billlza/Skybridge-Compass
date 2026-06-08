@@ -470,8 +470,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => TopBarNotificationsStatus = value,
             value => TopBarThemeStatus = value);
         _workspaceActionRenderContextBuilder = new WorkspaceActionRenderContextBuilder(
-            _workspaceCommandStateClient,
-            _sessionCommandStateClient,
+            _workspaceCommandGateCoordinator,
+            _workspaceShellStateAccessor.BuildCommandGateState,
             _topBarStatusUpdater);
         _workspaceShellRefreshCoordinator = new WorkspaceShellRefreshCoordinator(
             _workspaceCommandRegistry,

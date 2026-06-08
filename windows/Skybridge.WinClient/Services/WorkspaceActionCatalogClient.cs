@@ -59,6 +59,12 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
         WorkspaceActionSurface.SidebarSession,
         WorkspaceActionSurface.TopBarActions,
         WorkspaceActionSurface.SessionControls,
+        WorkspaceActionSurface.DeviceDiscoveryPrimary,
+        WorkspaceActionSurface.DeviceDiscoveryScan,
+        WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal,
+        WorkspaceActionSurface.CrossNetworkQr,
+        WorkspaceActionSurface.CrossNetworkCodePrimary,
+        WorkspaceActionSurface.CrossNetworkCodeConnect,
         WorkspaceActionSurface.UsbManagementHeader,
         WorkspaceActionSurface.FileTransferHeader,
         WorkspaceActionSurface.RemoteDesktopHeader,
@@ -130,6 +136,15 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             WorkspaceActionGateId.CanConnect => gates.CanConnect,
             WorkspaceActionGateId.CanDisconnect => gates.CanDisconnect,
             WorkspaceActionGateId.CanSendHeartbeat => gates.CanSendHeartbeat,
+            WorkspaceActionGateId.CanUseDiscoveryBrowser => gates.CanUseDiscoveryBrowser,
+            WorkspaceActionGateId.CanPrepareManualConnection => gates.CanPrepareManualConnection,
+            WorkspaceActionGateId.CanParseAdvertisement => gates.CanParseAdvertisement,
+            WorkspaceActionGateId.CanValidatePairing => gates.CanValidatePairing,
+            WorkspaceActionGateId.CanPrepareConnection => gates.CanPrepareConnection,
+            WorkspaceActionGateId.CanUseCrossNetworkConnection => gates.CanUseCrossNetworkConnection,
+            WorkspaceActionGateId.CanScanQrCode => gates.CanScanQrCode,
+            WorkspaceActionGateId.CanCopyConnectionCode => gates.CanCopyConnectionCode,
+            WorkspaceActionGateId.CanConnectConnectionCode => gates.CanConnectConnectionCode,
             WorkspaceActionGateId.CanRefreshUsbManagement => gates.CanRefreshUsbManagement,
             WorkspaceActionGateId.CanRefreshFileTransfer => gates.CanRefreshFileTransfer,
             WorkspaceActionGateId.CanRefreshRemoteDesktop => gates.CanRefreshRemoteDesktop,
@@ -261,21 +276,24 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "\uE8B9",
                 true,
                 "Mac-parity discovery parser action; command stays in SessionViewModel.",
-                CommandId: WorkspaceActionCommandId.ParseTxt),
+                CommandId: WorkspaceActionCommandId.ParseTxt,
+                GateId: WorkspaceActionGateId.CanParseAdvertisement),
             new(
                 "ValidatePairing",
                 "Validate Pairing",
                 "\uE8D7",
                 true,
                 "Mac-parity pairing validation action; command stays in SessionViewModel.",
-                CommandId: WorkspaceActionCommandId.ValidatePairing),
+                CommandId: WorkspaceActionCommandId.ValidatePairing,
+                GateId: WorkspaceActionGateId.CanValidatePairing),
             new(
                 "PrepareConnection",
                 "Prepare Connection",
                 "\uE768",
                 true,
                 "Mac-parity preflight action; command stays behind Core readiness gates.",
-                CommandId: WorkspaceActionCommandId.PrepareConnection)
+                CommandId: WorkspaceActionCommandId.PrepareConnection,
+                GateId: WorkspaceActionGateId.CanPrepareConnection)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildDeviceDiscoveryScanActions() =>
@@ -287,35 +305,40 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "\uE7B3",
                 true,
                 "Mac-parity discovery scan action; command stays in SessionViewModel.",
-                CommandId: WorkspaceActionCommandId.RunExtendedDiscovery),
+                CommandId: WorkspaceActionCommandId.RunExtendedDiscovery,
+                GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser),
             new(
                 "ManualConnect",
                 "Manual Connect",
                 "\uE8D7",
                 true,
                 "Mac-parity manual target action; command validates host/port/code without connecting.",
-                CommandId: WorkspaceActionCommandId.PrepareManualConnection),
+                CommandId: WorkspaceActionCommandId.PrepareManualConnection,
+                GateId: WorkspaceActionGateId.CanPrepareManualConnection),
             new(
                 "StartScan",
                 "Start Scan",
                 "\uE768",
                 true,
                 "Mac-parity discovery scan action; command uses the read-only browser boundary.",
-                CommandId: WorkspaceActionCommandId.StartDiscovery),
+                CommandId: WorkspaceActionCommandId.StartDiscovery,
+                GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser),
             new(
                 "StopScan",
                 "Stop Scan",
                 "\uE71A",
                 true,
                 "Mac-parity discovery scan action; command only stops browser state.",
-                CommandId: WorkspaceActionCommandId.StopDiscovery),
+                CommandId: WorkspaceActionCommandId.StopDiscovery,
+                GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser),
             new(
                 "Refresh",
                 "Refresh",
                 "\uE72C",
                 true,
                 "Mac-parity discovery scan action; command refreshes the read-only browser snapshot.",
-                CommandId: WorkspaceActionCommandId.RefreshDiscovery)
+                CommandId: WorkspaceActionCommandId.RefreshDiscovery,
+                GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildDeviceDiscoveryManualConnectFinalActions() =>
@@ -338,14 +361,16 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "\uE8EF",
                 true,
                 "Mac-parity cross-network QR action; command does not start signaling.",
-                CommandId: WorkspaceActionCommandId.GenerateQrCode),
+                CommandId: WorkspaceActionCommandId.GenerateQrCode,
+                GateId: WorkspaceActionGateId.CanUseCrossNetworkConnection),
             new(
                 "ScanQrCode",
                 "Scan QR Code",
                 "\uE722",
                 true,
                 "Mac-parity cross-network QR action; command validates the QR envelope read-only.",
-                CommandId: WorkspaceActionCommandId.ScanQrCode)
+                CommandId: WorkspaceActionCommandId.ScanQrCode,
+                GateId: WorkspaceActionGateId.CanScanQrCode)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildCrossNetworkCodePrimaryActions() =>
@@ -357,21 +382,24 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "\uE710",
                 true,
                 "Mac-parity smart-code action; command does not register a signaling room.",
-                CommandId: WorkspaceActionCommandId.GenerateConnectionCode),
+                CommandId: WorkspaceActionCommandId.GenerateConnectionCode,
+                GateId: WorkspaceActionGateId.CanUseCrossNetworkConnection),
             new(
                 "CopyCode",
                 "Copy",
                 "\uE8C8",
                 true,
                 "Mac-parity smart-code action; command keeps clipboard writes behind explicit availability.",
-                CommandId: WorkspaceActionCommandId.CopyConnectionCode),
+                CommandId: WorkspaceActionCommandId.CopyConnectionCode,
+                GateId: WorkspaceActionGateId.CanCopyConnectionCode),
             new(
                 "RegenerateCode",
                 "Regenerate",
                 "\uE72C",
                 true,
                 "Mac-parity smart-code action; command reuses the read-only code generation boundary.",
-                CommandId: WorkspaceActionCommandId.RegenerateConnectionCode)
+                CommandId: WorkspaceActionCommandId.RegenerateConnectionCode,
+                GateId: WorkspaceActionGateId.CanUseCrossNetworkConnection)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildCrossNetworkCodeConnectActions() =>
@@ -383,7 +411,8 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "\uE768",
                 true,
                 "Mac-parity smart-code action; command validates code shape without starting transport.",
-                CommandId: WorkspaceActionCommandId.ConnectConnectionCode)
+                CommandId: WorkspaceActionCommandId.ConnectConnectionCode,
+                GateId: WorkspaceActionGateId.CanConnectConnectionCode)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildUsbManagementHeaderActions() =>
@@ -679,6 +708,15 @@ public enum WorkspaceActionGateId
     CanConnect,
     CanDisconnect,
     CanSendHeartbeat,
+    CanUseDiscoveryBrowser,
+    CanPrepareManualConnection,
+    CanParseAdvertisement,
+    CanValidatePairing,
+    CanPrepareConnection,
+    CanUseCrossNetworkConnection,
+    CanScanQrCode,
+    CanCopyConnectionCode,
+    CanConnectConnectionCode,
     CanRefreshUsbManagement,
     CanRefreshFileTransfer,
     CanRefreshRemoteDesktop,
@@ -706,6 +744,15 @@ public sealed record WorkspaceActionGateSnapshot(
     bool CanConnect,
     bool CanDisconnect,
     bool CanSendHeartbeat,
+    bool CanUseDiscoveryBrowser,
+    bool CanPrepareManualConnection,
+    bool CanParseAdvertisement,
+    bool CanValidatePairing,
+    bool CanPrepareConnection,
+    bool CanUseCrossNetworkConnection,
+    bool CanScanQrCode,
+    bool CanCopyConnectionCode,
+    bool CanConnectConnectionCode,
     bool CanRefreshUsbManagement,
     bool CanRefreshFileTransfer,
     bool CanRefreshRemoteDesktop,

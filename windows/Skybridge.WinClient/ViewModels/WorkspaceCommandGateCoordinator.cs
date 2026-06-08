@@ -114,6 +114,30 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanRefreshSettings(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.Settings);
 
+    public WorkspaceActionGateSnapshot BuildActionGateSnapshot(
+        WorkspaceCommandGateState state) =>
+        _workspaceCommandStateClient.BuildActionGateSnapshot(
+            new WorkspaceCommandGateRequest(
+                state.IsBusy,
+                IsFeatureSelected(state.SelectedFeature, FeatureEntryId.UsbManagement),
+                IsFeatureSelected(state.SelectedFeature, FeatureEntryId.FileTransfer),
+                IsFeatureSelected(state.SelectedFeature, FeatureEntryId.RemoteDesktop),
+                IsFeatureSelected(state.SelectedFeature, FeatureEntryId.Quantum),
+                IsFeatureSelected(state.SelectedFeature, FeatureEntryId.SystemMonitor),
+                IsFeatureSelected(state.SelectedFeature, FeatureEntryId.Settings),
+                _sessionCommandStateClient.BuildGateSnapshot(
+                    state.ConnectionState,
+                    state.IsBusy),
+                CanUseDiscoveryBrowser(state),
+                CanPrepareManualConnection(state),
+                CanParseAdvertisement(state),
+                CanValidatePairingCode(state),
+                CanPrepareConnection(state),
+                CanUseCrossNetworkConnection(state),
+                CanScanQrCode(state),
+                CanCopyConnectionCode(state),
+                CanConnectConnectionCode(state)));
+
     private bool CanUseDeviceDiscoveryAction(
         WorkspaceCommandGateState state,
         bool readiness) =>

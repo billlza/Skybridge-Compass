@@ -868,6 +868,18 @@ foreach ($signal in @(
     "WorkspaceActionCommandId",
     "WorkspaceActionGateId",
     "WorkspaceActionDetailSlot",
+    "WorkspaceActionGateId.CanUseDiscoveryBrowser",
+    "WorkspaceActionGateId.CanPrepareManualConnection",
+    "WorkspaceActionGateId.CanParseAdvertisement",
+    "WorkspaceActionGateId.CanValidatePairing",
+    "WorkspaceActionGateId.CanPrepareConnection",
+    "WorkspaceActionGateId.CanUseCrossNetworkConnection",
+    "WorkspaceActionGateId.CanScanQrCode",
+    "WorkspaceActionGateId.CanCopyConnectionCode",
+    "WorkspaceActionGateId.CanConnectConnectionCode",
+    "GateId: WorkspaceActionGateId.CanParseAdvertisement",
+    "GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser",
+    "GateId: WorkspaceActionGateId.CanUseCrossNetworkConnection",
     "CommandId",
     "GateId",
     "DetailSlot",
@@ -1201,7 +1213,16 @@ foreach ($signal in @(
     "CanUseCrossNetworkConnectionAction",
     "CanUseWorkspaceFeature",
     "BuildActionGateSnapshot",
-    "WorkspaceActionGateSnapshot"
+    "WorkspaceActionGateSnapshot",
+    "request.CanUseDiscoveryBrowser",
+    "request.CanPrepareManualConnection",
+    "request.CanParseAdvertisement",
+    "request.CanValidatePairing",
+    "request.CanPrepareConnection",
+    "request.CanUseCrossNetworkConnection",
+    "request.CanScanQrCode",
+    "request.CanCopyConnectionCode",
+    "request.CanConnectConnectionCode"
 )) {
     Assert-Contains -Text $workspaceCommandState -Needle $signal -Message "WorkspaceCommandStateClient missing workspace command gate signal: $signal"
 }
