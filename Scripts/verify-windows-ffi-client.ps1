@@ -217,6 +217,7 @@ foreach ($signal in @(
     "WindowsTransportAdapterRequest",
     "BuildTransportBindingMaterial",
     "pending adapter local endpoint",
+    "Windows transport adapter must not select AppleNative",
     "IWindowsDnsSdBrowseClient",
     "RecordingDnsSdBrowseClient",
     "RecordingDiscoveryClient",
@@ -810,7 +811,8 @@ foreach ($signal in @(
     "windows-preflight.local:443",
     "TransportSecretFingerprint",
     "CapabilityDigest",
-    "ConnectionPreflightPlan.ResolveAdapterKind"
+    "ConnectionPreflightPlan.ResolveAdapterKind",
+    "Windows transport adapter must not select AppleNative"
 )) {
     Assert-Contains -Text $windowsTransportAdapter -Needle $signal -Message "WindowsTransportAdapterClient missing adapter boundary signal: $signal"
 }

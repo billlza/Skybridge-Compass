@@ -17,6 +17,12 @@ public sealed class PendingWindowsTransportAdapterClient : IWindowsTransportAdap
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        var adapterKind = ConnectionPreflightPlan.ResolveAdapterKind(request.TransportKind);
+        if (adapterKind == ConnectionLaunchAdapterKind.AppleNative)
+        {
+            throw new InvalidOperationException("Windows transport adapter must not select AppleNative; Apple-to-Apple remains on the Apple native path.");
+        }
+
         var localEndpoint = "windows-preflight.local:443";
         var remoteEndpoint = $"{EndpointToken(request.PairingMaterial.DeviceId)}.skybridge-preflight.local:443";
         var selectedCandidatePair = $"{request.TransportKind}/preflight-candidate";
@@ -30,7 +36,7 @@ public sealed class PendingWindowsTransportAdapterClient : IWindowsTransportAdap
         };
 
         return Task.FromResult(new WindowsTransportAdapterSnapshot(
-            ConnectionPreflightPlan.ResolveAdapterKind(request.TransportKind),
+            adapterKind,
             IsLiveAdapterReady: false,
             AdapterBinding: "adapter pending",
             localEndpoint,
@@ -235,6 +241,12 @@ public sealed record WindowsTransportAdapterSnapshot(
         if (AdapterKind == ConnectionLaunchAdapterKind.None)
         {
             throw new InvalidOperationException("Windows transport adapter must resolve a concrete adapter kind before binding.");
+        }
+
+        if (transportKind == CoreTransportKind.AppleNative
+            || AdapterKind == ConnectionLaunchAdapterKind.AppleNative)
+        {
+            throw new InvalidOperationException("Windows transport adapter must not select AppleNative; Apple-to-Apple remains on the Apple native path.");
         }
 
         if (string.IsNullOrWhiteSpace(AdapterBinding))

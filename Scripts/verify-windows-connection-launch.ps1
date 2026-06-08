@@ -292,6 +292,24 @@ AssertEqual(32, pendingAdapter.CapabilityDigest.Length, "pending adapter capabil
 var pendingBindingMaterial = pendingAdapter.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel);
 AssertEqual("windows-preflight.local:443", pendingBindingMaterial.LocalEndpoint, "pending binding local endpoint");
 
+await ExpectThrowsAsync<InvalidOperationException>(
+    () => new PendingWindowsTransportAdapterClient().PrepareAsync(
+        adapterRequest with
+        {
+            TransportKind = CoreTransportKind.AppleNative,
+            TransportAudit = CoreTransportAuditCode.AppleNativeDefault
+        }),
+    "Windows transport adapter must not select AppleNative");
+
+ExpectThrows<InvalidOperationException>(
+    () => pendingAdapter.BuildTransportBindingMaterial(CoreTransportKind.AppleNative),
+    "Windows transport adapter must not select AppleNative");
+
+ExpectThrows<InvalidOperationException>(
+    () => (pendingAdapter with { AdapterKind = ConnectionLaunchAdapterKind.AppleNative })
+        .BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel),
+    "Windows transport adapter must not select AppleNative");
+
 var externalAdapter = await new ExternalWindowsTransportAdapterClient(
     new WindowsExternalTransportAdapterOptions(
         ConnectionLaunchAdapterKind.WebRtcDataChannel,
