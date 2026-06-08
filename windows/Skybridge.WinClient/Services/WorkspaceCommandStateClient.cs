@@ -16,6 +16,8 @@ public interface IWorkspaceCommandStateClient
         bool isDeviceDiscoverySelected,
         bool isActionReady);
 
+    bool CanUseTopBarAction(bool isBusy, bool isActionReady);
+
     bool CanUseFileTransferAction(
         bool isBusy,
         bool isFileTransferSelected,
@@ -61,6 +63,9 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
         bool isActionReady) =>
         CanUseCrossNetworkConnection(isBusy, isDeviceDiscoverySelected) && isActionReady;
 
+    public bool CanUseTopBarAction(bool isBusy, bool isActionReady) =>
+        !isBusy && isActionReady;
+
     public bool CanUseFileTransferAction(
         bool isBusy,
         bool isFileTransferSelected,
@@ -93,6 +98,8 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
             request.SessionGates.CanConnect,
             request.SessionGates.CanDisconnect,
             request.SessionGates.CanSendHeartbeat,
+            request.CanOpenTopBarNotifications,
+            request.CanToggleTopBarTheme,
             request.CanUseDiscoveryBrowser,
             request.CanPrepareManualConnection,
             request.CanParseAdvertisement,
@@ -140,6 +147,8 @@ public sealed record WorkspaceCommandGateRequest(
     bool IsSystemMonitorSelected,
     bool IsSettingsSelected,
     SessionCommandGateSnapshot SessionGates,
+    bool CanOpenTopBarNotifications,
+    bool CanToggleTopBarTheme,
     bool CanUseDiscoveryBrowser,
     bool CanPrepareManualConnection,
     bool CanParseAdvertisement,

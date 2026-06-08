@@ -44,6 +44,7 @@ public sealed class WorkspaceErrorStatusClient : IWorkspaceErrorStatusClient
 public enum WorkspaceErrorScope
 {
     Session,
+    TopBar,
     DeviceDiscovery,
     UsbManagement,
     CoreDiagnostics,

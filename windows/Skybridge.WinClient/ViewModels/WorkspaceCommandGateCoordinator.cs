@@ -7,6 +7,7 @@ internal sealed class WorkspaceCommandGateCoordinator
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private readonly IFeatureCatalogClient _featureCatalogClient;
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
+    private readonly ITopBarStatusClient _topBarStatusClient;
     private readonly IManualConnectionClient _manualConnectionClient;
     private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
@@ -21,6 +22,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         ISessionCommandStateClient sessionCommandStateClient,
         IFeatureCatalogClient featureCatalogClient,
         IWorkspaceCommandStateClient workspaceCommandStateClient,
+        ITopBarStatusClient topBarStatusClient,
         IManualConnectionClient manualConnectionClient,
         ICrossNetworkConnectionClient crossNetworkConnectionClient,
         IFileTransferWorkspaceClient fileTransferClient,
@@ -34,6 +36,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         _sessionCommandStateClient = sessionCommandStateClient;
         _featureCatalogClient = featureCatalogClient;
         _workspaceCommandStateClient = workspaceCommandStateClient;
+        _topBarStatusClient = topBarStatusClient;
         _manualConnectionClient = manualConnectionClient;
         _crossNetworkConnectionClient = crossNetworkConnectionClient;
         _fileTransferClient = fileTransferClient;
@@ -58,6 +61,16 @@ internal sealed class WorkspaceCommandGateCoordinator
 
     public bool CanSendHeartbeat(WorkspaceCommandGateState state) =>
         _sessionCommandStateClient.CanSendHeartbeat(state.ConnectionState, state.IsBusy);
+
+    public bool CanOpenTopBarNotifications(WorkspaceCommandGateState state) =>
+        _workspaceCommandStateClient.CanUseTopBarAction(
+            state.IsBusy,
+            _topBarStatusClient.CanOpenNotifications());
+
+    public bool CanToggleTopBarTheme(WorkspaceCommandGateState state) =>
+        _workspaceCommandStateClient.CanUseTopBarAction(
+            state.IsBusy,
+            _topBarStatusClient.CanToggleTheme());
 
     public bool CanUseDiscoveryBrowser(WorkspaceCommandGateState state) =>
         _workspaceCommandStateClient.CanUseDeviceDiscovery(
@@ -254,6 +267,8 @@ internal sealed class WorkspaceCommandGateCoordinator
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.SystemMonitor),
                 IsFeatureSelected(state.SelectedFeature, FeatureEntryId.Settings),
                 launchAwareSessionGates,
+                CanOpenTopBarNotifications(state),
+                CanToggleTopBarTheme(state),
                 CanUseDiscoveryBrowser(state),
                 CanPrepareManualConnection(state),
                 CanParseAdvertisement(state),

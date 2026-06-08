@@ -88,10 +88,14 @@ var settingsClient = new TestSettingsWorkspaceClient(
     canApplySettings: true,
     canRestoreDefaults: true,
     canResetMonitorData: true);
+var topBarStatusClient = new TestTopBarStatusClient(
+    canOpenNotifications: true,
+    canToggleTheme: true);
 var coordinator = new WorkspaceCommandGateCoordinator(
     new SessionCommandStateClient(),
     new FeatureCatalogClient(),
     new WorkspaceCommandStateClient(),
+    topBarStatusClient,
     new ManualConnectionClient(),
     new CrossNetworkConnectionClient(),
     fileTransferClient,
@@ -240,6 +244,64 @@ AssertResolvedAction(
     WorkspaceActionGateId.CanDisconnect,
     true,
     "reconnecting session control Disconnect");
+
+var topBarReadyState = BuildCommandState(liveReady: true);
+var topBarReadyAvailability = new WorkspaceCommandAvailability(coordinator, () => topBarReadyState);
+AssertEqual(true, topBarReadyAvailability.CanOpenTopBarNotifications(), "top bar WorkspaceCommandAvailability.Notifications");
+AssertEqual(true, topBarReadyAvailability.CanToggleTopBarTheme(), "top bar WorkspaceCommandAvailability.Theme");
+var topBarReadyGates = coordinator.BuildActionGateSnapshot(topBarReadyState);
+AssertEqual(true, topBarReadyGates.CanOpenTopBarNotifications, "top bar action gate Notifications");
+AssertEqual(true, topBarReadyGates.CanToggleTopBarTheme, "top bar action gate Theme");
+AssertResolvedAction(
+    catalog,
+    details,
+    topBarReadyGates,
+    WorkspaceActionSurface.TopBarActions,
+    "Notifications",
+    WorkspaceActionCommandId.OpenTopBarNotifications,
+    WorkspaceActionGateId.CanOpenTopBarNotifications,
+    true,
+    "top bar Notifications");
+AssertResolvedAction(
+    catalog,
+    details,
+    topBarReadyGates,
+    WorkspaceActionSurface.TopBarActions,
+    "Theme",
+    WorkspaceActionCommandId.ToggleTopBarTheme,
+    WorkspaceActionGateId.CanToggleTopBarTheme,
+    true,
+    "top bar Theme");
+
+var topBarBlockedState = BuildCommandState(liveReady: true);
+topBarStatusClient.CanOpenNotificationsValue = false;
+topBarStatusClient.CanToggleThemeValue = false;
+var topBarBlockedAvailability = new WorkspaceCommandAvailability(coordinator, () => topBarBlockedState);
+AssertEqual(false, topBarBlockedAvailability.CanOpenTopBarNotifications(), "blocked top bar WorkspaceCommandAvailability.Notifications");
+AssertEqual(false, topBarBlockedAvailability.CanToggleTopBarTheme(), "blocked top bar WorkspaceCommandAvailability.Theme");
+var topBarBlockedGates = coordinator.BuildActionGateSnapshot(topBarBlockedState);
+AssertResolvedAction(
+    catalog,
+    details,
+    topBarBlockedGates,
+    WorkspaceActionSurface.TopBarActions,
+    "Notifications",
+    WorkspaceActionCommandId.OpenTopBarNotifications,
+    WorkspaceActionGateId.CanOpenTopBarNotifications,
+    false,
+    "blocked top bar Notifications");
+AssertResolvedAction(
+    catalog,
+    details,
+    topBarBlockedGates,
+    WorkspaceActionSurface.TopBarActions,
+    "Theme",
+    WorkspaceActionCommandId.ToggleTopBarTheme,
+    WorkspaceActionGateId.CanToggleTopBarTheme,
+    false,
+    "blocked top bar Theme");
+topBarStatusClient.CanOpenNotificationsValue = true;
+topBarStatusClient.CanToggleThemeValue = true;
 
 var fileTransferReadyState = BuildCommandState(
     liveReady: true,
@@ -943,6 +1005,67 @@ void AssertEqual<T>(T expected, T actual, string label)
     {
         throw new InvalidOperationException($"{label}: expected '{expected}', got '{actual}'.");
     }
+}
+
+sealed class TestTopBarStatusClient : ITopBarStatusClient
+{
+    public TestTopBarStatusClient(
+        bool canOpenNotifications,
+        bool canToggleTheme)
+    {
+        CanOpenNotificationsValue = canOpenNotifications;
+        CanToggleThemeValue = canToggleTheme;
+    }
+
+    public bool CanOpenNotificationsValue { get; set; }
+
+    public bool CanToggleThemeValue { get; set; }
+
+    public TopBarStatusSnapshot BuildReadOnlySnapshot(TopBarStatusRequest request) =>
+        new(
+            DateTimeOffset.UtcNow,
+            new[]
+            {
+                new TopBarStatusItem(TopBarStatusSlot.Connection, "Connection", request.ConnectionStatus, "Connection"),
+                new TopBarStatusItem(TopBarStatusSlot.Diagnostics, "FPS / Diagnostics", request.PerformanceStatus, "Diagnostics"),
+                new TopBarStatusItem(TopBarStatusSlot.Notifications, "Notifications", "Off", "Notifications"),
+                new TopBarStatusItem(TopBarStatusSlot.Theme, "Theme", "System", "Theme")
+            });
+
+    public TopBarResolvedStatusSnapshot BuildResolvedStatusSnapshot(TopBarStatusRequest request) =>
+        new(DateTimeOffset.UtcNow, request.ConnectionStatus, request.PerformanceStatus, "Off", "System");
+
+    public TopBarStatusUpdateSnapshot BuildStatusUpdate(TopBarStatusRequest request) =>
+        new(
+            BuildResolvedStatusSnapshot(request),
+            new WorkspaceActionDetailSnapshot("Off", "System"));
+
+    public string BuildDefaultStatusValue(TopBarStatusSlot slot) =>
+        slot == TopBarStatusSlot.Notifications ? "Off" : slot == TopBarStatusSlot.Theme ? "System" : "";
+
+    public string ResolveStatusValue(
+        TopBarStatusSnapshot snapshot,
+        TopBarStatusSlot slot,
+        string fallback) =>
+        snapshot.Items.FirstOrDefault(item => item.Slot == slot)?.Value ?? fallback;
+
+    public WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot(
+        TopBarResolvedStatusSnapshot snapshot) =>
+        new(snapshot.NotificationsStatus, snapshot.ThemeStatus);
+
+    public bool CanOpenNotifications() => CanOpenNotificationsValue;
+
+    public bool CanToggleTheme() => CanToggleThemeValue;
+
+    public string BuildNotificationsPendingStatus() => "Preparing notifications...";
+
+    public string BuildThemePendingStatus() => "Preparing theme action...";
+
+    public Task<TopBarWorkspaceActionResult> BuildNotificationsActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs top bar action readiness.");
+
+    public Task<TopBarWorkspaceActionResult> BuildThemeActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs top bar action readiness.");
 }
 
 sealed class TestDiscoveryClient : IDiscoveryClient

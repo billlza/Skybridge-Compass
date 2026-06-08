@@ -47,6 +47,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly RemoteDesktopWorkspaceActions _remoteDesktopWorkspaceActions;
     private readonly SystemMonitorWorkspaceActions _systemMonitorWorkspaceActions;
     private readonly SettingsWorkspaceActions _settingsWorkspaceActions;
+    private readonly TopBarWorkspaceActions _topBarWorkspaceActions;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly ReadOnlyWorkspaceSnapshotHandlers _readOnlyWorkspaceSnapshotHandlers;
@@ -186,6 +187,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _sessionCommandStateClient,
             _featureCatalogClient,
             _workspaceCommandStateClient,
+            dependencies.TopBarStatusClient,
             _manualConnectionClient,
             _crossNetworkConnectionClient,
             _fileTransferClient,
@@ -317,6 +319,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceBusyCoordinator,
             _settingsClient,
             value => SettingsStatus = value,
+            value => StatusMessage = value);
+        _topBarWorkspaceActions = new TopBarWorkspaceActions(
+            _workspaceBusyCoordinator,
+            dependencies.TopBarStatusClient,
+            value => TopBarNotificationsStatus = value,
+            value => TopBarThemeStatus = value,
             value => StatusMessage = value);
         _dashboardMetricsUpdater = new DashboardMetricsUpdater(
             _dashboardMetricsClient,
@@ -457,6 +465,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         var commandBindings = new WorkspaceCommandBindings(
             _sessionEngineActions,
             dashboardNavigationActions,
+            _topBarWorkspaceActions,
             _discoveryBrowserActions,
             _connectionWorkspaceActions,
             _crossNetworkConnectionActions,
@@ -469,6 +478,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ConnectCommand = commandBindings.ConnectCommand;
         DisconnectCommand = commandBindings.DisconnectCommand;
         HeartbeatCommand = commandBindings.HeartbeatCommand;
+        OpenTopBarNotificationsCommand = commandBindings.OpenTopBarNotificationsCommand;
+        ToggleTopBarThemeCommand = commandBindings.ToggleTopBarThemeCommand;
         StartDiscoveryCommand = commandBindings.StartDiscoveryCommand;
         StopDiscoveryCommand = commandBindings.StopDiscoveryCommand;
         RefreshDiscoveryCommand = commandBindings.RefreshDiscoveryCommand;
@@ -1020,6 +1031,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand DisconnectCommand { get; }
 
     public ICommand HeartbeatCommand { get; }
+
+    public ICommand OpenTopBarNotificationsCommand { get; }
+
+    public ICommand ToggleTopBarThemeCommand { get; }
 
     public ICommand StartDiscoveryCommand { get; }
 

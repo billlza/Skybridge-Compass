@@ -8,6 +8,7 @@ internal sealed class WorkspaceCommandBindings
     public WorkspaceCommandBindings(
         SessionEngineActions sessionEngineActions,
         DashboardNavigationActions dashboardNavigationActions,
+        TopBarWorkspaceActions topBarWorkspaceActions,
         DiscoveryBrowserActions discoveryBrowserActions,
         ConnectionWorkspaceActions connectionWorkspaceActions,
         CrossNetworkConnectionActions crossNetworkConnectionActions,
@@ -25,6 +26,8 @@ internal sealed class WorkspaceCommandBindings
         OpenFileTransferCommand = new AsyncRelayCommand(dashboardNavigationActions.SelectFileTransferAsync);
         OpenSystemMonitorCommand = new AsyncRelayCommand(dashboardNavigationActions.SelectSystemMonitorAsync);
         OpenSettingsCommand = new AsyncRelayCommand(dashboardNavigationActions.SelectSettingsAsync);
+        OpenTopBarNotificationsCommand = new AsyncRelayCommand(topBarWorkspaceActions.OpenNotificationsAsync, commandAvailability.CanOpenTopBarNotifications);
+        ToggleTopBarThemeCommand = new AsyncRelayCommand(topBarWorkspaceActions.ToggleThemeAsync, commandAvailability.CanToggleTopBarTheme);
         StartDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StartAsync, commandAvailability.CanUseDiscoveryBrowser);
         StopDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanUseDiscoveryBrowser);
         RefreshDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser);
@@ -71,6 +74,8 @@ internal sealed class WorkspaceCommandBindings
             new(WorkspaceActionCommandId.Connect, ConnectCommand),
             new(WorkspaceActionCommandId.Disconnect, DisconnectCommand),
             new(WorkspaceActionCommandId.Heartbeat, HeartbeatCommand),
+            new(WorkspaceActionCommandId.OpenTopBarNotifications, OpenTopBarNotificationsCommand),
+            new(WorkspaceActionCommandId.ToggleTopBarTheme, ToggleTopBarThemeCommand),
             new(WorkspaceActionCommandId.OpenDeviceDiscovery, OpenDeviceDiscoveryCommand),
             new(WorkspaceActionCommandId.OpenFileTransfer, OpenFileTransferCommand),
             new(WorkspaceActionCommandId.OpenSystemMonitor, OpenSystemMonitorCommand),
@@ -123,6 +128,10 @@ internal sealed class WorkspaceCommandBindings
     public ICommand DisconnectCommand { get; }
 
     public ICommand HeartbeatCommand { get; }
+
+    public ICommand OpenTopBarNotificationsCommand { get; }
+
+    public ICommand ToggleTopBarThemeCommand { get; }
 
     public ICommand OpenDeviceDiscoveryCommand { get; }
 

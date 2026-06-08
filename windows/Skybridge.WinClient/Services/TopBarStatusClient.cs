@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 namespace Skybridge.WinClient.Services;
 
@@ -20,6 +21,18 @@ public interface ITopBarStatusClient
 
     WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot(
         TopBarResolvedStatusSnapshot snapshot);
+
+    bool CanOpenNotifications();
+
+    bool CanToggleTheme();
+
+    string BuildNotificationsPendingStatus();
+
+    string BuildThemePendingStatus();
+
+    Task<TopBarWorkspaceActionResult> BuildNotificationsActionAsync();
+
+    Task<TopBarWorkspaceActionResult> BuildThemeActionAsync();
 }
 
 public sealed class TopBarStatusClient : ITopBarStatusClient
@@ -109,6 +122,40 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
     public WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot(
         TopBarResolvedStatusSnapshot snapshot) =>
         new(snapshot.NotificationsStatus, snapshot.ThemeStatus);
+
+    public bool CanOpenNotifications() => false;
+
+    public bool CanToggleTheme() => false;
+
+    public string BuildNotificationsPendingStatus() => DefaultNotificationsPendingStatus;
+
+    public string BuildThemePendingStatus() => DefaultThemePendingStatus;
+
+    public Task<TopBarWorkspaceActionResult> BuildNotificationsActionAsync() =>
+        Task.FromResult(BuildDefaultNotificationsActionResult());
+
+    public Task<TopBarWorkspaceActionResult> BuildThemeActionAsync() =>
+        Task.FromResult(BuildDefaultThemeActionResult());
+
+    public static string DefaultNotificationsPendingStatus { get; } = "Preparing notifications...";
+
+    public static string DefaultThemePendingStatus { get; } = "Preparing theme action...";
+
+    public static string DefaultNotificationsBlockedStatus { get; } = "Notifications unavailable";
+
+    public static string DefaultThemeBlockedStatus { get; } = "Theme action unavailable";
+
+    public static string DefaultNotificationsBlockedMessage { get; } =
+        "Notification center and permission prompts require an explicit provider before opening.";
+
+    public static string DefaultThemeBlockedMessage { get; } =
+        "Theme mutation and persistence remain behind the Settings workspace provider.";
+
+    public static TopBarWorkspaceActionResult BuildDefaultNotificationsActionResult() =>
+        new(DefaultNotificationsBlockedStatus, DefaultNotificationsBlockedMessage);
+
+    public static TopBarWorkspaceActionResult BuildDefaultThemeActionResult() =>
+        new(DefaultThemeBlockedStatus, DefaultThemeBlockedMessage);
 }
 
 public enum TopBarStatusSlot
@@ -144,3 +191,7 @@ public sealed record TopBarStatusItem(
     string Label,
     string Value,
     string Detail);
+
+public sealed record TopBarWorkspaceActionResult(
+    string Status,
+    string Message);

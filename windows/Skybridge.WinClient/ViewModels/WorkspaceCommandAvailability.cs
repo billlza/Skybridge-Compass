@@ -21,6 +21,10 @@ internal sealed class WorkspaceCommandAvailability
 
     public bool CanSendHeartbeat() => _coordinator.CanSendHeartbeat(BuildState());
 
+    public bool CanOpenTopBarNotifications() => _coordinator.CanOpenTopBarNotifications(BuildState());
+
+    public bool CanToggleTopBarTheme() => _coordinator.CanToggleTopBarTheme(BuildState());
+
     public bool CanUseDiscoveryBrowser() => _coordinator.CanUseDiscoveryBrowser(BuildState());
 
     public bool CanPrepareManualConnection() => _coordinator.CanPrepareManualConnection(BuildState());

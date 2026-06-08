@@ -123,6 +123,7 @@ $fileTransferWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinCl
 $remoteDesktopWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/RemoteDesktopWorkspaceActions.cs"
 $systemMonitorWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SystemMonitorWorkspaceActions.cs"
 $settingsWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SettingsWorkspaceActions.cs"
+$topBarWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/TopBarWorkspaceActions.cs"
 $readOnlyWorkspaceSnapshotHandlersPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceSnapshotHandlers.cs"
 $workspaceCountNotifierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCountNotifier.cs"
 $workspaceObservableCollectionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceObservableCollections.cs"
@@ -170,7 +171,7 @@ $commandGateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-command-gate
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -210,6 +211,7 @@ $fileTransferWorkspaceActions = Get-Content -Raw -LiteralPath $fileTransferWorks
 $remoteDesktopWorkspaceActions = Get-Content -Raw -LiteralPath $remoteDesktopWorkspaceActionsPath
 $systemMonitorWorkspaceActions = Get-Content -Raw -LiteralPath $systemMonitorWorkspaceActionsPath
 $settingsWorkspaceActions = Get-Content -Raw -LiteralPath $settingsWorkspaceActionsPath
+$topBarWorkspaceActions = Get-Content -Raw -LiteralPath $topBarWorkspaceActionsPath
 $readOnlyWorkspaceSnapshotHandlers = Get-Content -Raw -LiteralPath $readOnlyWorkspaceSnapshotHandlersPath
 $workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierPath
 $workspaceObservableCollections = Get-Content -Raw -LiteralPath $workspaceObservableCollectionsPath
@@ -223,7 +225,7 @@ $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionW
 $remoteDesktopProfileSelectionCoordinator = Get-Content -Raw -LiteralPath $remoteDesktopProfileSelectionCoordinatorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
 $booleanToVisibilityConverter = Get-Content -Raw -LiteralPath $booleanToVisibilityConverterPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $dashboardNavigationActions + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceInputChangeRouter + $workspaceShellNotificationCatalog + $workspaceShellStateAccessor + $workspaceShellStateSource + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceDeferredRefreshAction + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $fileTransferWorkspaceActions + $remoteDesktopWorkspaceActions + $systemMonitorWorkspaceActions + $settingsWorkspaceActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $dashboardNavigationActions + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceInputChangeRouter + $workspaceShellNotificationCatalog + $workspaceShellStateAccessor + $workspaceShellStateSource + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceDeferredRefreshAction + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $fileTransferWorkspaceActions + $remoteDesktopWorkspaceActions + $systemMonitorWorkspaceActions + $settingsWorkspaceActions + $topBarWorkspaceActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $nativeDnsSdBrowse = Get-Content -Raw -LiteralPath $nativeDnsSdBrowsePath
@@ -329,9 +331,13 @@ foreach ($commandGateSmokeSignal in @(
     "WorkspaceActionCommandId.Connect",
     "WorkspaceActionCommandId.Disconnect",
     "WorkspaceActionCommandId.Heartbeat",
+    "WorkspaceActionCommandId.OpenTopBarNotifications",
+    "WorkspaceActionCommandId.ToggleTopBarTheme",
     "WorkspaceActionGateId.CanConnect",
     "WorkspaceActionGateId.CanDisconnect",
     "WorkspaceActionGateId.CanSendHeartbeat",
+    "WorkspaceActionGateId.CanOpenTopBarNotifications",
+    "WorkspaceActionGateId.CanToggleTopBarTheme",
     "WorkspaceActionGateId.CanStartSystemMonitoring",
     "WorkspaceActionGateId.CanExportSettings",
     "preflight-only manual-final Connect",
@@ -343,6 +349,10 @@ foreach ($commandGateSmokeSignal in @(
     "reconnecting WorkspaceCommandAvailability.Disconnect",
     "reconnecting session control Heartbeat",
     "reconnecting session control Disconnect",
+    "top bar WorkspaceCommandAvailability.Notifications",
+    "blocked top bar WorkspaceCommandAvailability.Notifications",
+    "top bar Theme",
+    "blocked top bar Theme",
     "system monitor WorkspaceCommandAvailability.Monitoring",
     "blocked system monitor WorkspaceCommandAvailability.Monitoring",
     "settings WorkspaceCommandAvailability.Export",
@@ -645,6 +655,7 @@ foreach ($commandBindingsSignal in @(
     "RemoteDesktopWorkspaceActions remoteDesktopWorkspaceActions",
     "SystemMonitorWorkspaceActions systemMonitorWorkspaceActions",
     "SettingsWorkspaceActions settingsWorkspaceActions",
+    "TopBarWorkspaceActions topBarWorkspaceActions",
     "WorkspaceCommandAvailability commandAvailability",
     "new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect)",
     "new AsyncRelayCommand(sessionEngineActions.DisconnectAsync, commandAvailability.CanDisconnect)",
@@ -653,6 +664,8 @@ foreach ($commandBindingsSignal in @(
     "new AsyncRelayCommand(dashboardNavigationActions.SelectFileTransferAsync)",
     "new AsyncRelayCommand(dashboardNavigationActions.SelectSystemMonitorAsync)",
     "new AsyncRelayCommand(dashboardNavigationActions.SelectSettingsAsync)",
+    "new AsyncRelayCommand(topBarWorkspaceActions.OpenNotificationsAsync, commandAvailability.CanOpenTopBarNotifications)",
+    "new AsyncRelayCommand(topBarWorkspaceActions.ToggleThemeAsync, commandAvailability.CanToggleTopBarTheme)",
     "new AsyncRelayCommand(discoveryBrowserActions.StartAsync, commandAvailability.CanUseDiscoveryBrowser)",
     "new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanUseDiscoveryBrowser)",
     "new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser)",
@@ -696,6 +709,8 @@ foreach ($commandBindingsSignal in @(
     "new AsyncRelayCommand(settingsWorkspaceActions.ResetMonitorDataAsync, commandAvailability.CanResetMonitorData)",
     "Registry = WorkspaceCommandRegistry.Create(",
     "WorkspaceActionCommandId.Connect",
+    "WorkspaceActionCommandId.OpenTopBarNotifications",
+    "WorkspaceActionCommandId.ToggleTopBarTheme",
     "WorkspaceActionCommandId.OpenDeviceDiscovery",
     "WorkspaceActionCommandId.OpenFileTransfer",
     "WorkspaceActionCommandId.OpenSystemMonitor",
@@ -857,11 +872,11 @@ foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferComman
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenTopBarNotificationsCommand", "ToggleTopBarThemeCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
 }
 
-foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
+foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenTopBarNotificationsCommand", "ToggleTopBarThemeCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
     Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
 
@@ -1048,8 +1063,12 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Top bar action catalog or
     'BuildTopBarActions',
     '"Notifications"',
     '"Notifications"',
+    "WorkspaceActionCommandId.OpenTopBarNotifications",
+    "WorkspaceActionGateId.CanOpenTopBarNotifications",
     '"Theme"',
-    '"Theme"'
+    '"Theme"',
+    "WorkspaceActionCommandId.ToggleTopBarTheme",
+    "WorkspaceActionGateId.CanToggleTopBarTheme"
 )
 Assert-True -Condition (-not [regex]::IsMatch($workspaceActionCatalog, "BuildTopBarActions\(\)[\s\S]*?`"Heartbeat`"[\s\S]*?BuildSessionControlActions")) -Message "Top bar action catalog must not expose Heartbeat; keep Heartbeat in sidebar/session controls."
 
@@ -1139,8 +1158,19 @@ foreach ($topBarSignal in @(
     "BuildDefaultStatusValue",
     "ResolveStatusValue",
     "BuildWorkspaceActionDetailSnapshot",
+    "CanOpenNotifications",
+    "CanToggleTheme",
+    "BuildNotificationsPendingStatus",
+    "BuildThemePendingStatus",
+    "BuildNotificationsActionAsync",
+    "BuildThemeActionAsync",
     "DefaultNotificationsStatus",
     "DefaultThemeStatus",
+    "DefaultNotificationsPendingStatus",
+    "DefaultThemePendingStatus",
+    "DefaultNotificationsBlockedStatus",
+    "DefaultThemeBlockedStatus",
+    "TopBarWorkspaceActionResult",
     "TopBarStatusRequest",
     "TopBarStatusSnapshot",
     "TopBarResolvedStatusSnapshot",
@@ -1181,6 +1211,7 @@ foreach ($topBarSignal in @(
     "WorkspaceActionDetailSnapshot",
     "new TopBarStatusClient()",
     "WorkspaceActionCatalogClient",
+    "TopBarWorkspaceActions",
     "Visible mac-parity notification entry point",
     "Visible mac-parity theme entry point"
 )) {
@@ -1562,6 +1593,7 @@ foreach ($workspaceCommandStateSignal in @(
     "CanUseDeviceDiscoveryAction",
     "CanUseCrossNetworkConnection",
     "CanUseCrossNetworkConnectionAction",
+    "CanUseTopBarAction",
     "CanUseSystemMonitorAction",
     "CanUseSettingsAction",
     "CanUseWorkspaceFeature",
@@ -1571,6 +1603,8 @@ foreach ($workspaceCommandStateSignal in @(
     "WorkspaceCommandAvailability",
     "WorkspaceCommandGateState",
     "request.CanUseDiscoveryBrowser",
+    "request.CanOpenTopBarNotifications",
+    "request.CanToggleTopBarTheme",
     "request.CanPrepareManualConnection",
     "request.CanParseAdvertisement",
     "request.CanValidatePairing",
@@ -1591,9 +1625,12 @@ foreach ($workspaceCommandStateSignal in @(
     "request.CanRestoreDefaults",
     "request.CanResetMonitorData",
     "commandAvailability.CanUseDiscoveryBrowser",
+    "commandAvailability.CanOpenTopBarNotifications",
+    "commandAvailability.CanToggleTopBarTheme",
     "CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnection(",
+    "_workspaceCommandStateClient.CanUseTopBarAction(",
     "CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseSystemMonitorAction(",
@@ -1611,6 +1648,7 @@ foreach ($workspaceGateCoordinatorSignal in @(
     "ISessionCommandStateClient sessionCommandStateClient",
     "IFeatureCatalogClient featureCatalogClient",
     "IWorkspaceCommandStateClient workspaceCommandStateClient",
+    "ITopBarStatusClient topBarStatusClient",
     "IManualConnectionClient manualConnectionClient",
     "ICrossNetworkConnectionClient crossNetworkConnectionClient",
     "ISystemMonitorWorkspaceClient systemMonitorClient",
@@ -1635,6 +1673,8 @@ foreach ($workspaceGateCoordinatorSignal in @(
     "_sessionCommandStateClient.BuildGateSnapshot(",
     "launchAwareSessionGates",
     "CanConnect = CanConnect(state)",
+    "CanOpenTopBarNotifications(state)",
+    "CanToggleTopBarTheme(state)",
     "CanUseDiscoveryBrowser(state)",
     "CanPrepareManualConnection(state)",
     "CanParseAdvertisement(state)",
@@ -1655,6 +1695,7 @@ foreach ($workspaceGateCoordinatorSignal in @(
     "CanApplySettings(state)",
     "CanRestoreDefaults(state)",
     "CanResetMonitorData(state)",
+    "_workspaceCommandStateClient.CanUseTopBarAction(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseSystemMonitorAction(",
@@ -1670,6 +1711,8 @@ foreach ($workspaceGateCoordinatorSignal in @(
     "_settingsClient.CanApplySettings()",
     "_settingsClient.CanRestoreDefaults()",
     "_settingsClient.CanResetMonitorData()",
+    "_topBarStatusClient.CanOpenNotifications()",
+    "_topBarStatusClient.CanToggleTheme()",
     "_workspaceCommandStateClient.CanUseWorkspaceFeature(",
     "internal sealed record WorkspaceCommandGateState("
 )) {
@@ -1684,6 +1727,8 @@ foreach ($workspaceCommandAvailabilitySignal in @(
     "_coordinator.CanConnect(BuildState())",
     "_coordinator.CanDisconnect(BuildState())",
     "_coordinator.CanSendHeartbeat(BuildState())",
+    "_coordinator.CanOpenTopBarNotifications(BuildState())",
+    "_coordinator.CanToggleTopBarTheme(BuildState())",
     "_coordinator.CanUseDiscoveryBrowser(BuildState())",
     "_coordinator.CanPrepareManualConnection(BuildState())",
     "_coordinator.CanUseCrossNetworkConnection(BuildState())",
@@ -1738,6 +1783,8 @@ foreach ($sessionViewModelForwardingGateWrapper in @(
     "private bool CanConnect()",
     "private bool CanDisconnect()",
     "private bool CanSendHeartbeat()",
+    "private bool CanOpenTopBarNotifications()",
+    "private bool CanToggleTopBarTheme()",
     "private bool CanUseDeviceDiscovery()",
     "private bool CanUseDiscoveryBrowser()",
     "private bool CanPrepareManualConnection()",
@@ -1783,6 +1830,8 @@ foreach ($sessionViewModelForwardingActionWrapper in @(
     "private Task ConnectAsync()",
     "private Task DisconnectAsync()",
     "private Task SendHeartbeatAsync()",
+    "private Task OpenTopBarNotificationsAsync()",
+    "private Task ToggleTopBarThemeAsync()",
     "private Task StartDiscoveryAsync()",
     "private Task StopDiscoveryAsync()",
     "private Task RefreshDiscoveryAsync()",
@@ -1835,6 +1884,10 @@ foreach ($sessionViewModelDirectCommandDelegateSignal in @(
     "_workspaceCommandAvailability.CanConnect,",
     "_workspaceCommandAvailability.CanDisconnect,",
     "_workspaceCommandAvailability.CanSendHeartbeat,",
+    "_topBarWorkspaceActions.OpenNotificationsAsync,",
+    "_topBarWorkspaceActions.ToggleThemeAsync,",
+    "_workspaceCommandAvailability.CanOpenTopBarNotifications,",
+    "_workspaceCommandAvailability.CanToggleTopBarTheme,",
     "_discoveryBrowserActions.StartAsync,",
     "_connectionWorkspaceActions.PrepareManualConnectionAsync,",
     "_crossNetworkConnectionActions.GenerateQrCodeAsync,",
@@ -1868,6 +1921,8 @@ foreach ($sessionViewModelDirectGateSignal in @(
     "_workspaceCommandGateCoordinator.CanConnect(",
     "_workspaceCommandGateCoordinator.CanDisconnect(",
     "_workspaceCommandGateCoordinator.CanSendHeartbeat(",
+    "_workspaceCommandGateCoordinator.CanOpenTopBarNotifications(",
+    "_workspaceCommandGateCoordinator.CanToggleTopBarTheme(",
     "_workspaceCommandGateCoordinator.CanUseDiscoveryBrowser(",
     "_workspaceCommandGateCoordinator.CanPrepareManualConnection(",
     "_workspaceCommandGateCoordinator.CanUseCrossNetworkConnection(",
@@ -1909,6 +1964,7 @@ foreach ($sessionViewModelDirectGateSignal in @(
     "_sessionCommandStateClient.CanSendHeartbeat(",
     "_workspaceCommandStateClient.CanUseDeviceDiscovery(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnection(",
+    "_workspaceCommandStateClient.CanUseTopBarAction(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseFileTransferAction(",
@@ -1940,6 +1996,8 @@ foreach ($sessionViewModelDirectGateSignal in @(
     "_settingsClient.CanApplySettings(",
     "_settingsClient.CanRestoreDefaults(",
     "_settingsClient.CanResetMonitorData(",
+    "_topBarStatusClient.CanOpenNotifications(",
+    "_topBarStatusClient.CanToggleTheme(",
     "_discoveryClient.CanParseAdvertisement(",
     "_pairingMaterialClient.CanValidate("
 )) {
@@ -1978,6 +2036,8 @@ foreach ($workspaceActionRoleSignal in @(
     "_actionCatalogClient.BuildResolvedSnapshot(",
     "WorkspaceActionCommandId.Connect",
     "WorkspaceActionCommandId.Heartbeat",
+    "WorkspaceActionCommandId.OpenTopBarNotifications",
+    "WorkspaceActionCommandId.ToggleTopBarTheme",
     "WorkspaceActionCommandId.OpenDeviceDiscovery",
     "WorkspaceActionCommandId.OpenFileTransfer",
     "WorkspaceActionCommandId.OpenSystemMonitor",
@@ -2006,6 +2066,8 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionCommandId.RestoreDefaults",
     "WorkspaceActionCommandId.ResetMonitorData",
     "WorkspaceActionGateId.CanConnect",
+    "WorkspaceActionGateId.CanOpenTopBarNotifications",
+    "WorkspaceActionGateId.CanToggleTopBarTheme",
     "WorkspaceActionGateId.CanUseDiscoveryBrowser",
     "WorkspaceActionGateId.CanPrepareManualConnection",
     "WorkspaceActionGateId.CanParseAdvertisement",
@@ -2086,6 +2148,10 @@ foreach ($workspaceActionRoleSignal in @(
     "GateId: WorkspaceActionGateId.CanRestoreDefaults",
     "CommandId: WorkspaceActionCommandId.ResetMonitorData",
     "GateId: WorkspaceActionGateId.CanResetMonitorData",
+    "CommandId: WorkspaceActionCommandId.OpenTopBarNotifications",
+    "GateId: WorkspaceActionGateId.CanOpenTopBarNotifications",
+    "CommandId: WorkspaceActionCommandId.ToggleTopBarTheme",
+    "GateId: WorkspaceActionGateId.CanToggleTopBarTheme",
     "CommandId: WorkspaceActionCommandId.Connect",
     "GateId: WorkspaceActionGateId.CanConnect",
     "WorkspaceActionSurface.DashboardQuickActions",
@@ -2674,6 +2740,27 @@ foreach ($settingsWorkspaceActionsSignal in @(
 )) {
     Assert-Contains -Text $settingsWorkspaceActions -Needle $settingsWorkspaceActionsSignal -Message "SettingsWorkspaceActions contract missing: $settingsWorkspaceActionsSignal"
 }
+foreach ($topBarWorkspaceActionsSignal in @(
+    "internal sealed class TopBarWorkspaceActions",
+    "WorkspaceBusyCoordinator busyCoordinator",
+    "ITopBarStatusClient topBarStatusClient",
+    "Action<string> setNotificationsStatus",
+    "Action<string> setThemeStatus",
+    "Action<string> setStatusMessage",
+    "OpenNotificationsAsync()",
+    "ToggleThemeAsync()",
+    "_busyCoordinator.RunAsync(",
+    "WorkspaceErrorScope.TopBar",
+    "_topBarStatusClient.BuildNotificationsPendingStatus",
+    "_topBarStatusClient.BuildThemePendingStatus",
+    "_topBarStatusClient.BuildNotificationsActionAsync",
+    "_topBarStatusClient.BuildThemeActionAsync",
+    "Func<Task<TopBarWorkspaceActionResult>>",
+    "setTopBarStatus(result.Status)",
+    "_setStatusMessage(result.Message)"
+)) {
+    Assert-Contains -Text $topBarWorkspaceActions -Needle $topBarWorkspaceActionsSignal -Message "TopBarWorkspaceActions contract missing: $topBarWorkspaceActionsSignal"
+}
 foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "new ReadOnlyWorkspaceRefreshCoordinator(",
     "new ReadOnlyWorkspaceRefreshActions(",
@@ -2681,6 +2768,7 @@ foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "new RemoteDesktopWorkspaceActions(",
     "new SystemMonitorWorkspaceActions(",
     "new SettingsWorkspaceActions(",
+    "new TopBarWorkspaceActions(",
     "readOnlyWorkspaceRefreshCoordinator,",
     "_readOnlyWorkspaceSnapshotHandlers,",
     "() => SelectedBitrate",
@@ -2689,6 +2777,7 @@ foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "_remoteDesktopWorkspaceActions,",
     "_systemMonitorWorkspaceActions,",
     "_settingsWorkspaceActions,",
+    "_topBarWorkspaceActions,",
     "_readOnlyWorkspaceRefreshActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshActions: $sessionViewModelReadOnlyRefreshSignal"
@@ -3967,6 +4056,7 @@ foreach ($docSignal in @(
     "RemoteDesktopWorkspaceActions",
     "SystemMonitorWorkspaceActions",
     "SettingsWorkspaceActions",
+    "TopBarWorkspaceActions",
     "ReadOnlyWorkspaceSnapshotHandlers",
     "RemoteDesktopProfileSelectionCoordinator",
     "WorkspaceCollectionProjector.Replace",
@@ -3981,6 +4071,7 @@ foreach ($docSignal in @(
     "Theme",
     "TopBarStatusClient",
     "TopBarStatusUpdater",
+    "TopBarWorkspaceActionResult",
     "BuildStatusUpdate",
     "TopBarStatusUpdateSnapshot",
     "TopBarStatusSlot",
@@ -3994,11 +4085,16 @@ foreach ($docSignal in @(
     "WorkspaceShellRefreshCoordinator",
     "IsFeatureSelected",
     "CanUseDeviceDiscoveryAction",
+    "CanUseTopBarAction",
     "CanUseCrossNetworkConnectionAction",
     "CanUseSelectedWorkspaceFeature",
     "WorkspaceCommandBindings",
     "WorkspaceActionCommandId",
+    "OpenTopBarNotifications",
+    "ToggleTopBarTheme",
     "WorkspaceActionGateId",
+    "CanOpenTopBarNotifications",
+    "CanToggleTopBarTheme",
     "WorkspaceActionDetailSlot",
     "WorkspaceActionCatalogClient",
     "WorkspaceActionButtonTemplate",
