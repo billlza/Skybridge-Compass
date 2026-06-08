@@ -816,12 +816,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private async Task RunDiscoveryBrowserAsync(DiscoveryBrowserAction action)
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
+        await RunDeviceDiscoveryActionAsync(async () =>
         {
             DiscoveryBrowserStatus = _discoveryBrowserClient.BuildPendingStatus(action);
             var snapshot = await _discoveryBrowserClient.BuildReadOnlySnapshotAsync(
@@ -856,12 +851,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private async Task PrepareManualConnectionAsync()
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
+        await RunDeviceDiscoveryActionAsync(async () =>
         {
             ManualConnectionStatus = _manualConnectionClient.BuildPendingStatus();
             var snapshot = await _manualConnectionClient.BuildReadOnlySnapshotAsync(
@@ -899,12 +889,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private async Task RunCrossNetworkConnectionAsync(CrossNetworkConnectionAction action)
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
+        await RunDeviceDiscoveryActionAsync(async () =>
         {
             CrossNetworkStatus = _crossNetworkConnectionClient.BuildPendingStatus(action);
 
@@ -934,12 +919,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private async Task ParseAdvertisementAsync()
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
+        await RunDeviceDiscoveryActionAsync(async () =>
         {
             DiscoveryStatus = _discoveryClient.BuildPendingStatus();
             var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
@@ -956,12 +936,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private async Task ValidatePairingCodeAsync()
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
+        await RunDeviceDiscoveryActionAsync(async () =>
         {
             PairingStatus = _pairingMaterialClient.BuildPendingStatus();
             var expectedFingerprint = DiscoveredPeers.Count == 1
@@ -986,12 +961,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private async Task PrepareConnectionAsync()
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
+        await RunDeviceDiscoveryActionAsync(async () =>
         {
             var discoveredPeer = _connectionValidatedState.DiscoveredPeer;
             var pairingMaterial = _connectionValidatedState.PairingMaterial;
@@ -1231,6 +1201,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             await engineAction();
             StatusMessage = _sessionStatusClient.BuildCompletedStatus(action);
         });
+    }
+
+    private async Task RunDeviceDiscoveryActionAsync(Func<Task> action)
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, action);
     }
 
     private async Task RefreshReadOnlyWorkspaceAsync<TSnapshot>(

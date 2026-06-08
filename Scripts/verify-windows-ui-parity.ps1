@@ -917,6 +917,7 @@ foreach ($workspaceErrorSignal in @(
     "WorkspaceErrorScope.Settings",
     "new WorkspaceErrorStatusClient()",
     "RunWithBusyState(WorkspaceErrorScope",
+    "RunDeviceDiscoveryActionAsync",
     "_workspaceErrorStatusClient.BuildErrorPatch(errorScope, ex.Message)",
     "ApplyWorkspaceErrorStatusPatch"
 )) {
@@ -925,6 +926,8 @@ foreach ($workspaceErrorSignal in @(
 
 Assert-True -Condition (-not $sessionViewModel.Contains("RunWithBusyState(async () =>")) -Message "RunWithBusyState call sites must declare a WorkspaceErrorScope."
 Assert-True -Condition (-not $sessionViewModel.Contains("RunWithBusyState(Func<Task> action)")) -Message "RunWithBusyState must require an explicit WorkspaceErrorScope."
+$deviceDiscoveryBusyScopeMatches = [regex]::Matches($sessionViewModelSource, [regex]::Escape("RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery"))
+Assert-True -Condition ($deviceDiscoveryBusyScopeMatches.Count -eq 1) -Message "SessionViewModel must route Device Discovery command lifecycle through RunDeviceDiscoveryActionAsync."
 Assert-True -Condition (-not $sessionViewModel.Contains("_connectionWorkspaceStateClient.BuildErrorPatch(ex.Message)")) -Message "RunWithBusyState must route errors through WorkspaceErrorStatusClient, not the currently selected feature."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("BuildErrorPatch")) -Message "ConnectionWorkspaceStateClient must not own busy-state error routing; use WorkspaceErrorStatusClient."
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModel, "catch \(Exception ex\)[\s\S]*?if \(IsDeviceDiscoverySelected\)[\s\S]*?BuildErrorPatch\(ex\.Message\)")) -Message "RunWithBusyState catch must not route errors by currently selected feature."
@@ -1767,6 +1770,7 @@ foreach ($docSignal in @(
     "TopBarStatusSlot",
     "SessionStatusClient",
     "RunSessionEngineActionAsync",
+    "RunDeviceDiscoveryActionAsync",
     "ApplyWorkspaceInputChange",
     "RefreshSelectedFeatureState",
     "RefreshConnectionState",
