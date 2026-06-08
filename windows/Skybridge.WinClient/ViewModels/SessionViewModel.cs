@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -888,13 +887,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     IsDiscoveryCompatibilityModeEnabled,
                     ExtendedSearchCountdown));
 
-            ReplaceCollection(DiscoveryBrowserFacts, snapshot.Facts, DiscoveryBrowserFactView.FromFact);
+            WorkspaceCollectionProjector.Replace(DiscoveryBrowserFacts, snapshot.Facts, DiscoveryBrowserFactView.FromFact);
 
             if (action != DiscoveryBrowserAction.Stop)
             {
                 ApplyConnectionValidatedState(
                     _connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot));
-                ReplaceCollection(DiscoveredPeers, snapshot.Peers, DiscoveredPeerView.FromCandidate);
+                WorkspaceCollectionProjector.Replace(DiscoveredPeers, snapshot.Peers, DiscoveredPeerView.FromCandidate);
 
                 ClearPairingAndPreflight();
                 _workspaceCountNotifier.DiscoveredPeersChanged();
@@ -919,7 +918,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     ManualConnectionHost,
                     ManualConnectionPort,
                     ManualConnectionCode));
-            ReplaceCollection(ManualConnectionFacts, snapshot.Facts, ManualConnectionFactView.FromFact);
+            WorkspaceCollectionProjector.Replace(ManualConnectionFacts, snapshot.Facts, ManualConnectionFactView.FromFact);
 
             ApplyConnectionInputInvalidation();
             _workspaceCountNotifier.ManualConnectionFactsChanged();
@@ -960,7 +959,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     CrossNetworkCodeInput,
                     CrossNetworkGeneratedCode));
 
-            ReplaceCollection(
+            WorkspaceCollectionProjector.Replace(
                 CrossNetworkConnectionFacts,
                 snapshot.Facts,
                 CrossNetworkConnectionFactView.FromFact);
@@ -1011,7 +1010,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     _connectionValidatedState,
                     material));
             ClearConnectionPreflight();
-            ReplaceCollection(PairingFacts, snapshot.Facts, PairingFactView.FromFact);
+            WorkspaceCollectionProjector.Replace(PairingFacts, snapshot.Facts, PairingFactView.FromFact);
 
             _workspaceCountNotifier.PairingFactsChanged();
             _workspaceStatusPatchApplier.Apply(
@@ -1037,7 +1036,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var snapshot = await _connectionPreflightClient.BuildReadOnlySnapshotAsync(
                 discoveredPeer!,
                 pairingMaterial!);
-            ReplaceCollection(ConnectionPreflightFacts, snapshot.Facts, ConnectionPreflightFactView.FromFact);
+            WorkspaceCollectionProjector.Replace(
+                ConnectionPreflightFacts,
+                snapshot.Facts,
+                ConnectionPreflightFactView.FromFact);
 
             _workspaceCountNotifier.ConnectionPreflightFactsChanged();
             _workspaceStatusPatchApplier.Apply(
@@ -1348,7 +1350,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ActiveSessionCount = snapshot.ActiveSessionCount;
         TransferTaskCount = snapshot.TransferTaskCount;
         PerformanceStatus = snapshot.PerformanceStatus;
-        ReplaceCollection(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric);
+        WorkspaceCollectionProjector.Replace(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric);
 
         _workspaceCountNotifier.DashboardMetricsChanged();
     }
@@ -1372,7 +1374,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             renderContext.Details);
         var target = _workspaceActionSurfaceTargets.Resolve(surface);
 
-        ReplaceCollection(
+        WorkspaceCollectionProjector.Replace(
             target,
             snapshot.Actions,
             action => WorkspaceActionItemView.FromItem(
@@ -1421,18 +1423,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         ConnectionState = newState;
         StatusMessage = _sessionStatusClient.BuildEngineStateStatus(newState);
-    }
-
-    private static void ReplaceCollection<TSource, TItem>(
-        ObservableCollection<TItem> target,
-        IEnumerable<TSource> source,
-        Func<TSource, TItem> map)
-    {
-        target.Clear();
-        foreach (var item in source)
-        {
-            target.Add(map(item));
-        }
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)

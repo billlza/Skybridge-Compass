@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using Skybridge.WinClient.Services;
 
@@ -22,7 +21,7 @@ internal sealed class WorkspaceSnapshotApplier
         CoreDiagnosticsSnapshot snapshot,
         ObservableCollection<CoreDiagnosticFactView> facts)
     {
-        ReplaceCollection(facts, snapshot.Facts, CoreDiagnosticFactView.FromFact);
+        WorkspaceCollectionProjector.Replace(facts, snapshot.Facts, CoreDiagnosticFactView.FromFact);
         _countNotifier.CoreDiagnosticFactsChanged();
     }
 
@@ -32,9 +31,9 @@ internal sealed class WorkspaceSnapshotApplier
         ObservableCollection<FileTransferHistoryItemView> history,
         ObservableCollection<FileTransferSecurityFactView> securityFacts)
     {
-        ReplaceCollection(queue, snapshot.Queue, FileTransferQueueItemView.FromItem);
-        ReplaceCollection(history, snapshot.History, FileTransferHistoryItemView.FromItem);
-        ReplaceCollection(securityFacts, snapshot.Security, FileTransferSecurityFactView.FromFact);
+        WorkspaceCollectionProjector.Replace(queue, snapshot.Queue, FileTransferQueueItemView.FromItem);
+        WorkspaceCollectionProjector.Replace(history, snapshot.History, FileTransferHistoryItemView.FromItem);
+        WorkspaceCollectionProjector.Replace(securityFacts, snapshot.Security, FileTransferSecurityFactView.FromFact);
         _refreshDashboardMetrics();
         _countNotifier.FileTransferHistoryChanged();
     }
@@ -44,8 +43,8 @@ internal sealed class WorkspaceSnapshotApplier
         ObservableCollection<UsbDeviceStatView> stats,
         ObservableCollection<UsbDeviceItemView> devices)
     {
-        ReplaceCollection(stats, snapshot.Stats, UsbDeviceStatView.FromStat);
-        ReplaceCollection(devices, snapshot.Devices, UsbDeviceItemView.FromItem);
+        WorkspaceCollectionProjector.Replace(stats, snapshot.Stats, UsbDeviceStatView.FromStat);
+        WorkspaceCollectionProjector.Replace(devices, snapshot.Devices, UsbDeviceItemView.FromItem);
         _countNotifier.UsbDevicesChanged();
     }
 
@@ -54,8 +53,8 @@ internal sealed class WorkspaceSnapshotApplier
         ObservableCollection<RemoteDesktopSessionItemView> sessions,
         ObservableCollection<RemoteDesktopControlFactView> controlFacts)
     {
-        ReplaceCollection(sessions, snapshot.Sessions, RemoteDesktopSessionItemView.FromItem);
-        ReplaceCollection(controlFacts, snapshot.ControlFacts, RemoteDesktopControlFactView.FromFact);
+        WorkspaceCollectionProjector.Replace(sessions, snapshot.Sessions, RemoteDesktopSessionItemView.FromItem);
+        WorkspaceCollectionProjector.Replace(controlFacts, snapshot.ControlFacts, RemoteDesktopControlFactView.FromFact);
         _countNotifier.RemoteDesktopSessionsChanged();
     }
 
@@ -65,9 +64,9 @@ internal sealed class WorkspaceSnapshotApplier
         ObservableCollection<SystemMonitorMetricView> details,
         ObservableCollection<SystemMonitorIndicatorView> indicators)
     {
-        ReplaceCollection(overview, snapshot.Overview, SystemMonitorMetricView.FromMetric);
-        ReplaceCollection(details, snapshot.Details, SystemMonitorMetricView.FromMetric);
-        ReplaceCollection(indicators, snapshot.Indicators, SystemMonitorIndicatorView.FromIndicator);
+        WorkspaceCollectionProjector.Replace(overview, snapshot.Overview, SystemMonitorMetricView.FromMetric);
+        WorkspaceCollectionProjector.Replace(details, snapshot.Details, SystemMonitorMetricView.FromMetric);
+        WorkspaceCollectionProjector.Replace(indicators, snapshot.Indicators, SystemMonitorIndicatorView.FromIndicator);
         _countNotifier.SystemMonitorMetricsChanged();
     }
 
@@ -77,21 +76,9 @@ internal sealed class WorkspaceSnapshotApplier
         ObservableCollection<SettingsActionItemView> actions,
         ObservableCollection<SettingsDetailItemView> details)
     {
-        ReplaceCollection(tabs, snapshot.Tabs, SettingsTabItemView.FromItem);
-        ReplaceCollection(actions, snapshot.Actions, SettingsActionItemView.FromItem);
-        ReplaceCollection(details, snapshot.Details, SettingsDetailItemView.FromItem);
+        WorkspaceCollectionProjector.Replace(tabs, snapshot.Tabs, SettingsTabItemView.FromItem);
+        WorkspaceCollectionProjector.Replace(actions, snapshot.Actions, SettingsActionItemView.FromItem);
+        WorkspaceCollectionProjector.Replace(details, snapshot.Details, SettingsDetailItemView.FromItem);
         _countNotifier.SettingsActionsChanged();
-    }
-
-    private static void ReplaceCollection<TSource, TItem>(
-        ObservableCollection<TItem> target,
-        IEnumerable<TSource> source,
-        Func<TSource, TItem> map)
-    {
-        target.Clear();
-        foreach (var item in source)
-        {
-            target.Add(map(item));
-        }
     }
 }
