@@ -43,6 +43,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
+    private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
     private string _statusMessage = "";
@@ -382,6 +383,26 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceCommandStateClient,
             _sessionCommandStateClient,
             _topBarStatusUpdater);
+        _workspaceShellRefreshCoordinator = new WorkspaceShellRefreshCoordinator(
+            _workspaceCommandRegistry,
+            _workspaceActionSurfaceLoader,
+            _workspaceActionRenderContextBuilder,
+            _dashboardMetricsUpdater,
+            _topBarStatusUpdater,
+            BuildDashboardMetricsRequest,
+            BuildWorkspaceActionRenderState,
+            OnPropertyChanged,
+            new[]
+            {
+                nameof(IsDeviceDiscoverySelected),
+                nameof(IsUsbManagementSelected),
+                nameof(IsFileTransferSelected),
+                nameof(IsRemoteDesktopSelected),
+                nameof(IsQuantumSelected),
+                nameof(IsSystemMonitorSelected),
+                nameof(IsSettingsSelected)
+            },
+            nameof(ConnectionStatus));
         var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
@@ -1235,72 +1256,35 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private Task RunDeviceDiscoveryActionAsync(Func<Task> action) =>
         _workspaceBusyCoordinator.RunAsync(WorkspaceErrorScope.DeviceDiscovery, action);
 
-    private void RefreshCommandStates()
-    {
-        _workspaceCommandRegistry.RefreshAll();
-        RefreshDynamicWorkspaceActionStates();
-    }
+    private void RefreshCommandStates() =>
+        _workspaceShellRefreshCoordinator.RefreshCommandStates();
 
-    private void ApplyWorkspaceInputChange(Action? resetInput = null)
-    {
-        resetInput?.Invoke();
-        RefreshCommandStates();
-    }
+    private void ApplyWorkspaceInputChange(Action? resetInput = null) =>
+        _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(resetInput);
 
-    private void RefreshSelectedFeatureState()
-    {
-        OnPropertyChanged(nameof(IsDeviceDiscoverySelected));
-        OnPropertyChanged(nameof(IsUsbManagementSelected));
-        OnPropertyChanged(nameof(IsFileTransferSelected));
-        OnPropertyChanged(nameof(IsRemoteDesktopSelected));
-        OnPropertyChanged(nameof(IsQuantumSelected));
-        OnPropertyChanged(nameof(IsSystemMonitorSelected));
-        OnPropertyChanged(nameof(IsSettingsSelected));
-        RefreshTopBarStatus();
-        RefreshCommandStates();
-    }
+    private void RefreshSelectedFeatureState() =>
+        _workspaceShellRefreshCoordinator.RefreshSelectedFeatureState();
 
-    private void RefreshConnectionState()
-    {
-        OnPropertyChanged(nameof(ConnectionStatus));
-        RefreshShellRuntimeState();
-    }
+    private void RefreshConnectionState() =>
+        _workspaceShellRefreshCoordinator.RefreshConnectionState();
 
-    private void RefreshShellRuntimeState()
-    {
-        RefreshDashboardMetrics();
-        RefreshTopBarStatus();
-        RefreshCommandStates();
-    }
+    private void RefreshShellRuntimeState() =>
+        _workspaceShellRefreshCoordinator.RefreshShellRuntimeState();
 
-    private void RefreshDynamicWorkspaceActionStates()
-    {
-        _workspaceActionSurfaceLoader.RefreshDynamicSurfaces(
-            _workspaceActionRenderContextBuilder.BuildContext(BuildWorkspaceActionRenderState()));
-    }
+    private void RefreshDashboardMetrics() =>
+        _workspaceShellRefreshCoordinator.RefreshDashboardMetrics();
 
-    private void RefreshDashboardMetrics()
-    {
-        _dashboardMetricsUpdater.Refresh(
-            new DashboardMetricsRequest(
-                ConnectionState,
-                FileTransferQueue.Count,
-                IsBusy));
-    }
+    private void LoadWorkspaceActions() =>
+        _workspaceShellRefreshCoordinator.LoadWorkspaceActions();
 
-    private void LoadWorkspaceActions()
-    {
-        _workspaceActionSurfaceLoader.LoadInitialSurfaces(
-            _workspaceActionRenderContextBuilder.BuildContext(BuildWorkspaceActionRenderState()));
-    }
+    private void RefreshTopBarStatus() =>
+        _workspaceShellRefreshCoordinator.RefreshTopBarStatus();
 
-    private void RefreshTopBarStatus()
-    {
-        var renderState = BuildWorkspaceActionRenderState();
-        _topBarStatusUpdater.Refresh(
-            _workspaceActionRenderContextBuilder.BuildTopBarStatusRequest(renderState),
-            _workspaceActionRenderContextBuilder.BuildGateSnapshot(renderState));
-    }
+    private DashboardMetricsRequest BuildDashboardMetricsRequest() =>
+        new(
+            ConnectionState,
+            FileTransferQueue.Count,
+            IsBusy);
 
     private WorkspaceActionRenderState BuildWorkspaceActionRenderState() =>
         new(
