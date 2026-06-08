@@ -307,6 +307,7 @@ foreach ($portabilitySmokeSignal in @(
     "verify-windows-ffi-client.ps1",
     "verify-windows-ui-parity.ps1",
     "verify-windows-ui-action-order.ps1",
+    "verify-windows-ui-parity-matrix.ps1",
     "verify-windows-startup-state.ps1",
     "verify-windows-command-gates.ps1",
     "verify-windows-native-runtime-profile.ps1",
@@ -391,6 +392,7 @@ foreach ($startupStateSmokeSignal in @(
 }
 Assert-Contains -Text $architecture -Needle "verify-windows-portability-smoke.ps1" -Message "Architecture doc missing portability smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-stack-freshness.ps1" -Message "Architecture doc missing stack freshness smoke entrypoint."
+Assert-Contains -Text $architecture -Needle "verify-windows-ui-parity-matrix.ps1" -Message "Architecture doc missing UI parity matrix smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "probe-mac-ssh.ps1" -Message "Architecture doc missing Mac SSH probe entrypoint."
 Assert-Contains -Text $architecture -Needle "-RequireMacSshReady" -Message "Architecture doc missing Mac SSH readiness gate."
 Assert-Contains -Text $architecture -Needle "-ExpectedHostAddress" -Message "Architecture doc missing Mac SSH expected-address diagnostic."

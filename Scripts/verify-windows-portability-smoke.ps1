@@ -95,6 +95,11 @@ Invoke-SmokeGate `
     -Parameters @{ RepoRoot = $RepoRoot }
 
 Invoke-SmokeGate `
+    -Name "windows-ui-parity-matrix" `
+    -RelativeScriptPath "Scripts/verify-windows-ui-parity-matrix.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
+
+Invoke-SmokeGate `
     -Name "windows-startup-state" `
     -RelativeScriptPath "Scripts/verify-windows-startup-state.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
