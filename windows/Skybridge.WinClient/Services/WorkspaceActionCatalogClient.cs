@@ -549,7 +549,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Performance Overlay",
                 "\uE9D9",
                 true,
-                "Visible mac-parity quick action; fail-closed command does not start overlay telemetry.",
+                "Visible mac-parity quick action; command records in-memory overlay state without starting telemetry.",
                 CommandId: WorkspaceActionCommandId.ShowRemoteDesktopPerformanceOverlay,
                 GateId: WorkspaceActionGateId.CanShowRemoteDesktopPerformanceOverlay),
             new(
@@ -557,7 +557,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Quality",
                 "\uE7F4",
                 true,
-                "Visible mac-parity quick action; fail-closed command does not change encoder or transport quality.",
+                "Visible mac-parity quick action; command records selected quality in memory without changing encoder or transport.",
                 CommandId: WorkspaceActionCommandId.ApplyRemoteDesktopQuality,
                 GateId: WorkspaceActionGateId.CanApplyRemoteDesktopQuality),
             new(
@@ -565,7 +565,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Settings",
                 "\uE713",
                 true,
-                "Visible mac-parity quick action; fail-closed command does not mutate runtime settings.",
+                "Visible mac-parity quick action; command opens in-memory settings state without mutating runtime settings.",
                 CommandId: WorkspaceActionCommandId.OpenRemoteDesktopSettings,
                 GateId: WorkspaceActionGateId.CanOpenRemoteDesktopSettings),
             new(

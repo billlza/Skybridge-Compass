@@ -308,6 +308,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _remoteDesktopWorkspaceActions = new RemoteDesktopWorkspaceActions(
             _workspaceBusyCoordinator,
             _remoteDesktopClient,
+            () => SelectedBitrate,
+            () => SelectedFramerate,
             value => RemoteDesktopStatus = value,
             value => StatusMessage = value);
         _systemMonitorWorkspaceActions = new SystemMonitorWorkspaceActions(

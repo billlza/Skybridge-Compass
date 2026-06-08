@@ -120,6 +120,20 @@ try
     var cycledTopBarUpdate = defaultDependencies.TopBarStatusClient.BuildStatusUpdate(
         new TopBarStatusRequest("Disconnected", "Nominal", "Dashboard"));
     AssertEqual(TopBarStatusClient.DefaultThemeStatus, cycledTopBarUpdate.ResolvedStatus.ThemeStatus, "cycled top-bar theme status");
+    AssertType<RemoteDesktopWorkspaceClient>(defaultDependencies.RemoteDesktopClient, "default remote desktop client");
+    AssertEqual(false, defaultDependencies.RemoteDesktopClient.CanStartRecommendedSession(), "default remote desktop recommended connect gate");
+    AssertEqual(false, defaultDependencies.RemoteDesktopClient.CanStartAdvancedSession(), "default remote desktop advanced connect gate");
+    AssertEqual(true, defaultDependencies.RemoteDesktopClient.CanShowPerformanceOverlay(), "default remote desktop overlay gate");
+    AssertEqual(true, defaultDependencies.RemoteDesktopClient.CanApplyQuality(), "default remote desktop quality gate");
+    AssertEqual(true, defaultDependencies.RemoteDesktopClient.CanOpenSettings(), "default remote desktop settings gate");
+    AssertEqual(false, defaultDependencies.RemoteDesktopClient.CanEnterFullScreen(), "default remote desktop full screen gate");
+    AssertEqual(false, defaultDependencies.RemoteDesktopClient.CanDisconnectSession(), "default remote desktop disconnect gate");
+    var overlayAction = await defaultDependencies.RemoteDesktopClient.BuildPerformanceOverlayActionAsync();
+    AssertEqual(RemoteDesktopWorkspaceClient.DefaultPerformanceOverlayReadyStatus, overlayAction.Status, "remote desktop overlay action status");
+    var qualityAction = await defaultDependencies.RemoteDesktopClient.BuildQualityActionAsync("High", "Fps30");
+    AssertEqual(RemoteDesktopWorkspaceClient.DefaultQualityAppliedStatus, qualityAction.Status, "remote desktop quality action status");
+    var settingsAction = await defaultDependencies.RemoteDesktopClient.BuildSettingsActionAsync();
+    AssertEqual(RemoteDesktopWorkspaceClient.DefaultSettingsReadyStatus, settingsAction.Status, "remote desktop settings action status");
 
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "external");

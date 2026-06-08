@@ -224,7 +224,9 @@ internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWo
     public Task<RemoteDesktopWorkspaceActionResult> BuildPerformanceOverlayActionAsync() =>
         Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultPerformanceOverlayActionResult());
 
-    public Task<RemoteDesktopWorkspaceActionResult> BuildQualityActionAsync() =>
+    public Task<RemoteDesktopWorkspaceActionResult> BuildQualityActionAsync(
+        string bitrateProfile,
+        string framerateProfile) =>
         Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultQualityActionResult());
 
     public Task<RemoteDesktopWorkspaceActionResult> BuildSettingsActionAsync() =>

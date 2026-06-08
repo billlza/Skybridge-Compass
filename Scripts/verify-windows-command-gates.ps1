@@ -1234,7 +1234,9 @@ sealed class TestRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
     public Task<RemoteDesktopWorkspaceActionResult> BuildPerformanceOverlayActionAsync() =>
         throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
 
-    public Task<RemoteDesktopWorkspaceActionResult> BuildQualityActionAsync() =>
+    public Task<RemoteDesktopWorkspaceActionResult> BuildQualityActionAsync(
+        string bitrateProfile,
+        string framerateProfile) =>
         throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
 
     public Task<RemoteDesktopWorkspaceActionResult> BuildSettingsActionAsync() =>

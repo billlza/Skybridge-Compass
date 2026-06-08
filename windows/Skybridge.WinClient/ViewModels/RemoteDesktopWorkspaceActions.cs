@@ -8,17 +8,23 @@ internal sealed class RemoteDesktopWorkspaceActions
 {
     private readonly WorkspaceBusyCoordinator _busyCoordinator;
     private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
+    private readonly Func<string> _getSelectedBitrate;
+    private readonly Func<string> _getSelectedFramerate;
     private readonly Action<string> _setRemoteDesktopStatus;
     private readonly Action<string> _setStatusMessage;
 
     public RemoteDesktopWorkspaceActions(
         WorkspaceBusyCoordinator busyCoordinator,
         IRemoteDesktopWorkspaceClient remoteDesktopClient,
+        Func<string> getSelectedBitrate,
+        Func<string> getSelectedFramerate,
         Action<string> setRemoteDesktopStatus,
         Action<string> setStatusMessage)
     {
         _busyCoordinator = busyCoordinator ?? throw new ArgumentNullException(nameof(busyCoordinator));
         _remoteDesktopClient = remoteDesktopClient ?? throw new ArgumentNullException(nameof(remoteDesktopClient));
+        _getSelectedBitrate = getSelectedBitrate ?? throw new ArgumentNullException(nameof(getSelectedBitrate));
+        _getSelectedFramerate = getSelectedFramerate ?? throw new ArgumentNullException(nameof(getSelectedFramerate));
         _setRemoteDesktopStatus = setRemoteDesktopStatus ?? throw new ArgumentNullException(nameof(setRemoteDesktopStatus));
         _setStatusMessage = setStatusMessage ?? throw new ArgumentNullException(nameof(setStatusMessage));
     }
@@ -41,7 +47,9 @@ internal sealed class RemoteDesktopWorkspaceActions
     public Task ApplyQualityAsync() =>
         RunAsync(
             _remoteDesktopClient.BuildQualityPendingStatus,
-            _remoteDesktopClient.BuildQualityActionAsync);
+            () => _remoteDesktopClient.BuildQualityActionAsync(
+                _getSelectedBitrate(),
+                _getSelectedFramerate()));
 
     public Task OpenSettingsAsync() =>
         RunAsync(
