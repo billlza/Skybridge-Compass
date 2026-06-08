@@ -107,11 +107,12 @@ $remoteDesktopProfileCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinCli
 $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SystemMonitorWorkspaceClient.cs"
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
+$sessionStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionStatusClient.cs"
 $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 
@@ -135,6 +136,7 @@ $remoteDesktopProfileCatalog = Get-Content -Raw -LiteralPath $remoteDesktopProfi
 $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
+$sessionStatus = Get-Content -Raw -LiteralPath $sessionStatusPath
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
@@ -494,6 +496,42 @@ foreach ($topBarSignal in @(
     "Visible mac-parity theme entry point"
 )) {
     Assert-Contains -Text ($topBarStatus + $sessionViewModel + $mainWindow + $workspaceActionCatalog) -Needle $topBarSignal -Message "Top bar parity signal missing: $topBarSignal"
+}
+
+foreach ($sessionStatusSignal in @(
+    "public interface ISessionStatusClient",
+    "public sealed class SessionStatusClient : ISessionStatusClient",
+    "SessionStatusAction",
+    "BuildInitialStatusMessage",
+    "BuildPendingStatus",
+    "BuildCompletedStatus",
+    "BuildEngineStateStatus",
+    "DefaultInitialStatusMessage",
+    "BuildDefaultPendingStatus",
+    "BuildDefaultCompletedStatus",
+    "BuildDefaultEngineStateStatus",
+    "new SessionStatusClient()",
+    "_sessionStatusClient.BuildInitialStatusMessage()",
+    "_sessionStatusClient.BuildPendingStatus(SessionStatusAction.Connect)",
+    "_sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Connect)",
+    "_sessionStatusClient.BuildPendingStatus(SessionStatusAction.Disconnect)",
+    "_sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Disconnect)",
+    "_sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Heartbeat)",
+    "_sessionStatusClient.BuildEngineStateStatus(newState)"
+)) {
+    Assert-Contains -Text ($sessionStatus + $sessionViewModel + $mainWindow) -Needle $sessionStatusSignal -Message "Session status service signal missing: $sessionStatusSignal"
+}
+
+foreach ($viewModelSessionStatusLiteral in @(
+    '_statusMessage = "Idle"',
+    'StatusMessage = "Connecting..."',
+    'StatusMessage = "Connected"',
+    'StatusMessage = "Disconnecting..."',
+    'StatusMessage = "Disconnected"',
+    'StatusMessage = "Heartbeat acknowledged"',
+    'StatusMessage = newState switch'
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelSessionStatusLiteral)) -Message "SessionViewModel must source session status text from SessionStatusClient instead of literal: $viewModelSessionStatusLiteral"
 }
 
 foreach ($workspaceActionRoleSignal in @(
@@ -1352,6 +1390,7 @@ foreach ($docSignal in @(
     "Theme",
     "TopBarStatusClient",
     "TopBarStatusSlot",
+    "SessionStatusClient",
     "WorkspaceActionCommandId",
     "WorkspaceActionGateId",
     "WorkspaceActionDetailSlot",

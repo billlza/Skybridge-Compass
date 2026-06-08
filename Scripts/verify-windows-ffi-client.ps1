@@ -46,12 +46,13 @@ $systemMonitorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/S
 $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SettingsWorkspaceClient.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
+$sessionStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionStatusClient.cs"
 $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $unavailableClientStubsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $topBarStatusPath, $sessionStatusPath, $unavailableClientStubsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -76,6 +77,7 @@ $systemMonitor = Get-Content -Raw -LiteralPath $systemMonitorPath
 $settings = Get-Content -Raw -LiteralPath $settingsPath
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
+$sessionStatus = Get-Content -Raw -LiteralPath $sessionStatusPath
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
@@ -136,6 +138,7 @@ Assert-Contains -Text $mainWindow -Needle "new UsbManagementWorkspaceClient()" -
 Assert-Contains -Text $mainWindow -Needle "new SettingsWorkspaceClient()" -Message "MainWindow should wire SettingsWorkspaceClient for explicit Settings diagnostics."
 Assert-Contains -Text $mainWindow -Needle "new DashboardMetricsClient()" -Message "MainWindow should wire DashboardMetricsClient for explicit dashboard metrics parity."
 Assert-Contains -Text $mainWindow -Needle "new TopBarStatusClient()" -Message "MainWindow should wire TopBarStatusClient for explicit top-bar status parity."
+Assert-Contains -Text $mainWindow -Needle "new SessionStatusClient()" -Message "MainWindow should wire SessionStatusClient for explicit session status text."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",
@@ -818,5 +821,28 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "TopBarStatusClient" -Message "Architecture doc missing TopBarStatusClient status."
+
+foreach ($signal in @(
+    "public interface ISessionStatusClient",
+    "public sealed class SessionStatusClient : ISessionStatusClient",
+    "SessionStatusAction",
+    "BuildInitialStatusMessage",
+    "BuildPendingStatus",
+    "BuildCompletedStatus",
+    "BuildEngineStateStatus",
+    "DefaultInitialStatusMessage",
+    "BuildDefaultPendingStatus",
+    "BuildDefaultCompletedStatus",
+    "BuildDefaultEngineStateStatus",
+    "EngineConnectionState.Connecting",
+    "EngineConnectionState.Connected",
+    "EngineConnectionState.Reconnecting",
+    "EngineConnectionState.ShuttingDown",
+    "Heartbeat acknowledged"
+)) {
+    Assert-Contains -Text $sessionStatus -Needle $signal -Message "SessionStatusClient missing session status signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "SessionStatusClient" -Message "Architecture doc missing SessionStatusClient status."
 
 Write-Output "windows-ffi-client: ok"

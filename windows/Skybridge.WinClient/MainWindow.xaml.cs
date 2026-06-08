@@ -33,7 +33,8 @@ public sealed partial class MainWindow : Window
             new TopBarStatusClient(),
             new ConnectionWorkspaceStateClient(),
             new WorkspaceActionCatalogClient(),
-            new WorkspaceErrorStatusClient());
+            new WorkspaceErrorStatusClient(),
+            new SessionStatusClient());
         DataContext = ViewModel;
     }
 }

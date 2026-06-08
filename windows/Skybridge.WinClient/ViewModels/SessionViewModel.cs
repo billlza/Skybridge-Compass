@@ -31,7 +31,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
     private readonly IWorkspaceActionCatalogClient _workspaceActionCatalogClient;
     private readonly IWorkspaceErrorStatusClient _workspaceErrorStatusClient;
-    private string _statusMessage = "Idle";
+    private readonly ISessionStatusClient _sessionStatusClient;
+    private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
     private string _manualConnectionHost = "";
@@ -93,7 +94,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ITopBarStatusClient? topBarStatusClient = null,
         IConnectionWorkspaceStateClient? connectionWorkspaceStateClient = null,
         IWorkspaceActionCatalogClient? workspaceActionCatalogClient = null,
-        IWorkspaceErrorStatusClient? workspaceErrorStatusClient = null)
+        IWorkspaceErrorStatusClient? workspaceErrorStatusClient = null,
+        ISessionStatusClient? sessionStatusClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -116,6 +118,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient ?? new ConnectionWorkspaceStateClient();
         _workspaceActionCatalogClient = workspaceActionCatalogClient ?? new WorkspaceActionCatalogClient();
         _workspaceErrorStatusClient = workspaceErrorStatusClient ?? new WorkspaceErrorStatusClient();
+        _sessionStatusClient = sessionStatusClient ?? new SessionStatusClient();
+        _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
         _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
         _manualConnectionPort = deviceDiscoveryInputDefaults.ManualConnectionPort;
@@ -750,9 +754,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
         {
-            StatusMessage = "Connecting...";
+            StatusMessage = _sessionStatusClient.BuildPendingStatus(SessionStatusAction.Connect);
             await _engineClient.ConnectAsync();
-            StatusMessage = "Connected";
+            StatusMessage = _sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Connect);
         });
     }
 
@@ -765,9 +769,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
         {
-            StatusMessage = "Disconnecting...";
+            StatusMessage = _sessionStatusClient.BuildPendingStatus(SessionStatusAction.Disconnect);
             await _engineClient.DisconnectAsync();
-            StatusMessage = "Disconnected";
+            StatusMessage = _sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Disconnect);
         });
     }
 
@@ -781,7 +785,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
         {
             await _engineClient.SendHeartbeatAsync();
-            StatusMessage = "Heartbeat acknowledged";
+            StatusMessage = _sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Heartbeat);
         });
     }
 
@@ -1565,14 +1569,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
     {
         ConnectionState = newState;
-        StatusMessage = newState switch
-        {
-            EngineConnectionState.Connecting => "Connecting...",
-            EngineConnectionState.Connected => "Connected",
-            EngineConnectionState.Reconnecting => "Reconnecting...",
-            EngineConnectionState.ShuttingDown => "Disconnecting...",
-            _ => "Disconnected"
-        };
+        StatusMessage = _sessionStatusClient.BuildEngineStateStatus(newState);
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
