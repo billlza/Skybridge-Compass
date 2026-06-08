@@ -52,10 +52,11 @@ $sessionCommandStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Serv
 $workspaceCommandStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceCommandStateClient.cs"
 $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
+$dependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/SessionViewModelDependencyFactory.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -86,6 +87,7 @@ $sessionCommandState = Get-Content -Raw -LiteralPath $sessionCommandStatePath
 $workspaceCommandState = Get-Content -Raw -LiteralPath $workspaceCommandStatePath
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
+$dependencyFactory = Get-Content -Raw -LiteralPath $dependencyFactoryPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 
@@ -121,33 +123,35 @@ foreach ($signal in @(
 }
 
 Assert-True -Condition (-not $client.Contains("var peerPublicKey = ReadLocalPublicKey();")) -Message "FfiEngineClient must not use the local public key as the peer key."
-Assert-Contains -Text $mainWindow -Needle "new DummyEngineClient()" -Message "MainWindow should keep the dummy client until native DLL deployment is explicit."
+Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateDefault()" -Message "MainWindow should create SessionViewModel through the dependency factory."
+Assert-Contains -Text $dependencyFactory -Needle "new DummyEngineClient()" -Message "Default dependency factory should keep the dummy client until native DLL deployment is explicit."
 Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not silently switch to FfiEngineClient before native DLL deployment."
+Assert-True -Condition (-not $dependencyFactory.Contains("new FfiEngineClient()")) -Message "Default dependency factory must not silently switch to FfiEngineClient before native DLL deployment."
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
-Assert-Contains -Text $mainWindow -Needle "var coreBridge = new CoreBridge();" -Message "MainWindow should create one explicit CoreBridge for manual Core tools."
-Assert-Contains -Text $mainWindow -Needle "var discoveryClient = new CoreDiscoveryClient(coreBridge);" -Message "MainWindow should create one explicit CoreDiscoveryClient for discovery parsing and browsing."
-Assert-Contains -Text $mainWindow -Needle "new WindowsDiscoveryBrowserClient(discoveryClient)" -Message "MainWindow should wire WindowsDiscoveryBrowserClient for explicit DNS-SD browse boundary snapshots."
-Assert-Contains -Text $mainWindow -Needle "new DeviceDiscoveryInputDefaultsClient()" -Message "MainWindow should wire DeviceDiscoveryInputDefaultsClient for explicit Device Discovery default inputs."
-Assert-Contains -Text $mainWindow -Needle "new ManualConnectionClient()" -Message "MainWindow should wire ManualConnectionClient for explicit manual target validation."
-Assert-Contains -Text $mainWindow -Needle "new CrossNetworkConnectionClient()" -Message "MainWindow should wire CrossNetworkConnectionClient for explicit QR/code envelope validation."
-Assert-Contains -Text $mainWindow -Needle "new PairingMaterialClient()" -Message "MainWindow should wire PairingMaterialClient for explicit manual pairing-code validation."
-Assert-Contains -Text $mainWindow -Needle "new ConnectionPreflightClient(coreBridge)" -Message "MainWindow should wire ConnectionPreflightClient for explicit connection preflight."
-Assert-Contains -Text $mainWindow -Needle "new ConnectionWorkspaceStateClient()" -Message "MainWindow should wire ConnectionWorkspaceStateClient for explicit connection state gates."
-Assert-Contains -Text $mainWindow -Needle "new WorkspaceErrorStatusClient()" -Message "MainWindow should wire WorkspaceErrorStatusClient for explicit workspace error routing."
-Assert-Contains -Text $mainWindow -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "MainWindow should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
-Assert-Contains -Text $mainWindow -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "MainWindow should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
-Assert-Contains -Text $mainWindow -Needle "new WorkspaceActionCatalogClient()" -Message "MainWindow should wire WorkspaceActionCatalogClient for explicit workspace action order."
-Assert-Contains -Text $mainWindow -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "MainWindow should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
-Assert-Contains -Text $mainWindow -Needle "new RemoteDesktopProfileCatalogClient()" -Message "MainWindow should wire RemoteDesktopProfileCatalogClient for explicit Remote Desktop profile parity."
-Assert-Contains -Text $mainWindow -Needle "new SystemMonitorWorkspaceClient()" -Message "MainWindow should wire SystemMonitorWorkspaceClient for explicit System Monitor diagnostics."
-Assert-Contains -Text $mainWindow -Needle "new UsbManagementWorkspaceClient()" -Message "MainWindow should wire UsbManagementWorkspaceClient for explicit USB Management diagnostics."
-Assert-Contains -Text $mainWindow -Needle "new SettingsWorkspaceClient()" -Message "MainWindow should wire SettingsWorkspaceClient for explicit Settings diagnostics."
-Assert-Contains -Text $mainWindow -Needle "new DashboardMetricsClient()" -Message "MainWindow should wire DashboardMetricsClient for explicit dashboard metrics parity."
-Assert-Contains -Text $mainWindow -Needle "new FeatureCatalogClient()" -Message "MainWindow should wire FeatureCatalogClient for explicit navigation parity."
-Assert-Contains -Text $mainWindow -Needle "new TopBarStatusClient()" -Message "MainWindow should wire TopBarStatusClient for explicit top-bar status parity."
-Assert-Contains -Text $mainWindow -Needle "new SessionStatusClient()" -Message "MainWindow should wire SessionStatusClient for explicit session status text."
-Assert-Contains -Text $mainWindow -Needle "new SessionCommandStateClient()" -Message "MainWindow should wire SessionCommandStateClient for explicit session command enablement."
-Assert-Contains -Text $mainWindow -Needle "new WorkspaceCommandStateClient()" -Message "MainWindow should wire WorkspaceCommandStateClient for explicit workspace command enablement."
+Assert-Contains -Text $dependencyFactory -Needle "var coreBridge = new CoreBridge();" -Message "Default dependency factory should create one explicit CoreBridge for manual Core tools."
+Assert-Contains -Text $dependencyFactory -Needle "var discoveryClient = new CoreDiscoveryClient(coreBridge);" -Message "Default dependency factory should create one explicit CoreDiscoveryClient for discovery parsing and browsing."
+Assert-Contains -Text $dependencyFactory -Needle "new WindowsDiscoveryBrowserClient(discoveryClient)" -Message "Default dependency factory should wire WindowsDiscoveryBrowserClient for explicit DNS-SD browse boundary snapshots."
+Assert-Contains -Text $dependencyFactory -Needle "new DeviceDiscoveryInputDefaultsClient()" -Message "Default dependency factory should wire DeviceDiscoveryInputDefaultsClient for explicit Device Discovery default inputs."
+Assert-Contains -Text $dependencyFactory -Needle "new ManualConnectionClient()" -Message "Default dependency factory should wire ManualConnectionClient for explicit manual target validation."
+Assert-Contains -Text $dependencyFactory -Needle "new CrossNetworkConnectionClient()" -Message "Default dependency factory should wire CrossNetworkConnectionClient for explicit QR/code envelope validation."
+Assert-Contains -Text $dependencyFactory -Needle "new PairingMaterialClient()" -Message "Default dependency factory should wire PairingMaterialClient for explicit manual pairing-code validation."
+Assert-Contains -Text $dependencyFactory -Needle "new ConnectionPreflightClient(coreBridge)" -Message "Default dependency factory should wire ConnectionPreflightClient for explicit connection preflight."
+Assert-Contains -Text $dependencyFactory -Needle "new ConnectionWorkspaceStateClient()" -Message "Default dependency factory should wire ConnectionWorkspaceStateClient for explicit connection state gates."
+Assert-Contains -Text $dependencyFactory -Needle "new WorkspaceErrorStatusClient()" -Message "Default dependency factory should wire WorkspaceErrorStatusClient for explicit workspace error routing."
+Assert-Contains -Text $dependencyFactory -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "Default dependency factory should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
+Assert-Contains -Text $dependencyFactory -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "Default dependency factory should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
+Assert-Contains -Text $dependencyFactory -Needle "new WorkspaceActionCatalogClient()" -Message "Default dependency factory should wire WorkspaceActionCatalogClient for explicit workspace action order."
+Assert-Contains -Text $dependencyFactory -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "Default dependency factory should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
+Assert-Contains -Text $dependencyFactory -Needle "new RemoteDesktopProfileCatalogClient()" -Message "Default dependency factory should wire RemoteDesktopProfileCatalogClient for explicit Remote Desktop profile parity."
+Assert-Contains -Text $dependencyFactory -Needle "new SystemMonitorWorkspaceClient()" -Message "Default dependency factory should wire SystemMonitorWorkspaceClient for explicit System Monitor diagnostics."
+Assert-Contains -Text $dependencyFactory -Needle "new UsbManagementWorkspaceClient()" -Message "Default dependency factory should wire UsbManagementWorkspaceClient for explicit USB Management diagnostics."
+Assert-Contains -Text $dependencyFactory -Needle "new SettingsWorkspaceClient()" -Message "Default dependency factory should wire SettingsWorkspaceClient for explicit Settings diagnostics."
+Assert-Contains -Text $dependencyFactory -Needle "new DashboardMetricsClient()" -Message "Default dependency factory should wire DashboardMetricsClient for explicit dashboard metrics parity."
+Assert-Contains -Text $dependencyFactory -Needle "new FeatureCatalogClient()" -Message "Default dependency factory should wire FeatureCatalogClient for explicit navigation parity."
+Assert-Contains -Text $dependencyFactory -Needle "new TopBarStatusClient()" -Message "Default dependency factory should wire TopBarStatusClient for explicit top-bar status parity."
+Assert-Contains -Text $dependencyFactory -Needle "new SessionStatusClient()" -Message "Default dependency factory should wire SessionStatusClient for explicit session status text."
+Assert-Contains -Text $dependencyFactory -Needle "new SessionCommandStateClient()" -Message "Default dependency factory should wire SessionCommandStateClient for explicit session command enablement."
+Assert-Contains -Text $dependencyFactory -Needle "new WorkspaceCommandStateClient()" -Message "Default dependency factory should wire WorkspaceCommandStateClient for explicit workspace command enablement."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",

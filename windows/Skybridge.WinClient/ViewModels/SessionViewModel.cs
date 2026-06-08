@@ -103,32 +103,63 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IFeatureCatalogClient? featureCatalogClient = null,
         ISessionCommandStateClient? sessionCommandStateClient = null,
         IWorkspaceCommandStateClient? workspaceCommandStateClient = null)
+        : this(new SessionViewModelDependencies(
+            engineClient,
+            discoveryClient,
+            discoveryBrowserClient,
+            deviceDiscoveryInputDefaultsClient,
+            manualConnectionClient,
+            crossNetworkConnectionClient,
+            pairingMaterialClient,
+            connectionPreflightClient,
+            coreDiagnosticsClient,
+            fileTransferClient,
+            remoteDesktopClient,
+            remoteDesktopProfileCatalogClient,
+            systemMonitorClient,
+            usbManagementClient,
+            settingsClient,
+            dashboardMetricsClient,
+            topBarStatusClient,
+            connectionWorkspaceStateClient,
+            workspaceActionCatalogClient,
+            workspaceErrorStatusClient,
+            sessionStatusClient,
+            featureCatalogClient,
+            sessionCommandStateClient,
+            workspaceCommandStateClient))
     {
-        _engineClient = engineClient;
-        _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
-        _discoveryBrowserClient = discoveryBrowserClient ?? new UnavailableDiscoveryBrowserClient();
+    }
+
+    public SessionViewModel(SessionViewModelDependencies dependencies)
+    {
+        ArgumentNullException.ThrowIfNull(dependencies);
+
+        _engineClient = dependencies.EngineClient;
+        _discoveryClient = dependencies.DiscoveryClient;
+        _discoveryBrowserClient = dependencies.DiscoveryBrowserClient;
         _discoveryBrowserInputPolicy = _discoveryBrowserClient.BuildInputPolicy();
-        _deviceDiscoveryInputDefaultsClient = deviceDiscoveryInputDefaultsClient ?? new DeviceDiscoveryInputDefaultsClient();
-        _manualConnectionClient = manualConnectionClient ?? new UnavailableManualConnectionClient();
-        _crossNetworkConnectionClient = crossNetworkConnectionClient ?? new UnavailableCrossNetworkConnectionClient();
-        _pairingMaterialClient = pairingMaterialClient ?? new UnavailablePairingMaterialClient();
-        _connectionPreflightClient = connectionPreflightClient ?? new UnavailableConnectionPreflightClient();
-        _coreDiagnosticsClient = coreDiagnosticsClient ?? new UnavailableCoreDiagnosticsClient();
-        _fileTransferClient = fileTransferClient ?? new UnavailableFileTransferWorkspaceClient();
-        _remoteDesktopClient = remoteDesktopClient ?? new UnavailableRemoteDesktopWorkspaceClient();
-        _remoteDesktopProfileCatalogClient = remoteDesktopProfileCatalogClient ?? new RemoteDesktopProfileCatalogClient();
-        _systemMonitorClient = systemMonitorClient ?? new UnavailableSystemMonitorWorkspaceClient();
-        _usbManagementClient = usbManagementClient ?? new UnavailableUsbManagementWorkspaceClient();
-        _settingsClient = settingsClient ?? new UnavailableSettingsWorkspaceClient();
-        _dashboardMetricsClient = dashboardMetricsClient ?? new DashboardMetricsClient();
-        _topBarStatusClient = topBarStatusClient ?? new TopBarStatusClient();
-        _connectionWorkspaceStateClient = connectionWorkspaceStateClient ?? new ConnectionWorkspaceStateClient();
-        _workspaceActionCatalogClient = workspaceActionCatalogClient ?? new WorkspaceActionCatalogClient();
-        _workspaceErrorStatusClient = workspaceErrorStatusClient ?? new WorkspaceErrorStatusClient();
-        _sessionStatusClient = sessionStatusClient ?? new SessionStatusClient();
-        _featureCatalogClient = featureCatalogClient ?? new FeatureCatalogClient();
-        _sessionCommandStateClient = sessionCommandStateClient ?? new SessionCommandStateClient();
-        _workspaceCommandStateClient = workspaceCommandStateClient ?? new WorkspaceCommandStateClient();
+        _deviceDiscoveryInputDefaultsClient = dependencies.DeviceDiscoveryInputDefaultsClient;
+        _manualConnectionClient = dependencies.ManualConnectionClient;
+        _crossNetworkConnectionClient = dependencies.CrossNetworkConnectionClient;
+        _pairingMaterialClient = dependencies.PairingMaterialClient;
+        _connectionPreflightClient = dependencies.ConnectionPreflightClient;
+        _coreDiagnosticsClient = dependencies.CoreDiagnosticsClient;
+        _fileTransferClient = dependencies.FileTransferClient;
+        _remoteDesktopClient = dependencies.RemoteDesktopClient;
+        _remoteDesktopProfileCatalogClient = dependencies.RemoteDesktopProfileCatalogClient;
+        _systemMonitorClient = dependencies.SystemMonitorClient;
+        _usbManagementClient = dependencies.UsbManagementClient;
+        _settingsClient = dependencies.SettingsClient;
+        _dashboardMetricsClient = dependencies.DashboardMetricsClient;
+        _topBarStatusClient = dependencies.TopBarStatusClient;
+        _connectionWorkspaceStateClient = dependencies.ConnectionWorkspaceStateClient;
+        _workspaceActionCatalogClient = dependencies.WorkspaceActionCatalogClient;
+        _workspaceErrorStatusClient = dependencies.WorkspaceErrorStatusClient;
+        _sessionStatusClient = dependencies.SessionStatusClient;
+        _featureCatalogClient = dependencies.FeatureCatalogClient;
+        _sessionCommandStateClient = dependencies.SessionCommandStateClient;
+        _workspaceCommandStateClient = dependencies.WorkspaceCommandStateClient;
         _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
         var initialConnectionStatusPatch = _connectionWorkspaceStateClient.BuildInitialStatusPatch();
         _discoveryStatus = initialConnectionStatusPatch.DiscoveryStatus ?? "";
