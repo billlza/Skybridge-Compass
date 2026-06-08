@@ -102,6 +102,7 @@ $workspaceCountNotifierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/V
 $workspaceCollectionProjectorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCollectionProjector.cs"
 $workspaceSnapshotApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceSnapshotApplier.cs"
 $dashboardMetricsUpdaterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/DashboardMetricsUpdater.cs"
+$topBarStatusUpdaterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/TopBarStatusUpdater.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -129,7 +130,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -148,8 +149,9 @@ $workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierP
 $workspaceCollectionProjector = Get-Content -Raw -LiteralPath $workspaceCollectionProjectorPath
 $workspaceSnapshotApplier = Get-Content -Raw -LiteralPath $workspaceSnapshotApplierPath
 $dashboardMetricsUpdater = Get-Content -Raw -LiteralPath $dashboardMetricsUpdaterPath
+$topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceStatusPatchApplier + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceStatusPatchApplier + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -724,12 +726,13 @@ foreach ($topBarSignal in @(
     "WorkspaceActionGateId",
     "WorkspaceActionDetailSlot",
     "WorkspaceCommandRegistry",
+    "TopBarStatusUpdater",
     "ResolveEnabled",
     "ResolveDetail",
-    "_topBarStatusClient.BuildStatusUpdate(",
+    "_topBarStatusUpdater.Refresh(",
+    "_topBarStatusUpdater.BuildActionDetails(",
     "WorkspaceActionRenderContext",
     "BuildWorkspaceActionRenderContext",
-    "BuildWorkspaceActionRenderContext(update.ActionDetails)",
     "ResolvedStatus",
     "ActionDetails",
     "NotificationsStatus",
@@ -743,6 +746,24 @@ foreach ($topBarSignal in @(
 )) {
     Assert-Contains -Text ($topBarStatus + $sessionViewModel + $mainWindow + $workspaceActionCatalog) -Needle $topBarSignal -Message "Top bar parity signal missing: $topBarSignal"
 }
+
+foreach ($topBarUpdaterSignal in @(
+    "internal sealed class TopBarStatusUpdater",
+    "ITopBarStatusClient topBarStatusClient",
+    "WorkspaceActionSurfaceLoader actionSurfaceLoader",
+    "BuildActionDetails(TopBarStatusRequest request)",
+    "BuildStatusUpdate(request)",
+    "_setConnectionStatus(update.ResolvedStatus.ConnectionStatus)",
+    "_setDiagnosticsStatus(update.ResolvedStatus.DiagnosticsStatus)",
+    "_setNotificationsStatus(update.ResolvedStatus.NotificationsStatus)",
+    "_setThemeStatus(update.ResolvedStatus.ThemeStatus)",
+    "WorkspaceActionSurface.TopBarActions",
+    "new WorkspaceActionRenderContext(gates, update.ActionDetails)"
+)) {
+    Assert-Contains -Text $topBarStatusUpdater -Needle $topBarUpdaterSignal -Message "TopBarStatusUpdater contract missing: $topBarUpdaterSignal"
+}
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarStatusClient")) -Message "SessionViewModel must refresh top-bar status through TopBarStatusUpdater."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("BuildWorkspaceActionRenderContext(update.ActionDetails)")) -Message "SessionViewModel must let TopBarStatusUpdater project top-bar action details."
 
 foreach ($sessionStatusSignal in @(
     "public interface ISessionStatusClient",
@@ -907,11 +928,11 @@ foreach ($surfaceLoaderSignal in @(
 
 foreach ($viewModelSurfaceLoaderSignal in @(
     "_workspaceActionSurfaceLoader.LoadInitialSurfaces(BuildWorkspaceActionRenderContext())",
-    "_workspaceActionSurfaceLoader.RefreshDynamicSurfaces(BuildWorkspaceActionRenderContext())",
-    "_workspaceActionSurfaceLoader.LoadSurface("
+    "_workspaceActionSurfaceLoader.RefreshDynamicSurfaces(BuildWorkspaceActionRenderContext())"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $viewModelSurfaceLoaderSignal -Message "SessionViewModel action surface loader usage missing: $viewModelSurfaceLoaderSignal"
 }
+Assert-Contains -Text $topBarStatusUpdater -Needle "_actionSurfaceLoader.LoadSurface(" -Message "TopBarStatusUpdater must load the top-bar action surface."
 
 Assert-True -Condition (-not $sessionViewModel.Contains("string actionKey")) -Message "SessionViewModel must resolve workspace actions by catalog role ids, not action-key strings."
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionCommand(surface")) -Message "SessionViewModel must not pass surface/key pairs to action command resolution."
@@ -1896,6 +1917,7 @@ foreach ($docSignal in @(
     "Notifications",
     "Theme",
     "TopBarStatusClient",
+    "TopBarStatusUpdater",
     "BuildStatusUpdate",
     "TopBarStatusUpdateSnapshot",
     "TopBarStatusSlot",

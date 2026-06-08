@@ -27,7 +27,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IUsbManagementWorkspaceClient _usbManagementClient;
     private readonly ISettingsWorkspaceClient _settingsClient;
     private readonly IDashboardMetricsClient _dashboardMetricsClient;
-    private readonly ITopBarStatusClient _topBarStatusClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
     private readonly IWorkspaceActionCatalogClient _workspaceActionCatalogClient;
     private readonly IWorkspaceErrorStatusClient _workspaceErrorStatusClient;
@@ -42,6 +41,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
+    private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -157,7 +157,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _usbManagementClient = dependencies.UsbManagementClient;
         _settingsClient = dependencies.SettingsClient;
         _dashboardMetricsClient = dependencies.DashboardMetricsClient;
-        _topBarStatusClient = dependencies.TopBarStatusClient;
         _connectionWorkspaceStateClient = dependencies.ConnectionWorkspaceStateClient;
         _workspaceActionCatalogClient = dependencies.WorkspaceActionCatalogClient;
         _workspaceErrorStatusClient = dependencies.WorkspaceErrorStatusClient;
@@ -347,6 +346,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceActionCatalogClient,
             _workspaceActionSurfaceTargets,
             _workspaceCommandRegistry);
+        _topBarStatusUpdater = new TopBarStatusUpdater(
+            dependencies.TopBarStatusClient,
+            _workspaceActionSurfaceLoader,
+            value => TopBarConnectionStatus = value,
+            value => TopBarDiagnosticsStatus = value,
+            value => TopBarNotificationsStatus = value,
+            value => TopBarThemeStatus = value);
         var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
@@ -1378,19 +1384,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         WorkspaceActionDetailSnapshot? actionDetails = null) =>
         new(
             BuildWorkspaceActionGateSnapshot(),
-            actionDetails ?? _topBarStatusClient.BuildStatusUpdate(BuildTopBarStatusRequest()).ActionDetails);
+            actionDetails ?? _topBarStatusUpdater.BuildActionDetails(BuildTopBarStatusRequest()));
 
     private void RefreshTopBarStatus()
     {
-        var update = _topBarStatusClient.BuildStatusUpdate(BuildTopBarStatusRequest());
-
-        TopBarConnectionStatus = update.ResolvedStatus.ConnectionStatus;
-        TopBarDiagnosticsStatus = update.ResolvedStatus.DiagnosticsStatus;
-        TopBarNotificationsStatus = update.ResolvedStatus.NotificationsStatus;
-        TopBarThemeStatus = update.ResolvedStatus.ThemeStatus;
-        _workspaceActionSurfaceLoader.LoadSurface(
-            WorkspaceActionSurface.TopBarActions,
-            BuildWorkspaceActionRenderContext(update.ActionDetails));
+        _topBarStatusUpdater.Refresh(
+            BuildTopBarStatusRequest(),
+            BuildWorkspaceActionGateSnapshot());
     }
 
     private TopBarStatusRequest BuildTopBarStatusRequest() =>
