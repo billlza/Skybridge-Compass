@@ -34,7 +34,7 @@ function Resolve-SkybridgeSshCommand {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($keyPath)) {
-        $resolvedKeyPath = (Resolve-Path -LiteralPath $keyPath -ErrorAction Stop).Path
+        $resolvedKeyPath = (Resolve-Path -LiteralPath $keyPath -ErrorAction Stop).Path -replace "\\", "/"
         $parts += @("-i", $resolvedKeyPath, "-o", "IdentitiesOnly=yes")
     }
 
