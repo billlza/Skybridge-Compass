@@ -1,12 +1,47 @@
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$SshKeyPath = $env:SKYBRIDGE_GITHUB_SSH_KEY,
     [switch]$CheckOnly
 )
 
 $ErrorActionPreference = "Stop"
 
 $originSsh = "git@github.com:billlza/Skybridge-Compass.git"
-$sshCommand = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+function Join-SshCommand {
+    param([string[]]$Parts)
+
+    return ($Parts | ForEach-Object {
+        if ($_ -match "\s") {
+            '"' + ($_ -replace '"', '\"') + '"'
+        }
+        else {
+            $_
+        }
+    }) -join " "
+}
+
+function Resolve-SkybridgeSshCommand {
+    param([string]$PreferredKeyPath)
+
+    $parts = @("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new")
+    $keyPath = $PreferredKeyPath
+    if ([string]::IsNullOrWhiteSpace($keyPath)) {
+        $candidateKey = Join-Path $env:USERPROFILE ".ssh\skybridge_zk_reverse_ed25519"
+        if (Test-Path -LiteralPath $candidateKey) {
+            $keyPath = $candidateKey
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($keyPath)) {
+        $resolvedKeyPath = (Resolve-Path -LiteralPath $keyPath -ErrorAction Stop).Path
+        $parts += @("-i", $resolvedKeyPath, "-o", "IdentitiesOnly=yes")
+    }
+
+    return Join-SshCommand -Parts $parts
+}
+
+$sshCommand = Resolve-SkybridgeSshCommand -PreferredKeyPath $SshKeyPath
 
 function Invoke-Git {
     param(
