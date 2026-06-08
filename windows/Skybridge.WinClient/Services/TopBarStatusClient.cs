@@ -7,12 +7,17 @@ public interface ITopBarStatusClient
 {
     TopBarStatusSnapshot BuildReadOnlySnapshot(TopBarStatusRequest request);
 
+    TopBarResolvedStatusSnapshot BuildResolvedStatusSnapshot(TopBarStatusRequest request);
+
     string BuildDefaultStatusValue(TopBarStatusSlot slot);
 
     string ResolveStatusValue(
         TopBarStatusSnapshot snapshot,
         TopBarStatusSlot slot,
         string fallback);
+
+    WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot(
+        TopBarResolvedStatusSnapshot snapshot);
 }
 
 public sealed class TopBarStatusClient : ITopBarStatusClient
@@ -48,6 +53,24 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
                     "Visible mac-parity theme entry point; persistence remains behind Settings.")
             });
 
+    public TopBarResolvedStatusSnapshot BuildResolvedStatusSnapshot(TopBarStatusRequest request)
+    {
+        var snapshot = BuildReadOnlySnapshot(request);
+
+        return new(
+            snapshot.CapturedAt,
+            ResolveStatusValue(snapshot, TopBarStatusSlot.Connection, request.ConnectionStatus),
+            ResolveStatusValue(snapshot, TopBarStatusSlot.Diagnostics, request.PerformanceStatus),
+            ResolveStatusValue(
+                snapshot,
+                TopBarStatusSlot.Notifications,
+                BuildDefaultStatusValue(TopBarStatusSlot.Notifications)),
+            ResolveStatusValue(
+                snapshot,
+                TopBarStatusSlot.Theme,
+                BuildDefaultStatusValue(TopBarStatusSlot.Theme)));
+    }
+
     public string BuildDefaultStatusValue(TopBarStatusSlot slot) =>
         slot switch
         {
@@ -71,6 +94,10 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
 
         return fallback;
     }
+
+    public WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot(
+        TopBarResolvedStatusSnapshot snapshot) =>
+        new(snapshot.NotificationsStatus, snapshot.ThemeStatus);
 }
 
 public enum TopBarStatusSlot
@@ -89,6 +116,13 @@ public sealed record TopBarStatusRequest(
 public sealed record TopBarStatusSnapshot(
     DateTimeOffset CapturedAt,
     IReadOnlyList<TopBarStatusItem> Items);
+
+public sealed record TopBarResolvedStatusSnapshot(
+    DateTimeOffset CapturedAt,
+    string ConnectionStatus,
+    string DiagnosticsStatus,
+    string NotificationsStatus,
+    string ThemeStatus);
 
 public sealed record TopBarStatusItem(
     TopBarStatusSlot Slot,

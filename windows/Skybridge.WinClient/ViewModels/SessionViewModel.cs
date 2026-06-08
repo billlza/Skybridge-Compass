@@ -68,6 +68,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _topBarThemeStatus = "";
     private string _selectedBitrate = "";
     private string _selectedFramerate = "";
+    private TopBarResolvedStatusSnapshot? _topBarResolvedStatusSnapshot;
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
     private DiscoveredPeer? _validatedDiscoveredPeer;
@@ -129,8 +130,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _sessionCommandStateClient = sessionCommandStateClient ?? new SessionCommandStateClient();
         _workspaceCommandStateClient = workspaceCommandStateClient ?? new WorkspaceCommandStateClient();
         _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
-        _topBarNotificationsStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications);
-        _topBarThemeStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme);
         var initialConnectionStatusPatch = _connectionWorkspaceStateClient.BuildInitialStatusPatch();
         _discoveryStatus = initialConnectionStatusPatch.DiscoveryStatus ?? "";
         _discoveryBrowserStatus = initialConnectionStatusPatch.DiscoveryBrowserStatus ?? "";
@@ -1579,34 +1578,26 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 CanSendHeartbeat()));
 
     private WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot() =>
-        new(TopBarNotificationsStatus, TopBarThemeStatus);
+        _topBarStatusClient.BuildWorkspaceActionDetailSnapshot(
+            _topBarResolvedStatusSnapshot
+            ?? _topBarStatusClient.BuildResolvedStatusSnapshot(BuildTopBarStatusRequest()));
 
     private void RefreshTopBarStatus()
     {
-        var snapshot = _topBarStatusClient.BuildReadOnlySnapshot(
-            new TopBarStatusRequest(
-                ConnectionStatus,
-                PerformanceStatus,
-                SelectedFeature.Title));
+        _topBarResolvedStatusSnapshot = _topBarStatusClient.BuildResolvedStatusSnapshot(BuildTopBarStatusRequest());
 
-        TopBarConnectionStatus = _topBarStatusClient.ResolveStatusValue(
-            snapshot,
-            TopBarStatusSlot.Connection,
-            ConnectionStatus);
-        TopBarDiagnosticsStatus = _topBarStatusClient.ResolveStatusValue(
-            snapshot,
-            TopBarStatusSlot.Diagnostics,
-            PerformanceStatus);
-        TopBarNotificationsStatus = _topBarStatusClient.ResolveStatusValue(
-            snapshot,
-            TopBarStatusSlot.Notifications,
-            _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications));
-        TopBarThemeStatus = _topBarStatusClient.ResolveStatusValue(
-            snapshot,
-            TopBarStatusSlot.Theme,
-            _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme));
+        TopBarConnectionStatus = _topBarResolvedStatusSnapshot.ConnectionStatus;
+        TopBarDiagnosticsStatus = _topBarResolvedStatusSnapshot.DiagnosticsStatus;
+        TopBarNotificationsStatus = _topBarResolvedStatusSnapshot.NotificationsStatus;
+        TopBarThemeStatus = _topBarResolvedStatusSnapshot.ThemeStatus;
         LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions);
     }
+
+    private TopBarStatusRequest BuildTopBarStatusRequest() =>
+        new(
+            ConnectionStatus,
+            PerformanceStatus,
+            SelectedFeature.Title);
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
     {

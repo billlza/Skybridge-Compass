@@ -521,12 +521,15 @@ foreach ($topBarSignal in @(
     "public interface ITopBarStatusClient",
     "public sealed class TopBarStatusClient : ITopBarStatusClient",
     "BuildReadOnlySnapshot",
+    "BuildResolvedStatusSnapshot",
     "BuildDefaultStatusValue",
     "ResolveStatusValue",
+    "BuildWorkspaceActionDetailSnapshot",
     "DefaultNotificationsStatus",
     "DefaultThemeStatus",
     "TopBarStatusRequest",
     "TopBarStatusSnapshot",
+    "TopBarResolvedStatusSnapshot",
     "TopBarStatusItem",
     "TopBarStatusSlot",
     "TopBarStatusSlot.Connection",
@@ -549,9 +552,10 @@ foreach ($topBarSignal in @(
     "ResolveWorkspaceActionCommand",
     "ResolveEnabled",
     "ResolveDetail",
-    "_topBarStatusClient.ResolveStatusValue(",
-    "_topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications)",
-    "_topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme)",
+    "_topBarStatusClient.BuildResolvedStatusSnapshot(",
+    "_topBarStatusClient.BuildWorkspaceActionDetailSnapshot(",
+    "NotificationsStatus",
+    "ThemeStatus",
     "WorkspaceActionGateSnapshot",
     "WorkspaceActionDetailSnapshot",
     "new TopBarStatusClient()",
@@ -678,7 +682,10 @@ Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionE
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionDetail")) -Message "SessionViewModel must delegate workspace action detail resolution to WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession,")) -Message "SessionViewModel must source the initial workspace action surface plan from WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader,")) -Message "SessionViewModel must source the dynamic workspace action refresh plan from WorkspaceActionCatalogClient."
-Assert-True -Condition (-not $sessionViewModel.Contains("GetTopBarStatusValue")) -Message "SessionViewModel must delegate top-bar status lookup to TopBarStatusClient.ResolveStatusValue."
+Assert-True -Condition (-not $sessionViewModel.Contains("GetTopBarStatusValue")) -Message "SessionViewModel must delegate top-bar status lookup to TopBarStatusClient.BuildResolvedStatusSnapshot."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarStatusClient.ResolveStatusValue(")) -Message "SessionViewModel must use TopBarStatusClient.BuildResolvedStatusSnapshot instead of resolving top-bar scalar values inline."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarStatusClient.BuildDefaultStatusValue(")) -Message "SessionViewModel must use TopBarStatusClient.BuildResolvedStatusSnapshot instead of selecting top-bar defaults inline."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("new(TopBarNotificationsStatus, TopBarThemeStatus)")) -Message "SessionViewModel must ask TopBarStatusClient for top-bar workspace action details."
 
 foreach ($topBarLabelLookup in @(
     'GetTopBarStatusValue(snapshot, "Connection"',
