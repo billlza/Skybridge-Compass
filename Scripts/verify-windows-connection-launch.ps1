@@ -70,6 +70,11 @@ $compileItemText
 "@
 
     Set-Content -LiteralPath $testProgram -Encoding UTF8 -Value @'
+using System.Globalization;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Skybridge.WinClient.Services;
 
 const string Fingerprint = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -224,6 +229,37 @@ AssertEqual(32, pendingAdapter.CapabilityDigest.Length, "pending adapter capabil
 var pendingBindingMaterial = pendingAdapter.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel);
 AssertEqual("windows-preflight.local:443", pendingBindingMaterial.LocalEndpoint, "pending binding local endpoint");
 
+var crossNetworkClient = new CrossNetworkConnectionClient();
+var verifiedDynamicSnapshot = await crossNetworkClient.BuildReadOnlySnapshotAsync(
+    new CrossNetworkConnectionRequest(
+        CrossNetworkConnectionAction.ScanQrCode,
+        BuildDynamicQrInput(includeSignedOsVersion: true, tamperDeviceName: false),
+        "",
+        ""));
+AssertEqual("QR signature verified", verifiedDynamicSnapshot.Status, "dynamic QR verified status");
+AssertEqual("DynamicQRCodeData", Fact(verifiedDynamicSnapshot, "QR schema").Value, "dynamic QR schema");
+AssertEqual("verified", Fact(verifiedDynamicSnapshot, "Signature").Value, "dynamic QR signature fact");
+AssertContains(Fact(verifiedDynamicSnapshot, "Signature").Detail, "P256 dynamic canonical signature verified", "dynamic QR signature detail");
+
+var unverifiableDynamicSnapshot = await crossNetworkClient.BuildReadOnlySnapshotAsync(
+    new CrossNetworkConnectionRequest(
+        CrossNetworkConnectionAction.ScanQrCode,
+        BuildDynamicQrInput(includeSignedOsVersion: false, tamperDeviceName: false),
+        "",
+        ""));
+AssertEqual("QR payload validated", unverifiableDynamicSnapshot.Status, "dynamic QR unverifiable status");
+AssertEqual("unverifiable", Fact(unverifiableDynamicSnapshot, "Signature").Value, "dynamic QR unverifiable signature fact");
+AssertContains(Fact(unverifiableDynamicSnapshot, "Signature").Detail, "generator osVersion", "dynamic QR unverifiable detail");
+
+await ExpectThrowsAsync<InvalidOperationException>(
+    () => crossNetworkClient.BuildReadOnlySnapshotAsync(
+        new CrossNetworkConnectionRequest(
+            CrossNetworkConnectionAction.ScanQrCode,
+            BuildDynamicQrInput(includeSignedOsVersion: true, tamperDeviceName: true),
+            "",
+            "")),
+    "QR dynamic canonical signature verification failed.");
+
 Console.WriteLine("windows-connection-launch-smoke: ok");
 
 static ConnectionPreflightSnapshot BuildSnapshot(ConnectionPreflightPlan plan) =>
@@ -262,6 +298,90 @@ static ConnectionPreflightPlan BuildPlan(
         selectedCandidatePair,
         relayId,
         timestampWindowMs);
+
+static string BuildDynamicQrInput(bool includeSignedOsVersion, bool tamperDeviceName)
+{
+    const string sessionId = "smoke-session";
+    const string deviceName = "Desk Mac";
+    const string deviceFingerprint = "0011223344556677";
+    const string osVersion = "Version 15.5 (Build 24F74)";
+    var timestampText = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0)
+        .ToString("F3", CultureInfo.InvariantCulture);
+    var expiresText = ((DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds() / 1000.0) - 978_307_200.0)
+        .ToString("F3", CultureInfo.InvariantCulture);
+    var agreementPublicKey = Enumerable.Range(1, 32).Select(value => (byte)value).ToArray();
+
+    using var signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    var signingPublicKey = ExportP256PublicKey(signingKey);
+    var signingFingerprint = Convert.ToHexString(SHA256.HashData(signingPublicKey)).ToLowerInvariant();
+    var canonical = BuildMacDynamicQrCanonical(
+        deviceFingerprint,
+        deviceName,
+        osVersion,
+        timestampText,
+        signingFingerprint);
+    var signature = signingKey.SignData(
+        Encoding.UTF8.GetBytes(canonical),
+        HashAlgorithmName.SHA256,
+        DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+
+    using var jsonStream = new MemoryStream();
+    using (var writer = new Utf8JsonWriter(jsonStream))
+    {
+        writer.WriteStartObject();
+        writer.WriteNumber("version", 2);
+        writer.WriteString("sessionID", sessionId);
+        writer.WriteString("deviceName", tamperDeviceName ? "Desk Mac Tampered" : deviceName);
+        writer.WriteString("deviceFingerprint", deviceFingerprint);
+        writer.WriteString("publicKey", Convert.ToBase64String(agreementPublicKey));
+        writer.WriteString("signingPublicKey", Convert.ToBase64String(signingPublicKey));
+        writer.WriteString("signature", Convert.ToBase64String(signature));
+        writer.WritePropertyName("signatureTimestamp");
+        writer.WriteRawValue(timestampText);
+        writer.WriteStartArray("iceServers");
+        writer.WriteStringValue("stun:stun.l.google.com:19302");
+        writer.WriteEndArray();
+        writer.WritePropertyName("expiresAt");
+        writer.WriteRawValue(expiresText);
+        if (includeSignedOsVersion)
+        {
+            writer.WriteString("osVersion", osVersion);
+        }
+
+        writer.WriteEndObject();
+    }
+
+    return "skybridge://connect/" + Base64UrlEncode(jsonStream.ToArray());
+}
+
+static string BuildMacDynamicQrCanonical(
+    string deviceFingerprint,
+    string deviceName,
+    string osVersion,
+    string timestampText,
+    string signingFingerprint) =>
+    $"id={deviceFingerprint}|name={deviceName}|type=macOS|address=0.0.0.0|port=0|os={osVersion}|cap=p2p,cross-network|ts={timestampText}|fp={signingFingerprint}";
+
+static byte[] ExportP256PublicKey(ECDsa signingKey)
+{
+    var parameters = signingKey.ExportParameters(false);
+    if (parameters.Q.X is null || parameters.Q.Y is null)
+    {
+        throw new InvalidOperationException("P256 smoke key is missing public coordinates.");
+    }
+
+    var publicKey = new byte[65];
+    publicKey[0] = 0x04;
+    parameters.Q.X.CopyTo(publicKey.AsSpan(1, 32));
+    parameters.Q.Y.CopyTo(publicKey.AsSpan(33, 32));
+    return publicKey;
+}
+
+static string Base64UrlEncode(byte[] value) =>
+    Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+static CrossNetworkConnectionFact Fact(CrossNetworkConnectionSnapshot snapshot, string label) =>
+    snapshot.Facts.Single(fact => string.Equals(fact.Label, label, StringComparison.Ordinal));
 
 static void ExpectThrows<T>(Action action, string messageFragment)
     where T : Exception

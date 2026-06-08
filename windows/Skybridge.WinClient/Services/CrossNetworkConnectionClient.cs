@@ -37,6 +37,10 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
     private const int RawP256SignatureLengthBytes = 64;
     private const int P256PublicKeyFingerprintHexLength = 64;
     private const double QrSignatureChallengeLifetimeSeconds = 300;
+    private const string DynamicQrDeviceType = "macOS";
+    private const string DynamicQrAddress = "0.0.0.0";
+    private const ushort DynamicQrPort = 0;
+    private static readonly IReadOnlyList<string> DynamicQrCapabilities = new[] { "p2p", "cross-network" };
 
     public static CrossNetworkCodeInputPolicy DefaultCodeInputPolicy { get; } =
         new(ShortCodeAlphabet, 6);
@@ -399,7 +403,7 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             && root.TryGetProperty("signature", out _)
             && root.TryGetProperty("signatureTimestamp", out _))
         {
-            return AnalyzeDynamicQrCodeData(root);
+            return AnalyzeDynamicQrCodeData(root, envelope);
         }
 
         throw new InvalidOperationException("Scan Error: QR payload is not SignedQRPayload, DynamicQRCodeData, or QRCodeSignature payload.");
@@ -472,7 +476,16 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         var signatureBytes = ValidateBase64Bytes(signatureBase64, "signatureBase64");
         ValidateByteLength(signatureBytes, RawP256SignatureLengthBytes, "signatureBase64");
 
-        var canonical = $"id={id}|name={name}|type={type}|address={address}|port={port}|os={osVersion}|cap={string.Join(",", capabilities)}|ts={timestampText}|fp={publicKeyFingerprint}";
+        var canonical = BuildQrCanonicalSignaturePayload(
+            id,
+            name,
+            type,
+            address,
+            port,
+            osVersion,
+            capabilities,
+            timestampText,
+            publicKeyFingerprint);
         if (!VerifyP256RawSignature(Encoding.UTF8.GetBytes(canonical), signatureBytes, publicKeyBytes))
         {
             throw new InvalidOperationException("Scan Error: QR canonical signature verification failed.");
@@ -490,7 +503,7 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             true);
     }
 
-    private static CrossNetworkQrAnalysis AnalyzeDynamicQrCodeData(JsonElement root)
+    private static CrossNetworkQrAnalysis AnalyzeDynamicQrCodeData(JsonElement root, QrInputEnvelope envelope)
     {
         var version = ReadRequiredInt32(root, "version");
         ValidateQrVersion(version);
@@ -502,14 +515,47 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         var signingPublicKey = ReadRequiredString(root, "signingPublicKey");
         var signature = ReadRequiredString(root, "signature");
         var signatureTimestamp = ReadRequiredDouble(root, "signatureTimestamp");
+        var signatureTimestampText = root.GetProperty("signatureTimestamp").GetRawText();
         var iceServers = ReadRequiredArray(root, "iceServers");
         var expiresAt = ReadAppleOrUnixDateTimeOffset(root, "expiresAt");
         ThrowIfExpired(expiresAt);
 
         ValidateByteLength(ValidateBase64Bytes(publicKey, "publicKey"), PublicKeyLengthBytes, "publicKey");
-        ValidateP256PublicKey(ValidateBase64Bytes(signingPublicKey, "signingPublicKey"));
-        ValidateByteLength(ValidateBase64Bytes(signature, "signature"), RawP256SignatureLengthBytes, "signature");
+        var signingPublicKeyBytes = ValidateBase64Bytes(signingPublicKey, "signingPublicKey");
+        ValidateP256PublicKey(signingPublicKeyBytes);
+        var signingKeyFingerprint = Convert.ToHexString(SHA256.HashData(signingPublicKeyBytes)).ToLowerInvariant();
+        var signatureBytes = ValidateBase64Bytes(signature, "signature");
+        ValidateByteLength(signatureBytes, RawP256SignatureLengthBytes, "signature");
         ValidateSignatureTimestamp(signatureTimestamp, "signatureTimestamp");
+
+        if (!TryGetDynamicQrSignedOsVersion(root, envelope, out var signedOsVersion))
+        {
+            return new CrossNetworkQrAnalysis(
+                "DynamicQRCodeData",
+                sessionId,
+                deviceName,
+                deviceFingerprint,
+                expiresAt,
+                false,
+                "unverifiable",
+                $"version={version}; signingPublicKey/signature present; iceServers={iceServers.Count}; TDSC canonical QR signature requires the generator osVersion, but current DynamicQRCodeData does not carry that signed field.",
+                false);
+        }
+
+        var canonical = BuildQrCanonicalSignaturePayload(
+            deviceFingerprint,
+            deviceName,
+            DynamicQrDeviceType,
+            DynamicQrAddress,
+            DynamicQrPort,
+            signedOsVersion,
+            DynamicQrCapabilities,
+            signatureTimestampText,
+            signingKeyFingerprint);
+        if (!VerifyP256RawSignature(Encoding.UTF8.GetBytes(canonical), signatureBytes, signingPublicKeyBytes))
+        {
+            throw new InvalidOperationException("Scan Error: QR dynamic canonical signature verification failed.");
+        }
 
         return new CrossNetworkQrAnalysis(
             "DynamicQRCodeData",
@@ -518,9 +564,38 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
             deviceFingerprint,
             expiresAt,
             false,
-            "pending canonical verifier",
-            $"version={version}; signingPublicKey/signature present; iceServers={iceServers.Count}; P2PSecurityManager canonical payload must be matched before WebRTC.",
-            false);
+            "verified",
+            $"P256 dynamic canonical signature verified; version={version}; osVersion={signedOsVersion}; type={DynamicQrDeviceType}; address={DynamicQrAddress}:{DynamicQrPort}; iceServers={iceServers.Count}.",
+            true);
+    }
+
+    private static string BuildQrCanonicalSignaturePayload(
+        string id,
+        string name,
+        string type,
+        string address,
+        ushort port,
+        string osVersion,
+        IReadOnlyList<string> capabilities,
+        string timestampText,
+        string publicKeyFingerprint) =>
+        $"id={id}|name={name}|type={type}|address={address}|port={port}|os={osVersion}|cap={string.Join(",", capabilities)}|ts={timestampText}|fp={publicKeyFingerprint}";
+
+    private static bool TryGetDynamicQrSignedOsVersion(
+        JsonElement root,
+        QrInputEnvelope envelope,
+        out string osVersion)
+    {
+        if (TryReadOptionalString(root, "osVersion", out osVersion)
+            || TryReadOptionalString(root, "signedOsVersion", out osVersion)
+            || TryGetQueryValue(envelope, "osVersion", out osVersion)
+            || TryGetQueryValue(envelope, "os", out osVersion))
+        {
+            return true;
+        }
+
+        osVersion = string.Empty;
+        return false;
     }
 
     private static bool TryGetQuerySignature(
@@ -568,6 +643,36 @@ public sealed class CrossNetworkConnectionClient : ICrossNetworkConnectionClient
         }
 
         return value;
+    }
+
+    private static bool TryReadOptionalString(JsonElement element, string propertyName, out string value)
+    {
+        if (!element.TryGetProperty(propertyName, out var property))
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        value = ReadString(property, propertyName);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException($"Scan Error: QR payload {propertyName} is empty.");
+        }
+
+        return true;
+    }
+
+    private static bool TryGetQueryValue(QrInputEnvelope envelope, string propertyName, out string value)
+    {
+        if (envelope.QueryParameters.TryGetValue(propertyName, out var queryValue)
+            && !string.IsNullOrWhiteSpace(queryValue))
+        {
+            value = queryValue;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
     }
 
     private static string ReadString(JsonElement element, string propertyName)

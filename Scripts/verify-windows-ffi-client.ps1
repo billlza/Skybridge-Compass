@@ -190,7 +190,13 @@ foreach ($signal in @(
     "DummyEngineClient().ConnectAsync",
     "adapter pending",
     "digestLength: 31",
-    "smoke live adapter"
+    "smoke live adapter",
+    "BuildDynamicQrInput",
+    "P256 dynamic canonical signature verified",
+    "dynamic QR verified status",
+    "dynamic QR unverifiable status",
+    "generator osVersion",
+    "QR dynamic canonical signature verification failed."
 )) {
     Assert-Contains -Text $connectionLaunchSmoke -Needle $signal -Message "Windows connection launch smoke missing signal: $signal"
 }
@@ -471,7 +477,12 @@ foreach ($signal in @(
     "Scan Error: QR code expired.",
     "P256 raw signature verified",
     "P256 canonical signature verified",
-    "pending canonical verifier",
+    "P256 dynamic canonical signature verified",
+    "BuildQrCanonicalSignaturePayload",
+    "TryGetDynamicQrSignedOsVersion",
+    "generator osVersion",
+    "unverifiable",
+    "Scan Error: QR dynamic canonical signature verification failed.",
     "DSASignatureFormat.IeeeP1363FixedFieldConcatenation",
     "QrSignatureChallengeLifetimeSeconds",
     "CrossNetworkReadiness",
