@@ -101,6 +101,7 @@ $workspaceStatusPatchApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinCli
 $workspaceCountNotifierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCountNotifier.cs"
 $workspaceCollectionProjectorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCollectionProjector.cs"
 $workspaceSnapshotApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceSnapshotApplier.cs"
+$dashboardMetricsUpdaterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/DashboardMetricsUpdater.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -128,7 +129,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -146,8 +147,9 @@ $workspaceStatusPatchApplier = Get-Content -Raw -LiteralPath $workspaceStatusPat
 $workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierPath
 $workspaceCollectionProjector = Get-Content -Raw -LiteralPath $workspaceCollectionProjectorPath
 $workspaceSnapshotApplier = Get-Content -Raw -LiteralPath $workspaceSnapshotApplierPath
+$dashboardMetricsUpdater = Get-Content -Raw -LiteralPath $dashboardMetricsUpdaterPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceStatusPatchApplier + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceStatusPatchApplier + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -278,9 +280,9 @@ foreach ($viewModelOwnedItemView in @(
 }
 
 foreach ($viewModelProjectionSignal in @(
-    "WorkspaceCollectionProjector.Replace(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric)",
     "WorkspaceCountNotifier",
-    "_workspaceCountNotifier.DashboardMetricsChanged()",
+    "new DashboardMetricsUpdater(",
+    "_dashboardMetricsUpdater.Refresh(",
     "new WorkspaceSnapshotApplier(_workspaceCountNotifier, RefreshDashboardMetrics)",
     "_workspaceSnapshotApplier.ApplyFileTransfer("
 )) {
@@ -299,6 +301,23 @@ foreach ($collectionProjectorSignal in @(
 }
 Assert-True -Condition (-not $sessionViewModelSource.Contains("ReplaceCollection(")) -Message "SessionViewModel must use WorkspaceCollectionProjector.Replace instead of owning ReplaceCollection."
 Assert-True -Condition (-not $workspaceSnapshotApplier.Contains("ReplaceCollection(")) -Message "WorkspaceSnapshotApplier must reuse WorkspaceCollectionProjector.Replace instead of owning ReplaceCollection."
+
+foreach ($dashboardUpdaterSignal in @(
+    "internal sealed class DashboardMetricsUpdater",
+    "IDashboardMetricsClient dashboardMetricsClient",
+    "BuildReadOnlySnapshot(request)",
+    "_setOnlineDeviceCount(snapshot.OnlineDeviceCount)",
+    "_setActiveSessionCount(snapshot.ActiveSessionCount)",
+    "_setTransferTaskCount(snapshot.TransferTaskCount)",
+    "_setPerformanceStatus(snapshot.PerformanceStatus)",
+    "WorkspaceCollectionProjector.Replace(_dashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric)",
+    "_countNotifier.DashboardMetricsChanged()"
+)) {
+    Assert-Contains -Text $dashboardMetricsUpdater -Needle $dashboardUpdaterSignal -Message "DashboardMetricsUpdater contract missing: $dashboardUpdaterSignal"
+}
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_dashboardMetricsClient.BuildReadOnlySnapshot(")) -Message "SessionViewModel must refresh dashboard metric snapshots through DashboardMetricsUpdater."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("WorkspaceCollectionProjector.Replace(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric)")) -Message "SessionViewModel must project dashboard metric rows through DashboardMetricsUpdater."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceCountNotifier.DashboardMetricsChanged()")) -Message "SessionViewModel must notify dashboard metric count through DashboardMetricsUpdater."
 
 foreach ($snapshotApplierSignal in @(
     "internal sealed class WorkspaceSnapshotApplier",
@@ -1861,6 +1880,7 @@ foreach ($docSignal in @(
     "origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md",
     "Dashboard, Device Discovery, USB Management, File Transfer, Remote Desktop, Quantum, System Monitor, Settings",
     "DashboardMetricsClient",
+    "DashboardMetricsUpdater",
     "ConnectionPreflightClient",
     "ConnectionWorkspaceStateClient",
     "ApplyConnectionInputInvalidation",

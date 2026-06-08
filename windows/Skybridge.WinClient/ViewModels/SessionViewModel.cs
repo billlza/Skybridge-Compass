@@ -41,6 +41,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceStatusPatchApplier _workspaceStatusPatchApplier;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
+    private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -208,6 +209,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         NavigationItems = new ObservableCollection<FeatureEntry>(featureEntries);
         _selectedFeature = _featureCatalogClient.ResolveDefaultSelection(featureEntries);
         DashboardMetrics = new ObservableCollection<DashboardMetricView>();
+        _dashboardMetricsUpdater = new DashboardMetricsUpdater(
+            _dashboardMetricsClient,
+            DashboardMetrics,
+            _workspaceCountNotifier,
+            value => OnlineDeviceCount = value,
+            value => ActiveSessionCount = value,
+            value => TransferTaskCount = value,
+            value => PerformanceStatus = value);
         SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();
         TopBarActions = new ObservableCollection<WorkspaceActionItemView>();
         SessionControlActions = new ObservableCollection<WorkspaceActionItemView>();
@@ -1341,19 +1350,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshDashboardMetrics()
     {
-        var snapshot = _dashboardMetricsClient.BuildReadOnlySnapshot(
+        _dashboardMetricsUpdater.Refresh(
             new DashboardMetricsRequest(
                 ConnectionState,
                 FileTransferQueue.Count,
                 IsBusy));
-
-        OnlineDeviceCount = snapshot.OnlineDeviceCount;
-        ActiveSessionCount = snapshot.ActiveSessionCount;
-        TransferTaskCount = snapshot.TransferTaskCount;
-        PerformanceStatus = snapshot.PerformanceStatus;
-        WorkspaceCollectionProjector.Replace(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric);
-
-        _workspaceCountNotifier.DashboardMetricsChanged();
     }
 
     private void LoadWorkspaceActions()
