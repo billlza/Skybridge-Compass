@@ -1009,12 +1009,12 @@ Assert-True -Condition (-not $sessionViewModel.Contains("&& _validatedDiscovered
 Assert-True -Condition (-not $sessionViewModel.Contains("&& _validatedPairingMaterial is not null")) -Message "SessionViewModel must source Prepare Connection readiness from ConnectionWorkspaceStateClient."
 
 foreach ($workspaceRefreshPendingStatusSignal in @(
-    "_coreDiagnosticsClient.BuildPendingStatus()",
-    "_fileTransferClient.BuildPendingStatus()",
-    "_usbManagementClient.BuildPendingStatus()",
-    "_remoteDesktopClient.BuildPendingStatus()",
-    "_systemMonitorClient.BuildPendingStatus()",
-    "_settingsClient.BuildPendingStatus()",
+    "_coreDiagnosticsClient.BuildPendingStatus,",
+    "_fileTransferClient.BuildPendingStatus,",
+    "_usbManagementClient.BuildPendingStatus,",
+    "_remoteDesktopClient.BuildPendingStatus,",
+    "_systemMonitorClient.BuildPendingStatus,",
+    "_settingsClient.BuildPendingStatus,",
     "CoreDiagnosticsClient.DefaultPendingStatus",
     "FileTransferWorkspaceClient.DefaultPendingStatus",
     "UsbManagementWorkspaceClient.DefaultPendingStatus",
@@ -1043,22 +1043,34 @@ foreach ($workspaceInitialStatusSignal in @(
 }
 
 foreach ($workspaceRefreshCompletedStatusSignal in @(
-    "_coreDiagnosticsClient.BuildCompletedStatus(snapshot)",
-    "_coreDiagnosticsClient.BuildCompletedStatusMessage()",
-    "_fileTransferClient.BuildCompletedStatus(snapshot)",
-    "_fileTransferClient.BuildCompletedStatusMessage()",
-    "_usbManagementClient.BuildCompletedStatus(snapshot)",
-    "_usbManagementClient.BuildCompletedStatusMessage()",
-    "_remoteDesktopClient.BuildCompletedStatus(snapshot)",
-    "_remoteDesktopClient.BuildCompletedStatusMessage()",
-    "_systemMonitorClient.BuildCompletedStatus(snapshot)",
-    "_systemMonitorClient.BuildCompletedStatusMessage()",
-    "_settingsClient.BuildCompletedStatus(snapshot)",
-    "_settingsClient.BuildCompletedStatusMessage()",
+    "RefreshReadOnlyWorkspaceAsync",
+    "_coreDiagnosticsClient.BuildCompletedStatus,",
+    "_coreDiagnosticsClient.BuildCompletedStatusMessage,",
+    "_fileTransferClient.BuildCompletedStatus,",
+    "_fileTransferClient.BuildCompletedStatusMessage,",
+    "_usbManagementClient.BuildCompletedStatus,",
+    "_usbManagementClient.BuildCompletedStatusMessage,",
+    "_remoteDesktopClient.BuildCompletedStatus,",
+    "_remoteDesktopClient.BuildCompletedStatusMessage,",
+    "_systemMonitorClient.BuildCompletedStatus,",
+    "_systemMonitorClient.BuildCompletedStatusMessage,",
+    "_settingsClient.BuildCompletedStatus,",
+    "_settingsClient.BuildCompletedStatusMessage,",
     "BuildDefaultCompletedStatus",
     "DefaultCompletedStatusMessage"
 )) {
     Assert-Contains -Text ($coreDiagnostics + $fileTransfer + $usbManagement + $remoteDesktop + $systemMonitor + $settings + $unavailableClientStubs + $sessionViewModel) -Needle $workspaceRefreshCompletedStatusSignal -Message "Workspace refresh completed status signal missing: $workspaceRefreshCompletedStatusSignal"
+}
+
+foreach ($readOnlyRefreshScope in @(
+    "CoreDiagnostics",
+    "FileTransfer",
+    "UsbManagement",
+    "RemoteDesktop",
+    "SystemMonitor",
+    "Settings"
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains("RunWithBusyState(WorkspaceErrorScope.$readOnlyRefreshScope")) -Message "SessionViewModel must use RefreshReadOnlyWorkspaceAsync for $readOnlyRefreshScope refresh lifecycle."
 }
 
 foreach ($viewModelWorkspacePendingStatusLiteral in @(
@@ -1697,6 +1709,7 @@ foreach ($docSignal in @(
     "ConnectionPreflightClient",
     "ConnectionWorkspaceStateClient",
     "ReplaceCollection",
+    "RefreshReadOnlyWorkspaceAsync",
     "Prepare Connection",
     "WindowsDiscoveryBrowserClient",
     "DeviceDiscoveryInputDefaultsClient",

@@ -1081,137 +1081,109 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         });
     }
 
-    private async Task RunCoreDiagnosticsAsync()
+    private Task RunCoreDiagnosticsAsync() =>
+        RefreshReadOnlyWorkspaceAsync<CoreDiagnosticsSnapshot>(
+            WorkspaceErrorScope.CoreDiagnostics,
+            _coreDiagnosticsClient.BuildPendingStatus,
+            _coreDiagnosticsClient.BuildInteropSnapshotAsync,
+            ApplyCoreDiagnosticsSnapshot,
+            _coreDiagnosticsClient.BuildCompletedStatus,
+            _coreDiagnosticsClient.BuildCompletedStatusMessage,
+            value => CoreDiagnosticsStatus = value);
+
+    private Task RefreshFileTransferAsync() =>
+        RefreshReadOnlyWorkspaceAsync<FileTransferWorkspaceSnapshot>(
+            WorkspaceErrorScope.FileTransfer,
+            _fileTransferClient.BuildPendingStatus,
+            _fileTransferClient.BuildReadOnlySnapshotAsync,
+            ApplyFileTransferSnapshot,
+            _fileTransferClient.BuildCompletedStatus,
+            _fileTransferClient.BuildCompletedStatusMessage,
+            value => FileTransferStatus = value);
+
+    private Task RefreshUsbManagementAsync() =>
+        RefreshReadOnlyWorkspaceAsync<UsbManagementWorkspaceSnapshot>(
+            WorkspaceErrorScope.UsbManagement,
+            _usbManagementClient.BuildPendingStatus,
+            _usbManagementClient.BuildReadOnlySnapshotAsync,
+            ApplyUsbManagementSnapshot,
+            _usbManagementClient.BuildCompletedStatus,
+            _usbManagementClient.BuildCompletedStatusMessage,
+            value => UsbManagementStatus = value);
+
+    private Task RefreshRemoteDesktopAsync() =>
+        RefreshReadOnlyWorkspaceAsync<RemoteDesktopWorkspaceSnapshot>(
+            WorkspaceErrorScope.RemoteDesktop,
+            _remoteDesktopClient.BuildPendingStatus,
+            () => _remoteDesktopClient.BuildReadOnlySnapshotAsync(SelectedBitrate, SelectedFramerate),
+            ApplyRemoteDesktopSnapshot,
+            _remoteDesktopClient.BuildCompletedStatus,
+            _remoteDesktopClient.BuildCompletedStatusMessage,
+            value => RemoteDesktopStatus = value);
+
+    private Task RefreshSystemMonitorAsync() =>
+        RefreshReadOnlyWorkspaceAsync<SystemMonitorWorkspaceSnapshot>(
+            WorkspaceErrorScope.SystemMonitor,
+            _systemMonitorClient.BuildPendingStatus,
+            _systemMonitorClient.BuildReadOnlySnapshotAsync,
+            ApplySystemMonitorSnapshot,
+            _systemMonitorClient.BuildCompletedStatus,
+            _systemMonitorClient.BuildCompletedStatusMessage,
+            value => SystemMonitorStatus = value);
+
+    private Task RefreshSettingsAsync() =>
+        RefreshReadOnlyWorkspaceAsync<SettingsWorkspaceSnapshot>(
+            WorkspaceErrorScope.Settings,
+            _settingsClient.BuildPendingStatus,
+            _settingsClient.BuildReadOnlySnapshotAsync,
+            ApplySettingsSnapshot,
+            _settingsClient.BuildCompletedStatus,
+            _settingsClient.BuildCompletedStatusMessage,
+            value => SettingsStatus = value);
+
+    private void ApplyCoreDiagnosticsSnapshot(CoreDiagnosticsSnapshot snapshot)
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.CoreDiagnostics, async () =>
-        {
-            CoreDiagnosticsStatus = _coreDiagnosticsClient.BuildPendingStatus();
-            var snapshot = await _coreDiagnosticsClient.BuildInteropSnapshotAsync();
-            ReplaceCollection(CoreDiagnosticFacts, snapshot.Facts, CoreDiagnosticFactView.FromFact);
-
-            OnPropertyChanged(nameof(CoreDiagnosticFactCount));
-            CoreDiagnosticsStatus = _coreDiagnosticsClient.BuildCompletedStatus(snapshot);
-            StatusMessage = _coreDiagnosticsClient.BuildCompletedStatusMessage();
-        });
+        ReplaceCollection(CoreDiagnosticFacts, snapshot.Facts, CoreDiagnosticFactView.FromFact);
+        OnPropertyChanged(nameof(CoreDiagnosticFactCount));
     }
 
-    private async Task RefreshFileTransferAsync()
+    private void ApplyFileTransferSnapshot(FileTransferWorkspaceSnapshot snapshot)
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.FileTransfer, async () =>
-        {
-            FileTransferStatus = _fileTransferClient.BuildPendingStatus();
-            var snapshot = await _fileTransferClient.BuildReadOnlySnapshotAsync();
-            ReplaceCollection(FileTransferQueue, snapshot.Queue, FileTransferQueueItemView.FromItem);
-
-            ReplaceCollection(FileTransferHistory, snapshot.History, FileTransferHistoryItemView.FromItem);
-
-            ReplaceCollection(FileTransferSecurityFacts, snapshot.Security, FileTransferSecurityFactView.FromFact);
-
-            RefreshDashboardMetrics();
-            OnPropertyChanged(nameof(FileTransferHistoryCount));
-            FileTransferStatus = _fileTransferClient.BuildCompletedStatus(snapshot);
-            StatusMessage = _fileTransferClient.BuildCompletedStatusMessage();
-        });
+        ReplaceCollection(FileTransferQueue, snapshot.Queue, FileTransferQueueItemView.FromItem);
+        ReplaceCollection(FileTransferHistory, snapshot.History, FileTransferHistoryItemView.FromItem);
+        ReplaceCollection(FileTransferSecurityFacts, snapshot.Security, FileTransferSecurityFactView.FromFact);
+        RefreshDashboardMetrics();
+        OnPropertyChanged(nameof(FileTransferHistoryCount));
     }
 
-    private async Task RefreshUsbManagementAsync()
+    private void ApplyUsbManagementSnapshot(UsbManagementWorkspaceSnapshot snapshot)
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.UsbManagement, async () =>
-        {
-            UsbManagementStatus = _usbManagementClient.BuildPendingStatus();
-            var snapshot = await _usbManagementClient.BuildReadOnlySnapshotAsync();
-            ReplaceCollection(UsbDeviceStats, snapshot.Stats, UsbDeviceStatView.FromStat);
-
-            ReplaceCollection(UsbDevices, snapshot.Devices, UsbDeviceItemView.FromItem);
-
-            OnPropertyChanged(nameof(UsbDeviceCount));
-            UsbManagementStatus = _usbManagementClient.BuildCompletedStatus(snapshot);
-            StatusMessage = _usbManagementClient.BuildCompletedStatusMessage();
-        });
+        ReplaceCollection(UsbDeviceStats, snapshot.Stats, UsbDeviceStatView.FromStat);
+        ReplaceCollection(UsbDevices, snapshot.Devices, UsbDeviceItemView.FromItem);
+        OnPropertyChanged(nameof(UsbDeviceCount));
     }
 
-    private async Task RefreshRemoteDesktopAsync()
+    private void ApplyRemoteDesktopSnapshot(RemoteDesktopWorkspaceSnapshot snapshot)
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.RemoteDesktop, async () =>
-        {
-            RemoteDesktopStatus = _remoteDesktopClient.BuildPendingStatus();
-            var snapshot = await _remoteDesktopClient.BuildReadOnlySnapshotAsync(
-                SelectedBitrate,
-                SelectedFramerate);
-            ReplaceCollection(RemoteDesktopSessions, snapshot.Sessions, RemoteDesktopSessionItemView.FromItem);
-
-            ReplaceCollection(RemoteDesktopControlFacts, snapshot.ControlFacts, RemoteDesktopControlFactView.FromFact);
-
-            OnPropertyChanged(nameof(RemoteDesktopSessionCount));
-            RemoteDesktopStatus = _remoteDesktopClient.BuildCompletedStatus(snapshot);
-            StatusMessage = _remoteDesktopClient.BuildCompletedStatusMessage();
-        });
+        ReplaceCollection(RemoteDesktopSessions, snapshot.Sessions, RemoteDesktopSessionItemView.FromItem);
+        ReplaceCollection(RemoteDesktopControlFacts, snapshot.ControlFacts, RemoteDesktopControlFactView.FromFact);
+        OnPropertyChanged(nameof(RemoteDesktopSessionCount));
     }
 
-    private async Task RefreshSystemMonitorAsync()
+    private void ApplySystemMonitorSnapshot(SystemMonitorWorkspaceSnapshot snapshot)
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.SystemMonitor, async () =>
-        {
-            SystemMonitorStatus = _systemMonitorClient.BuildPendingStatus();
-            var snapshot = await _systemMonitorClient.BuildReadOnlySnapshotAsync();
-            ReplaceCollection(SystemMonitorOverview, snapshot.Overview, SystemMonitorMetricView.FromMetric);
-
-            ReplaceCollection(SystemMonitorDetails, snapshot.Details, SystemMonitorMetricView.FromMetric);
-
-            ReplaceCollection(SystemMonitorIndicators, snapshot.Indicators, SystemMonitorIndicatorView.FromIndicator);
-
-            OnPropertyChanged(nameof(SystemMonitorMetricCount));
-            SystemMonitorStatus = _systemMonitorClient.BuildCompletedStatus(snapshot);
-            StatusMessage = _systemMonitorClient.BuildCompletedStatusMessage();
-        });
+        ReplaceCollection(SystemMonitorOverview, snapshot.Overview, SystemMonitorMetricView.FromMetric);
+        ReplaceCollection(SystemMonitorDetails, snapshot.Details, SystemMonitorMetricView.FromMetric);
+        ReplaceCollection(SystemMonitorIndicators, snapshot.Indicators, SystemMonitorIndicatorView.FromIndicator);
+        OnPropertyChanged(nameof(SystemMonitorMetricCount));
     }
 
-    private async Task RefreshSettingsAsync()
+    private void ApplySettingsSnapshot(SettingsWorkspaceSnapshot snapshot)
     {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.Settings, async () =>
-        {
-            SettingsStatus = _settingsClient.BuildPendingStatus();
-            var snapshot = await _settingsClient.BuildReadOnlySnapshotAsync();
-            ReplaceCollection(SettingsTabs, snapshot.Tabs, SettingsTabItemView.FromItem);
-
-            ReplaceCollection(SettingsActions, snapshot.Actions, SettingsActionItemView.FromItem);
-
-            ReplaceCollection(SettingsDetails, snapshot.Details, SettingsDetailItemView.FromItem);
-
-            OnPropertyChanged(nameof(SettingsActionCount));
-            SettingsStatus = _settingsClient.BuildCompletedStatus(snapshot);
-            StatusMessage = _settingsClient.BuildCompletedStatusMessage();
-        });
+        ReplaceCollection(SettingsTabs, snapshot.Tabs, SettingsTabItemView.FromItem);
+        ReplaceCollection(SettingsActions, snapshot.Actions, SettingsActionItemView.FromItem);
+        ReplaceCollection(SettingsDetails, snapshot.Details, SettingsDetailItemView.FromItem);
+        OnPropertyChanged(nameof(SettingsActionCount));
     }
 
     private bool CanConnect() => _sessionCommandStateClient.CanConnect(ConnectionState, IsBusy);
@@ -1308,6 +1280,30 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             IsBusy = false;
         }
+    }
+
+    private async Task RefreshReadOnlyWorkspaceAsync<TSnapshot>(
+        WorkspaceErrorScope errorScope,
+        Func<string> buildPendingStatus,
+        Func<Task<TSnapshot>> buildSnapshotAsync,
+        Action<TSnapshot> applySnapshot,
+        Func<TSnapshot, string> buildCompletedStatus,
+        Func<string> buildCompletedStatusMessage,
+        Action<string> setWorkspaceStatus)
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(errorScope, async () =>
+        {
+            setWorkspaceStatus(buildPendingStatus());
+            var snapshot = await buildSnapshotAsync();
+            applySnapshot(snapshot);
+            setWorkspaceStatus(buildCompletedStatus(snapshot));
+            StatusMessage = buildCompletedStatusMessage();
+        });
     }
 
     private void RefreshCommandStates()
