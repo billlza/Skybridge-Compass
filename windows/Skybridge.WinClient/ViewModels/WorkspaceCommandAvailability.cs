@@ -53,6 +53,20 @@ internal sealed class WorkspaceCommandAvailability
 
     public bool CanRefreshRemoteDesktop() => _coordinator.CanRefreshRemoteDesktop(BuildState());
 
+    public bool CanRecommendedRemoteDesktopConnect() => _coordinator.CanRecommendedRemoteDesktopConnect(BuildState());
+
+    public bool CanAdvancedRemoteDesktopConnect() => _coordinator.CanAdvancedRemoteDesktopConnect(BuildState());
+
+    public bool CanShowRemoteDesktopPerformanceOverlay() => _coordinator.CanShowRemoteDesktopPerformanceOverlay(BuildState());
+
+    public bool CanApplyRemoteDesktopQuality() => _coordinator.CanApplyRemoteDesktopQuality(BuildState());
+
+    public bool CanOpenRemoteDesktopSettings() => _coordinator.CanOpenRemoteDesktopSettings(BuildState());
+
+    public bool CanEnterRemoteDesktopFullScreen() => _coordinator.CanEnterRemoteDesktopFullScreen(BuildState());
+
+    public bool CanDisconnectRemoteDesktopSession() => _coordinator.CanDisconnectRemoteDesktopSession(BuildState());
+
     public bool CanRefreshSystemMonitor() => _coordinator.CanRefreshSystemMonitor(BuildState());
 
     public bool CanRefreshSettings() => _coordinator.CanRefreshSettings(BuildState());

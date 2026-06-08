@@ -173,12 +173,68 @@ internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWo
     public string BuildCompletedStatusMessage() =>
         RemoteDesktopWorkspaceClient.DefaultCompletedStatusMessage;
 
+    public bool CanStartRecommendedSession() => false;
+
+    public bool CanStartAdvancedSession() => false;
+
+    public bool CanShowPerformanceOverlay() => false;
+
+    public bool CanApplyQuality() => false;
+
+    public bool CanOpenSettings() => false;
+
+    public bool CanEnterFullScreen() => false;
+
+    public bool CanDisconnectSession() => false;
+
+    public string BuildRecommendedConnectPendingStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultRecommendedConnectPendingStatus;
+
+    public string BuildAdvancedConnectPendingStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultAdvancedConnectPendingStatus;
+
+    public string BuildPerformanceOverlayPendingStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultPerformanceOverlayPendingStatus;
+
+    public string BuildQualityPendingStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultQualityPendingStatus;
+
+    public string BuildSettingsPendingStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultSettingsPendingStatus;
+
+    public string BuildFullScreenPendingStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultFullScreenPendingStatus;
+
+    public string BuildDisconnectSessionPendingStatus() =>
+        RemoteDesktopWorkspaceClient.DefaultDisconnectSessionPendingStatus;
+
     public Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
         string bitrateProfile,
         string framerateProfile)
     {
         throw new InvalidOperationException("Remote desktop workspace client is not configured.");
     }
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildRecommendedConnectActionAsync() =>
+        Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultRecommendedConnectActionResult());
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildAdvancedConnectActionAsync() =>
+        Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultAdvancedConnectActionResult());
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildPerformanceOverlayActionAsync() =>
+        Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultPerformanceOverlayActionResult());
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildQualityActionAsync() =>
+        Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultQualityActionResult());
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildSettingsActionAsync() =>
+        Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultSettingsActionResult());
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildFullScreenActionAsync() =>
+        Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultFullScreenActionResult());
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildDisconnectSessionActionAsync() =>
+        Task.FromResult(RemoteDesktopWorkspaceClient.BuildDefaultDisconnectSessionActionResult());
 }
 
 internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient

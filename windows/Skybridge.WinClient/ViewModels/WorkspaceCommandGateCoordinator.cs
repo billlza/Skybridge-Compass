@@ -10,6 +10,7 @@ internal sealed class WorkspaceCommandGateCoordinator
     private readonly IManualConnectionClient _manualConnectionClient;
     private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
+    private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
@@ -21,6 +22,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         IManualConnectionClient manualConnectionClient,
         ICrossNetworkConnectionClient crossNetworkConnectionClient,
         IFileTransferWorkspaceClient fileTransferClient,
+        IRemoteDesktopWorkspaceClient remoteDesktopClient,
         IDiscoveryClient discoveryClient,
         IPairingMaterialClient pairingMaterialClient,
         IConnectionWorkspaceStateClient connectionWorkspaceStateClient)
@@ -31,6 +33,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         _manualConnectionClient = manualConnectionClient;
         _crossNetworkConnectionClient = crossNetworkConnectionClient;
         _fileTransferClient = fileTransferClient;
+        _remoteDesktopClient = remoteDesktopClient;
         _discoveryClient = discoveryClient;
         _pairingMaterialClient = pairingMaterialClient;
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient;
@@ -128,6 +131,41 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanRefreshRemoteDesktop(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.RemoteDesktop);
 
+    public bool CanRecommendedRemoteDesktopConnect(WorkspaceCommandGateState state) =>
+        CanUseRemoteDesktopAction(
+            state,
+            _remoteDesktopClient.CanStartRecommendedSession());
+
+    public bool CanAdvancedRemoteDesktopConnect(WorkspaceCommandGateState state) =>
+        CanUseRemoteDesktopAction(
+            state,
+            _remoteDesktopClient.CanStartAdvancedSession());
+
+    public bool CanShowRemoteDesktopPerformanceOverlay(WorkspaceCommandGateState state) =>
+        CanUseRemoteDesktopAction(
+            state,
+            _remoteDesktopClient.CanShowPerformanceOverlay());
+
+    public bool CanApplyRemoteDesktopQuality(WorkspaceCommandGateState state) =>
+        CanUseRemoteDesktopAction(
+            state,
+            _remoteDesktopClient.CanApplyQuality());
+
+    public bool CanOpenRemoteDesktopSettings(WorkspaceCommandGateState state) =>
+        CanUseRemoteDesktopAction(
+            state,
+            _remoteDesktopClient.CanOpenSettings());
+
+    public bool CanEnterRemoteDesktopFullScreen(WorkspaceCommandGateState state) =>
+        CanUseRemoteDesktopAction(
+            state,
+            _remoteDesktopClient.CanEnterFullScreen());
+
+    public bool CanDisconnectRemoteDesktopSession(WorkspaceCommandGateState state) =>
+        CanUseRemoteDesktopAction(
+            state,
+            _remoteDesktopClient.CanDisconnectSession());
+
     public bool CanRefreshSystemMonitor(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.SystemMonitor);
 
@@ -166,7 +204,14 @@ internal sealed class WorkspaceCommandGateCoordinator
                 CanConnectConnectionCode(state),
                 CanSelectFileTransferFiles(state),
                 CanSelectFileTransferFolder(state),
-                CanGenerateFileTransferQr(state)));
+                CanGenerateFileTransferQr(state),
+                CanRecommendedRemoteDesktopConnect(state),
+                CanAdvancedRemoteDesktopConnect(state),
+                CanShowRemoteDesktopPerformanceOverlay(state),
+                CanApplyRemoteDesktopQuality(state),
+                CanOpenRemoteDesktopSettings(state),
+                CanEnterRemoteDesktopFullScreen(state),
+                CanDisconnectRemoteDesktopSession(state)));
     }
 
     private bool CanUseDeviceDiscoveryAction(
@@ -191,6 +236,14 @@ internal sealed class WorkspaceCommandGateCoordinator
         _workspaceCommandStateClient.CanUseFileTransferAction(
             state.IsBusy,
             IsFeatureSelected(state.SelectedFeature, FeatureEntryId.FileTransfer),
+            readiness);
+
+    private bool CanUseRemoteDesktopAction(
+        WorkspaceCommandGateState state,
+        bool readiness) =>
+        _workspaceCommandStateClient.CanUseRemoteDesktopAction(
+            state.IsBusy,
+            IsFeatureSelected(state.SelectedFeature, FeatureEntryId.RemoteDesktop),
             readiness);
 
     private bool CanUseSelectedWorkspaceFeature(

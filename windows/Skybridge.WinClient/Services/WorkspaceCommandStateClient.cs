@@ -21,6 +21,11 @@ public interface IWorkspaceCommandStateClient
         bool isFileTransferSelected,
         bool isActionReady);
 
+    bool CanUseRemoteDesktopAction(
+        bool isBusy,
+        bool isRemoteDesktopSelected,
+        bool isActionReady);
+
     bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected);
 
     WorkspaceActionGateSnapshot BuildActionGateSnapshot(WorkspaceCommandGateRequest request);
@@ -52,6 +57,12 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
         bool isActionReady) =>
         CanUseWorkspaceFeature(isBusy, isFileTransferSelected) && isActionReady;
 
+    public bool CanUseRemoteDesktopAction(
+        bool isBusy,
+        bool isRemoteDesktopSelected,
+        bool isActionReady) =>
+        CanUseWorkspaceFeature(isBusy, isRemoteDesktopSelected) && isActionReady;
+
     public bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected) =>
         !isBusy && isFeatureSelected;
 
@@ -75,6 +86,13 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
             request.CanSelectFileTransferFolder,
             request.CanGenerateFileTransferQr,
             CanUseWorkspaceFeature(request.IsBusy, request.IsRemoteDesktopSelected),
+            request.CanRecommendedRemoteDesktopConnect,
+            request.CanAdvancedRemoteDesktopConnect,
+            request.CanShowRemoteDesktopPerformanceOverlay,
+            request.CanApplyRemoteDesktopQuality,
+            request.CanOpenRemoteDesktopSettings,
+            request.CanEnterRemoteDesktopFullScreen,
+            request.CanDisconnectRemoteDesktopSession,
             CanUseWorkspaceFeature(request.IsBusy, request.IsQuantumSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsSystemMonitorSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsSettingsSelected));
@@ -100,4 +118,11 @@ public sealed record WorkspaceCommandGateRequest(
     bool CanConnectConnectionCode,
     bool CanSelectFileTransferFiles,
     bool CanSelectFileTransferFolder,
-    bool CanGenerateFileTransferQr);
+    bool CanGenerateFileTransferQr,
+    bool CanRecommendedRemoteDesktopConnect,
+    bool CanAdvancedRemoteDesktopConnect,
+    bool CanShowRemoteDesktopPerformanceOverlay,
+    bool CanApplyRemoteDesktopQuality,
+    bool CanOpenRemoteDesktopSettings,
+    bool CanEnterRemoteDesktopFullScreen,
+    bool CanDisconnectRemoteDesktopSession);

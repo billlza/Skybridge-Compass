@@ -67,6 +67,14 @@ var fileTransferClient = new TestFileTransferWorkspaceClient(
     canSelectFiles: true,
     canSelectFolder: true,
     canGenerateShareQr: true);
+var remoteDesktopClient = new TestRemoteDesktopWorkspaceClient(
+    canRecommendedConnect: true,
+    canAdvancedConnect: true,
+    canShowPerformanceOverlay: true,
+    canApplyQuality: true,
+    canOpenSettings: true,
+    canEnterFullScreen: true,
+    canDisconnectSession: true);
 var coordinator = new WorkspaceCommandGateCoordinator(
     new SessionCommandStateClient(),
     new FeatureCatalogClient(),
@@ -74,6 +82,7 @@ var coordinator = new WorkspaceCommandGateCoordinator(
     new ManualConnectionClient(),
     new CrossNetworkConnectionClient(),
     fileTransferClient,
+    remoteDesktopClient,
     new TestDiscoveryClient(),
     new PairingMaterialClient(),
     new ConnectionWorkspaceStateClient());
@@ -304,6 +313,189 @@ AssertResolvedAction(
     false,
     "blocked file transfer Generate QR");
 
+var remoteDesktopReadyState = BuildCommandState(
+    liveReady: true,
+    selectedFeatureId: FeatureEntryId.RemoteDesktop);
+var remoteDesktopReadyAvailability = new WorkspaceCommandAvailability(coordinator, () => remoteDesktopReadyState);
+AssertEqual(true, remoteDesktopReadyAvailability.CanRefreshRemoteDesktop(), "remote desktop WorkspaceCommandAvailability.Refresh");
+AssertEqual(true, remoteDesktopReadyAvailability.CanRecommendedRemoteDesktopConnect(), "remote desktop WorkspaceCommandAvailability.RecommendedConnect");
+AssertEqual(true, remoteDesktopReadyAvailability.CanAdvancedRemoteDesktopConnect(), "remote desktop WorkspaceCommandAvailability.AdvancedConnect");
+AssertEqual(true, remoteDesktopReadyAvailability.CanShowRemoteDesktopPerformanceOverlay(), "remote desktop WorkspaceCommandAvailability.PerformanceOverlay");
+AssertEqual(true, remoteDesktopReadyAvailability.CanApplyRemoteDesktopQuality(), "remote desktop WorkspaceCommandAvailability.Quality");
+AssertEqual(true, remoteDesktopReadyAvailability.CanOpenRemoteDesktopSettings(), "remote desktop WorkspaceCommandAvailability.Settings");
+AssertEqual(true, remoteDesktopReadyAvailability.CanEnterRemoteDesktopFullScreen(), "remote desktop WorkspaceCommandAvailability.FullScreen");
+AssertEqual(true, remoteDesktopReadyAvailability.CanDisconnectRemoteDesktopSession(), "remote desktop WorkspaceCommandAvailability.DisconnectSession");
+var remoteDesktopReadyGates = coordinator.BuildActionGateSnapshot(remoteDesktopReadyState);
+AssertEqual(true, remoteDesktopReadyGates.CanRefreshRemoteDesktop, "remote desktop action gate Refresh");
+AssertEqual(true, remoteDesktopReadyGates.CanRecommendedRemoteDesktopConnect, "remote desktop action gate RecommendedConnect");
+AssertEqual(true, remoteDesktopReadyGates.CanAdvancedRemoteDesktopConnect, "remote desktop action gate AdvancedConnect");
+AssertEqual(true, remoteDesktopReadyGates.CanShowRemoteDesktopPerformanceOverlay, "remote desktop action gate PerformanceOverlay");
+AssertEqual(true, remoteDesktopReadyGates.CanApplyRemoteDesktopQuality, "remote desktop action gate Quality");
+AssertEqual(true, remoteDesktopReadyGates.CanOpenRemoteDesktopSettings, "remote desktop action gate Settings");
+AssertEqual(true, remoteDesktopReadyGates.CanEnterRemoteDesktopFullScreen, "remote desktop action gate FullScreen");
+AssertEqual(true, remoteDesktopReadyGates.CanDisconnectRemoteDesktopSession, "remote desktop action gate DisconnectSession");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopReadyGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "RecommendedConnect",
+    WorkspaceActionCommandId.RecommendedRemoteDesktopConnect,
+    WorkspaceActionGateId.CanRecommendedRemoteDesktopConnect,
+    true,
+    "remote desktop Recommended Connect");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopReadyGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "AdvancedConnect",
+    WorkspaceActionCommandId.AdvancedRemoteDesktopConnect,
+    WorkspaceActionGateId.CanAdvancedRemoteDesktopConnect,
+    true,
+    "remote desktop Advanced Connect");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopReadyGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "PerformanceOverlay",
+    WorkspaceActionCommandId.ShowRemoteDesktopPerformanceOverlay,
+    WorkspaceActionGateId.CanShowRemoteDesktopPerformanceOverlay,
+    true,
+    "remote desktop Performance Overlay");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopReadyGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "Quality",
+    WorkspaceActionCommandId.ApplyRemoteDesktopQuality,
+    WorkspaceActionGateId.CanApplyRemoteDesktopQuality,
+    true,
+    "remote desktop Quality");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopReadyGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "Settings",
+    WorkspaceActionCommandId.OpenRemoteDesktopSettings,
+    WorkspaceActionGateId.CanOpenRemoteDesktopSettings,
+    true,
+    "remote desktop Settings");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopReadyGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "FullScreen",
+    WorkspaceActionCommandId.EnterRemoteDesktopFullScreen,
+    WorkspaceActionGateId.CanEnterRemoteDesktopFullScreen,
+    true,
+    "remote desktop Full Screen");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopReadyGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "DisconnectSession",
+    WorkspaceActionCommandId.DisconnectRemoteDesktopSession,
+    WorkspaceActionGateId.CanDisconnectRemoteDesktopSession,
+    true,
+    "remote desktop Disconnect Session");
+
+var remoteDesktopBlockedState = BuildCommandState(
+    liveReady: true,
+    selectedFeatureId: FeatureEntryId.RemoteDesktop);
+remoteDesktopClient.CanRecommendedConnectValue = false;
+remoteDesktopClient.CanAdvancedConnectValue = false;
+remoteDesktopClient.CanShowPerformanceOverlayValue = false;
+remoteDesktopClient.CanApplyQualityValue = false;
+remoteDesktopClient.CanOpenSettingsValue = false;
+remoteDesktopClient.CanEnterFullScreenValue = false;
+remoteDesktopClient.CanDisconnectSessionValue = false;
+var remoteDesktopBlockedAvailability = new WorkspaceCommandAvailability(coordinator, () => remoteDesktopBlockedState);
+AssertEqual(true, remoteDesktopBlockedAvailability.CanRefreshRemoteDesktop(), "blocked remote desktop WorkspaceCommandAvailability.Refresh");
+AssertEqual(false, remoteDesktopBlockedAvailability.CanRecommendedRemoteDesktopConnect(), "blocked remote desktop WorkspaceCommandAvailability.RecommendedConnect");
+AssertEqual(false, remoteDesktopBlockedAvailability.CanAdvancedRemoteDesktopConnect(), "blocked remote desktop WorkspaceCommandAvailability.AdvancedConnect");
+AssertEqual(false, remoteDesktopBlockedAvailability.CanShowRemoteDesktopPerformanceOverlay(), "blocked remote desktop WorkspaceCommandAvailability.PerformanceOverlay");
+AssertEqual(false, remoteDesktopBlockedAvailability.CanApplyRemoteDesktopQuality(), "blocked remote desktop WorkspaceCommandAvailability.Quality");
+AssertEqual(false, remoteDesktopBlockedAvailability.CanOpenRemoteDesktopSettings(), "blocked remote desktop WorkspaceCommandAvailability.Settings");
+AssertEqual(false, remoteDesktopBlockedAvailability.CanEnterRemoteDesktopFullScreen(), "blocked remote desktop WorkspaceCommandAvailability.FullScreen");
+AssertEqual(false, remoteDesktopBlockedAvailability.CanDisconnectRemoteDesktopSession(), "blocked remote desktop WorkspaceCommandAvailability.DisconnectSession");
+var remoteDesktopBlockedGates = coordinator.BuildActionGateSnapshot(remoteDesktopBlockedState);
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopBlockedGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "RecommendedConnect",
+    WorkspaceActionCommandId.RecommendedRemoteDesktopConnect,
+    WorkspaceActionGateId.CanRecommendedRemoteDesktopConnect,
+    false,
+    "blocked remote desktop Recommended Connect");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopBlockedGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "AdvancedConnect",
+    WorkspaceActionCommandId.AdvancedRemoteDesktopConnect,
+    WorkspaceActionGateId.CanAdvancedRemoteDesktopConnect,
+    false,
+    "blocked remote desktop Advanced Connect");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopBlockedGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "PerformanceOverlay",
+    WorkspaceActionCommandId.ShowRemoteDesktopPerformanceOverlay,
+    WorkspaceActionGateId.CanShowRemoteDesktopPerformanceOverlay,
+    false,
+    "blocked remote desktop Performance Overlay");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopBlockedGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "Quality",
+    WorkspaceActionCommandId.ApplyRemoteDesktopQuality,
+    WorkspaceActionGateId.CanApplyRemoteDesktopQuality,
+    false,
+    "blocked remote desktop Quality");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopBlockedGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "Settings",
+    WorkspaceActionCommandId.OpenRemoteDesktopSettings,
+    WorkspaceActionGateId.CanOpenRemoteDesktopSettings,
+    false,
+    "blocked remote desktop Settings");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopBlockedGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "FullScreen",
+    WorkspaceActionCommandId.EnterRemoteDesktopFullScreen,
+    WorkspaceActionGateId.CanEnterRemoteDesktopFullScreen,
+    false,
+    "blocked remote desktop Full Screen");
+AssertResolvedAction(
+    catalog,
+    details,
+    remoteDesktopBlockedGates,
+    WorkspaceActionSurface.RemoteDesktop,
+    "DisconnectSession",
+    WorkspaceActionCommandId.DisconnectRemoteDesktopSession,
+    WorkspaceActionGateId.CanDisconnectRemoteDesktopSession,
+    false,
+    "blocked remote desktop Disconnect Session");
+
 Console.WriteLine("windows-command-gates: ok");
 
 WorkspaceCommandGateState BuildCommandState(
@@ -504,6 +696,103 @@ sealed class TestFileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync() =>
         throw new NotSupportedException("Command-gate smoke only needs file transfer action readiness.");
+}
+
+sealed class TestRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
+{
+    public TestRemoteDesktopWorkspaceClient(
+        bool canRecommendedConnect,
+        bool canAdvancedConnect,
+        bool canShowPerformanceOverlay,
+        bool canApplyQuality,
+        bool canOpenSettings,
+        bool canEnterFullScreen,
+        bool canDisconnectSession)
+    {
+        CanRecommendedConnectValue = canRecommendedConnect;
+        CanAdvancedConnectValue = canAdvancedConnect;
+        CanShowPerformanceOverlayValue = canShowPerformanceOverlay;
+        CanApplyQualityValue = canApplyQuality;
+        CanOpenSettingsValue = canOpenSettings;
+        CanEnterFullScreenValue = canEnterFullScreen;
+        CanDisconnectSessionValue = canDisconnectSession;
+    }
+
+    public bool CanRecommendedConnectValue { get; set; }
+
+    public bool CanAdvancedConnectValue { get; set; }
+
+    public bool CanShowPerformanceOverlayValue { get; set; }
+
+    public bool CanApplyQualityValue { get; set; }
+
+    public bool CanOpenSettingsValue { get; set; }
+
+    public bool CanEnterFullScreenValue { get; set; }
+
+    public bool CanDisconnectSessionValue { get; set; }
+
+    public string BuildInitialStatus() => "Ready";
+
+    public string BuildPendingStatus() => "Refreshing...";
+
+    public string BuildCompletedStatus(RemoteDesktopWorkspaceSnapshot snapshot) => "Snapshot";
+
+    public string BuildCompletedStatusMessage() => "Updated";
+
+    public bool CanStartRecommendedSession() => CanRecommendedConnectValue;
+
+    public bool CanStartAdvancedSession() => CanAdvancedConnectValue;
+
+    public bool CanShowPerformanceOverlay() => CanShowPerformanceOverlayValue;
+
+    public bool CanApplyQuality() => CanApplyQualityValue;
+
+    public bool CanOpenSettings() => CanOpenSettingsValue;
+
+    public bool CanEnterFullScreen() => CanEnterFullScreenValue;
+
+    public bool CanDisconnectSession() => CanDisconnectSessionValue;
+
+    public string BuildRecommendedConnectPendingStatus() => "Preparing recommended session...";
+
+    public string BuildAdvancedConnectPendingStatus() => "Preparing advanced session...";
+
+    public string BuildPerformanceOverlayPendingStatus() => "Preparing performance overlay...";
+
+    public string BuildQualityPendingStatus() => "Preparing quality controls...";
+
+    public string BuildSettingsPendingStatus() => "Preparing remote desktop settings...";
+
+    public string BuildFullScreenPendingStatus() => "Preparing full screen...";
+
+    public string BuildDisconnectSessionPendingStatus() => "Preparing session disconnect...";
+
+    public Task<RemoteDesktopWorkspaceSnapshot> BuildReadOnlySnapshotAsync(
+        string bitrateProfile,
+        string framerateProfile) =>
+        throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildRecommendedConnectActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildAdvancedConnectActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildPerformanceOverlayActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildQualityActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildSettingsActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildFullScreenActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
+
+    public Task<RemoteDesktopWorkspaceActionResult> BuildDisconnectSessionActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
 }
 '@
 

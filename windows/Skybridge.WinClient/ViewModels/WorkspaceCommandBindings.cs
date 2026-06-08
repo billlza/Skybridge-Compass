@@ -13,6 +13,7 @@ internal sealed class WorkspaceCommandBindings
         CrossNetworkConnectionActions crossNetworkConnectionActions,
         ReadOnlyWorkspaceRefreshActions readOnlyWorkspaceRefreshActions,
         FileTransferWorkspaceActions fileTransferWorkspaceActions,
+        RemoteDesktopWorkspaceActions remoteDesktopWorkspaceActions,
         WorkspaceCommandAvailability commandAvailability)
     {
         ConnectCommand = new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect);
@@ -42,6 +43,13 @@ internal sealed class WorkspaceCommandBindings
         SelectFileTransferFolderCommand = new AsyncRelayCommand(fileTransferWorkspaceActions.SelectFolderAsync, commandAvailability.CanSelectFileTransferFolder);
         GenerateFileTransferQrCommand = new AsyncRelayCommand(fileTransferWorkspaceActions.GenerateQrAsync, commandAvailability.CanGenerateFileTransferQr);
         RefreshRemoteDesktopCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync, commandAvailability.CanRefreshRemoteDesktop);
+        RecommendedRemoteDesktopConnectCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.RecommendedConnectAsync, commandAvailability.CanRecommendedRemoteDesktopConnect);
+        AdvancedRemoteDesktopConnectCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.AdvancedConnectAsync, commandAvailability.CanAdvancedRemoteDesktopConnect);
+        ShowRemoteDesktopPerformanceOverlayCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.ShowPerformanceOverlayAsync, commandAvailability.CanShowRemoteDesktopPerformanceOverlay);
+        ApplyRemoteDesktopQualityCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.ApplyQualityAsync, commandAvailability.CanApplyRemoteDesktopQuality);
+        OpenRemoteDesktopSettingsCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.OpenSettingsAsync, commandAvailability.CanOpenRemoteDesktopSettings);
+        EnterRemoteDesktopFullScreenCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.EnterFullScreenAsync, commandAvailability.CanEnterRemoteDesktopFullScreen);
+        DisconnectRemoteDesktopSessionCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.DisconnectSessionAsync, commandAvailability.CanDisconnectRemoteDesktopSession);
         RefreshSystemMonitorCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync, commandAvailability.CanRefreshSystemMonitor);
         RefreshUsbManagementCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync, commandAvailability.CanRefreshUsbManagement);
         RefreshSettingsCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSettingsAsync, commandAvailability.CanRefreshSettings);
@@ -74,6 +82,13 @@ internal sealed class WorkspaceCommandBindings
             new(WorkspaceActionCommandId.SelectFileTransferFolder, SelectFileTransferFolderCommand),
             new(WorkspaceActionCommandId.GenerateFileTransferQr, GenerateFileTransferQrCommand),
             new(WorkspaceActionCommandId.RefreshRemoteDesktop, RefreshRemoteDesktopCommand),
+            new(WorkspaceActionCommandId.RecommendedRemoteDesktopConnect, RecommendedRemoteDesktopConnectCommand),
+            new(WorkspaceActionCommandId.AdvancedRemoteDesktopConnect, AdvancedRemoteDesktopConnectCommand),
+            new(WorkspaceActionCommandId.ShowRemoteDesktopPerformanceOverlay, ShowRemoteDesktopPerformanceOverlayCommand),
+            new(WorkspaceActionCommandId.ApplyRemoteDesktopQuality, ApplyRemoteDesktopQualityCommand),
+            new(WorkspaceActionCommandId.OpenRemoteDesktopSettings, OpenRemoteDesktopSettingsCommand),
+            new(WorkspaceActionCommandId.EnterRemoteDesktopFullScreen, EnterRemoteDesktopFullScreenCommand),
+            new(WorkspaceActionCommandId.DisconnectRemoteDesktopSession, DisconnectRemoteDesktopSessionCommand),
             new(WorkspaceActionCommandId.RefreshSystemMonitor, RefreshSystemMonitorCommand),
             new(WorkspaceActionCommandId.RefreshUsbManagement, RefreshUsbManagementCommand),
             new(WorkspaceActionCommandId.RefreshSettings, RefreshSettingsCommand));
@@ -132,6 +147,20 @@ internal sealed class WorkspaceCommandBindings
     public ICommand GenerateFileTransferQrCommand { get; }
 
     public ICommand RefreshRemoteDesktopCommand { get; }
+
+    public ICommand RecommendedRemoteDesktopConnectCommand { get; }
+
+    public ICommand AdvancedRemoteDesktopConnectCommand { get; }
+
+    public ICommand ShowRemoteDesktopPerformanceOverlayCommand { get; }
+
+    public ICommand ApplyRemoteDesktopQualityCommand { get; }
+
+    public ICommand OpenRemoteDesktopSettingsCommand { get; }
+
+    public ICommand EnterRemoteDesktopFullScreenCommand { get; }
+
+    public ICommand DisconnectRemoteDesktopSessionCommand { get; }
 
     public ICommand RefreshSystemMonitorCommand { get; }
 
