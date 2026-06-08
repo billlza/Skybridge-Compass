@@ -381,6 +381,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         CoreDiagnosticFacts = collections.CoreDiagnosticFacts;
         DeviceDiscoveryPrimaryActions = collections.DeviceDiscoveryPrimaryActions;
         DeviceDiscoveryScanActions = collections.DeviceDiscoveryScanActions;
+        DeviceDiscoveryManualConnectFinalActions = collections.DeviceDiscoveryManualConnectFinalActions;
         CrossNetworkQrActions = collections.CrossNetworkQrActions;
         CrossNetworkCodePrimaryActions = collections.CrossNetworkCodePrimaryActions;
         CrossNetworkCodeConnectActions = collections.CrossNetworkCodeConnectActions;
@@ -518,6 +519,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<WorkspaceActionItemView> DeviceDiscoveryPrimaryActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> DeviceDiscoveryScanActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> DeviceDiscoveryManualConnectFinalActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> CrossNetworkQrActions { get; }
 

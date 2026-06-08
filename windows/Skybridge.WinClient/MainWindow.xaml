@@ -86,6 +86,21 @@
                 </StackPanel>
             </Button>
         </DataTemplate>
+        <DataTemplate x:Key="TopBarStatusActionButtonTemplate">
+            <Button
+                AutomationProperties.AutomationId="{Binding AutomationId}"
+                AutomationProperties.Name="{Binding Title}"
+                Command="{Binding Command}"
+                IsEnabled="{Binding IsEnabled}"
+                MinWidth="44"
+                Padding="10,6"
+                ToolTipService.ToolTip="{Binding Title}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
+                    <TextBlock Text="{Binding Detail}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Button>
+        </DataTemplate>
         <DataTemplate x:Key="WorkspaceMetricCardTemplate">
             <Border
                 Width="210"
@@ -373,7 +388,7 @@
                             AutomationProperties.AutomationId="Skybridge.Actions.TopBar"
                             ItemsSource="{Binding TopBarActions}"
                             ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
-                            ItemTemplate="{StaticResource WorkspaceActionButtonWithDetailTemplate}" />
+                            ItemTemplate="{StaticResource TopBarStatusActionButtonTemplate}" />
                     </StackPanel>
                 </Grid>
             </Border>
@@ -569,6 +584,11 @@
                                     <ItemsControl
                                         ItemsSource="{Binding ConnectionPreflightFacts}"
                                         ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
+                                    <ItemsControl
+                                        AutomationProperties.AutomationId="Skybridge.Actions.DeviceDiscoveryManualConnectFinal"
+                                        ItemsSource="{Binding DeviceDiscoveryManualConnectFinalActions}"
+                                        ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                        ItemTemplate="{StaticResource WorkspaceActionButtonWithDetailTemplate}" />
                                 </StackPanel>
                             </Grid>
                         </StackPanel>

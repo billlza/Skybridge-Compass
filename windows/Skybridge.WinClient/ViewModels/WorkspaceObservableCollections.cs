@@ -26,6 +26,7 @@ internal sealed class WorkspaceObservableCollections
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
         DeviceDiscoveryPrimaryActions = new ObservableCollection<WorkspaceActionItemView>();
         DeviceDiscoveryScanActions = new ObservableCollection<WorkspaceActionItemView>();
+        DeviceDiscoveryManualConnectFinalActions = new ObservableCollection<WorkspaceActionItemView>();
         CrossNetworkQrActions = new ObservableCollection<WorkspaceActionItemView>();
         CrossNetworkCodePrimaryActions = new ObservableCollection<WorkspaceActionItemView>();
         CrossNetworkCodeConnectActions = new ObservableCollection<WorkspaceActionItemView>();
@@ -86,6 +87,8 @@ internal sealed class WorkspaceObservableCollections
     public ObservableCollection<WorkspaceActionItemView> DeviceDiscoveryPrimaryActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> DeviceDiscoveryScanActions { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> DeviceDiscoveryManualConnectFinalActions { get; }
 
     public ObservableCollection<WorkspaceActionItemView> CrossNetworkQrActions { get; }
 

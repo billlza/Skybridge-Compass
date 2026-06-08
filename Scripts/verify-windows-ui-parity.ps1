@@ -394,6 +394,7 @@ foreach ($observableCollectionsSignal in @(
     "SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>()",
     "TopBarActions = new ObservableCollection<WorkspaceActionItemView>()",
     "SessionControlActions = new ObservableCollection<WorkspaceActionItemView>()",
+    "DeviceDiscoveryManualConnectFinalActions = new ObservableCollection<WorkspaceActionItemView>()",
     "DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>()",
     "DiscoveryBrowserFacts = new ObservableCollection<DiscoveryBrowserFactView>()",
     "CrossNetworkConnectionFacts = new ObservableCollection<CrossNetworkConnectionFactView>()",
@@ -413,6 +414,7 @@ foreach ($sessionViewModelCollectionSignal in @(
     "BitrateProfiles = collections.BitrateProfiles;",
     "FramerateProfiles = collections.FramerateProfiles;",
     "DiscoveredPeers = collections.DiscoveredPeers;",
+    "DeviceDiscoveryManualConnectFinalActions = collections.DeviceDiscoveryManualConnectFinalActions;",
     "CoreDiagnosticFacts = collections.CoreDiagnosticFacts;",
     "RemoteDesktopSessions = collections.RemoteDesktopSessions;",
     "SettingsDetails = collections.SettingsDetails;"
@@ -766,7 +768,8 @@ foreach ($workspaceVisibilitySignal in @(
 }
 
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "SidebarSessionActions" -ItemsPanel "VerticalWorkspaceActionItemsPanel" -ItemTemplate "SidebarWorkspaceActionButtonTemplate"
-Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
+Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "TopBarStatusActionButtonTemplate"
+Assert-ActionItemsControlResources -Text $mainWindow -Binding "DeviceDiscoveryManualConnectFinalActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
 
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "NavigationItems" -ItemTemplate "NavigationItemTemplate"
 Assert-ItemsControlResources -Text $mainWindow -Binding "DashboardMetrics" -ItemsPanel "WorkspaceMetricCardItemsPanel" -ItemTemplate "WorkspaceMetricCardTemplate"
@@ -888,10 +891,9 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Top bar action catalog or
     '"Notifications"',
     '"Notifications"',
     '"Theme"',
-    '"Theme"',
-    '"Heartbeat"',
-    '"Heartbeat"'
+    '"Theme"'
 )
+Assert-True -Condition (-not [regex]::IsMatch($workspaceActionCatalog, "BuildTopBarActions\(\)[\s\S]*?`"Heartbeat`"[\s\S]*?BuildSessionControlActions")) -Message "Top bar action catalog must not expose Heartbeat; keep Heartbeat in sidebar/session controls."
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Session controls action catalog order" -Needles @(
     'BuildSessionControlActions',
@@ -1599,6 +1601,7 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionCommandId.RefreshSettings",
     "WorkspaceActionGateId.CanConnect",
     "WorkspaceActionGateId.CanRefreshSettings",
+    "WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal",
     "WorkspaceActionDetailSlot.TopBarNotifications",
     "WorkspaceActionDetailSlot.TopBarTheme"
 )) {
@@ -1612,10 +1615,12 @@ foreach ($surfaceTargetsSignal in @(
     "collections.TopBarActions",
     "collections.SessionControlActions",
     "collections.DeviceDiscoveryPrimaryActions",
+    "collections.DeviceDiscoveryManualConnectFinalActions",
     "collections.CrossNetworkCodeConnectActions",
     "collections.SettingsMaintenanceActions",
     "WorkspaceActionSurface.SidebarSession",
     "WorkspaceActionSurface.TopBarActions",
+    "WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal",
     "WorkspaceActionSurface.SettingsMaintenance"
 )) {
     Assert-Contains -Text $workspaceActionSurfaceTargets -Needle $surfaceTargetsSignal -Message "WorkspaceActionSurfaceTargets collection-entry contract missing: $surfaceTargetsSignal"
@@ -2083,14 +2088,19 @@ foreach ($deviceDiscoveryDefaultSignal in @(
     "PairingConnectionCode",
     "_skybridge._udp",
     "11550",
+    "new DeviceDiscoveryInputDefaultsClient()"
+)) {
+    Assert-Contains -Text ($deviceDiscoveryInputDefaults + $sessionViewModel) -Needle $deviceDiscoveryDefaultSignal -Message "Device Discovery default-input signal missing: $deviceDiscoveryDefaultSignal"
+}
+
+foreach ($deviceDiscoveryDefaultSample in @(
     "deviceId=mac-1",
     "Desk Mac",
     "skybridge-pair:v1",
     "SampleFingerprint",
-    "SamplePairingPublicKey",
-    "new DeviceDiscoveryInputDefaultsClient()"
+    "SamplePairingPublicKey"
 )) {
-    Assert-Contains -Text ($deviceDiscoveryInputDefaults + $sessionViewModel) -Needle $deviceDiscoveryDefaultSignal -Message "Device Discovery default-input signal missing: $deviceDiscoveryDefaultSignal"
+    Assert-True -Condition (-not $deviceDiscoveryInputDefaults.Contains($deviceDiscoveryDefaultSample)) -Message "DeviceDiscoveryInputDefaultsClient must not prefill production inputs with sample pairing material: $deviceDiscoveryDefaultSample"
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("SampleFingerprint")) -Message "SessionViewModel must not own Device Discovery sample fingerprints."
@@ -2756,6 +2766,7 @@ foreach ($discoverySignal in @(
     "Prepare Connection",
     "DeviceDiscoveryPrimaryActions",
     "DeviceDiscoveryScanActions",
+    "DeviceDiscoveryManualConnectFinalActions",
     "CrossNetworkQrActions",
     "CrossNetworkCodePrimaryActions",
     "CrossNetworkCodeConnectActions",
@@ -2763,6 +2774,7 @@ foreach ($discoverySignal in @(
     "WorkspaceActionItemView",
     "WorkspaceActionSurface.DeviceDiscoveryPrimary",
     "WorkspaceActionSurface.DeviceDiscoveryScan",
+    "WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal",
     "WorkspaceActionSurface.CrossNetworkQr",
     "WorkspaceActionSurface.CrossNetworkCodePrimary",
     "WorkspaceActionSurface.CrossNetworkCodeConnect",

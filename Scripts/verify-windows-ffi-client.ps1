@@ -255,14 +255,19 @@ foreach ($signal in @(
     "DiscoveryTxtRecord",
     "PairingConnectionCode",
     "_skybridge._udp",
-    "11550",
+    "11550"
+)) {
+    Assert-Contains -Text $deviceDiscoveryInputDefaults -Needle $signal -Message "DeviceDiscoveryInputDefaultsClient missing default-input signal: $signal"
+}
+
+foreach ($sampleDefault in @(
     "deviceId=mac-1",
     "Desk Mac",
     "skybridge-pair:v1",
     "SampleFingerprint",
     "SamplePairingPublicKey"
 )) {
-    Assert-Contains -Text $deviceDiscoveryInputDefaults -Needle $signal -Message "DeviceDiscoveryInputDefaultsClient missing default-input signal: $signal"
+    Assert-True -Condition (-not $deviceDiscoveryInputDefaults.Contains($sampleDefault)) -Message "DeviceDiscoveryInputDefaultsClient must not prefill production inputs with sample pairing material: $sampleDefault"
 }
 
 Assert-Contains -Text $architecture -Needle "DeviceDiscoveryInputDefaultsClient" -Message "Architecture doc missing DeviceDiscoveryInputDefaultsClient status."

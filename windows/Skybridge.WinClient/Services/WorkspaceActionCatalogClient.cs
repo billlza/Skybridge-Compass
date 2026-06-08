@@ -36,6 +36,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
         WorkspaceActionSurface.SessionControls,
         WorkspaceActionSurface.DeviceDiscoveryPrimary,
         WorkspaceActionSurface.DeviceDiscoveryScan,
+        WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal,
         WorkspaceActionSurface.CrossNetworkQr,
         WorkspaceActionSurface.CrossNetworkCodePrimary,
         WorkspaceActionSurface.CrossNetworkCodeConnect,
@@ -80,6 +81,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 WorkspaceActionSurface.SessionControls => BuildSessionControlActions(),
                 WorkspaceActionSurface.DeviceDiscoveryPrimary => BuildDeviceDiscoveryPrimaryActions(),
                 WorkspaceActionSurface.DeviceDiscoveryScan => BuildDeviceDiscoveryScanActions(),
+                WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal => BuildDeviceDiscoveryManualConnectFinalActions(),
                 WorkspaceActionSurface.CrossNetworkQr => BuildCrossNetworkQrActions(),
                 WorkspaceActionSurface.CrossNetworkCodePrimary => BuildCrossNetworkCodePrimaryActions(),
                 WorkspaceActionSurface.CrossNetworkCodeConnect => BuildCrossNetworkCodeConnectActions(),
@@ -183,15 +185,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "\uE771",
                 false,
                 "System",
-                DetailSlot: WorkspaceActionDetailSlot.TopBarTheme),
-            new(
-                "Heartbeat",
-                "Heartbeat",
-                "\uE95B",
-                true,
-                "",
-                CommandId: WorkspaceActionCommandId.Heartbeat,
-                GateId: WorkspaceActionGateId.CanSendHeartbeat)
+                DetailSlot: WorkspaceActionDetailSlot.TopBarTheme)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildSessionControlActions() =>
@@ -287,6 +281,17 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 true,
                 "Mac-parity discovery scan action; command refreshes the read-only browser snapshot.",
                 CommandId: WorkspaceActionCommandId.RefreshDiscovery)
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildDeviceDiscoveryManualConnectFinalActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "Connect",
+                "Connect",
+                "\uE768",
+                false,
+                "Adapter pending")
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildCrossNetworkQrActions() =>
@@ -583,6 +588,7 @@ public enum WorkspaceActionSurface
     SessionControls,
     DeviceDiscoveryPrimary,
     DeviceDiscoveryScan,
+    DeviceDiscoveryManualConnectFinal,
     CrossNetworkQr,
     CrossNetworkCodePrimary,
     CrossNetworkCodeConnect,
