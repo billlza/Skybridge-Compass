@@ -60,12 +60,13 @@ $nativeRuntimeFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Win
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
+$stackFreshnessSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-stack-freshness.ps1"
 $startupStateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-startup-state.ps1"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $stackFreshnessSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -104,6 +105,7 @@ $nativeRuntimeFactory = Get-Content -Raw -LiteralPath $nativeRuntimeFactoryPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
+$stackFreshnessSmoke = Get-Content -Raw -LiteralPath $stackFreshnessSmokePath
 $startupStateSmoke = Get-Content -Raw -LiteralPath $startupStateSmokePath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
@@ -299,6 +301,7 @@ foreach ($nativeRuntimeSmokeSignal in @(
 foreach ($portabilitySmokeSignal in @(
     "windows-portability-smoke: ok",
     "verify-git-ssh-remote.ps1",
+    "verify-windows-stack-freshness.ps1",
     "verify-windows-ffi-client.ps1",
     "verify-windows-ui-parity.ps1",
     "verify-windows-ui-action-order.ps1",
@@ -312,10 +315,31 @@ foreach ($portabilitySmokeSignal in @(
     "MinimumLineCoverage",
     "IncludeNativeDnsSdAcceptance",
     "RequireNativeDnsSdPeer",
+    "CheckOnlineStackFreshness",
     "RequireGitRemoteAccess",
     "RequireCredentialHelperReset"
 )) {
     Assert-Contains -Text $portabilitySmoke -Needle $portabilitySmokeSignal -Message "Portability smoke missing signal: $portabilitySmokeSignal"
+}
+foreach ($stackFreshnessSignal in @(
+    "windows-stack-freshness: ok",
+    "net10.0-windows10.0.19041.0",
+    "Microsoft.WindowsAppSDK",
+    "2.1.3",
+    "Microsoft.Windows.SDK.BuildTools",
+    "10.0.28000.1839",
+    "edition = `"2021`"",
+    "crate-type = [`"rlib`", `"cdylib`"]",
+    "10.0.8",
+    "2028-11-14",
+    "v2.5.8",
+    "v0.24.4",
+    "CheckOnline",
+    "api.nuget.org",
+    "api.github.com/repos/microsoft/msquic/releases/latest",
+    "api.github.com/repos/paullouisageneau/libdatachannel/releases/latest"
+)) {
+    Assert-Contains -Text $stackFreshnessSmoke -Needle $stackFreshnessSignal -Message "Stack freshness smoke missing signal: $stackFreshnessSignal"
 }
 foreach ($startupStateSmokeSignal in @(
     "windows-startup-state: ok",
@@ -337,6 +361,7 @@ foreach ($startupStateSmokeSignal in @(
     Assert-Contains -Text $startupStateSmoke -Needle $startupStateSmokeSignal -Message "Startup-state smoke missing signal: $startupStateSmokeSignal"
 }
 Assert-Contains -Text $architecture -Needle "verify-windows-portability-smoke.ps1" -Message "Architecture doc missing portability smoke entrypoint."
+Assert-Contains -Text $architecture -Needle "verify-windows-stack-freshness.ps1" -Message "Architecture doc missing stack freshness smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-startup-state.ps1" -Message "Architecture doc missing startup-state smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
 Assert-Contains -Text $dependencyFactory -Needle "var coreBridge = new CoreBridge();" -Message "Default dependency factory should create one explicit CoreBridge for manual Core tools."

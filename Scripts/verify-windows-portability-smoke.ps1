@@ -3,6 +3,7 @@ param(
     [double]$MinimumLineCoverage = 90.0,
     [switch]$IncludeRustCliCoverage,
     [switch]$IncludeNativeDnsSdAcceptance,
+    [switch]$CheckOnlineStackFreshness,
     [switch]$RequireNativeDnsSdPeer,
     [string]$ExpectedDeviceId = "",
     [string]$ExpectedFingerprint = "",
@@ -54,6 +55,18 @@ Invoke-SmokeGate `
     -Name "git-ssh-remote" `
     -RelativeScriptPath "Scripts/verify-git-ssh-remote.ps1" `
     -Parameters $gitRemoteParameters
+
+$stackFreshnessParameters = @{
+    RepoRoot = $RepoRoot
+}
+if ($CheckOnlineStackFreshness) {
+    $stackFreshnessParameters.CheckOnline = $true
+}
+
+Invoke-SmokeGate `
+    -Name "windows-stack-freshness" `
+    -RelativeScriptPath "Scripts/verify-windows-stack-freshness.ps1" `
+    -Parameters $stackFreshnessParameters
 
 Invoke-SmokeGate `
     -Name "windows-ffi-client" `
