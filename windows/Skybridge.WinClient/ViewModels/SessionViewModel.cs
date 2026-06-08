@@ -43,6 +43,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ReadOnlyWorkspaceRefreshCoordinator _readOnlyWorkspaceRefreshCoordinator;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
+    private readonly ReadOnlyWorkspaceSnapshotHandlers _readOnlyWorkspaceSnapshotHandlers;
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
@@ -256,6 +257,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         DashboardMetrics = collections.DashboardMetrics;
         BitrateProfiles = collections.BitrateProfiles;
         FramerateProfiles = collections.FramerateProfiles;
+        _readOnlyWorkspaceSnapshotHandlers = new ReadOnlyWorkspaceSnapshotHandlers(
+            _workspaceSnapshotApplier,
+            collections);
         _dashboardMetricsUpdater = new DashboardMetricsUpdater(
             _dashboardMetricsClient,
             DashboardMetrics,
@@ -1079,19 +1083,19 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private Task RunCoreDiagnosticsAsync() =>
         _readOnlyWorkspaceRefreshCoordinator.RunCoreDiagnosticsAsync(
-            ApplyCoreDiagnosticsSnapshot,
+            _readOnlyWorkspaceSnapshotHandlers.ApplyCoreDiagnostics,
             value => CoreDiagnosticsStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshFileTransferAsync() =>
         _readOnlyWorkspaceRefreshCoordinator.RefreshFileTransferAsync(
-            ApplyFileTransferSnapshot,
+            _readOnlyWorkspaceSnapshotHandlers.ApplyFileTransfer,
             value => FileTransferStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshUsbManagementAsync() =>
         _readOnlyWorkspaceRefreshCoordinator.RefreshUsbManagementAsync(
-            ApplyUsbManagementSnapshot,
+            _readOnlyWorkspaceSnapshotHandlers.ApplyUsbManagement,
             value => UsbManagementStatus = value,
             value => StatusMessage = value);
 
@@ -1099,54 +1103,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _readOnlyWorkspaceRefreshCoordinator.RefreshRemoteDesktopAsync(
             SelectedBitrate,
             SelectedFramerate,
-            ApplyRemoteDesktopSnapshot,
+            _readOnlyWorkspaceSnapshotHandlers.ApplyRemoteDesktop,
             value => RemoteDesktopStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshSystemMonitorAsync() =>
         _readOnlyWorkspaceRefreshCoordinator.RefreshSystemMonitorAsync(
-            ApplySystemMonitorSnapshot,
+            _readOnlyWorkspaceSnapshotHandlers.ApplySystemMonitor,
             value => SystemMonitorStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshSettingsAsync() =>
         _readOnlyWorkspaceRefreshCoordinator.RefreshSettingsAsync(
-            ApplySettingsSnapshot,
+            _readOnlyWorkspaceSnapshotHandlers.ApplySettings,
             value => SettingsStatus = value,
             value => StatusMessage = value);
-
-    private void ApplyCoreDiagnosticsSnapshot(CoreDiagnosticsSnapshot snapshot)
-        => _workspaceSnapshotApplier.ApplyCoreDiagnostics(snapshot, CoreDiagnosticFacts);
-
-    private void ApplyFileTransferSnapshot(FileTransferWorkspaceSnapshot snapshot)
-        => _workspaceSnapshotApplier.ApplyFileTransfer(
-            snapshot,
-            FileTransferQueue,
-            FileTransferHistory,
-            FileTransferSecurityFacts);
-
-    private void ApplyUsbManagementSnapshot(UsbManagementWorkspaceSnapshot snapshot)
-        => _workspaceSnapshotApplier.ApplyUsbManagement(snapshot, UsbDeviceStats, UsbDevices);
-
-    private void ApplyRemoteDesktopSnapshot(RemoteDesktopWorkspaceSnapshot snapshot)
-        => _workspaceSnapshotApplier.ApplyRemoteDesktop(
-            snapshot,
-            RemoteDesktopSessions,
-            RemoteDesktopControlFacts);
-
-    private void ApplySystemMonitorSnapshot(SystemMonitorWorkspaceSnapshot snapshot)
-        => _workspaceSnapshotApplier.ApplySystemMonitor(
-            snapshot,
-            SystemMonitorOverview,
-            SystemMonitorDetails,
-            SystemMonitorIndicators);
-
-    private void ApplySettingsSnapshot(SettingsWorkspaceSnapshot snapshot)
-        => _workspaceSnapshotApplier.ApplySettings(
-            snapshot,
-            SettingsTabs,
-            SettingsActions,
-            SettingsDetails);
 
     private bool CanConnect() =>
         _workspaceCommandAvailability.CanConnect();
