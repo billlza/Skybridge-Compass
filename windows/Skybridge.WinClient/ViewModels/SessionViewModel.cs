@@ -33,6 +33,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IFeatureCatalogClient _featureCatalogClient;
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
+    private readonly WorkspaceCommandGateCoordinator _workspaceCommandGateCoordinator;
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
     private readonly WorkspaceActionSurfaceTargets _workspaceActionSurfaceTargets;
     private readonly WorkspaceActionSurfaceLoader _workspaceActionSurfaceLoader;
@@ -166,6 +167,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _featureCatalogClient = dependencies.FeatureCatalogClient;
         _sessionCommandStateClient = dependencies.SessionCommandStateClient;
         _workspaceCommandStateClient = dependencies.WorkspaceCommandStateClient;
+        _workspaceCommandGateCoordinator = new WorkspaceCommandGateCoordinator(
+            _sessionCommandStateClient,
+            _featureCatalogClient,
+            _workspaceCommandStateClient,
+            _manualConnectionClient,
+            _crossNetworkConnectionClient,
+            _discoveryClient,
+            _pairingMaterialClient,
+            _connectionWorkspaceStateClient);
         _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
         var initialConnectionStatusPatch = _connectionWorkspaceStateClient.BuildInitialStatusPatch();
         _discoveryStatus = initialConnectionStatusPatch.DiscoveryStatus ?? "";
@@ -1165,81 +1175,64 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             SettingsActions,
             SettingsDetails);
 
-    private bool CanConnect() => _sessionCommandStateClient.CanConnect(ConnectionState, IsBusy);
+    private bool CanConnect() =>
+        _workspaceCommandGateCoordinator.CanConnect(BuildWorkspaceCommandGateState());
 
-    private bool CanDisconnect() => _sessionCommandStateClient.CanDisconnect(ConnectionState, IsBusy);
+    private bool CanDisconnect() =>
+        _workspaceCommandGateCoordinator.CanDisconnect(BuildWorkspaceCommandGateState());
 
-    private bool CanSendHeartbeat() => _sessionCommandStateClient.CanSendHeartbeat(ConnectionState, IsBusy);
+    private bool CanSendHeartbeat() =>
+        _workspaceCommandGateCoordinator.CanSendHeartbeat(BuildWorkspaceCommandGateState());
 
     private bool IsFeatureSelected(FeatureEntryId featureId) =>
-        _featureCatalogClient.IsSelected(SelectedFeature, featureId);
+        _workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId);
 
     private bool CanUseDeviceDiscovery() =>
-        _workspaceCommandStateClient.CanUseDeviceDiscovery(IsBusy, IsDeviceDiscoverySelected);
+        _workspaceCommandGateCoordinator.CanUseDiscoveryBrowser(BuildWorkspaceCommandGateState());
 
     private bool CanUseDiscoveryBrowser() => CanUseDeviceDiscovery();
 
     private bool CanPrepareManualConnection() =>
-        CanUseDeviceDiscoveryAction(
-            _manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort));
+        _workspaceCommandGateCoordinator.CanPrepareManualConnection(BuildWorkspaceCommandGateState());
 
     private bool CanUseCrossNetworkConnection() =>
-        _workspaceCommandStateClient.CanUseCrossNetworkConnection(IsBusy, IsDeviceDiscoverySelected);
+        _workspaceCommandGateCoordinator.CanUseCrossNetworkConnection(BuildWorkspaceCommandGateState());
 
     private bool CanScanQRCode() =>
-        CanUseCrossNetworkConnectionAction(_crossNetworkConnectionClient.CanScanQrCode(CrossNetworkQrInput));
+        _workspaceCommandGateCoordinator.CanScanQrCode(BuildWorkspaceCommandGateState());
 
     private bool CanCopyConnectionCode() =>
-        CanUseCrossNetworkConnectionAction(_crossNetworkConnectionClient.CanCopyCode(CrossNetworkGeneratedCode));
+        _workspaceCommandGateCoordinator.CanCopyConnectionCode(BuildWorkspaceCommandGateState());
 
     private bool CanConnectConnectionCode() =>
-        CanUseCrossNetworkConnectionAction(_crossNetworkConnectionClient.CanConnectWithCode(CrossNetworkCodeInput));
+        _workspaceCommandGateCoordinator.CanConnectConnectionCode(BuildWorkspaceCommandGateState());
 
     private bool CanParseAdvertisement() =>
-        CanUseDeviceDiscoveryAction(
-            _discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord));
+        _workspaceCommandGateCoordinator.CanParseAdvertisement(BuildWorkspaceCommandGateState());
 
     private bool CanValidatePairingCode() =>
-        CanUseDeviceDiscoveryAction(_pairingMaterialClient.CanValidate(PairingConnectionCode));
+        _workspaceCommandGateCoordinator.CanValidatePairingCode(BuildWorkspaceCommandGateState());
 
     private bool CanPrepareConnection() =>
-        CanUseDeviceDiscoveryAction(
-            _connectionWorkspaceStateClient.CanPreparePreflight(
-                _connectionInputCoordinator.ValidatedState.DiscoveredPeer,
-                _connectionInputCoordinator.ValidatedState.PairingMaterial));
+        _workspaceCommandGateCoordinator.CanPrepareConnection(BuildWorkspaceCommandGateState());
 
     private bool CanRefreshUsbManagement() =>
-        CanUseSelectedWorkspaceFeature(IsUsbManagementSelected);
+        _workspaceCommandGateCoordinator.CanRefreshUsbManagement(BuildWorkspaceCommandGateState());
 
     private bool CanRunCoreDiagnostics() =>
-        CanUseSelectedWorkspaceFeature(IsQuantumSelected);
+        _workspaceCommandGateCoordinator.CanRunCoreDiagnostics(BuildWorkspaceCommandGateState());
 
     private bool CanRefreshFileTransfer() =>
-        CanUseSelectedWorkspaceFeature(IsFileTransferSelected);
+        _workspaceCommandGateCoordinator.CanRefreshFileTransfer(BuildWorkspaceCommandGateState());
 
     private bool CanRefreshRemoteDesktop() =>
-        CanUseSelectedWorkspaceFeature(IsRemoteDesktopSelected);
+        _workspaceCommandGateCoordinator.CanRefreshRemoteDesktop(BuildWorkspaceCommandGateState());
 
     private bool CanRefreshSystemMonitor() =>
-        CanUseSelectedWorkspaceFeature(IsSystemMonitorSelected);
+        _workspaceCommandGateCoordinator.CanRefreshSystemMonitor(BuildWorkspaceCommandGateState());
 
     private bool CanRefreshSettings() =>
-        CanUseSelectedWorkspaceFeature(IsSettingsSelected);
-
-    private bool CanUseDeviceDiscoveryAction(bool readiness) =>
-        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
-            readiness);
-
-    private bool CanUseCrossNetworkConnectionAction(bool readiness) =>
-        _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
-            readiness);
-
-    private bool CanUseSelectedWorkspaceFeature(bool isSelected) =>
-        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, isSelected);
+        _workspaceCommandGateCoordinator.CanRefreshSettings(BuildWorkspaceCommandGateState());
 
     private async Task RunSessionEngineActionAsync(
         SessionStatusAction action,
@@ -1285,6 +1278,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ConnectionState,
             FileTransferQueue.Count,
             IsBusy);
+
+    private WorkspaceCommandGateState BuildWorkspaceCommandGateState() =>
+        new(
+            IsBusy,
+            ConnectionState,
+            SelectedFeature,
+            ManualConnectionHost,
+            ManualConnectionPort,
+            CrossNetworkQrInput,
+            CrossNetworkCodeInput,
+            CrossNetworkGeneratedCode,
+            DiscoveryService,
+            DiscoveryTxtRecord,
+            PairingConnectionCode,
+            _connectionInputCoordinator.ValidatedState);
 
     private WorkspaceActionRenderState BuildWorkspaceActionRenderState() =>
         new(

@@ -93,6 +93,7 @@ $sessionViewModelDependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
 $sessionViewModelDependenciesPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModelDependencies.cs"
 $asyncRelayCommandPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/AsyncRelayCommand.cs"
+$workspaceCommandGateCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandGateCoordinator.cs"
 $workspaceCommandBindingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandBindings.cs"
 $workspaceCommandRegistryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandRegistry.cs"
 $workspaceActionSurfaceTargetsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionSurfaceTargets.cs"
@@ -135,7 +136,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -145,6 +146,7 @@ $sessionViewModelDependencyFactory = Get-Content -Raw -LiteralPath $sessionViewM
 $sessionViewModelSource = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $sessionViewModelDependencies = Get-Content -Raw -LiteralPath $sessionViewModelDependenciesPath
 $asyncRelayCommand = Get-Content -Raw -LiteralPath $asyncRelayCommandPath
+$workspaceCommandGateCoordinator = Get-Content -Raw -LiteralPath $workspaceCommandGateCoordinatorPath
 $workspaceCommandBindings = Get-Content -Raw -LiteralPath $workspaceCommandBindingsPath
 $workspaceCommandRegistry = Get-Content -Raw -LiteralPath $workspaceCommandRegistryPath
 $workspaceActionSurfaceTargets = Get-Content -Raw -LiteralPath $workspaceActionSurfaceTargetsPath
@@ -161,7 +163,7 @@ $topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
 $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connectionWorkspaceInputCoordinatorPath
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -240,7 +242,8 @@ foreach ($featureCatalogSignal in @(
     "RefreshConnectionState",
     "RefreshShellRuntimeState",
     "private bool IsFeatureSelected(FeatureEntryId featureId)",
-    "_featureCatalogClient.IsSelected(SelectedFeature, featureId)",
+    "_workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId)",
+    "_featureCatalogClient.IsSelected(selectedFeature, featureId)",
     "IsFeatureSelected(FeatureEntryId.DeviceDiscovery)",
     "IsFeatureSelected(FeatureEntryId.Settings)",
     "new FeatureCatalogClient()"
@@ -250,8 +253,9 @@ foreach ($featureCatalogSignal in @(
 Assert-True -Condition (-not $sessionViewModel.Contains("FeatureEntryContract")) -Message "SessionViewModel must source navigation entries from FeatureCatalogClient instead of FeatureEntryContract."
 Assert-True -Condition (-not $sessionViewModel.Contains("NavigationItems[0]")) -Message "SessionViewModel must source default navigation selection from FeatureCatalogClient."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("SelectedFeature.Id == FeatureEntryId.")) -Message "SessionViewModel must source selected-feature predicates from FeatureCatalogClient.IsSelected."
-$featureSelectedMatches = [regex]::Matches($sessionViewModelSource, [regex]::Escape("_featureCatalogClient.IsSelected("))
-Assert-True -Condition ($featureSelectedMatches.Count -eq 1) -Message "SessionViewModel must centralize selected-feature predicates through IsFeatureSelected."
+$featureSelectedMatches = [regex]::Matches($workspaceCommandGateCoordinator, [regex]::Escape("_featureCatalogClient.IsSelected("))
+Assert-True -Condition ($featureSelectedMatches.Count -eq 1) -Message "WorkspaceCommandGateCoordinator must centralize selected-feature predicates through FeatureCatalogClient.IsSelected."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_featureCatalogClient.IsSelected(")) -Message "SessionViewModel must delegate selected-feature predicates through WorkspaceCommandGateCoordinator."
 Assert-True -Condition ($sessionViewModelSource.Contains("RefreshSelectedFeatureState();")) -Message "SelectedFeature setter must delegate selected-state notifications to RefreshSelectedFeatureState."
 Assert-True -Condition ($sessionViewModelSource.Contains("RefreshConnectionState();")) -Message "ConnectionState setter must delegate shell refresh to RefreshConnectionState."
 Assert-True -Condition ($sessionViewModelSource.Contains("RefreshShellRuntimeState();")) -Message "Runtime shell refresh must be centralized through RefreshShellRuntimeState."
@@ -908,13 +912,14 @@ foreach ($sessionCommandStateSignal in @(
     "EngineConnectionState.Connected",
     "EngineConnectionState.Reconnecting",
     "new SessionCommandStateClient()",
-    "_sessionCommandStateClient.CanConnect(ConnectionState, IsBusy)",
-    "_sessionCommandStateClient.CanDisconnect(ConnectionState, IsBusy)",
-    "_sessionCommandStateClient.CanSendHeartbeat(ConnectionState, IsBusy)",
+    "_workspaceCommandGateCoordinator.CanConnect(BuildWorkspaceCommandGateState())",
+    "_sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy)",
+    "_sessionCommandStateClient.CanDisconnect(state.ConnectionState, state.IsBusy)",
+    "_sessionCommandStateClient.CanSendHeartbeat(state.ConnectionState, state.IsBusy)",
     "_sessionCommandStateClient.BuildGateSnapshot(",
     "state.ConnectionState"
 )) {
-    Assert-Contains -Text ($sessionCommandState + $sessionViewModel) -Needle $sessionCommandStateSignal -Message "Session command state service signal missing: $sessionCommandStateSignal"
+    Assert-Contains -Text ($sessionCommandState + $sessionViewModel + $workspaceCommandGateCoordinator + $workspaceActionRenderContextBuilder) -Needle $sessionCommandStateSignal -Message "Session command state service signal missing: $sessionCommandStateSignal"
 }
 
 foreach ($viewModelSessionCommandGate in @(
@@ -938,27 +943,82 @@ foreach ($workspaceCommandStateSignal in @(
     "CanUseWorkspaceFeature",
     "BuildActionGateSnapshot",
     "new WorkspaceCommandStateClient()",
-    "_workspaceCommandStateClient.CanUseDeviceDiscovery(IsBusy, IsDeviceDiscoverySelected)",
-    "CanUseDeviceDiscoveryAction(bool readiness)",
+    "WorkspaceCommandGateCoordinator",
+    "WorkspaceCommandGateState",
+    "_workspaceCommandGateCoordinator.CanUseDiscoveryBrowser(BuildWorkspaceCommandGateState())",
+    "CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
-    "_workspaceCommandStateClient.CanUseCrossNetworkConnection(IsBusy, IsDeviceDiscoverySelected)",
-    "CanUseCrossNetworkConnectionAction(bool readiness)",
+    "_workspaceCommandStateClient.CanUseCrossNetworkConnection(",
+    "CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
-    "CanUseSelectedWorkspaceFeature(bool isSelected)",
-    "_workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, isSelected)",
+    "CanUseSelectedWorkspaceFeature(",
+    "_workspaceCommandStateClient.CanUseWorkspaceFeature(",
     "_workspaceCommandStateClient.BuildActionGateSnapshot(",
     "new WorkspaceCommandGateRequest("
 )) {
     Assert-Contains -Text ($workspaceCommandState + $sessionViewModel + $mainWindow) -Needle $workspaceCommandStateSignal -Message "Workspace command state service signal missing: $workspaceCommandStateSignal"
 }
 
-foreach ($workspaceGateCall in @(
+foreach ($workspaceGateCoordinatorSignal in @(
+    "internal sealed class WorkspaceCommandGateCoordinator",
+    "ISessionCommandStateClient sessionCommandStateClient",
+    "IFeatureCatalogClient featureCatalogClient",
+    "IWorkspaceCommandStateClient workspaceCommandStateClient",
+    "IManualConnectionClient manualConnectionClient",
+    "ICrossNetworkConnectionClient crossNetworkConnectionClient",
+    "IDiscoveryClient discoveryClient",
+    "IPairingMaterialClient pairingMaterialClient",
+    "IConnectionWorkspaceStateClient connectionWorkspaceStateClient",
+    "IsFeatureSelected(FeatureEntry selectedFeature, FeatureEntryId featureId)",
+    "_featureCatalogClient.IsSelected(selectedFeature, featureId)",
+    "_sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy)",
+    "_workspaceCommandStateClient.CanUseDeviceDiscovery(",
+    "_manualConnectionClient.CanPrepareTarget(",
+    "_crossNetworkConnectionClient.CanScanQrCode(state.CrossNetworkQrInput)",
+    "_crossNetworkConnectionClient.CanCopyCode(state.CrossNetworkGeneratedCode)",
+    "_crossNetworkConnectionClient.CanConnectWithCode(state.CrossNetworkCodeInput)",
+    "_discoveryClient.CanParseAdvertisement(",
+    "_pairingMaterialClient.CanValidate(state.PairingConnectionCode)",
+    "_connectionWorkspaceStateClient.CanPreparePreflight(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
-    "_workspaceCommandStateClient.CanUseWorkspaceFeature("
+    "_workspaceCommandStateClient.CanUseWorkspaceFeature(",
+    "internal sealed record WorkspaceCommandGateState("
 )) {
-    $matches = [regex]::Matches($sessionViewModelSource, [regex]::Escape($workspaceGateCall))
-    Assert-True -Condition ($matches.Count -eq 1) -Message "SessionViewModel must centralize workspace gate calls through helper methods: $workspaceGateCall"
+    Assert-Contains -Text $workspaceCommandGateCoordinator -Needle $workspaceGateCoordinatorSignal -Message "WorkspaceCommandGateCoordinator contract missing: $workspaceGateCoordinatorSignal"
+}
+
+foreach ($sessionViewModelGateSignal in @(
+    "new WorkspaceCommandGateCoordinator(",
+    "BuildWorkspaceCommandGateState()",
+    "_workspaceCommandGateCoordinator.CanConnect(BuildWorkspaceCommandGateState())",
+    "_workspaceCommandGateCoordinator.CanDisconnect(BuildWorkspaceCommandGateState())",
+    "_workspaceCommandGateCoordinator.CanSendHeartbeat(BuildWorkspaceCommandGateState())",
+    "_workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId)",
+    "_workspaceCommandGateCoordinator.CanPrepareManualConnection(BuildWorkspaceCommandGateState())",
+    "_workspaceCommandGateCoordinator.CanUseCrossNetworkConnection(BuildWorkspaceCommandGateState())",
+    "_workspaceCommandGateCoordinator.CanPrepareConnection(BuildWorkspaceCommandGateState())"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelGateSignal -Message "SessionViewModel must delegate command gates through WorkspaceCommandGateCoordinator: $sessionViewModelGateSignal"
+}
+
+foreach ($sessionViewModelDirectGateSignal in @(
+    "_sessionCommandStateClient.CanConnect(",
+    "_sessionCommandStateClient.CanDisconnect(",
+    "_sessionCommandStateClient.CanSendHeartbeat(",
+    "_workspaceCommandStateClient.CanUseDeviceDiscovery(",
+    "_workspaceCommandStateClient.CanUseCrossNetworkConnection(",
+    "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
+    "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
+    "_workspaceCommandStateClient.CanUseWorkspaceFeature(",
+    "_manualConnectionClient.CanPrepareTarget(",
+    "_crossNetworkConnectionClient.CanScanQrCode(",
+    "_crossNetworkConnectionClient.CanCopyCode(",
+    "_crossNetworkConnectionClient.CanConnectWithCode(",
+    "_discoveryClient.CanParseAdvertisement(",
+    "_pairingMaterialClient.CanValidate("
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelDirectGateSignal)) -Message "SessionViewModel must not own command gate composition directly: $sessionViewModelDirectGateSignal"
 }
 
 foreach ($viewModelWorkspaceCommandGate in @(
@@ -1357,10 +1417,10 @@ foreach ($deviceDiscoveryPendingStatusSignal in @(
     "_manualConnectionClient.BuildPendingStatus()",
     "_pairingMaterialClient.BuildPendingStatus()",
     "_connectionPreflightClient.BuildPendingStatus()",
-    "_discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord)",
-    "_manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort)",
-    "_pairingMaterialClient.CanValidate(PairingConnectionCode)",
-    "_connectionWorkspaceStateClient.CanPreparePreflight",
+    "_discoveryClient.CanParseAdvertisement(",
+    "_manualConnectionClient.CanPrepareTarget(",
+    "_pairingMaterialClient.CanValidate(state.PairingConnectionCode)",
+    "_connectionWorkspaceStateClient.CanPreparePreflight(",
     "CoreDiscoveryClient.HasParseInputs",
     "ManualConnectionClient.HasManualTargetInputs",
     "PairingMaterialClient.HasConnectionCode",
@@ -1370,7 +1430,7 @@ foreach ($deviceDiscoveryPendingStatusSignal in @(
     "PairingMaterialClient.DefaultPendingStatus",
     "ConnectionPreflightClient.DefaultPendingStatus"
 )) {
-    Assert-Contains -Text ($discoveryClient + $manualConnection + $pairing + $connectionPreflight + $unavailableClientStubs + $sessionViewModel) -Needle $deviceDiscoveryPendingStatusSignal -Message "Device Discovery pending status signal missing: $deviceDiscoveryPendingStatusSignal"
+    Assert-Contains -Text ($discoveryClient + $manualConnection + $pairing + $connectionPreflight + $unavailableClientStubs + $sessionViewModel + $workspaceCommandGateCoordinator) -Needle $deviceDiscoveryPendingStatusSignal -Message "Device Discovery pending status signal missing: $deviceDiscoveryPendingStatusSignal"
 }
 
 foreach ($viewModelPendingStatusLiteral in @(
@@ -2095,6 +2155,7 @@ foreach ($docSignal in @(
     "DashboardMetricsClient",
     "DashboardMetricsUpdater",
     "WorkspaceShellRefreshCoordinator",
+    "WorkspaceCommandGateCoordinator",
     "ConnectionPreflightClient",
     "ConnectionWorkspaceStateClient",
     "ConnectionWorkspaceInputCoordinator",
