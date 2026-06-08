@@ -105,6 +105,7 @@ $workspaceStatusPatchApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinCli
 $workspaceBusyCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceBusyCoordinator.cs"
 $readOnlyWorkspaceRefreshCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceRefreshCoordinator.cs"
 $workspaceCountNotifierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCountNotifier.cs"
+$workspaceObservableCollectionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceObservableCollections.cs"
 $workspaceCollectionProjectorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCollectionProjector.cs"
 $workspaceSnapshotApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceSnapshotApplier.cs"
 $dashboardMetricsUpdaterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/DashboardMetricsUpdater.cs"
@@ -138,7 +139,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceViewStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceViewStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -160,6 +161,7 @@ $workspaceStatusPatchApplier = Get-Content -Raw -LiteralPath $workspaceStatusPat
 $workspaceBusyCoordinator = Get-Content -Raw -LiteralPath $workspaceBusyCoordinatorPath
 $readOnlyWorkspaceRefreshCoordinator = Get-Content -Raw -LiteralPath $readOnlyWorkspaceRefreshCoordinatorPath
 $workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierPath
+$workspaceObservableCollections = Get-Content -Raw -LiteralPath $workspaceObservableCollectionsPath
 $workspaceCollectionProjector = Get-Content -Raw -LiteralPath $workspaceCollectionProjectorPath
 $workspaceSnapshotApplier = Get-Content -Raw -LiteralPath $workspaceSnapshotApplierPath
 $dashboardMetricsUpdater = Get-Content -Raw -LiteralPath $dashboardMetricsUpdaterPath
@@ -167,7 +169,7 @@ $topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
 $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connectionWorkspaceInputCoordinatorPath
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceViewStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceViewStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -310,6 +312,42 @@ foreach ($viewModelProjectionSignal in @(
     Assert-Contains -Text $sessionViewModelSource -Needle $viewModelProjectionSignal -Message "SessionViewModel reusable projection helper missing: $viewModelProjectionSignal"
 }
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "OnPropertyChanged\(nameof\([A-Za-z]+Count\)\)")) -Message "SessionViewModel must notify derived count properties through WorkspaceCountNotifier."
+
+foreach ($observableCollectionsSignal in @(
+    "internal sealed class WorkspaceObservableCollections",
+    "IEnumerable<FeatureEntry> featureEntries",
+    "RemoteDesktopProfileCatalogSnapshot profileCatalog",
+    "NavigationItems = new ObservableCollection<FeatureEntry>(featureEntries)",
+    "DashboardMetrics = new ObservableCollection<DashboardMetricView>()",
+    "BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles)",
+    "FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles)",
+    "SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>()",
+    "TopBarActions = new ObservableCollection<WorkspaceActionItemView>()",
+    "SessionControlActions = new ObservableCollection<WorkspaceActionItemView>()",
+    "DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>()",
+    "DiscoveryBrowserFacts = new ObservableCollection<DiscoveryBrowserFactView>()",
+    "CrossNetworkConnectionFacts = new ObservableCollection<CrossNetworkConnectionFactView>()",
+    "CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>()",
+    "RemoteDesktopSessions = new ObservableCollection<RemoteDesktopSessionItemView>()",
+    "SystemMonitorIndicators = new ObservableCollection<SystemMonitorIndicatorView>()",
+    "SettingsDetails = new ObservableCollection<SettingsDetailItemView>()"
+)) {
+    Assert-Contains -Text $workspaceObservableCollections -Needle $observableCollectionsSignal -Message "WorkspaceObservableCollections contract missing: $observableCollectionsSignal"
+}
+foreach ($sessionViewModelCollectionSignal in @(
+    "var collections = new WorkspaceObservableCollections(featureEntries, profileCatalog);",
+    "NavigationItems = collections.NavigationItems;",
+    "DashboardMetrics = collections.DashboardMetrics;",
+    "BitrateProfiles = collections.BitrateProfiles;",
+    "FramerateProfiles = collections.FramerateProfiles;",
+    "DiscoveredPeers = collections.DiscoveredPeers;",
+    "CoreDiagnosticFacts = collections.CoreDiagnosticFacts;",
+    "RemoteDesktopSessions = collections.RemoteDesktopSessions;",
+    "SettingsDetails = collections.SettingsDetails;"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelCollectionSignal -Message "SessionViewModel must receive XAML-bound collections from WorkspaceObservableCollections: $sessionViewModelCollectionSignal"
+}
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "new\s+ObservableCollection<")) -Message "SessionViewModel must not construct XAML-bound ObservableCollection instances directly."
 
 foreach ($collectionProjectorSignal in @(
     "internal static class WorkspaceCollectionProjector",
@@ -2287,6 +2325,7 @@ foreach ($docSignal in @(
     "WorkspaceActionSurfaceLoader",
     "WorkspaceStatusPatchApplier",
     "WorkspaceCountNotifier",
+    "WorkspaceObservableCollections",
     "WorkspaceCollectionProjector",
     "WorkspaceSnapshotApplier",
     "DiscoveredPeerItemTemplate",

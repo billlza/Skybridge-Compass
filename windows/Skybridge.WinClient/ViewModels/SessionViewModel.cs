@@ -232,9 +232,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _extendedSearchCountdown = _discoveryBrowserInputPolicy.ExtendedSearchSeconds;
         _connectionState = _engineClient.State;
         var featureEntries = _featureCatalogClient.BuildReadOnlySnapshot();
-        NavigationItems = new ObservableCollection<FeatureEntry>(featureEntries);
+        var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
+        var collections = new WorkspaceObservableCollections(featureEntries, profileCatalog);
+        NavigationItems = collections.NavigationItems;
         _selectedFeature = _featureCatalogClient.ResolveDefaultSelection(featureEntries);
-        DashboardMetrics = new ObservableCollection<DashboardMetricView>();
+        DashboardMetrics = collections.DashboardMetrics;
+        BitrateProfiles = collections.BitrateProfiles;
+        FramerateProfiles = collections.FramerateProfiles;
         _dashboardMetricsUpdater = new DashboardMetricsUpdater(
             _dashboardMetricsClient,
             DashboardMetrics,
@@ -243,15 +247,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => ActiveSessionCount = value,
             value => TransferTaskCount = value,
             value => PerformanceStatus = value);
-        SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();
-        TopBarActions = new ObservableCollection<WorkspaceActionItemView>();
-        SessionControlActions = new ObservableCollection<WorkspaceActionItemView>();
-        DiscoveredPeers = new ObservableCollection<DiscoveredPeerView>();
-        DiscoveryBrowserFacts = new ObservableCollection<DiscoveryBrowserFactView>();
-        ManualConnectionFacts = new ObservableCollection<ManualConnectionFactView>();
-        CrossNetworkConnectionFacts = new ObservableCollection<CrossNetworkConnectionFactView>();
-        PairingFacts = new ObservableCollection<PairingFactView>();
-        ConnectionPreflightFacts = new ObservableCollection<ConnectionPreflightFactView>();
+        SidebarSessionActions = collections.SidebarSessionActions;
+        TopBarActions = collections.TopBarActions;
+        SessionControlActions = collections.SessionControlActions;
+        DiscoveredPeers = collections.DiscoveredPeers;
+        DiscoveryBrowserFacts = collections.DiscoveryBrowserFacts;
+        ManualConnectionFacts = collections.ManualConnectionFacts;
+        CrossNetworkConnectionFacts = collections.CrossNetworkConnectionFacts;
+        PairingFacts = collections.PairingFacts;
+        ConnectionPreflightFacts = collections.ConnectionPreflightFacts;
         _connectionInputCoordinator = new ConnectionWorkspaceInputCoordinator(
             _connectionWorkspaceStateClient,
             _workspaceStatusPatchApplier,
@@ -272,31 +276,31 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             CrossNetworkConnectionFacts,
             PairingFacts,
             ConnectionPreflightFacts);
-        CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
-        DeviceDiscoveryPrimaryActions = new ObservableCollection<WorkspaceActionItemView>();
-        DeviceDiscoveryScanActions = new ObservableCollection<WorkspaceActionItemView>();
-        CrossNetworkQrActions = new ObservableCollection<WorkspaceActionItemView>();
-        CrossNetworkCodePrimaryActions = new ObservableCollection<WorkspaceActionItemView>();
-        CrossNetworkCodeConnectActions = new ObservableCollection<WorkspaceActionItemView>();
-        UsbManagementHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
-        FileTransferHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
-        FileTransferActions = new ObservableCollection<WorkspaceActionItemView>();
-        RemoteDesktopHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
-        RemoteDesktopActions = new ObservableCollection<WorkspaceActionItemView>();
-        QuantumDiagnosticsHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
-        SettingsHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
-        SettingsToolbarActions = new ObservableCollection<WorkspaceActionItemView>();
-        SettingsMaintenanceActions = new ObservableCollection<WorkspaceActionItemView>();
-        FileTransferQueue = new ObservableCollection<FileTransferQueueItemView>();
-        FileTransferHistory = new ObservableCollection<FileTransferHistoryItemView>();
-        FileTransferSecurityFacts = new ObservableCollection<FileTransferSecurityFactView>();
-        RemoteDesktopSessions = new ObservableCollection<RemoteDesktopSessionItemView>();
-        RemoteDesktopControlFacts = new ObservableCollection<RemoteDesktopControlFactView>();
-        SystemMonitorHeaderActions = new ObservableCollection<WorkspaceActionItemView>();
-        SystemMonitorActions = new ObservableCollection<WorkspaceActionItemView>();
-        SystemMonitorOverview = new ObservableCollection<SystemMonitorMetricView>();
-        SystemMonitorDetails = new ObservableCollection<SystemMonitorMetricView>();
-        SystemMonitorIndicators = new ObservableCollection<SystemMonitorIndicatorView>();
+        CoreDiagnosticFacts = collections.CoreDiagnosticFacts;
+        DeviceDiscoveryPrimaryActions = collections.DeviceDiscoveryPrimaryActions;
+        DeviceDiscoveryScanActions = collections.DeviceDiscoveryScanActions;
+        CrossNetworkQrActions = collections.CrossNetworkQrActions;
+        CrossNetworkCodePrimaryActions = collections.CrossNetworkCodePrimaryActions;
+        CrossNetworkCodeConnectActions = collections.CrossNetworkCodeConnectActions;
+        UsbManagementHeaderActions = collections.UsbManagementHeaderActions;
+        FileTransferHeaderActions = collections.FileTransferHeaderActions;
+        FileTransferActions = collections.FileTransferActions;
+        RemoteDesktopHeaderActions = collections.RemoteDesktopHeaderActions;
+        RemoteDesktopActions = collections.RemoteDesktopActions;
+        QuantumDiagnosticsHeaderActions = collections.QuantumDiagnosticsHeaderActions;
+        SettingsHeaderActions = collections.SettingsHeaderActions;
+        SettingsToolbarActions = collections.SettingsToolbarActions;
+        SettingsMaintenanceActions = collections.SettingsMaintenanceActions;
+        FileTransferQueue = collections.FileTransferQueue;
+        FileTransferHistory = collections.FileTransferHistory;
+        FileTransferSecurityFacts = collections.FileTransferSecurityFacts;
+        RemoteDesktopSessions = collections.RemoteDesktopSessions;
+        RemoteDesktopControlFacts = collections.RemoteDesktopControlFacts;
+        SystemMonitorHeaderActions = collections.SystemMonitorHeaderActions;
+        SystemMonitorActions = collections.SystemMonitorActions;
+        SystemMonitorOverview = collections.SystemMonitorOverview;
+        SystemMonitorDetails = collections.SystemMonitorDetails;
+        SystemMonitorIndicators = collections.SystemMonitorIndicators;
         _workspaceActionSurfaceTargets = new WorkspaceActionSurfaceTargets(
             SidebarSessionActions,
             TopBarActions,
@@ -317,11 +321,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             SettingsHeaderActions,
             SettingsToolbarActions,
             SettingsMaintenanceActions);
-        UsbDeviceStats = new ObservableCollection<UsbDeviceStatView>();
-        UsbDevices = new ObservableCollection<UsbDeviceItemView>();
-        SettingsTabs = new ObservableCollection<SettingsTabItemView>();
-        SettingsActions = new ObservableCollection<SettingsActionItemView>();
-        SettingsDetails = new ObservableCollection<SettingsDetailItemView>();
+        UsbDeviceStats = collections.UsbDeviceStats;
+        UsbDevices = collections.UsbDevices;
+        SettingsTabs = collections.SettingsTabs;
+        SettingsActions = collections.SettingsActions;
+        SettingsDetails = collections.SettingsDetails;
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         var commandBindings = new WorkspaceCommandBindings(
             ConnectAsync,
@@ -424,9 +428,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 nameof(IsSettingsSelected)
             },
             nameof(ConnectionStatus));
-        var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
-        BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
-        FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
         _selectedBitrate = profileCatalog.DefaultBitrateProfile;
         _selectedFramerate = profileCatalog.DefaultFramerateProfile;
         LoadWorkspaceActions();
