@@ -67,10 +67,11 @@ $macSshProbePath = Join-Path $RepoRoot "Scripts/probe-mac-ssh.ps1"
 $startupStateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-startup-state.ps1"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
 $fileTransferQrSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-file-transfer-qr.ps1"
+$uiAutomationSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-automation-smoke.ps1"
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -116,6 +117,7 @@ $macSshProbe = Get-Content -Raw -LiteralPath $macSshProbePath
 $startupStateSmoke = Get-Content -Raw -LiteralPath $startupStateSmokePath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
 $fileTransferQrSmoke = Get-Content -Raw -LiteralPath $fileTransferQrSmokePath
+$uiAutomationSmoke = Get-Content -Raw -LiteralPath $uiAutomationSmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
 
@@ -330,6 +332,7 @@ foreach ($portabilitySmokeSignal in @(
     "verify-windows-ffi-client.ps1",
     "verify-windows-ui-parity.ps1",
     "verify-windows-ui-action-order.ps1",
+    "verify-windows-ui-automation-smoke.ps1",
     "verify-windows-ui-parity-matrix.ps1",
     "verify-windows-startup-state.ps1",
     "verify-windows-command-gates.ps1",
@@ -346,6 +349,7 @@ foreach ($portabilitySmokeSignal in @(
     "RequireNativeDnsSdPeer",
     "CheckOnlineStackFreshness",
     "ProbeMacSsh",
+    "IncludeWinUiAutomationSmoke",
     "RequireMacSshReady",
     "RequireMacRustCliSmoke",
     "MacAlternateHostNames",
@@ -372,6 +376,17 @@ foreach ($fileTransferQrSmokeSignal in @(
     "no transport or signaling session was started"
 )) {
     Assert-Contains -Text $fileTransferQrSmoke -Needle $fileTransferQrSmokeSignal -Message "File transfer QR smoke missing signal: $fileTransferQrSmokeSignal"
+}
+foreach ($uiAutomationSmokeSignal in @(
+    "windows-ui-automation-smoke: ok",
+    "UIAutomationClient",
+    "Wait-ForMainWindow",
+    "Skybridge.Navigation.List",
+    "WorkspaceAction.FileTransfer.GenerateQr",
+    "FileTransferShareQrImage",
+    "no local files were read"
+)) {
+    Assert-Contains -Text $uiAutomationSmoke -Needle $uiAutomationSmokeSignal -Message "WinUI automation smoke missing signal: $uiAutomationSmokeSignal"
 }
 foreach ($ciWorkflowSmokeSignal in @(
     "windows-ci-workflow: ok",

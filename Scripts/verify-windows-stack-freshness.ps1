@@ -63,6 +63,7 @@ foreach ($path in @($winClientProjectPath, $cargoManifestPath, $architecturePath
 
 $project = [xml](Get-Content -Raw -LiteralPath $winClientProjectPath)
 $targetFramework = [string]$project.Project.PropertyGroup.TargetFramework
+$windowsPackageType = [string]$project.Project.PropertyGroup.WindowsPackageType
 $windowsAppSdkVersion = Get-PackageReferenceVersion -Project $project -PackageId "Microsoft.WindowsAppSDK"
 $buildToolsVersion = Get-PackageReferenceVersion -Project $project -PackageId "Microsoft.Windows.SDK.BuildTools"
 $qrCoderVersion = Get-PackageReferenceVersion -Project $project -PackageId "QRCoder"
@@ -71,6 +72,7 @@ $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $agents = Get-Content -Raw -LiteralPath $agentsPath
 
 Assert-True -Condition ($targetFramework -eq "net10.0-windows10.0.19041.0") -Message "Windows client must target net10.0-windows10.0.19041.0, got $targetFramework"
+Assert-True -Condition ($windowsPackageType -eq "None") -Message "Windows client must set WindowsPackageType=None so unpackaged WinUI auto-initializes the Windows App SDK runtime, got $windowsPackageType"
 Assert-True -Condition ($windowsAppSdkVersion -eq "2.1.3") -Message "Windows App SDK must stay on latest stable 2.1.3, got $windowsAppSdkVersion"
 Assert-True -Condition ($buildToolsVersion -eq "10.0.28000.1839") -Message "Windows SDK BuildTools must stay on latest stable 10.0.28000.1839, got $buildToolsVersion"
 Assert-True -Condition ($qrCoderVersion -eq "1.8.0") -Message "QRCoder must stay on latest stable 1.8.0, got $qrCoderVersion"
@@ -82,6 +84,7 @@ foreach ($architectureSignal in @(
     'net10.0-windows10.0.19041.0',
     'Windows App SDK `2.1.3`',
     'Windows SDK BuildTools `10.0.28000.1839`',
+    '`WindowsPackageType=None`',
     'QRCoder `1.8.0`',
     '.NET 10',
     '10.0.8',

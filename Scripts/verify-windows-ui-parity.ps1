@@ -171,13 +171,14 @@ $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connect
 $commandGateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-command-gates.ps1"
 $fileTransferQrSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-file-transfer-qr.ps1"
 $uiActionOrderSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-action-order.ps1"
+$uiAutomationSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-automation-smoke.ps1"
 $uiParityMatrixSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-parity-matrix.ps1"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 $macSshProbePath = Join-Path $RepoRoot "Scripts/probe-mac-ssh.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $fileTransferQrSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (Test-Path -LiteralPath $uiActionOrderSmokePath) -Message "Missing parity file: $uiActionOrderSmokePath"
@@ -267,6 +268,7 @@ $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePat
 $commandGateSmoke = Get-Content -Raw -LiteralPath $commandGateSmokePath
 $fileTransferQrSmoke = Get-Content -Raw -LiteralPath $fileTransferQrSmokePath
 $uiActionOrderSmoke = Get-Content -Raw -LiteralPath $uiActionOrderSmokePath
+$uiAutomationSmoke = Get-Content -Raw -LiteralPath $uiAutomationSmokePath
 $uiParityMatrixSmoke = Get-Content -Raw -LiteralPath $uiParityMatrixSmokePath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
@@ -283,6 +285,7 @@ Assert-True -Condition (-not [regex]::IsMatch($mainWindowCode, "(?m)^\s*DataCont
 
 foreach ($winClientProjectSignal in @(
     "<TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>",
+    "<WindowsPackageType>None</WindowsPackageType>",
     '<PackageReference Include="Microsoft.WindowsAppSDK" Version="2.1.3" />',
     '<PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" PrivateAssets="all" />'
 )) {
@@ -408,6 +411,29 @@ foreach ($uiActionOrderSmokeSignal in @(
     "OpenSystemPreferences"
 )) {
     Assert-Contains -Text $uiActionOrderSmoke -Needle $uiActionOrderSmokeSignal -Message "Windows UI action-order smoke missing signal: $uiActionOrderSmokeSignal"
+}
+
+foreach ($uiAutomationSmokeSignal in @(
+    "windows-ui-automation-smoke: ok",
+    "UIAutomationClient",
+    "Wait-ForMainWindow",
+    "WindowsPackageType>None",
+    "SKYBRIDGE_WINDOWS_RUNTIME",
+    "Skybridge.Navigation.List",
+    "Skybridge.SelectedFeature.Title",
+    "WorkspaceAction.TopBarActions.Notifications",
+    "WorkspaceAction.DashboardQuickActions.ScanDevices",
+    "WorkspaceAction.DeviceDiscoveryPrimary.ParseTxt",
+    "WorkspaceAction.UsbManagementHeader.RefreshDevices",
+    "WorkspaceAction.FileTransfer.GenerateQr",
+    "WorkspaceAction.RemoteDesktop.RecommendedConnect",
+    "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics",
+    "WorkspaceAction.SystemMonitorControls.Monitoring",
+    "WorkspaceAction.SettingsToolbar.ExportSettings",
+    "FileTransferShareQrImage",
+    "no local files were read"
+)) {
+    Assert-Contains -Text $uiAutomationSmoke -Needle $uiAutomationSmokeSignal -Message "Windows UI automation smoke missing signal: $uiAutomationSmokeSignal"
 }
 
 foreach ($uiParityMatrixSignal in @(

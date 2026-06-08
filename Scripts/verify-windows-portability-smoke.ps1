@@ -6,6 +6,7 @@ param(
     [switch]$CheckOnlineStackFreshness,
     [switch]$CiMode,
     [switch]$ProbeMacSsh,
+    [switch]$IncludeWinUiAutomationSmoke,
     [switch]$RequireMacSshReady,
     [switch]$RequireMacDirectLan,
     [switch]$RequireMacRustCliSmoke,
@@ -113,6 +114,16 @@ Invoke-SmokeGate `
     -Name "windows-ui-parity-matrix" `
     -RelativeScriptPath "Scripts/verify-windows-ui-parity-matrix.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
+
+if ($IncludeWinUiAutomationSmoke) {
+    Invoke-SmokeGate `
+        -Name "windows-ui-automation-smoke" `
+        -RelativeScriptPath "Scripts/verify-windows-ui-automation-smoke.ps1" `
+        -Parameters @{ RepoRoot = $RepoRoot }
+}
+else {
+    Write-Output "windows-portability-smoke: skipped windows-ui-automation-smoke; pass -IncludeWinUiAutomationSmoke on an interactive Windows desktop to verify live WinUI navigation, anchors, layout, and File Transfer QR preview."
+}
 
 Invoke-SmokeGate `
     -Name "windows-startup-state" `
