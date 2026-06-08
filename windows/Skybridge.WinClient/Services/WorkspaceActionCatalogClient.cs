@@ -348,8 +348,10 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Connect",
                 "Connect",
                 "\uE768",
-                false,
-                "Adapter pending")
+                true,
+                "Global session action; requires live Windows adapter.",
+                CommandId: WorkspaceActionCommandId.Connect,
+                GateId: WorkspaceActionGateId.CanConnect)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildCrossNetworkQrActions() =>

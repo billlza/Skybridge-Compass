@@ -162,10 +162,11 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
+$commandGateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-command-gates.ps1"
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -245,6 +246,7 @@ $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $mainWindowCode = Get-Content -Raw -LiteralPath $mainWindowCodePath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
+$commandGateSmoke = Get-Content -Raw -LiteralPath $commandGateSmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
 
@@ -309,6 +311,19 @@ foreach ($nativeRuntimeSmokeSignal in @(
     "Windows external adapter must not select AppleNative"
 )) {
     Assert-Contains -Text $nativeRuntimeProfileSmoke -Needle $nativeRuntimeSmokeSignal -Message "Native runtime profile smoke missing signal: $nativeRuntimeSmokeSignal"
+}
+foreach ($commandGateSmokeSignal in @(
+    "windows-command-gates: ok",
+    "WorkspaceCommandAvailability",
+    "WorkspaceActionSurface.SidebarSession",
+    "WorkspaceActionSurface.SessionControls",
+    "WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal",
+    "WorkspaceActionCommandId.Connect",
+    "WorkspaceActionGateId.CanConnect",
+    "preflight-only manual-final Connect",
+    "live manual-final Connect"
+)) {
+    Assert-Contains -Text $commandGateSmoke -Needle $commandGateSmokeSignal -Message "Windows command gate smoke missing signal: $commandGateSmokeSignal"
 }
 
 Assert-True -Condition (-not [regex]::IsMatch($mainWindowCode, "new\s+(CoreBridge|CoreDiscoveryClient|WindowsDiscoveryBrowserClient|DummyEngineClient|DeviceDiscoveryInputDefaultsClient|ManualConnectionClient|CrossNetworkConnectionClient|PairingMaterialClient|ConnectionPreflightClient|PendingWindowsTransportAdapterClient|CoreDiagnosticsClient|FileTransferWorkspaceClient|RemoteDesktopWorkspaceClient|RemoteDesktopProfileCatalogClient|SystemMonitorWorkspaceClient|UsbManagementWorkspaceClient|SettingsWorkspaceClient|DashboardMetricsClient|TopBarStatusClient|ConnectionWorkspaceStateClient|WorkspaceActionCatalogClient|WorkspaceErrorStatusClient|SessionStatusClient|FeatureCatalogClient|SessionCommandStateClient|WorkspaceCommandStateClient)\(")) -Message "MainWindow.xaml.cs must create SessionViewModel through SessionViewModelDependencyFactory, not direct service construction."
@@ -1746,6 +1761,8 @@ foreach ($workspaceActionRoleSignal in @(
     "GateId: WorkspaceActionGateId.CanScanQrCode",
     "GateId: WorkspaceActionGateId.CanCopyConnectionCode",
     "GateId: WorkspaceActionGateId.CanConnectConnectionCode",
+    "CommandId: WorkspaceActionCommandId.Connect",
+    "GateId: WorkspaceActionGateId.CanConnect",
     "WorkspaceActionSurface.DashboardQuickActions",
     "WorkspaceActionSurface.DeviceDiscoveryPrimary",
     "WorkspaceActionSurface.DeviceDiscoveryScan",
@@ -3359,6 +3376,7 @@ foreach ($docSignal in @(
     "ConnectionLaunchRequest",
     "ConnectionPreflightPlan",
     "verify-windows-connection-launch.ps1",
+    "verify-windows-command-gates.ps1",
     "ConnectionWorkspaceStateClient",
     "ConnectionWorkspaceInputCoordinator",
     "ConnectionWorkspaceResultProjector",
