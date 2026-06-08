@@ -63,6 +63,7 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
             remoteSuites,
             suitePolicy,
             padding);
+        var channelMappings = CoreChannelMappingResolver.RequireAll(plan.ChannelMappings);
         var bindingDigest = await _coreBridge.ComputeTransportBindingDigestAsync(
             new TransportBindingMaterial(
                 plan.Transport.Kind,
@@ -73,7 +74,7 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
                 null,
                 10_000,
                 Encoding.UTF8.GetBytes("windows,apple,webrtc,tcp")));
-        var realtime = await _coreBridge.MapChannelAsync(plan.Transport.Kind, CoreChannelKind.Realtime);
+        var realtime = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.Realtime);
         var frame = await _coreBridge.EncodeSbp2FrameAsync(
             CoreChannelKind.Control,
             1,
@@ -90,6 +91,7 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
             new("Selected suite", plan.SelectedSuite.ToString(), $"wire=0x{plan.SelectedSuiteWireId:x4}; audit={plan.SuiteAudit}"),
             new("SBP2", plan.Sbp2Enabled ? "enabled" : "disabled", $"fixed_payload_len={plan.Sbp2FixedPayloadLen}"),
             new("Frame header", $"{plan.FrameHeaderLen} bytes", "Core SBF1 envelope"),
+            new("Core channel map", $"{channelMappings.Count} channels", "control/file/clipboard/telemetry/realtime from the connection plan"),
             new("Realtime binding", realtime.BindingKind.ToString(), $"reliability={realtime.Reliability}; HOL isolated={realtime.HeadOfLineIsolated}"),
             new("Frame flags", $"0x{frameMetadata.Flags:x4}", $"sbp2={frameMetadata.IsSbp2Padded}; eom={frameMetadata.IsEndOfMessage}"),
             new("Payload roundtrip", $"{payload.Length} bytes", $"encoded={frameMetadata.EncodedLen}; decoded={frameMetadata.DecodedPayloadLen}")

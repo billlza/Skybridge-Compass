@@ -47,9 +47,16 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public async Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
-        var fileChannel = await _coreBridge.MapChannelAsync(
-            CoreTransportKind.WebRtcDataChannel,
-            CoreChannelKind.File);
+        var plan = await _coreBridge.PlanConnectionAsync(
+            PeerCapabilities.Windows(),
+            PeerCapabilities.Apple(),
+            NetworkPath.CrossNatPath(),
+            CryptoProviderCapabilities.ResearchAll(),
+            new ushort[] { 0x0001, 0x0101, 0x1001 },
+            CryptoSuitePolicy.Compatibility(),
+            TrafficPaddingPlan.Sbp2Fixed(512));
+        var channelMappings = CoreChannelMappingResolver.RequireAll(plan.ChannelMappings);
+        var fileChannel = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.File);
         var manifestPayload = Encoding.UTF8.GetBytes("file-manifest:name=sample.mov;bytes=73400320");
         var manifestFrame = await _coreBridge.EncodeFrameAsync(
             CoreChannelKind.File,
@@ -77,6 +84,7 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
         };
         var security = new List<FileTransferSecurityFact>
         {
+            new("Transport plan", plan.Transport.Kind.ToString(), $"audit={plan.Transport.AuditCode}; channels={channelMappings.Count}"),
             new("Channel", fileChannel.BindingKind.ToString(), $"reliability={fileChannel.Reliability}; HOL isolated={fileChannel.HeadOfLineIsolated}"),
             new("Manifest frame", $"{metadata.FrameHeaderLen} byte header", $"flags=0x{metadata.Flags:x4}; decoded={metadata.DecodedPayloadLen}"),
             new("HMAC", "pending live transfer", "mac parity placeholder; no local files are read"),

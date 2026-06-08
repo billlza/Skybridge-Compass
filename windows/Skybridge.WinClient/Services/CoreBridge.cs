@@ -730,6 +730,63 @@ public sealed record ChannelMapping(
             mapping.HeadOfLineIsolated != 0);
 }
 
+internal static class CoreChannelMappingResolver
+{
+    public static IReadOnlyList<ChannelMapping> RequireAll(
+        IReadOnlyList<ChannelMapping> mappings)
+    {
+        ArgumentNullException.ThrowIfNull(mappings);
+        if (mappings.Count != 5)
+        {
+            throw new InvalidOperationException("Core connection plan must return all five channel mappings.");
+        }
+
+        var seenChannels = new HashSet<CoreChannelKind>();
+        foreach (var mapping in mappings)
+        {
+            if (!seenChannels.Add(mapping.Channel))
+            {
+                throw new InvalidOperationException("Core connection plan returned duplicate channel mappings.");
+            }
+        }
+
+        foreach (var channel in RequiredChannels)
+        {
+            if (!seenChannels.Contains(channel))
+            {
+                throw new InvalidOperationException($"Core connection plan did not return the required {channel} channel mapping.");
+            }
+        }
+
+        return mappings;
+    }
+
+    public static ChannelMapping Require(
+        IReadOnlyList<ChannelMapping> mappings,
+        CoreChannelKind channel)
+    {
+        RequireAll(mappings);
+        foreach (var mapping in mappings)
+        {
+            if (mapping.Channel == channel)
+            {
+                return mapping;
+            }
+        }
+
+        throw new InvalidOperationException($"Core connection plan did not return the required {channel} channel mapping.");
+    }
+
+    private static readonly CoreChannelKind[] RequiredChannels =
+    {
+        CoreChannelKind.Control,
+        CoreChannelKind.File,
+        CoreChannelKind.Clipboard,
+        CoreChannelKind.Telemetry,
+        CoreChannelKind.Realtime
+    };
+}
+
 public sealed record FrameMetadata(
     CoreChannelKind Channel,
     ulong Sequence,

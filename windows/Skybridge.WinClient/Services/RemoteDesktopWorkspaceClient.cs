@@ -61,9 +61,10 @@ public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
             new ushort[] { 0x0001, 0x0101, 0x1001 },
             CryptoSuitePolicy.Compatibility(),
             TrafficPaddingPlan.Sbp2Fixed(1024));
-        var realtime = await _coreBridge.MapChannelAsync(plan.Transport.Kind, CoreChannelKind.Realtime);
-        var telemetry = await _coreBridge.MapChannelAsync(plan.Transport.Kind, CoreChannelKind.Telemetry);
-        var control = await _coreBridge.MapChannelAsync(plan.Transport.Kind, CoreChannelKind.Control);
+        var channelMappings = CoreChannelMappingResolver.RequireAll(plan.ChannelMappings);
+        var realtime = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.Realtime);
+        var telemetry = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.Telemetry);
+        var control = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.Control);
         var frame = await _coreBridge.EncodeSbp2FrameAsync(
             CoreChannelKind.Realtime,
             1,
@@ -90,6 +91,7 @@ public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
         var facts = new List<RemoteDesktopControlFact>
         {
             new("Connection mode", "Auto", plan.Transport.AuditCode.ToString()),
+            new("Core channel map", $"{channelMappings.Count} channels", "control/file/clipboard/telemetry/realtime from the connection plan"),
             new("Realtime channel", realtime.BindingKind.ToString(), $"reliability={realtime.Reliability}; HOL isolated={realtime.HeadOfLineIsolated}"),
             new("Telemetry channel", telemetry.BindingKind.ToString(), $"reliability={telemetry.Reliability}; HOL isolated={telemetry.HeadOfLineIsolated}"),
             new("Control channel", control.BindingKind.ToString(), $"reliability={control.Reliability}; HOL isolated={control.HeadOfLineIsolated}"),

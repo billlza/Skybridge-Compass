@@ -3072,7 +3072,10 @@ foreach ($fileTransferSignal in @(
     "Signature",
     "FileTransferWorkspaceClient",
     "BuildReadOnlySnapshotAsync",
-    "MapChannelAsync",
+    "PlanConnectionAsync",
+    "ChannelMappings",
+    "CoreChannelMappingResolver",
+    "Transport plan",
     "EncodeFrameAsync"
 )) {
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer + $workspaceActionCatalog) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
@@ -3099,6 +3102,9 @@ foreach ($remoteDesktopSignal in @(
     "RemoteDesktopWorkspaceClient",
     "BuildReadOnlySnapshotAsync",
     "PlanConnectionAsync",
+    "ChannelMappings",
+    "CoreChannelMappingResolver",
+    "Core channel map",
     "CoreChannelKind.Realtime",
     "CoreChannelKind.Telemetry",
     "EncodeSbp2FrameAsync",
@@ -3124,6 +3130,9 @@ foreach ($diagnosticSignal in @(
     "ComputeTransportBindingDigestAsync",
     "Transport binding digest",
     "diagnostic-only binding material",
+    "ChannelMappings",
+    "CoreChannelMappingResolver",
+    "Core channel map",
     "EncodeSbp2FrameAsync",
     "DecodeFrameMetadataAsync"
 )) {

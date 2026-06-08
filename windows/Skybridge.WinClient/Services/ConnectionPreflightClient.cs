@@ -72,12 +72,12 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
             new ushort[] { 0x0001, 0x0101, 0x1001 },
             CryptoSuitePolicy.Compatibility(),
             TrafficPaddingPlan.Sbp2Fixed(512));
-        var channelMappings = plan.ChannelMappings;
-        var control = RequireChannelMapping(channelMappings, CoreChannelKind.Control);
-        var file = RequireChannelMapping(channelMappings, CoreChannelKind.File);
-        var clipboard = RequireChannelMapping(channelMappings, CoreChannelKind.Clipboard);
-        var telemetry = RequireChannelMapping(channelMappings, CoreChannelKind.Telemetry);
-        var realtime = RequireChannelMapping(channelMappings, CoreChannelKind.Realtime);
+        var channelMappings = CoreChannelMappingResolver.RequireAll(plan.ChannelMappings);
+        var control = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.Control);
+        var file = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.File);
+        var clipboard = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.Clipboard);
+        var telemetry = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.Telemetry);
+        var realtime = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.Realtime);
         var adapterSnapshot = await _transportAdapterClient.PrepareAsync(
             new WindowsTransportAdapterRequest(
                 discoveredPeer,
@@ -166,21 +166,6 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
         discoveredPeer.Platform == CorePeerPlatform.Windows
             ? NetworkPath.SameLanPath()
             : NetworkPath.CrossNatPath();
-
-    private static ChannelMapping RequireChannelMapping(
-        IReadOnlyList<ChannelMapping> mappings,
-        CoreChannelKind channel)
-    {
-        foreach (var mapping in mappings)
-        {
-            if (mapping.Channel == channel)
-            {
-                return mapping;
-            }
-        }
-
-        throw new InvalidOperationException($"Core connection plan did not return the required {channel} channel mapping.");
-    }
 
     private static string FormatHex(byte[] bytes)
     {
