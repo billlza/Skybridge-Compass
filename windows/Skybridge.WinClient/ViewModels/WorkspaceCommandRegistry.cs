@@ -31,7 +31,7 @@ public sealed class WorkspaceCommandRegistry
         RefreshableCommands = refreshableCommands;
     }
 
-    public IReadOnlyList<ICommand> RefreshableCommands { get; }
+    private IReadOnlyList<ICommand> RefreshableCommands { get; }
 
     public static WorkspaceCommandRegistry Create(params WorkspaceCommandRegistration[] registrations) =>
         new(registrations);
@@ -42,6 +42,14 @@ public sealed class WorkspaceCommandRegistry
             : _commandsById.TryGetValue(commandId, out var command)
                 ? command
                 : null;
+
+    public void RefreshAll()
+    {
+        foreach (var command in RefreshableCommands)
+        {
+            (command as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        }
+    }
 }
 
 public sealed record WorkspaceCommandRegistration(

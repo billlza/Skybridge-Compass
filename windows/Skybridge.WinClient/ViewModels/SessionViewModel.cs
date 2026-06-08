@@ -1317,11 +1317,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshCommandStates()
     {
-        foreach (var command in _workspaceCommandRegistry.RefreshableCommands)
-        {
-            (command as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        }
-
+        _workspaceCommandRegistry.RefreshAll();
         RefreshDynamicWorkspaceActionStates();
     }
 

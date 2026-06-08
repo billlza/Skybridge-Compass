@@ -378,6 +378,8 @@ foreach ($commandRegistrySignal in @(
     "public sealed class WorkspaceCommandRegistry",
     "WorkspaceCommandRegistration",
     "RefreshableCommands",
+    "public void RefreshAll()",
+    "(command as AsyncRelayCommand)?.RaiseCanExecuteChanged();",
     "Resolve(WorkspaceActionCommandId commandId)",
     "Duplicate workspace command registration"
 )) {
@@ -388,12 +390,14 @@ foreach ($commandRefreshSignal in @(
     "private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;",
     "new WorkspaceCommandBindings(",
     "_workspaceCommandRegistry = commandBindings.Registry;",
-    "foreach (var command in _workspaceCommandRegistry.RefreshableCommands)"
+    "_workspaceCommandRegistry.RefreshAll();"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $commandRefreshSignal -Message "SessionViewModel command refresh registry missing: $commandRefreshSignal"
 }
 Assert-Contains -Text $workspaceActionSurfaceLoader -Needle "_commandRegistry.Resolve(action.CommandId)" -Message "WorkspaceActionSurfaceLoader must bind action role commands through WorkspaceCommandRegistry."
-Assert-True -Condition (-not $sessionViewModelSource.Contains("(ConnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();")) -Message "SessionViewModel must refresh command states through _refreshableCommands instead of per-command cast calls."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("(ConnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();")) -Message "SessionViewModel must refresh command states through WorkspaceCommandRegistry.RefreshAll instead of per-command cast calls."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("(command as AsyncRelayCommand)?.RaiseCanExecuteChanged();")) -Message "SessionViewModel must delegate command refresh iteration to WorkspaceCommandRegistry.RefreshAll."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceCommandRegistry.RefreshableCommands")) -Message "SessionViewModel must not enumerate refreshable commands directly."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_refreshableCommands")) -Message "SessionViewModel must source refreshable commands from WorkspaceCommandRegistry."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("new AsyncRelayCommand(")) -Message "SessionViewModel must create bindable commands through WorkspaceCommandBindings."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("WorkspaceCommandRegistry.Create(")) -Message "SessionViewModel must source the command registry from WorkspaceCommandBindings."
