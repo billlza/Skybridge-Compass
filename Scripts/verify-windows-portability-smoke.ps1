@@ -71,6 +71,11 @@ Invoke-SmokeGate `
     -Parameters @{ RepoRoot = $RepoRoot }
 
 Invoke-SmokeGate `
+    -Name "windows-startup-state" `
+    -RelativeScriptPath "Scripts/verify-windows-startup-state.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
+
+Invoke-SmokeGate `
     -Name "windows-command-gates" `
     -RelativeScriptPath "Scripts/verify-windows-command-gates.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
