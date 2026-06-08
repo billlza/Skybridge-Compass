@@ -1245,7 +1245,10 @@ Assert-Contains -Text $architecture -Needle "RemoteDesktopProfileCatalogClient" 
 
 foreach ($signal in @(
     "public interface ISystemMonitorWorkspaceClient",
+    "public interface ISystemMonitorAdvancedModeClient",
+    "public sealed class InMemorySystemMonitorAdvancedModeClient : ISystemMonitorAdvancedModeClient",
     "public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient",
+    "new InMemorySystemMonitorAdvancedModeClient()",
     "BuildInitialStatus",
     "DefaultInitialStatus",
     "BuildPendingStatus",
@@ -1261,12 +1264,16 @@ foreach ($signal in @(
     "NetworkInterface.GetAllNetworkInterfaces",
     "RuntimeInformation",
     "MonitoringSessionSnapshot",
+    "SystemMonitorAdvancedModeSnapshot",
     "DefaultStartMonitoringStartedStatus",
     "DefaultStopMonitoringStoppedStatus",
+    "DefaultAdvancedMonitoringEnabledStatus",
     "BuildStartMonitoringStartedActionResult",
     "BuildStopMonitoringStoppedActionResult",
+    "BuildAdvancedMonitoringEnabledActionResult",
     "CaptureMonitoringSample",
     "BuildMonitoringDetail",
+    "BuildAdvancedMonitoringDetail",
     "SystemMonitorMetric",
     "SystemMonitorIndicator"
 )) {

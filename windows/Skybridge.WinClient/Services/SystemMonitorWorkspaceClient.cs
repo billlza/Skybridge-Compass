@@ -40,11 +40,72 @@ public interface ISystemMonitorWorkspaceClient
     Task<SystemMonitorWorkspaceActionResult> BuildAdvancedMonitoringActionAsync();
 }
 
+public interface ISystemMonitorAdvancedModeClient
+{
+    bool CanEnableAdvancedMonitoring();
+
+    SystemMonitorAdvancedModeSnapshot CaptureSnapshot();
+
+    SystemMonitorWorkspaceActionResult EnableAdvancedMonitoring();
+}
+
+public sealed class InMemorySystemMonitorAdvancedModeClient : ISystemMonitorAdvancedModeClient
+{
+    private readonly object _lock = new();
+    private DateTimeOffset? _enabledAt;
+    private int _activationCount;
+
+    public bool CanEnableAdvancedMonitoring()
+    {
+        lock (_lock)
+        {
+            return !_enabledAt.HasValue;
+        }
+    }
+
+    public SystemMonitorAdvancedModeSnapshot CaptureSnapshot()
+    {
+        lock (_lock)
+        {
+            return new SystemMonitorAdvancedModeSnapshot(
+                _enabledAt.HasValue,
+                _enabledAt,
+                _activationCount);
+        }
+    }
+
+    public SystemMonitorWorkspaceActionResult EnableAdvancedMonitoring()
+    {
+        lock (_lock)
+        {
+            if (_enabledAt.HasValue)
+            {
+                return SystemMonitorWorkspaceClient.BuildDefaultAdvancedMonitoringActionResult();
+            }
+
+            _enabledAt = DateTimeOffset.UtcNow;
+            _activationCount++;
+            return SystemMonitorWorkspaceClient.BuildAdvancedMonitoringEnabledActionResult();
+        }
+    }
+}
+
 public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 {
+    private readonly ISystemMonitorAdvancedModeClient _advancedModeClient;
     private readonly object _monitoringLock = new();
     private DateTimeOffset? _monitoringStartedAt;
     private int _monitoringSampleCount;
+
+    public SystemMonitorWorkspaceClient()
+        : this(new InMemorySystemMonitorAdvancedModeClient())
+    {
+    }
+
+    public SystemMonitorWorkspaceClient(ISystemMonitorAdvancedModeClient advancedModeClient)
+    {
+        _advancedModeClient = advancedModeClient ?? throw new ArgumentNullException(nameof(advancedModeClient));
+    }
 
     public string BuildInitialStatus() => DefaultInitialStatus;
 
@@ -59,7 +120,7 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 
     public bool CanStopMonitoring() => GetMonitoringSession().IsActive;
 
-    public bool CanEnableAdvancedMonitoring() => false;
+    public bool CanEnableAdvancedMonitoring() => _advancedModeClient.CanEnableAdvancedMonitoring();
 
     public string BuildStartMonitoringPendingStatus() => DefaultStartMonitoringPendingStatus;
 
@@ -83,7 +144,7 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 
     public static string DefaultStopMonitoringBlockedStatus { get; } = "Monitoring inactive";
 
-    public static string DefaultAdvancedMonitoringBlockedStatus { get; } = "Advanced monitoring unavailable";
+    public static string DefaultAdvancedMonitoringBlockedStatus { get; } = "Advanced monitoring already enabled";
 
     public static string DefaultStartMonitoringBlockedMessage { get; } =
         "System monitor is already running in the in-process read-only sampler.";
@@ -92,7 +153,7 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
         "System monitor background sampling is not running.";
 
     public static string DefaultAdvancedMonitoringBlockedMessage { get; } =
-        "Advanced system monitoring requires a helper installation and elevation boundary.";
+        "Advanced read-only diagnostics are already enabled in memory.";
 
     public static string DefaultStartMonitoringStartedStatus { get; } = "Monitoring started";
 
@@ -100,6 +161,11 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
         "In-process read-only monitoring is active; refresh samples process, runtime, disk, and network snapshots without installing helpers.";
 
     public static string DefaultStopMonitoringStoppedStatus { get; } = "Monitoring stopped";
+
+    public static string DefaultAdvancedMonitoringEnabledStatus { get; } = "Advanced monitoring enabled";
+
+    public static string DefaultAdvancedMonitoringEnabledMessage { get; } =
+        "Advanced read-only diagnostics are enabled in memory only; no helper was installed and no elevation was requested.";
 
     public static string BuildDefaultCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) =>
         $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
@@ -121,11 +187,15 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
             DefaultStopMonitoringStoppedStatus,
             $"Stopped in-process read-only monitoring after {sampleCount} refresh sample(s) over {FormatElapsed(elapsed)}.");
 
+    public static SystemMonitorWorkspaceActionResult BuildAdvancedMonitoringEnabledActionResult() =>
+        new(DefaultAdvancedMonitoringEnabledStatus, DefaultAdvancedMonitoringEnabledMessage);
+
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         return Task.Run(() =>
         {
             var monitoring = CaptureMonitoringSample();
+            var advanced = _advancedModeClient.CaptureSnapshot();
             using var process = Process.GetCurrentProcess();
             var memory = GC.GetGCMemoryInfo();
             var processMemoryBytes = process.WorkingSet64;
@@ -160,6 +230,7 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
                 new("OS", RuntimeInformation.OSDescription, RuntimeInformation.OSArchitecture.ToString()),
                 new(".NET", RuntimeInformation.FrameworkDescription, RuntimeInformation.ProcessArchitecture.ToString()),
                 new("GC heap", FormatBytes(memory.HeapSizeBytes), $"fragmented={FormatBytes(memory.FragmentedBytes)}"),
+                new("Advanced", advanced.IsEnabled ? "read-only enabled" : "off", BuildAdvancedMonitoringDetail(advanced)),
                 new("Thermal", "Windows provider pending", "mac helper parity requires ETW/WMI adapter, not UI code"),
                 new("GPU", "provider pending", "Windows GPU counters need a diagnostics adapter"),
                 new("Helper", "not installed", "no elevation or background service is started by this workspace")
@@ -168,6 +239,7 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
             {
                 new("Health", overallHealth, "derived from memory, disk, and network adapter availability"),
                 new("Monitoring", monitoring.IsActive ? "Active" : "Idle", BuildMonitoringDetail(monitoring)),
+                new("Advanced", advanced.IsEnabled ? "Read-only" : "Off", BuildAdvancedMonitoringDetail(advanced)),
                 new("Thermal", "Unknown", "read-only shell avoids unsupported temperature claims"),
                 new("Load", "Nominal", "process/runtime snapshot only until ETW sampling is wired")
             };
@@ -218,7 +290,7 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
     }
 
     public Task<SystemMonitorWorkspaceActionResult> BuildAdvancedMonitoringActionAsync() =>
-        Task.FromResult(BuildDefaultAdvancedMonitoringActionResult());
+        Task.FromResult(_advancedModeClient.EnableAdvancedMonitoring());
 
     private static string CalculateHealth(double memoryPercent, double diskPercent, int activeNetworkCount)
     {
@@ -270,6 +342,16 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
         }
 
         return $"started={monitoring.StartedAt.Value:HH:mm:ss} UTC; samples={monitoring.SampleCount}";
+    }
+
+    private static string BuildAdvancedMonitoringDetail(SystemMonitorAdvancedModeSnapshot advanced)
+    {
+        if (!advanced.IsEnabled || !advanced.EnabledAt.HasValue)
+        {
+            return "Use Enable Advanced Monitoring to expose additional read-only diagnostics; no helper or elevation is required.";
+        }
+
+        return $"enabled={advanced.EnabledAt.Value:HH:mm:ss} UTC; activations={advanced.ActivationCount}; no helper/elevation";
     }
 
     private static string FormatBytes(long bytes)
@@ -327,6 +409,11 @@ public sealed record SystemMonitorIndicator(
     string Label,
     string State,
     string Detail);
+
+public sealed record SystemMonitorAdvancedModeSnapshot(
+    bool IsEnabled,
+    DateTimeOffset? EnabledAt,
+    int ActivationCount);
 
 public sealed record SystemMonitorWorkspaceActionResult(
     string Status,

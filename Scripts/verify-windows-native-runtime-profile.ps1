@@ -91,6 +91,7 @@ try
     AssertType<SystemMonitorWorkspaceClient>(defaultDependencies.SystemMonitorClient, "default system monitor client");
     AssertEqual(true, defaultDependencies.SystemMonitorClient.CanStartMonitoring(), "default system monitor start gate");
     AssertEqual(false, defaultDependencies.SystemMonitorClient.CanStopMonitoring(), "default system monitor stop gate");
+    AssertEqual(true, defaultDependencies.SystemMonitorClient.CanEnableAdvancedMonitoring(), "default system monitor advanced gate");
     var startMonitoring = await defaultDependencies.SystemMonitorClient.BuildStartMonitoringActionAsync();
     AssertEqual(SystemMonitorWorkspaceClient.DefaultStartMonitoringStartedStatus, startMonitoring.Status, "start monitoring status");
     AssertEqual(false, defaultDependencies.SystemMonitorClient.CanStartMonitoring(), "active system monitor start gate");
@@ -101,6 +102,14 @@ try
     AssertEqual(SystemMonitorWorkspaceClient.DefaultStopMonitoringStoppedStatus, stopMonitoring.Status, "stop monitoring status");
     AssertEqual(true, defaultDependencies.SystemMonitorClient.CanStartMonitoring(), "stopped system monitor start gate");
     AssertEqual(false, defaultDependencies.SystemMonitorClient.CanStopMonitoring(), "stopped system monitor stop gate");
+    var advancedMonitoring = await defaultDependencies.SystemMonitorClient.BuildAdvancedMonitoringActionAsync();
+    AssertEqual(SystemMonitorWorkspaceClient.DefaultAdvancedMonitoringEnabledStatus, advancedMonitoring.Status, "advanced monitoring status");
+    AssertEqual(SystemMonitorWorkspaceClient.DefaultAdvancedMonitoringEnabledMessage, advancedMonitoring.Message, "advanced monitoring message");
+    AssertEqual(false, defaultDependencies.SystemMonitorClient.CanEnableAdvancedMonitoring(), "enabled system monitor advanced gate");
+    var advancedMonitoringSnapshot = await defaultDependencies.SystemMonitorClient.BuildReadOnlySnapshotAsync();
+    AssertIndicator(advancedMonitoringSnapshot, "Advanced", "Read-only", "advanced monitoring indicator");
+    var repeatedAdvancedMonitoring = await defaultDependencies.SystemMonitorClient.BuildAdvancedMonitoringActionAsync();
+    AssertEqual(SystemMonitorWorkspaceClient.DefaultAdvancedMonitoringBlockedStatus, repeatedAdvancedMonitoring.Status, "repeat advanced monitoring status");
     AssertType<FileTransferWorkspaceClient>(defaultDependencies.FileTransferClient, "default file transfer client");
     AssertEqual(false, defaultDependencies.FileTransferClient.CanSelectFiles(), "default file transfer select files gate");
     AssertEqual(false, defaultDependencies.FileTransferClient.CanSelectFolder(), "default file transfer select folder gate");

@@ -636,7 +636,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Enable Advanced Monitoring",
                 "\uE72E",
                 true,
-                "Visible mac-parity monitoring action; fail-closed command does not install helpers or request elevation.",
+                "Visible mac-parity monitoring action; enables in-memory advanced read-only diagnostics without installing helpers or requesting elevation.",
                 CommandId: WorkspaceActionCommandId.EnableAdvancedSystemMonitoring,
                 GateId: WorkspaceActionGateId.CanEnableAdvancedSystemMonitoring)
         };
