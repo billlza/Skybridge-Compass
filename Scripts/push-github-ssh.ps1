@@ -15,29 +15,55 @@ Set-StrictMode -Version Latest
 function Invoke-RepositoryGit {
     param([string[]]$Arguments)
 
-    $nativeErrorPreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
-    if ($nativeErrorPreference) {
-        Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local
+    return Invoke-NativeProcess -FilePath "git" -Arguments (@("-C", $RepoRoot) + $Arguments)
+}
+
+function Join-ProcessArguments {
+    param([string[]]$Arguments)
+
+    return ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        }
+        else {
+            $_
+        }
+    }) -join " "
+}
+
+function Invoke-NativeProcess {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = Join-ProcessArguments -Arguments $Arguments
+    $startInfo.WorkingDirectory = $RepoRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+
+    $textParts = @()
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        $textParts += $stdout.TrimEnd()
     }
 
-    try {
-        $output = & git -C $RepoRoot @Arguments 2>&1
-        $gitExitCode = $LASTEXITCODE
-    }
-    catch {
-        $lastNativeExitCode = $LASTEXITCODE
-        $gitExitCode = if ($lastNativeExitCode -ne 0) { $lastNativeExitCode } else { 1 }
-        $output = @($_.Exception.Message)
-    }
-    finally {
-        if ($nativeErrorPreference) {
-            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativeErrorPreference.Value -Scope Local
-        }
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        $textParts += $stderr.TrimEnd()
     }
 
     return [pscustomobject]@{
-        ExitCode = $gitExitCode
-        Text = ($output -join [Environment]::NewLine).Trim()
+        ExitCode = $process.ExitCode
+        Text = ($textParts -join [Environment]::NewLine)
     }
 }
 
