@@ -180,17 +180,21 @@ foreach ($featureCatalogSignal in @(
     "public sealed class FeatureCatalogClient : IFeatureCatalogClient",
     "BuildReadOnlySnapshot",
     "ResolveDefaultSelection",
+    "IsSelected",
     "FeatureEntryId",
     "public sealed record FeatureEntry",
     "Entries",
     "_featureCatalogClient.BuildReadOnlySnapshot()",
     "_featureCatalogClient.ResolveDefaultSelection(featureEntries)",
+    "_featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.DeviceDiscovery)",
+    "_featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.Settings)",
     "new FeatureCatalogClient()"
 )) {
     Assert-Contains -Text ($featureContract + $sessionViewModel) -Needle $featureCatalogSignal -Message "Feature catalog service signal missing: $featureCatalogSignal"
 }
 Assert-True -Condition (-not $sessionViewModel.Contains("FeatureEntryContract")) -Message "SessionViewModel must source navigation entries from FeatureCatalogClient instead of FeatureEntryContract."
 Assert-True -Condition (-not $sessionViewModel.Contains("NavigationItems[0]")) -Message "SessionViewModel must source default navigation selection from FeatureCatalogClient."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("SelectedFeature.Id == FeatureEntryId.")) -Message "SessionViewModel must source selected-feature predicates from FeatureCatalogClient.IsSelected."
 
 foreach ($workspaceItemViewSignal in @(
     "public sealed record SettingsTabItemView",

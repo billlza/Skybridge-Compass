@@ -385,19 +385,26 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
-    public bool IsDeviceDiscoverySelected => SelectedFeature.Id == FeatureEntryId.DeviceDiscovery;
+    public bool IsDeviceDiscoverySelected =>
+        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.DeviceDiscovery);
 
-    public bool IsUsbManagementSelected => SelectedFeature.Id == FeatureEntryId.UsbManagement;
+    public bool IsUsbManagementSelected =>
+        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.UsbManagement);
 
-    public bool IsFileTransferSelected => SelectedFeature.Id == FeatureEntryId.FileTransfer;
+    public bool IsFileTransferSelected =>
+        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.FileTransfer);
 
-    public bool IsRemoteDesktopSelected => SelectedFeature.Id == FeatureEntryId.RemoteDesktop;
+    public bool IsRemoteDesktopSelected =>
+        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.RemoteDesktop);
 
-    public bool IsQuantumSelected => SelectedFeature.Id == FeatureEntryId.Quantum;
+    public bool IsQuantumSelected =>
+        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.Quantum);
 
-    public bool IsSystemMonitorSelected => SelectedFeature.Id == FeatureEntryId.SystemMonitor;
+    public bool IsSystemMonitorSelected =>
+        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.SystemMonitor);
 
-    public bool IsSettingsSelected => SelectedFeature.Id == FeatureEntryId.Settings;
+    public bool IsSettingsSelected =>
+        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.Settings);
 
     public EngineConnectionState ConnectionState
     {

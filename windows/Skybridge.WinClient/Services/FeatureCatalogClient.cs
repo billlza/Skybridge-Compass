@@ -7,6 +7,8 @@ public interface IFeatureCatalogClient
     IReadOnlyList<FeatureEntry> BuildReadOnlySnapshot();
 
     FeatureEntry ResolveDefaultSelection(IReadOnlyList<FeatureEntry> entries);
+
+    bool IsSelected(FeatureEntry selectedFeature, FeatureEntryId featureId);
 }
 
 public sealed class FeatureCatalogClient : IFeatureCatalogClient
@@ -28,6 +30,9 @@ public sealed class FeatureCatalogClient : IFeatureCatalogClient
 
     public FeatureEntry ResolveDefaultSelection(IReadOnlyList<FeatureEntry> entries) =>
         entries.Count == 0 ? Entries[0] : entries[0];
+
+    public bool IsSelected(FeatureEntry selectedFeature, FeatureEntryId featureId) =>
+        selectedFeature.Id == featureId;
 }
 
 public enum FeatureEntryId
