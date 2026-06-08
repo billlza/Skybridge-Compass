@@ -103,6 +103,8 @@ internal sealed class UnavailableConnectionPreflightClient : IConnectionPrefligh
 
 internal sealed class UnavailableCoreDiagnosticsClient : ICoreDiagnosticsClient
 {
+    public string BuildInitialStatus() => CoreDiagnosticsClient.DefaultInitialStatus;
+
     public string BuildPendingStatus() => CoreDiagnosticsClient.DefaultPendingStatus;
 
     public string BuildCompletedStatus(CoreDiagnosticsSnapshot snapshot) =>
@@ -119,6 +121,8 @@ internal sealed class UnavailableCoreDiagnosticsClient : ICoreDiagnosticsClient
 
 internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWorkspaceClient
 {
+    public string BuildInitialStatus() => FileTransferWorkspaceClient.DefaultInitialStatus;
+
     public string BuildPendingStatus() => FileTransferWorkspaceClient.DefaultPendingStatus;
 
     public string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
@@ -135,6 +139,8 @@ internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWork
 
 internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
 {
+    public string BuildInitialStatus() => RemoteDesktopWorkspaceClient.DefaultInitialStatus;
+
     public string BuildPendingStatus() => RemoteDesktopWorkspaceClient.DefaultPendingStatus;
 
     public string BuildCompletedStatus(RemoteDesktopWorkspaceSnapshot snapshot) =>
@@ -153,6 +159,8 @@ internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWo
 
 internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 {
+    public string BuildInitialStatus() => SystemMonitorWorkspaceClient.DefaultInitialStatus;
+
     public string BuildPendingStatus() => SystemMonitorWorkspaceClient.DefaultPendingStatus;
 
     public string BuildCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) =>
@@ -169,6 +177,8 @@ internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWo
 
 internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWorkspaceClient
 {
+    public string BuildInitialStatus() => UsbManagementWorkspaceClient.DefaultInitialStatus;
+
     public string BuildPendingStatus() => UsbManagementWorkspaceClient.DefaultPendingStatus;
 
     public string BuildCompletedStatus(UsbManagementWorkspaceSnapshot snapshot) =>
@@ -185,6 +195,8 @@ internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWo
 
 internal sealed class UnavailableSettingsWorkspaceClient : ISettingsWorkspaceClient
 {
+    public string BuildInitialStatus() => SettingsWorkspaceClient.DefaultInitialStatus;
+
     public string BuildPendingStatus() => SettingsWorkspaceClient.DefaultPendingStatus;
 
     public string BuildCompletedStatus(SettingsWorkspaceSnapshot snapshot) =>

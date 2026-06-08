@@ -7,6 +7,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface IFileTransferWorkspaceClient
 {
+    string BuildInitialStatus();
+
     string BuildPendingStatus();
 
     string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot);
@@ -27,10 +29,14 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildInitialStatus() => DefaultInitialStatus;
+
     public string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
         BuildDefaultCompletedStatus(snapshot);
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
+    public static string DefaultInitialStatus { get; } = "Ready";
 
     public static string DefaultPendingStatus { get; } = "Refreshing...";
 

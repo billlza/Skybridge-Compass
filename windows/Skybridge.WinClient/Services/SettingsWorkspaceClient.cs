@@ -7,6 +7,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface ISettingsWorkspaceClient
 {
+    string BuildInitialStatus();
+
     string BuildPendingStatus();
 
     string BuildCompletedStatus(SettingsWorkspaceSnapshot snapshot);
@@ -18,12 +20,16 @@ public interface ISettingsWorkspaceClient
 
 public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 {
+    public string BuildInitialStatus() => DefaultInitialStatus;
+
     public string BuildPendingStatus() => DefaultPendingStatus;
 
     public string BuildCompletedStatus(SettingsWorkspaceSnapshot snapshot) =>
         BuildDefaultCompletedStatus(snapshot);
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
+    public static string DefaultInitialStatus { get; } = "Ready";
 
     public static string DefaultPendingStatus { get; } = "Refreshing...";
 

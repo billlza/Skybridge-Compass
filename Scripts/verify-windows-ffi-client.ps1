@@ -397,6 +397,8 @@ Assert-Contains -Text $architecture -Needle "ConnectionPreflightClient" -Message
 foreach ($signal in @(
     "public interface IConnectionWorkspaceStateClient",
     "public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateClient",
+    "BuildInitialStatusPatch",
+    "DefaultReadyStatus",
     "BuildInputResetPatch",
     "BuildDiscoveryBrowserResultPatch",
     "BuildManualTargetPreparedPatch",
@@ -475,6 +477,8 @@ Assert-True -Condition (-not $unavailableClientStubs.Contains("signaling")) -Mes
 foreach ($signal in @(
     "public interface IUsbManagementWorkspaceClient",
     "public sealed class UsbManagementWorkspaceClient : IUsbManagementWorkspaceClient",
+    "BuildInitialStatus",
+    "DefaultInitialStatus",
     "BuildPendingStatus",
     "DefaultPendingStatus",
     "BuildCompletedStatus",
@@ -497,6 +501,8 @@ Assert-Contains -Text $architecture -Needle "UsbManagementWorkspaceClient" -Mess
 foreach ($signal in @(
     "public interface ICoreDiagnosticsClient",
     "public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient",
+    "BuildInitialStatus",
+    "DefaultInitialStatus",
     "BuildPendingStatus",
     "DefaultPendingStatus",
     "BuildCompletedStatus",
@@ -535,6 +541,8 @@ foreach ($signal in @(
 foreach ($signal in @(
     "public interface IFileTransferWorkspaceClient",
     "public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient",
+    "BuildInitialStatus",
+    "DefaultInitialStatus",
     "BuildPendingStatus",
     "DefaultPendingStatus",
     "BuildCompletedStatus",
@@ -688,6 +696,8 @@ Assert-Contains -Text $architecture -Needle "WorkspaceActionCatalogClient" -Mess
 foreach ($signal in @(
     "public interface IRemoteDesktopWorkspaceClient",
     "public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient",
+    "BuildInitialStatus",
+    "DefaultInitialStatus",
     "BuildPendingStatus",
     "DefaultPendingStatus",
     "BuildCompletedStatus",
@@ -724,6 +734,8 @@ Assert-Contains -Text $architecture -Needle "RemoteDesktopProfileCatalogClient" 
 foreach ($signal in @(
     "public interface ISystemMonitorWorkspaceClient",
     "public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient",
+    "BuildInitialStatus",
+    "DefaultInitialStatus",
     "BuildPendingStatus",
     "DefaultPendingStatus",
     "BuildCompletedStatus",
@@ -747,6 +759,8 @@ Assert-Contains -Text $architecture -Needle "SystemMonitorWorkspaceClient" -Mess
 foreach ($signal in @(
     "public interface ISettingsWorkspaceClient",
     "public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient",
+    "BuildInitialStatus",
+    "DefaultInitialStatus",
     "BuildPendingStatus",
     "DefaultPendingStatus",
     "BuildCompletedStatus",

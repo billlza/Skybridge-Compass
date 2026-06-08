@@ -7,6 +7,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface IRemoteDesktopWorkspaceClient
 {
+    string BuildInitialStatus();
+
     string BuildPendingStatus();
 
     string BuildCompletedStatus(RemoteDesktopWorkspaceSnapshot snapshot);
@@ -29,10 +31,14 @@ public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
 
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildInitialStatus() => DefaultInitialStatus;
+
     public string BuildCompletedStatus(RemoteDesktopWorkspaceSnapshot snapshot) =>
         BuildDefaultCompletedStatus(snapshot);
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
+    public static string DefaultInitialStatus { get; } = "Ready";
 
     public static string DefaultPendingStatus { get; } = "Refreshing...";
 

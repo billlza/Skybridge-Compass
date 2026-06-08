@@ -578,6 +578,8 @@ foreach ($viewModelTopBarDefaultLiteral in @(
 foreach ($connectionStateSignal in @(
     "public interface IConnectionWorkspaceStateClient",
     "public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateClient",
+    "BuildInitialStatusPatch",
+    "DefaultReadyStatus",
     "BuildInputResetPatch",
     "BuildDiscoveryBrowserResultPatch",
     "BuildManualTargetPreparedPatch",
@@ -596,6 +598,7 @@ foreach ($connectionStateSignal in @(
     "PreflightCleared",
     "Parse a Core-validated discovery TXT record before connection preflight.",
     "Validate pairing material before connection preflight.",
+    "_connectionWorkspaceStateClient.BuildInitialStatusPatch()",
     "new ConnectionWorkspaceStateClient()"
 )) {
     Assert-Contains -Text ($connectionWorkspaceState + $sessionViewModel + $mainWindow) -Needle $connectionStateSignal -Message "Connection workspace state signal missing: $connectionStateSignal"
@@ -765,6 +768,23 @@ foreach ($workspaceRefreshPendingStatusSignal in @(
     Assert-Contains -Text ($coreDiagnostics + $fileTransfer + $usbManagement + $remoteDesktop + $systemMonitor + $settings + $unavailableClientStubs + $sessionViewModel) -Needle $workspaceRefreshPendingStatusSignal -Message "Workspace refresh pending status signal missing: $workspaceRefreshPendingStatusSignal"
 }
 
+foreach ($workspaceInitialStatusSignal in @(
+    "_coreDiagnosticsClient.BuildInitialStatus()",
+    "_fileTransferClient.BuildInitialStatus()",
+    "_usbManagementClient.BuildInitialStatus()",
+    "_remoteDesktopClient.BuildInitialStatus()",
+    "_systemMonitorClient.BuildInitialStatus()",
+    "_settingsClient.BuildInitialStatus()",
+    "CoreDiagnosticsClient.DefaultInitialStatus",
+    "FileTransferWorkspaceClient.DefaultInitialStatus",
+    "UsbManagementWorkspaceClient.DefaultInitialStatus",
+    "RemoteDesktopWorkspaceClient.DefaultInitialStatus",
+    "SystemMonitorWorkspaceClient.DefaultInitialStatus",
+    "SettingsWorkspaceClient.DefaultInitialStatus"
+)) {
+    Assert-Contains -Text ($coreDiagnostics + $fileTransfer + $usbManagement + $remoteDesktop + $systemMonitor + $settings + $unavailableClientStubs + $sessionViewModel) -Needle $workspaceInitialStatusSignal -Message "Workspace initial status signal missing: $workspaceInitialStatusSignal"
+}
+
 foreach ($workspaceRefreshCompletedStatusSignal in @(
     "_coreDiagnosticsClient.BuildCompletedStatus(snapshot)",
     "_coreDiagnosticsClient.BuildCompletedStatusMessage()",
@@ -793,6 +813,23 @@ foreach ($viewModelWorkspacePendingStatusLiteral in @(
     'SettingsStatus = "Refreshing..."'
 )) {
     Assert-True -Condition (-not $sessionViewModel.Contains($viewModelWorkspacePendingStatusLiteral)) -Message "SessionViewModel must source workspace pending status from service boundary instead of literal: $viewModelWorkspacePendingStatusLiteral"
+}
+
+foreach ($viewModelWorkspaceInitialStatusLiteral in @(
+    '_discoveryStatus = "Ready"',
+    '_discoveryBrowserStatus = "Ready"',
+    '_manualConnectionStatus = "Ready"',
+    '_crossNetworkStatus = "Ready"',
+    '_pairingStatus = "Ready"',
+    '_connectionPreflightStatus = "Ready"',
+    '_coreDiagnosticsStatus = "Ready"',
+    '_fileTransferStatus = "Ready"',
+    '_remoteDesktopStatus = "Ready"',
+    '_systemMonitorStatus = "Ready"',
+    '_usbManagementStatus = "Ready"',
+    '_settingsStatus = "Ready"'
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelWorkspaceInitialStatusLiteral)) -Message "SessionViewModel must source workspace initial status from service boundary instead of literal: $viewModelWorkspaceInitialStatusLiteral"
 }
 
 foreach ($viewModelWorkspaceCompletedStatusLiteral in @(

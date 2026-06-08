@@ -11,6 +11,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface ISystemMonitorWorkspaceClient
 {
+    string BuildInitialStatus();
+
     string BuildPendingStatus();
 
     string BuildCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot);
@@ -22,12 +24,16 @@ public interface ISystemMonitorWorkspaceClient
 
 public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 {
+    public string BuildInitialStatus() => DefaultInitialStatus;
+
     public string BuildPendingStatus() => DefaultPendingStatus;
 
     public string BuildCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) =>
         BuildDefaultCompletedStatus(snapshot);
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
+    public static string DefaultInitialStatus { get; } = "Ready";
 
     public static string DefaultPendingStatus { get; } = "Refreshing...";
 

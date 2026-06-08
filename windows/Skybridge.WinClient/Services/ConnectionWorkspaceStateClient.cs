@@ -2,6 +2,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface IConnectionWorkspaceStateClient
 {
+    ConnectionWorkspaceStatusPatch BuildInitialStatusPatch();
+
     ConnectionWorkspaceStatusPatch BuildInputResetPatch(ConnectionWorkspaceResetReason reason);
 
     ConnectionWorkspaceStatusPatch BuildDiscoveryBrowserResultPatch(
@@ -30,26 +32,36 @@ public interface IConnectionWorkspaceStateClient
 
 public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateClient
 {
-    private const string Ready = "Ready";
+    public static string DefaultReadyStatus { get; } = "Ready";
+
+    public ConnectionWorkspaceStatusPatch BuildInitialStatusPatch() =>
+        new(
+            DiscoveryStatus: DefaultReadyStatus,
+            DiscoveryBrowserStatus: DefaultReadyStatus,
+            ManualConnectionStatus: DefaultReadyStatus,
+            CrossNetworkStatus: DefaultReadyStatus,
+            PairingStatus: DefaultReadyStatus,
+            ConnectionPreflightStatus: DefaultReadyStatus,
+            IsDiscoveryScanning: false);
 
     public ConnectionWorkspaceStatusPatch BuildInputResetPatch(ConnectionWorkspaceResetReason reason) =>
         reason switch
         {
             ConnectionWorkspaceResetReason.DiscoveryInputChanged => new ConnectionWorkspaceStatusPatch(
-                DiscoveryStatus: Ready,
-                DiscoveryBrowserStatus: Ready,
-                PairingStatus: Ready,
-                ConnectionPreflightStatus: Ready,
+                DiscoveryStatus: DefaultReadyStatus,
+                DiscoveryBrowserStatus: DefaultReadyStatus,
+                PairingStatus: DefaultReadyStatus,
+                ConnectionPreflightStatus: DefaultReadyStatus,
                 IsDiscoveryScanning: false),
             ConnectionWorkspaceResetReason.ManualTargetInputChanged => new ConnectionWorkspaceStatusPatch(
-                ManualConnectionStatus: Ready),
+                ManualConnectionStatus: DefaultReadyStatus),
             ConnectionWorkspaceResetReason.CrossNetworkInputChanged => new ConnectionWorkspaceStatusPatch(
-                CrossNetworkStatus: Ready),
+                CrossNetworkStatus: DefaultReadyStatus),
             ConnectionWorkspaceResetReason.PairingInputChanged => new ConnectionWorkspaceStatusPatch(
-                PairingStatus: Ready,
-                ConnectionPreflightStatus: Ready),
+                PairingStatus: DefaultReadyStatus,
+                ConnectionPreflightStatus: DefaultReadyStatus),
             ConnectionWorkspaceResetReason.PreflightCleared => new ConnectionWorkspaceStatusPatch(
-                ConnectionPreflightStatus: Ready),
+                ConnectionPreflightStatus: DefaultReadyStatus),
             _ => new ConnectionWorkspaceStatusPatch()
         };
 
@@ -66,7 +78,7 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
             DiscoveryBrowserStatus: snapshot.IsScanning
                 ? $"Scanning {snapshot.CapturedAt:HH:mm:ss} UTC"
                 : $"Stopped {snapshot.CapturedAt:HH:mm:ss} UTC",
-            PairingStatus: action == DiscoveryBrowserAction.Stop ? currentPairingStatus : Ready,
+            PairingStatus: action == DiscoveryBrowserAction.Stop ? currentPairingStatus : DefaultReadyStatus,
             IsDiscoveryScanning: snapshot.IsScanning,
             StatusMessage: "Discovery browser snapshot updated");
 
@@ -74,20 +86,20 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
         new(
             DiscoveryStatus: "Manual target prepared",
             ManualConnectionStatus: $"Prepared {snapshot.Target.Host}:{snapshot.Target.Port}",
-            PairingStatus: Ready,
+            PairingStatus: DefaultReadyStatus,
             StatusMessage: "Manual connection target prepared");
 
     public ConnectionWorkspaceStatusPatch BuildCrossNetworkPreparedPatch(CrossNetworkConnectionSnapshot snapshot) =>
         new(
             DiscoveryStatus: "Cross-network envelope prepared",
             CrossNetworkStatus: snapshot.Status,
-            PairingStatus: Ready,
+            PairingStatus: DefaultReadyStatus,
             StatusMessage: "Cross-network connection snapshot updated");
 
     public ConnectionWorkspaceStatusPatch BuildDiscoveryPeerValidatedPatch(DiscoveredPeer peer) =>
         new(
             DiscoveryStatus: $"Validated {peer.DeviceId}",
-            PairingStatus: Ready,
+            PairingStatus: DefaultReadyStatus,
             StatusMessage: "Discovery advertisement validated");
 
     public ConnectionWorkspaceStatusPatch BuildPairingValidatedPatch(PairingMaterial material) =>

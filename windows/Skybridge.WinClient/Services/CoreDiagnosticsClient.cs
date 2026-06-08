@@ -7,6 +7,8 @@ namespace Skybridge.WinClient.Services;
 
 public interface ICoreDiagnosticsClient
 {
+    string BuildInitialStatus();
+
     string BuildPendingStatus();
 
     string BuildCompletedStatus(CoreDiagnosticsSnapshot snapshot);
@@ -27,10 +29,14 @@ public sealed class CoreDiagnosticsClient : ICoreDiagnosticsClient
 
     public string BuildPendingStatus() => DefaultPendingStatus;
 
+    public string BuildInitialStatus() => DefaultInitialStatus;
+
     public string BuildCompletedStatus(CoreDiagnosticsSnapshot snapshot) =>
         BuildDefaultCompletedStatus(snapshot);
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
+
+    public static string DefaultInitialStatus { get; } = "Ready";
 
     public static string DefaultPendingStatus { get; } = "Running...";
 
