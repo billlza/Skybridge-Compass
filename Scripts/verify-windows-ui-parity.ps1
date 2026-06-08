@@ -106,6 +106,7 @@ $workspaceSnapshotApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient
 $dashboardMetricsUpdaterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/DashboardMetricsUpdater.cs"
 $topBarStatusUpdaterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/TopBarStatusUpdater.cs"
 $connectionWorkspaceInputCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ConnectionWorkspaceInputCoordinator.cs"
+$connectionWorkspaceResultProjectorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ConnectionWorkspaceResultProjector.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -133,7 +134,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceCountNotifierPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -156,8 +157,9 @@ $workspaceSnapshotApplier = Get-Content -Raw -LiteralPath $workspaceSnapshotAppl
 $dashboardMetricsUpdater = Get-Content -Raw -LiteralPath $dashboardMetricsUpdaterPath
 $topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
 $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connectionWorkspaceInputCoordinatorPath
+$connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceCountNotifier + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -1037,8 +1039,9 @@ foreach ($connectionStateSignal in @(
     "ConnectionWorkspaceResetReason",
     "ConnectionWorkspaceStatusPatch",
     "WorkspaceStatusPatchApplier",
-    "_workspaceStatusPatchApplier.Apply(",
+    "_statusPatchApplier.Apply(",
     "ConnectionWorkspaceInputCoordinator",
+    "ConnectionWorkspaceResultProjector",
     "_connectionInputCoordinator.ValidatedState",
     "ApplyInputInvalidation",
     "ConnectionWorkspaceValidatedState",
@@ -1099,11 +1102,60 @@ foreach ($inputResetSignal in @(
     "_connectionInputCoordinator.ResetManualConnectionInput",
     "_connectionInputCoordinator.ResetCrossNetworkInput",
     "_connectionInputCoordinator.ResetPairingInput",
+    "_connectionInputCoordinator.InvalidatePairingAndPreflight"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $inputResetSignal -Message "SessionViewModel setter reset path must call input coordinator: $inputResetSignal"
+}
+foreach ($resultProjectionSignal in @(
+    "internal sealed class ConnectionWorkspaceResultProjector",
+    "ApplyDiscoveryBrowserResult",
+    "ApplyManualTargetPrepared",
+    "ApplyCrossNetworkPrepared",
+    "ApplyDiscoveryPeerValidated",
+    "ApplyPairingValidated",
+    "ApplyPreflightPrepared",
+    "_connectionInputCoordinator.ApplyValidatedState",
     "_connectionInputCoordinator.ApplyInputInvalidation",
     "_connectionInputCoordinator.ClearPairingAndPreflight",
-    "_connectionInputCoordinator.ClearConnectionPreflight"
+    "_connectionInputCoordinator.ClearConnectionPreflight",
+    "_connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot)",
+    "_connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer)",
+    "_connectionWorkspaceStateClient.BuildPairingValidatedState(",
+    "_connectionWorkspaceStateClient.BuildDiscoveryBrowserResultPatch(",
+    "_connectionWorkspaceStateClient.BuildManualTargetPreparedPatch(snapshot)",
+    "_connectionWorkspaceStateClient.BuildCrossNetworkPreparedPatch(snapshot)",
+    "_connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedPatch(peer)",
+    "_connectionWorkspaceStateClient.BuildPairingValidatedPatch(material)",
+    "_connectionWorkspaceStateClient.BuildPreflightPreparedPatch(snapshot)",
+    "WorkspaceCollectionProjector.Replace(",
+    "_countNotifier.DiscoveredPeersChanged()",
+    "_countNotifier.DiscoveryBrowserFactsChanged()",
+    "_countNotifier.ManualConnectionFactsChanged()",
+    "_countNotifier.CrossNetworkConnectionFactsChanged()",
+    "_countNotifier.PairingFactsChanged()",
+    "_countNotifier.ConnectionPreflightFactsChanged()"
 )) {
-    Assert-Contains -Text $sessionViewModelSource -Needle $inputResetSignal -Message "SessionViewModel must call input coordinator: $inputResetSignal"
+    Assert-Contains -Text $connectionWorkspaceResultProjector -Needle $resultProjectionSignal -Message "ConnectionWorkspaceResultProjector contract missing: $resultProjectionSignal"
+}
+foreach ($sessionViewModelResultProjectionSignal in @(
+    "BuildDiscoveryBrowserValidatedState(snapshot)",
+    "BuildDiscoveryPeerValidatedState(peer)",
+    "BuildPairingValidatedState(",
+    "BuildDiscoveryBrowserResultPatch(",
+    "BuildManualTargetPreparedPatch(snapshot)",
+    "BuildCrossNetworkPreparedPatch(snapshot)",
+    "BuildDiscoveryPeerValidatedPatch(peer)",
+    "BuildPairingValidatedPatch(material)",
+    "BuildPreflightPreparedPatch(snapshot)",
+    "DiscoveredPeers.Clear()",
+    "DiscoveredPeers.Add(",
+    "WorkspaceCollectionProjector.Replace(DiscoveryBrowserFacts",
+    "WorkspaceCollectionProjector.Replace(ManualConnectionFacts",
+    "WorkspaceCollectionProjector.Replace(CrossNetworkConnectionFacts",
+    "WorkspaceCollectionProjector.Replace(PairingFacts",
+    "WorkspaceCollectionProjector.Replace(ConnectionPreflightFacts"
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelResultProjectionSignal)) -Message "SessionViewModel must route connection result projection through ConnectionWorkspaceResultProjector: $sessionViewModelResultProjectionSignal"
 }
 foreach ($inputResetReason in @(
     "ConnectionWorkspaceResetReason.ManualTargetInputChanged",
@@ -1138,7 +1190,7 @@ foreach ($workspaceErrorSignal in @(
     "RunDeviceDiscoveryActionAsync",
     "_workspaceErrorStatusClient.BuildErrorPatch(errorScope, ex.Message)",
     "WorkspaceStatusPatchApplier",
-    "_workspaceStatusPatchApplier.Apply("
+    "_statusPatchApplier.Apply("
 )) {
     Assert-Contains -Text ($workspaceErrorStatus + $sessionViewModel + $mainWindow) -Needle $workspaceErrorSignal -Message "Workspace error routing signal missing: $workspaceErrorSignal"
 }
@@ -1990,6 +2042,7 @@ foreach ($docSignal in @(
     "ConnectionPreflightClient",
     "ConnectionWorkspaceStateClient",
     "ConnectionWorkspaceInputCoordinator",
+    "ConnectionWorkspaceResultProjector",
     "ApplyInputInvalidation",
     "ClearPairingAndPreflight",
     "WorkspaceBusyCoordinator",

@@ -44,6 +44,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
+    private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -236,6 +237,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             DiscoveredPeers,
             DiscoveryBrowserFacts,
             ManualConnectionFacts,
+            PairingFacts,
+            ConnectionPreflightFacts);
+        _connectionResultProjector = new ConnectionWorkspaceResultProjector(
+            _connectionWorkspaceStateClient,
+            _connectionInputCoordinator,
+            _workspaceStatusPatchApplier,
+            _workspaceCountNotifier,
+            DiscoveredPeers,
+            DiscoveryBrowserFacts,
+            ManualConnectionFacts,
+            CrossNetworkConnectionFacts,
             PairingFacts,
             ConnectionPreflightFacts);
         CoreDiagnosticFacts = new ObservableCollection<CoreDiagnosticFactView>();
@@ -924,24 +936,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     IsDiscoveryCompatibilityModeEnabled,
                     ExtendedSearchCountdown));
 
-            WorkspaceCollectionProjector.Replace(DiscoveryBrowserFacts, snapshot.Facts, DiscoveryBrowserFactView.FromFact);
-
-            if (action != DiscoveryBrowserAction.Stop)
-            {
-                _connectionInputCoordinator.ApplyValidatedState(
-                    _connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot));
-                WorkspaceCollectionProjector.Replace(DiscoveredPeers, snapshot.Peers, DiscoveredPeerView.FromCandidate);
-
-                _connectionInputCoordinator.ClearPairingAndPreflight();
-                _workspaceCountNotifier.DiscoveredPeersChanged();
-            }
-
-            _workspaceCountNotifier.DiscoveryBrowserFactsChanged();
-            _workspaceStatusPatchApplier.Apply(
-                _connectionWorkspaceStateClient.BuildDiscoveryBrowserResultPatch(
-                    action,
-                    snapshot,
-                    PairingStatus));
+            _connectionResultProjector.ApplyDiscoveryBrowserResult(
+                action,
+                snapshot,
+                PairingStatus);
         });
     }
 
@@ -955,13 +953,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     ManualConnectionHost,
                     ManualConnectionPort,
                     ManualConnectionCode));
-            WorkspaceCollectionProjector.Replace(ManualConnectionFacts, snapshot.Facts, ManualConnectionFactView.FromFact);
-
-            _connectionInputCoordinator.ApplyInputInvalidation();
-            _workspaceCountNotifier.ManualConnectionFactsChanged();
-            DiscoveryService = snapshot.Target.Service;
-            _workspaceStatusPatchApplier.Apply(
-                _connectionWorkspaceStateClient.BuildManualTargetPreparedPatch(snapshot));
+            _connectionResultProjector.ApplyManualTargetPrepared(
+                snapshot,
+                value => DiscoveryService = value);
         });
     }
 
@@ -996,20 +990,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     CrossNetworkCodeInput,
                     CrossNetworkGeneratedCode));
 
-            WorkspaceCollectionProjector.Replace(
-                CrossNetworkConnectionFacts,
-                snapshot.Facts,
-                CrossNetworkConnectionFactView.FromFact);
-
-            if (!string.IsNullOrWhiteSpace(snapshot.GeneratedCode))
-            {
-                CrossNetworkGeneratedCode = snapshot.GeneratedCode;
-            }
-
-            _connectionInputCoordinator.ApplyInputInvalidation();
-            _workspaceCountNotifier.CrossNetworkConnectionFactsChanged();
-            _workspaceStatusPatchApplier.Apply(
-                _connectionWorkspaceStateClient.BuildCrossNetworkPreparedPatch(snapshot));
+            _connectionResultProjector.ApplyCrossNetworkPrepared(
+                snapshot,
+                value => CrossNetworkGeneratedCode = value);
         });
     }
 
@@ -1019,14 +1002,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             DiscoveryStatus = _discoveryClient.BuildPendingStatus();
             var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
-            _connectionInputCoordinator.ApplyValidatedState(
-                _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer));
-            DiscoveredPeers.Clear();
-            DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(_discoveryBrowserClient.BuildPeerCandidate(peer)));
-            _connectionInputCoordinator.ClearPairingAndPreflight();
-            _workspaceCountNotifier.DiscoveredPeersChanged();
-            _workspaceStatusPatchApplier.Apply(
-                _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedPatch(peer));
+            _connectionResultProjector.ApplyDiscoveryPeerValidated(
+                peer,
+                _discoveryBrowserClient.BuildPeerCandidate(peer));
         });
     }
 
@@ -1041,17 +1019,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var snapshot = await _pairingMaterialClient.BuildReadOnlySnapshotAsync(
                 PairingConnectionCode,
                 expectedFingerprint);
-            var material = snapshot.Material;
-            _connectionInputCoordinator.ApplyValidatedState(
-                _connectionWorkspaceStateClient.BuildPairingValidatedState(
-                    _connectionInputCoordinator.ValidatedState,
-                    material));
-            _connectionInputCoordinator.ClearConnectionPreflight();
-            WorkspaceCollectionProjector.Replace(PairingFacts, snapshot.Facts, PairingFactView.FromFact);
-
-            _workspaceCountNotifier.PairingFactsChanged();
-            _workspaceStatusPatchApplier.Apply(
-                _connectionWorkspaceStateClient.BuildPairingValidatedPatch(material));
+            _connectionResultProjector.ApplyPairingValidated(snapshot);
         });
     }
 
@@ -1073,14 +1041,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var snapshot = await _connectionPreflightClient.BuildReadOnlySnapshotAsync(
                 discoveredPeer!,
                 pairingMaterial!);
-            WorkspaceCollectionProjector.Replace(
-                ConnectionPreflightFacts,
-                snapshot.Facts,
-                ConnectionPreflightFactView.FromFact);
-
-            _workspaceCountNotifier.ConnectionPreflightFactsChanged();
-            _workspaceStatusPatchApplier.Apply(
-                _connectionWorkspaceStateClient.BuildPreflightPreparedPatch(snapshot));
+            _connectionResultProjector.ApplyPreflightPrepared(snapshot);
         });
     }
 
