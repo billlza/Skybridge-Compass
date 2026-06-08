@@ -4,10 +4,11 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 
 ## Source Baseline
 
-- Mac navigation source: `origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift`.
-- Mac dashboard source: `origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift`.
-- Mac quick actions source: `origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift`.
-- Mac top bar source: `origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift`.
+- Mac baseline commit: `23ba06343bbaa58c30ef6b9bbddd09bb4e80241c` (`origin/tdsc-2026-01-0318-ios-sim-fix` at the 2026-06-09 audit).
+- Mac navigation source: `23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift`.
+- Mac dashboard source: `23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift`.
+- Mac quick actions source: `23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift`.
+- Mac top bar source: `23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift`.
 - Windows shell source: `windows/Skybridge.WinClient/MainWindow.xaml`.
 - Windows catalog source: `windows/Skybridge.WinClient/Services/FeatureCatalogClient.cs` and `windows/Skybridge.WinClient/Services/WorkspaceActionCatalogClient.cs`.
 
@@ -72,7 +73,7 @@ All action buttons must be rendered through these shared templates. Feature sect
 
 ## Verification
 
-- `Scripts/verify-windows-ui-parity-matrix.ps1` verifies this matrix, `MainWindow.xaml`, `FeatureCatalogClient`, and `WorkspaceActionCatalogClient` agree on feature order, workspace visibility order, top-bar/session anchors, and per-surface action order.
+- `Scripts/verify-windows-ui-parity-matrix.ps1` verifies this matrix, the pinned mac baseline objects, `MainWindow.xaml`, `FeatureCatalogClient`, and `WorkspaceActionCatalogClient` agree on feature order, workspace visibility order, top-bar/session anchors, and per-surface action order.
 - The matrix smoke also verifies shared action templates and rejects inline XAML action buttons outside the approved templates.
 - `Scripts/verify-windows-ui-action-order.ps1` remains the executable catalog smoke for action keys and automation ids.
 - `Scripts/verify-windows-ui-parity.ps1` remains the broader static modularity gate.

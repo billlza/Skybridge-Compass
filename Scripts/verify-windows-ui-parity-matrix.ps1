@@ -53,6 +53,35 @@ function Assert-Ordered {
     }
 }
 
+function Join-ProcessArguments {
+    param([string[]]$Arguments)
+
+    return ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        }
+        else {
+            $_
+        }
+    }) -join " "
+}
+
+function Test-GitObjectExists {
+    param([string]$ObjectName)
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = "git"
+    $startInfo.Arguments = Join-ProcessArguments -Arguments @("-C", $RepoRoot, "cat-file", "-e", $ObjectName)
+    $startInfo.WorkingDirectory = $RepoRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $process.WaitForExit()
+    return $process.ExitCode -eq 0
+}
+
 function Get-MethodSlice {
     param(
         [string]$Text,
@@ -88,6 +117,21 @@ $featureCatalog = Get-Content -Raw -LiteralPath $featureCatalogPath
 $actionCatalog = Get-Content -Raw -LiteralPath $actionCatalogPath
 $actionOrderSmoke = Get-Content -Raw -LiteralPath $actionOrderSmokePath
 $paritySmoke = Get-Content -Raw -LiteralPath $paritySmokePath
+
+$macBaselineCommit = "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c"
+$macBaselinePaths = @(
+    "Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
+    "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift",
+    "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
+    "Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift"
+)
+
+Assert-Contains -Text $matrix -Needle "Mac baseline commit: ``$macBaselineCommit``" -Message "UI parity matrix must pin the mac baseline commit."
+foreach ($macPath in $macBaselinePaths) {
+    $macObject = "${macBaselineCommit}:$macPath"
+    Assert-Contains -Text $matrix -Needle "``$macObject``" -Message "UI parity matrix must use immutable mac source object: $macObject"
+    Assert-True -Condition (Test-GitObjectExists -ObjectName $macObject) -Message "Pinned mac source object is not available in this repository: $macObject"
+}
 
 $featureRows = @(
     [pscustomobject]@{ Order = "1"; Id = "Dashboard"; Title = "Dashboard"; Gate = "IsDashboardSelected"; Heading = 'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"'; Surfaces = @("DashboardQuickActions"); Anchors = @("Skybridge.Navigation.List", "Skybridge.SelectedFeature.Title", "Skybridge.Actions.DashboardQuickActions") },
@@ -207,6 +251,7 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usa
 
 foreach ($styleMatrixSignal in @(
     "Shared Style And Template Matrix",
+    "Mac baseline commit",
     "SidebarWorkspaceActionButtonTemplate",
     "WorkspaceActionButtonTemplate",
     "WorkspaceActionButtonWithDetailTemplate",
