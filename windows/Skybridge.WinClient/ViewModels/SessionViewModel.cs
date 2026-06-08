@@ -149,7 +149,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _engineClient = dependencies.EngineClient;
         _discoveryClient = dependencies.DiscoveryClient;
         _discoveryBrowserClient = dependencies.DiscoveryBrowserClient;
-        _discoveryBrowserInputPolicy = _discoveryBrowserClient.BuildInputPolicy();
         _deviceDiscoveryInputDefaultsClient = dependencies.DeviceDiscoveryInputDefaultsClient;
         _manualConnectionClient = dependencies.ManualConnectionClient;
         _crossNetworkConnectionClient = dependencies.CrossNetworkConnectionClient;
@@ -179,21 +178,36 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _pairingMaterialClient,
             _connectionWorkspaceStateClient);
         _workspaceViewStateBuilder = new WorkspaceViewStateBuilder();
-        _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
-        var initialConnectionStatusPatch = _connectionWorkspaceStateClient.BuildInitialStatusPatch();
-        _discoveryStatus = initialConnectionStatusPatch.DiscoveryStatus ?? "";
-        _discoveryBrowserStatus = initialConnectionStatusPatch.DiscoveryBrowserStatus ?? "";
-        _manualConnectionStatus = initialConnectionStatusPatch.ManualConnectionStatus ?? "";
-        _crossNetworkStatus = initialConnectionStatusPatch.CrossNetworkStatus ?? "";
-        _pairingStatus = initialConnectionStatusPatch.PairingStatus ?? "";
-        _connectionPreflightStatus = initialConnectionStatusPatch.ConnectionPreflightStatus ?? "";
-        _isDiscoveryScanning = initialConnectionStatusPatch.IsDiscoveryScanning ?? false;
-        _coreDiagnosticsStatus = _coreDiagnosticsClient.BuildInitialStatus();
-        _fileTransferStatus = _fileTransferClient.BuildInitialStatus();
-        _remoteDesktopStatus = _remoteDesktopClient.BuildInitialStatus();
-        _systemMonitorStatus = _systemMonitorClient.BuildInitialStatus();
-        _usbManagementStatus = _usbManagementClient.BuildInitialStatus();
-        _settingsStatus = _settingsClient.BuildInitialStatus();
+        var workspaceStartupStateBuilder = new WorkspaceStartupStateBuilder(
+            _engineClient,
+            _discoveryBrowserClient,
+            _deviceDiscoveryInputDefaultsClient,
+            _connectionWorkspaceStateClient,
+            _sessionStatusClient,
+            _featureCatalogClient,
+            _coreDiagnosticsClient,
+            _fileTransferClient,
+            _remoteDesktopClient,
+            _remoteDesktopProfileCatalogClient,
+            _systemMonitorClient,
+            _usbManagementClient,
+            _settingsClient);
+        var startupState = workspaceStartupStateBuilder.Build();
+        _discoveryBrowserInputPolicy = startupState.DiscoveryBrowserInputPolicy;
+        _statusMessage = startupState.StatusMessage;
+        _discoveryStatus = startupState.DiscoveryStatus;
+        _discoveryBrowserStatus = startupState.DiscoveryBrowserStatus;
+        _manualConnectionStatus = startupState.ManualConnectionStatus;
+        _crossNetworkStatus = startupState.CrossNetworkStatus;
+        _pairingStatus = startupState.PairingStatus;
+        _connectionPreflightStatus = startupState.ConnectionPreflightStatus;
+        _isDiscoveryScanning = startupState.IsDiscoveryScanning;
+        _coreDiagnosticsStatus = startupState.CoreDiagnosticsStatus;
+        _fileTransferStatus = startupState.FileTransferStatus;
+        _remoteDesktopStatus = startupState.RemoteDesktopStatus;
+        _systemMonitorStatus = startupState.SystemMonitorStatus;
+        _usbManagementStatus = startupState.UsbManagementStatus;
+        _settingsStatus = startupState.SettingsStatus;
         _workspaceStatusPatchApplier = new WorkspaceStatusPatchApplier(
             value => StatusMessage = value,
             value => DiscoveryStatus = value,
@@ -224,18 +238,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _settingsClient);
         _workspaceCountNotifier = new WorkspaceCountNotifier(OnPropertyChanged);
         _workspaceSnapshotApplier = new WorkspaceSnapshotApplier(_workspaceCountNotifier, RefreshDashboardMetrics);
-        var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
-        _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
-        _manualConnectionPort = deviceDiscoveryInputDefaults.ManualConnectionPort;
-        _discoveryTxtRecord = deviceDiscoveryInputDefaults.DiscoveryTxtRecord;
-        _pairingConnectionCode = deviceDiscoveryInputDefaults.PairingConnectionCode;
-        _extendedSearchCountdown = _discoveryBrowserInputPolicy.ExtendedSearchSeconds;
-        _connectionState = _engineClient.State;
-        var featureEntries = _featureCatalogClient.BuildReadOnlySnapshot();
-        var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
-        var collections = new WorkspaceObservableCollections(featureEntries, profileCatalog);
+        _discoveryService = startupState.DiscoveryService;
+        _manualConnectionPort = startupState.ManualConnectionPort;
+        _discoveryTxtRecord = startupState.DiscoveryTxtRecord;
+        _pairingConnectionCode = startupState.PairingConnectionCode;
+        _extendedSearchCountdown = startupState.ExtendedSearchCountdown;
+        _connectionState = startupState.ConnectionState;
+        var collections = new WorkspaceObservableCollections(
+            startupState.FeatureEntries,
+            startupState.RemoteDesktopProfileCatalog);
         NavigationItems = collections.NavigationItems;
-        _selectedFeature = _featureCatalogClient.ResolveDefaultSelection(featureEntries);
+        _selectedFeature = startupState.SelectedFeature;
         DashboardMetrics = collections.DashboardMetrics;
         BitrateProfiles = collections.BitrateProfiles;
         FramerateProfiles = collections.FramerateProfiles;
@@ -326,6 +339,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SettingsTabs = collections.SettingsTabs;
         SettingsActions = collections.SettingsActions;
         SettingsDetails = collections.SettingsDetails;
+        _selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;
+        _selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         var commandBindings = new WorkspaceCommandBindings(
             ConnectAsync,
@@ -428,8 +443,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 nameof(IsSettingsSelected)
             },
             nameof(ConnectionStatus));
-        _selectedBitrate = profileCatalog.DefaultBitrateProfile;
-        _selectedFramerate = profileCatalog.DefaultFramerateProfile;
         LoadWorkspaceActions();
         RefreshDashboardMetrics();
         RefreshTopBarStatus();

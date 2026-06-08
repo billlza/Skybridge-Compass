@@ -101,6 +101,7 @@ $workspaceActionSurfaceLoaderPath = Join-Path $RepoRoot "windows/Skybridge.WinCl
 $workspaceActionRenderContextBuilderPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionRenderContextBuilder.cs"
 $workspaceShellRefreshCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceShellRefreshCoordinator.cs"
 $workspaceViewStateBuilderPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceViewStateBuilder.cs"
+$workspaceStartupStateBuilderPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStartupStateBuilder.cs"
 $workspaceStatusPatchApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStatusPatchApplier.cs"
 $workspaceBusyCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceBusyCoordinator.cs"
 $readOnlyWorkspaceRefreshCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceRefreshCoordinator.cs"
@@ -139,7 +140,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceViewStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -157,6 +158,7 @@ $workspaceActionSurfaceLoader = Get-Content -Raw -LiteralPath $workspaceActionSu
 $workspaceActionRenderContextBuilder = Get-Content -Raw -LiteralPath $workspaceActionRenderContextBuilderPath
 $workspaceShellRefreshCoordinator = Get-Content -Raw -LiteralPath $workspaceShellRefreshCoordinatorPath
 $workspaceViewStateBuilder = Get-Content -Raw -LiteralPath $workspaceViewStateBuilderPath
+$workspaceStartupStateBuilder = Get-Content -Raw -LiteralPath $workspaceStartupStateBuilderPath
 $workspaceStatusPatchApplier = Get-Content -Raw -LiteralPath $workspaceStatusPatchApplierPath
 $workspaceBusyCoordinator = Get-Content -Raw -LiteralPath $workspaceBusyCoordinatorPath
 $readOnlyWorkspaceRefreshCoordinator = Get-Content -Raw -LiteralPath $readOnlyWorkspaceRefreshCoordinatorPath
@@ -169,7 +171,7 @@ $topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
 $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connectionWorkspaceInputCoordinatorPath
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceViewStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -335,7 +337,9 @@ foreach ($observableCollectionsSignal in @(
     Assert-Contains -Text $workspaceObservableCollections -Needle $observableCollectionsSignal -Message "WorkspaceObservableCollections contract missing: $observableCollectionsSignal"
 }
 foreach ($sessionViewModelCollectionSignal in @(
-    "var collections = new WorkspaceObservableCollections(featureEntries, profileCatalog);",
+    "var collections = new WorkspaceObservableCollections(",
+    "startupState.FeatureEntries,",
+    "startupState.RemoteDesktopProfileCatalog);",
     "NavigationItems = collections.NavigationItems;",
     "DashboardMetrics = collections.DashboardMetrics;",
     "BitrateProfiles = collections.BitrateProfiles;",
@@ -1446,6 +1450,59 @@ foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshCoordinator: $sessionViewModelReadOnlyRefreshSignal"
 }
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceBusyCoordinator.RefreshReadOnlyWorkspaceAsync")) -Message "SessionViewModel must not compose read-only workspace refresh templates directly."
+foreach ($workspaceStartupStateBuilderSignal in @(
+    "internal sealed class WorkspaceStartupStateBuilder",
+    "public WorkspaceStartupState Build()",
+    "_discoveryBrowserClient.BuildInputPolicy()",
+    "_sessionStatusClient.BuildInitialStatusMessage()",
+    "_connectionWorkspaceStateClient.BuildInitialStatusPatch()",
+    "_deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot()",
+    "_featureCatalogClient.BuildReadOnlySnapshot()",
+    "_featureCatalogClient.ResolveDefaultSelection(featureEntries)",
+    "_remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot()",
+    "_coreDiagnosticsClient.BuildInitialStatus()",
+    "_fileTransferClient.BuildInitialStatus()",
+    "_usbManagementClient.BuildInitialStatus()",
+    "_remoteDesktopClient.BuildInitialStatus()",
+    "_systemMonitorClient.BuildInitialStatus()",
+    "_settingsClient.BuildInitialStatus()",
+    "_engineClient.State",
+    "internal sealed record WorkspaceStartupState"
+)) {
+    Assert-Contains -Text $workspaceStartupStateBuilder -Needle $workspaceStartupStateBuilderSignal -Message "WorkspaceStartupStateBuilder contract missing: $workspaceStartupStateBuilderSignal"
+}
+foreach ($sessionViewModelStartupStateSignal in @(
+    "new WorkspaceStartupStateBuilder(",
+    "var startupState = workspaceStartupStateBuilder.Build();",
+    "_discoveryBrowserInputPolicy = startupState.DiscoveryBrowserInputPolicy;",
+    "_statusMessage = startupState.StatusMessage;",
+    "_selectedFeature = startupState.SelectedFeature;",
+    "new WorkspaceObservableCollections(",
+    "startupState.FeatureEntries,",
+    "startupState.RemoteDesktopProfileCatalog);",
+    "_selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;",
+    "_selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelStartupStateSignal -Message "SessionViewModel must consume startup defaults through WorkspaceStartupStateBuilder: $sessionViewModelStartupStateSignal"
+}
+foreach ($sessionViewModelDirectStartupStateSignal in @(
+    "_discoveryBrowserClient.BuildInputPolicy()",
+    "_sessionStatusClient.BuildInitialStatusMessage()",
+    "_connectionWorkspaceStateClient.BuildInitialStatusPatch()",
+    "_deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot()",
+    "_featureCatalogClient.BuildReadOnlySnapshot()",
+    "_featureCatalogClient.ResolveDefaultSelection(featureEntries)",
+    "_remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot()",
+    "_coreDiagnosticsClient.BuildInitialStatus()",
+    "_fileTransferClient.BuildInitialStatus()",
+    "_usbManagementClient.BuildInitialStatus()",
+    "_remoteDesktopClient.BuildInitialStatus()",
+    "_systemMonitorClient.BuildInitialStatus()",
+    "_settingsClient.BuildInitialStatus()",
+    "_engineClient.State"
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelDirectStartupStateSignal)) -Message "SessionViewModel must not compose startup/default state directly: $sessionViewModelDirectStartupStateSignal"
+}
 Assert-True -Condition (-not $sessionViewModel.Contains("_connectionWorkspaceStateClient.BuildErrorPatch(ex.Message)")) -Message "WorkspaceBusyCoordinator must route errors through WorkspaceErrorStatusClient, not the currently selected feature."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("BuildErrorPatch")) -Message "ConnectionWorkspaceStateClient must not own busy-state error routing; use WorkspaceErrorStatusClient."
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModel, "catch \(Exception ex\)[\s\S]*?if \(IsDeviceDiscoverySelected\)[\s\S]*?BuildErrorPatch\(ex\.Message\)")) -Message "WorkspaceBusyCoordinator catch must not route errors by currently selected feature."
@@ -2275,6 +2332,7 @@ foreach ($docSignal in @(
     "WorkspaceShellRefreshCoordinator",
     "WorkspaceCommandGateCoordinator",
     "WorkspaceViewStateBuilder",
+    "WorkspaceStartupStateBuilder",
     "ConnectionPreflightClient",
     "ConnectionWorkspaceStateClient",
     "ConnectionWorkspaceInputCoordinator",
