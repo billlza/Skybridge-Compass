@@ -501,11 +501,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionHost, value))
             {
-                ManualConnectionFacts.Clear();
-                ApplyConnectionWorkspaceStatusPatch(
-                    _connectionWorkspaceStateClient.BuildInputResetPatch(
-                        ConnectionWorkspaceResetReason.ManualTargetInputChanged));
-                OnPropertyChanged(nameof(ManualConnectionFactCount));
+                ResetManualConnectionInput();
                 RefreshCommandStates();
             }
         }
@@ -518,11 +514,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionPort, value))
             {
-                ManualConnectionFacts.Clear();
-                ApplyConnectionWorkspaceStatusPatch(
-                    _connectionWorkspaceStateClient.BuildInputResetPatch(
-                        ConnectionWorkspaceResetReason.ManualTargetInputChanged));
-                OnPropertyChanged(nameof(ManualConnectionFactCount));
+                ResetManualConnectionInput();
                 RefreshCommandStates();
             }
         }
@@ -535,11 +527,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionCode, value))
             {
-                ManualConnectionFacts.Clear();
-                ApplyConnectionWorkspaceStatusPatch(
-                    _connectionWorkspaceStateClient.BuildInputResetPatch(
-                        ConnectionWorkspaceResetReason.ManualTargetInputChanged));
-                OnPropertyChanged(nameof(ManualConnectionFactCount));
+                ResetManualConnectionInput();
                 RefreshCommandStates();
             }
         }
@@ -552,9 +540,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _crossNetworkQrInput, value))
             {
-                ApplyConnectionWorkspaceStatusPatch(
-                    _connectionWorkspaceStateClient.BuildInputResetPatch(
-                        ConnectionWorkspaceResetReason.CrossNetworkInputChanged));
+                ResetCrossNetworkInput();
                 RefreshCommandStates();
             }
         }
@@ -568,9 +554,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var normalized = _crossNetworkConnectionClient.NormalizeCodeInput(value);
             if (SetField(ref _crossNetworkCodeInput, normalized))
             {
-                ApplyConnectionWorkspaceStatusPatch(
-                    _connectionWorkspaceStateClient.BuildInputResetPatch(
-                        ConnectionWorkspaceResetReason.CrossNetworkInputChanged));
+                ResetCrossNetworkInput();
                 RefreshCommandStates();
             }
             else if (!string.Equals(value, normalized, StringComparison.Ordinal))
@@ -606,13 +590,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _pairingConnectionCode, value))
             {
-                _validatedPairingMaterial = null;
-                PairingFacts.Clear();
-                ClearConnectionPreflight();
-                ApplyConnectionWorkspaceStatusPatch(
-                    _connectionWorkspaceStateClient.BuildInputResetPatch(
-                        ConnectionWorkspaceResetReason.PairingInputChanged));
-                OnPropertyChanged(nameof(PairingFactCount));
+                ResetPairingInput();
                 RefreshCommandStates();
             }
         }
@@ -1584,6 +1562,33 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 ConnectionWorkspaceResetReason.DiscoveryInputChanged));
         OnPropertyChanged(nameof(DiscoveredPeerCount));
         OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
+        OnPropertyChanged(nameof(PairingFactCount));
+    }
+
+    private void ResetManualConnectionInput()
+    {
+        ManualConnectionFacts.Clear();
+        ApplyConnectionWorkspaceStatusPatch(
+            _connectionWorkspaceStateClient.BuildInputResetPatch(
+                ConnectionWorkspaceResetReason.ManualTargetInputChanged));
+        OnPropertyChanged(nameof(ManualConnectionFactCount));
+    }
+
+    private void ResetCrossNetworkInput()
+    {
+        ApplyConnectionWorkspaceStatusPatch(
+            _connectionWorkspaceStateClient.BuildInputResetPatch(
+                ConnectionWorkspaceResetReason.CrossNetworkInputChanged));
+    }
+
+    private void ResetPairingInput()
+    {
+        _validatedPairingMaterial = null;
+        PairingFacts.Clear();
+        ClearConnectionPreflight();
+        ApplyConnectionWorkspaceStatusPatch(
+            _connectionWorkspaceStateClient.BuildInputResetPatch(
+                ConnectionWorkspaceResetReason.PairingInputChanged));
         OnPropertyChanged(nameof(PairingFactCount));
     }
 

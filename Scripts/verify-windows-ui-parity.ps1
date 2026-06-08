@@ -793,6 +793,22 @@ foreach ($connectionStateSignal in @(
     Assert-Contains -Text ($connectionWorkspaceState + $sessionViewModel + $mainWindow) -Needle $connectionStateSignal -Message "Connection workspace state signal missing: $connectionStateSignal"
 }
 
+foreach ($inputResetSignal in @(
+    "ResetManualConnectionInput",
+    "ResetCrossNetworkInput",
+    "ResetPairingInput"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $inputResetSignal -Message "SessionViewModel input reset helper missing: $inputResetSignal"
+}
+foreach ($inputResetReason in @(
+    "ConnectionWorkspaceResetReason.ManualTargetInputChanged",
+    "ConnectionWorkspaceResetReason.CrossNetworkInputChanged",
+    "ConnectionWorkspaceResetReason.PairingInputChanged"
+)) {
+    $matches = [regex]::Matches($sessionViewModelSource, [regex]::Escape($inputResetReason))
+    Assert-True -Condition ($matches.Count -eq 1) -Message "SessionViewModel must centralize $inputResetReason in one reset helper."
+}
+
 foreach ($workspaceErrorSignal in @(
     "public interface IWorkspaceErrorStatusClient",
     "public sealed class WorkspaceErrorStatusClient : IWorkspaceErrorStatusClient",
