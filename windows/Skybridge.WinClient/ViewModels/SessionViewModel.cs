@@ -427,15 +427,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _selectedFeature, value))
             {
-                OnPropertyChanged(nameof(IsDeviceDiscoverySelected));
-                OnPropertyChanged(nameof(IsUsbManagementSelected));
-                OnPropertyChanged(nameof(IsFileTransferSelected));
-                OnPropertyChanged(nameof(IsRemoteDesktopSelected));
-                OnPropertyChanged(nameof(IsQuantumSelected));
-                OnPropertyChanged(nameof(IsSystemMonitorSelected));
-                OnPropertyChanged(nameof(IsSettingsSelected));
-                RefreshTopBarStatus();
-                RefreshCommandStates();
+                RefreshSelectedFeatureState();
             }
         }
     }
@@ -1286,6 +1278,19 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
 
         RefreshDynamicWorkspaceActionStates();
+    }
+
+    private void RefreshSelectedFeatureState()
+    {
+        OnPropertyChanged(nameof(IsDeviceDiscoverySelected));
+        OnPropertyChanged(nameof(IsUsbManagementSelected));
+        OnPropertyChanged(nameof(IsFileTransferSelected));
+        OnPropertyChanged(nameof(IsRemoteDesktopSelected));
+        OnPropertyChanged(nameof(IsQuantumSelected));
+        OnPropertyChanged(nameof(IsSystemMonitorSelected));
+        OnPropertyChanged(nameof(IsSettingsSelected));
+        RefreshTopBarStatus();
+        RefreshCommandStates();
     }
 
     private void RefreshDynamicWorkspaceActionStates()
