@@ -58,8 +58,21 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | `SettingsToolbar` | `ExportSettings`, `ImportSettings`, `ResetSettings`, `RequestPermission`, `OpenSystemPreferences` |
 | `SettingsMaintenance` | `ApplySettings`, `RestoreDefaults`, `ResetMonitorData` |
 
+## Shared Style And Template Matrix
+
+| Region | Required shared template | Required panel/style ownership |
+| --- | --- | --- |
+| Sidebar session actions | `SidebarWorkspaceActionButtonTemplate` | `VerticalWorkspaceActionItemsPanel` |
+| Top-bar actions | `TopBarStatusActionButtonTemplate` | `HorizontalWorkspaceActionItemsPanel` |
+| Dashboard quick actions | `DashboardQuickActionTemplate` | `DashboardQuickActionItemsPanel` |
+| Workspace action surfaces | `WorkspaceActionButtonTemplate` | `HorizontalWorkspaceActionItemsPanel` |
+| Final/manual connect action | `WorkspaceActionButtonWithDetailTemplate` | `HorizontalWorkspaceActionItemsPanel` |
+
+All action buttons must be rendered through these shared templates. Feature sections must not introduce inline `Button` controls for local-only styling, because button shape, command binding, automation id binding, and spacing are part of the mac-parity contract.
+
 ## Verification
 
 - `Scripts/verify-windows-ui-parity-matrix.ps1` verifies this matrix, `MainWindow.xaml`, `FeatureCatalogClient`, and `WorkspaceActionCatalogClient` agree on feature order, workspace visibility order, top-bar/session anchors, and per-surface action order.
+- The matrix smoke also verifies shared action templates and rejects inline XAML action buttons outside the approved templates.
 - `Scripts/verify-windows-ui-action-order.ps1` remains the executable catalog smoke for action keys and automation ids.
 - `Scripts/verify-windows-ui-parity.ps1` remains the broader static modularity gate.

@@ -25,6 +25,18 @@ function Assert-Contains {
     Assert-True -Condition ($Text.Contains($Needle)) -Message $Message
 }
 
+function Assert-Count {
+    param(
+        [string]$Text,
+        [string]$Pattern,
+        [int]$ExpectedCount,
+        [string]$Message
+    )
+
+    $count = [regex]::Matches($Text, $Pattern).Count
+    Assert-True -Condition ($count -eq $ExpectedCount) -Message "$Message Expected $ExpectedCount, got $count."
+}
+
 function Assert-Ordered {
     param(
         [string]$Text,
@@ -160,6 +172,50 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow action binding order" -Nee
     'ItemsSource="{Binding SettingsMaintenanceActions}"',
     'ItemsSource="{Binding SessionControlActions}"'
 )
+
+foreach ($templateSignal in @(
+    '<DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">',
+    '<DataTemplate x:Key="WorkspaceActionButtonTemplate">',
+    '<DataTemplate x:Key="WorkspaceActionButtonWithDetailTemplate">',
+    '<DataTemplate x:Key="TopBarStatusActionButtonTemplate">',
+    '<DataTemplate x:Key="DashboardQuickActionTemplate">',
+    'AutomationProperties.AutomationId="{Binding AutomationId}"',
+    'Command="{Binding Command}"'
+)) {
+    Assert-Contains -Text $mainWindow -Needle $templateSignal -Message "MainWindow missing shared action-template signal: $templateSignal"
+}
+
+Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 5 -Message "MainWindow must render action buttons only through the five shared action templates."
+
+Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usage" -Needles @(
+    'ItemsSource="{Binding SidebarSessionActions}"',
+    'ItemsPanel="{StaticResource VerticalWorkspaceActionItemsPanel}"',
+    'ItemTemplate="{StaticResource SidebarWorkspaceActionButtonTemplate}"',
+    'ItemsSource="{Binding TopBarActions}"',
+    'ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"',
+    'ItemTemplate="{StaticResource TopBarStatusActionButtonTemplate}"',
+    'ItemsSource="{Binding DashboardQuickActions}"',
+    'ItemsPanel="{StaticResource DashboardQuickActionItemsPanel}"',
+    'ItemTemplate="{StaticResource DashboardQuickActionTemplate}"',
+    'ItemsSource="{Binding DeviceDiscoveryPrimaryActions}"',
+    'ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"',
+    'ItemTemplate="{StaticResource WorkspaceActionButtonTemplate}"',
+    'ItemsSource="{Binding DeviceDiscoveryManualConnectFinalActions}"',
+    'ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"',
+    'ItemTemplate="{StaticResource WorkspaceActionButtonWithDetailTemplate}"'
+)
+
+foreach ($styleMatrixSignal in @(
+    "Shared Style And Template Matrix",
+    "SidebarWorkspaceActionButtonTemplate",
+    "WorkspaceActionButtonTemplate",
+    "WorkspaceActionButtonWithDetailTemplate",
+    "TopBarStatusActionButtonTemplate",
+    "DashboardQuickActionTemplate",
+    "Feature sections must not introduce inline ``Button`` controls"
+)) {
+    Assert-Contains -Text $matrix -Needle $styleMatrixSignal -Message "UI parity matrix doc missing style/template signal: $styleMatrixSignal"
+}
 
 Assert-Ordered -Text $actionCatalog -Context "WorkspaceActionCatalog initial surface order" -Needles @(
     "WorkspaceActionSurface.SidebarSession",
