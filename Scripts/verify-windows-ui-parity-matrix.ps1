@@ -95,17 +95,49 @@ function Join-ProcessArguments {
 function Test-GitObjectExists {
     param([string]$ObjectName)
 
+    $result = Invoke-Git -Arguments @("cat-file", "-e", $ObjectName)
+    return $result.ExitCode -eq 0
+}
+
+function Invoke-Git {
+    param([string[]]$Arguments)
+
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = "git"
-    $startInfo.Arguments = Join-ProcessArguments -Arguments @("-C", $RepoRoot, "cat-file", "-e", $ObjectName)
+    $startInfo.Arguments = Join-ProcessArguments -Arguments (@("-C", $RepoRoot) + $Arguments)
     $startInfo.WorkingDirectory = $RepoRoot
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
 
     $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     $process.WaitForExit()
-    return $process.ExitCode -eq 0
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+
+    $textParts = @()
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        $textParts += $stdout.TrimEnd()
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        $textParts += $stderr.TrimEnd()
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Text = ($textParts -join [Environment]::NewLine)
+    }
+}
+
+function Get-GitObjectText {
+    param([string]$ObjectName)
+
+    $result = Invoke-Git -Arguments @("show", $ObjectName)
+    Assert-True -Condition ($result.ExitCode -eq 0) -Message "Unable to read pinned git object: $ObjectName $($result.Text)"
+    return $result.Text
 }
 
 function Split-MarkdownTableLine {
@@ -253,12 +285,77 @@ $macBaselinePaths = @(
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift"
 )
+$macBaselineSignals = @(
+    [pscustomobject]@{
+        Source = "NavigationItem.swift"
+        Path = "Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift"
+        Symbols = @(
+            'case dashboard = "sidebar.dashboard"',
+            'case deviceManagement = "sidebar.deviceDiscovery"',
+            'case usbDeviceManagement = "sidebar.usbManagement"',
+            'case fileTransfer = "sidebar.fileTransfer"',
+            'case remoteDesktop = "sidebar.remoteDesktop"',
+            'case quantumCommunication = "quantum.title"',
+            'case systemMonitor = "sidebar.systemMonitor"',
+            'case settings = "sidebar.settings"'
+        )
+        Anchors = @("FeatureCatalogClient.Entries")
+    },
+    [pscustomobject]@{
+        Source = "QuickActionsPanelView.swift"
+        Path = "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift"
+        Symbols = @(
+            "action.scanDevices",
+            "appModel.triggerDiscoveryRefresh()",
+            "dashboard.fileTransfer",
+            "selectedNavigation = .fileTransfer",
+            "action.systemMonitor",
+            "selectedNavigation = .systemMonitor",
+            "action.settings",
+            "selectedNavigation = .settings"
+        )
+        Anchors = @("DashboardQuickActions")
+    },
+    [pscustomobject]@{
+        Source = "TopNavigationBarView.swift"
+        Path = "Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift"
+        Symbols = @(
+            "ipLocationIndicator",
+            "networkSpeedIndicator",
+            "networkLatencyIndicator",
+            "connectionStatusIndicator",
+            "fpsIndicator",
+            "NotificationBellView()",
+            "themeToggleButton"
+        )
+        Anchors = @("TopBarStatusItems", "TopBarActions")
+    }
+)
 
 Assert-Contains -Text $matrix -Needle "Mac baseline commit: ``$macBaselineCommit``" -Message "UI parity matrix must pin the mac baseline commit."
 foreach ($macPath in $macBaselinePaths) {
     $macObject = "${macBaselineCommit}:$macPath"
     Assert-Contains -Text $matrix -Needle "``$macObject``" -Message "UI parity matrix must use immutable mac source object: $macObject"
     Assert-True -Condition (Test-GitObjectExists -ObjectName $macObject) -Message "Pinned mac source object is not available in this repository: $macObject"
+}
+
+$macSignalRows = Get-MarkdownTableRows `
+    -Text $matrix `
+    -Heading "Mac-To-Windows Baseline Signal Matrix" `
+    -Columns @("Mac source", "Required ordered mac symbols", "Windows parity anchor")
+Assert-True -Condition ($macSignalRows.Count -eq $macBaselineSignals.Count) -Message "Mac baseline signal matrix row count mismatch."
+Assert-NoDuplicates -Values @($macSignalRows | ForEach-Object { Get-SingleMarkdownCodeValue -Text $_.'Mac source' -Context "Mac baseline signal source" }) -Context "Mac baseline signal source"
+
+for ($macSignalIndex = 0; $macSignalIndex -lt $macBaselineSignals.Count; $macSignalIndex++) {
+    $expected = $macBaselineSignals[$macSignalIndex]
+    $actual = $macSignalRows[$macSignalIndex]
+    Assert-SequenceEqual -Actual @(Get-SingleMarkdownCodeValue -Text $actual.'Mac source' -Context "Mac baseline signal source") -Expected @($expected.Source) -Context "Mac baseline signal source row $macSignalIndex"
+    Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'Required ordered mac symbols') -Expected $expected.Symbols -Context "Mac baseline signal symbols for $($expected.Source)"
+    Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'Windows parity anchor') -Expected $expected.Anchors -Context "Mac baseline Windows anchors for $($expected.Source)"
+
+    $macObject = "${macBaselineCommit}:$($expected.Path)"
+    $macText = Get-GitObjectText -ObjectName $macObject
+    Assert-Ordered -Text $macText -Needles $expected.Symbols -Context "Pinned mac source signals for $($expected.Source)"
 }
 
 $featureRows = @(
