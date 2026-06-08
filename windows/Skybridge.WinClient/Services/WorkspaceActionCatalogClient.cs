@@ -491,7 +491,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Select Files",
                 "\uE8E5",
                 true,
-                "Fail-closed mac-parity quick action; command does not open a picker or read files.",
+                "Mac-parity quick action; prepares an in-memory file selection intent without opening a picker or reading files.",
                 CommandId: WorkspaceActionCommandId.SelectFileTransferFiles,
                 GateId: WorkspaceActionGateId.CanSelectFileTransferFiles),
             new(
@@ -499,7 +499,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Select Folder",
                 "\uE8B7",
                 true,
-                "Fail-closed mac-parity quick action; command does not open a picker or scan directories.",
+                "Mac-parity quick action; prepares an in-memory folder selection intent without opening a picker or scanning directories.",
                 CommandId: WorkspaceActionCommandId.SelectFileTransferFolder,
                 GateId: WorkspaceActionGateId.CanSelectFileTransferFolder),
             new(

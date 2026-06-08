@@ -43,6 +43,76 @@ public interface IFileTransferShareIntentClient
     FileTransferWorkspaceActionResult BuildShareQrIntent();
 }
 
+public interface IFileTransferSelectionIntentClient
+{
+    bool CanSelectFiles();
+
+    bool CanSelectFolder();
+
+    FileTransferSelectionIntentSnapshot CaptureSnapshot();
+
+    FileTransferWorkspaceActionResult BuildSelectFilesIntent();
+
+    FileTransferWorkspaceActionResult BuildSelectFolderIntent();
+}
+
+public sealed class InMemoryFileTransferSelectionIntentClient : IFileTransferSelectionIntentClient
+{
+    private readonly object _sync = new();
+    private int _nextFilesIntentId;
+    private int _nextFolderIntentId;
+    private string? _latestFilesIntentId;
+    private string? _latestFolderIntentId;
+    private DateTimeOffset? _latestFilesIntentAt;
+    private DateTimeOffset? _latestFolderIntentAt;
+
+    public bool CanSelectFiles() => true;
+
+    public bool CanSelectFolder() => true;
+
+    public FileTransferSelectionIntentSnapshot CaptureSnapshot()
+    {
+        lock (_sync)
+        {
+            return new FileTransferSelectionIntentSnapshot(
+                _latestFilesIntentId is not null,
+                _latestFilesIntentId,
+                _latestFilesIntentAt,
+                _latestFolderIntentId is not null,
+                _latestFolderIntentId,
+                _latestFolderIntentAt);
+        }
+    }
+
+    public FileTransferWorkspaceActionResult BuildSelectFilesIntent()
+    {
+        string intentId;
+        lock (_sync)
+        {
+            _nextFilesIntentId++;
+            intentId = $"FT-FILES-{_nextFilesIntentId:0000}";
+            _latestFilesIntentId = intentId;
+            _latestFilesIntentAt = DateTimeOffset.UtcNow;
+        }
+
+        return FileTransferWorkspaceClient.BuildSelectFilesIntentActionResult(intentId);
+    }
+
+    public FileTransferWorkspaceActionResult BuildSelectFolderIntent()
+    {
+        string intentId;
+        lock (_sync)
+        {
+            _nextFolderIntentId++;
+            intentId = $"FT-FOLDER-{_nextFolderIntentId:0000}";
+            _latestFolderIntentId = intentId;
+            _latestFolderIntentAt = DateTimeOffset.UtcNow;
+        }
+
+        return FileTransferWorkspaceClient.BuildSelectFolderIntentActionResult(intentId);
+    }
+}
+
 public sealed class InMemoryFileTransferShareIntentClient : IFileTransferShareIntentClient
 {
     private readonly object _sync = new();
@@ -65,20 +135,36 @@ public sealed class InMemoryFileTransferShareIntentClient : IFileTransferShareIn
 
 public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 {
+    private const string DefaultFilesSelectionIntentId = "FT-FILES-0000";
+    private const string DefaultFolderSelectionIntentId = "FT-FOLDER-0000";
+
     private readonly CoreBridge _coreBridge;
+    private readonly IFileTransferSelectionIntentClient _selectionIntentClient;
     private readonly IFileTransferShareIntentClient _shareIntentClient;
 
     public FileTransferWorkspaceClient(CoreBridge coreBridge)
-        : this(coreBridge, new InMemoryFileTransferShareIntentClient())
+        : this(
+            coreBridge,
+            new InMemoryFileTransferShareIntentClient(),
+            new InMemoryFileTransferSelectionIntentClient())
     {
     }
 
     public FileTransferWorkspaceClient(
         CoreBridge coreBridge,
         IFileTransferShareIntentClient shareIntentClient)
+        : this(coreBridge, shareIntentClient, new InMemoryFileTransferSelectionIntentClient())
+    {
+    }
+
+    public FileTransferWorkspaceClient(
+        CoreBridge coreBridge,
+        IFileTransferShareIntentClient shareIntentClient,
+        IFileTransferSelectionIntentClient selectionIntentClient)
     {
         _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
         _shareIntentClient = shareIntentClient ?? throw new ArgumentNullException(nameof(shareIntentClient));
+        _selectionIntentClient = selectionIntentClient ?? throw new ArgumentNullException(nameof(selectionIntentClient));
     }
 
     public string BuildPendingStatus() => DefaultPendingStatus;
@@ -90,9 +176,9 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
 
-    public bool CanSelectFiles() => false;
+    public bool CanSelectFiles() => _selectionIntentClient.CanSelectFiles();
 
-    public bool CanSelectFolder() => false;
+    public bool CanSelectFolder() => _selectionIntentClient.CanSelectFolder();
 
     public bool CanGenerateShareQr() => _shareIntentClient.CanGenerateShareQr();
 
@@ -118,9 +204,19 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public static string DefaultSelectFilesBlockedMessage { get; } = "File selection remains fail-closed";
 
+    public static string DefaultSelectFilesIntentReadyStatus { get; } = "File selection intent ready";
+
+    public static string DefaultSelectFilesIntentReadyMessage { get; } =
+        "File selection intent prepared in memory only; no file picker was opened.";
+
     public static string DefaultSelectFolderBlockedStatus { get; } = "Folder picker pending adapter";
 
     public static string DefaultSelectFolderBlockedMessage { get; } = "Folder selection remains fail-closed";
+
+    public static string DefaultSelectFolderIntentReadyStatus { get; } = "Folder selection intent ready";
+
+    public static string DefaultSelectFolderIntentReadyMessage { get; } =
+        "Folder selection intent prepared in memory only; no folder picker was opened.";
 
     public static string DefaultShareQrBlockedStatus { get; } = "QR generation pending adapter";
 
@@ -140,11 +236,23 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
             DefaultSelectFilesBlockedMessage,
             "No file picker was opened, no local files were read, and no transfer manifest was created.");
 
+    public static FileTransferWorkspaceActionResult BuildSelectFilesIntentActionResult(string intentId) =>
+        new(
+            DefaultSelectFilesIntentReadyStatus,
+            DefaultSelectFilesIntentReadyMessage,
+            $"intent={NormalizeSelectionIntentId(intentId, DefaultFilesSelectionIntentId)}; no file picker was opened, no local files were read, and no transfer manifest was created.");
+
     public static FileTransferWorkspaceActionResult BuildDefaultSelectFolderActionResult() =>
         new(
             DefaultSelectFolderBlockedStatus,
             DefaultSelectFolderBlockedMessage,
             "No folder picker was opened, no directory was scanned, and no transfer manifest was created.");
+
+    public static FileTransferWorkspaceActionResult BuildSelectFolderIntentActionResult(string intentId) =>
+        new(
+            DefaultSelectFolderIntentReadyStatus,
+            DefaultSelectFolderIntentReadyMessage,
+            $"intent={NormalizeSelectionIntentId(intentId, DefaultFolderSelectionIntentId)}; no folder picker was opened, no directory was scanned, and no transfer manifest was created.");
 
     public static FileTransferWorkspaceActionResult BuildDefaultShareQrActionResult() =>
         new(
@@ -164,8 +272,15 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
         return normalized.Length == 0 ? "FT-0000" : normalized;
     }
 
+    private static string NormalizeSelectionIntentId(string? intentId, string fallback)
+    {
+        var normalized = (intentId ?? "").Trim();
+        return normalized.Length == 0 ? fallback : normalized;
+    }
+
     public async Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
+        var selectionIntent = _selectionIntentClient.CaptureSnapshot();
         var plan = await _coreBridge.PlanConnectionAsync(
             PeerCapabilities.Windows(),
             PeerCapabilities.Apple(),
@@ -193,6 +308,7 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
                 fileChannel.BindingKind.ToString(),
                 $"frame={metadata.EncodedLen} bytes; payload={decodedPayload.Length} bytes")
         };
+        AddSelectionIntentQueueItems(queue, selectionIntent);
         var history = new List<FileTransferHistoryItem>
         {
             new(
@@ -206,6 +322,7 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
             new("Transport plan", plan.Transport.Kind.ToString(), $"audit={plan.Transport.AuditCode}; channels={channelMappings.Count}"),
             new("Channel", fileChannel.BindingKind.ToString(), $"reliability={fileChannel.Reliability}; HOL isolated={fileChannel.HeadOfLineIsolated}"),
             new("Manifest frame", $"{metadata.FrameHeaderLen} byte header", $"flags=0x{metadata.Flags:x4}; decoded={metadata.DecodedPayloadLen}"),
+            new("Selection intent", BuildSelectionIntentState(selectionIntent), BuildSelectionIntentDetail(selectionIntent)),
             new("HMAC", "pending live transfer", "mac parity placeholder; no local files are read"),
             new("Signature", "pending live transfer", "pairing/trust layer must verify sender identity")
         };
@@ -214,13 +331,82 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
     }
 
     public Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync() =>
-        Task.FromResult(BuildDefaultSelectFilesActionResult());
+        Task.FromResult(_selectionIntentClient.BuildSelectFilesIntent());
 
     public Task<FileTransferWorkspaceActionResult> BuildSelectFolderActionAsync() =>
-        Task.FromResult(BuildDefaultSelectFolderActionResult());
+        Task.FromResult(_selectionIntentClient.BuildSelectFolderIntent());
 
     public Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync() =>
         Task.FromResult(_shareIntentClient.BuildShareQrIntent());
+
+    private static void AddSelectionIntentQueueItems(
+        List<FileTransferQueueItem> queue,
+        FileTransferSelectionIntentSnapshot selectionIntent)
+    {
+        if (selectionIntent.HasFilesIntent)
+        {
+            queue.Insert(
+                0,
+                new FileTransferQueueItem(
+                    "Selected files intent",
+                    "Intent ready",
+                    "0 files",
+                    "Picker pending",
+                    BuildFilesSelectionIntentDetail(selectionIntent)));
+        }
+
+        if (selectionIntent.HasFolderIntent)
+        {
+            queue.Insert(
+                0,
+                new FileTransferQueueItem(
+                    "Selected folder intent",
+                    "Intent ready",
+                    "0 folders",
+                    "Picker pending",
+                    BuildFolderSelectionIntentDetail(selectionIntent)));
+        }
+    }
+
+    private static string BuildSelectionIntentState(FileTransferSelectionIntentSnapshot selectionIntent)
+    {
+        if (selectionIntent.HasFilesIntent && selectionIntent.HasFolderIntent)
+        {
+            return "files/folder intents ready";
+        }
+
+        if (selectionIntent.HasFilesIntent)
+        {
+            return "files intent ready";
+        }
+
+        if (selectionIntent.HasFolderIntent)
+        {
+            return "folder intent ready";
+        }
+
+        return "ready";
+    }
+
+    private static string BuildSelectionIntentDetail(FileTransferSelectionIntentSnapshot selectionIntent)
+    {
+        if (!selectionIntent.HasFilesIntent && !selectionIntent.HasFolderIntent)
+        {
+            return "Selection actions prepare in-memory intents only; no picker is opened and no files are read.";
+        }
+
+        return $"{BuildFilesSelectionIntentDetail(selectionIntent)}; {BuildFolderSelectionIntentDetail(selectionIntent)}";
+    }
+
+    private static string BuildFilesSelectionIntentDetail(FileTransferSelectionIntentSnapshot selectionIntent) =>
+        selectionIntent.HasFilesIntent && selectionIntent.FilesIntentCreatedAt.HasValue
+            ? $"files={NormalizeSelectionIntentId(selectionIntent.FilesIntentId, DefaultFilesSelectionIntentId)} at {selectionIntent.FilesIntentCreatedAt.Value:HH:mm:ss} UTC"
+            : "files=not prepared";
+
+    private static string BuildFolderSelectionIntentDetail(FileTransferSelectionIntentSnapshot selectionIntent) =>
+        selectionIntent.HasFolderIntent && selectionIntent.FolderIntentCreatedAt.HasValue
+            ? $"folder={NormalizeSelectionIntentId(selectionIntent.FolderIntentId, DefaultFolderSelectionIntentId)} at {selectionIntent.FolderIntentCreatedAt.Value:HH:mm:ss} UTC"
+            : "folder=not prepared";
 }
 
 public sealed record FileTransferWorkspaceSnapshot(
@@ -246,6 +432,14 @@ public sealed record FileTransferSecurityFact(
     string Label,
     string Value,
     string Detail);
+
+public sealed record FileTransferSelectionIntentSnapshot(
+    bool HasFilesIntent,
+    string? FilesIntentId,
+    DateTimeOffset? FilesIntentCreatedAt,
+    bool HasFolderIntent,
+    string? FolderIntentId,
+    DateTimeOffset? FolderIntentCreatedAt);
 
 public sealed record FileTransferWorkspaceActionResult(
     string Status,

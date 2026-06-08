@@ -111,9 +111,26 @@ try
     var repeatedAdvancedMonitoring = await defaultDependencies.SystemMonitorClient.BuildAdvancedMonitoringActionAsync();
     AssertEqual(SystemMonitorWorkspaceClient.DefaultAdvancedMonitoringBlockedStatus, repeatedAdvancedMonitoring.Status, "repeat advanced monitoring status");
     AssertType<FileTransferWorkspaceClient>(defaultDependencies.FileTransferClient, "default file transfer client");
-    AssertEqual(false, defaultDependencies.FileTransferClient.CanSelectFiles(), "default file transfer select files gate");
-    AssertEqual(false, defaultDependencies.FileTransferClient.CanSelectFolder(), "default file transfer select folder gate");
+    AssertNestedType<InMemoryFileTransferSelectionIntentClient>(defaultDependencies.FileTransferClient, "_selectionIntentClient", "default file transfer selection intent client");
+    AssertEqual(true, defaultDependencies.FileTransferClient.CanSelectFiles(), "default file transfer select files gate");
+    AssertEqual(true, defaultDependencies.FileTransferClient.CanSelectFolder(), "default file transfer select folder gate");
     AssertEqual(true, defaultDependencies.FileTransferClient.CanGenerateShareQr(), "default file transfer QR share gate");
+    var selectFilesIntent = await defaultDependencies.FileTransferClient.BuildSelectFilesActionAsync();
+    AssertEqual(FileTransferWorkspaceClient.DefaultSelectFilesIntentReadyStatus, selectFilesIntent.Status, "file transfer select files intent status");
+    AssertContains(selectFilesIntent.Detail, "intent=FT-FILES-0001", "file transfer select files intent detail should include deterministic in-memory intent id.");
+    AssertContains(selectFilesIntent.Detail, "no local files were read", "file transfer select files intent detail should keep file reads disabled.");
+    var selectFolderIntent = await defaultDependencies.FileTransferClient.BuildSelectFolderActionAsync();
+    AssertEqual(FileTransferWorkspaceClient.DefaultSelectFolderIntentReadyStatus, selectFolderIntent.Status, "file transfer select folder intent status");
+    AssertContains(selectFolderIntent.Detail, "intent=FT-FOLDER-0001", "file transfer select folder intent detail should include deterministic in-memory intent id.");
+    AssertContains(selectFolderIntent.Detail, "no directory was scanned", "file transfer select folder intent detail should keep directory scanning disabled.");
+    var selectionIntentClient = GetNested<InMemoryFileTransferSelectionIntentClient>(
+        defaultDependencies.FileTransferClient,
+        "_selectionIntentClient");
+    var selectionIntentSnapshot = selectionIntentClient.CaptureSnapshot();
+    AssertEqual(true, selectionIntentSnapshot.HasFilesIntent, "file transfer files selection snapshot readiness");
+    AssertEqual("FT-FILES-0001", selectionIntentSnapshot.FilesIntentId, "file transfer files selection snapshot id");
+    AssertEqual(true, selectionIntentSnapshot.HasFolderIntent, "file transfer folder selection snapshot readiness");
+    AssertEqual("FT-FOLDER-0001", selectionIntentSnapshot.FolderIntentId, "file transfer folder selection snapshot id");
     var shareQrIntent = await defaultDependencies.FileTransferClient.BuildShareQrActionAsync();
     AssertEqual(FileTransferWorkspaceClient.DefaultShareQrReadyStatus, shareQrIntent.Status, "file transfer QR share intent status");
     AssertEqual(FileTransferWorkspaceClient.DefaultShareQrReadyMessage, shareQrIntent.Message, "file transfer QR share intent message");
