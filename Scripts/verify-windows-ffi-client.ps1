@@ -60,9 +60,10 @@ $nativeRuntimeFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Win
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
+$nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -101,6 +102,7 @@ $nativeRuntimeFactory = Get-Content -Raw -LiteralPath $nativeRuntimeFactoryPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
+$nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
 
 foreach ($member in @("ConnectAsync", "DisconnectAsync", "SendHeartbeatAsync")) {
@@ -227,6 +229,7 @@ foreach ($nativeRuntimeSignal in @(
     "SKYBRIDGE_WINDOWS_SELECTED_CANDIDATE_PAIR",
     "SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX",
     "SKYBRIDGE_WINDOWS_CAPABILITY_DIGEST_HEX",
+    "SKYBRIDGE_WINDOWS_RELAY_ID",
     "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
     "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
     "new FfiEngineClient()",
@@ -236,6 +239,20 @@ foreach ($nativeRuntimeSignal in @(
     "ConnectionPreflightClient(coreBridge, transportAdapterClient)"
 )) {
     Assert-Contains -Text $nativeRuntimeFactory -Needle $nativeRuntimeSignal -Message "Native runtime factory missing explicit runtime signal: $nativeRuntimeSignal"
+}
+foreach ($nativeRuntimeSmokeSignal in @(
+    "windows-native-runtime-profile",
+    "SessionViewModelDependencyFactory.CreateConfigured()",
+    "WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested()",
+    "PendingWindowsTransportAdapterClient",
+    "ExternalWindowsTransportAdapterClient",
+    "SKYBRIDGE_WINDOWS_RELAY_ID",
+    "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
+    "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
+    "SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX must be 64 lowercase hex characters.",
+    "Windows external adapter must not select AppleNative"
+)) {
+    Assert-Contains -Text $nativeRuntimeProfileSmoke -Needle $nativeRuntimeSmokeSignal -Message "Native runtime profile smoke missing signal: $nativeRuntimeSmokeSignal"
 }
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
 Assert-Contains -Text $dependencyFactory -Needle "var coreBridge = new CoreBridge();" -Message "Default dependency factory should create one explicit CoreBridge for manual Core tools."

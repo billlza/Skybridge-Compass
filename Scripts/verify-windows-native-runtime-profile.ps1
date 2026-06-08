@@ -1,0 +1,339 @@
+param(
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+)
+
+$ErrorActionPreference = "Stop"
+
+function Assert-True {
+    param(
+        [bool]$Condition,
+        [string]$Message
+    )
+
+    if (-not $Condition) {
+        throw $Message
+    }
+}
+
+$sourceFiles = @()
+$sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
+    Sort-Object Name |
+    ForEach-Object { $_.FullName }
+$sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModelDependencies.cs"
+$sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/SessionViewModelDependencyFactory.cs"
+$sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/WindowsNativeRuntimeDependencyFactory.cs"
+
+foreach ($sourceFile in $sourceFiles) {
+    Assert-True -Condition (Test-Path -LiteralPath $sourceFile) -Message "Missing Windows native runtime source file: $sourceFile"
+}
+
+$tempParent = [System.IO.Path]::GetTempPath()
+$tempRoot = Join-Path $tempParent ("skybridge-win-native-runtime-profile-" + [guid]::NewGuid().ToString("N"))
+$testProject = Join-Path $tempRoot "Skybridge.WinNativeRuntimeProfile.csproj"
+$testProgram = Join-Path $tempRoot "Program.cs"
+
+try {
+    New-Item -ItemType Directory -Path $tempRoot | Out-Null
+
+    $programXml = [System.Security.SecurityElement]::Escape($testProgram)
+    $compileItems = @("    <Compile Include=""$programXml"" />")
+    foreach ($sourceFile in $sourceFiles) {
+        $sourceFileXml = [System.Security.SecurityElement]::Escape($sourceFile)
+        $compileItems += "    <Compile Include=""$sourceFileXml"" />"
+    }
+    $compileItemText = $compileItems -join "`r`n"
+
+    Set-Content -LiteralPath $testProject -Encoding UTF8 -Value @"
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+$compileItemText
+  </ItemGroup>
+</Project>
+"@
+
+    Set-Content -LiteralPath $testProgram -Encoding UTF8 -Value @'
+using System.Reflection;
+using Skybridge.WinClient;
+using Skybridge.WinClient.Services;
+using Skybridge.WinClient.ViewModels;
+
+var runtimeVariables = new[]
+{
+    "SKYBRIDGE_WINDOWS_RUNTIME",
+    "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER",
+    "SKYBRIDGE_WINDOWS_ADAPTER_BINDING",
+    "SKYBRIDGE_WINDOWS_LOCAL_ENDPOINT",
+    "SKYBRIDGE_WINDOWS_REMOTE_ENDPOINT",
+    "SKYBRIDGE_WINDOWS_SELECTED_CANDIDATE_PAIR",
+    "SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX",
+    "SKYBRIDGE_WINDOWS_CAPABILITY_DIGEST_HEX",
+    "SKYBRIDGE_WINDOWS_RELAY_ID",
+    "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
+    "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS"
+};
+
+try
+{
+    ClearRuntimeEnvironment();
+    AssertEqual(false, WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested(), "default native runtime flag");
+    var defaultDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<DummyEngineClient>(defaultDependencies.EngineClient, "default engine");
+    AssertNestedType<PendingWindowsDnsSdBrowseClient>(defaultDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
+    AssertNestedType<PendingWindowsTransportAdapterClient>(defaultDependencies.ConnectionPreflightClient, "_transportAdapterClient", "default transport adapter");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "external");
+    var transportEnvWithoutNative = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<DummyEngineClient>(transportEnvWithoutNative.EngineClient, "transport env without native engine");
+    AssertNestedType<PendingWindowsTransportAdapterClient>(transportEnvWithoutNative.ConnectionPreflightClient, "_transportAdapterClient", "transport env without native adapter");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    AssertEqual(true, WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested(), "native runtime flag");
+    var nativePendingDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<FfiEngineClient>(nativePendingDependencies.EngineClient, "native engine");
+    AssertNestedType<NativeWindowsDnsSdBrowseClient>(nativePendingDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "native DNS-SD provider");
+    AssertNestedType<PendingWindowsTransportAdapterClient>(nativePendingDependencies.ConnectionPreflightClient, "_transportAdapterClient", "native pending adapter");
+
+    ConfigureExternalEnvironment();
+    var externalDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<FfiEngineClient>(externalDependencies.EngineClient, "external engine");
+    AssertNestedType<NativeWindowsDnsSdBrowseClient>(externalDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "external DNS-SD provider");
+    var externalAdapter = GetNested<IWindowsTransportAdapterClient>(externalDependencies.ConnectionPreflightClient, "_transportAdapterClient");
+    AssertType<ExternalWindowsTransportAdapterClient>(externalAdapter, "external transport adapter");
+    var externalSnapshot = await externalAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.WebRtcDataChannel, CoreTransportAuditCode.WebRtcInterop));
+    AssertEqual(true, externalSnapshot.IsLiveAdapterReady, "external adapter live readiness");
+    AssertEqual(ConnectionLaunchAdapterKind.WebRtcDataChannel, externalSnapshot.AdapterKind, "external adapter kind");
+    AssertEqual("external webrtc datachannel", externalSnapshot.AdapterBinding, "external adapter binding");
+    AssertEqual("windows.example:5443", externalSnapshot.LocalEndpoint, "external local endpoint");
+    AssertEqual("mac.example:5443", externalSnapshot.RemoteEndpoint, "external remote endpoint");
+    AssertEqual("webrtc/dtls/sctp-selected", externalSnapshot.SelectedCandidatePair, "external candidate pair");
+    AssertEqual("relay-1", externalSnapshot.RelayId, "external relay id");
+    AssertEqual((ulong)12000, externalSnapshot.TimestampWindowMs, "external timestamp window");
+    AssertEqual(32, externalSnapshot.TransportSecretFingerprint.Length, "external transport secret length");
+    AssertEqual(32, externalSnapshot.CapabilityDigest.Length, "external capability digest length");
+    var binding = externalSnapshot.BuildTransportBindingMaterial(CoreTransportKind.WebRtcDataChannel);
+    AssertEqual("relay-1", binding.RelayId, "external binding relay id");
+
+    ConfigureExternalEnvironment(adapterKind: "WindowsNativeMsQuic");
+    var mismatchDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    var mismatchAdapter = GetNested<IWindowsTransportAdapterClient>(mismatchDependencies.ConnectionPreflightClient, "_transportAdapterClient");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => mismatchAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.WebRtcDataChannel, CoreTransportAuditCode.WebRtcInterop)),
+        "External Windows transport adapter kind must match the Core-selected transport.");
+
+    ConfigureExternalEnvironment(adapterKind: null);
+    var appleSelectionDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    var appleSelectionAdapter = GetNested<IWindowsTransportAdapterClient>(appleSelectionDependencies.ConnectionPreflightClient, "_transportAdapterClient");
+    await ExpectThrowsAsync<InvalidOperationException>(
+        () => appleSelectionAdapter.PrepareAsync(BuildAdapterRequest(CoreTransportKind.AppleNative, CoreTransportAuditCode.AppleNativeDefault)),
+        "Windows external adapter must not select AppleNative");
+
+    ConfigureExternalEnvironment(includeBinding: false);
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_ADAPTER_BINDING is required");
+
+    ConfigureExternalEnvironment(secretHex: new string('a', 63));
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX must be 64 lowercase hex characters.");
+
+    ConfigureExternalEnvironment(secretHex: new string('A', 64));
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX must be 64 lowercase hex characters.");
+
+    ConfigureExternalEnvironment(timestampWindowMs: "0");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS must be a positive unsigned integer.");
+
+    ConfigureExternalEnvironment(adapterKind: "AppleNative");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "Windows external adapter must not select AppleNative");
+
+    Console.WriteLine("windows-native-runtime-profile: ok");
+}
+finally
+{
+    ClearRuntimeEnvironment();
+}
+
+void ConfigureExternalEnvironment(
+    string? adapterKind = "WebRtcDataChannel",
+    string? secretHex = null,
+    string? capabilityHex = null,
+    string? timestampWindowMs = "12000",
+    bool includeBinding = true)
+{
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "external");
+    if (includeBinding)
+    {
+        Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_ADAPTER_BINDING", "external webrtc datachannel");
+    }
+
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_LOCAL_ENDPOINT", "windows.example:5443");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_REMOTE_ENDPOINT", "mac.example:5443");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_SELECTED_CANDIDATE_PAIR", "webrtc/dtls/sctp-selected");
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX", secretHex ?? new string('4', 64));
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_CAPABILITY_DIGEST_HEX", capabilityHex ?? new string('2', 64));
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RELAY_ID", "relay-1");
+    if (adapterKind is not null)
+    {
+        Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_ADAPTER_KIND", adapterKind);
+    }
+
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS", timestampWindowMs);
+}
+
+void ClearRuntimeEnvironment()
+{
+    foreach (var variable in runtimeVariables)
+    {
+        Environment.SetEnvironmentVariable(variable, null);
+    }
+}
+
+static WindowsTransportAdapterRequest BuildAdapterRequest(CoreTransportKind transportKind, CoreTransportAuditCode auditCode)
+{
+    var peer = new DiscoveredPeer(
+        CoreDiscoveryServiceKind.QuicPrimary,
+        "mac-1",
+        "Desk Mac",
+        CorePeerPlatform.Apple,
+        "macOS",
+        new string('0', 64),
+        "apple-native,webrtc,tcp,relay",
+        "1",
+        PeerCapabilities.Apple());
+    var pairingMaterial = new PairingMaterial(
+        "mac-1",
+        "Desk Mac",
+        "macOS",
+        new string('0', 64),
+        new byte[] { 1, 2, 3, 4 },
+        VerifiedAgainstDiscoveryFingerprint: true,
+        "profile smoke");
+
+    return new WindowsTransportAdapterRequest(
+        peer,
+        pairingMaterial,
+        transportKind,
+        auditCode,
+        RelayRequired: false,
+        RelayAllowed: true,
+        PeerCapabilities.Windows(),
+        peer.Capabilities,
+        NetworkPath.CrossNatPath());
+}
+
+static T GetNested<T>(object source, string fieldName)
+{
+    var field = source.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+    if (field is null)
+    {
+        throw new InvalidOperationException($"Missing private field '{fieldName}' on {source.GetType().Name}.");
+    }
+
+    var value = field.GetValue(source);
+    if (value is not T typed)
+    {
+        throw new InvalidOperationException($"Expected field '{fieldName}' to be {typeof(T).Name}, got {value?.GetType().Name ?? "null"}.");
+    }
+
+    return typed;
+}
+
+static void AssertNestedType<T>(object source, string fieldName, string label)
+{
+    var value = GetNested<object>(source, fieldName);
+    AssertType<T>(value, label);
+}
+
+static void AssertType<T>(object? value, string label)
+{
+    if (value?.GetType() != typeof(T))
+    {
+        throw new InvalidOperationException($"{label}: expected {typeof(T).Name}, got {value?.GetType().Name ?? "null"}.");
+    }
+}
+
+static void ExpectThrows<T>(Action action, string messageFragment)
+    where T : Exception
+{
+    try
+    {
+        action();
+    }
+    catch (T ex) when (ex.Message.Contains(messageFragment, StringComparison.Ordinal))
+    {
+        return;
+    }
+    catch (Exception ex)
+    {
+        throw new InvalidOperationException($"Expected {typeof(T).Name} containing '{messageFragment}', got {ex.GetType().Name}: {ex.Message}");
+    }
+
+    throw new InvalidOperationException($"Expected {typeof(T).Name} containing '{messageFragment}'.");
+}
+
+static async Task ExpectThrowsAsync<T>(Func<Task> action, string messageFragment)
+    where T : Exception
+{
+    try
+    {
+        await action();
+    }
+    catch (T ex) when (ex.Message.Contains(messageFragment, StringComparison.Ordinal))
+    {
+        return;
+    }
+    catch (Exception ex)
+    {
+        throw new InvalidOperationException($"Expected {typeof(T).Name} containing '{messageFragment}', got {ex.GetType().Name}: {ex.Message}");
+    }
+
+    throw new InvalidOperationException($"Expected {typeof(T).Name} containing '{messageFragment}'.");
+}
+
+static void AssertEqual<T>(T expected, T actual, string label)
+{
+    if (!EqualityComparer<T>.Default.Equals(expected, actual))
+    {
+        throw new InvalidOperationException($"{label}: expected '{expected}', got '{actual}'.");
+    }
+}
+'@
+
+    & dotnet restore $testProject
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows native runtime profile restore failed."
+
+    & dotnet run --project $testProject --no-restore
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows native runtime profile run failed."
+}
+finally {
+    if (Test-Path -LiteralPath $tempRoot) {
+        $resolvedTempRoot = (Resolve-Path -LiteralPath $tempRoot).Path
+        $resolvedTempParent = (Resolve-Path -LiteralPath $tempParent).Path.TrimEnd('\')
+        $leaf = Split-Path -Leaf $resolvedTempRoot
+        $isOwnedSmokeDir = $resolvedTempRoot.StartsWith(
+            $resolvedTempParent,
+            [StringComparison]::OrdinalIgnoreCase) -and $leaf.StartsWith(
+            "skybridge-win-native-runtime-profile-",
+            [StringComparison]::Ordinal)
+
+        Assert-True -Condition $isOwnedSmokeDir -Message "Refusing to remove unexpected temp directory: $resolvedTempRoot"
+        Remove-Item -LiteralPath $resolvedTempRoot -Recurse -Force
+    }
+}
