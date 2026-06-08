@@ -187,6 +187,7 @@ foreach ($signal in @(
 }
 foreach ($signal in @(
     "windows-connection-launch-smoke: ok",
+    "BuildLiveConnectionLaunchReadiness",
     "BuildConnectionLaunchRequest",
     "Parse a Core-validated discovery TXT record before connection launch.",
     "Validate pairing material before connection launch.",
@@ -665,6 +666,7 @@ foreach ($signal in @(
     "BuildPreflightValidatedState",
     "BuildPreflightInputResetState",
     "BuildConnectionLaunchReadiness",
+    "BuildLiveConnectionLaunchReadiness",
     "BuildConnectionLaunchRequest",
     "BuildPreflightPreparedPatch",
     "ConnectionWorkspaceResetReason",
@@ -675,7 +677,8 @@ foreach ($signal in @(
     "ConnectionWorkspacePreflightReadiness",
     "Parse a Core-validated discovery TXT record before connection preflight.",
     "Validate pairing material before connection preflight.",
-    "Prepare Core connection preflight before connection launch."
+    "Prepare Core connection preflight before connection launch.",
+    "Connection launch requires a live Windows transport adapter; the current request is preflight-only."
 )) {
     Assert-Contains -Text $connectionWorkspaceState -Needle $signal -Message "ConnectionWorkspaceStateClient missing connection state signal: $signal"
 }

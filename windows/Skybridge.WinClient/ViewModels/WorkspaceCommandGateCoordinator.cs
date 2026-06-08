@@ -38,7 +38,7 @@ internal sealed class WorkspaceCommandGateCoordinator
 
     public bool CanConnect(WorkspaceCommandGateState state) =>
         _sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy)
-            && _connectionWorkspaceStateClient.BuildConnectionLaunchReadiness(
+            && _connectionWorkspaceStateClient.BuildLiveConnectionLaunchReadiness(
                 state.ValidatedState).IsReady;
 
     public bool CanDisconnect(WorkspaceCommandGateState state) =>

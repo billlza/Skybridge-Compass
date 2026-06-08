@@ -52,6 +52,9 @@ public interface IConnectionWorkspaceStateClient
     ConnectionWorkspacePreflightReadiness BuildConnectionLaunchReadiness(
         ConnectionWorkspaceValidatedState state);
 
+    ConnectionWorkspacePreflightReadiness BuildLiveConnectionLaunchReadiness(
+        ConnectionWorkspaceValidatedState state);
+
     ConnectionLaunchRequest BuildConnectionLaunchRequest(
         ConnectionWorkspaceValidatedState state);
 
@@ -60,6 +63,9 @@ public interface IConnectionWorkspaceStateClient
 
 public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateClient
 {
+    private const string LiveAdapterRequiredMessage =
+        "Connection launch requires a live Windows transport adapter; the current request is preflight-only.";
+
     public static string DefaultReadyStatus { get; } = "Ready";
 
     public ConnectionWorkspaceStatusPatch BuildInitialStatusPatch() =>
@@ -214,6 +220,23 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
         catch (InvalidOperationException ex)
         {
             return new(false, ex.Message);
+        }
+
+        return new(true, "");
+    }
+
+    public ConnectionWorkspacePreflightReadiness BuildLiveConnectionLaunchReadiness(
+        ConnectionWorkspaceValidatedState state)
+    {
+        var readiness = BuildConnectionLaunchReadiness(state);
+        if (!readiness.IsReady)
+        {
+            return readiness;
+        }
+
+        if (!state.PreflightSnapshot!.Plan.IsLiveAdapterReady)
+        {
+            return new(false, LiveAdapterRequiredMessage);
         }
 
         return new(true, "");

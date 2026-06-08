@@ -175,10 +175,16 @@ ExpectThrows<InvalidOperationException>(
                 adapterBinding: "apple native bypass")))),
     "Windows connection launch must not use AppleNative transport; Apple-to-Apple stays on the Apple native path.");
 
-var preflightOnlyRequest = stateClient.BuildConnectionLaunchRequest(
-    stateClient.BuildPreflightValidatedState(
-        pairedState,
-        BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false))));
+var preflightOnlyState = stateClient.BuildPreflightValidatedState(
+    pairedState,
+    BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false)));
+var preflightOnlyReadiness = stateClient.BuildLiveConnectionLaunchReadiness(preflightOnlyState);
+AssertEqual(false, preflightOnlyReadiness.IsReady, "preflight live launch readiness");
+AssertEqual(
+    "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
+    preflightOnlyReadiness.ErrorMessage,
+    "preflight live launch readiness message");
+var preflightOnlyRequest = stateClient.BuildConnectionLaunchRequest(preflightOnlyState);
 AssertEqual(ConnectionLaunchAdapterKind.WebRtcDataChannel, preflightOnlyRequest.Plan.AdapterKind, "adapter kind");
 AssertEqual("adapter pending", preflightOnlyRequest.Plan.AdapterBinding, "preflight adapter binding");
 AssertEqual(5, preflightOnlyRequest.Plan.ChannelMappings.Count, "preflight channel mapping count");
@@ -188,10 +194,13 @@ await ExpectThrowsAsync<NotSupportedException>(
     () => new DummyEngineClient().ConnectAsync(preflightOnlyRequest),
     "Connection launch requires a live Windows transport adapter; the current request is preflight-only.");
 
-var liveRequest = stateClient.BuildConnectionLaunchRequest(
-    stateClient.BuildPreflightValidatedState(
-        pairedState,
-        BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: true, adapterBinding: "smoke live adapter"))));
+var liveState = stateClient.BuildPreflightValidatedState(
+    pairedState,
+    BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: true, adapterBinding: "smoke live adapter")));
+var liveReadiness = stateClient.BuildLiveConnectionLaunchReadiness(liveState);
+AssertEqual(true, liveReadiness.IsReady, "live adapter launch readiness");
+AssertEqual("", liveReadiness.ErrorMessage, "live adapter launch readiness message");
+var liveRequest = stateClient.BuildConnectionLaunchRequest(liveState);
 var engine = new DummyEngineClient();
 await engine.ConnectAsync(liveRequest);
 AssertEqual(EngineConnectionState.Connected, engine.State, "dummy live adapter state");

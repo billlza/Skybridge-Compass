@@ -1516,7 +1516,7 @@ foreach ($workspaceGateCoordinatorSignal in @(
     "IsFeatureSelected(FeatureEntry selectedFeature, FeatureEntryId featureId)",
     "_featureCatalogClient.IsSelected(selectedFeature, featureId)",
     "_sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy)",
-    "_connectionWorkspaceStateClient.BuildConnectionLaunchReadiness(",
+    "_connectionWorkspaceStateClient.BuildLiveConnectionLaunchReadiness(",
     "state.ValidatedState).IsReady",
     "_workspaceCommandStateClient.CanUseDeviceDiscovery(",
     "_manualConnectionClient.CanPrepareTarget(",
@@ -3055,6 +3055,7 @@ foreach ($discoverySignal in @(
     "Peer key provider",
     "BuildReadOnlySnapshotAsync",
     "BuildPreflightReadiness",
+    "BuildLiveConnectionLaunchReadiness",
     "BuildConnectionLaunchRequest",
     "PlanConnectionAsync",
     "ComputeTransportBindingDigestAsync",
@@ -3066,6 +3067,7 @@ foreach ($discoverySignal in @(
     "TimestampWindowMs",
     "ChannelMappings",
     "Prepare Core connection preflight before connection launch.",
+    "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
     "No connection attempt is started"
 )) {
     Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $nativeDnsSdBrowse + $nativeDnsSdAcceptance + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionLaunchRequest + $windowsTransportAdapter + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
