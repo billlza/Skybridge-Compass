@@ -96,6 +96,7 @@ $asyncRelayCommandPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewMo
 $workspaceCommandRegistryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandRegistry.cs"
 $workspaceActionSurfaceTargetsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionSurfaceTargets.cs"
 $workspaceStatusPatchApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStatusPatchApplier.cs"
+$workspaceCountNotifierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCountNotifier.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -123,7 +124,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceStatusPatchApplierPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceStatusPatchApplierPath, $workspaceCountNotifierPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -136,8 +137,9 @@ $asyncRelayCommand = Get-Content -Raw -LiteralPath $asyncRelayCommandPath
 $workspaceCommandRegistry = Get-Content -Raw -LiteralPath $workspaceCommandRegistryPath
 $workspaceActionSurfaceTargets = Get-Content -Raw -LiteralPath $workspaceActionSurfaceTargetsPath
 $workspaceStatusPatchApplier = Get-Content -Raw -LiteralPath $workspaceStatusPatchApplierPath
+$workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceStatusPatchApplier
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceStatusPatchApplier + $workspaceCountNotifier
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -272,10 +274,14 @@ foreach ($viewModelProjectionSignal in @(
     "IEnumerable<TSource>",
     "ReplaceCollection(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric)",
     "ReplaceCollection(FileTransferQueue, snapshot.Queue, FileTransferQueueItemView.FromItem)",
-    "ReplaceCollection(SettingsDetails, snapshot.Details, SettingsDetailItemView.FromItem)"
+    "ReplaceCollection(SettingsDetails, snapshot.Details, SettingsDetailItemView.FromItem)",
+    "WorkspaceCountNotifier",
+    "_workspaceCountNotifier.DashboardMetricsChanged()",
+    "_workspaceCountNotifier.SettingsActionsChanged()"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $viewModelProjectionSignal -Message "SessionViewModel reusable projection helper missing: $viewModelProjectionSignal"
 }
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "OnPropertyChanged\(nameof\([A-Za-z]+Count\)\)")) -Message "SessionViewModel must notify derived count properties through WorkspaceCountNotifier."
 
 foreach ($asyncRelayCommandSignal in @(
     "public sealed class AsyncRelayCommand : ICommand",
@@ -1804,6 +1810,7 @@ foreach ($docSignal in @(
     "WorkspaceActionRenderContext",
     "WorkspaceActionSurfaceTargets",
     "WorkspaceStatusPatchApplier",
+    "WorkspaceCountNotifier",
     "DiscoveredPeerItemTemplate",
     "UsbDeviceItemTemplate",
     "FileTransferQueueItemTemplate",

@@ -39,6 +39,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
     private readonly WorkspaceActionSurfaceTargets _workspaceActionSurfaceTargets;
     private readonly WorkspaceStatusPatchApplier _workspaceStatusPatchApplier;
+    private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -192,6 +193,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => RemoteDesktopStatus = value,
             value => SystemMonitorStatus = value,
             value => SettingsStatus = value);
+        _workspaceCountNotifier = new WorkspaceCountNotifier(OnPropertyChanged);
         _connectionValidatedState = _connectionWorkspaceStateClient.BuildInputInvalidatedState();
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
         _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
@@ -874,10 +876,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 ReplaceCollection(DiscoveredPeers, snapshot.Peers, DiscoveredPeerView.FromCandidate);
 
                 ClearPairingAndPreflight();
-                OnPropertyChanged(nameof(DiscoveredPeerCount));
+                _workspaceCountNotifier.DiscoveredPeersChanged();
             }
 
-            OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
+            _workspaceCountNotifier.DiscoveryBrowserFactsChanged();
             _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildDiscoveryBrowserResultPatch(
                     action,
@@ -899,7 +901,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ReplaceCollection(ManualConnectionFacts, snapshot.Facts, ManualConnectionFactView.FromFact);
 
             ApplyConnectionInputInvalidation();
-            OnPropertyChanged(nameof(ManualConnectionFactCount));
+            _workspaceCountNotifier.ManualConnectionFactsChanged();
             DiscoveryService = snapshot.Target.Service;
             _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildManualTargetPreparedPatch(snapshot));
@@ -948,7 +950,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             ApplyConnectionInputInvalidation();
-            OnPropertyChanged(nameof(CrossNetworkConnectionFactCount));
+            _workspaceCountNotifier.CrossNetworkConnectionFactsChanged();
             _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildCrossNetworkPreparedPatch(snapshot));
         });
@@ -965,7 +967,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             DiscoveredPeers.Clear();
             DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(_discoveryBrowserClient.BuildPeerCandidate(peer)));
             ClearPairingAndPreflight();
-            OnPropertyChanged(nameof(DiscoveredPeerCount));
+            _workspaceCountNotifier.DiscoveredPeersChanged();
             _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedPatch(peer));
         });
@@ -990,7 +992,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ClearConnectionPreflight();
             ReplaceCollection(PairingFacts, snapshot.Facts, PairingFactView.FromFact);
 
-            OnPropertyChanged(nameof(PairingFactCount));
+            _workspaceCountNotifier.PairingFactsChanged();
             _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildPairingValidatedPatch(material));
         });
@@ -1016,7 +1018,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 pairingMaterial!);
             ReplaceCollection(ConnectionPreflightFacts, snapshot.Facts, ConnectionPreflightFactView.FromFact);
 
-            OnPropertyChanged(nameof(ConnectionPreflightFactCount));
+            _workspaceCountNotifier.ConnectionPreflightFactsChanged();
             _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildPreflightPreparedPatch(snapshot));
         });
@@ -1085,7 +1087,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void ApplyCoreDiagnosticsSnapshot(CoreDiagnosticsSnapshot snapshot)
     {
         ReplaceCollection(CoreDiagnosticFacts, snapshot.Facts, CoreDiagnosticFactView.FromFact);
-        OnPropertyChanged(nameof(CoreDiagnosticFactCount));
+        _workspaceCountNotifier.CoreDiagnosticFactsChanged();
     }
 
     private void ApplyFileTransferSnapshot(FileTransferWorkspaceSnapshot snapshot)
@@ -1094,21 +1096,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ReplaceCollection(FileTransferHistory, snapshot.History, FileTransferHistoryItemView.FromItem);
         ReplaceCollection(FileTransferSecurityFacts, snapshot.Security, FileTransferSecurityFactView.FromFact);
         RefreshDashboardMetrics();
-        OnPropertyChanged(nameof(FileTransferHistoryCount));
+        _workspaceCountNotifier.FileTransferHistoryChanged();
     }
 
     private void ApplyUsbManagementSnapshot(UsbManagementWorkspaceSnapshot snapshot)
     {
         ReplaceCollection(UsbDeviceStats, snapshot.Stats, UsbDeviceStatView.FromStat);
         ReplaceCollection(UsbDevices, snapshot.Devices, UsbDeviceItemView.FromItem);
-        OnPropertyChanged(nameof(UsbDeviceCount));
+        _workspaceCountNotifier.UsbDevicesChanged();
     }
 
     private void ApplyRemoteDesktopSnapshot(RemoteDesktopWorkspaceSnapshot snapshot)
     {
         ReplaceCollection(RemoteDesktopSessions, snapshot.Sessions, RemoteDesktopSessionItemView.FromItem);
         ReplaceCollection(RemoteDesktopControlFacts, snapshot.ControlFacts, RemoteDesktopControlFactView.FromFact);
-        OnPropertyChanged(nameof(RemoteDesktopSessionCount));
+        _workspaceCountNotifier.RemoteDesktopSessionsChanged();
     }
 
     private void ApplySystemMonitorSnapshot(SystemMonitorWorkspaceSnapshot snapshot)
@@ -1116,7 +1118,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ReplaceCollection(SystemMonitorOverview, snapshot.Overview, SystemMonitorMetricView.FromMetric);
         ReplaceCollection(SystemMonitorDetails, snapshot.Details, SystemMonitorMetricView.FromMetric);
         ReplaceCollection(SystemMonitorIndicators, snapshot.Indicators, SystemMonitorIndicatorView.FromIndicator);
-        OnPropertyChanged(nameof(SystemMonitorMetricCount));
+        _workspaceCountNotifier.SystemMonitorMetricsChanged();
     }
 
     private void ApplySettingsSnapshot(SettingsWorkspaceSnapshot snapshot)
@@ -1124,7 +1126,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ReplaceCollection(SettingsTabs, snapshot.Tabs, SettingsTabItemView.FromItem);
         ReplaceCollection(SettingsActions, snapshot.Actions, SettingsActionItemView.FromItem);
         ReplaceCollection(SettingsDetails, snapshot.Details, SettingsDetailItemView.FromItem);
-        OnPropertyChanged(nameof(SettingsActionCount));
+        _workspaceCountNotifier.SettingsActionsChanged();
     }
 
     private bool CanConnect() => _sessionCommandStateClient.CanConnect(ConnectionState, IsBusy);
@@ -1339,7 +1341,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PerformanceStatus = snapshot.PerformanceStatus;
         ReplaceCollection(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric);
 
-        OnPropertyChanged(nameof(DashboardMetricCount));
+        _workspaceCountNotifier.DashboardMetricsChanged();
     }
 
     private void LoadWorkspaceActions()
@@ -1456,7 +1458,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         PairingFacts.Clear();
         ClearConnectionPreflight();
-        OnPropertyChanged(nameof(PairingFactCount));
+        _workspaceCountNotifier.PairingFactsChanged();
     }
 
     private void InvalidatePairingAndPreflight()
@@ -1468,8 +1470,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceStatusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.DiscoveryInputChanged));
-        OnPropertyChanged(nameof(DiscoveredPeerCount));
-        OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
+        _workspaceCountNotifier.DiscoveredPeersChanged();
+        _workspaceCountNotifier.DiscoveryBrowserFactsChanged();
     }
 
     private void ResetManualConnectionInput()
@@ -1478,7 +1480,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceStatusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.ManualTargetInputChanged));
-        OnPropertyChanged(nameof(ManualConnectionFactCount));
+        _workspaceCountNotifier.ManualConnectionFactsChanged();
     }
 
     private void ResetCrossNetworkInput()
@@ -1504,7 +1506,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceStatusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.PreflightCleared));
-        OnPropertyChanged(nameof(ConnectionPreflightFactCount));
+        _workspaceCountNotifier.ConnectionPreflightFactsChanged();
     }
 }
 
