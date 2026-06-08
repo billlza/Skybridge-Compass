@@ -599,7 +599,9 @@ foreach ($topBarSignal in @(
     "ResolveEnabled",
     "ResolveDetail",
     "_topBarStatusClient.BuildStatusUpdate(",
-    "LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, update.ActionDetails)",
+    "WorkspaceActionRenderContext",
+    "BuildWorkspaceActionRenderContext",
+    "BuildWorkspaceActionRenderContext(update.ActionDetails)",
     "ResolvedStatus",
     "ActionDetails",
     "NotificationsStatus",
@@ -751,6 +753,8 @@ Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionC
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionCatalogClient.ResolveDetail(")) -Message "SessionViewModel must use WorkspaceActionCatalogClient.BuildResolvedSnapshot instead of resolving action details inline."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession,")) -Message "SessionViewModel must source the initial workspace action surface plan from WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader,")) -Message "SessionViewModel must source the dynamic workspace action refresh plan from WorkspaceActionCatalogClient."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "BuildResolvedSnapshot\(\s*new WorkspaceActionCatalogRequest\(surface\),\s*BuildWorkspaceActionGateSnapshot\(")) -Message "SessionViewModel must build workspace action gates once in WorkspaceActionRenderContext, not per surface."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "BuildResolvedSnapshot\(\s*new WorkspaceActionCatalogRequest\(surface\),[\s\S]{0,250}_topBarStatusClient\.BuildStatusUpdate\(")) -Message "SessionViewModel must build top-bar action details once in WorkspaceActionRenderContext, not per surface."
 Assert-True -Condition (-not $sessionViewModel.Contains("GetTopBarStatusValue")) -Message "SessionViewModel must delegate top-bar status lookup to TopBarStatusClient.BuildResolvedStatusSnapshot."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarStatusClient.ResolveStatusValue(")) -Message "SessionViewModel must use TopBarStatusClient.BuildResolvedStatusSnapshot instead of resolving top-bar scalar values inline."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarStatusClient.BuildDefaultStatusValue(")) -Message "SessionViewModel must use TopBarStatusClient.BuildResolvedStatusSnapshot instead of selecting top-bar defaults inline."
@@ -1697,6 +1701,7 @@ foreach ($docSignal in @(
     "WorkspaceActionButtonWithDetailTemplate",
     "SidebarWorkspaceActionButtonTemplate",
     "ItemsPanelTemplate",
+    "WorkspaceActionRenderContext",
     "DiscoveredPeerItemTemplate",
     "UsbDeviceItemTemplate",
     "FileTransferQueueItemTemplate",

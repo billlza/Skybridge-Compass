@@ -1291,9 +1291,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshDynamicWorkspaceActionStates()
     {
+        var renderContext = BuildWorkspaceActionRenderContext();
         foreach (var surface in _workspaceActionCatalogClient.BuildDynamicRefreshSurfaces())
         {
-            LoadWorkspaceActionSurface(surface);
+            LoadWorkspaceActionSurface(surface, renderContext);
         }
     }
 
@@ -1402,20 +1403,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void LoadWorkspaceActions()
     {
+        var renderContext = BuildWorkspaceActionRenderContext();
         foreach (var surface in _workspaceActionCatalogClient.BuildInitialSurfaces())
         {
-            LoadWorkspaceActionSurface(surface);
+            LoadWorkspaceActionSurface(surface, renderContext);
         }
     }
 
     private void LoadWorkspaceActionSurface(
         WorkspaceActionSurface surface,
-        WorkspaceActionDetailSnapshot? actionDetails = null)
+        WorkspaceActionRenderContext renderContext)
     {
         var snapshot = _workspaceActionCatalogClient.BuildResolvedSnapshot(
             new WorkspaceActionCatalogRequest(surface),
-            BuildWorkspaceActionGateSnapshot(),
-            actionDetails ?? BuildWorkspaceActionDetailSnapshot());
+            renderContext.Gates,
+            renderContext.Details);
         var target = GetWorkspaceActionSurfaceTarget(surface);
 
         ReplaceCollection(
@@ -1464,8 +1466,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 IsSettingsSelected,
                 _sessionCommandStateClient.BuildGateSnapshot(ConnectionState, IsBusy)));
 
-    private WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot() =>
-        _topBarStatusClient.BuildStatusUpdate(BuildTopBarStatusRequest()).ActionDetails;
+    private WorkspaceActionRenderContext BuildWorkspaceActionRenderContext(
+        WorkspaceActionDetailSnapshot? actionDetails = null) =>
+        new(
+            BuildWorkspaceActionGateSnapshot(),
+            actionDetails ?? _topBarStatusClient.BuildStatusUpdate(BuildTopBarStatusRequest()).ActionDetails);
 
     private void RefreshTopBarStatus()
     {
@@ -1475,7 +1480,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         TopBarDiagnosticsStatus = update.ResolvedStatus.DiagnosticsStatus;
         TopBarNotificationsStatus = update.ResolvedStatus.NotificationsStatus;
         TopBarThemeStatus = update.ResolvedStatus.ThemeStatus;
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, update.ActionDetails);
+        LoadWorkspaceActionSurface(
+            WorkspaceActionSurface.TopBarActions,
+            BuildWorkspaceActionRenderContext(update.ActionDetails));
     }
 
     private TopBarStatusRequest BuildTopBarStatusRequest() =>
@@ -1576,3 +1583,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ConnectionPreflightFactCount));
     }
 }
+
+internal sealed record WorkspaceActionRenderContext(
+    WorkspaceActionGateSnapshot Gates,
+    WorkspaceActionDetailSnapshot Details);
