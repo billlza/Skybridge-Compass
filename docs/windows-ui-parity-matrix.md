@@ -31,7 +31,7 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | --- | --- | --- |
 | `NavigationItem.swift` | `case dashboard = "sidebar.dashboard"`; `case deviceManagement = "sidebar.deviceDiscovery"`; `case usbDeviceManagement = "sidebar.usbManagement"`; `case fileTransfer = "sidebar.fileTransfer"`; `case remoteDesktop = "sidebar.remoteDesktop"`; `case quantumCommunication = "quantum.title"`; `case systemMonitor = "sidebar.systemMonitor"`; `case settings = "sidebar.settings"` | `FeatureCatalogClient.Entries` |
 | `QuickActionsPanelView.swift` | `action.scanDevices`; `appModel.triggerDiscoveryRefresh()`; `dashboard.fileTransfer`; `selectedNavigation = .fileTransfer`; `action.systemMonitor`; `selectedNavigation = .systemMonitor`; `action.settings`; `selectedNavigation = .settings` | `DashboardQuickActions` |
-| `TopNavigationBarView.swift` | `ipLocationIndicator`; `networkSpeedIndicator`; `networkLatencyIndicator`; `connectionStatusIndicator`; `fpsIndicator`; `NotificationBellView()`; `themeToggleButton` | `TopBarStatusItems`; `TopBarActions` |
+| `TopNavigationBarView.swift` | `ipLocationIndicator`; `networkSpeedIndicator`; `networkLatencyIndicator`; `connectionStatusIndicator`; `fpsIndicator`; `NotificationBellView()`; `themeToggleButton`; `manualConnect.title`; `manualConnect.ipAddress`; `manualConnect.port`; `manualConnect.pairingCode`; `action.cancel`; `device.action.connect`; `appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode)` | `TopBarStatusItems`; `TopBarActions`; `DeviceDiscoveryScan`; `ManualConnectionClient`; `DeviceDiscoveryManualConnectFinal` |
 
 ## Global Shell Matrix
 

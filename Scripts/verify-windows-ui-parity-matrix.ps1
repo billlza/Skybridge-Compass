@@ -326,9 +326,16 @@ $macBaselineSignals = @(
             "connectionStatusIndicator",
             "fpsIndicator",
             "NotificationBellView()",
-            "themeToggleButton"
+            "themeToggleButton",
+            "manualConnect.title",
+            "manualConnect.ipAddress",
+            "manualConnect.port",
+            "manualConnect.pairingCode",
+            "action.cancel",
+            "device.action.connect",
+            "appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode)"
         )
-        Anchors = @("TopBarStatusItems", "TopBarActions")
+        Anchors = @("TopBarStatusItems", "TopBarActions", "DeviceDiscoveryScan", "ManualConnectionClient", "DeviceDiscoveryManualConnectFinal")
     }
 )
 
