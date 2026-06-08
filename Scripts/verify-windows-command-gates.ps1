@@ -63,7 +63,10 @@ using Skybridge.WinClient.ViewModels;
 
 const string Fingerprint = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
-var fileTransferClient = new TestFileTransferWorkspaceClient(canGenerateShareQr: true);
+var fileTransferClient = new TestFileTransferWorkspaceClient(
+    canSelectFiles: true,
+    canSelectFolder: true,
+    canGenerateShareQr: true);
 var coordinator = new WorkspaceCommandGateCoordinator(
     new SessionCommandStateClient(),
     new FeatureCatalogClient(),
@@ -219,10 +222,34 @@ var fileTransferReadyState = BuildCommandState(
     selectedFeatureId: FeatureEntryId.FileTransfer);
 var fileTransferReadyAvailability = new WorkspaceCommandAvailability(coordinator, () => fileTransferReadyState);
 AssertEqual(true, fileTransferReadyAvailability.CanRefreshFileTransfer(), "file transfer WorkspaceCommandAvailability.Refresh");
+AssertEqual(true, fileTransferReadyAvailability.CanSelectFileTransferFiles(), "file transfer WorkspaceCommandAvailability.SelectFiles");
+AssertEqual(true, fileTransferReadyAvailability.CanSelectFileTransferFolder(), "file transfer WorkspaceCommandAvailability.SelectFolder");
 AssertEqual(true, fileTransferReadyAvailability.CanGenerateFileTransferQr(), "file transfer WorkspaceCommandAvailability.GenerateQr");
 var fileTransferReadyGates = coordinator.BuildActionGateSnapshot(fileTransferReadyState);
 AssertEqual(true, fileTransferReadyGates.CanRefreshFileTransfer, "file transfer action gate Refresh");
+AssertEqual(true, fileTransferReadyGates.CanSelectFileTransferFiles, "file transfer action gate SelectFiles");
+AssertEqual(true, fileTransferReadyGates.CanSelectFileTransferFolder, "file transfer action gate SelectFolder");
 AssertEqual(true, fileTransferReadyGates.CanGenerateFileTransferQr, "file transfer action gate GenerateQr");
+AssertResolvedAction(
+    catalog,
+    details,
+    fileTransferReadyGates,
+    WorkspaceActionSurface.FileTransfer,
+    "SelectFiles",
+    WorkspaceActionCommandId.SelectFileTransferFiles,
+    WorkspaceActionGateId.CanSelectFileTransferFiles,
+    true,
+    "file transfer Select Files");
+AssertResolvedAction(
+    catalog,
+    details,
+    fileTransferReadyGates,
+    WorkspaceActionSurface.FileTransfer,
+    "SelectFolder",
+    WorkspaceActionCommandId.SelectFileTransferFolder,
+    WorkspaceActionGateId.CanSelectFileTransferFolder,
+    true,
+    "file transfer Select Folder");
 AssertResolvedAction(
     catalog,
     details,
@@ -237,11 +264,35 @@ AssertResolvedAction(
 var fileTransferBlockedState = BuildCommandState(
     liveReady: true,
     selectedFeatureId: FeatureEntryId.FileTransfer);
+fileTransferClient.CanSelectFilesValue = false;
+fileTransferClient.CanSelectFolderValue = false;
 fileTransferClient.CanGenerateShareQrValue = false;
 var fileTransferBlockedAvailability = new WorkspaceCommandAvailability(coordinator, () => fileTransferBlockedState);
 AssertEqual(true, fileTransferBlockedAvailability.CanRefreshFileTransfer(), "blocked file transfer WorkspaceCommandAvailability.Refresh");
+AssertEqual(false, fileTransferBlockedAvailability.CanSelectFileTransferFiles(), "blocked file transfer WorkspaceCommandAvailability.SelectFiles");
+AssertEqual(false, fileTransferBlockedAvailability.CanSelectFileTransferFolder(), "blocked file transfer WorkspaceCommandAvailability.SelectFolder");
 AssertEqual(false, fileTransferBlockedAvailability.CanGenerateFileTransferQr(), "blocked file transfer WorkspaceCommandAvailability.GenerateQr");
 var fileTransferBlockedGates = coordinator.BuildActionGateSnapshot(fileTransferBlockedState);
+AssertResolvedAction(
+    catalog,
+    details,
+    fileTransferBlockedGates,
+    WorkspaceActionSurface.FileTransfer,
+    "SelectFiles",
+    WorkspaceActionCommandId.SelectFileTransferFiles,
+    WorkspaceActionGateId.CanSelectFileTransferFiles,
+    false,
+    "blocked file transfer Select Files");
+AssertResolvedAction(
+    catalog,
+    details,
+    fileTransferBlockedGates,
+    WorkspaceActionSurface.FileTransfer,
+    "SelectFolder",
+    WorkspaceActionCommandId.SelectFileTransferFolder,
+    WorkspaceActionGateId.CanSelectFileTransferFolder,
+    false,
+    "blocked file transfer Select Folder");
 AssertResolvedAction(
     catalog,
     details,
@@ -406,10 +457,19 @@ sealed class TestDiscoveryClient : IDiscoveryClient
 
 sealed class TestFileTransferWorkspaceClient : IFileTransferWorkspaceClient
 {
-    public TestFileTransferWorkspaceClient(bool canGenerateShareQr)
+    public TestFileTransferWorkspaceClient(
+        bool canSelectFiles,
+        bool canSelectFolder,
+        bool canGenerateShareQr)
     {
+        CanSelectFilesValue = canSelectFiles;
+        CanSelectFolderValue = canSelectFolder;
         CanGenerateShareQrValue = canGenerateShareQr;
     }
+
+    public bool CanSelectFilesValue { get; set; }
+
+    public bool CanSelectFolderValue { get; set; }
 
     public bool CanGenerateShareQrValue { get; set; }
 
@@ -421,14 +481,28 @@ sealed class TestFileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public string BuildCompletedStatusMessage() => "Updated";
 
+    public bool CanSelectFiles() => CanSelectFilesValue;
+
+    public bool CanSelectFolder() => CanSelectFolderValue;
+
     public bool CanGenerateShareQr() => CanGenerateShareQrValue;
+
+    public string BuildSelectFilesPendingStatus() => "Preparing file picker...";
+
+    public string BuildSelectFolderPendingStatus() => "Preparing folder picker...";
 
     public string BuildShareQrPendingStatus() => "Preparing QR...";
 
     public Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync() =>
         throw new NotSupportedException("Command-gate smoke only needs file transfer action readiness.");
 
-    public Task<FileTransferShareQrActionResult> BuildShareQrActionAsync() =>
+    public Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs file transfer action readiness.");
+
+    public Task<FileTransferWorkspaceActionResult> BuildSelectFolderActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs file transfer action readiness.");
+
+    public Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync() =>
         throw new NotSupportedException("Command-gate smoke only needs file transfer action readiness.");
 }
 '@

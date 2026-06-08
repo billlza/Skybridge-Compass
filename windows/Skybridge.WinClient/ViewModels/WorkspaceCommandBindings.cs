@@ -38,6 +38,8 @@ internal sealed class WorkspaceCommandBindings
         PrepareConnectionCommand = new AsyncRelayCommand(connectionWorkspaceActions.PrepareConnectionAsync, commandAvailability.CanPrepareConnection);
         RunCoreDiagnosticsCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync, commandAvailability.CanRunCoreDiagnostics);
         RefreshFileTransferCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync, commandAvailability.CanRefreshFileTransfer);
+        SelectFileTransferFilesCommand = new AsyncRelayCommand(fileTransferWorkspaceActions.SelectFilesAsync, commandAvailability.CanSelectFileTransferFiles);
+        SelectFileTransferFolderCommand = new AsyncRelayCommand(fileTransferWorkspaceActions.SelectFolderAsync, commandAvailability.CanSelectFileTransferFolder);
         GenerateFileTransferQrCommand = new AsyncRelayCommand(fileTransferWorkspaceActions.GenerateQrAsync, commandAvailability.CanGenerateFileTransferQr);
         RefreshRemoteDesktopCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync, commandAvailability.CanRefreshRemoteDesktop);
         RefreshSystemMonitorCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync, commandAvailability.CanRefreshSystemMonitor);
@@ -68,6 +70,8 @@ internal sealed class WorkspaceCommandBindings
             new(WorkspaceActionCommandId.PrepareConnection, PrepareConnectionCommand),
             new(WorkspaceActionCommandId.RunCoreDiagnostics, RunCoreDiagnosticsCommand),
             new(WorkspaceActionCommandId.RefreshFileTransfer, RefreshFileTransferCommand),
+            new(WorkspaceActionCommandId.SelectFileTransferFiles, SelectFileTransferFilesCommand),
+            new(WorkspaceActionCommandId.SelectFileTransferFolder, SelectFileTransferFolderCommand),
             new(WorkspaceActionCommandId.GenerateFileTransferQr, GenerateFileTransferQrCommand),
             new(WorkspaceActionCommandId.RefreshRemoteDesktop, RefreshRemoteDesktopCommand),
             new(WorkspaceActionCommandId.RefreshSystemMonitor, RefreshSystemMonitorCommand),
@@ -120,6 +124,10 @@ internal sealed class WorkspaceCommandBindings
     public ICommand RunCoreDiagnosticsCommand { get; }
 
     public ICommand RefreshFileTransferCommand { get; }
+
+    public ICommand SelectFileTransferFilesCommand { get; }
+
+    public ICommand SelectFileTransferFolderCommand { get; }
 
     public ICommand GenerateFileTransferQrCommand { get; }
 

@@ -15,13 +15,25 @@ public interface IFileTransferWorkspaceClient
 
     string BuildCompletedStatusMessage();
 
+    bool CanSelectFiles();
+
+    bool CanSelectFolder();
+
     bool CanGenerateShareQr();
+
+    string BuildSelectFilesPendingStatus();
+
+    string BuildSelectFolderPendingStatus();
 
     string BuildShareQrPendingStatus();
 
     Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
 
-    Task<FileTransferShareQrActionResult> BuildShareQrActionAsync();
+    Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync();
+
+    Task<FileTransferWorkspaceActionResult> BuildSelectFolderActionAsync();
+
+    Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync();
 }
 
 public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
@@ -42,7 +54,15 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
 
+    public bool CanSelectFiles() => false;
+
+    public bool CanSelectFolder() => false;
+
     public bool CanGenerateShareQr() => false;
+
+    public string BuildSelectFilesPendingStatus() => DefaultSelectFilesPendingStatus;
+
+    public string BuildSelectFolderPendingStatus() => DefaultSelectFolderPendingStatus;
 
     public string BuildShareQrPendingStatus() => DefaultShareQrPendingStatus;
 
@@ -52,7 +72,19 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public static string DefaultCompletedStatusMessage { get; } = "File transfer workspace updated";
 
+    public static string DefaultSelectFilesPendingStatus { get; } = "Preparing file picker...";
+
+    public static string DefaultSelectFolderPendingStatus { get; } = "Preparing folder picker...";
+
     public static string DefaultShareQrPendingStatus { get; } = "Preparing QR...";
+
+    public static string DefaultSelectFilesBlockedStatus { get; } = "File picker pending adapter";
+
+    public static string DefaultSelectFilesBlockedMessage { get; } = "File selection remains fail-closed";
+
+    public static string DefaultSelectFolderBlockedStatus { get; } = "Folder picker pending adapter";
+
+    public static string DefaultSelectFolderBlockedMessage { get; } = "Folder selection remains fail-closed";
 
     public static string DefaultShareQrBlockedStatus { get; } = "QR generation pending adapter";
 
@@ -61,7 +93,19 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
     public static string BuildDefaultCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
         $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
 
-    public static FileTransferShareQrActionResult BuildDefaultShareQrActionResult() =>
+    public static FileTransferWorkspaceActionResult BuildDefaultSelectFilesActionResult() =>
+        new(
+            DefaultSelectFilesBlockedStatus,
+            DefaultSelectFilesBlockedMessage,
+            "No file picker was opened, no local files were read, and no transfer manifest was created.");
+
+    public static FileTransferWorkspaceActionResult BuildDefaultSelectFolderActionResult() =>
+        new(
+            DefaultSelectFolderBlockedStatus,
+            DefaultSelectFolderBlockedMessage,
+            "No folder picker was opened, no directory was scanned, and no transfer manifest was created.");
+
+    public static FileTransferWorkspaceActionResult BuildDefaultShareQrActionResult() =>
         new(
             DefaultShareQrBlockedStatus,
             DefaultShareQrBlockedMessage,
@@ -116,7 +160,13 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
         return new FileTransferWorkspaceSnapshot(DateTimeOffset.UtcNow, queue, history, security);
     }
 
-    public Task<FileTransferShareQrActionResult> BuildShareQrActionAsync() =>
+    public Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync() =>
+        Task.FromResult(BuildDefaultSelectFilesActionResult());
+
+    public Task<FileTransferWorkspaceActionResult> BuildSelectFolderActionAsync() =>
+        Task.FromResult(BuildDefaultSelectFolderActionResult());
+
+    public Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync() =>
         Task.FromResult(BuildDefaultShareQrActionResult());
 }
 
@@ -144,7 +194,7 @@ public sealed record FileTransferSecurityFact(
     string Value,
     string Detail);
 
-public sealed record FileTransferShareQrActionResult(
+public sealed record FileTransferWorkspaceActionResult(
     string Status,
     string Message,
     string Detail);

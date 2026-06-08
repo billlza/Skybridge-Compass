@@ -17,6 +17,12 @@ function Write-Probe {
     Write-Output "mac-ssh-probe: $Message"
 }
 
+function Test-IsProxySourceAddress {
+    param([string]$Address)
+
+    $Address -match "^(198\.18\.|198\.19\.)"
+}
+
 function Invoke-SshCommand {
     param([string]$UserName)
 
@@ -63,6 +69,22 @@ if (-not $tcp.TcpTestSucceeded) {
 }
 
 Write-Probe "tcp ready: ${HostName}:$Port"
+if ($tcp.SourceAddress) {
+    $sourceAddress = [string]$tcp.SourceAddress
+    if ($tcp.SourceAddress.PSObject.Properties.Name -contains "IPAddress") {
+        $sourceAddress = [string]$tcp.SourceAddress.IPAddress
+    }
+
+    $nextHop = ""
+    if ($tcp.NetRoute -and $tcp.NetRoute.NextHop) {
+        $nextHop = $tcp.NetRoute.NextHop
+    }
+
+    Write-Probe "route: source=$sourceAddress interface=$($tcp.InterfaceAlias) nextHop=$nextHop context=$($tcp.NetworkIsolationContext)"
+    if (Test-IsProxySourceAddress -Address $sourceAddress) {
+        Write-Probe "route warning: source address is in 198.18.0.0/15, which is commonly used by proxy or virtual routing; this is not proof of direct LAN reachability"
+    }
+}
 
 $ready = $false
 foreach ($userName in $UserNames) {

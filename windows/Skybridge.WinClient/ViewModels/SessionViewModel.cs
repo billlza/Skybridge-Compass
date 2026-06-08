@@ -461,6 +461,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PrepareConnectionCommand = commandBindings.PrepareConnectionCommand;
         RunCoreDiagnosticsCommand = commandBindings.RunCoreDiagnosticsCommand;
         RefreshFileTransferCommand = commandBindings.RefreshFileTransferCommand;
+        SelectFileTransferFilesCommand = commandBindings.SelectFileTransferFilesCommand;
+        SelectFileTransferFolderCommand = commandBindings.SelectFileTransferFolderCommand;
         GenerateFileTransferQrCommand = commandBindings.GenerateFileTransferQrCommand;
         RefreshRemoteDesktopCommand = commandBindings.RefreshRemoteDesktopCommand;
         RefreshSystemMonitorCommand = commandBindings.RefreshSystemMonitorCommand;
@@ -1008,6 +1010,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RunCoreDiagnosticsCommand { get; }
 
     public ICommand RefreshFileTransferCommand { get; }
+
+    public ICommand SelectFileTransferFilesCommand { get; }
+
+    public ICommand SelectFileTransferFolderCommand { get; }
 
     public ICommand GenerateFileTransferQrCommand { get; }
 

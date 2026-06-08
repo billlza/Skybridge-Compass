@@ -23,13 +23,30 @@ internal sealed class FileTransferWorkspaceActions
         _setStatusMessage = setStatusMessage ?? throw new ArgumentNullException(nameof(setStatusMessage));
     }
 
+    public Task SelectFilesAsync() =>
+        RunAsync(
+            _fileTransferClient.BuildSelectFilesPendingStatus,
+            _fileTransferClient.BuildSelectFilesActionAsync);
+
+    public Task SelectFolderAsync() =>
+        RunAsync(
+            _fileTransferClient.BuildSelectFolderPendingStatus,
+            _fileTransferClient.BuildSelectFolderActionAsync);
+
     public Task GenerateQrAsync() =>
+        RunAsync(
+            _fileTransferClient.BuildShareQrPendingStatus,
+            _fileTransferClient.BuildShareQrActionAsync);
+
+    private Task RunAsync(
+        Func<string> buildPendingStatus,
+        Func<Task<FileTransferWorkspaceActionResult>> buildActionAsync) =>
         _busyCoordinator.RunAsync(
             WorkspaceErrorScope.FileTransfer,
             async () =>
             {
-                _setFileTransferStatus(_fileTransferClient.BuildShareQrPendingStatus());
-                var result = await _fileTransferClient.BuildShareQrActionAsync();
+                _setFileTransferStatus(buildPendingStatus());
+                var result = await buildActionAsync();
                 _setFileTransferStatus(result.Status);
                 _setStatusMessage(result.Message);
             });

@@ -110,10 +110,19 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanRefreshFileTransfer(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.FileTransfer);
 
+    public bool CanSelectFileTransferFiles(WorkspaceCommandGateState state) =>
+        CanUseFileTransferAction(
+            state,
+            _fileTransferClient.CanSelectFiles());
+
+    public bool CanSelectFileTransferFolder(WorkspaceCommandGateState state) =>
+        CanUseFileTransferAction(
+            state,
+            _fileTransferClient.CanSelectFolder());
+
     public bool CanGenerateFileTransferQr(WorkspaceCommandGateState state) =>
-        _workspaceCommandStateClient.CanUseFileTransferAction(
-            state.IsBusy,
-            IsFeatureSelected(state.SelectedFeature, FeatureEntryId.FileTransfer),
+        CanUseFileTransferAction(
+            state,
             _fileTransferClient.CanGenerateShareQr());
 
     public bool CanRefreshRemoteDesktop(WorkspaceCommandGateState state) =>
@@ -155,6 +164,8 @@ internal sealed class WorkspaceCommandGateCoordinator
                 CanScanQrCode(state),
                 CanCopyConnectionCode(state),
                 CanConnectConnectionCode(state),
+                CanSelectFileTransferFiles(state),
+                CanSelectFileTransferFolder(state),
                 CanGenerateFileTransferQr(state)));
     }
 
@@ -172,6 +183,14 @@ internal sealed class WorkspaceCommandGateCoordinator
         _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
             state.IsBusy,
             IsFeatureSelected(state.SelectedFeature, FeatureEntryId.DeviceDiscovery),
+            readiness);
+
+    private bool CanUseFileTransferAction(
+        WorkspaceCommandGateState state,
+        bool readiness) =>
+        _workspaceCommandStateClient.CanUseFileTransferAction(
+            state.IsBusy,
+            IsFeatureSelected(state.SelectedFeature, FeatureEntryId.FileTransfer),
             readiness);
 
     private bool CanUseSelectedWorkspaceFeature(

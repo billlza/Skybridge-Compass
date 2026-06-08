@@ -71,6 +71,8 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
             request.CanConnectConnectionCode,
             CanUseWorkspaceFeature(request.IsBusy, request.IsUsbManagementSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsFileTransferSelected),
+            request.CanSelectFileTransferFiles,
+            request.CanSelectFileTransferFolder,
             request.CanGenerateFileTransferQr,
             CanUseWorkspaceFeature(request.IsBusy, request.IsRemoteDesktopSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsQuantumSelected),
@@ -96,4 +98,6 @@ public sealed record WorkspaceCommandGateRequest(
     bool CanScanQrCode,
     bool CanCopyConnectionCode,
     bool CanConnectConnectionCode,
+    bool CanSelectFileTransferFiles,
+    bool CanSelectFileTransferFolder,
     bool CanGenerateFileTransferQr);

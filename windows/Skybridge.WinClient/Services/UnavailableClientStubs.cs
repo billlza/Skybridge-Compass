@@ -131,7 +131,17 @@ internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWork
     public string BuildCompletedStatusMessage() =>
         FileTransferWorkspaceClient.DefaultCompletedStatusMessage;
 
+    public bool CanSelectFiles() => false;
+
+    public bool CanSelectFolder() => false;
+
     public bool CanGenerateShareQr() => false;
+
+    public string BuildSelectFilesPendingStatus() =>
+        FileTransferWorkspaceClient.DefaultSelectFilesPendingStatus;
+
+    public string BuildSelectFolderPendingStatus() =>
+        FileTransferWorkspaceClient.DefaultSelectFolderPendingStatus;
 
     public string BuildShareQrPendingStatus() =>
         FileTransferWorkspaceClient.DefaultShareQrPendingStatus;
@@ -141,7 +151,13 @@ internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWork
         throw new InvalidOperationException("File transfer workspace client is not configured.");
     }
 
-    public Task<FileTransferShareQrActionResult> BuildShareQrActionAsync() =>
+    public Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync() =>
+        Task.FromResult(FileTransferWorkspaceClient.BuildDefaultSelectFilesActionResult());
+
+    public Task<FileTransferWorkspaceActionResult> BuildSelectFolderActionAsync() =>
+        Task.FromResult(FileTransferWorkspaceClient.BuildDefaultSelectFolderActionResult());
+
+    public Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync() =>
         Task.FromResult(FileTransferWorkspaceClient.BuildDefaultShareQrActionResult());
 }
 

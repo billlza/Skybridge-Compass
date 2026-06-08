@@ -45,6 +45,10 @@ internal sealed class WorkspaceCommandAvailability
 
     public bool CanRefreshFileTransfer() => _coordinator.CanRefreshFileTransfer(BuildState());
 
+    public bool CanSelectFileTransferFiles() => _coordinator.CanSelectFileTransferFiles(BuildState());
+
+    public bool CanSelectFileTransferFolder() => _coordinator.CanSelectFileTransferFolder(BuildState());
+
     public bool CanGenerateFileTransferQr() => _coordinator.CanGenerateFileTransferQr(BuildState());
 
     public bool CanRefreshRemoteDesktop() => _coordinator.CanRefreshRemoteDesktop(BuildState());
