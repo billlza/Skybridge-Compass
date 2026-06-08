@@ -17,6 +17,14 @@ Run the repair/check command:
 .\Scripts\verify-git-ssh-remote.ps1 -RequireConfiguredSshCommand -RequireKnownHosts -RequireCredentialHelperReset
 ```
 
+Use the guarded upload command for this branch:
+
+```powershell
+.\Scripts\push-github-ssh.ps1
+```
+
+It repairs/verifies the local SSH policy, refuses accidental pushes from the wrong branch, pushes `HEAD` to `Bill/windows-portability`, and creates a verified fallback bundle if GitHub rejects the SSH key.
+
 Run the remote authorization check:
 
 ```powershell
