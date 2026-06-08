@@ -162,6 +162,19 @@ ExpectThrows<InvalidOperationException>(
             BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, timestampWindowMs: 0)))),
     "Connection launch requires a non-zero transport timestamp window.");
 
+ExpectThrows<InvalidOperationException>(
+    () => stateClient.BuildConnectionLaunchRequest(
+        stateClient.BuildPreflightValidatedState(
+            pairedState,
+            BuildSnapshot(BuildPlan(
+                peerDeviceId: "mac-1",
+                fingerprint: Fingerprint,
+                liveReady: true,
+                transportKind: CoreTransportKind.AppleNative,
+                adapterKind: ConnectionLaunchAdapterKind.AppleNative,
+                adapterBinding: "apple native bypass")))),
+    "Windows connection launch must not use AppleNative transport; Apple-to-Apple stays on the Apple native path.");
+
 var preflightOnlyRequest = stateClient.BuildConnectionLaunchRequest(
     stateClient.BuildPreflightValidatedState(
         pairedState,
@@ -347,11 +360,13 @@ static ConnectionPreflightPlan BuildPlan(
     string selectedCandidatePair = "WebRtcDataChannel/preflight-candidate",
     string? relayId = null,
     ulong timestampWindowMs = 10_000,
+    CoreTransportKind transportKind = CoreTransportKind.WebRtcDataChannel,
+    ConnectionLaunchAdapterKind adapterKind = ConnectionLaunchAdapterKind.WebRtcDataChannel,
     IReadOnlyList<ChannelMapping>? channelMappings = null) =>
     new(
         peerDeviceId,
         fingerprint,
-        CoreTransportKind.WebRtcDataChannel,
+        transportKind,
         CoreTransportAuditCode.WebRtcInterop,
         RelayRequired: false,
         RelayAllowed: true,
@@ -363,7 +378,7 @@ static ConnectionPreflightPlan BuildPlan(
         (nuint)20,
         channelMappings ?? DefaultChannelMappings(),
         Enumerable.Range(0, digestLength).Select(value => (byte)value).ToArray(),
-        ConnectionLaunchAdapterKind.WebRtcDataChannel,
+        adapterKind,
         liveReady,
         adapterBinding,
         localEndpoint,

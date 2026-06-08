@@ -67,6 +67,12 @@ public sealed record ConnectionPreflightPlan(
             throw new InvalidOperationException("Connection launch requires a concrete transport adapter kind.");
         }
 
+        if (TransportKind == CoreTransportKind.AppleNative
+            || AdapterKind == ConnectionLaunchAdapterKind.AppleNative)
+        {
+            throw new InvalidOperationException("Windows connection launch must not use AppleNative transport; Apple-to-Apple stays on the Apple native path.");
+        }
+
         if (string.IsNullOrWhiteSpace(AdapterBinding))
         {
             throw new InvalidOperationException("Connection launch requires an adapter binding description.");
