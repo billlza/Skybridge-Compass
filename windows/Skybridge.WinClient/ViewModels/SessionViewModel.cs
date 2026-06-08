@@ -1268,37 +1268,51 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanUseDiscoveryBrowser() => CanUseDeviceDiscovery();
 
     private bool CanPrepareManualConnection() =>
-        CanUseDeviceDiscovery()
-        && _manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort);
+        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            _manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort));
 
     private bool CanUseCrossNetworkConnection() =>
         _workspaceCommandStateClient.CanUseCrossNetworkConnection(IsBusy, IsDeviceDiscoverySelected);
 
     private bool CanScanQRCode() =>
-        CanUseCrossNetworkConnection()
-        && _crossNetworkConnectionClient.CanScanQrCode(CrossNetworkQrInput);
+        _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            _crossNetworkConnectionClient.CanScanQrCode(CrossNetworkQrInput));
 
     private bool CanCopyConnectionCode() =>
-        CanUseCrossNetworkConnection()
-        && _crossNetworkConnectionClient.CanCopyCode(CrossNetworkGeneratedCode);
+        _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            _crossNetworkConnectionClient.CanCopyCode(CrossNetworkGeneratedCode));
 
     private bool CanConnectConnectionCode() =>
-        CanUseCrossNetworkConnection()
-        && _crossNetworkConnectionClient.CanConnectWithCode(CrossNetworkCodeInput);
+        _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            _crossNetworkConnectionClient.CanConnectWithCode(CrossNetworkCodeInput));
 
     private bool CanParseAdvertisement() =>
-        CanUseDeviceDiscovery()
-        && _discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord);
+        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            _discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord));
 
     private bool CanValidatePairingCode() =>
-        CanUseDeviceDiscovery()
-        && _pairingMaterialClient.CanValidate(PairingConnectionCode);
+        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            _pairingMaterialClient.CanValidate(PairingConnectionCode));
 
     private bool CanPrepareConnection() =>
-        CanUseDeviceDiscovery()
-        && _connectionWorkspaceStateClient.CanPreparePreflight(
-            _validatedDiscoveredPeer,
-            _validatedPairingMaterial);
+        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            _connectionWorkspaceStateClient.CanPreparePreflight(
+                _validatedDiscoveredPeer,
+                _validatedPairingMaterial));
 
     private bool CanRefreshUsbManagement() =>
         _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsUsbManagementSelected);

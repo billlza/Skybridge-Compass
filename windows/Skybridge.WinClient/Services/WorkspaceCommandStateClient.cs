@@ -4,7 +4,17 @@ public interface IWorkspaceCommandStateClient
 {
     bool CanUseDeviceDiscovery(bool isBusy, bool isDeviceDiscoverySelected);
 
+    bool CanUseDeviceDiscoveryAction(
+        bool isBusy,
+        bool isDeviceDiscoverySelected,
+        bool isActionReady);
+
     bool CanUseCrossNetworkConnection(bool isBusy, bool isDeviceDiscoverySelected);
+
+    bool CanUseCrossNetworkConnectionAction(
+        bool isBusy,
+        bool isDeviceDiscoverySelected,
+        bool isActionReady);
 
     bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected);
 
@@ -16,8 +26,20 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
     public bool CanUseDeviceDiscovery(bool isBusy, bool isDeviceDiscoverySelected) =>
         !isBusy && isDeviceDiscoverySelected;
 
+    public bool CanUseDeviceDiscoveryAction(
+        bool isBusy,
+        bool isDeviceDiscoverySelected,
+        bool isActionReady) =>
+        CanUseDeviceDiscovery(isBusy, isDeviceDiscoverySelected) && isActionReady;
+
     public bool CanUseCrossNetworkConnection(bool isBusy, bool isDeviceDiscoverySelected) =>
         CanUseDeviceDiscovery(isBusy, isDeviceDiscoverySelected);
+
+    public bool CanUseCrossNetworkConnectionAction(
+        bool isBusy,
+        bool isDeviceDiscoverySelected,
+        bool isActionReady) =>
+        CanUseCrossNetworkConnection(isBusy, isDeviceDiscoverySelected) && isActionReady;
 
     public bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected) =>
         !isBusy && isFeatureSelected;

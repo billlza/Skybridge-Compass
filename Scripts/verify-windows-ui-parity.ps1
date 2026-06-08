@@ -632,12 +632,16 @@ foreach ($workspaceCommandStateSignal in @(
     "public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient",
     "WorkspaceCommandGateRequest",
     "CanUseDeviceDiscovery",
+    "CanUseDeviceDiscoveryAction",
     "CanUseCrossNetworkConnection",
+    "CanUseCrossNetworkConnectionAction",
     "CanUseWorkspaceFeature",
     "BuildActionGateSnapshot",
     "new WorkspaceCommandStateClient()",
     "_workspaceCommandStateClient.CanUseDeviceDiscovery(IsBusy, IsDeviceDiscoverySelected)",
+    "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnection(IsBusy, IsDeviceDiscoverySelected)",
+    "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsUsbManagementSelected)",
     "_workspaceCommandStateClient.BuildActionGateSnapshot(",
     "new WorkspaceCommandGateRequest("
@@ -656,6 +660,9 @@ foreach ($viewModelWorkspaceCommandGate in @(
 )) {
     Assert-True -Condition (-not $sessionViewModel.Contains($viewModelWorkspaceCommandGate)) -Message "SessionViewModel must source workspace feature command enablement from WorkspaceCommandStateClient instead of inline gate: $viewModelWorkspaceCommandGate"
 }
+
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "CanUseDeviceDiscovery\(\)\s*&&")) -Message "SessionViewModel must let WorkspaceCommandStateClient compose Device Discovery action readiness with busy/selection state."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "CanUseCrossNetworkConnection\(\)\s*&&")) -Message "SessionViewModel must let WorkspaceCommandStateClient compose Cross-network action readiness with busy/selection state."
 
 foreach ($workspaceActionRoleSignal in @(
     "BuildInitialSurfaces",

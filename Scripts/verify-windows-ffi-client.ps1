@@ -927,7 +927,9 @@ foreach ($signal in @(
     "public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient",
     "WorkspaceCommandGateRequest",
     "CanUseDeviceDiscovery",
+    "CanUseDeviceDiscoveryAction",
     "CanUseCrossNetworkConnection",
+    "CanUseCrossNetworkConnectionAction",
     "CanUseWorkspaceFeature",
     "BuildActionGateSnapshot",
     "WorkspaceActionGateSnapshot"
