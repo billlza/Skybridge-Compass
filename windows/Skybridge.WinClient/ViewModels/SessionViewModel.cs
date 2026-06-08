@@ -33,6 +33,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IFeatureCatalogClient _featureCatalogClient;
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
+    private readonly SessionEngineActions _sessionEngineActions;
     private readonly WorkspaceCommandGateCoordinator _workspaceCommandGateCoordinator;
     private readonly WorkspaceCommandAvailability _workspaceCommandAvailability;
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
@@ -237,6 +238,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => IsBusy = value,
             _workspaceStatusPatchApplier,
             dependencies.WorkspaceErrorStatusClient);
+        _sessionEngineActions = new SessionEngineActions(
+            _engineClient,
+            _workspaceBusyCoordinator,
+            _sessionStatusClient,
+            value => StatusMessage = value);
         var readOnlyWorkspaceRefreshCoordinator = new ReadOnlyWorkspaceRefreshCoordinator(
             _workspaceBusyCoordinator,
             _coreDiagnosticsClient,
@@ -951,13 +957,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RefreshSettingsCommand { get; }
 
     private Task ConnectAsync() =>
-        RunSessionEngineActionAsync(SessionStatusAction.Connect, _engineClient.ConnectAsync);
+        _sessionEngineActions.ConnectAsync();
 
     private Task DisconnectAsync() =>
-        RunSessionEngineActionAsync(SessionStatusAction.Disconnect, _engineClient.DisconnectAsync);
+        _sessionEngineActions.DisconnectAsync();
 
     private Task SendHeartbeatAsync() =>
-        RunSessionEngineActionAsync(SessionStatusAction.Heartbeat, _engineClient.SendHeartbeatAsync);
+        _sessionEngineActions.SendHeartbeatAsync();
 
     private Task StartDiscoveryAsync() =>
         RunDiscoveryBrowserAsync(DiscoveryBrowserAction.Start);
@@ -1173,18 +1179,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool CanRefreshSettings() =>
         _workspaceCommandAvailability.CanRefreshSettings();
-
-    private async Task RunSessionEngineActionAsync(
-        SessionStatusAction action,
-        Func<Task> engineAction)
-    {
-        await _workspaceBusyCoordinator.RunAsync(WorkspaceErrorScope.Session, async () =>
-        {
-            StatusMessage = _sessionStatusClient.BuildPendingStatus(action);
-            await engineAction();
-            StatusMessage = _sessionStatusClient.BuildCompletedStatus(action);
-        });
-    }
 
     private Task RunDeviceDiscoveryActionAsync(Func<Task> action) =>
         _workspaceBusyCoordinator.RunAsync(WorkspaceErrorScope.DeviceDiscovery, action);
