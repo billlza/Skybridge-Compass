@@ -107,6 +107,7 @@ $workspaceActionSurfaceLoaderPath = Join-Path $RepoRoot "windows/Skybridge.WinCl
 $workspaceActionRenderContextBuilderPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionRenderContextBuilder.cs"
 $workspaceShellRefreshCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceShellRefreshCoordinator.cs"
 $workspaceShellNotificationCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceShellNotificationCatalog.cs"
+$workspaceShellStateAccessorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceShellStateAccessor.cs"
 $workspaceViewStateBuilderPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceViewStateBuilder.cs"
 $workspaceStartupStateBuilderPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStartupStateBuilder.cs"
 $workspaceStatusPatchApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStatusPatchApplier.cs"
@@ -151,7 +152,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -175,6 +176,7 @@ $workspaceActionSurfaceLoader = Get-Content -Raw -LiteralPath $workspaceActionSu
 $workspaceActionRenderContextBuilder = Get-Content -Raw -LiteralPath $workspaceActionRenderContextBuilderPath
 $workspaceShellRefreshCoordinator = Get-Content -Raw -LiteralPath $workspaceShellRefreshCoordinatorPath
 $workspaceShellNotificationCatalog = Get-Content -Raw -LiteralPath $workspaceShellNotificationCatalogPath
+$workspaceShellStateAccessor = Get-Content -Raw -LiteralPath $workspaceShellStateAccessorPath
 $workspaceViewStateBuilder = Get-Content -Raw -LiteralPath $workspaceViewStateBuilderPath
 $workspaceStartupStateBuilder = Get-Content -Raw -LiteralPath $workspaceStartupStateBuilderPath
 $workspaceStatusPatchApplier = Get-Content -Raw -LiteralPath $workspaceStatusPatchApplierPath
@@ -193,7 +195,7 @@ $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connection
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $remoteDesktopProfileSelectionCoordinator = Get-Content -Raw -LiteralPath $remoteDesktopProfileSelectionCoordinatorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceShellStateAccessor + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -918,7 +920,7 @@ foreach ($renderContextBuilderSignal in @(
     Assert-Contains -Text $workspaceActionRenderContextBuilder -Needle $renderContextBuilderSignal -Message "WorkspaceActionRenderContextBuilder contract missing: $renderContextBuilderSignal"
 }
 Assert-Contains -Text $sessionViewModelSource -Needle "new WorkspaceActionRenderContextBuilder(" -Message "SessionViewModel must compose action render contexts through WorkspaceActionRenderContextBuilder."
-Assert-Contains -Text $sessionViewModelSource -Needle "BuildWorkspaceActionRenderState()" -Message "SessionViewModel must provide a single render state snapshot to WorkspaceActionRenderContextBuilder."
+Assert-Contains -Text $sessionViewModelSource -Needle "_workspaceShellStateAccessor.BuildActionRenderState" -Message "SessionViewModel must provide a single render state snapshot through WorkspaceShellStateAccessor."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("BuildWorkspaceActionGateSnapshot")) -Message "SessionViewModel must build workspace action gates through WorkspaceActionRenderContextBuilder."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("BuildWorkspaceActionRenderContext")) -Message "SessionViewModel must build action render contexts through WorkspaceActionRenderContextBuilder."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("new WorkspaceCommandGateRequest(")) -Message "SessionViewModel must not construct workspace command gate requests directly."
@@ -942,25 +944,64 @@ foreach ($viewStateBuilderSignal in @(
     Assert-Contains -Text $workspaceViewStateBuilder -Needle $viewStateBuilderSignal -Message "WorkspaceViewStateBuilder contract missing: $viewStateBuilderSignal"
 }
 foreach ($sessionViewModelViewStateSignal in @(
-    "new WorkspaceViewStateBuilder()",
-    "_workspaceViewStateBuilder.BuildDashboardMetricsRequest(",
-    "_workspaceViewStateBuilder.BuildCommandGateState(",
-    "_workspaceViewStateBuilder.BuildActionRenderState("
+    "new WorkspaceViewStateBuilder()"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelViewStateSignal -Message "SessionViewModel must delegate request/state construction through WorkspaceViewStateBuilder: $sessionViewModelViewStateSignal"
 }
 Assert-Contains -Text $discoveryBrowserActions -Needle "_viewStateBuilder.BuildDiscoveryBrowserRequest(" -Message "DiscoveryBrowserActions must build browser requests through WorkspaceViewStateBuilder."
 Assert-Contains -Text $crossNetworkConnectionActions -Needle "_viewStateBuilder.BuildCrossNetworkConnectionRequest(" -Message "CrossNetworkConnectionActions must build cross-network requests through WorkspaceViewStateBuilder."
 Assert-Contains -Text $connectionWorkspaceActions -Needle "_viewStateBuilder.BuildManualConnectionRequest(" -Message "ConnectionWorkspaceActions must build manual connection requests through WorkspaceViewStateBuilder."
+foreach ($workspaceShellStateAccessorViewStateSignal in @(
+    "_viewStateBuilder.BuildDashboardMetricsRequest(",
+    "_viewStateBuilder.BuildCommandGateState(",
+    "_viewStateBuilder.BuildActionRenderState("
+)) {
+    Assert-Contains -Text $workspaceShellStateAccessor -Needle $workspaceShellStateAccessorViewStateSignal -Message "WorkspaceShellStateAccessor must build shell state through WorkspaceViewStateBuilder: $workspaceShellStateAccessorViewStateSignal"
+}
 foreach ($sessionViewModelDirectViewStateConstructionPattern in @(
     "new\s+DiscoveryBrowserRequest\s*\(",
     "new\s+ManualConnectionRequest\s*\(",
     "new\s+CrossNetworkConnectionRequest\s*\(",
-    "BuildDashboardMetricsRequest\(\)\s*=>\s*new\s*\(",
-    "BuildWorkspaceCommandGateState\(\)\s*=>\s*new\s*\(",
-    "BuildWorkspaceActionRenderState\(\)\s*=>\s*new\s*\("
+    "BuildDashboardMetricsRequest\(\)\s*=>",
+    "BuildWorkspaceCommandGateState\(\)\s*=>",
+    "BuildWorkspaceActionRenderState\(\)\s*=>",
+    "_workspaceViewStateBuilder\.BuildDashboardMetricsRequest\(",
+    "_workspaceViewStateBuilder\.BuildCommandGateState\(",
+    "_workspaceViewStateBuilder\.BuildActionRenderState\("
 )) {
     Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, $sessionViewModelDirectViewStateConstructionPattern)) -Message "SessionViewModel must not construct request/state snapshots directly: $sessionViewModelDirectViewStateConstructionPattern"
+}
+
+foreach ($workspaceShellStateAccessorSignal in @(
+    "internal sealed class WorkspaceShellStateAccessor",
+    "WorkspaceViewStateBuilder viewStateBuilder",
+    "Func<EngineConnectionState> getConnectionState",
+    "Func<int> getTransferTaskCount",
+    "Func<bool> getIsBusy",
+    "Func<FeatureEntry> getSelectedFeature",
+    "Func<ConnectionWorkspaceValidatedState> getValidatedState",
+    "BuildDashboardMetricsRequest()",
+    "_viewStateBuilder.BuildDashboardMetricsRequest(",
+    "_getTransferTaskCount()",
+    "BuildCommandGateState()",
+    "_viewStateBuilder.BuildCommandGateState(",
+    "_getValidatedState()",
+    "BuildActionRenderState()",
+    "var selectedFeature = _getSelectedFeature()",
+    "_viewStateBuilder.BuildActionRenderState(",
+    "selectedFeature.Title"
+)) {
+    Assert-Contains -Text $workspaceShellStateAccessor -Needle $workspaceShellStateAccessorSignal -Message "WorkspaceShellStateAccessor contract missing: $workspaceShellStateAccessorSignal"
+}
+foreach ($sessionViewModelShellStateAccessorSignal in @(
+    "new WorkspaceShellStateAccessor(",
+    "() => FileTransferQueue.Count",
+    "() => _connectionInputCoordinator.ValidatedState",
+    "_workspaceShellStateAccessor.BuildCommandGateState",
+    "_workspaceShellStateAccessor.BuildDashboardMetricsRequest",
+    "_workspaceShellStateAccessor.BuildActionRenderState"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelShellStateAccessorSignal -Message "SessionViewModel must source shell state through WorkspaceShellStateAccessor: $sessionViewModelShellStateAccessorSignal"
 }
 
 foreach ($shellRefreshCoordinatorSignal in @(
@@ -1249,7 +1290,7 @@ foreach ($workspaceCommandAvailabilitySignal in @(
 foreach ($sessionViewModelGateSignal in @(
     "new WorkspaceCommandGateCoordinator(",
     "new WorkspaceCommandAvailability(",
-    "BuildWorkspaceCommandGateState()",
+    "_workspaceShellStateAccessor.BuildCommandGateState",
     "_workspaceCommandAvailability.CanConnect()",
     "_workspaceCommandAvailability.CanDisconnect()",
     "_workspaceCommandAvailability.CanSendHeartbeat()",

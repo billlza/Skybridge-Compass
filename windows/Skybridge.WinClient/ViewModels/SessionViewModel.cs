@@ -37,6 +37,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly SessionEngineStateProjector _sessionEngineStateProjector;
     private readonly WorkspaceCommandGateCoordinator _workspaceCommandGateCoordinator;
     private readonly WorkspaceCommandAvailability _workspaceCommandAvailability;
+    private readonly WorkspaceShellStateAccessor _workspaceShellStateAccessor;
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
     private readonly WorkspaceActionSurfaceTargets _workspaceActionSurfaceTargets;
     private readonly WorkspaceActionSurfaceLoader _workspaceActionSurfaceLoader;
@@ -187,9 +188,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _pairingMaterialClient,
             _connectionWorkspaceStateClient);
         _workspaceViewStateBuilder = new WorkspaceViewStateBuilder();
-        _workspaceCommandAvailability = new WorkspaceCommandAvailability(
-            _workspaceCommandGateCoordinator,
-            BuildWorkspaceCommandGateState);
         _remoteDesktopProfileSelectionCoordinator = new RemoteDesktopProfileSelectionCoordinator(
             _remoteDesktopProfileCatalogClient,
             value => StatusMessage = value);
@@ -410,6 +408,32 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SettingsDetails = collections.SettingsDetails;
         _selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;
         _selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;
+        _workspaceShellStateAccessor = new WorkspaceShellStateAccessor(
+            _workspaceViewStateBuilder,
+            () => ConnectionState,
+            () => FileTransferQueue.Count,
+            () => IsBusy,
+            () => SelectedFeature,
+            () => ManualConnectionHost,
+            () => ManualConnectionPort,
+            () => CrossNetworkQrInput,
+            () => CrossNetworkCodeInput,
+            () => CrossNetworkGeneratedCode,
+            () => DiscoveryService,
+            () => DiscoveryTxtRecord,
+            () => PairingConnectionCode,
+            () => _connectionInputCoordinator.ValidatedState,
+            () => IsUsbManagementSelected,
+            () => IsFileTransferSelected,
+            () => IsRemoteDesktopSelected,
+            () => IsQuantumSelected,
+            () => IsSystemMonitorSelected,
+            () => IsSettingsSelected,
+            () => ConnectionStatus,
+            () => PerformanceStatus);
+        _workspaceCommandAvailability = new WorkspaceCommandAvailability(
+            _workspaceCommandGateCoordinator,
+            _workspaceShellStateAccessor.BuildCommandGateState);
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         var commandBindings = new WorkspaceCommandBindings(
             ConnectAsync,
@@ -498,8 +522,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceActionRenderContextBuilder,
             _dashboardMetricsUpdater,
             _topBarStatusUpdater,
-            BuildDashboardMetricsRequest,
-            BuildWorkspaceActionRenderState,
+            _workspaceShellStateAccessor.BuildDashboardMetricsRequest,
+            _workspaceShellStateAccessor.BuildActionRenderState,
             OnPropertyChanged,
             WorkspaceShellNotificationCatalog.SelectedFeaturePropertyNames,
             WorkspaceShellNotificationCatalog.ConnectionStatusPropertyName);
@@ -1167,41 +1191,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshTopBarStatus() =>
         _workspaceShellRefreshCoordinator.RefreshTopBarStatus();
-
-    private DashboardMetricsRequest BuildDashboardMetricsRequest() =>
-        _workspaceViewStateBuilder.BuildDashboardMetricsRequest(
-            ConnectionState,
-            FileTransferQueue.Count,
-            IsBusy);
-
-    private WorkspaceCommandGateState BuildWorkspaceCommandGateState() =>
-        _workspaceViewStateBuilder.BuildCommandGateState(
-            IsBusy,
-            ConnectionState,
-            SelectedFeature,
-            ManualConnectionHost,
-            ManualConnectionPort,
-            CrossNetworkQrInput,
-            CrossNetworkCodeInput,
-            CrossNetworkGeneratedCode,
-            DiscoveryService,
-            DiscoveryTxtRecord,
-            PairingConnectionCode,
-            _connectionInputCoordinator.ValidatedState);
-
-    private WorkspaceActionRenderState BuildWorkspaceActionRenderState() =>
-        _workspaceViewStateBuilder.BuildActionRenderState(
-            IsBusy,
-            IsUsbManagementSelected,
-            IsFileTransferSelected,
-            IsRemoteDesktopSelected,
-            IsQuantumSelected,
-            IsSystemMonitorSelected,
-            IsSettingsSelected,
-            ConnectionState,
-            ConnectionStatus,
-            PerformanceStatus,
-            SelectedFeature.Title);
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
     {
