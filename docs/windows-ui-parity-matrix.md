@@ -73,7 +73,7 @@ All action buttons must be rendered through these shared templates. Feature sect
 
 ## Verification
 
-- `Scripts/verify-windows-ui-parity-matrix.ps1` verifies this matrix, the pinned mac baseline objects, `MainWindow.xaml`, `FeatureCatalogClient`, and `WorkspaceActionCatalogClient` agree on feature order, workspace visibility order, top-bar/session anchors, and per-surface action order.
+- `Scripts/verify-windows-ui-parity-matrix.ps1` parses these markdown tables and verifies exact row counts, row order, duplicate prevention, pinned mac baseline objects, `MainWindow.xaml`, `FeatureCatalogClient`, and `WorkspaceActionCatalogClient` agree on feature order, workspace visibility order, top-bar/session anchors, and per-surface action order.
 - The matrix smoke also verifies shared action templates and rejects inline XAML action buttons outside the approved templates.
 - `Scripts/verify-windows-ui-action-order.ps1` remains the executable catalog smoke for action keys and automation ids.
 - `Scripts/verify-windows-ui-parity.ps1` remains the broader static modularity gate.

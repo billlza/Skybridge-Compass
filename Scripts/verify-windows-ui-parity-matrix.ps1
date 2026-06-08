@@ -53,6 +53,32 @@ function Assert-Ordered {
     }
 }
 
+function Assert-SequenceEqual {
+    param(
+        [string[]]$Actual,
+        [string[]]$Expected,
+        [string]$Context
+    )
+
+    Assert-True -Condition ($Actual.Count -eq $Expected.Count) -Message "$Context count mismatch. Expected $($Expected.Count), got $($Actual.Count). Actual=[$($Actual -join ', ')]"
+    for ($i = 0; $i -lt $Expected.Count; $i++) {
+        Assert-True -Condition ($Actual[$i] -eq $Expected[$i]) -Message "$Context mismatch at index $i. Expected '$($Expected[$i])', got '$($Actual[$i])'."
+    }
+}
+
+function Assert-NoDuplicates {
+    param(
+        [string[]]$Values,
+        [string]$Context
+    )
+
+    $duplicates = @($Values |
+        Group-Object |
+        Where-Object { $_.Count -gt 1 } |
+        ForEach-Object { $_.Name })
+    Assert-True -Condition ($duplicates.Count -eq 0) -Message "$Context contains duplicate values: $($duplicates -join ', ')"
+}
+
 function Join-ProcessArguments {
     param([string[]]$Arguments)
 
@@ -80,6 +106,108 @@ function Test-GitObjectExists {
     $process = [System.Diagnostics.Process]::Start($startInfo)
     $process.WaitForExit()
     return $process.ExitCode -eq 0
+}
+
+function Split-MarkdownTableLine {
+    param([string]$Line)
+
+    return @($Line.Trim().Trim("|").Split("|") | ForEach-Object { $_.Trim() })
+}
+
+function Get-MarkdownTableRows {
+    param(
+        [string]$Text,
+        [string]$Heading,
+        [string[]]$Columns
+    )
+
+    $headingMarker = "## $Heading"
+    $start = $Text.IndexOf($headingMarker, [StringComparison]::Ordinal)
+    Assert-True -Condition ($start -ge 0) -Message "Missing markdown heading: $headingMarker"
+
+    $next = $Text.IndexOf("`n## ", $start + $headingMarker.Length, [StringComparison]::Ordinal)
+    if ($next -lt 0) {
+        $next = $Text.Length
+    }
+
+    $section = $Text.Substring($start, $next - $start)
+    $tableLines = @($section -split "\r?\n" | Where-Object { $_.Trim().StartsWith("|") })
+    Assert-True -Condition ($tableLines.Count -ge 2) -Message "Markdown heading '$Heading' must contain a table."
+
+    $header = Split-MarkdownTableLine -Line $tableLines[0]
+    Assert-SequenceEqual -Actual $header -Expected $Columns -Context "$Heading table header"
+
+    $separator = Split-MarkdownTableLine -Line $tableLines[1]
+    Assert-True -Condition ($separator.Count -eq $Columns.Count) -Message "$Heading table separator column count mismatch."
+    foreach ($cell in $separator) {
+        Assert-True -Condition ($cell -match '^-+$') -Message "$Heading table separator must contain only dashes: $cell"
+    }
+
+    $rows = @()
+    for ($i = 2; $i -lt $tableLines.Count; $i++) {
+        $cells = Split-MarkdownTableLine -Line $tableLines[$i]
+        Assert-True -Condition ($cells.Count -eq $Columns.Count) -Message "$Heading table row $($i - 1) column count mismatch: $($tableLines[$i])"
+
+        $row = [ordered]@{}
+        for ($columnIndex = 0; $columnIndex -lt $Columns.Count; $columnIndex++) {
+            $row[$Columns[$columnIndex]] = $cells[$columnIndex]
+        }
+
+        $rows += [pscustomobject]$row
+    }
+
+    return $rows
+}
+
+function Get-MarkdownCodeValues {
+    param([string]$Text)
+
+    return @([regex]::Matches($Text, '`([^`]+)`') | ForEach-Object { $_.Groups[1].Value })
+}
+
+function Get-SingleMarkdownCodeValue {
+    param(
+        [string]$Text,
+        [string]$Context
+    )
+
+    $values = @(Get-MarkdownCodeValues -Text $Text)
+    Assert-True -Condition ($values.Count -eq 1) -Message "$Context must contain exactly one markdown code value. Actual=[$($values -join ', ')]"
+    return $values[0]
+}
+
+function Get-CSharpEnumMembers {
+    param(
+        [string]$Text,
+        [string]$EnumName
+    )
+
+    $start = $Text.IndexOf("public enum $EnumName", [StringComparison]::Ordinal)
+    Assert-True -Condition ($start -ge 0) -Message "Missing enum: $EnumName"
+    $openBrace = $Text.IndexOf("{", $start, [StringComparison]::Ordinal)
+    $closeBrace = $Text.IndexOf("}", $openBrace, [StringComparison]::Ordinal)
+    Assert-True -Condition ($openBrace -gt $start -and $closeBrace -gt $openBrace) -Message "Cannot slice enum body: $EnumName"
+
+    $body = $Text.Substring($openBrace + 1, $closeBrace - $openBrace - 1)
+    return @($body -split "\r?\n" |
+        ForEach-Object { $_.Trim().TrimEnd(",") } |
+        Where-Object { $_ -match '^[A-Za-z][A-Za-z0-9_]*$' })
+}
+
+function Get-WorkspaceActionSurfaceArray {
+    param(
+        [string]$Text,
+        [string]$ArrayName
+    )
+
+    $start = $Text.IndexOf("WorkspaceActionSurface[] $ArrayName", [StringComparison]::Ordinal)
+    Assert-True -Condition ($start -ge 0) -Message "Missing WorkspaceActionSurface array: $ArrayName"
+    $end = $Text.IndexOf("};", $start, [StringComparison]::Ordinal)
+    Assert-True -Condition ($end -gt $start) -Message "Cannot slice WorkspaceActionSurface array: $ArrayName"
+
+    $slice = $Text.Substring($start, $end - $start)
+    return @([regex]::Matches($slice, 'WorkspaceActionSurface\.([A-Za-z0-9_]+)') |
+        ForEach-Object { $_.Groups[1].Value })
 }
 
 function Get-MethodSlice {
@@ -143,6 +271,26 @@ $featureRows = @(
     [pscustomobject]@{ Order = "7"; Id = "SystemMonitor"; Title = "System Monitor"; Gate = "IsSystemMonitorSelected"; Heading = 'Text="System Monitor"'; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls"); Anchors = @("WorkspaceAction.SystemMonitorControls.Monitoring", "WorkspaceAction.SystemMonitorControls.StopMonitoring", "WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring") },
     [pscustomobject]@{ Order = "8"; Id = "Settings"; Title = "Settings"; Gate = "IsSettingsSelected"; Heading = 'Text="Settings"'; Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance"); Anchors = @("WorkspaceAction.SettingsToolbar.ExportSettings", "WorkspaceAction.SettingsToolbar.OpenSystemPreferences", "WorkspaceAction.SettingsMaintenance.ApplySettings") }
 )
+
+$navigationMatrixRows = Get-MarkdownTableRows `
+    -Text $matrix `
+    -Heading "Navigation And Workspace Matrix" `
+    -Columns @("Mac order", "Windows feature id", "Visible title", "XAML visibility gate", "Required action surfaces", "Required automation anchors")
+Assert-True -Condition ($navigationMatrixRows.Count -eq $featureRows.Count) -Message "Navigation matrix row count must match the expected mac feature count."
+Assert-NoDuplicates -Values @($navigationMatrixRows | ForEach-Object { $_.'Mac order' }) -Context "Navigation matrix mac order"
+Assert-NoDuplicates -Values @($navigationMatrixRows | ForEach-Object { $_.'Windows feature id' }) -Context "Navigation matrix feature id"
+
+for ($featureIndex = 0; $featureIndex -lt $featureRows.Count; $featureIndex++) {
+    $expected = $featureRows[$featureIndex]
+    $actual = $navigationMatrixRows[$featureIndex]
+
+    Assert-True -Condition ($actual.'Mac order' -eq $expected.Order) -Message "Navigation matrix order mismatch for $($expected.Id)."
+    Assert-True -Condition ($actual.'Windows feature id' -eq $expected.Id) -Message "Navigation matrix feature id mismatch at row $($expected.Order)."
+    Assert-True -Condition ($actual.'Visible title' -eq $expected.Title) -Message "Navigation matrix title mismatch for $($expected.Id)."
+    Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'XAML visibility gate') -Expected @($expected.Gate) -Context "Navigation matrix gate for $($expected.Id)"
+    Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'Required action surfaces') -Expected $expected.Surfaces -Context "Navigation matrix surfaces for $($expected.Id)"
+    Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'Required automation anchors') -Expected $expected.Anchors -Context "Navigation matrix anchors for $($expected.Id)"
+}
 
 foreach ($row in $featureRows) {
     Assert-Contains -Text $matrix -Needle "| $($row.Order) | $($row.Id) | $($row.Title) | ``$($row.Gate)`` |" -Message "UI parity matrix missing feature row: $($row.Id)"
@@ -310,11 +458,51 @@ $surfaceActions = @(
     [pscustomobject]@{ Surface = "SettingsMaintenance"; Method = "BuildSettingsMaintenanceActions"; Keys = @('"ApplySettings"', '"RestoreDefaults"', '"ResetMonitorData"') }
 )
 
+$expectedSurfaceNames = @($surfaceActions | ForEach-Object { $_.Surface })
+$actionMatrixRows = Get-MarkdownTableRows `
+    -Text $matrix `
+    -Heading "Action Order Matrix" `
+    -Columns @("Surface", "Required action key order")
+Assert-True -Condition ($actionMatrixRows.Count -eq $surfaceActions.Count) -Message "Action-order matrix row count must match expected surfaces."
+$actionMatrixSurfaceNames = @($actionMatrixRows | ForEach-Object { Get-SingleMarkdownCodeValue -Text $_.Surface -Context "Action-order matrix surface" })
+Assert-NoDuplicates -Values $actionMatrixSurfaceNames -Context "Action-order matrix surface"
+Assert-SequenceEqual -Actual $actionMatrixSurfaceNames -Expected $expectedSurfaceNames -Context "Action-order matrix surface order"
+
+$enumSurfaceNames = Get-CSharpEnumMembers -Text $actionCatalog -EnumName "WorkspaceActionSurface"
+Assert-SequenceEqual -Actual $enumSurfaceNames -Expected $expectedSurfaceNames -Context "WorkspaceActionSurface enum order"
+Assert-SequenceEqual -Actual (Get-WorkspaceActionSurfaceArray -Text $actionCatalog -ArrayName "InitialSurfaces") -Expected $expectedSurfaceNames -Context "WorkspaceActionCatalog InitialSurfaces order"
+
 foreach ($surface in $surfaceActions) {
+    $actionRow = @($actionMatrixRows | Where-Object { (Get-SingleMarkdownCodeValue -Text $_.Surface -Context "Action-order matrix surface") -eq $surface.Surface })
+    Assert-True -Condition ($actionRow.Count -eq 1) -Message "Action-order matrix must have exactly one row for surface: $($surface.Surface)"
+    $expectedKeys = @($surface.Keys | ForEach-Object { $_.Trim('"') })
+    Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actionRow[0].'Required action key order') -Expected $expectedKeys -Context "Action-order matrix keys for $($surface.Surface)"
+
     $slice = Get-MethodSlice -Text $actionCatalog -MethodName $surface.Method
     Assert-Ordered -Text $slice -Context "$($surface.Surface) action order" -Needles $surface.Keys
     Assert-Contains -Text $matrix -Needle "| ``$($surface.Surface)`` |" -Message "UI parity matrix missing action-order row: $($surface.Surface)"
     Assert-Contains -Text $actionOrderSmoke -Needle "WorkspaceActionSurface.$($surface.Surface)" -Message "UI action-order smoke missing surface: $($surface.Surface)"
+}
+
+$styleRows = Get-MarkdownTableRows `
+    -Text $matrix `
+    -Heading "Shared Style And Template Matrix" `
+    -Columns @("Region", "Required shared template", "Required panel/style ownership")
+$expectedStyleRows = @(
+    [pscustomobject]@{ Region = "Sidebar session actions"; Template = "SidebarWorkspaceActionButtonTemplate"; Panel = "VerticalWorkspaceActionItemsPanel" },
+    [pscustomobject]@{ Region = "Top-bar actions"; Template = "TopBarStatusActionButtonTemplate"; Panel = "HorizontalWorkspaceActionItemsPanel" },
+    [pscustomobject]@{ Region = "Dashboard quick actions"; Template = "DashboardQuickActionTemplate"; Panel = "DashboardQuickActionItemsPanel" },
+    [pscustomobject]@{ Region = "Workspace action surfaces"; Template = "WorkspaceActionButtonTemplate"; Panel = "HorizontalWorkspaceActionItemsPanel" },
+    [pscustomobject]@{ Region = "Final/manual connect action"; Template = "WorkspaceActionButtonWithDetailTemplate"; Panel = "HorizontalWorkspaceActionItemsPanel" }
+)
+Assert-True -Condition ($styleRows.Count -eq $expectedStyleRows.Count) -Message "Shared style/template matrix row count mismatch."
+Assert-NoDuplicates -Values @($styleRows | ForEach-Object { $_.Region }) -Context "Shared style/template matrix region"
+for ($styleIndex = 0; $styleIndex -lt $expectedStyleRows.Count; $styleIndex++) {
+    $expected = $expectedStyleRows[$styleIndex]
+    $actual = $styleRows[$styleIndex]
+    Assert-True -Condition ($actual.Region -eq $expected.Region) -Message "Shared style/template matrix region mismatch at row $styleIndex."
+    Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'Required shared template') -Expected @($expected.Template) -Context "Shared style/template template for $($expected.Region)"
+    Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $actual.'Required panel/style ownership') -Expected @($expected.Panel) -Context "Shared style/template panel for $($expected.Region)"
 }
 
 foreach ($matrixSignal in @(
