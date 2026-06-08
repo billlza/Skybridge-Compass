@@ -161,6 +161,12 @@ foreach ($signal in @(
     "Connection launch request fingerprint does not match pairing material.",
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
     "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
+    "IWindowsDnsSdBrowseClient",
+    "RecordingDnsSdBrowseClient",
+    "RecordingDiscoveryClient",
+    "DNS-SD query order",
+    "DnsServiceBrowse/DnsServiceResolve",
+    "desk-mac.local:11550",
     "DummyEngineClient().ConnectAsync",
     "adapter pending",
     "digestLength: 31",
@@ -259,7 +265,9 @@ Assert-Contains -Text $architecture -Needle "CoreDiscoveryClient" -Message "Arch
 
 foreach ($signal in @(
     "public interface IDiscoveryBrowserClient",
+    "public interface IWindowsDnsSdBrowseClient",
     "public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient",
+    "public sealed class PendingWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient",
     "BuildInputPolicy",
     "DiscoveryBrowserInputPolicy",
     "DefaultInputPolicy",
@@ -281,7 +289,13 @@ foreach ($signal in @(
     "_skybridge._udp",
     "_skybridge._tcp",
     "DnsServiceBrowse",
+    "DnsServiceResolve",
     "DnsServiceRegister",
+    "WindowsDnsSdBrowseRequest",
+    "WindowsDnsSdBrowseSnapshot",
+    "WindowsDnsSdResolvedTxtRecord",
+    "IWindowsDnsSdBrowseClient dnsSdBrowseClient",
+    "_dnsSdBrowseClient.BrowseAsync",
     "CoreDiscoveryClient",
     "pubKeyFP remains fingerprint-only"
 )) {

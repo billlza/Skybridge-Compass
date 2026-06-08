@@ -15,18 +15,32 @@ public interface IDiscoveryBrowserClient
     Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request);
 }
 
+public interface IWindowsDnsSdBrowseClient
+{
+    Task<WindowsDnsSdBrowseSnapshot> BrowseAsync(WindowsDnsSdBrowseRequest request);
+}
+
 public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
 {
     private static readonly string[] DefaultQueryOrder = { "_skybridge._udp", "_skybridge._tcp" };
     private const int ExtendedSearchDurationSeconds = 15;
     private readonly IDiscoveryClient _discoveryClient;
+    private readonly IWindowsDnsSdBrowseClient _dnsSdBrowseClient;
 
     public static DiscoveryBrowserInputPolicy DefaultInputPolicy { get; } =
         new(ExtendedSearchDurationSeconds, DefaultQueryOrder);
 
     public WindowsDiscoveryBrowserClient(IDiscoveryClient discoveryClient)
+        : this(discoveryClient, new PendingWindowsDnsSdBrowseClient())
+    {
+    }
+
+    public WindowsDiscoveryBrowserClient(
+        IDiscoveryClient discoveryClient,
+        IWindowsDnsSdBrowseClient dnsSdBrowseClient)
     {
         _discoveryClient = discoveryClient ?? throw new ArgumentNullException(nameof(discoveryClient));
+        _dnsSdBrowseClient = dnsSdBrowseClient ?? throw new ArgumentNullException(nameof(dnsSdBrowseClient));
     }
 
     public DiscoveryBrowserInputPolicy BuildInputPolicy() => DefaultInputPolicy;
@@ -82,29 +96,45 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
             return new DiscoveryBrowserSnapshot(DateTimeOffset.UtcNow, false, Array.Empty<DiscoveryBrowserPeerCandidate>(), facts);
         }
 
-        var peers = new List<DiscoveryBrowserPeerCandidate>();
+        var records = new List<WindowsDnsSdResolvedTxtRecord>();
         if (string.IsNullOrWhiteSpace(request.TxtRecord))
         {
-            facts.Add(new DiscoveryBrowserFact(
-                "Native browse",
-                "pending",
-                "No TXT record supplied; live DnsServiceBrowse resolution must feed CoreDiscoveryClient once wired."));
-            return new DiscoveryBrowserSnapshot(DateTimeOffset.UtcNow, true, peers, facts);
+            var browseSnapshot = await _dnsSdBrowseClient.BrowseAsync(
+                new WindowsDnsSdBrowseRequest(
+                    DefaultQueryOrder,
+                    request.Action,
+                    request.CompatibilityMode,
+                    request.ExtendedSearchSeconds));
+            facts.AddRange(browseSnapshot.Facts);
+            records.AddRange(browseSnapshot.Records);
         }
-
-        var service = string.IsNullOrWhiteSpace(request.Service)
-            ? DefaultQueryOrder[0]
-            : request.Service.Trim();
-        var peer = await _discoveryClient.ParseAdvertisementAsync(service, request.TxtRecord);
-        if (MatchesSearch(peer, request.SearchText))
+        else
         {
-            peers.Add(BuildPeerCandidate(peer));
+            var service = string.IsNullOrWhiteSpace(request.Service)
+                ? DefaultQueryOrder[0]
+                : request.Service.Trim();
+            records.Add(new WindowsDnsSdResolvedTxtRecord(
+                service,
+                request.TxtRecord,
+                "manual TXT input",
+                "",
+                0));
         }
 
-        facts.Add(new DiscoveryBrowserFact(
-            "Core TXT parse",
-            peer.DeviceId,
-            "Candidate came from CoreDiscoveryClient; pubKeyFP remains fingerprint-only until pairing material is validated."));
+        var peers = new List<DiscoveryBrowserPeerCandidate>();
+        foreach (var record in records)
+        {
+            var peer = await _discoveryClient.ParseAdvertisementAsync(record.Service, record.TxtRecord);
+            if (MatchesSearch(peer, request.SearchText))
+            {
+                peers.Add(BuildPeerCandidate(peer));
+            }
+
+            facts.Add(new DiscoveryBrowserFact(
+                "Core TXT parse",
+                peer.DeviceId,
+                $"Candidate came from {FormatRecordSource(record)}; pubKeyFP remains fingerprint-only until pairing material is validated."));
+        }
 
         return new DiscoveryBrowserSnapshot(DateTimeOffset.UtcNow, true, peers, facts);
     }
@@ -126,6 +156,18 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
 
     private static bool Contains(string value, string needle) =>
         value.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
+    private static string FormatRecordSource(WindowsDnsSdResolvedTxtRecord record)
+    {
+        if (string.IsNullOrWhiteSpace(record.InstanceName))
+        {
+            return record.Service;
+        }
+
+        return string.IsNullOrWhiteSpace(record.HostName)
+            ? $"{record.InstanceName} via {record.Service}"
+            : $"{record.InstanceName} at {record.HostName}:{record.Port} via {record.Service}";
+    }
 
     private static string FormatCapabilities(PeerCapabilities capabilities)
     {
@@ -164,6 +206,24 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
     }
 }
 
+public sealed class PendingWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
+{
+    public Task<WindowsDnsSdBrowseSnapshot> BrowseAsync(WindowsDnsSdBrowseRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        IReadOnlyList<DiscoveryBrowserFact> facts =
+        [
+            new(
+                "Native browse",
+                "pending",
+                "No TXT record supplied; live DnsServiceBrowse/DnsServiceResolve resolution must feed CoreDiscoveryClient once wired.")
+        ];
+
+        return Task.FromResult(new WindowsDnsSdBrowseSnapshot(Array.Empty<WindowsDnsSdResolvedTxtRecord>(), facts));
+    }
+}
+
 public sealed record DiscoveryBrowserRequest(
     DiscoveryBrowserAction Action,
     string Service,
@@ -199,3 +259,20 @@ public sealed record DiscoveryBrowserFact(
     string Label,
     string Value,
     string Detail);
+
+public sealed record WindowsDnsSdBrowseRequest(
+    IReadOnlyList<string> QueryOrder,
+    DiscoveryBrowserAction Action,
+    bool CompatibilityMode,
+    int ExtendedSearchSeconds);
+
+public sealed record WindowsDnsSdBrowseSnapshot(
+    IReadOnlyList<WindowsDnsSdResolvedTxtRecord> Records,
+    IReadOnlyList<DiscoveryBrowserFact> Facts);
+
+public sealed record WindowsDnsSdResolvedTxtRecord(
+    string Service,
+    string TxtRecord,
+    string InstanceName,
+    string HostName,
+    ushort Port);

@@ -149,6 +149,44 @@ await engine.SendHeartbeatAsync();
 await engine.DisconnectAsync();
 AssertEqual(EngineConnectionState.Disconnected, engine.State, "dummy disconnect state");
 
+var recordingDiscovery = new RecordingDiscoveryClient(peer);
+var recordingDnsSd = new RecordingDnsSdBrowseClient(new WindowsDnsSdBrowseSnapshot(
+    new[]
+    {
+        new WindowsDnsSdResolvedTxtRecord(
+            "_skybridge._udp",
+            "deviceId=mac-1;pubKeyFP=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff;platform=macOS;capabilities=webrtc,tcp;name=Desk Mac;version=v1",
+            "Desk Mac",
+            "desk-mac.local",
+            11550)
+    },
+    new[]
+    {
+        new DiscoveryBrowserFact(
+            "Native browse",
+            "resolved",
+            "Injected DNS-SD smoke record; production provider must use DnsServiceBrowse/DnsServiceResolve.")
+    }));
+var discoveryBrowser = new WindowsDiscoveryBrowserClient(recordingDiscovery, recordingDnsSd);
+var browserSnapshot = await discoveryBrowser.BuildReadOnlySnapshotAsync(
+    new DiscoveryBrowserRequest(
+        DiscoveryBrowserAction.Start,
+        "",
+        "",
+        "desk",
+        CompatibilityMode: false,
+        ExtendedSearchSeconds: 15));
+AssertEqual(1, recordingDnsSd.Requests.Count, "DNS-SD browse request count");
+AssertEqual("_skybridge._udp,_skybridge._tcp", string.Join(",", recordingDnsSd.Requests[0].QueryOrder), "DNS-SD query order");
+AssertEqual(1, recordingDiscovery.ParseCalls.Count, "discovery parser call count");
+AssertEqual("_skybridge._udp", recordingDiscovery.ParseCalls[0].Service, "discovery parser service");
+AssertEqual(1, browserSnapshot.Peers.Count, "DNS-SD Core-validated peer count");
+AssertContains(browserSnapshot.Peers[0].TrustSummary, "fingerprint only", "browser trust summary");
+AssertContains(
+    browserSnapshot.Facts.Last().Detail,
+    "desk-mac.local:11550",
+    "Core TXT parse fact source");
+
 Console.WriteLine("windows-connection-launch-smoke: ok");
 
 static ConnectionPreflightSnapshot BuildSnapshot(ConnectionPreflightPlan plan) =>
@@ -223,6 +261,55 @@ static void AssertEqual<T>(T expected, T actual, string label)
     if (!EqualityComparer<T>.Default.Equals(expected, actual))
     {
         throw new InvalidOperationException($"{label}: expected '{expected}', got '{actual}'.");
+    }
+}
+
+static void AssertContains(string text, string expected, string label)
+{
+    if (!text.Contains(expected, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException($"{label}: expected '{text}' to contain '{expected}'.");
+    }
+}
+
+sealed class RecordingDnsSdBrowseClient : IWindowsDnsSdBrowseClient
+{
+    private readonly WindowsDnsSdBrowseSnapshot _snapshot;
+
+    public RecordingDnsSdBrowseClient(WindowsDnsSdBrowseSnapshot snapshot)
+    {
+        _snapshot = snapshot;
+    }
+
+    public List<WindowsDnsSdBrowseRequest> Requests { get; } = new();
+
+    public Task<WindowsDnsSdBrowseSnapshot> BrowseAsync(WindowsDnsSdBrowseRequest request)
+    {
+        Requests.Add(request);
+        return Task.FromResult(_snapshot);
+    }
+}
+
+sealed class RecordingDiscoveryClient : IDiscoveryClient
+{
+    private readonly DiscoveredPeer _peer;
+
+    public RecordingDiscoveryClient(DiscoveredPeer peer)
+    {
+        _peer = peer;
+    }
+
+    public List<(string Service, string TxtRecord)> ParseCalls { get; } = new();
+
+    public string BuildPendingStatus() => "Parsing...";
+
+    public bool CanParseAdvertisement(string service, string txtRecord) =>
+        !string.IsNullOrWhiteSpace(service) && !string.IsNullOrWhiteSpace(txtRecord);
+
+    public Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord)
+    {
+        ParseCalls.Add((service, txtRecord));
+        return Task.FromResult(_peer);
     }
 }
 '@
