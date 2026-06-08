@@ -94,6 +94,7 @@ $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewMod
 $sessionViewModelDependenciesPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModelDependencies.cs"
 $asyncRelayCommandPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/AsyncRelayCommand.cs"
 $workspaceCommandRegistryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandRegistry.cs"
+$workspaceActionSurfaceTargetsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionSurfaceTargets.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -121,7 +122,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandRegistryPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -132,8 +133,9 @@ $sessionViewModelSource = Get-Content -Raw -LiteralPath $sessionViewModelPath
 $sessionViewModelDependencies = Get-Content -Raw -LiteralPath $sessionViewModelDependenciesPath
 $asyncRelayCommand = Get-Content -Raw -LiteralPath $asyncRelayCommandPath
 $workspaceCommandRegistry = Get-Content -Raw -LiteralPath $workspaceCommandRegistryPath
+$workspaceActionSurfaceTargets = Get-Content -Raw -LiteralPath $workspaceActionSurfaceTargetsPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandRegistry
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandRegistry + $workspaceActionSurfaceTargets
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -778,6 +780,8 @@ foreach ($workspaceActionRoleSignal in @(
     "BuildInitialSurfaces",
     "BuildDynamicRefreshSurfaces",
     "BuildResolvedSnapshot",
+    "WorkspaceActionSurfaceTargets",
+    "_workspaceActionSurfaceTargets.Resolve(surface)",
     "InitialSurfaces",
     "DynamicRefreshSurfaces",
     "_workspaceActionCatalogClient.BuildInitialSurfaces()",
@@ -803,6 +807,8 @@ Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionE
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionDetail")) -Message "SessionViewModel must delegate workspace action detail resolution to WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionCatalogClient.ResolveEnabled(")) -Message "SessionViewModel must use WorkspaceActionCatalogClient.BuildResolvedSnapshot instead of resolving action gates inline."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionCatalogClient.ResolveDetail(")) -Message "SessionViewModel must use WorkspaceActionCatalogClient.BuildResolvedSnapshot instead of resolving action details inline."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("GetWorkspaceActionSurfaceTarget")) -Message "SessionViewModel must resolve workspace action surface targets through WorkspaceActionSurfaceTargets."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "WorkspaceActionSurface\.[A-Za-z]+ =>")) -Message "SessionViewModel must not own a WorkspaceActionSurface target switch."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession,")) -Message "SessionViewModel must source the initial workspace action surface plan from WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader,")) -Message "SessionViewModel must source the dynamic workspace action refresh plan from WorkspaceActionCatalogClient."
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "BuildResolvedSnapshot\(\s*new WorkspaceActionCatalogRequest\(surface\),\s*BuildWorkspaceActionGateSnapshot\(")) -Message "SessionViewModel must build workspace action gates once in WorkspaceActionRenderContext, not per surface."
@@ -1788,6 +1794,7 @@ foreach ($docSignal in @(
     "SidebarWorkspaceActionButtonTemplate",
     "ItemsPanelTemplate",
     "WorkspaceActionRenderContext",
+    "WorkspaceActionSurfaceTargets",
     "DiscoveredPeerItemTemplate",
     "UsbDeviceItemTemplate",
     "FileTransferQueueItemTemplate",

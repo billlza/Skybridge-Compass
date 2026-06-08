@@ -37,6 +37,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
+    private readonly WorkspaceActionSurfaceTargets _workspaceActionSurfaceTargets;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -221,6 +222,26 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SystemMonitorOverview = new ObservableCollection<SystemMonitorMetricView>();
         SystemMonitorDetails = new ObservableCollection<SystemMonitorMetricView>();
         SystemMonitorIndicators = new ObservableCollection<SystemMonitorIndicatorView>();
+        _workspaceActionSurfaceTargets = new WorkspaceActionSurfaceTargets(
+            SidebarSessionActions,
+            TopBarActions,
+            SessionControlActions,
+            DeviceDiscoveryPrimaryActions,
+            DeviceDiscoveryScanActions,
+            CrossNetworkQrActions,
+            CrossNetworkCodePrimaryActions,
+            CrossNetworkCodeConnectActions,
+            UsbManagementHeaderActions,
+            FileTransferHeaderActions,
+            FileTransferActions,
+            RemoteDesktopHeaderActions,
+            RemoteDesktopActions,
+            QuantumDiagnosticsHeaderActions,
+            SystemMonitorHeaderActions,
+            SystemMonitorActions,
+            SettingsHeaderActions,
+            SettingsToolbarActions,
+            SettingsMaintenanceActions);
         UsbDeviceStats = new ObservableCollection<UsbDeviceStatView>();
         UsbDevices = new ObservableCollection<UsbDeviceItemView>();
         SettingsTabs = new ObservableCollection<SettingsTabItemView>();
@@ -1408,7 +1429,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             new WorkspaceActionCatalogRequest(surface),
             renderContext.Gates,
             renderContext.Details);
-        var target = GetWorkspaceActionSurfaceTarget(surface);
+        var target = _workspaceActionSurfaceTargets.Resolve(surface);
 
         ReplaceCollection(
             target,
@@ -1417,32 +1438,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 action,
                 _workspaceCommandRegistry.Resolve(action.CommandId)));
     }
-
-    private ObservableCollection<WorkspaceActionItemView> GetWorkspaceActionSurfaceTarget(
-        WorkspaceActionSurface surface) =>
-        surface switch
-        {
-            WorkspaceActionSurface.SidebarSession => SidebarSessionActions,
-            WorkspaceActionSurface.TopBarActions => TopBarActions,
-            WorkspaceActionSurface.SessionControls => SessionControlActions,
-            WorkspaceActionSurface.DeviceDiscoveryPrimary => DeviceDiscoveryPrimaryActions,
-            WorkspaceActionSurface.DeviceDiscoveryScan => DeviceDiscoveryScanActions,
-            WorkspaceActionSurface.CrossNetworkQr => CrossNetworkQrActions,
-            WorkspaceActionSurface.CrossNetworkCodePrimary => CrossNetworkCodePrimaryActions,
-            WorkspaceActionSurface.CrossNetworkCodeConnect => CrossNetworkCodeConnectActions,
-            WorkspaceActionSurface.UsbManagementHeader => UsbManagementHeaderActions,
-            WorkspaceActionSurface.FileTransferHeader => FileTransferHeaderActions,
-            WorkspaceActionSurface.FileTransfer => FileTransferActions,
-            WorkspaceActionSurface.RemoteDesktopHeader => RemoteDesktopHeaderActions,
-            WorkspaceActionSurface.RemoteDesktop => RemoteDesktopActions,
-            WorkspaceActionSurface.QuantumDiagnosticsHeader => QuantumDiagnosticsHeaderActions,
-            WorkspaceActionSurface.SystemMonitorHeader => SystemMonitorHeaderActions,
-            WorkspaceActionSurface.SystemMonitorControls => SystemMonitorActions,
-            WorkspaceActionSurface.SettingsHeader => SettingsHeaderActions,
-            WorkspaceActionSurface.SettingsToolbar => SettingsToolbarActions,
-            WorkspaceActionSurface.SettingsMaintenance => SettingsMaintenanceActions,
-            _ => throw new InvalidOperationException()
-        };
 
     private WorkspaceActionGateSnapshot BuildWorkspaceActionGateSnapshot() =>
         _workspaceCommandStateClient.BuildActionGateSnapshot(
