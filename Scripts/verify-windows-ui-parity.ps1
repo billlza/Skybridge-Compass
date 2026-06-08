@@ -119,6 +119,7 @@ $workspaceBusyCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient
 $workspaceDeferredRefreshActionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceDeferredRefreshAction.cs"
 $readOnlyWorkspaceRefreshCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceRefreshCoordinator.cs"
 $readOnlyWorkspaceRefreshActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceRefreshActions.cs"
+$fileTransferWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FileTransferWorkspaceActions.cs"
 $readOnlyWorkspaceSnapshotHandlersPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceSnapshotHandlers.cs"
 $workspaceCountNotifierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCountNotifier.cs"
 $workspaceObservableCollectionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceObservableCollections.cs"
@@ -166,7 +167,7 @@ $commandGateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-command-gate
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -202,6 +203,7 @@ $workspaceBusyCoordinator = Get-Content -Raw -LiteralPath $workspaceBusyCoordina
 $workspaceDeferredRefreshAction = Get-Content -Raw -LiteralPath $workspaceDeferredRefreshActionPath
 $readOnlyWorkspaceRefreshCoordinator = Get-Content -Raw -LiteralPath $readOnlyWorkspaceRefreshCoordinatorPath
 $readOnlyWorkspaceRefreshActions = Get-Content -Raw -LiteralPath $readOnlyWorkspaceRefreshActionsPath
+$fileTransferWorkspaceActions = Get-Content -Raw -LiteralPath $fileTransferWorkspaceActionsPath
 $readOnlyWorkspaceSnapshotHandlers = Get-Content -Raw -LiteralPath $readOnlyWorkspaceSnapshotHandlersPath
 $workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierPath
 $workspaceObservableCollections = Get-Content -Raw -LiteralPath $workspaceObservableCollectionsPath
@@ -625,6 +627,7 @@ foreach ($commandBindingsSignal in @(
     "ConnectionWorkspaceActions connectionWorkspaceActions",
     "CrossNetworkConnectionActions crossNetworkConnectionActions",
     "ReadOnlyWorkspaceRefreshActions readOnlyWorkspaceRefreshActions",
+    "FileTransferWorkspaceActions fileTransferWorkspaceActions",
     "WorkspaceCommandAvailability commandAvailability",
     "new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect)",
     "new AsyncRelayCommand(sessionEngineActions.DisconnectAsync, commandAvailability.CanDisconnect)",
@@ -649,6 +652,7 @@ foreach ($commandBindingsSignal in @(
     "new AsyncRelayCommand(connectionWorkspaceActions.PrepareConnectionAsync, commandAvailability.CanPrepareConnection)",
     "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync, commandAvailability.CanRunCoreDiagnostics)",
     "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync, commandAvailability.CanRefreshFileTransfer)",
+    "new AsyncRelayCommand(fileTransferWorkspaceActions.GenerateQrAsync, commandAvailability.CanGenerateFileTransferQr)",
     "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync, commandAvailability.CanRefreshRemoteDesktop)",
     "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync, commandAvailability.CanRefreshSystemMonitor)",
     "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync, commandAvailability.CanRefreshUsbManagement)",
@@ -659,6 +663,7 @@ foreach ($commandBindingsSignal in @(
     "WorkspaceActionCommandId.OpenFileTransfer",
     "WorkspaceActionCommandId.OpenSystemMonitor",
     "WorkspaceActionCommandId.OpenSettings",
+    "WorkspaceActionCommandId.GenerateFileTransferQr",
     "WorkspaceActionCommandId.RefreshSettings",
     "public WorkspaceCommandRegistry Registry { get; }"
 )) {
@@ -791,15 +796,15 @@ foreach ($dashboardScalar in @(
     Assert-Contains -Text ($sessionViewModel + $dashboardMetrics) -Needle $dashboardScalar -Message "Dashboard scalar status signal missing: $dashboardScalar"
 }
 
-foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
 }
 
-foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand")) {
+foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "RefreshSettingsCommand")) {
     Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
 
@@ -1593,6 +1598,7 @@ foreach ($workspaceCommandAvailabilitySignal in @(
     "_coordinator.CanRefreshUsbManagement(BuildState())",
     "_coordinator.CanRunCoreDiagnostics(BuildState())",
     "_coordinator.CanRefreshFileTransfer(BuildState())",
+    "_coordinator.CanGenerateFileTransferQr(BuildState())",
     "_coordinator.CanRefreshRemoteDesktop(BuildState())",
     "_coordinator.CanRefreshSystemMonitor(BuildState())",
     "_coordinator.CanRefreshSettings(BuildState())"
@@ -1627,6 +1633,7 @@ foreach ($sessionViewModelForwardingGateWrapper in @(
     "private bool CanRefreshUsbManagement()",
     "private bool CanRunCoreDiagnostics()",
     "private bool CanRefreshFileTransfer()",
+    "private bool CanGenerateFileTransferQr()",
     "private bool CanRefreshRemoteDesktop()",
     "private bool CanRefreshSystemMonitor()",
     "private bool CanRefreshSettings()"
@@ -1654,6 +1661,7 @@ foreach ($sessionViewModelForwardingActionWrapper in @(
     "private Task PrepareConnectionAsync()",
     "private Task RunCoreDiagnosticsAsync()",
     "private Task RefreshFileTransferAsync()",
+    "private Task GenerateFileTransferQrAsync()",
     "private Task RefreshUsbManagementAsync()",
     "private Task RefreshRemoteDesktopAsync()",
     "private Task RefreshSystemMonitorAsync()",
@@ -1672,6 +1680,7 @@ foreach ($sessionViewModelDirectCommandDelegateSignal in @(
     "_discoveryBrowserActions.StartAsync,",
     "_connectionWorkspaceActions.PrepareManualConnectionAsync,",
     "_crossNetworkConnectionActions.GenerateQrCodeAsync,",
+    "_fileTransferWorkspaceActions.GenerateQrAsync,",
     "_readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync,"
 )) {
     Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelDirectCommandDelegateSignal)) -Message "SessionViewModel must pass grouped helpers to WorkspaceCommandBindings instead of per-command delegates: $sessionViewModelDirectCommandDelegateSignal"
@@ -1693,6 +1702,7 @@ foreach ($sessionViewModelDirectGateSignal in @(
     "_workspaceCommandGateCoordinator.CanRefreshUsbManagement(",
     "_workspaceCommandGateCoordinator.CanRunCoreDiagnostics(",
     "_workspaceCommandGateCoordinator.CanRefreshFileTransfer(",
+    "_workspaceCommandGateCoordinator.CanGenerateFileTransferQr(",
     "_workspaceCommandGateCoordinator.CanRefreshRemoteDesktop(",
     "_workspaceCommandGateCoordinator.CanRefreshSystemMonitor(",
     "_workspaceCommandGateCoordinator.CanRefreshSettings(",
@@ -1703,11 +1713,13 @@ foreach ($sessionViewModelDirectGateSignal in @(
     "_workspaceCommandStateClient.CanUseCrossNetworkConnection(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
+    "_workspaceCommandStateClient.CanUseFileTransferAction(",
     "_workspaceCommandStateClient.CanUseWorkspaceFeature(",
     "_manualConnectionClient.CanPrepareTarget(",
     "_crossNetworkConnectionClient.CanScanQrCode(",
     "_crossNetworkConnectionClient.CanCopyCode(",
     "_crossNetworkConnectionClient.CanConnectWithCode(",
+    "_fileTransferClient.CanGenerateShareQr(",
     "_discoveryClient.CanParseAdvertisement(",
     "_pairingMaterialClient.CanValidate("
 )) {
@@ -1751,6 +1763,7 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionCommandId.OpenSystemMonitor",
     "WorkspaceActionCommandId.OpenSettings",
     "WorkspaceActionCommandId.ParseTxt",
+    "WorkspaceActionCommandId.GenerateFileTransferQr",
     "WorkspaceActionCommandId.RefreshSettings",
     "WorkspaceActionGateId.CanConnect",
     "WorkspaceActionGateId.CanUseDiscoveryBrowser",
@@ -1762,6 +1775,7 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionGateId.CanScanQrCode",
     "WorkspaceActionGateId.CanCopyConnectionCode",
     "WorkspaceActionGateId.CanConnectConnectionCode",
+    "WorkspaceActionGateId.CanGenerateFileTransferQr",
     "WorkspaceActionGateId.CanRefreshSettings",
     "GateId: WorkspaceActionGateId.CanParseAdvertisement",
     "GateId: WorkspaceActionGateId.CanValidatePairing",
@@ -1781,6 +1795,7 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionSurface.CrossNetworkQr",
     "WorkspaceActionSurface.CrossNetworkCodePrimary",
     "WorkspaceActionSurface.CrossNetworkCodeConnect",
+    "WorkspaceActionSurface.FileTransfer",
     "WorkspaceActionDetailSlot.TopBarNotifications",
     "WorkspaceActionDetailSlot.TopBarTheme"
 )) {
@@ -2236,13 +2251,31 @@ foreach ($readOnlyWorkspaceRefreshActionsSignal in @(
 )) {
     Assert-Contains -Text $readOnlyWorkspaceRefreshActions -Needle $readOnlyWorkspaceRefreshActionsSignal -Message "ReadOnlyWorkspaceRefreshActions contract missing: $readOnlyWorkspaceRefreshActionsSignal"
 }
+foreach ($fileTransferWorkspaceActionsSignal in @(
+    "internal sealed class FileTransferWorkspaceActions",
+    "WorkspaceBusyCoordinator busyCoordinator",
+    "IFileTransferWorkspaceClient fileTransferClient",
+    "Action<string> setFileTransferStatus",
+    "Action<string> setStatusMessage",
+    "GenerateQrAsync()",
+    "_busyCoordinator.RunAsync(",
+    "WorkspaceErrorScope.FileTransfer",
+    "_fileTransferClient.BuildShareQrPendingStatus()",
+    "_fileTransferClient.BuildShareQrActionAsync()",
+    "_setFileTransferStatus(result.Status)",
+    "_setStatusMessage(result.Message)"
+)) {
+    Assert-Contains -Text $fileTransferWorkspaceActions -Needle $fileTransferWorkspaceActionsSignal -Message "FileTransferWorkspaceActions contract missing: $fileTransferWorkspaceActionsSignal"
+}
 foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "new ReadOnlyWorkspaceRefreshCoordinator(",
     "new ReadOnlyWorkspaceRefreshActions(",
+    "new FileTransferWorkspaceActions(",
     "readOnlyWorkspaceRefreshCoordinator,",
     "_readOnlyWorkspaceSnapshotHandlers,",
     "() => SelectedBitrate",
     "() => SelectedFramerate",
+    "_fileTransferWorkspaceActions,",
     "_readOnlyWorkspaceRefreshActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshActions: $sessionViewModelReadOnlyRefreshSignal"
@@ -2841,7 +2874,9 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "File Transfer action cata
     '"SelectFolder"',
     '"Select Folder"',
     '"GenerateQr"',
-    '"Generate QR"'
+    '"Generate QR"',
+    "WorkspaceActionCommandId.GenerateFileTransferQr",
+    "WorkspaceActionGateId.CanGenerateFileTransferQr"
 )
 
 Assert-Ordered -Text $mainWindow -Context "Remote Desktop action order" -Needles @(
@@ -3161,14 +3196,19 @@ foreach ($fileTransferSignal in @(
     "HMAC",
     "Signature",
     "FileTransferWorkspaceClient",
+    "FileTransferWorkspaceActions",
     "BuildReadOnlySnapshotAsync",
+    "CanGenerateShareQr",
+    "BuildShareQrActionAsync",
+    "BuildDefaultShareQrActionResult",
+    "DefaultShareQrBlockedStatus",
     "PlanConnectionAsync",
     "ChannelMappings",
     "CoreChannelMappingResolver",
     "Transport plan",
     "EncodeFrameAsync"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer + $workspaceActionCatalog) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer + $fileTransferWorkspaceActions + $workspaceActionCatalog) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", true)' -Message "File Transfer must be marked implemented once the queue/history workspace exists."

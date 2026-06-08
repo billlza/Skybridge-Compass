@@ -9,6 +9,7 @@ internal sealed class WorkspaceCommandGateCoordinator
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
     private readonly IManualConnectionClient _manualConnectionClient;
     private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
+    private readonly IFileTransferWorkspaceClient _fileTransferClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
@@ -19,6 +20,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         IWorkspaceCommandStateClient workspaceCommandStateClient,
         IManualConnectionClient manualConnectionClient,
         ICrossNetworkConnectionClient crossNetworkConnectionClient,
+        IFileTransferWorkspaceClient fileTransferClient,
         IDiscoveryClient discoveryClient,
         IPairingMaterialClient pairingMaterialClient,
         IConnectionWorkspaceStateClient connectionWorkspaceStateClient)
@@ -28,6 +30,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         _workspaceCommandStateClient = workspaceCommandStateClient;
         _manualConnectionClient = manualConnectionClient;
         _crossNetworkConnectionClient = crossNetworkConnectionClient;
+        _fileTransferClient = fileTransferClient;
         _discoveryClient = discoveryClient;
         _pairingMaterialClient = pairingMaterialClient;
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient;
@@ -107,6 +110,12 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanRefreshFileTransfer(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.FileTransfer);
 
+    public bool CanGenerateFileTransferQr(WorkspaceCommandGateState state) =>
+        _workspaceCommandStateClient.CanUseFileTransferAction(
+            state.IsBusy,
+            IsFeatureSelected(state.SelectedFeature, FeatureEntryId.FileTransfer),
+            _fileTransferClient.CanGenerateShareQr());
+
     public bool CanRefreshRemoteDesktop(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.RemoteDesktop);
 
@@ -145,7 +154,8 @@ internal sealed class WorkspaceCommandGateCoordinator
                 CanUseCrossNetworkConnection(state),
                 CanScanQrCode(state),
                 CanCopyConnectionCode(state),
-                CanConnectConnectionCode(state)));
+                CanConnectConnectionCode(state),
+                CanGenerateFileTransferQr(state)));
     }
 
     private bool CanUseDeviceDiscoveryAction(

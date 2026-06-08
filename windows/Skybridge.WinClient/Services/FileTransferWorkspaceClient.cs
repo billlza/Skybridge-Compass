@@ -15,7 +15,13 @@ public interface IFileTransferWorkspaceClient
 
     string BuildCompletedStatusMessage();
 
+    bool CanGenerateShareQr();
+
+    string BuildShareQrPendingStatus();
+
     Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
+
+    Task<FileTransferShareQrActionResult> BuildShareQrActionAsync();
 }
 
 public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
@@ -36,14 +42,30 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
 
+    public bool CanGenerateShareQr() => false;
+
+    public string BuildShareQrPendingStatus() => DefaultShareQrPendingStatus;
+
     public static string DefaultInitialStatus { get; } = "Ready";
 
     public static string DefaultPendingStatus { get; } = "Refreshing...";
 
     public static string DefaultCompletedStatusMessage { get; } = "File transfer workspace updated";
 
+    public static string DefaultShareQrPendingStatus { get; } = "Preparing QR...";
+
+    public static string DefaultShareQrBlockedStatus { get; } = "QR generation pending adapter";
+
+    public static string DefaultShareQrBlockedMessage { get; } = "File transfer QR generation remains fail-closed";
+
     public static string BuildDefaultCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
         $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
+
+    public static FileTransferShareQrActionResult BuildDefaultShareQrActionResult() =>
+        new(
+            DefaultShareQrBlockedStatus,
+            DefaultShareQrBlockedMessage,
+            "No local files were read and no transport or signaling session was started.");
 
     public async Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
@@ -93,6 +115,9 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
         return new FileTransferWorkspaceSnapshot(DateTimeOffset.UtcNow, queue, history, security);
     }
+
+    public Task<FileTransferShareQrActionResult> BuildShareQrActionAsync() =>
+        Task.FromResult(BuildDefaultShareQrActionResult());
 }
 
 public sealed record FileTransferWorkspaceSnapshot(
@@ -117,4 +142,9 @@ public sealed record FileTransferHistoryItem(
 public sealed record FileTransferSecurityFact(
     string Label,
     string Value,
+    string Detail);
+
+public sealed record FileTransferShareQrActionResult(
+    string Status,
+    string Message,
     string Detail);

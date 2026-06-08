@@ -43,6 +43,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceStatusPatchApplier _workspaceStatusPatchApplier;
     private readonly WorkspaceBusyCoordinator _workspaceBusyCoordinator;
     private readonly ReadOnlyWorkspaceRefreshActions _readOnlyWorkspaceRefreshActions;
+    private readonly FileTransferWorkspaceActions _fileTransferWorkspaceActions;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly ReadOnlyWorkspaceSnapshotHandlers _readOnlyWorkspaceSnapshotHandlers;
@@ -184,6 +185,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceCommandStateClient,
             _manualConnectionClient,
             _crossNetworkConnectionClient,
+            _fileTransferClient,
             _discoveryClient,
             _pairingMaterialClient,
             _connectionWorkspaceStateClient);
@@ -290,6 +292,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => RemoteDesktopStatus = value,
             value => SystemMonitorStatus = value,
             value => SettingsStatus = value);
+        _fileTransferWorkspaceActions = new FileTransferWorkspaceActions(
+            _workspaceBusyCoordinator,
+            _fileTransferClient,
+            value => FileTransferStatus = value,
+            value => StatusMessage = value);
         _dashboardMetricsUpdater = new DashboardMetricsUpdater(
             _dashboardMetricsClient,
             DashboardMetrics,
@@ -433,6 +440,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _connectionWorkspaceActions,
             _crossNetworkConnectionActions,
             _readOnlyWorkspaceRefreshActions,
+            _fileTransferWorkspaceActions,
             _workspaceCommandAvailability);
         ConnectCommand = commandBindings.ConnectCommand;
         DisconnectCommand = commandBindings.DisconnectCommand;
@@ -453,6 +461,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PrepareConnectionCommand = commandBindings.PrepareConnectionCommand;
         RunCoreDiagnosticsCommand = commandBindings.RunCoreDiagnosticsCommand;
         RefreshFileTransferCommand = commandBindings.RefreshFileTransferCommand;
+        GenerateFileTransferQrCommand = commandBindings.GenerateFileTransferQrCommand;
         RefreshRemoteDesktopCommand = commandBindings.RefreshRemoteDesktopCommand;
         RefreshSystemMonitorCommand = commandBindings.RefreshSystemMonitorCommand;
         RefreshUsbManagementCommand = commandBindings.RefreshUsbManagementCommand;
@@ -999,6 +1008,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RunCoreDiagnosticsCommand { get; }
 
     public ICommand RefreshFileTransferCommand { get; }
+
+    public ICommand GenerateFileTransferQrCommand { get; }
 
     public ICommand RefreshRemoteDesktopCommand { get; }
 

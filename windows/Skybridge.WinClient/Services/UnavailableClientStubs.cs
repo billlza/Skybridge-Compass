@@ -131,10 +131,18 @@ internal sealed class UnavailableFileTransferWorkspaceClient : IFileTransferWork
     public string BuildCompletedStatusMessage() =>
         FileTransferWorkspaceClient.DefaultCompletedStatusMessage;
 
+    public bool CanGenerateShareQr() => false;
+
+    public string BuildShareQrPendingStatus() =>
+        FileTransferWorkspaceClient.DefaultShareQrPendingStatus;
+
     public Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("File transfer workspace client is not configured.");
     }
+
+    public Task<FileTransferShareQrActionResult> BuildShareQrActionAsync() =>
+        Task.FromResult(FileTransferWorkspaceClient.BuildDefaultShareQrActionResult());
 }
 
 internal sealed class UnavailableRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient

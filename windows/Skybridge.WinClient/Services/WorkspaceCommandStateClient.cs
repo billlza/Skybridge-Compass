@@ -16,6 +16,11 @@ public interface IWorkspaceCommandStateClient
         bool isDeviceDiscoverySelected,
         bool isActionReady);
 
+    bool CanUseFileTransferAction(
+        bool isBusy,
+        bool isFileTransferSelected,
+        bool isActionReady);
+
     bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected);
 
     WorkspaceActionGateSnapshot BuildActionGateSnapshot(WorkspaceCommandGateRequest request);
@@ -41,6 +46,12 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
         bool isActionReady) =>
         CanUseCrossNetworkConnection(isBusy, isDeviceDiscoverySelected) && isActionReady;
 
+    public bool CanUseFileTransferAction(
+        bool isBusy,
+        bool isFileTransferSelected,
+        bool isActionReady) =>
+        CanUseWorkspaceFeature(isBusy, isFileTransferSelected) && isActionReady;
+
     public bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected) =>
         !isBusy && isFeatureSelected;
 
@@ -60,6 +71,7 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
             request.CanConnectConnectionCode,
             CanUseWorkspaceFeature(request.IsBusy, request.IsUsbManagementSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsFileTransferSelected),
+            request.CanGenerateFileTransferQr,
             CanUseWorkspaceFeature(request.IsBusy, request.IsRemoteDesktopSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsQuantumSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsSystemMonitorSelected),
@@ -83,4 +95,5 @@ public sealed record WorkspaceCommandGateRequest(
     bool CanUseCrossNetworkConnection,
     bool CanScanQrCode,
     bool CanCopyConnectionCode,
-    bool CanConnectConnectionCode);
+    bool CanConnectConnectionCode,
+    bool CanGenerateFileTransferQr);

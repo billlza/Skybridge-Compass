@@ -67,6 +67,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
         WorkspaceActionSurface.CrossNetworkCodeConnect,
         WorkspaceActionSurface.UsbManagementHeader,
         WorkspaceActionSurface.FileTransferHeader,
+        WorkspaceActionSurface.FileTransfer,
         WorkspaceActionSurface.RemoteDesktopHeader,
         WorkspaceActionSurface.QuantumDiagnosticsHeader,
         WorkspaceActionSurface.SystemMonitorHeader,
@@ -147,6 +148,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             WorkspaceActionGateId.CanConnectConnectionCode => gates.CanConnectConnectionCode,
             WorkspaceActionGateId.CanRefreshUsbManagement => gates.CanRefreshUsbManagement,
             WorkspaceActionGateId.CanRefreshFileTransfer => gates.CanRefreshFileTransfer,
+            WorkspaceActionGateId.CanGenerateFileTransferQr => gates.CanGenerateFileTransferQr,
             WorkspaceActionGateId.CanRefreshRemoteDesktop => gates.CanRefreshRemoteDesktop,
             WorkspaceActionGateId.CanRunCoreDiagnostics => gates.CanRunCoreDiagnostics,
             WorkspaceActionGateId.CanRefreshSystemMonitor => gates.CanRefreshSystemMonitor,
@@ -462,8 +464,10 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "GenerateQr",
                 "Generate QR",
                 "\uE97E",
-                false,
-                "Visible mac-parity quick action; live share QR generation is pending.")
+                true,
+                "Fail-closed mac-parity quick action; command does not read files or start transport.",
+                CommandId: WorkspaceActionCommandId.GenerateFileTransferQr,
+                GateId: WorkspaceActionGateId.CanGenerateFileTransferQr)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildRemoteDesktopHeaderActions() =>
@@ -698,6 +702,7 @@ public enum WorkspaceActionCommandId
     ConnectConnectionCode,
     RefreshUsbManagement,
     RefreshFileTransfer,
+    GenerateFileTransferQr,
     RefreshRemoteDesktop,
     RunCoreDiagnostics,
     RefreshSystemMonitor,
@@ -721,6 +726,7 @@ public enum WorkspaceActionGateId
     CanConnectConnectionCode,
     CanRefreshUsbManagement,
     CanRefreshFileTransfer,
+    CanGenerateFileTransferQr,
     CanRefreshRemoteDesktop,
     CanRunCoreDiagnostics,
     CanRefreshSystemMonitor,
@@ -757,6 +763,7 @@ public sealed record WorkspaceActionGateSnapshot(
     bool CanConnectConnectionCode,
     bool CanRefreshUsbManagement,
     bool CanRefreshFileTransfer,
+    bool CanGenerateFileTransferQr,
     bool CanRefreshRemoteDesktop,
     bool CanRunCoreDiagnostics,
     bool CanRefreshSystemMonitor,

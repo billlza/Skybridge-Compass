@@ -63,12 +63,14 @@ using Skybridge.WinClient.ViewModels;
 
 const string Fingerprint = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
+var fileTransferClient = new TestFileTransferWorkspaceClient(canGenerateShareQr: true);
 var coordinator = new WorkspaceCommandGateCoordinator(
     new SessionCommandStateClient(),
     new FeatureCatalogClient(),
     new WorkspaceCommandStateClient(),
     new ManualConnectionClient(),
     new CrossNetworkConnectionClient(),
+    fileTransferClient,
     new TestDiscoveryClient(),
     new PairingMaterialClient(),
     new ConnectionWorkspaceStateClient());
@@ -212,13 +214,53 @@ AssertResolvedAction(
     true,
     "reconnecting session control Disconnect");
 
+var fileTransferReadyState = BuildCommandState(
+    liveReady: true,
+    selectedFeatureId: FeatureEntryId.FileTransfer);
+var fileTransferReadyAvailability = new WorkspaceCommandAvailability(coordinator, () => fileTransferReadyState);
+AssertEqual(true, fileTransferReadyAvailability.CanRefreshFileTransfer(), "file transfer WorkspaceCommandAvailability.Refresh");
+AssertEqual(true, fileTransferReadyAvailability.CanGenerateFileTransferQr(), "file transfer WorkspaceCommandAvailability.GenerateQr");
+var fileTransferReadyGates = coordinator.BuildActionGateSnapshot(fileTransferReadyState);
+AssertEqual(true, fileTransferReadyGates.CanRefreshFileTransfer, "file transfer action gate Refresh");
+AssertEqual(true, fileTransferReadyGates.CanGenerateFileTransferQr, "file transfer action gate GenerateQr");
+AssertResolvedAction(
+    catalog,
+    details,
+    fileTransferReadyGates,
+    WorkspaceActionSurface.FileTransfer,
+    "GenerateQr",
+    WorkspaceActionCommandId.GenerateFileTransferQr,
+    WorkspaceActionGateId.CanGenerateFileTransferQr,
+    true,
+    "file transfer Generate QR");
+
+var fileTransferBlockedState = BuildCommandState(
+    liveReady: true,
+    selectedFeatureId: FeatureEntryId.FileTransfer);
+fileTransferClient.CanGenerateShareQrValue = false;
+var fileTransferBlockedAvailability = new WorkspaceCommandAvailability(coordinator, () => fileTransferBlockedState);
+AssertEqual(true, fileTransferBlockedAvailability.CanRefreshFileTransfer(), "blocked file transfer WorkspaceCommandAvailability.Refresh");
+AssertEqual(false, fileTransferBlockedAvailability.CanGenerateFileTransferQr(), "blocked file transfer WorkspaceCommandAvailability.GenerateQr");
+var fileTransferBlockedGates = coordinator.BuildActionGateSnapshot(fileTransferBlockedState);
+AssertResolvedAction(
+    catalog,
+    details,
+    fileTransferBlockedGates,
+    WorkspaceActionSurface.FileTransfer,
+    "GenerateQr",
+    WorkspaceActionCommandId.GenerateFileTransferQr,
+    WorkspaceActionGateId.CanGenerateFileTransferQr,
+    false,
+    "blocked file transfer Generate QR");
+
 Console.WriteLine("windows-command-gates: ok");
 
 WorkspaceCommandGateState BuildCommandState(
     bool liveReady,
-    EngineConnectionState connectionState = EngineConnectionState.Disconnected)
+    EngineConnectionState connectionState = EngineConnectionState.Disconnected,
+    FeatureEntryId selectedFeatureId = FeatureEntryId.DeviceDiscovery)
 {
-    var selectedFeature = FeatureCatalogClient.Entries.Single(entry => entry.Id == FeatureEntryId.DeviceDiscovery);
+    var selectedFeature = FeatureCatalogClient.Entries.Single(entry => entry.Id == selectedFeatureId);
     return new WorkspaceCommandGateState(
         IsBusy: false,
         connectionState,
@@ -360,6 +402,34 @@ sealed class TestDiscoveryClient : IDiscoveryClient
 
     public Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord) =>
         throw new NotSupportedException("Command-gate smoke only needs parser readiness.");
+}
+
+sealed class TestFileTransferWorkspaceClient : IFileTransferWorkspaceClient
+{
+    public TestFileTransferWorkspaceClient(bool canGenerateShareQr)
+    {
+        CanGenerateShareQrValue = canGenerateShareQr;
+    }
+
+    public bool CanGenerateShareQrValue { get; set; }
+
+    public string BuildInitialStatus() => "Ready";
+
+    public string BuildPendingStatus() => "Refreshing...";
+
+    public string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot) => "Snapshot";
+
+    public string BuildCompletedStatusMessage() => "Updated";
+
+    public bool CanGenerateShareQr() => CanGenerateShareQrValue;
+
+    public string BuildShareQrPendingStatus() => "Preparing QR...";
+
+    public Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs file transfer action readiness.");
+
+    public Task<FileTransferShareQrActionResult> BuildShareQrActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs file transfer action readiness.");
 }
 '@
 

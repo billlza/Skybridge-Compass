@@ -12,6 +12,7 @@ internal sealed class WorkspaceCommandBindings
         ConnectionWorkspaceActions connectionWorkspaceActions,
         CrossNetworkConnectionActions crossNetworkConnectionActions,
         ReadOnlyWorkspaceRefreshActions readOnlyWorkspaceRefreshActions,
+        FileTransferWorkspaceActions fileTransferWorkspaceActions,
         WorkspaceCommandAvailability commandAvailability)
     {
         ConnectCommand = new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect);
@@ -37,6 +38,7 @@ internal sealed class WorkspaceCommandBindings
         PrepareConnectionCommand = new AsyncRelayCommand(connectionWorkspaceActions.PrepareConnectionAsync, commandAvailability.CanPrepareConnection);
         RunCoreDiagnosticsCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync, commandAvailability.CanRunCoreDiagnostics);
         RefreshFileTransferCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync, commandAvailability.CanRefreshFileTransfer);
+        GenerateFileTransferQrCommand = new AsyncRelayCommand(fileTransferWorkspaceActions.GenerateQrAsync, commandAvailability.CanGenerateFileTransferQr);
         RefreshRemoteDesktopCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync, commandAvailability.CanRefreshRemoteDesktop);
         RefreshSystemMonitorCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync, commandAvailability.CanRefreshSystemMonitor);
         RefreshUsbManagementCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync, commandAvailability.CanRefreshUsbManagement);
@@ -66,6 +68,7 @@ internal sealed class WorkspaceCommandBindings
             new(WorkspaceActionCommandId.PrepareConnection, PrepareConnectionCommand),
             new(WorkspaceActionCommandId.RunCoreDiagnostics, RunCoreDiagnosticsCommand),
             new(WorkspaceActionCommandId.RefreshFileTransfer, RefreshFileTransferCommand),
+            new(WorkspaceActionCommandId.GenerateFileTransferQr, GenerateFileTransferQrCommand),
             new(WorkspaceActionCommandId.RefreshRemoteDesktop, RefreshRemoteDesktopCommand),
             new(WorkspaceActionCommandId.RefreshSystemMonitor, RefreshSystemMonitorCommand),
             new(WorkspaceActionCommandId.RefreshUsbManagement, RefreshUsbManagementCommand),
@@ -117,6 +120,8 @@ internal sealed class WorkspaceCommandBindings
     public ICommand RunCoreDiagnosticsCommand { get; }
 
     public ICommand RefreshFileTransferCommand { get; }
+
+    public ICommand GenerateFileTransferQrCommand { get; }
 
     public ICommand RefreshRemoteDesktopCommand { get; }
 
