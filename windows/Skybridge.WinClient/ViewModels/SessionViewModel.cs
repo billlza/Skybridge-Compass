@@ -42,6 +42,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
+    private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private string _statusMessage = "";
     private string _discoveryService = "";
@@ -361,6 +362,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => TopBarDiagnosticsStatus = value,
             value => TopBarNotificationsStatus = value,
             value => TopBarThemeStatus = value);
+        _workspaceActionRenderContextBuilder = new WorkspaceActionRenderContextBuilder(
+            _workspaceCommandStateClient,
+            _sessionCommandStateClient,
+            _topBarStatusUpdater);
         var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
@@ -1355,7 +1360,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshDynamicWorkspaceActionStates()
     {
-        _workspaceActionSurfaceLoader.RefreshDynamicSurfaces(BuildWorkspaceActionRenderContext());
+        _workspaceActionSurfaceLoader.RefreshDynamicSurfaces(
+            _workspaceActionRenderContextBuilder.BuildContext(BuildWorkspaceActionRenderState()));
     }
 
     private void RefreshDashboardMetrics()
@@ -1369,36 +1375,28 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void LoadWorkspaceActions()
     {
-        _workspaceActionSurfaceLoader.LoadInitialSurfaces(BuildWorkspaceActionRenderContext());
+        _workspaceActionSurfaceLoader.LoadInitialSurfaces(
+            _workspaceActionRenderContextBuilder.BuildContext(BuildWorkspaceActionRenderState()));
     }
-
-    private WorkspaceActionGateSnapshot BuildWorkspaceActionGateSnapshot() =>
-        _workspaceCommandStateClient.BuildActionGateSnapshot(
-            new WorkspaceCommandGateRequest(
-                IsBusy,
-                IsUsbManagementSelected,
-                IsFileTransferSelected,
-                IsRemoteDesktopSelected,
-                IsQuantumSelected,
-                IsSystemMonitorSelected,
-                IsSettingsSelected,
-                _sessionCommandStateClient.BuildGateSnapshot(ConnectionState, IsBusy)));
-
-    private WorkspaceActionRenderContext BuildWorkspaceActionRenderContext(
-        WorkspaceActionDetailSnapshot? actionDetails = null) =>
-        new(
-            BuildWorkspaceActionGateSnapshot(),
-            actionDetails ?? _topBarStatusUpdater.BuildActionDetails(BuildTopBarStatusRequest()));
 
     private void RefreshTopBarStatus()
     {
+        var renderState = BuildWorkspaceActionRenderState();
         _topBarStatusUpdater.Refresh(
-            BuildTopBarStatusRequest(),
-            BuildWorkspaceActionGateSnapshot());
+            _workspaceActionRenderContextBuilder.BuildTopBarStatusRequest(renderState),
+            _workspaceActionRenderContextBuilder.BuildGateSnapshot(renderState));
     }
 
-    private TopBarStatusRequest BuildTopBarStatusRequest() =>
+    private WorkspaceActionRenderState BuildWorkspaceActionRenderState() =>
         new(
+            IsBusy,
+            IsUsbManagementSelected,
+            IsFileTransferSelected,
+            IsRemoteDesktopSelected,
+            IsQuantumSelected,
+            IsSystemMonitorSelected,
+            IsSettingsSelected,
+            ConnectionState,
             ConnectionStatus,
             PerformanceStatus,
             SelectedFeature.Title);
@@ -1427,7 +1425,3 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     }
 
 }
-
-internal sealed record WorkspaceActionRenderContext(
-    WorkspaceActionGateSnapshot Gates,
-    WorkspaceActionDetailSnapshot Details);
