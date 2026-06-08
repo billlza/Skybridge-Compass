@@ -107,6 +107,7 @@ $workspaceStartupStateBuilderPath = Join-Path $RepoRoot "windows/Skybridge.WinCl
 $workspaceStatusPatchApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStatusPatchApplier.cs"
 $workspaceBusyCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceBusyCoordinator.cs"
 $readOnlyWorkspaceRefreshCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceRefreshCoordinator.cs"
+$readOnlyWorkspaceRefreshActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceRefreshActions.cs"
 $readOnlyWorkspaceSnapshotHandlersPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceSnapshotHandlers.cs"
 $workspaceCountNotifierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCountNotifier.cs"
 $workspaceObservableCollectionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceObservableCollections.cs"
@@ -143,7 +144,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -167,6 +168,7 @@ $workspaceStartupStateBuilder = Get-Content -Raw -LiteralPath $workspaceStartupS
 $workspaceStatusPatchApplier = Get-Content -Raw -LiteralPath $workspaceStatusPatchApplierPath
 $workspaceBusyCoordinator = Get-Content -Raw -LiteralPath $workspaceBusyCoordinatorPath
 $readOnlyWorkspaceRefreshCoordinator = Get-Content -Raw -LiteralPath $readOnlyWorkspaceRefreshCoordinatorPath
+$readOnlyWorkspaceRefreshActions = Get-Content -Raw -LiteralPath $readOnlyWorkspaceRefreshActionsPath
 $readOnlyWorkspaceSnapshotHandlers = Get-Content -Raw -LiteralPath $readOnlyWorkspaceSnapshotHandlersPath
 $workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierPath
 $workspaceObservableCollections = Get-Content -Raw -LiteralPath $workspaceObservableCollectionsPath
@@ -177,7 +179,7 @@ $topBarStatusUpdater = Get-Content -Raw -LiteralPath $topBarStatusUpdaterPath
 $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connectionWorkspaceInputCoordinatorPath
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -315,8 +317,9 @@ foreach ($viewModelProjectionSignal in @(
     "new WorkspaceShellRefreshCoordinator(",
     "BuildDashboardMetricsRequest",
     "new WorkspaceSnapshotApplier(_workspaceCountNotifier, RefreshDashboardMetrics)",
+    "new ReadOnlyWorkspaceRefreshActions(",
     "new ReadOnlyWorkspaceSnapshotHandlers(",
-    "_readOnlyWorkspaceSnapshotHandlers.ApplyFileTransfer"
+    "_readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync()"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $viewModelProjectionSignal -Message "SessionViewModel reusable projection helper missing: $viewModelProjectionSignal"
 }
@@ -432,16 +435,6 @@ foreach ($snapshotHandlerSignal in @(
     "_collections.SettingsDetails"
 )) {
     Assert-Contains -Text $readOnlyWorkspaceSnapshotHandlers -Needle $snapshotHandlerSignal -Message "ReadOnlyWorkspaceSnapshotHandlers contract missing: $snapshotHandlerSignal"
-}
-foreach ($sessionViewModelSnapshotHandlerSignal in @(
-    "_readOnlyWorkspaceSnapshotHandlers.ApplyCoreDiagnostics",
-    "_readOnlyWorkspaceSnapshotHandlers.ApplyFileTransfer",
-    "_readOnlyWorkspaceSnapshotHandlers.ApplyUsbManagement",
-    "_readOnlyWorkspaceSnapshotHandlers.ApplyRemoteDesktop",
-    "_readOnlyWorkspaceSnapshotHandlers.ApplySystemMonitor",
-    "_readOnlyWorkspaceSnapshotHandlers.ApplySettings"
-)) {
-    Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelSnapshotHandlerSignal -Message "SessionViewModel must pass read-only snapshot handlers instead of owning collection maps: $sessionViewModelSnapshotHandlerSignal"
 }
 foreach ($viewModelSnapshotHandlerReturnSignal in @(
     "ApplyCoreDiagnosticsSnapshot",
@@ -1589,16 +1582,69 @@ foreach ($readOnlyWorkspaceRefreshCoordinatorSignal in @(
 )) {
     Assert-Contains -Text $readOnlyWorkspaceRefreshCoordinator -Needle $readOnlyWorkspaceRefreshCoordinatorSignal -Message "ReadOnlyWorkspaceRefreshCoordinator contract missing: $readOnlyWorkspaceRefreshCoordinatorSignal"
 }
+foreach ($readOnlyWorkspaceRefreshActionsSignal in @(
+    "internal sealed class ReadOnlyWorkspaceRefreshActions",
+    "ReadOnlyWorkspaceRefreshCoordinator refreshCoordinator",
+    "ReadOnlyWorkspaceSnapshotHandlers snapshotHandlers",
+    "Func<string> getSelectedBitrate",
+    "Func<string> getSelectedFramerate",
+    "Action<string> setStatusMessage",
+    "Action<string> setCoreDiagnosticsStatus",
+    "Action<string> setFileTransferStatus",
+    "Action<string> setUsbManagementStatus",
+    "Action<string> setRemoteDesktopStatus",
+    "Action<string> setSystemMonitorStatus",
+    "Action<string> setSettingsStatus",
+    "RunCoreDiagnosticsAsync()",
+    "_refreshCoordinator.RunCoreDiagnosticsAsync(",
+    "_snapshotHandlers.ApplyCoreDiagnostics",
+    "RefreshFileTransferAsync()",
+    "_refreshCoordinator.RefreshFileTransferAsync(",
+    "_snapshotHandlers.ApplyFileTransfer",
+    "RefreshUsbManagementAsync()",
+    "_snapshotHandlers.ApplyUsbManagement",
+    "RefreshRemoteDesktopAsync()",
+    "_getSelectedBitrate()",
+    "_getSelectedFramerate()",
+    "_snapshotHandlers.ApplyRemoteDesktop",
+    "RefreshSystemMonitorAsync()",
+    "_snapshotHandlers.ApplySystemMonitor",
+    "RefreshSettingsAsync()",
+    "_snapshotHandlers.ApplySettings"
+)) {
+    Assert-Contains -Text $readOnlyWorkspaceRefreshActions -Needle $readOnlyWorkspaceRefreshActionsSignal -Message "ReadOnlyWorkspaceRefreshActions contract missing: $readOnlyWorkspaceRefreshActionsSignal"
+}
 foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "new ReadOnlyWorkspaceRefreshCoordinator(",
+    "new ReadOnlyWorkspaceRefreshActions(",
+    "readOnlyWorkspaceRefreshCoordinator,",
+    "_readOnlyWorkspaceSnapshotHandlers,",
+    "() => SelectedBitrate",
+    "() => SelectedFramerate",
+    "_readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync()",
+    "_readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync()",
+    "_readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync()",
+    "_readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync()",
+    "_readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync()",
+    "_readOnlyWorkspaceRefreshActions.RefreshSettingsAsync()"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshActions: $sessionViewModelReadOnlyRefreshSignal"
+}
+foreach ($sessionViewModelDirectReadOnlyRefreshSignal in @(
     "_readOnlyWorkspaceRefreshCoordinator.RunCoreDiagnosticsAsync(",
     "_readOnlyWorkspaceRefreshCoordinator.RefreshFileTransferAsync(",
     "_readOnlyWorkspaceRefreshCoordinator.RefreshUsbManagementAsync(",
     "_readOnlyWorkspaceRefreshCoordinator.RefreshRemoteDesktopAsync(",
     "_readOnlyWorkspaceRefreshCoordinator.RefreshSystemMonitorAsync(",
-    "_readOnlyWorkspaceRefreshCoordinator.RefreshSettingsAsync("
+    "_readOnlyWorkspaceRefreshCoordinator.RefreshSettingsAsync(",
+    "_readOnlyWorkspaceSnapshotHandlers.ApplyCoreDiagnostics",
+    "_readOnlyWorkspaceSnapshotHandlers.ApplyFileTransfer",
+    "_readOnlyWorkspaceSnapshotHandlers.ApplyUsbManagement",
+    "_readOnlyWorkspaceSnapshotHandlers.ApplyRemoteDesktop",
+    "_readOnlyWorkspaceSnapshotHandlers.ApplySystemMonitor",
+    "_readOnlyWorkspaceSnapshotHandlers.ApplySettings"
 )) {
-    Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshCoordinator: $sessionViewModelReadOnlyRefreshSignal"
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelDirectReadOnlyRefreshSignal)) -Message "SessionViewModel must not compose read-only refresh callbacks directly: $sessionViewModelDirectReadOnlyRefreshSignal"
 }
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceBusyCoordinator.RefreshReadOnlyWorkspaceAsync")) -Message "SessionViewModel must not compose read-only workspace refresh templates directly."
 foreach ($workspaceStartupStateBuilderSignal in @(
@@ -2494,6 +2540,7 @@ foreach ($docSignal in @(
     "ClearPairingAndPreflight",
     "WorkspaceBusyCoordinator",
     "ReadOnlyWorkspaceRefreshCoordinator",
+    "ReadOnlyWorkspaceRefreshActions",
     "ReadOnlyWorkspaceSnapshotHandlers",
     "WorkspaceCollectionProjector.Replace",
     "RefreshReadOnlyWorkspaceAsync",
