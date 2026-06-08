@@ -507,7 +507,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Generate QR",
                 "\uE97E",
                 true,
-                "Fail-closed mac-parity quick action; command does not read files or start transport.",
+                "Mac-parity quick action; prepares an in-memory QR share plan without reading files or starting transport.",
                 CommandId: WorkspaceActionCommandId.GenerateFileTransferQr,
                 GateId: WorkspaceActionGateId.CanGenerateFileTransferQr)
         };

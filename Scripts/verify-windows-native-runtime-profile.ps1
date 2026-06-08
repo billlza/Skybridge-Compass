@@ -101,6 +101,15 @@ try
     AssertEqual(SystemMonitorWorkspaceClient.DefaultStopMonitoringStoppedStatus, stopMonitoring.Status, "stop monitoring status");
     AssertEqual(true, defaultDependencies.SystemMonitorClient.CanStartMonitoring(), "stopped system monitor start gate");
     AssertEqual(false, defaultDependencies.SystemMonitorClient.CanStopMonitoring(), "stopped system monitor stop gate");
+    AssertType<FileTransferWorkspaceClient>(defaultDependencies.FileTransferClient, "default file transfer client");
+    AssertEqual(false, defaultDependencies.FileTransferClient.CanSelectFiles(), "default file transfer select files gate");
+    AssertEqual(false, defaultDependencies.FileTransferClient.CanSelectFolder(), "default file transfer select folder gate");
+    AssertEqual(true, defaultDependencies.FileTransferClient.CanGenerateShareQr(), "default file transfer QR share gate");
+    var shareQrIntent = await defaultDependencies.FileTransferClient.BuildShareQrActionAsync();
+    AssertEqual(FileTransferWorkspaceClient.DefaultShareQrReadyStatus, shareQrIntent.Status, "file transfer QR share intent status");
+    AssertEqual(FileTransferWorkspaceClient.DefaultShareQrReadyMessage, shareQrIntent.Message, "file transfer QR share intent message");
+    AssertContains(shareQrIntent.Detail, "intent=FT-0001", "file transfer QR share intent detail should include deterministic in-memory intent id.");
+    AssertContains(shareQrIntent.Detail, "no transport or signaling session was started", "file transfer QR share intent detail should keep transport/signaling disabled.");
     AssertType<SettingsWorkspaceClient>(defaultDependencies.SettingsClient, "default settings client");
     AssertNestedType<DisabledSystemPreferencesLauncher>(defaultDependencies.SettingsClient, "_systemPreferencesLauncher", "default system preferences launcher");
     AssertEqual(false, defaultDependencies.SettingsClient.CanOpenSystemPreferences(), "default system preferences gate");
@@ -374,6 +383,14 @@ static void AssertEqual<T>(T expected, T actual, string label)
     if (!EqualityComparer<T>.Default.Equals(expected, actual))
     {
         throw new InvalidOperationException($"{label}: expected '{expected}', got '{actual}'.");
+    }
+}
+
+static void AssertContains(string text, string expected, string label)
+{
+    if (!text.Contains(expected, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException($"{label}: expected to find '{expected}' in '{text}'.");
     }
 }
 

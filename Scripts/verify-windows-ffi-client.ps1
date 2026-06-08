@@ -1004,7 +1004,10 @@ foreach ($signal in @(
 
 foreach ($signal in @(
     "public interface IFileTransferWorkspaceClient",
+    "public interface IFileTransferShareIntentClient",
+    "public sealed class InMemoryFileTransferShareIntentClient : IFileTransferShareIntentClient",
     "public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient",
+    "BuildShareQrIntent",
     "BuildInitialStatus",
     "DefaultInitialStatus",
     "BuildPendingStatus",
@@ -1022,7 +1025,12 @@ foreach ($signal in @(
     "DecodeFrameMetadataAsync",
     "FileTransferSecurityFact",
     "HMAC",
-    "Signature"
+    "Signature",
+    "CanGenerateShareQr() => _shareIntentClient.CanGenerateShareQr()",
+    "DefaultShareQrReadyStatus",
+    "DefaultShareQrReadyMessage",
+    "BuildShareQrIntentActionResult",
+    "NormalizeShareIntentId"
 )) {
     Assert-Contains -Text $fileTransfer -Needle $signal -Message "FileTransferWorkspaceClient missing Core file-transfer signal: $signal"
 }

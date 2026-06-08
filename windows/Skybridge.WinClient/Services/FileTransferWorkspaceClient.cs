@@ -36,13 +36,49 @@ public interface IFileTransferWorkspaceClient
     Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync();
 }
 
+public interface IFileTransferShareIntentClient
+{
+    bool CanGenerateShareQr();
+
+    FileTransferWorkspaceActionResult BuildShareQrIntent();
+}
+
+public sealed class InMemoryFileTransferShareIntentClient : IFileTransferShareIntentClient
+{
+    private readonly object _sync = new();
+    private int _nextIntentId;
+
+    public bool CanGenerateShareQr() => true;
+
+    public FileTransferWorkspaceActionResult BuildShareQrIntent()
+    {
+        int intentId;
+        lock (_sync)
+        {
+            _nextIntentId++;
+            intentId = _nextIntentId;
+        }
+
+        return FileTransferWorkspaceClient.BuildShareQrIntentActionResult($"FT-{intentId:0000}");
+    }
+}
+
 public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 {
     private readonly CoreBridge _coreBridge;
+    private readonly IFileTransferShareIntentClient _shareIntentClient;
 
     public FileTransferWorkspaceClient(CoreBridge coreBridge)
+        : this(coreBridge, new InMemoryFileTransferShareIntentClient())
+    {
+    }
+
+    public FileTransferWorkspaceClient(
+        CoreBridge coreBridge,
+        IFileTransferShareIntentClient shareIntentClient)
     {
         _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
+        _shareIntentClient = shareIntentClient ?? throw new ArgumentNullException(nameof(shareIntentClient));
     }
 
     public string BuildPendingStatus() => DefaultPendingStatus;
@@ -58,7 +94,7 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public bool CanSelectFolder() => false;
 
-    public bool CanGenerateShareQr() => false;
+    public bool CanGenerateShareQr() => _shareIntentClient.CanGenerateShareQr();
 
     public string BuildSelectFilesPendingStatus() => DefaultSelectFilesPendingStatus;
 
@@ -90,6 +126,11 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 
     public static string DefaultShareQrBlockedMessage { get; } = "File transfer QR generation remains fail-closed";
 
+    public static string DefaultShareQrReadyStatus { get; } = "QR share plan ready";
+
+    public static string DefaultShareQrReadyMessage { get; } =
+        "File transfer QR share plan prepared in memory only; no local files were read.";
+
     public static string BuildDefaultCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
         $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
 
@@ -110,6 +151,18 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
             DefaultShareQrBlockedStatus,
             DefaultShareQrBlockedMessage,
             "No local files were read and no transport or signaling session was started.");
+
+    public static FileTransferWorkspaceActionResult BuildShareQrIntentActionResult(string intentId) =>
+        new(
+            DefaultShareQrReadyStatus,
+            DefaultShareQrReadyMessage,
+            $"intent={NormalizeShareIntentId(intentId)}; no QR payload was emitted, and no transport or signaling session was started.");
+
+    private static string NormalizeShareIntentId(string intentId)
+    {
+        var normalized = (intentId ?? "").Trim();
+        return normalized.Length == 0 ? "FT-0000" : normalized;
+    }
 
     public async Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
@@ -167,7 +220,7 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
         Task.FromResult(BuildDefaultSelectFolderActionResult());
 
     public Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync() =>
-        Task.FromResult(BuildDefaultShareQrActionResult());
+        Task.FromResult(_shareIntentClient.BuildShareQrIntent());
 }
 
 public sealed record FileTransferWorkspaceSnapshot(
