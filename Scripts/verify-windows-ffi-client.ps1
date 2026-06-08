@@ -34,6 +34,7 @@ $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Service
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
+$connectionLaunchRequestPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionLaunchRequest.cs"
 $connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs"
 $workspaceErrorStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceErrorStatusClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
@@ -56,7 +57,7 @@ $dependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Sessio
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -69,6 +70,7 @@ $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
+$connectionLaunchRequest = Get-Content -Raw -LiteralPath $connectionLaunchRequestPath
 $connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceStatePath
 $workspaceErrorStatus = Get-Content -Raw -LiteralPath $workspaceErrorStatusPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
@@ -110,6 +112,10 @@ foreach ($entryPoint in @(
 
 foreach ($signal in @(
     "public sealed class FfiEngineClient : IEngineClient, IDisposable",
+    "ConnectAsync(ConnectionLaunchRequest request)",
+    "request.Plan.ValidateForLaunch(request.PairingMaterial)",
+    "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
+    "request.PairingMaterial.ToPeerPublicKeyProvider()",
     "IPeerPublicKeyProvider",
     "GetPeerPublicKeyAsync",
     "Cannot connect without a peer public key from pairing.",
@@ -123,6 +129,26 @@ foreach ($signal in @(
 }
 
 Assert-True -Condition (-not $client.Contains("var peerPublicKey = ReadLocalPublicKey();")) -Message "FfiEngineClient must not use the local public key as the peer key."
+foreach ($signal in @(
+    "public sealed record ConnectionLaunchRequest",
+    "public sealed record ConnectionPreflightPlan",
+    "ConnectionLaunchAdapterKind",
+    "ResolveAdapterKind",
+    "ValidateForLaunch",
+    "CoreTransportKind TransportKind",
+    "CoreTransportAuditCode TransportAudit",
+    "CoreCryptoSuiteKind SelectedSuite",
+    "CoreCryptoSuiteAuditCode SuiteAudit",
+    "TransportBindingDigest",
+    "IsLiveAdapterReady",
+    "AdapterBinding",
+    "Connection launch requires a concrete transport adapter kind.",
+    "Connection launch requires a 32-byte transport binding digest from Core preflight.",
+    "Connection launch request peer does not match pairing material.",
+    "Connection launch request fingerprint does not match pairing material."
+)) {
+    Assert-Contains -Text $connectionLaunchRequest -Needle $signal -Message "ConnectionLaunchRequest missing launch signal: $signal"
+}
 Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateDefault()" -Message "MainWindow should create SessionViewModel through the dependency factory."
 Assert-Contains -Text $dependencyFactory -Needle "new DummyEngineClient()" -Message "Default dependency factory should keep the dummy client until native DLL deployment is explicit."
 Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not silently switch to FfiEngineClient before native DLL deployment."
@@ -399,15 +425,21 @@ foreach ($signal in @(
     "DefaultPendingStatus",
     "BuildReadOnlySnapshotAsync",
     "Pairing material must be validated against the discovered peer before connection preflight.",
+    "ConnectionPreflightPlan",
+    "ConnectionLaunchAdapterKind",
+    "ResolveAdapterKind",
     "PlanConnectionAsync",
     "ComputeTransportBindingDigestAsync",
     "TransportBindingMaterial",
+    "TransportBindingDigest",
+    "IsLiveAdapterReady",
+    "adapter pending",
     "MapChannelAsync",
     "TrafficPaddingPlan.Sbp2Fixed",
     "ToPeerPublicKeyProvider",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text $connectionPreflight -Needle $signal -Message "ConnectionPreflightClient missing preflight signal: $signal"
+    Assert-Contains -Text ($connectionPreflight + $connectionLaunchRequest) -Needle $signal -Message "ConnectionPreflightClient missing preflight signal: $signal"
 }
 
 Assert-Contains -Text $architecture -Needle "ConnectionPreflightClient" -Message "Architecture doc missing ConnectionPreflightClient status."
@@ -430,13 +462,20 @@ foreach ($signal in @(
     "BuildPairingValidatedPatch",
     "BuildPreflightReadiness",
     "CanPreparePreflight",
+    "BuildPreflightValidatedState",
+    "BuildPreflightInputResetState",
+    "BuildConnectionLaunchReadiness",
+    "BuildConnectionLaunchRequest",
     "BuildPreflightPreparedPatch",
     "ConnectionWorkspaceResetReason",
     "ConnectionWorkspaceStatusPatch",
     "ConnectionWorkspaceValidatedState",
+    "ConnectionLaunchRequest",
+    "ConnectionPreflightSnapshot? PreflightSnapshot",
     "ConnectionWorkspacePreflightReadiness",
     "Parse a Core-validated discovery TXT record before connection preflight.",
-    "Validate pairing material before connection preflight."
+    "Validate pairing material before connection preflight.",
+    "Prepare Core connection preflight before connection launch."
 )) {
     Assert-Contains -Text $connectionWorkspaceState -Needle $signal -Message "ConnectionWorkspaceStateClient missing connection state signal: $signal"
 }

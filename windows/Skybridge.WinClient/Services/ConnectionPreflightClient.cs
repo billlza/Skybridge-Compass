@@ -78,6 +78,23 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
                 10_000,
                 CapabilityDigest(local, remote, discoveredPeer, pairingMaterial)));
         var provider = pairingMaterial.ToPeerPublicKeyProvider();
+        var launchPlan = new ConnectionPreflightPlan(
+            discoveredPeer.DeviceId,
+            pairingMaterial.PublicKeyFingerprint,
+            plan.Transport.Kind,
+            plan.Transport.AuditCode,
+            plan.Transport.RelayRequired,
+            plan.Transport.RelayAllowed,
+            plan.SelectedSuite,
+            plan.SelectedSuiteWireId,
+            plan.SuiteAudit,
+            plan.Sbp2Enabled,
+            plan.Sbp2FixedPayloadLen,
+            plan.FrameHeaderLen,
+            bindingDigest,
+            ConnectionPreflightPlan.ResolveAdapterKind(plan.Transport.Kind),
+            false,
+            "adapter pending");
 
         var facts = new List<ConnectionPreflightFact>
         {
@@ -115,7 +132,7 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
                 "No connection attempt is started; FfiEngineClient remains behind explicit native DLL deployment.")
         };
 
-        return new ConnectionPreflightSnapshot(DateTimeOffset.UtcNow, facts);
+        return new ConnectionPreflightSnapshot(DateTimeOffset.UtcNow, launchPlan, facts);
     }
 
     private static byte[] PreflightTransportSecretFingerprint(PairingMaterial pairingMaterial) =>
@@ -167,6 +184,7 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
 
 public sealed record ConnectionPreflightSnapshot(
     DateTimeOffset CapturedAt,
+    ConnectionPreflightPlan Plan,
     IReadOnlyList<ConnectionPreflightFact> Facts);
 
 public sealed record ConnectionPreflightFact(

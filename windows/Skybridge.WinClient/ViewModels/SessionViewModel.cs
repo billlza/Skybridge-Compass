@@ -243,11 +243,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => IsBusy = value,
             _workspaceStatusPatchApplier,
             dependencies.WorkspaceErrorStatusClient);
-        _sessionEngineActions = new SessionEngineActions(
-            _engineClient,
-            _workspaceBusyCoordinator,
-            _sessionStatusClient,
-            value => StatusMessage = value);
         _sessionEngineStateProjector = new SessionEngineStateProjector(
             _sessionStatusClient,
             value => ConnectionState = value,
@@ -332,6 +327,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             CrossNetworkConnectionFacts,
             PairingFacts,
             ConnectionPreflightFacts);
+        _sessionEngineActions = new SessionEngineActions(
+            _engineClient,
+            _workspaceBusyCoordinator,
+            _sessionStatusClient,
+            () => _connectionWorkspaceStateClient.BuildConnectionLaunchRequest(
+                _connectionInputCoordinator.ValidatedState),
+            value => StatusMessage = value);
         _discoveryBrowserActions = new DiscoveryBrowserActions(
             _discoveryBrowserInputPolicy,
             _workspaceBusyCoordinator,

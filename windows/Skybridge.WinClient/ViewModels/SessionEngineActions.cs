@@ -9,22 +9,27 @@ internal sealed class SessionEngineActions
     private readonly IEngineClient _engineClient;
     private readonly WorkspaceBusyCoordinator _busyCoordinator;
     private readonly ISessionStatusClient _sessionStatusClient;
+    private readonly Func<ConnectionLaunchRequest> _buildConnectionLaunchRequest;
     private readonly Action<string> _setStatusMessage;
 
     public SessionEngineActions(
         IEngineClient engineClient,
         WorkspaceBusyCoordinator busyCoordinator,
         ISessionStatusClient sessionStatusClient,
+        Func<ConnectionLaunchRequest> buildConnectionLaunchRequest,
         Action<string> setStatusMessage)
     {
         _engineClient = engineClient;
         _busyCoordinator = busyCoordinator;
         _sessionStatusClient = sessionStatusClient;
+        _buildConnectionLaunchRequest = buildConnectionLaunchRequest;
         _setStatusMessage = setStatusMessage;
     }
 
     public Task ConnectAsync() =>
-        RunAsync(SessionStatusAction.Connect, _engineClient.ConnectAsync);
+        RunAsync(
+            SessionStatusAction.Connect,
+            () => _engineClient.ConnectAsync(_buildConnectionLaunchRequest()));
 
     public Task DisconnectAsync() =>
         RunAsync(SessionStatusAction.Disconnect, _engineClient.DisconnectAsync);

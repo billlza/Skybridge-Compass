@@ -18,7 +18,7 @@ public interface IEngineClient
 
     event EventHandler<EngineConnectionState>? ConnectionStateChanged;
 
-    Task ConnectAsync();
+    Task ConnectAsync(ConnectionLaunchRequest request);
 
     Task DisconnectAsync();
 

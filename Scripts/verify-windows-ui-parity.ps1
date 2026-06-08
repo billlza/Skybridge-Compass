@@ -137,6 +137,7 @@ $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Service
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
 $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs"
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
+$connectionLaunchRequestPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionLaunchRequest.cs"
 $connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs"
 $workspaceErrorStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceErrorStatusClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
@@ -158,7 +159,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -214,6 +215,7 @@ $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
 $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
+$connectionLaunchRequest = Get-Content -Raw -LiteralPath $connectionLaunchRequestPath
 $connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceStatePath
 $workspaceErrorStatus = Get-Content -Raw -LiteralPath $workspaceErrorStatusPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
@@ -1322,9 +1324,11 @@ foreach ($sessionEngineActionsSignal in @(
     "IEngineClient engineClient",
     "WorkspaceBusyCoordinator busyCoordinator",
     "ISessionStatusClient sessionStatusClient",
+    "Func<ConnectionLaunchRequest> buildConnectionLaunchRequest",
+    "_buildConnectionLaunchRequest = buildConnectionLaunchRequest",
     "Action<string> setStatusMessage",
     "ConnectAsync()",
-    "RunAsync(SessionStatusAction.Connect, _engineClient.ConnectAsync)",
+    "_engineClient.ConnectAsync(_buildConnectionLaunchRequest())",
     "DisconnectAsync()",
     "RunAsync(SessionStatusAction.Disconnect, _engineClient.DisconnectAsync)",
     "SendHeartbeatAsync()",
@@ -1337,6 +1341,7 @@ foreach ($sessionEngineActionsSignal in @(
 }
 foreach ($sessionViewModelEngineActionSignal in @(
     "new SessionEngineActions(",
+    "BuildConnectionLaunchRequest(",
     "_sessionEngineActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelEngineActionSignal -Message "SessionViewModel must delegate session engine actions through SessionEngineActions: $sessionViewModelEngineActionSignal"
@@ -1763,12 +1768,16 @@ foreach ($connectionStateSignal in @(
     "BuildDiscoveryPeerValidatedState",
     "BuildPairingValidatedState",
     "BuildPairingInputResetState",
+    "BuildPreflightValidatedState",
+    "BuildPreflightInputResetState",
     "BuildDiscoveryBrowserResultPatch",
     "BuildManualTargetPreparedPatch",
     "BuildCrossNetworkPreparedPatch",
     "BuildDiscoveryPeerValidatedPatch",
     "BuildPairingValidatedPatch",
     "BuildPreflightReadiness",
+    "BuildConnectionLaunchReadiness",
+    "BuildConnectionLaunchRequest",
     "BuildPreflightPreparedPatch",
     "ConnectionWorkspaceResetReason",
     "ConnectionWorkspaceStatusPatch",
@@ -1780,6 +1789,8 @@ foreach ($connectionStateSignal in @(
     "ApplyInputInvalidation",
     "ConnectionWorkspaceValidatedState",
     "ConnectionWorkspacePreflightReadiness",
+    "ConnectionLaunchRequest",
+    "ConnectionPreflightSnapshot? PreflightSnapshot",
     "DiscoveryInputChanged",
     "ManualTargetInputChanged",
     "CrossNetworkInputChanged",
@@ -1787,14 +1798,36 @@ foreach ($connectionStateSignal in @(
     "PreflightCleared",
     "Parse a Core-validated discovery TXT record before connection preflight.",
     "Validate pairing material before connection preflight.",
+    "Prepare Core connection preflight before connection launch.",
     "_connectionWorkspaceStateClient.BuildInitialStatusPatch()",
     "ClearPairingAndPreflight",
     "_connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot)",
     "_connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer)",
     "_connectionWorkspaceStateClient.BuildPairingValidatedState(",
+    "_connectionWorkspaceStateClient.BuildConnectionLaunchRequest(",
     "new ConnectionWorkspaceStateClient()"
 )) {
     Assert-Contains -Text ($connectionWorkspaceState + $sessionViewModel + $mainWindow) -Needle $connectionStateSignal -Message "Connection workspace state signal missing: $connectionStateSignal"
+}
+foreach ($connectionLaunchSignal in @(
+    "public sealed record ConnectionLaunchRequest",
+    "public sealed record ConnectionPreflightPlan",
+    "ConnectionLaunchAdapterKind",
+    "ResolveAdapterKind",
+    "ValidateForLaunch",
+    "CoreTransportKind TransportKind",
+    "CoreTransportAuditCode TransportAudit",
+    "CoreCryptoSuiteKind SelectedSuite",
+    "CoreCryptoSuiteAuditCode SuiteAudit",
+    "TransportBindingDigest",
+    "IsLiveAdapterReady",
+    "AdapterBinding",
+    "Connection launch requires a concrete transport adapter kind.",
+    "Connection launch requires a 32-byte transport binding digest from Core preflight.",
+    "Connection launch request peer does not match pairing material.",
+    "Connection launch request fingerprint does not match pairing material."
+)) {
+    Assert-Contains -Text ($connectionLaunchRequest + $connectionPreflight + $connectionWorkspaceState + $sessionEngineActions) -Needle $connectionLaunchSignal -Message "Connection launch request contract missing: $connectionLaunchSignal"
 }
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_validatedDiscoveredPeer")) -Message "SessionViewModel must store validated connection material in ConnectionWorkspaceValidatedState."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_validatedPairingMaterial")) -Message "SessionViewModel must store validated connection material in ConnectionWorkspaceValidatedState."
@@ -1819,6 +1852,7 @@ foreach ($inputCoordinatorSignal in @(
     "ResetCrossNetworkInput",
     "ResetPairingInput",
     "ClearConnectionPreflight",
+    "BuildPreflightInputResetState(ValidatedState)",
     "ConnectionWorkspaceResetReason.DiscoveryInputChanged",
     "ConnectionWorkspaceResetReason.ManualTargetInputChanged",
     "ConnectionWorkspaceResetReason.CrossNetworkInputChanged",
@@ -1863,6 +1897,7 @@ foreach ($resultProjectionSignal in @(
     "_connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot)",
     "_connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer)",
     "_connectionWorkspaceStateClient.BuildPairingValidatedState(",
+    "_connectionWorkspaceStateClient.BuildPreflightValidatedState(",
     "_connectionWorkspaceStateClient.BuildDiscoveryBrowserResultPatch(",
     "_connectionWorkspaceStateClient.BuildManualTargetPreparedPatch(snapshot)",
     "_connectionWorkspaceStateClient.BuildCrossNetworkPreparedPatch(snapshot)",
@@ -2837,6 +2872,8 @@ foreach ($discoverySignal in @(
     "ConnectionWorkspaceStateClient",
     "PairingMaterialClient",
     "ConnectionPreflightClient",
+    "ConnectionLaunchRequest",
+    "ConnectionPreflightPlan",
     "skybridge-pair:v1",
     "IPeerPublicKeyProvider",
     "PublicKeyFingerprint",
@@ -2846,12 +2883,15 @@ foreach ($discoverySignal in @(
     "Peer key provider",
     "BuildReadOnlySnapshotAsync",
     "BuildPreflightReadiness",
+    "BuildConnectionLaunchRequest",
     "PlanConnectionAsync",
     "ComputeTransportBindingDigestAsync",
     "Transport binding digest",
+    "adapter pending",
+    "Prepare Core connection preflight before connection launch.",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionLaunchRequest + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("PairingFacts.Add(new PairingFactView")) -Message "SessionViewModel must map pairing facts from PairingMaterialClient instead of constructing pairing/trust facts inline."
@@ -3128,6 +3168,8 @@ foreach ($docSignal in @(
     "WorkspaceViewStateBuilder",
     "WorkspaceStartupStateBuilder",
     "ConnectionPreflightClient",
+    "ConnectionLaunchRequest",
+    "ConnectionPreflightPlan",
     "ConnectionWorkspaceStateClient",
     "ConnectionWorkspaceInputCoordinator",
     "ConnectionWorkspaceResultProjector",
@@ -3202,6 +3244,8 @@ foreach ($docSignal in @(
     "Generate QR Code",
     "Smart Connection Code",
     "CoreBridge.PlanConnectionAsync",
+    "live Windows transport adapter",
+    "adapter pending",
     "Visual QA"
 )) {
     Assert-Contains -Text $parityDoc -Needle $docSignal -Message "windows-ui-parity-contract.md missing signal: $docSignal"

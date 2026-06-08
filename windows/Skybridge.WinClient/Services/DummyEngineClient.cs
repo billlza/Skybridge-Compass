@@ -13,8 +13,15 @@ public sealed class DummyEngineClient : IEngineClient
 
     public event EventHandler<EngineConnectionState>? ConnectionStateChanged;
 
-    public async Task ConnectAsync()
+    public async Task ConnectAsync(ConnectionLaunchRequest request)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        request.Plan.ValidateForLaunch(request.PairingMaterial);
+        if (!request.Plan.IsLiveAdapterReady)
+        {
+            throw new NotSupportedException("Connection launch requires a live Windows transport adapter; the current request is preflight-only.");
+        }
+
         await _mutex.WaitAsync();
         try
         {

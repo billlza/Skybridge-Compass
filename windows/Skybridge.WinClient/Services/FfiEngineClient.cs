@@ -12,22 +12,23 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
     private const ulong HeartbeatIntervalMs = 1_000;
 
     private readonly SemaphoreSlim _mutex = new(1, 1);
-    private readonly IPeerPublicKeyProvider _peerPublicKeyProvider;
     private nint _handle;
     private bool _disposed;
     private EngineConnectionState _state = EngineConnectionState.Disconnected;
-
-    public FfiEngineClient(IPeerPublicKeyProvider peerPublicKeyProvider)
-    {
-        _peerPublicKeyProvider = peerPublicKeyProvider ?? throw new ArgumentNullException(nameof(peerPublicKeyProvider));
-    }
 
     public EngineConnectionState State => _state;
 
     public event EventHandler<EngineConnectionState>? ConnectionStateChanged;
 
-    public async Task ConnectAsync()
+    public async Task ConnectAsync(ConnectionLaunchRequest request)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        request.Plan.ValidateForLaunch(request.PairingMaterial);
+        if (!request.Plan.IsLiveAdapterReady)
+        {
+            throw new NotSupportedException("Connection launch requires a live Windows transport adapter; the current request is preflight-only.");
+        }
+
         await _mutex.WaitAsync();
         try
         {
@@ -39,7 +40,8 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
 
             EnsureHandle();
             SetState(EngineConnectionState.Connecting);
-            var peerPublicKey = await _peerPublicKeyProvider.GetPeerPublicKeyAsync();
+            IPeerPublicKeyProvider peerPublicKeyProvider = request.PairingMaterial.ToPeerPublicKeyProvider();
+            var peerPublicKey = await peerPublicKeyProvider.GetPeerPublicKeyAsync();
             if (peerPublicKey is null || peerPublicKey.Length == 0)
             {
                 throw new InvalidOperationException("Cannot connect without a peer public key from pairing.");

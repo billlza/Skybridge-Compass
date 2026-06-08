@@ -96,6 +96,8 @@ internal sealed class ConnectionWorkspaceInputCoordinator
 
     public void ClearConnectionPreflight()
     {
+        ApplyValidatedState(
+            _connectionWorkspaceStateClient.BuildPreflightInputResetState(ValidatedState));
         _connectionPreflightFacts.Clear();
         _statusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(

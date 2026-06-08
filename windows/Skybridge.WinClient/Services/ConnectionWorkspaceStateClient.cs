@@ -21,6 +21,13 @@ public interface IConnectionWorkspaceStateClient
     ConnectionWorkspaceValidatedState BuildPairingInputResetState(
         ConnectionWorkspaceValidatedState currentState);
 
+    ConnectionWorkspaceValidatedState BuildPreflightValidatedState(
+        ConnectionWorkspaceValidatedState currentState,
+        ConnectionPreflightSnapshot snapshot);
+
+    ConnectionWorkspaceValidatedState BuildPreflightInputResetState(
+        ConnectionWorkspaceValidatedState currentState);
+
     ConnectionWorkspaceStatusPatch BuildDiscoveryBrowserResultPatch(
         DiscoveryBrowserAction action,
         DiscoveryBrowserSnapshot snapshot,
@@ -41,6 +48,12 @@ public interface IConnectionWorkspaceStateClient
     bool CanPreparePreflight(
         DiscoveredPeer? discoveredPeer,
         PairingMaterial? pairingMaterial);
+
+    ConnectionWorkspacePreflightReadiness BuildConnectionLaunchReadiness(
+        ConnectionWorkspaceValidatedState state);
+
+    ConnectionLaunchRequest BuildConnectionLaunchRequest(
+        ConnectionWorkspaceValidatedState state);
 
     ConnectionWorkspaceStatusPatch BuildPreflightPreparedPatch(ConnectionPreflightSnapshot snapshot);
 }
@@ -81,26 +94,36 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
         };
 
     public ConnectionWorkspaceValidatedState BuildInputInvalidatedState() =>
-        new(null, null);
+        new(null, null, null);
 
     public ConnectionWorkspaceValidatedState BuildDiscoveryBrowserValidatedState(
         DiscoveryBrowserSnapshot snapshot) =>
         new(
             snapshot.Peers.Count == 1 ? snapshot.Peers[0].Peer : null,
+            null,
             null);
 
     public ConnectionWorkspaceValidatedState BuildDiscoveryPeerValidatedState(
         DiscoveredPeer peer) =>
-        new(peer, null);
+        new(peer, null, null);
 
     public ConnectionWorkspaceValidatedState BuildPairingValidatedState(
         ConnectionWorkspaceValidatedState currentState,
         PairingMaterial material) =>
-        new(currentState.DiscoveredPeer, material);
+        new(currentState.DiscoveredPeer, material, null);
 
     public ConnectionWorkspaceValidatedState BuildPairingInputResetState(
         ConnectionWorkspaceValidatedState currentState) =>
-        new(currentState.DiscoveredPeer, null);
+        new(currentState.DiscoveredPeer, null, null);
+
+    public ConnectionWorkspaceValidatedState BuildPreflightValidatedState(
+        ConnectionWorkspaceValidatedState currentState,
+        ConnectionPreflightSnapshot snapshot) =>
+        new(currentState.DiscoveredPeer, currentState.PairingMaterial, snapshot);
+
+    public ConnectionWorkspaceValidatedState BuildPreflightInputResetState(
+        ConnectionWorkspaceValidatedState currentState) =>
+        new(currentState.DiscoveredPeer, currentState.PairingMaterial, null);
 
     public ConnectionWorkspaceStatusPatch BuildDiscoveryBrowserResultPatch(
         DiscoveryBrowserAction action,
@@ -166,6 +189,50 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
         PairingMaterial? pairingMaterial) =>
         BuildPreflightReadiness(discoveredPeer, pairingMaterial).IsReady;
 
+    public ConnectionWorkspacePreflightReadiness BuildConnectionLaunchReadiness(
+        ConnectionWorkspaceValidatedState state)
+    {
+        if (state.DiscoveredPeer is null)
+        {
+            return new(false, "Parse a Core-validated discovery TXT record before connection launch.");
+        }
+
+        if (state.PairingMaterial is null)
+        {
+            return new(false, "Validate pairing material before connection launch.");
+        }
+
+        if (state.PreflightSnapshot is null)
+        {
+            return new(false, "Prepare Core connection preflight before connection launch.");
+        }
+
+        try
+        {
+            state.PreflightSnapshot.Plan.ValidateForLaunch(state.PairingMaterial);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return new(false, ex.Message);
+        }
+
+        return new(true, "");
+    }
+
+    public ConnectionLaunchRequest BuildConnectionLaunchRequest(
+        ConnectionWorkspaceValidatedState state)
+    {
+        var readiness = BuildConnectionLaunchReadiness(state);
+        if (!readiness.IsReady)
+        {
+            throw new InvalidOperationException(readiness.ErrorMessage);
+        }
+
+        return new ConnectionLaunchRequest(
+            state.PairingMaterial!,
+            state.PreflightSnapshot!);
+    }
+
     public ConnectionWorkspaceStatusPatch BuildPreflightPreparedPatch(ConnectionPreflightSnapshot snapshot) =>
         new(
             ConnectionPreflightStatus: $"Prepared {snapshot.CapturedAt:HH:mm:ss} UTC",
@@ -197,4 +264,5 @@ public sealed record ConnectionWorkspacePreflightReadiness(
 
 public sealed record ConnectionWorkspaceValidatedState(
     DiscoveredPeer? DiscoveredPeer,
-    PairingMaterial? PairingMaterial);
+    PairingMaterial? PairingMaterial,
+    ConnectionPreflightSnapshot? PreflightSnapshot);

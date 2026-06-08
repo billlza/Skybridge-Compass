@@ -141,6 +141,10 @@ internal sealed class ConnectionWorkspaceResultProjector
 
     public void ApplyPreflightPrepared(ConnectionPreflightSnapshot snapshot)
     {
+        _connectionInputCoordinator.ApplyValidatedState(
+            _connectionWorkspaceStateClient.BuildPreflightValidatedState(
+                _connectionInputCoordinator.ValidatedState,
+                snapshot));
         WorkspaceCollectionProjector.Replace(
             _connectionPreflightFacts,
             snapshot.Facts,
