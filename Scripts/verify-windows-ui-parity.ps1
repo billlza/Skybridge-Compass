@@ -244,6 +244,16 @@ foreach ($asyncRelayCommandSignal in @(
 }
 Assert-True -Condition (-not $sessionViewModelSource.Contains("public sealed class AsyncRelayCommand")) -Message "SessionViewModel.cs must not own the reusable AsyncRelayCommand adapter."
 
+foreach ($commandRefreshSignal in @(
+    "private readonly IReadOnlyList<ICommand> _refreshableCommands;",
+    "_refreshableCommands = new[]",
+    "foreach (var command in _refreshableCommands)",
+    "(command as AsyncRelayCommand)?.RaiseCanExecuteChanged();"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $commandRefreshSignal -Message "SessionViewModel command refresh registry missing: $commandRefreshSignal"
+}
+Assert-True -Condition (-not $sessionViewModelSource.Contains("(ConnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();")) -Message "SessionViewModel must refresh command states through _refreshableCommands instead of per-command cast calls."
+
 foreach ($binding in @(
     "NavigationItems",
     "SelectedFeature",

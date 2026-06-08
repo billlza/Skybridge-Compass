@@ -36,6 +36,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IFeatureCatalogClient _featureCatalogClient;
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
+    private readonly IReadOnlyList<ICommand> _refreshableCommands;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -218,6 +219,32 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshSystemMonitorCommand = new AsyncRelayCommand(RefreshSystemMonitorAsync, CanRefreshSystemMonitor);
         RefreshUsbManagementCommand = new AsyncRelayCommand(RefreshUsbManagementAsync, CanRefreshUsbManagement);
         RefreshSettingsCommand = new AsyncRelayCommand(RefreshSettingsAsync, CanRefreshSettings);
+        _refreshableCommands = new[]
+        {
+            ConnectCommand,
+            DisconnectCommand,
+            HeartbeatCommand,
+            StartDiscoveryCommand,
+            StopDiscoveryCommand,
+            RefreshDiscoveryCommand,
+            RunExtendedDiscoveryCommand,
+            PrepareManualConnectionCommand,
+            GenerateQRCodeCommand,
+            ScanQRCodeCommand,
+            GenerateConnectionCodeCommand,
+            RegenerateConnectionCodeCommand,
+            CopyConnectionCodeCommand,
+            ConnectConnectionCodeCommand,
+            ParseAdvertisementCommand,
+            ValidatePairingCodeCommand,
+            PrepareConnectionCommand,
+            RunCoreDiagnosticsCommand,
+            RefreshFileTransferCommand,
+            RefreshRemoteDesktopCommand,
+            RefreshSystemMonitorCommand,
+            RefreshUsbManagementCommand,
+            RefreshSettingsCommand
+        };
         var profileCatalog = _remoteDesktopProfileCatalogClient.BuildReadOnlySnapshot();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
@@ -1277,29 +1304,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void RefreshCommandStates()
     {
-        (ConnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (DisconnectCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (HeartbeatCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (StartDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (StopDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RefreshDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RunExtendedDiscoveryCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (PrepareManualConnectionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (GenerateQRCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (ScanQRCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (GenerateConnectionCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RegenerateConnectionCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (CopyConnectionCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (ConnectConnectionCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (ParseAdvertisementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (ValidatePairingCodeCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (PrepareConnectionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RefreshUsbManagementCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RunCoreDiagnosticsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RefreshFileTransferCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RefreshRemoteDesktopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RefreshSystemMonitorCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        (RefreshSettingsCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        foreach (var command in _refreshableCommands)
+        {
+            (command as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+        }
+
         RefreshDynamicWorkspaceActionStates();
     }
 
