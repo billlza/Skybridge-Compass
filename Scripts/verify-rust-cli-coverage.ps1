@@ -44,6 +44,55 @@ function Get-NativeLibraryFileName {
     return "libskybridge_core.so"
 }
 
+function Join-ProcessArguments {
+    param([string[]]$Arguments)
+
+    return ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_ -replace '"', '\"') + '"'
+        }
+        else {
+            $_
+        }
+    }) -join " "
+}
+
+function Invoke-NativeCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = Join-ProcessArguments -Arguments $Arguments
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+
+    $textParts = @()
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        $textParts += $stdout.TrimEnd()
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        $textParts += $stderr.TrimEnd()
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Text = ($textParts -join [Environment]::NewLine)
+    }
+}
+
 $coreRoot = Join-Path $RepoRoot "core/skybridge-core"
 Assert-True -Condition (Test-Path -LiteralPath (Join-Path $coreRoot "Cargo.toml")) -Message "Missing Rust core Cargo.toml: $coreRoot"
 
@@ -98,19 +147,26 @@ foreach ($signal in @(
 
 Push-Location $coreRoot
 try {
-    & cargo build --lib
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "cargo build --lib failed."
+    $buildResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("build", "--lib")
+    if (-not [string]::IsNullOrWhiteSpace($buildResult.Text)) {
+        Write-Output $buildResult.Text
+    }
+
+    Assert-True -Condition ($buildResult.ExitCode -eq 0) -Message "cargo build --lib failed."
     $nativeLibraryPath = Join-Path (Join-Path $coreRoot "target/debug") (Get-NativeLibraryFileName)
     Assert-True -Condition (Test-Path -LiteralPath $nativeLibraryPath) -Message "Missing native skybridge_core library after cargo build --lib: $nativeLibraryPath"
 
-    & cargo test
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "cargo test failed."
+    $testResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("test")
+    if (-not [string]::IsNullOrWhiteSpace($testResult.Text)) {
+        Write-Output $testResult.Text
+    }
 
-    $coverageOutput = & cargo llvm-cov --fail-under-lines $MinimumLineCoverage --summary-only 2>&1
-    $coverageExitCode = $LASTEXITCODE
-    $coverageText = $coverageOutput -join "`n"
+    Assert-True -Condition ($testResult.ExitCode -eq 0) -Message "cargo test failed."
+
+    $coverageResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("llvm-cov", "--fail-under-lines", "$MinimumLineCoverage", "--summary-only")
+    $coverageText = $coverageResult.Text
     Write-Output $coverageText
-    Assert-True -Condition ($coverageExitCode -eq 0) -Message "cargo llvm-cov failed or total line coverage is below $MinimumLineCoverage%."
+    Assert-True -Condition ($coverageResult.ExitCode -eq 0) -Message "cargo llvm-cov failed or total line coverage is below $MinimumLineCoverage%."
 
     $totalLineCoverage = Get-LineCoverage -CoverageText $coverageText -RowName "TOTAL"
     $cliLineCoverage = Get-LineCoverage -CoverageText $coverageText -RowName "cli.rs"

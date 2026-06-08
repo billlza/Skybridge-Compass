@@ -185,12 +185,31 @@ function Invoke-SshCommand {
     }
 
     $sshArgs += @($target, "whoami; hostname; pwd")
-    $output = & ssh @sshArgs 2>&1
+
+    $nativeErrorPreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    if ($nativeErrorPreference) {
+        Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $false -Scope Local
+    }
+
+    try {
+        $output = & ssh @sshArgs 2>&1
+        $sshExitCode = $LASTEXITCODE
+    }
+    catch {
+        $lastNativeExitCode = $LASTEXITCODE
+        $sshExitCode = if ($lastNativeExitCode -ne 0) { $lastNativeExitCode } else { 255 }
+        $output = @($_.Exception.Message)
+    }
+    finally {
+        if ($nativeErrorPreference) {
+            Set-Variable -Name PSNativeCommandUseErrorActionPreference -Value $nativeErrorPreference.Value -Scope Local
+        }
+    }
 
     $text = ($output -join [Environment]::NewLine).Trim()
     return [pscustomobject]@{
         UserName = $UserName
-        ExitCode = $LASTEXITCODE
+        ExitCode = $sshExitCode
         Text = $text
     }
 }

@@ -1,0 +1,51 @@
+name: Windows Portability
+
+on:
+  push:
+    branches:
+      - main
+      - Bill/windows-portability
+  pull_request:
+    branches:
+      - main
+      - Bill/windows-portability
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portability:
+    name: Windows smoke, stack, and Rust CLI coverage
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      DOTNET_NOLOGO: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pin GitHub remote to SSH
+        shell: pwsh
+        run: |
+          git remote set-url origin git@github.com:billlza/Skybridge-Compass.git
+          git remote set-url --push origin git@github.com:billlza/Skybridge-Compass.git
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Rust coverage tooling
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --locked
+
+      - name: Run Windows portability gate
+        shell: pwsh
+        run: .\Scripts\verify-windows-portability-smoke.ps1 -CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage

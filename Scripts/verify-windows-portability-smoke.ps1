@@ -4,6 +4,7 @@ param(
     [switch]$IncludeRustCliCoverage,
     [switch]$IncludeNativeDnsSdAcceptance,
     [switch]$CheckOnlineStackFreshness,
+    [switch]$CiMode,
     [switch]$ProbeMacSsh,
     [switch]$RequireMacSshReady,
     [switch]$RequireNativeDnsSdPeer,
@@ -54,9 +55,14 @@ function Invoke-SmokeGate {
 
 $gitRemoteParameters = @{
     RepoRoot = $RepoRoot
-    RequireConfiguredSshCommand = $true
-    RequireKnownHosts = $true
-    RequireCredentialHelperReset = $true
+}
+if (-not $CiMode) {
+    $gitRemoteParameters.RequireConfiguredSshCommand = $true
+    $gitRemoteParameters.RequireKnownHosts = $true
+    $gitRemoteParameters.RequireCredentialHelperReset = $true
+}
+else {
+    Write-Output "windows-portability-smoke: CI mode keeps the SSH-only remote check but skips workstation-specific SSH key, known_hosts, and credential-helper requirements."
 }
 if ($RequireGitRemoteAccess) {
     $gitRemoteParameters.RequireRemoteAccess = $true
@@ -66,6 +72,11 @@ Invoke-SmokeGate `
     -Name "git-ssh-remote" `
     -RelativeScriptPath "Scripts/verify-git-ssh-remote.ps1" `
     -Parameters $gitRemoteParameters
+
+Invoke-SmokeGate `
+    -Name "windows-ci-workflow" `
+    -RelativeScriptPath "Scripts/verify-windows-ci-workflow.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
 
 $stackFreshnessParameters = @{
     RepoRoot = $RepoRoot

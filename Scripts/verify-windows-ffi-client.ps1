@@ -60,6 +60,8 @@ $nativeRuntimeFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Win
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
+$ciWorkflowSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ci-workflow.ps1"
+$githubWorkflowPath = Join-Path $RepoRoot ".github/workflows/windows-portability.yml"
 $stackFreshnessSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-stack-freshness.ps1"
 $macSshProbePath = Join-Path $RepoRoot "Scripts/probe-mac-ssh.ps1"
 $startupStateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-startup-state.ps1"
@@ -67,7 +69,7 @@ $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connect
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -106,6 +108,8 @@ $nativeRuntimeFactory = Get-Content -Raw -LiteralPath $nativeRuntimeFactoryPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
+$ciWorkflowSmoke = Get-Content -Raw -LiteralPath $ciWorkflowSmokePath
+$githubWorkflow = Get-Content -Raw -LiteralPath $githubWorkflowPath
 $stackFreshnessSmoke = Get-Content -Raw -LiteralPath $stackFreshnessSmokePath
 $macSshProbe = Get-Content -Raw -LiteralPath $macSshProbePath
 $startupStateSmoke = Get-Content -Raw -LiteralPath $startupStateSmokePath
@@ -303,6 +307,7 @@ foreach ($nativeRuntimeSmokeSignal in @(
 foreach ($portabilitySmokeSignal in @(
     "windows-portability-smoke: ok",
     "verify-git-ssh-remote.ps1",
+    "verify-windows-ci-workflow.ps1",
     "verify-windows-stack-freshness.ps1",
     "verify-windows-ffi-client.ps1",
     "verify-windows-ui-parity.ps1",
@@ -317,6 +322,7 @@ foreach ($portabilitySmokeSignal in @(
     "verify-rust-cli-coverage.ps1",
     "IncludeRustCliCoverage",
     "MinimumLineCoverage",
+    "CiMode",
     "IncludeNativeDnsSdAcceptance",
     "RequireNativeDnsSdPeer",
     "CheckOnlineStackFreshness",
@@ -327,9 +333,52 @@ foreach ($portabilitySmokeSignal in @(
     "LASTEXITCODE",
     "Smoke gate failed: `$Name exitCode=`$LASTEXITCODE",
     "RequireGitRemoteAccess",
+    "RequireConfiguredSshCommand",
+    "RequireKnownHosts",
     "RequireCredentialHelperReset"
 )) {
     Assert-Contains -Text $portabilitySmoke -Needle $portabilitySmokeSignal -Message "Portability smoke missing signal: $portabilitySmokeSignal"
+}
+foreach ($ciWorkflowSmokeSignal in @(
+    "windows-ci-workflow: ok",
+    ".github/workflows/windows-portability.yml",
+    "actions/checkout@v4",
+    "actions/setup-dotnet@v4",
+    "dotnet-version: '10.0.x'",
+    "rustup toolchain install stable --profile minimal",
+    "rustup component add llvm-tools-preview",
+    "cargo install cargo-llvm-cov --locked",
+    "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
+    "-CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage",
+    "RequireConfiguredSshCommand",
+    "RequireKnownHosts",
+    "RequireCredentialHelperReset",
+    "git-remote-https.exe"
+)) {
+    Assert-Contains -Text $ciWorkflowSmoke -Needle $ciWorkflowSmokeSignal -Message "Windows CI workflow smoke missing signal: $ciWorkflowSmokeSignal"
+}
+foreach ($githubWorkflowSignal in @(
+    "name: Windows Portability",
+    "windows-latest",
+    "actions/checkout@v4",
+    "actions/setup-dotnet@v4",
+    "dotnet-version: '10.0.x'",
+    "rustup toolchain install stable --profile minimal",
+    "rustup component add llvm-tools-preview",
+    "cargo install cargo-llvm-cov --locked",
+    "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
+    "git remote set-url --push origin git@github.com:billlza/Skybridge-Compass.git",
+    "-CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage",
+    "contents: read"
+)) {
+    Assert-Contains -Text $githubWorkflow -Needle $githubWorkflowSignal -Message "GitHub workflow missing signal: $githubWorkflowSignal"
+}
+foreach ($forbiddenWorkflowSignal in @(
+    "-RequireGitRemoteAccess",
+    "-RequireMacSshReady",
+    "-RequireNativeDnsSdPeer"
+)) {
+    Assert-True -Condition (-not $githubWorkflow.Contains($forbiddenWorkflowSignal)) -Message "GitHub workflow must not require local-only readiness gate: $forbiddenWorkflowSignal"
 }
 foreach ($macSshProbeSignal in @(
     'mac-ssh-probe: $Message',
