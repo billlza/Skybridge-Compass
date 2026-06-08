@@ -68,7 +68,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _topBarThemeStatus = "";
     private string _selectedBitrate = "";
     private string _selectedFramerate = "";
-    private TopBarResolvedStatusSnapshot? _topBarResolvedStatusSnapshot;
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
     private DiscoveredPeer? _validatedDiscoveredPeer;
@@ -1588,18 +1587,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 _sessionCommandStateClient.BuildGateSnapshot(ConnectionState, IsBusy)));
 
     private WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot() =>
-        _topBarStatusClient.BuildWorkspaceActionDetailSnapshot(
-            _topBarResolvedStatusSnapshot
-            ?? _topBarStatusClient.BuildResolvedStatusSnapshot(BuildTopBarStatusRequest()));
+        _topBarStatusClient.BuildStatusUpdate(BuildTopBarStatusRequest()).ActionDetails;
 
     private void RefreshTopBarStatus()
     {
-        _topBarResolvedStatusSnapshot = _topBarStatusClient.BuildResolvedStatusSnapshot(BuildTopBarStatusRequest());
+        var update = _topBarStatusClient.BuildStatusUpdate(BuildTopBarStatusRequest());
 
-        TopBarConnectionStatus = _topBarResolvedStatusSnapshot.ConnectionStatus;
-        TopBarDiagnosticsStatus = _topBarResolvedStatusSnapshot.DiagnosticsStatus;
-        TopBarNotificationsStatus = _topBarResolvedStatusSnapshot.NotificationsStatus;
-        TopBarThemeStatus = _topBarResolvedStatusSnapshot.ThemeStatus;
+        TopBarConnectionStatus = update.ResolvedStatus.ConnectionStatus;
+        TopBarDiagnosticsStatus = update.ResolvedStatus.DiagnosticsStatus;
+        TopBarNotificationsStatus = update.ResolvedStatus.NotificationsStatus;
+        TopBarThemeStatus = update.ResolvedStatus.ThemeStatus;
         LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions);
     }
 

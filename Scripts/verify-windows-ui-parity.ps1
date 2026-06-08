@@ -533,6 +533,7 @@ foreach ($topBarSignal in @(
     "public sealed class TopBarStatusClient : ITopBarStatusClient",
     "BuildReadOnlySnapshot",
     "BuildResolvedStatusSnapshot",
+    "BuildStatusUpdate",
     "BuildDefaultStatusValue",
     "ResolveStatusValue",
     "BuildWorkspaceActionDetailSnapshot",
@@ -541,6 +542,7 @@ foreach ($topBarSignal in @(
     "TopBarStatusRequest",
     "TopBarStatusSnapshot",
     "TopBarResolvedStatusSnapshot",
+    "TopBarStatusUpdateSnapshot",
     "TopBarStatusItem",
     "TopBarStatusSlot",
     "TopBarStatusSlot.Connection",
@@ -563,8 +565,9 @@ foreach ($topBarSignal in @(
     "ResolveWorkspaceActionCommand",
     "ResolveEnabled",
     "ResolveDetail",
-    "_topBarStatusClient.BuildResolvedStatusSnapshot(",
-    "_topBarStatusClient.BuildWorkspaceActionDetailSnapshot(",
+    "_topBarStatusClient.BuildStatusUpdate(",
+    "ResolvedStatus",
+    "ActionDetails",
     "NotificationsStatus",
     "ThemeStatus",
     "WorkspaceActionGateSnapshot",
@@ -716,6 +719,8 @@ Assert-True -Condition (-not $sessionViewModel.Contains("GetTopBarStatusValue"))
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarStatusClient.ResolveStatusValue(")) -Message "SessionViewModel must use TopBarStatusClient.BuildResolvedStatusSnapshot instead of resolving top-bar scalar values inline."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarStatusClient.BuildDefaultStatusValue(")) -Message "SessionViewModel must use TopBarStatusClient.BuildResolvedStatusSnapshot instead of selecting top-bar defaults inline."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("new(TopBarNotificationsStatus, TopBarThemeStatus)")) -Message "SessionViewModel must ask TopBarStatusClient for top-bar workspace action details."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarResolvedStatusSnapshot")) -Message "SessionViewModel must use TopBarStatusClient.BuildStatusUpdate instead of caching top-bar resolved status locally."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_topBarStatusClient.BuildWorkspaceActionDetailSnapshot(")) -Message "SessionViewModel must use TopBarStatusClient.BuildStatusUpdate for top-bar action details."
 
 foreach ($topBarLabelLookup in @(
     'GetTopBarStatusValue(snapshot, "Connection"',
@@ -1611,6 +1616,8 @@ foreach ($docSignal in @(
     "Notifications",
     "Theme",
     "TopBarStatusClient",
+    "BuildStatusUpdate",
+    "TopBarStatusUpdateSnapshot",
     "TopBarStatusSlot",
     "SessionStatusClient",
     "WorkspaceActionCommandId",

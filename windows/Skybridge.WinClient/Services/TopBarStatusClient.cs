@@ -9,6 +9,8 @@ public interface ITopBarStatusClient
 
     TopBarResolvedStatusSnapshot BuildResolvedStatusSnapshot(TopBarStatusRequest request);
 
+    TopBarStatusUpdateSnapshot BuildStatusUpdate(TopBarStatusRequest request);
+
     string BuildDefaultStatusValue(TopBarStatusSlot slot);
 
     string ResolveStatusValue(
@@ -71,6 +73,15 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
                 BuildDefaultStatusValue(TopBarStatusSlot.Theme)));
     }
 
+    public TopBarStatusUpdateSnapshot BuildStatusUpdate(TopBarStatusRequest request)
+    {
+        var resolvedStatus = BuildResolvedStatusSnapshot(request);
+
+        return new(
+            resolvedStatus,
+            BuildWorkspaceActionDetailSnapshot(resolvedStatus));
+    }
+
     public string BuildDefaultStatusValue(TopBarStatusSlot slot) =>
         slot switch
         {
@@ -123,6 +134,10 @@ public sealed record TopBarResolvedStatusSnapshot(
     string DiagnosticsStatus,
     string NotificationsStatus,
     string ThemeStatus);
+
+public sealed record TopBarStatusUpdateSnapshot(
+    TopBarResolvedStatusSnapshot ResolvedStatus,
+    WorkspaceActionDetailSnapshot ActionDetails);
 
 public sealed record TopBarStatusItem(
     TopBarStatusSlot Slot,
