@@ -357,7 +357,7 @@ foreach ($viewModelProjectionSignal in @(
     "new WorkspaceSnapshotApplier(",
     "new ReadOnlyWorkspaceRefreshActions(",
     "new ReadOnlyWorkspaceSnapshotHandlers(",
-    "_readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync"
+    "_readOnlyWorkspaceRefreshActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $viewModelProjectionSignal -Message "SessionViewModel reusable projection helper missing: $viewModelProjectionSignal"
 }
@@ -525,8 +525,35 @@ Assert-True -Condition (-not $sessionViewModelSource.Contains("public sealed cla
 
 foreach ($commandBindingsSignal in @(
     "internal sealed class WorkspaceCommandBindings",
-    "new AsyncRelayCommand(connectAsync, canConnect)",
-    "new AsyncRelayCommand(refreshSettingsAsync, canRefreshSettings)",
+    "SessionEngineActions sessionEngineActions",
+    "DiscoveryBrowserActions discoveryBrowserActions",
+    "ConnectionWorkspaceActions connectionWorkspaceActions",
+    "CrossNetworkConnectionActions crossNetworkConnectionActions",
+    "ReadOnlyWorkspaceRefreshActions readOnlyWorkspaceRefreshActions",
+    "WorkspaceCommandAvailability commandAvailability",
+    "new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect)",
+    "new AsyncRelayCommand(sessionEngineActions.DisconnectAsync, commandAvailability.CanDisconnect)",
+    "new AsyncRelayCommand(sessionEngineActions.SendHeartbeatAsync, commandAvailability.CanSendHeartbeat)",
+    "new AsyncRelayCommand(discoveryBrowserActions.StartAsync, commandAvailability.CanUseDiscoveryBrowser)",
+    "new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanUseDiscoveryBrowser)",
+    "new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser)",
+    "new AsyncRelayCommand(discoveryBrowserActions.RunExtendedSearchAsync, commandAvailability.CanUseDiscoveryBrowser)",
+    "new AsyncRelayCommand(connectionWorkspaceActions.PrepareManualConnectionAsync, commandAvailability.CanPrepareManualConnection)",
+    "new AsyncRelayCommand(crossNetworkConnectionActions.GenerateQrCodeAsync, commandAvailability.CanUseCrossNetworkConnection)",
+    "new AsyncRelayCommand(crossNetworkConnectionActions.ScanQrCodeAsync, commandAvailability.CanScanQrCode)",
+    "new AsyncRelayCommand(crossNetworkConnectionActions.GenerateCodeAsync, commandAvailability.CanUseCrossNetworkConnection)",
+    "new AsyncRelayCommand(crossNetworkConnectionActions.RegenerateCodeAsync, commandAvailability.CanUseCrossNetworkConnection)",
+    "new AsyncRelayCommand(crossNetworkConnectionActions.CopyCodeAsync, commandAvailability.CanCopyConnectionCode)",
+    "new AsyncRelayCommand(crossNetworkConnectionActions.ConnectWithCodeAsync, commandAvailability.CanConnectConnectionCode)",
+    "new AsyncRelayCommand(connectionWorkspaceActions.ParseAdvertisementAsync, commandAvailability.CanParseAdvertisement)",
+    "new AsyncRelayCommand(connectionWorkspaceActions.ValidatePairingCodeAsync, commandAvailability.CanValidatePairingCode)",
+    "new AsyncRelayCommand(connectionWorkspaceActions.PrepareConnectionAsync, commandAvailability.CanPrepareConnection)",
+    "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync, commandAvailability.CanRunCoreDiagnostics)",
+    "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync, commandAvailability.CanRefreshFileTransfer)",
+    "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync, commandAvailability.CanRefreshRemoteDesktop)",
+    "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync, commandAvailability.CanRefreshSystemMonitor)",
+    "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync, commandAvailability.CanRefreshUsbManagement)",
+    "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSettingsAsync, commandAvailability.CanRefreshSettings)",
     "Registry = WorkspaceCommandRegistry.Create(",
     "WorkspaceActionCommandId.Connect",
     "WorkspaceActionCommandId.RefreshSettings",
@@ -1137,9 +1164,9 @@ foreach ($sessionStatusSignal in @(
     "BuildDefaultEngineStateStatus",
     "new SessionStatusClient()",
     "_sessionStatusClient.BuildInitialStatusMessage()",
-    "_sessionEngineActions.ConnectAsync",
-    "_sessionEngineActions.DisconnectAsync",
-    "_sessionEngineActions.SendHeartbeatAsync",
+    "sessionEngineActions.ConnectAsync",
+    "sessionEngineActions.DisconnectAsync",
+    "sessionEngineActions.SendHeartbeatAsync",
     "_sessionEngineStateProjector.Apply(newState)",
     "_sessionStatusClient.BuildPendingStatus(action)",
     "_sessionStatusClient.BuildCompletedStatus(action)",
@@ -1168,9 +1195,7 @@ foreach ($sessionEngineActionsSignal in @(
 }
 foreach ($sessionViewModelEngineActionSignal in @(
     "new SessionEngineActions(",
-    "_sessionEngineActions.ConnectAsync",
-    "_sessionEngineActions.DisconnectAsync",
-    "_sessionEngineActions.SendHeartbeatAsync"
+    "_sessionEngineActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelEngineActionSignal -Message "SessionViewModel must delegate session engine actions through SessionEngineActions: $sessionViewModelEngineActionSignal"
 }
@@ -1225,7 +1250,7 @@ foreach ($sessionCommandStateSignal in @(
     "EngineConnectionState.Connected",
     "EngineConnectionState.Reconnecting",
     "new SessionCommandStateClient()",
-    "_workspaceCommandAvailability.CanConnect",
+    "commandAvailability.CanConnect",
     "_sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy)",
     "_sessionCommandStateClient.CanDisconnect(state.ConnectionState, state.IsBusy)",
     "_sessionCommandStateClient.CanSendHeartbeat(state.ConnectionState, state.IsBusy)",
@@ -1259,7 +1284,7 @@ foreach ($workspaceCommandStateSignal in @(
     "WorkspaceCommandGateCoordinator",
     "WorkspaceCommandAvailability",
     "WorkspaceCommandGateState",
-    "_workspaceCommandAvailability.CanUseDiscoveryBrowser",
+    "commandAvailability.CanUseDiscoveryBrowser",
     "CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnection(",
@@ -1333,25 +1358,8 @@ foreach ($sessionViewModelGateSignal in @(
     "new WorkspaceCommandGateCoordinator(",
     "new WorkspaceCommandAvailability(",
     "_workspaceShellStateAccessor.BuildCommandGateState",
-    "_workspaceCommandAvailability.CanConnect",
-    "_workspaceCommandAvailability.CanDisconnect",
-    "_workspaceCommandAvailability.CanSendHeartbeat",
     "_workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId)",
-    "_workspaceCommandAvailability.CanUseDiscoveryBrowser",
-    "_workspaceCommandAvailability.CanPrepareManualConnection",
-    "_workspaceCommandAvailability.CanUseCrossNetworkConnection",
-    "_workspaceCommandAvailability.CanScanQrCode",
-    "_workspaceCommandAvailability.CanCopyConnectionCode",
-    "_workspaceCommandAvailability.CanConnectConnectionCode",
-    "_workspaceCommandAvailability.CanParseAdvertisement",
-    "_workspaceCommandAvailability.CanValidatePairingCode",
-    "_workspaceCommandAvailability.CanPrepareConnection",
-    "_workspaceCommandAvailability.CanRunCoreDiagnostics",
-    "_workspaceCommandAvailability.CanRefreshFileTransfer",
-    "_workspaceCommandAvailability.CanRefreshRemoteDesktop",
-    "_workspaceCommandAvailability.CanRefreshSystemMonitor",
-    "_workspaceCommandAvailability.CanRefreshUsbManagement",
-    "_workspaceCommandAvailability.CanRefreshSettings"
+    "_workspaceCommandAvailability)"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelGateSignal -Message "SessionViewModel must delegate command gates through WorkspaceCommandGateCoordinator: $sessionViewModelGateSignal"
 }
@@ -1377,7 +1385,7 @@ foreach ($sessionViewModelForwardingGateWrapper in @(
     "private bool CanRefreshSystemMonitor()",
     "private bool CanRefreshSettings()"
 )) {
-    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingGateWrapper)) -Message "SessionViewModel must inject WorkspaceCommandAvailability delegates directly instead of reintroducing forwarding command gate wrappers: $sessionViewModelForwardingGateWrapper"
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingGateWrapper)) -Message "SessionViewModel must pass WorkspaceCommandAvailability into WorkspaceCommandBindings instead of reintroducing forwarding command gate wrappers: $sessionViewModelForwardingGateWrapper"
 }
 
 foreach ($sessionViewModelForwardingActionWrapper in @(
@@ -1405,7 +1413,22 @@ foreach ($sessionViewModelForwardingActionWrapper in @(
     "private Task RefreshSystemMonitorAsync()",
     "private Task RefreshSettingsAsync()"
 )) {
-    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingActionWrapper)) -Message "SessionViewModel must inject action delegates directly instead of reintroducing forwarding command action wrappers: $sessionViewModelForwardingActionWrapper"
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingActionWrapper)) -Message "SessionViewModel must pass grouped action helpers into WorkspaceCommandBindings instead of reintroducing forwarding command action wrappers: $sessionViewModelForwardingActionWrapper"
+}
+
+foreach ($sessionViewModelDirectCommandDelegateSignal in @(
+    "_sessionEngineActions.ConnectAsync,",
+    "_sessionEngineActions.DisconnectAsync,",
+    "_sessionEngineActions.SendHeartbeatAsync,",
+    "_workspaceCommandAvailability.CanConnect,",
+    "_workspaceCommandAvailability.CanDisconnect,",
+    "_workspaceCommandAvailability.CanSendHeartbeat,",
+    "_discoveryBrowserActions.StartAsync,",
+    "_connectionWorkspaceActions.PrepareManualConnectionAsync,",
+    "_crossNetworkConnectionActions.GenerateQrCodeAsync,",
+    "_readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync,"
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelDirectCommandDelegateSignal)) -Message "SessionViewModel must pass grouped helpers to WorkspaceCommandBindings instead of per-command delegates: $sessionViewModelDirectCommandDelegateSignal"
 }
 
 foreach ($sessionViewModelDirectGateSignal in @(
@@ -1842,12 +1865,7 @@ foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "_readOnlyWorkspaceSnapshotHandlers,",
     "() => SelectedBitrate",
     "() => SelectedFramerate",
-    "_readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync",
-    "_readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync",
-    "_readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync",
-    "_readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync",
-    "_readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync",
-    "_readOnlyWorkspaceRefreshActions.RefreshSettingsAsync"
+    "_readOnlyWorkspaceRefreshActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshActions: $sessionViewModelReadOnlyRefreshSignal"
 }
@@ -2013,10 +2031,7 @@ foreach ($discoveryBrowserActionsSignal in @(
 }
 foreach ($sessionViewModelDiscoveryBrowserActionSignal in @(
     "new DiscoveryBrowserActions(",
-    "_discoveryBrowserActions.StartAsync",
-    "_discoveryBrowserActions.StopAsync",
-    "_discoveryBrowserActions.RefreshAsync",
-    "_discoveryBrowserActions.RunExtendedSearchAsync"
+    "_discoveryBrowserActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelDiscoveryBrowserActionSignal -Message "SessionViewModel must delegate discovery browser actions through DiscoveryBrowserActions: $sessionViewModelDiscoveryBrowserActionSignal"
 }
@@ -2110,10 +2125,7 @@ foreach ($connectionWorkspaceActionsSignal in @(
 }
 foreach ($sessionViewModelConnectionWorkspaceActionSignal in @(
     "new ConnectionWorkspaceActions(",
-    "_connectionWorkspaceActions.PrepareManualConnectionAsync",
-    "_connectionWorkspaceActions.ParseAdvertisementAsync",
-    "_connectionWorkspaceActions.ValidatePairingCodeAsync",
-    "_connectionWorkspaceActions.PrepareConnectionAsync"
+    "_connectionWorkspaceActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelConnectionWorkspaceActionSignal -Message "SessionViewModel must delegate connection workspace actions through ConnectionWorkspaceActions: $sessionViewModelConnectionWorkspaceActionSignal"
 }
@@ -2328,12 +2340,7 @@ foreach ($crossNetworkConnectionActionsSignal in @(
 }
 foreach ($sessionViewModelCrossNetworkActionSignal in @(
     "new CrossNetworkConnectionActions(",
-    "_crossNetworkConnectionActions.GenerateQrCodeAsync",
-    "_crossNetworkConnectionActions.ScanQrCodeAsync",
-    "_crossNetworkConnectionActions.GenerateCodeAsync",
-    "_crossNetworkConnectionActions.RegenerateCodeAsync",
-    "_crossNetworkConnectionActions.CopyCodeAsync",
-    "_crossNetworkConnectionActions.ConnectWithCodeAsync"
+    "_crossNetworkConnectionActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelCrossNetworkActionSignal -Message "SessionViewModel must delegate cross-network actions through CrossNetworkConnectionActions: $sessionViewModelCrossNetworkActionSignal"
 }

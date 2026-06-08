@@ -1,5 +1,3 @@
-using System;
-using System.Threading.Tasks;
 using System.Windows.Input;
 using Skybridge.WinClient.Services;
 
@@ -8,71 +6,36 @@ namespace Skybridge.WinClient.ViewModels;
 internal sealed class WorkspaceCommandBindings
 {
     public WorkspaceCommandBindings(
-        Func<Task> connectAsync,
-        Func<bool> canConnect,
-        Func<Task> disconnectAsync,
-        Func<bool> canDisconnect,
-        Func<Task> heartbeatAsync,
-        Func<bool> canHeartbeat,
-        Func<Task> startDiscoveryAsync,
-        Func<bool> canUseDiscoveryBrowser,
-        Func<Task> stopDiscoveryAsync,
-        Func<Task> refreshDiscoveryAsync,
-        Func<Task> runExtendedDiscoveryAsync,
-        Func<Task> prepareManualConnectionAsync,
-        Func<bool> canPrepareManualConnection,
-        Func<Task> generateQrCodeAsync,
-        Func<bool> canUseCrossNetworkConnection,
-        Func<Task> scanQrCodeAsync,
-        Func<bool> canScanQrCode,
-        Func<Task> generateConnectionCodeAsync,
-        Func<Task> regenerateConnectionCodeAsync,
-        Func<Task> copyConnectionCodeAsync,
-        Func<bool> canCopyConnectionCode,
-        Func<Task> connectConnectionCodeAsync,
-        Func<bool> canConnectConnectionCode,
-        Func<Task> parseAdvertisementAsync,
-        Func<bool> canParseAdvertisement,
-        Func<Task> validatePairingCodeAsync,
-        Func<bool> canValidatePairingCode,
-        Func<Task> prepareConnectionAsync,
-        Func<bool> canPrepareConnection,
-        Func<Task> runCoreDiagnosticsAsync,
-        Func<bool> canRunCoreDiagnostics,
-        Func<Task> refreshFileTransferAsync,
-        Func<bool> canRefreshFileTransfer,
-        Func<Task> refreshRemoteDesktopAsync,
-        Func<bool> canRefreshRemoteDesktop,
-        Func<Task> refreshSystemMonitorAsync,
-        Func<bool> canRefreshSystemMonitor,
-        Func<Task> refreshUsbManagementAsync,
-        Func<bool> canRefreshUsbManagement,
-        Func<Task> refreshSettingsAsync,
-        Func<bool> canRefreshSettings)
+        SessionEngineActions sessionEngineActions,
+        DiscoveryBrowserActions discoveryBrowserActions,
+        ConnectionWorkspaceActions connectionWorkspaceActions,
+        CrossNetworkConnectionActions crossNetworkConnectionActions,
+        ReadOnlyWorkspaceRefreshActions readOnlyWorkspaceRefreshActions,
+        WorkspaceCommandAvailability commandAvailability)
     {
-        ConnectCommand = new AsyncRelayCommand(connectAsync, canConnect);
-        DisconnectCommand = new AsyncRelayCommand(disconnectAsync, canDisconnect);
-        HeartbeatCommand = new AsyncRelayCommand(heartbeatAsync, canHeartbeat);
-        StartDiscoveryCommand = new AsyncRelayCommand(startDiscoveryAsync, canUseDiscoveryBrowser);
-        StopDiscoveryCommand = new AsyncRelayCommand(stopDiscoveryAsync, canUseDiscoveryBrowser);
-        RefreshDiscoveryCommand = new AsyncRelayCommand(refreshDiscoveryAsync, canUseDiscoveryBrowser);
-        RunExtendedDiscoveryCommand = new AsyncRelayCommand(runExtendedDiscoveryAsync, canUseDiscoveryBrowser);
-        PrepareManualConnectionCommand = new AsyncRelayCommand(prepareManualConnectionAsync, canPrepareManualConnection);
-        GenerateQRCodeCommand = new AsyncRelayCommand(generateQrCodeAsync, canUseCrossNetworkConnection);
-        ScanQRCodeCommand = new AsyncRelayCommand(scanQrCodeAsync, canScanQrCode);
-        GenerateConnectionCodeCommand = new AsyncRelayCommand(generateConnectionCodeAsync, canUseCrossNetworkConnection);
-        RegenerateConnectionCodeCommand = new AsyncRelayCommand(regenerateConnectionCodeAsync, canUseCrossNetworkConnection);
-        CopyConnectionCodeCommand = new AsyncRelayCommand(copyConnectionCodeAsync, canCopyConnectionCode);
-        ConnectConnectionCodeCommand = new AsyncRelayCommand(connectConnectionCodeAsync, canConnectConnectionCode);
-        ParseAdvertisementCommand = new AsyncRelayCommand(parseAdvertisementAsync, canParseAdvertisement);
-        ValidatePairingCodeCommand = new AsyncRelayCommand(validatePairingCodeAsync, canValidatePairingCode);
-        PrepareConnectionCommand = new AsyncRelayCommand(prepareConnectionAsync, canPrepareConnection);
-        RunCoreDiagnosticsCommand = new AsyncRelayCommand(runCoreDiagnosticsAsync, canRunCoreDiagnostics);
-        RefreshFileTransferCommand = new AsyncRelayCommand(refreshFileTransferAsync, canRefreshFileTransfer);
-        RefreshRemoteDesktopCommand = new AsyncRelayCommand(refreshRemoteDesktopAsync, canRefreshRemoteDesktop);
-        RefreshSystemMonitorCommand = new AsyncRelayCommand(refreshSystemMonitorAsync, canRefreshSystemMonitor);
-        RefreshUsbManagementCommand = new AsyncRelayCommand(refreshUsbManagementAsync, canRefreshUsbManagement);
-        RefreshSettingsCommand = new AsyncRelayCommand(refreshSettingsAsync, canRefreshSettings);
+        ConnectCommand = new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect);
+        DisconnectCommand = new AsyncRelayCommand(sessionEngineActions.DisconnectAsync, commandAvailability.CanDisconnect);
+        HeartbeatCommand = new AsyncRelayCommand(sessionEngineActions.SendHeartbeatAsync, commandAvailability.CanSendHeartbeat);
+        StartDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StartAsync, commandAvailability.CanUseDiscoveryBrowser);
+        StopDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanUseDiscoveryBrowser);
+        RefreshDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser);
+        RunExtendedDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.RunExtendedSearchAsync, commandAvailability.CanUseDiscoveryBrowser);
+        PrepareManualConnectionCommand = new AsyncRelayCommand(connectionWorkspaceActions.PrepareManualConnectionAsync, commandAvailability.CanPrepareManualConnection);
+        GenerateQRCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.GenerateQrCodeAsync, commandAvailability.CanUseCrossNetworkConnection);
+        ScanQRCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.ScanQrCodeAsync, commandAvailability.CanScanQrCode);
+        GenerateConnectionCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.GenerateCodeAsync, commandAvailability.CanUseCrossNetworkConnection);
+        RegenerateConnectionCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.RegenerateCodeAsync, commandAvailability.CanUseCrossNetworkConnection);
+        CopyConnectionCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.CopyCodeAsync, commandAvailability.CanCopyConnectionCode);
+        ConnectConnectionCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.ConnectWithCodeAsync, commandAvailability.CanConnectConnectionCode);
+        ParseAdvertisementCommand = new AsyncRelayCommand(connectionWorkspaceActions.ParseAdvertisementAsync, commandAvailability.CanParseAdvertisement);
+        ValidatePairingCodeCommand = new AsyncRelayCommand(connectionWorkspaceActions.ValidatePairingCodeAsync, commandAvailability.CanValidatePairingCode);
+        PrepareConnectionCommand = new AsyncRelayCommand(connectionWorkspaceActions.PrepareConnectionAsync, commandAvailability.CanPrepareConnection);
+        RunCoreDiagnosticsCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync, commandAvailability.CanRunCoreDiagnostics);
+        RefreshFileTransferCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync, commandAvailability.CanRefreshFileTransfer);
+        RefreshRemoteDesktopCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync, commandAvailability.CanRefreshRemoteDesktop);
+        RefreshSystemMonitorCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync, commandAvailability.CanRefreshSystemMonitor);
+        RefreshUsbManagementCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync, commandAvailability.CanRefreshUsbManagement);
+        RefreshSettingsCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSettingsAsync, commandAvailability.CanRefreshSettings);
 
         Registry = WorkspaceCommandRegistry.Create(
             new(WorkspaceActionCommandId.Connect, ConnectCommand),
