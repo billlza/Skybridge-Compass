@@ -437,46 +437,46 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         var commandBindings = new WorkspaceCommandBindings(
             ConnectAsync,
-            CanConnect,
+            _workspaceCommandAvailability.CanConnect,
             DisconnectAsync,
-            CanDisconnect,
+            _workspaceCommandAvailability.CanDisconnect,
             SendHeartbeatAsync,
-            CanSendHeartbeat,
+            _workspaceCommandAvailability.CanSendHeartbeat,
             StartDiscoveryAsync,
-            CanUseDiscoveryBrowser,
+            _workspaceCommandAvailability.CanUseDiscoveryBrowser,
             StopDiscoveryAsync,
             RefreshDiscoveryAsync,
             RunExtendedDiscoveryAsync,
             PrepareManualConnectionAsync,
-            CanPrepareManualConnection,
+            _workspaceCommandAvailability.CanPrepareManualConnection,
             GenerateQRCodeAsync,
-            CanUseCrossNetworkConnection,
+            _workspaceCommandAvailability.CanUseCrossNetworkConnection,
             ScanQRCodeAsync,
-            CanScanQRCode,
+            _workspaceCommandAvailability.CanScanQrCode,
             GenerateConnectionCodeAsync,
             RegenerateConnectionCodeAsync,
             CopyConnectionCodeAsync,
-            CanCopyConnectionCode,
+            _workspaceCommandAvailability.CanCopyConnectionCode,
             ConnectConnectionCodeAsync,
-            CanConnectConnectionCode,
+            _workspaceCommandAvailability.CanConnectConnectionCode,
             ParseAdvertisementAsync,
-            CanParseAdvertisement,
+            _workspaceCommandAvailability.CanParseAdvertisement,
             ValidatePairingCodeAsync,
-            CanValidatePairingCode,
+            _workspaceCommandAvailability.CanValidatePairingCode,
             PrepareConnectionAsync,
-            CanPrepareConnection,
+            _workspaceCommandAvailability.CanPrepareConnection,
             RunCoreDiagnosticsAsync,
-            CanRunCoreDiagnostics,
+            _workspaceCommandAvailability.CanRunCoreDiagnostics,
             RefreshFileTransferAsync,
-            CanRefreshFileTransfer,
+            _workspaceCommandAvailability.CanRefreshFileTransfer,
             RefreshRemoteDesktopAsync,
-            CanRefreshRemoteDesktop,
+            _workspaceCommandAvailability.CanRefreshRemoteDesktop,
             RefreshSystemMonitorAsync,
-            CanRefreshSystemMonitor,
+            _workspaceCommandAvailability.CanRefreshSystemMonitor,
             RefreshUsbManagementAsync,
-            CanRefreshUsbManagement,
+            _workspaceCommandAvailability.CanRefreshUsbManagement,
             RefreshSettingsAsync,
-            CanRefreshSettings);
+            _workspaceCommandAvailability.CanRefreshSettings);
         ConnectCommand = commandBindings.ConnectCommand;
         DisconnectCommand = commandBindings.DisconnectCommand;
         HeartbeatCommand = commandBindings.HeartbeatCommand;
@@ -1109,64 +1109,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private Task RefreshSettingsAsync() =>
         _readOnlyWorkspaceRefreshActions.RefreshSettingsAsync();
 
-    private bool CanConnect() =>
-        _workspaceCommandAvailability.CanConnect();
-
-    private bool CanDisconnect() =>
-        _workspaceCommandAvailability.CanDisconnect();
-
-    private bool CanSendHeartbeat() =>
-        _workspaceCommandAvailability.CanSendHeartbeat();
-
     private bool IsFeatureSelected(FeatureEntryId featureId) =>
         _workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId);
-
-    private bool CanUseDeviceDiscovery() =>
-        _workspaceCommandAvailability.CanUseDiscoveryBrowser();
-
-    private bool CanUseDiscoveryBrowser() => CanUseDeviceDiscovery();
-
-    private bool CanPrepareManualConnection() =>
-        _workspaceCommandAvailability.CanPrepareManualConnection();
-
-    private bool CanUseCrossNetworkConnection() =>
-        _workspaceCommandAvailability.CanUseCrossNetworkConnection();
-
-    private bool CanScanQRCode() =>
-        _workspaceCommandAvailability.CanScanQrCode();
-
-    private bool CanCopyConnectionCode() =>
-        _workspaceCommandAvailability.CanCopyConnectionCode();
-
-    private bool CanConnectConnectionCode() =>
-        _workspaceCommandAvailability.CanConnectConnectionCode();
-
-    private bool CanParseAdvertisement() =>
-        _workspaceCommandAvailability.CanParseAdvertisement();
-
-    private bool CanValidatePairingCode() =>
-        _workspaceCommandAvailability.CanValidatePairingCode();
-
-    private bool CanPrepareConnection() =>
-        _workspaceCommandAvailability.CanPrepareConnection();
-
-    private bool CanRefreshUsbManagement() =>
-        _workspaceCommandAvailability.CanRefreshUsbManagement();
-
-    private bool CanRunCoreDiagnostics() =>
-        _workspaceCommandAvailability.CanRunCoreDiagnostics();
-
-    private bool CanRefreshFileTransfer() =>
-        _workspaceCommandAvailability.CanRefreshFileTransfer();
-
-    private bool CanRefreshRemoteDesktop() =>
-        _workspaceCommandAvailability.CanRefreshRemoteDesktop();
-
-    private bool CanRefreshSystemMonitor() =>
-        _workspaceCommandAvailability.CanRefreshSystemMonitor();
-
-    private bool CanRefreshSettings() =>
-        _workspaceCommandAvailability.CanRefreshSettings();
 
     private void RefreshCommandStates() =>
         _workspaceShellRefreshCoordinator.RefreshCommandStates();

@@ -1183,7 +1183,7 @@ foreach ($sessionCommandStateSignal in @(
     "EngineConnectionState.Connected",
     "EngineConnectionState.Reconnecting",
     "new SessionCommandStateClient()",
-    "_workspaceCommandAvailability.CanConnect()",
+    "_workspaceCommandAvailability.CanConnect",
     "_sessionCommandStateClient.CanConnect(state.ConnectionState, state.IsBusy)",
     "_sessionCommandStateClient.CanDisconnect(state.ConnectionState, state.IsBusy)",
     "_sessionCommandStateClient.CanSendHeartbeat(state.ConnectionState, state.IsBusy)",
@@ -1217,7 +1217,7 @@ foreach ($workspaceCommandStateSignal in @(
     "WorkspaceCommandGateCoordinator",
     "WorkspaceCommandAvailability",
     "WorkspaceCommandGateState",
-    "_workspaceCommandAvailability.CanUseDiscoveryBrowser()",
+    "_workspaceCommandAvailability.CanUseDiscoveryBrowser",
     "CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnection(",
@@ -1291,15 +1291,51 @@ foreach ($sessionViewModelGateSignal in @(
     "new WorkspaceCommandGateCoordinator(",
     "new WorkspaceCommandAvailability(",
     "_workspaceShellStateAccessor.BuildCommandGateState",
-    "_workspaceCommandAvailability.CanConnect()",
-    "_workspaceCommandAvailability.CanDisconnect()",
-    "_workspaceCommandAvailability.CanSendHeartbeat()",
+    "_workspaceCommandAvailability.CanConnect",
+    "_workspaceCommandAvailability.CanDisconnect",
+    "_workspaceCommandAvailability.CanSendHeartbeat",
     "_workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId)",
-    "_workspaceCommandAvailability.CanPrepareManualConnection()",
-    "_workspaceCommandAvailability.CanUseCrossNetworkConnection()",
-    "_workspaceCommandAvailability.CanPrepareConnection()"
+    "_workspaceCommandAvailability.CanUseDiscoveryBrowser",
+    "_workspaceCommandAvailability.CanPrepareManualConnection",
+    "_workspaceCommandAvailability.CanUseCrossNetworkConnection",
+    "_workspaceCommandAvailability.CanScanQrCode",
+    "_workspaceCommandAvailability.CanCopyConnectionCode",
+    "_workspaceCommandAvailability.CanConnectConnectionCode",
+    "_workspaceCommandAvailability.CanParseAdvertisement",
+    "_workspaceCommandAvailability.CanValidatePairingCode",
+    "_workspaceCommandAvailability.CanPrepareConnection",
+    "_workspaceCommandAvailability.CanRunCoreDiagnostics",
+    "_workspaceCommandAvailability.CanRefreshFileTransfer",
+    "_workspaceCommandAvailability.CanRefreshRemoteDesktop",
+    "_workspaceCommandAvailability.CanRefreshSystemMonitor",
+    "_workspaceCommandAvailability.CanRefreshUsbManagement",
+    "_workspaceCommandAvailability.CanRefreshSettings"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelGateSignal -Message "SessionViewModel must delegate command gates through WorkspaceCommandGateCoordinator: $sessionViewModelGateSignal"
+}
+
+foreach ($sessionViewModelForwardingGateWrapper in @(
+    "private bool CanConnect()",
+    "private bool CanDisconnect()",
+    "private bool CanSendHeartbeat()",
+    "private bool CanUseDeviceDiscovery()",
+    "private bool CanUseDiscoveryBrowser()",
+    "private bool CanPrepareManualConnection()",
+    "private bool CanUseCrossNetworkConnection()",
+    "private bool CanScanQRCode()",
+    "private bool CanCopyConnectionCode()",
+    "private bool CanConnectConnectionCode()",
+    "private bool CanParseAdvertisement()",
+    "private bool CanValidatePairingCode()",
+    "private bool CanPrepareConnection()",
+    "private bool CanRefreshUsbManagement()",
+    "private bool CanRunCoreDiagnostics()",
+    "private bool CanRefreshFileTransfer()",
+    "private bool CanRefreshRemoteDesktop()",
+    "private bool CanRefreshSystemMonitor()",
+    "private bool CanRefreshSettings()"
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingGateWrapper)) -Message "SessionViewModel must inject WorkspaceCommandAvailability delegates directly instead of reintroducing forwarding command gate wrappers: $sessionViewModelForwardingGateWrapper"
 }
 
 foreach ($sessionViewModelDirectGateSignal in @(
