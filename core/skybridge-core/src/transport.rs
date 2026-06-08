@@ -313,6 +313,18 @@ mod tests {
     }
 
     #[test]
+    fn windows_to_apple_same_lan_never_uses_apple_native() {
+        let local = PeerCapabilities::windows();
+        let remote = PeerCapabilities::apple();
+
+        let plan = TransportSelector::select(local, remote, NetworkPath::same_lan());
+
+        assert_eq!(plan.kind, Some(SkyBridgeTransportKind::WebRtcDataChannel));
+        assert_eq!(plan.audit_reason, TransportAuditReason::WebRtcInterop);
+        assert_eq!(plan.relay_policy, RelayPolicy::NotNeeded);
+    }
+
+    #[test]
     fn unsupported_when_no_capabilities_overlap() {
         let local = PeerCapabilities {
             platform: PeerPlatform::Windows,

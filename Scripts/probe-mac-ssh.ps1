@@ -8,6 +8,7 @@ param(
     [string]$ExpectedHostAddress = "",
     [string]$DirectSourceAddress = "",
     [int]$ConnectTimeoutSeconds = 5,
+    [switch]$RequireDirectLan,
     [switch]$RequireRustCliSmoke,
     [string]$RemoteRepoRoot = "",
     [switch]$RequireReady
@@ -197,6 +198,8 @@ function Write-LanRouteDiagnostics {
     if ((Test-IsProxySourceAddress -Address $SourceAddress) -and -not $sameSubnet) {
         Write-Probe "lan action: bypass or disable the proxy/tunnel route, or put Windows and the Mac on the same LAN before Rust CLI co-debugging"
     }
+
+    $script:HostProbeHasSameSubnetLanCandidate = $sameSubnet
 }
 
 function Invoke-SshCommand {
@@ -295,6 +298,8 @@ function Invoke-HostReadinessProbe {
     $script:HostProbeReady = $false
     $script:HostProbeUserName = ""
     $script:HostProbeHostName = $script:CurrentHostName
+    $script:HostProbeHasSameSubnetLanCandidate = $false
+    $script:HostProbeUsesProxySourceRoute = $false
 
     Write-Probe "candidate: host=$script:CurrentHostName port=$Port"
     Write-NameResolutionDiagnostics
@@ -326,7 +331,20 @@ function Invoke-HostReadinessProbe {
         }
 
         if (Test-IsProxySourceAddress -Address $sourceAddress) {
+            $script:HostProbeUsesProxySourceRoute = $true
             Write-Probe "route warning: source address is in 198.18.0.0/15, which is commonly used by proxy or virtual routing; this is not proof of direct LAN reachability"
+        }
+    }
+
+    if ($RequireDirectLan) {
+        if (-not $script:HostProbeHasSameSubnetLanCandidate) {
+            Write-Probe "direct-lan required: no non-proxy Windows IPv4 interface is in the same subnet as $script:CurrentHostName"
+            return
+        }
+
+        if ($script:HostProbeUsesProxySourceRoute -and [string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
+            Write-Probe "direct-lan required: current route uses a 198.18.0.0/15 proxy source; pass -DirectSourceAddress with the same-subnet Windows LAN IPv4 after bypassing the proxy route"
+            return
         }
     }
 
@@ -405,6 +423,6 @@ foreach ($candidateHostName in $hostCandidates) {
 }
 
 Write-Probe "not ready"
-if ($RequireReady -or $RequireRustCliSmoke) {
+if ($RequireReady -or $RequireRustCliSmoke -or $RequireDirectLan) {
     throw "Mac SSH probe is not ready"
 }

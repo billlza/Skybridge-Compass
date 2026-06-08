@@ -62,6 +62,7 @@ foreach ($signal in @(
 foreach ($forbidden in @(
     "-RequireGitRemoteAccess",
     "-RequireMacSshReady",
+    "-RequireMacDirectLan",
     "-RequireNativeDnsSdPeer"
 )) {
     Assert-True -Condition (-not $workflow.Contains($forbidden)) -Message "Windows CI workflow must not require local-only readiness gate: $forbidden"

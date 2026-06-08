@@ -102,6 +102,12 @@ $cliSmoke = Get-Content -Raw -LiteralPath $cliSmokePath
 $ffiLifecyclePath = Join-Path $coreRoot "tests/ffi_lifecycle.rs"
 Assert-True -Condition (Test-Path -LiteralPath $ffiLifecyclePath) -Message "Missing FFI lifecycle tests: $ffiLifecyclePath"
 $ffiLifecycle = Get-Content -Raw -LiteralPath $ffiLifecyclePath
+$sessionPath = Join-Path $coreRoot "src/session.rs"
+Assert-True -Condition (Test-Path -LiteralPath $sessionPath) -Message "Missing session core source: $sessionPath"
+$session = Get-Content -Raw -LiteralPath $sessionPath
+$transportPath = Join-Path $coreRoot "src/transport.rs"
+Assert-True -Condition (Test-Path -LiteralPath $transportPath) -Message "Missing transport core source: $transportPath"
+$transport = Get-Content -Raw -LiteralPath $transportPath
 
 foreach ($signal in @(
     "cli_version_smoke",
@@ -137,12 +143,29 @@ foreach ($signal in @(
 
 foreach ($signal in @(
     "ffi_connection_plan_keeps_apple_to_apple_native",
+    "ffi_connect_rejects_channel_binding_transport_mismatch",
     "SkybridgeTransportKind::AppleNative",
     "SkybridgeTransportAuditCode::AppleNativeDefault",
     "SkybridgeAdapterBindingKind::AppleStream",
     "SkybridgeAdapterBindingKind::AppleDatagram"
 )) {
     Assert-True -Condition ($ffiLifecycle.Contains($signal)) -Message "FFI Apple-native coverage missing signal: $signal"
+}
+
+foreach ($signal in @(
+    "is_binding_kind_valid_for_transport",
+    "config_validation_rejects_transport_channel_binding_mismatch",
+    "does not match WebRtcDataChannel"
+)) {
+    Assert-True -Condition ($session.Contains($signal)) -Message "Session transport binding validation missing signal: $signal"
+}
+
+foreach ($signal in @(
+    "windows_to_apple_same_lan_never_uses_apple_native",
+    "TransportAuditReason::WebRtcInterop",
+    "RelayPolicy::NotNeeded"
+)) {
+    Assert-True -Condition ($transport.Contains($signal)) -Message "Transport Apple interop invariant missing signal: $signal"
 }
 
 Push-Location $coreRoot

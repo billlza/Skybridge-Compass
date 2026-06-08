@@ -192,6 +192,8 @@ foreach ($signal in @(
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
     "Connection launch requires all five Core channel mappings from preflight.",
     "Connection launch Core channel mappings must not contain duplicate channels.",
+    "IsChannelBindingKindValidForTransport",
+    "which does not match",
     "Connection launch request peer does not match pairing material.",
     "Connection launch request fingerprint does not match pairing material."
 )) {
@@ -209,6 +211,8 @@ foreach ($signal in @(
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
     "Connection launch requires all five Core channel mappings from preflight.",
     "Connection launch Core channel mappings must not contain duplicate channels.",
+    "AppleChannelMappings",
+    "which does not match WebRtcDataChannel.",
     "Connection launch requires a local transport endpoint.",
     "Connection launch requires a non-zero transport timestamp window.",
     "Windows connection launch must not use AppleNative transport; Apple-to-Apple stays on the Apple native path.",

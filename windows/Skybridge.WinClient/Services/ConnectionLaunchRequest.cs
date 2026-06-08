@@ -111,6 +111,12 @@ public sealed record ConnectionPreflightPlan(
         var seenChannels = new HashSet<CoreChannelKind>();
         foreach (var mapping in ChannelMappings)
         {
+            if (!IsChannelBindingKindValidForTransport(TransportKind, mapping.BindingKind))
+            {
+                throw new InvalidOperationException(
+                    $"Connection launch channel mapping {mapping.Channel} uses {mapping.BindingKind}, which does not match {TransportKind}.");
+            }
+
             if (!seenChannels.Add(mapping.Channel))
             {
                 throw new InvalidOperationException("Connection launch Core channel mappings must not contain duplicate channels.");
@@ -145,4 +151,25 @@ public sealed record ConnectionPreflightPlan(
             throw new InvalidOperationException("Connection launch request fingerprint does not match pairing material.");
         }
     }
+
+    private static bool IsChannelBindingKindValidForTransport(
+        CoreTransportKind transportKind,
+        CoreAdapterBindingKind bindingKind) =>
+        transportKind switch
+        {
+            CoreTransportKind.AppleNative =>
+                bindingKind is CoreAdapterBindingKind.AppleStream
+                    or CoreAdapterBindingKind.AppleDatagram,
+            CoreTransportKind.WindowsNativeMsQuic
+                or CoreTransportKind.SkyBridgeIceMsQuic =>
+                bindingKind is CoreAdapterBindingKind.MsQuicStream
+                    or CoreAdapterBindingKind.MsQuicDatagram,
+            CoreTransportKind.WebRtcDataChannel =>
+                bindingKind == CoreAdapterBindingKind.WebRtcDataChannel,
+            CoreTransportKind.Relay =>
+                bindingKind == CoreAdapterBindingKind.RelayStream,
+            CoreTransportKind.TcpFallback =>
+                bindingKind == CoreAdapterBindingKind.TcpStream,
+            _ => false
+        };
 }

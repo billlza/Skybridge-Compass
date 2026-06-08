@@ -171,11 +171,12 @@ $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connect
 $commandGateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-command-gates.ps1"
 $uiActionOrderSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-action-order.ps1"
 $uiParityMatrixSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-parity-matrix.ps1"
+$portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 $macSshProbePath = Join-Path $RepoRoot "Scripts/probe-mac-ssh.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $uiParityMatrixSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (Test-Path -LiteralPath $uiActionOrderSmokePath) -Message "Missing parity file: $uiActionOrderSmokePath"
@@ -265,6 +266,7 @@ $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePat
 $commandGateSmoke = Get-Content -Raw -LiteralPath $commandGateSmokePath
 $uiActionOrderSmoke = Get-Content -Raw -LiteralPath $uiActionOrderSmokePath
 $uiParityMatrixSmoke = Get-Content -Raw -LiteralPath $uiParityMatrixSmokePath
+$portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
 $macSshProbe = Get-Content -Raw -LiteralPath $macSshProbePath
@@ -2429,6 +2431,8 @@ foreach ($connectionLaunchSignal in @(
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
     "Connection launch requires all five Core channel mappings from preflight.",
     "Connection launch Core channel mappings must not contain duplicate channels.",
+    "IsChannelBindingKindValidForTransport",
+    "which does not match",
     "Connection launch request peer does not match pairing material.",
     "Connection launch request fingerprint does not match pairing material."
 )) {
@@ -2445,6 +2449,8 @@ foreach ($connectionLaunchSmokeSignal in @(
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
     "Connection launch requires all five Core channel mappings from preflight.",
     "Connection launch Core channel mappings must not contain duplicate channels.",
+    "AppleChannelMappings",
+    "which does not match WebRtcDataChannel.",
     "Connection launch requires a local transport endpoint.",
     "Connection launch requires a non-zero transport timestamp window.",
     "Windows connection launch must not use AppleNative transport; Apple-to-Apple stays on the Apple native path.",
@@ -4330,6 +4336,7 @@ foreach ($macSshProbeSignal in @(
     'candidate: host=',
     'LzadeMacBook-Pro.local',
     '$DirectSourceAddress',
+    '$RequireDirectLan',
     'Test-IsProxySourceAddress',
     'Test-IsSameIPv4Subnet',
     'Test-IsPrivateIPv4Address',
@@ -4339,12 +4346,21 @@ foreach ($macSshProbeSignal in @(
     'sameSubnet=',
     'lan warning: target',
     'lan action: bypass or disable the proxy/tunnel route',
+    'direct-lan required:',
     'direct bind: ssh will use source=',
     '-b',
     '198.18.0.0/15',
     'timed out during banner exchange'
 )) {
     Assert-Contains -Text $macSshProbe -Needle $macSshProbeSignal -Message "probe-mac-ssh.ps1 missing LAN route diagnostic signal: $macSshProbeSignal"
+}
+
+foreach ($portabilityMacSshSignal in @(
+    '$RequireMacDirectLan',
+    '$macSshParameters.RequireDirectLan',
+    '-RequireMacDirectLan to reject proxy/TUN routes'
+)) {
+    Assert-Contains -Text $portabilitySmoke -Needle $portabilityMacSshSignal -Message "verify-windows-portability-smoke.ps1 missing Mac direct-LAN gate signal: $portabilityMacSshSignal"
 }
 
 Write-Output "windows-ui-parity: ok"

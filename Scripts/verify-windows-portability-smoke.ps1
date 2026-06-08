@@ -7,6 +7,7 @@ param(
     [switch]$CiMode,
     [switch]$ProbeMacSsh,
     [switch]$RequireMacSshReady,
+    [switch]$RequireMacDirectLan,
     [switch]$RequireMacRustCliSmoke,
     [switch]$RequireNativeDnsSdPeer,
     [string]$ExpectedDeviceId = "",
@@ -133,7 +134,7 @@ Invoke-SmokeGate `
     -RelativeScriptPath "Scripts/verify-windows-connection-launch.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
 
-if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacRustCliSmoke) {
+if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMacRustCliSmoke) {
     $macSshParameters = @{
         HostName = $MacHostName
         AlternateHostNames = $MacAlternateHostNames
@@ -152,6 +153,10 @@ if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacRustCliSmoke) {
         $macSshParameters.RequireReady = $true
     }
 
+    if ($RequireMacDirectLan) {
+        $macSshParameters.RequireDirectLan = $true
+    }
+
     if ($RequireMacRustCliSmoke) {
         $macSshParameters.RequireReady = $true
         $macSshParameters.RequireRustCliSmoke = $true
@@ -164,7 +169,7 @@ if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacRustCliSmoke) {
         -Parameters $macSshParameters
 }
 else {
-    Write-Output "windows-portability-smoke: skipped mac-ssh-readiness; pass -ProbeMacSsh for diagnostics, -RequireMacSshReady before Rust CLI co-debugging, or -RequireMacRustCliSmoke -MacRemoteRepoRoot <path> for a Mac-side CLI smoke."
+    Write-Output "windows-portability-smoke: skipped mac-ssh-readiness; pass -ProbeMacSsh for diagnostics, -RequireMacSshReady before Rust CLI co-debugging, -RequireMacDirectLan to reject proxy/TUN routes, or -RequireMacRustCliSmoke -MacRemoteRepoRoot <path> for a Mac-side CLI smoke."
 }
 
 if ($IncludeNativeDnsSdAcceptance -or $RequireNativeDnsSdPeer) {

@@ -152,6 +152,13 @@ ExpectThrows<InvalidOperationException>(
     () => stateClient.BuildConnectionLaunchRequest(
         stateClient.BuildPreflightValidatedState(
             pairedState,
+            BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, channelMappings: AppleChannelMappings())))),
+    "which does not match WebRtcDataChannel.");
+
+ExpectThrows<InvalidOperationException>(
+    () => stateClient.BuildConnectionLaunchRequest(
+        stateClient.BuildPreflightValidatedState(
+            pairedState,
             BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, localEndpoint: "")))),
     "Connection launch requires a local transport endpoint.");
 
@@ -480,6 +487,16 @@ static IReadOnlyList<ChannelMapping> DuplicateChannelMappings()
     mappings[4] = mappings[0];
     return mappings;
 }
+
+static IReadOnlyList<ChannelMapping> AppleChannelMappings() =>
+    new[]
+    {
+        new ChannelMapping(CoreChannelKind.Control, CoreReliabilityKind.ReliableOrdered, 0, CoreAdapterBindingKind.AppleStream, false),
+        new ChannelMapping(CoreChannelKind.File, CoreReliabilityKind.ReliableOrdered, 0, CoreAdapterBindingKind.AppleStream, false),
+        new ChannelMapping(CoreChannelKind.Clipboard, CoreReliabilityKind.ReliableOrdered, 0, CoreAdapterBindingKind.AppleStream, false),
+        new ChannelMapping(CoreChannelKind.Telemetry, CoreReliabilityKind.ReliableUnordered, 0, CoreAdapterBindingKind.AppleDatagram, true),
+        new ChannelMapping(CoreChannelKind.Realtime, CoreReliabilityKind.PartialReliable, 1, CoreAdapterBindingKind.AppleDatagram, true)
+    };
 
 static string BuildDynamicQrInput(bool includeSignedOsVersion, bool tamperDeviceName)
 {

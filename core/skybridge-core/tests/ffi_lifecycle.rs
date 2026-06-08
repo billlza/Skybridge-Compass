@@ -522,6 +522,37 @@ fn ffi_event_queue_is_bounded_and_clearable() {
 }
 
 #[test]
+fn ffi_connect_rejects_channel_binding_transport_mismatch() {
+    let handle = skybridge_engine_new();
+    assert!(!handle.is_null());
+
+    let mut local_public = SkybridgeBuffer {
+        data_ptr: ptr::null(),
+        data_len: 0,
+    };
+    unsafe { skybridge_engine_local_public_key(handle, &mut local_public) };
+    let local_key =
+        unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
+
+    let client_id = b"binding-transport-mismatch";
+    let mut mismatched_mappings = WEBRTC_CHANNEL_MAPPINGS;
+    mismatched_mappings[0].binding_kind = SkybridgeAdapterBindingKind::AppleStream;
+    let mut config = valid_session_config(client_id, local_key);
+    config.channel_mappings_ptr = mismatched_mappings.as_ptr();
+
+    assert_eq!(
+        skybridge_engine_connect(handle, config),
+        SkybridgeErrorCode::InvalidInput
+    );
+    assert_eq!(
+        skybridge_engine_state(handle),
+        SkybridgeSessionState::Disconnected
+    );
+
+    unsafe { skybridge_engine_free(handle) };
+}
+
+#[test]
 fn ffi_transport_selector_exports_adr_defaults() {
     let windows = SkybridgePeerCapabilities {
         platform: SkybridgePeerPlatform::Windows,

@@ -232,6 +232,15 @@ impl SessionTransportBinding {
 
         let mut seen = [false; 5];
         for mapping in &self.channel_mappings {
+            if !is_binding_kind_valid_for_transport(self.transport, mapping.binding_kind) {
+                return Err(CoreError::InvalidConfig {
+                    reason: format!(
+                        "transport channel mapping {:?} uses {:?}, which does not match {:?}",
+                        mapping.channel, mapping.binding_kind, self.transport
+                    ),
+                });
+            }
+
             let index = channel_index(mapping.channel);
             if seen[index] {
                 return Err(CoreError::InvalidConfig {
@@ -242,6 +251,28 @@ impl SessionTransportBinding {
         }
 
         Ok(())
+    }
+}
+
+fn is_binding_kind_valid_for_transport(
+    transport: SkyBridgeTransportKind,
+    binding_kind: SessionAdapterBindingKind,
+) -> bool {
+    match transport {
+        SkyBridgeTransportKind::AppleNative => matches!(
+            binding_kind,
+            SessionAdapterBindingKind::AppleStream | SessionAdapterBindingKind::AppleDatagram
+        ),
+        SkyBridgeTransportKind::WindowsNativeMsQuic
+        | SkyBridgeTransportKind::SkyBridgeIceMsQuic => matches!(
+            binding_kind,
+            SessionAdapterBindingKind::MsQuicStream | SessionAdapterBindingKind::MsQuicDatagram
+        ),
+        SkyBridgeTransportKind::WebRtcDataChannel => {
+            binding_kind == SessionAdapterBindingKind::WebRtcDataChannel
+        }
+        SkyBridgeTransportKind::Relay => binding_kind == SessionAdapterBindingKind::RelayStream,
+        SkyBridgeTransportKind::TcpFallback => binding_kind == SessionAdapterBindingKind::TcpStream,
     }
 }
 
@@ -312,6 +343,30 @@ mod tests {
                 head_of_line_isolated: true,
             },
         ]
+    }
+
+    fn valid_transport_binding() -> SessionTransportBinding {
+        SessionTransportBinding {
+            transport: SkyBridgeTransportKind::WebRtcDataChannel,
+            transport_audit: TransportAuditReason::WebRtcInterop,
+            relay_required: false,
+            relay_allowed: true,
+            selected_suite: CryptoSuite::XWingHybrid,
+            selected_suite_wire_id: CryptoSuite::XWingHybrid.wire_id(),
+            suite_audit: CryptoSuiteAudit::HybridPqcPreferred,
+            sbp2_enabled: true,
+            sbp2_fixed_payload_len: 512,
+            frame_header_len: 16,
+            transport_binding_digest: [0x42; 32],
+            adapter_kind: SkyBridgeTransportKind::WebRtcDataChannel,
+            adapter_binding: "external webrtc".into(),
+            local_endpoint: "windows.example:5443".into(),
+            remote_endpoint: "mac.example:5443".into(),
+            selected_candidate_pair: "webrtc/dtls/sctp-selected".into(),
+            relay_id: None,
+            timestamp_window_ms: 10_000,
+            channel_mappings: valid_channel_mappings(),
+        }
     }
 
     #[test]
@@ -401,5 +456,19 @@ mod tests {
         };
         let err = bad_transport_binding.validate().unwrap_err();
         assert!(matches!(err, CoreError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn config_validation_rejects_transport_channel_binding_mismatch() {
+        let mut binding = valid_transport_binding();
+        binding.channel_mappings[0].binding_kind = SessionAdapterBindingKind::AppleStream;
+
+        let err = binding.validate().unwrap_err();
+        match err {
+            CoreError::InvalidConfig { reason } => {
+                assert!(reason.contains("does not match WebRtcDataChannel"));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
     }
 }
