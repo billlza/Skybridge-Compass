@@ -70,8 +70,10 @@ $fileTransferQrSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-file-tran
 $uiAutomationSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-automation-smoke.ps1"
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
+$webrtcProofSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-webrtc-proof.ps1"
+$macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $macWebRtcInteropPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -120,6 +122,8 @@ $fileTransferQrSmoke = Get-Content -Raw -LiteralPath $fileTransferQrSmokePath
 $uiAutomationSmoke = Get-Content -Raw -LiteralPath $uiAutomationSmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
+$webrtcProofSmoke = Get-Content -Raw -LiteralPath $webrtcProofSmokePath
+$macWebRtcInterop = Get-Content -Raw -LiteralPath $macWebRtcInteropPath
 
 foreach ($member in @("ConnectAsync", "DisconnectAsync", "SendHeartbeatAsync")) {
     Assert-Contains -Text $interface -Needle $member -Message "IEngineClient missing member: $member"
@@ -354,6 +358,8 @@ foreach ($portabilitySmokeSignal in @(
     "verify-windows-connection-launch.ps1",
     "probe-mac-ssh.ps1",
     "verify-windows-native-dns-sd-acceptance.ps1",
+    "verify-windows-webrtc-proof.ps1",
+    "verify-windows-mac-webrtc-interop.ps1",
     "verify-rust-cli-coverage.ps1",
     "IncludeRustCliCoverage",
     "MinimumLineCoverage",
@@ -365,10 +371,13 @@ foreach ($portabilitySmokeSignal in @(
     "IncludeWinUiAutomationSmoke",
     "RequireMacSshReady",
     "RequireMacRustCliSmoke",
+    "RequireMacWebRtcInterop",
     "MacAlternateHostNames",
     "MacExpectedHostAddress",
     "MacDirectSourceAddress",
     "MacRemoteRepoRoot",
+    "MacWebRtcProofPath",
+    "MacWebRtcProofMaxAgeMs",
     "LASTEXITCODE",
     "Smoke gate failed: `$Name exitCode=`$LASTEXITCODE",
     "RequireGitRemoteAccess",
@@ -439,6 +448,7 @@ foreach ($forbiddenWorkflowSignal in @(
     "-RequireGitRemoteAccess",
     "-RequireMacSshReady",
     "-RequireMacRustCliSmoke",
+    "-RequireMacWebRtcInterop",
     "-RequireNativeDnsSdPeer"
 )) {
     Assert-True -Condition (-not $githubWorkflow.Contains($forbiddenWorkflowSignal)) -Message "GitHub workflow must not require local-only readiness gate: $forbiddenWorkflowSignal"
@@ -690,6 +700,33 @@ foreach ($signal in @(
     "fingerprint-only trust summary"
 )) {
     Assert-Contains -Text $nativeDnsSdAcceptance -Needle $signal -Message "Windows native DNS-SD acceptance missing signal: $signal"
+}
+foreach ($signal in @(
+    "windows-webrtc-proof: ok",
+    "VerifiedWebRtcDataChannelTransportAdapterClient",
+    "WindowsVerifiedWebRtcDataChannelOptions",
+    "--proof",
+    "--expected-device-id",
+    "--expected-fingerprint",
+    "--max-age-ms",
+    "SBF1",
+    "Windows verified WebRTC adapter must not select AppleNative"
+)) {
+    Assert-Contains -Text $webrtcProofSmoke -Needle $signal -Message "Windows WebRTC proof gate missing signal: $signal"
+}
+foreach ($signal in @(
+    "windows-mac-webrtc-interop: ok",
+    "mac-ssh-direct-lan-rust-cli",
+    "windows-native-dns-sd-peer",
+    "windows-webrtc-proof",
+    "windows-connection-launch",
+    "RequireDirectLan",
+    "RequireRustCliSmoke",
+    "MacRemoteRepoRoot",
+    "WebRtcProofPath",
+    "ExpectedFingerprint"
+)) {
+    Assert-Contains -Text $macWebRtcInterop -Needle $signal -Message "Windows/mac WebRTC interop gate missing signal: $signal"
 }
 
 Assert-Contains -Text $architecture -Needle "WindowsDiscoveryBrowserClient" -Message "Architecture doc missing WindowsDiscoveryBrowserClient status."

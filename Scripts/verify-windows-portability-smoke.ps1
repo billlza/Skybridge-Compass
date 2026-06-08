@@ -10,6 +10,7 @@ param(
     [switch]$RequireMacSshReady,
     [switch]$RequireMacDirectLan,
     [switch]$RequireMacRustCliSmoke,
+    [switch]$RequireMacWebRtcInterop,
     [switch]$RequireNativeDnsSdPeer,
     [string]$ExpectedDeviceId = "",
     [string]$ExpectedFingerprint = "",
@@ -23,6 +24,9 @@ param(
     [string]$MacExpectedHostAddress = "192.168.0.102",
     [string]$MacDirectSourceAddress = "",
     [string]$MacRemoteRepoRoot = "",
+    [string]$MacWebRtcProofPath = "",
+    [ValidateRange(1, 600000)]
+    [ulong]$MacWebRtcProofMaxAgeMs = 60000,
     [ValidateRange(1, 30)]
     [int]$ExtendedSearchSeconds = 2,
     [switch]$RequireGitRemoteAccess
@@ -186,6 +190,33 @@ if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMa
 }
 else {
     Write-Output "windows-portability-smoke: skipped mac-ssh-readiness; pass -ProbeMacSsh for diagnostics, -RequireMacSshReady before Rust CLI co-debugging, -RequireMacDirectLan to reject proxy/TUN routes, or -RequireMacRustCliSmoke -MacRemoteRepoRoot <path> for a Mac-side CLI smoke."
+}
+
+if ($RequireMacWebRtcInterop) {
+    Invoke-SmokeGate `
+        -Name "windows-mac-webrtc-interop" `
+        -RelativeScriptPath "Scripts/verify-windows-mac-webrtc-interop.ps1" `
+        -Parameters @{
+            RepoRoot = $RepoRoot
+            MacHostName = $MacHostName
+            MacAlternateHostNames = $MacAlternateHostNames
+            MacPort = $MacPort
+            MacUserNames = $MacUserNames
+            MacSshKeyPath = $MacSshKeyPath
+            MacKnownHostsPath = $MacKnownHostsPath
+            MacExpectedHostAddress = $MacExpectedHostAddress
+            MacDirectSourceAddress = $MacDirectSourceAddress
+            MacRemoteRepoRoot = $MacRemoteRepoRoot
+            WebRtcProofPath = $MacWebRtcProofPath
+            ExpectedDeviceId = $ExpectedDeviceId
+            ExpectedFingerprint = $ExpectedFingerprint
+            SearchText = $SearchText
+            ExtendedSearchSeconds = $ExtendedSearchSeconds
+            WebRtcProofMaxAgeMs = $MacWebRtcProofMaxAgeMs
+        }
+}
+else {
+    Write-Output "windows-portability-smoke: skipped windows-mac-webrtc-interop; pass -RequireMacWebRtcInterop -MacRemoteRepoRoot <path> -MacWebRtcProofPath <path> -ExpectedDeviceId <id> -ExpectedFingerprint <hex> after direct LAN and helper proof are ready. That local gate composes probe-mac-ssh.ps1, verify-windows-native-dns-sd-acceptance.ps1, verify-windows-webrtc-proof.ps1, and verify-windows-connection-launch.ps1."
 }
 
 if ($IncludeNativeDnsSdAcceptance -or $RequireNativeDnsSdPeer) {
