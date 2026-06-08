@@ -441,25 +441,25 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     }
 
     public bool IsDeviceDiscoverySelected =>
-        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.DeviceDiscovery);
+        IsFeatureSelected(FeatureEntryId.DeviceDiscovery);
 
     public bool IsUsbManagementSelected =>
-        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.UsbManagement);
+        IsFeatureSelected(FeatureEntryId.UsbManagement);
 
     public bool IsFileTransferSelected =>
-        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.FileTransfer);
+        IsFeatureSelected(FeatureEntryId.FileTransfer);
 
     public bool IsRemoteDesktopSelected =>
-        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.RemoteDesktop);
+        IsFeatureSelected(FeatureEntryId.RemoteDesktop);
 
     public bool IsQuantumSelected =>
-        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.Quantum);
+        IsFeatureSelected(FeatureEntryId.Quantum);
 
     public bool IsSystemMonitorSelected =>
-        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.SystemMonitor);
+        IsFeatureSelected(FeatureEntryId.SystemMonitor);
 
     public bool IsSettingsSelected =>
-        _featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.Settings);
+        IsFeatureSelected(FeatureEntryId.Settings);
 
     public EngineConnectionState ConnectionState
     {
@@ -1146,6 +1146,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanDisconnect() => _sessionCommandStateClient.CanDisconnect(ConnectionState, IsBusy);
 
     private bool CanSendHeartbeat() => _sessionCommandStateClient.CanSendHeartbeat(ConnectionState, IsBusy);
+
+    private bool IsFeatureSelected(FeatureEntryId featureId) =>
+        _featureCatalogClient.IsSelected(SelectedFeature, featureId);
 
     private bool CanUseDeviceDiscovery() =>
         _workspaceCommandStateClient.CanUseDeviceDiscovery(IsBusy, IsDeviceDiscoverySelected);

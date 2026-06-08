@@ -207,8 +207,10 @@ foreach ($featureCatalogSignal in @(
     "Entries",
     "_featureCatalogClient.BuildReadOnlySnapshot()",
     "_featureCatalogClient.ResolveDefaultSelection(featureEntries)",
-    "_featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.DeviceDiscovery)",
-    "_featureCatalogClient.IsSelected(SelectedFeature, FeatureEntryId.Settings)",
+    "private bool IsFeatureSelected(FeatureEntryId featureId)",
+    "_featureCatalogClient.IsSelected(SelectedFeature, featureId)",
+    "IsFeatureSelected(FeatureEntryId.DeviceDiscovery)",
+    "IsFeatureSelected(FeatureEntryId.Settings)",
     "new FeatureCatalogClient()"
 )) {
     Assert-Contains -Text ($featureContract + $sessionViewModel) -Needle $featureCatalogSignal -Message "Feature catalog service signal missing: $featureCatalogSignal"
@@ -216,6 +218,8 @@ foreach ($featureCatalogSignal in @(
 Assert-True -Condition (-not $sessionViewModel.Contains("FeatureEntryContract")) -Message "SessionViewModel must source navigation entries from FeatureCatalogClient instead of FeatureEntryContract."
 Assert-True -Condition (-not $sessionViewModel.Contains("NavigationItems[0]")) -Message "SessionViewModel must source default navigation selection from FeatureCatalogClient."
 Assert-True -Condition (-not $sessionViewModelSource.Contains("SelectedFeature.Id == FeatureEntryId.")) -Message "SessionViewModel must source selected-feature predicates from FeatureCatalogClient.IsSelected."
+$featureSelectedMatches = [regex]::Matches($sessionViewModelSource, [regex]::Escape("_featureCatalogClient.IsSelected("))
+Assert-True -Condition ($featureSelectedMatches.Count -eq 1) -Message "SessionViewModel must centralize selected-feature predicates through IsFeatureSelected."
 
 foreach ($workspaceItemViewSignal in @(
     "public sealed record SettingsTabItemView",
@@ -1736,6 +1740,7 @@ foreach ($docSignal in @(
     "TopBarStatusSlot",
     "SessionStatusClient",
     "RunSessionEngineActionAsync",
+    "IsFeatureSelected",
     "WorkspaceActionCommandId",
     "WorkspaceActionGateId",
     "WorkspaceActionDetailSlot",
