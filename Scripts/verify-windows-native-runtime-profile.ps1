@@ -105,11 +105,18 @@ try
     AssertNestedType<DisabledSystemPreferencesLauncher>(defaultDependencies.SettingsClient, "_systemPreferencesLauncher", "default system preferences launcher");
     AssertEqual(false, defaultDependencies.SettingsClient.CanOpenSystemPreferences(), "default system preferences gate");
     AssertType<TopBarStatusClient>(defaultDependencies.TopBarStatusClient, "default top-bar status client");
-    AssertEqual(false, defaultDependencies.TopBarStatusClient.CanOpenNotifications(), "default top-bar notifications gate");
+    AssertEqual(true, defaultDependencies.TopBarStatusClient.CanOpenNotifications(), "default top-bar notifications gate");
     AssertEqual(true, defaultDependencies.TopBarStatusClient.CanToggleTheme(), "default top-bar theme gate");
     var initialTopBarUpdate = defaultDependencies.TopBarStatusClient.BuildStatusUpdate(
         new TopBarStatusRequest("Disconnected", "Nominal", "Dashboard"));
+    AssertEqual(TopBarStatusClient.DefaultNotificationsStatus, initialTopBarUpdate.ResolvedStatus.NotificationsStatus, "initial top-bar notifications status");
     AssertEqual(TopBarStatusClient.DefaultThemeStatus, initialTopBarUpdate.ResolvedStatus.ThemeStatus, "initial top-bar theme status");
+    var notificationsAction = await defaultDependencies.TopBarStatusClient.BuildNotificationsActionAsync();
+    AssertEqual(TopBarStatusClient.NotificationsViewedStatus, notificationsAction.Status, "top-bar notifications action status");
+    AssertEqual(TopBarStatusClient.DefaultNotificationsOpenedMessage, notificationsAction.Message, "top-bar notifications action message");
+    var viewedTopBarUpdate = defaultDependencies.TopBarStatusClient.BuildStatusUpdate(
+        new TopBarStatusRequest("Disconnected", "Nominal", "Dashboard"));
+    AssertEqual(TopBarStatusClient.NotificationsViewedStatus, viewedTopBarUpdate.ResolvedStatus.NotificationsStatus, "viewed top-bar notifications status");
     var firstThemeToggle = await defaultDependencies.TopBarStatusClient.BuildThemeActionAsync();
     AssertEqual(TopBarStatusClient.DarkThemeStatus, firstThemeToggle.Status, "first top-bar theme toggle");
     AssertEqual(TopBarStatusClient.DefaultThemeUpdatedMessage, firstThemeToggle.Message, "top-bar theme update message");

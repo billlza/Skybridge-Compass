@@ -35,6 +35,53 @@ public interface ITopBarStatusClient
     Task<TopBarWorkspaceActionResult> BuildThemeActionAsync();
 }
 
+public interface ITopBarNotificationCenterClient
+{
+    string CurrentStatus { get; }
+
+    bool CanOpenNotifications();
+
+    TopBarWorkspaceActionResult OpenNotifications();
+}
+
+public sealed class InMemoryTopBarNotificationCenterClient : ITopBarNotificationCenterClient
+{
+    private readonly object _sync = new();
+    private string _currentStatus;
+
+    public InMemoryTopBarNotificationCenterClient()
+        : this(TopBarStatusClient.DefaultNotificationsStatus)
+    {
+    }
+
+    public InMemoryTopBarNotificationCenterClient(string initialStatus)
+    {
+        _currentStatus = TopBarStatusClient.NormalizeNotificationsStatus(initialStatus);
+    }
+
+    public string CurrentStatus
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _currentStatus;
+            }
+        }
+    }
+
+    public bool CanOpenNotifications() => true;
+
+    public TopBarWorkspaceActionResult OpenNotifications()
+    {
+        lock (_sync)
+        {
+            _currentStatus = TopBarStatusClient.NotificationsViewedStatus;
+            return TopBarStatusClient.BuildNotificationsOpenedActionResult(_currentStatus);
+        }
+    }
+}
+
 public interface ITopBarThemePreferenceClient
 {
     string CurrentStatus { get; }
@@ -102,19 +149,31 @@ public sealed class InMemoryTopBarThemePreferenceClient : ITopBarThemePreference
 
 public sealed class TopBarStatusClient : ITopBarStatusClient
 {
+    private readonly ITopBarNotificationCenterClient _notificationCenterClient;
     private readonly ITopBarThemePreferenceClient _themePreferenceClient;
 
     public TopBarStatusClient()
-        : this(new InMemoryTopBarThemePreferenceClient())
+        : this(new InMemoryTopBarNotificationCenterClient(), new InMemoryTopBarThemePreferenceClient())
     {
     }
 
     public TopBarStatusClient(ITopBarThemePreferenceClient themePreferenceClient)
+        : this(new InMemoryTopBarNotificationCenterClient(), themePreferenceClient)
     {
+    }
+
+    public TopBarStatusClient(
+        ITopBarNotificationCenterClient notificationCenterClient,
+        ITopBarThemePreferenceClient themePreferenceClient)
+    {
+        _notificationCenterClient =
+            notificationCenterClient ?? throw new ArgumentNullException(nameof(notificationCenterClient));
         _themePreferenceClient = themePreferenceClient ?? throw new ArgumentNullException(nameof(themePreferenceClient));
     }
 
     public static string DefaultNotificationsStatus { get; } = "Off";
+
+    public static string NotificationsViewedStatus { get; } = "Viewed";
 
     public static string DefaultThemeStatus { get; } = "System";
 
@@ -141,7 +200,7 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
                     TopBarStatusSlot.Notifications,
                     "Notifications",
                     BuildDefaultStatusValue(TopBarStatusSlot.Notifications),
-                    "Visible mac-parity notification entry point; permission prompts remain disabled until Settings owns the explicit write."),
+                    "Visible mac-parity notification entry point; default provider opens an in-memory notification center without permission prompts."),
                 new(
                     TopBarStatusSlot.Theme,
                     "Theme",
@@ -179,7 +238,7 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
     public string BuildDefaultStatusValue(TopBarStatusSlot slot) =>
         slot switch
         {
-            TopBarStatusSlot.Notifications => DefaultNotificationsStatus,
+            TopBarStatusSlot.Notifications => _notificationCenterClient.CurrentStatus,
             TopBarStatusSlot.Theme => _themePreferenceClient.CurrentStatus,
             _ => ""
         };
@@ -204,7 +263,7 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
         TopBarResolvedStatusSnapshot snapshot) =>
         new(snapshot.NotificationsStatus, snapshot.ThemeStatus);
 
-    public bool CanOpenNotifications() => false;
+    public bool CanOpenNotifications() => _notificationCenterClient.CanOpenNotifications();
 
     public bool CanToggleTheme() => true;
 
@@ -213,7 +272,7 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
     public string BuildThemePendingStatus() => DefaultThemePendingStatus;
 
     public Task<TopBarWorkspaceActionResult> BuildNotificationsActionAsync() =>
-        Task.FromResult(BuildDefaultNotificationsActionResult());
+        Task.FromResult(_notificationCenterClient.OpenNotifications());
 
     public Task<TopBarWorkspaceActionResult> BuildThemeActionAsync() =>
         Task.FromResult(BuildThemeUpdatedActionResult(_themePreferenceClient.Toggle()));
@@ -232,14 +291,30 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
     public static string DefaultThemeBlockedMessage { get; } =
         "Theme mutation and persistence remain behind the Settings workspace provider.";
 
+    public static string DefaultNotificationsOpenedMessage { get; } =
+        "Top-bar notification center opened in memory only; no Windows notification permissions were requested.";
+
     public static string DefaultThemeUpdatedMessage { get; } =
         "Top-bar theme preference changed in memory only; no Windows theme or persisted settings were written.";
+
+    public static string NormalizeNotificationsStatus(string status) =>
+        status switch
+        {
+            var value when string.Equals(value, DefaultNotificationsStatus, StringComparison.Ordinal) =>
+                DefaultNotificationsStatus,
+            var value when string.Equals(value, NotificationsViewedStatus, StringComparison.Ordinal) =>
+                NotificationsViewedStatus,
+            _ => DefaultNotificationsStatus
+        };
 
     public static TopBarWorkspaceActionResult BuildDefaultNotificationsActionResult() =>
         new(DefaultNotificationsBlockedStatus, DefaultNotificationsBlockedMessage);
 
     public static TopBarWorkspaceActionResult BuildDefaultThemeActionResult() =>
         new(DefaultThemeBlockedStatus, DefaultThemeBlockedMessage);
+
+    public static TopBarWorkspaceActionResult BuildNotificationsOpenedActionResult(string status) =>
+        new(NormalizeNotificationsStatus(status), DefaultNotificationsOpenedMessage);
 
     public static TopBarWorkspaceActionResult BuildThemeUpdatedActionResult(string status) =>
         new(InMemoryTopBarThemePreferenceClient.NormalizeThemeStatus(status), DefaultThemeUpdatedMessage);
