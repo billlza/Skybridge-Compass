@@ -330,6 +330,7 @@ foreach ($portabilitySmokeSignal in @(
     "ProbeMacSsh",
     "RequireMacSshReady",
     "RequireMacRustCliSmoke",
+    "MacAlternateHostNames",
     "MacExpectedHostAddress",
     "MacDirectSourceAddress",
     "MacRemoteRepoRoot",
@@ -388,6 +389,10 @@ foreach ($macSshProbeSignal in @(
     'mac-ssh-probe: $Message',
     "Resolve-DnsName",
     "ExpectedHostAddress",
+    "AlternateHostNames",
+    "CurrentHostName",
+    "candidate: host=",
+    "LzadeMacBook-Pro.local",
     "198.18.0.0/15",
     "prefer the Mac private LAN IPv4",
     "DirectSourceAddress",
@@ -457,6 +462,7 @@ Assert-Contains -Text $architecture -Needle "-RequireMacSshReady" -Message "Arch
 Assert-Contains -Text $architecture -Needle "-RequireMacRustCliSmoke -MacRemoteRepoRoot <path>" -Message "Architecture doc missing Mac Rust CLI smoke gate."
 Assert-Contains -Text $architecture -Needle "cli_apple_to_apple_selects_apple_native" -Message "Architecture doc missing Mac Rust CLI AppleNative smoke."
 Assert-Contains -Text $architecture -Needle "-ExpectedHostAddress" -Message "Architecture doc missing Mac SSH expected-address diagnostic."
+Assert-Contains -Text $architecture -Needle "LzadeMacBook-Pro.local" -Message "Architecture doc missing Mac .local alternate host diagnostic."
 Assert-Contains -Text $architecture -Needle "198.18.0.0/15" -Message "Architecture doc missing proxy-route diagnostic."
 Assert-Contains -Text $architecture -Needle "verify-windows-startup-state.ps1" -Message "Architecture doc missing startup-state smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."

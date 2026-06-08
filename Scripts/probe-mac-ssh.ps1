@@ -1,5 +1,6 @@
 param(
     [string]$HostName = "192.168.0.102",
+    [string[]]$AlternateHostNames = @("LzadeMacBook-Pro.local"),
     [int]$Port = 22,
     [string[]]$UserNames = @("bill", "Lza"),
     [string]$KeyPath = (Join-Path $env:USERPROFILE ".ssh\skybridge_mac_debug_ed25519"),
@@ -14,6 +15,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+$script:CurrentHostName = $HostName
 
 function Write-Probe {
     param([string]$Message)
@@ -88,46 +91,46 @@ function Get-TcpRemoteAddress {
         return [string]$TcpResult.RemoteAddress
     }
 
-    if (Test-IsIPv4Address -Address $HostName) {
-        return $HostName
+    if (Test-IsIPv4Address -Address $script:CurrentHostName) {
+        return $script:CurrentHostName
     }
 
     return ""
 }
 
 function Write-NameResolutionDiagnostics {
-    if (Test-IsIPv4Address -Address $HostName) {
-        if (-not [string]::IsNullOrWhiteSpace($ExpectedHostAddress) -and $HostName -ne $ExpectedHostAddress) {
-            Write-Probe "host warning: target $HostName does not match expected Mac address $ExpectedHostAddress"
+    if (Test-IsIPv4Address -Address $script:CurrentHostName) {
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedHostAddress) -and $script:CurrentHostName -ne $ExpectedHostAddress) {
+            Write-Probe "host warning: target $script:CurrentHostName does not match expected Mac address $ExpectedHostAddress"
         }
 
         return
     }
 
     try {
-        $records = @(Resolve-DnsName -Name $HostName -Type A -ErrorAction Stop |
+        $records = @(Resolve-DnsName -Name $script:CurrentHostName -Type A -ErrorAction Stop |
             Where-Object { $_.IPAddress } |
             ForEach-Object { [string]$_.IPAddress })
     }
     catch {
-        Write-Probe "resolve warning: could not resolve $HostName as an IPv4 host: $($_.Exception.Message)"
+        Write-Probe "resolve warning: could not resolve $script:CurrentHostName as an IPv4 host: $($_.Exception.Message)"
         return
     }
 
     if ($records.Count -eq 0) {
-        Write-Probe "resolve warning: $HostName returned no IPv4 A records"
+        Write-Probe "resolve warning: $script:CurrentHostName returned no IPv4 A records"
         return
     }
 
     foreach ($address in $records) {
-        Write-Probe "resolve: $HostName -> $address"
+        Write-Probe "resolve: $script:CurrentHostName -> $address"
         if (Test-IsProxySourceAddress -Address $address) {
-            Write-Probe "resolve warning: $HostName resolved to $address in 198.18.0.0/15; prefer the Mac private LAN IPv4 for Rust CLI co-debugging"
+            Write-Probe "resolve warning: $script:CurrentHostName resolved to $address in 198.18.0.0/15; prefer the Mac private LAN IPv4 for Rust CLI co-debugging"
         }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($ExpectedHostAddress) -and -not ($records -contains $ExpectedHostAddress)) {
-        Write-Probe "resolve warning: expected Mac address $ExpectedHostAddress was not returned for $HostName"
+        Write-Probe "resolve warning: expected Mac address $ExpectedHostAddress was not returned for $script:CurrentHostName"
     }
 }
 
@@ -182,7 +185,7 @@ function Invoke-SshCommand {
         [string]$Command = "whoami; hostname; pwd"
     )
 
-    $target = "$UserName@$HostName"
+    $target = "$UserName@$script:CurrentHostName"
     $sshArgs = @(
         "-o", "BatchMode=yes",
         "-o", "PreferredAuthentications=publickey",
@@ -240,7 +243,7 @@ function Invoke-MacRustCliSmoke {
     $command = "set -eu; cd $remoteRepo; cargo test --manifest-path core/skybridge-core/Cargo.toml --test cli_smoke cli_apple_to_apple_selects_apple_native -- --exact"
     $probe = Invoke-SshCommand -UserName $UserName -Command $command
     if ($probe.ExitCode -ne 0) {
-        throw "Mac Rust CLI smoke failed for $UserName@$HostName`: $($probe.Text)"
+        throw "Mac Rust CLI smoke failed for $UserName@$script:CurrentHostName`: $($probe.Text)"
     }
 
     Write-Probe "$UserName rust cli smoke ready: cli_apple_to_apple_selects_apple_native"
@@ -265,6 +268,87 @@ function Test-IsReadyProbeResult {
     return ($lines -contains $Probe.UserName) -and ($lines.Count -ge 3)
 }
 
+function Invoke-HostReadinessProbe {
+    param([string]$CandidateHostName)
+
+    $script:CurrentHostName = $CandidateHostName
+    $script:HostProbeReady = $false
+    $script:HostProbeUserName = ""
+    $script:HostProbeHostName = $script:CurrentHostName
+
+    Write-Probe "candidate: host=$script:CurrentHostName port=$Port"
+    Write-NameResolutionDiagnostics
+
+    $tcp = Test-NetConnection -ComputerName $script:CurrentHostName -Port $Port -WarningAction SilentlyContinue
+    if (-not $tcp.TcpTestSucceeded) {
+        Write-Probe "tcp not ready: ${script:CurrentHostName}:$Port"
+        Write-Probe "tcp readiness failure: Mac SSH TCP endpoint is not ready for $script:CurrentHostName"
+        return
+    }
+
+    Write-Probe "tcp ready: ${script:CurrentHostName}:$Port"
+    if ($tcp.SourceAddress) {
+        $sourceAddress = [string]$tcp.SourceAddress
+        if ($tcp.SourceAddress.PSObject.Properties.Name -contains "IPAddress") {
+            $sourceAddress = [string]$tcp.SourceAddress.IPAddress
+        }
+
+        $nextHop = ""
+        if ($tcp.NetRoute -and $tcp.NetRoute.NextHop) {
+            $nextHop = $tcp.NetRoute.NextHop
+        }
+
+        Write-Probe "route: source=$sourceAddress interface=$($tcp.InterfaceAlias) nextHop=$nextHop context=$($tcp.NetworkIsolationContext)"
+        $targetAddress = Get-TcpRemoteAddress -TcpResult $tcp
+        if ($targetAddress) {
+            Write-Probe "target: address=$targetAddress"
+            Write-LanRouteDiagnostics -TargetAddress $targetAddress -SourceAddress $sourceAddress
+        }
+
+        if (Test-IsProxySourceAddress -Address $sourceAddress) {
+            Write-Probe "route warning: source address is in 198.18.0.0/15, which is commonly used by proxy or virtual routing; this is not proof of direct LAN reachability"
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
+        Write-Probe "direct bind: ssh will use source=$DirectSourceAddress"
+    }
+
+    $readyUserName = ""
+    foreach ($userName in $UserNames) {
+        $probe = Invoke-SshCommand -UserName $userName
+        if (Test-IsReadyProbeResult -Probe $probe) {
+            if ([string]::IsNullOrWhiteSpace($readyUserName)) {
+                $readyUserName = $probe.UserName
+            }
+
+            Write-Probe "$($probe.UserName) ready"
+            Write-Output $probe.Text
+            continue
+        }
+
+        if ($probe.ExitCode -eq 0) {
+            Write-Probe "$($probe.UserName) failed readiness transcript: $($probe.Text)"
+        }
+        elseif ($probe.Text -match "Permission denied \(publickey\)") {
+            Write-Probe "$($probe.UserName) not authorized: add the public key or check the username"
+        }
+        elseif ($probe.Text -match "timed out during banner exchange") {
+            Write-Probe "$($probe.UserName) banner timeout: TCP accepts connections but sshd did not send an SSH banner"
+        }
+        elseif ($probe.Text -match "Connection timed out") {
+            Write-Probe "$($probe.UserName) timeout"
+        }
+        else {
+            Write-Probe "$($probe.UserName) failed: $($probe.Text)"
+        }
+    }
+
+    $script:HostProbeReady = -not [string]::IsNullOrWhiteSpace($readyUserName)
+    $script:HostProbeUserName = $readyUserName
+    $script:HostProbeHostName = $script:CurrentHostName
+}
+
 if (-not (Test-Path -LiteralPath $KeyPath)) {
     Write-Probe "missing SSH key: $KeyPath"
     if ($RequireReady) {
@@ -274,81 +358,19 @@ if (-not (Test-Path -LiteralPath $KeyPath)) {
     return
 }
 
-Write-NameResolutionDiagnostics
+$hostCandidates = @($HostName) + @($AlternateHostNames) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -Unique
 
-$tcp = Test-NetConnection -ComputerName $HostName -Port $Port -WarningAction SilentlyContinue
-if (-not $tcp.TcpTestSucceeded) {
-    Write-Probe "tcp not ready: ${HostName}:$Port"
-    if ($RequireReady) {
-        throw "Mac SSH TCP endpoint is not ready: ${HostName}:$Port"
-    }
-
-    return
-}
-
-Write-Probe "tcp ready: ${HostName}:$Port"
-if ($tcp.SourceAddress) {
-    $sourceAddress = [string]$tcp.SourceAddress
-    if ($tcp.SourceAddress.PSObject.Properties.Name -contains "IPAddress") {
-        $sourceAddress = [string]$tcp.SourceAddress.IPAddress
-    }
-
-    $nextHop = ""
-    if ($tcp.NetRoute -and $tcp.NetRoute.NextHop) {
-        $nextHop = $tcp.NetRoute.NextHop
-    }
-
-    Write-Probe "route: source=$sourceAddress interface=$($tcp.InterfaceAlias) nextHop=$nextHop context=$($tcp.NetworkIsolationContext)"
-    $targetAddress = Get-TcpRemoteAddress -TcpResult $tcp
-    if ($targetAddress) {
-        Write-Probe "target: address=$targetAddress"
-        Write-LanRouteDiagnostics -TargetAddress $targetAddress -SourceAddress $sourceAddress
-    }
-
-    if (Test-IsProxySourceAddress -Address $sourceAddress) {
-        Write-Probe "route warning: source address is in 198.18.0.0/15, which is commonly used by proxy or virtual routing; this is not proof of direct LAN reachability"
-    }
-}
-
-if (-not [string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
-    Write-Probe "direct bind: ssh will use source=$DirectSourceAddress"
-}
-
-$ready = $false
-$readyUserName = ""
-foreach ($userName in $UserNames) {
-    $probe = Invoke-SshCommand -UserName $userName
-    if (Test-IsReadyProbeResult -Probe $probe) {
-        $ready = $true
-        if ([string]::IsNullOrWhiteSpace($readyUserName)) {
-            $readyUserName = $probe.UserName
-        }
-
-        Write-Probe "$($probe.UserName) ready"
-        Write-Output $probe.Text
+foreach ($candidateHostName in $hostCandidates) {
+    Invoke-HostReadinessProbe -CandidateHostName $candidateHostName
+    if (-not $script:HostProbeReady) {
         continue
     }
 
-    if ($probe.ExitCode -eq 0) {
-        Write-Probe "$($probe.UserName) failed readiness transcript: $($probe.Text)"
-    }
-    elseif ($probe.Text -match "Permission denied \(publickey\)") {
-        Write-Probe "$($probe.UserName) not authorized: add the public key or check the username"
-    }
-    elseif ($probe.Text -match "timed out during banner exchange") {
-        Write-Probe "$($probe.UserName) banner timeout: TCP accepts connections but sshd did not send an SSH banner"
-    }
-    elseif ($probe.Text -match "Connection timed out") {
-        Write-Probe "$($probe.UserName) timeout"
-    }
-    else {
-        Write-Probe "$($probe.UserName) failed: $($probe.Text)"
-    }
-}
-
-if ($ready) {
+    $script:CurrentHostName = $script:HostProbeHostName
     if ($RequireRustCliSmoke) {
-        Invoke-MacRustCliSmoke -UserName $readyUserName
+        Invoke-MacRustCliSmoke -UserName $script:HostProbeUserName
     }
 
     Write-Probe "ready"

@@ -4225,6 +4225,10 @@ foreach ($docSignal in @(
 }
 
 foreach ($macSshProbeSignal in @(
+    '$AlternateHostNames',
+    '$script:CurrentHostName',
+    'candidate: host=',
+    'LzadeMacBook-Pro.local',
     '$DirectSourceAddress',
     'Test-IsProxySourceAddress',
     'Test-IsSameIPv4Subnet',
