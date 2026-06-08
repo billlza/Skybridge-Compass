@@ -566,6 +566,7 @@ foreach ($topBarSignal in @(
     "ResolveEnabled",
     "ResolveDetail",
     "_topBarStatusClient.BuildStatusUpdate(",
+    "LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, update.ActionDetails)",
     "ResolvedStatus",
     "ActionDetails",
     "NotificationsStatus",

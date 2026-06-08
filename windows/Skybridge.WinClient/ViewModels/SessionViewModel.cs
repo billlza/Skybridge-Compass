@@ -1502,12 +1502,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
     }
 
-    private void LoadWorkspaceActionSurface(WorkspaceActionSurface surface)
+    private void LoadWorkspaceActionSurface(
+        WorkspaceActionSurface surface,
+        WorkspaceActionDetailSnapshot? actionDetails = null)
     {
         var snapshot = _workspaceActionCatalogClient.BuildResolvedSnapshot(
             new WorkspaceActionCatalogRequest(surface),
             BuildWorkspaceActionGateSnapshot(),
-            BuildWorkspaceActionDetailSnapshot());
+            actionDetails ?? BuildWorkspaceActionDetailSnapshot());
         var target = GetWorkspaceActionSurfaceTarget(surface);
 
         target.Clear();
@@ -1597,7 +1599,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         TopBarDiagnosticsStatus = update.ResolvedStatus.DiagnosticsStatus;
         TopBarNotificationsStatus = update.ResolvedStatus.NotificationsStatus;
         TopBarThemeStatus = update.ResolvedStatus.ThemeStatus;
-        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions);
+        LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, update.ActionDetails);
     }
 
     private TopBarStatusRequest BuildTopBarStatusRequest() =>
