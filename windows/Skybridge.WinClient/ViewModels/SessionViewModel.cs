@@ -77,6 +77,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _crossNetworkCodeInput = "";
     private string _crossNetworkGeneratedCode = "";
     private ImageSource? _crossNetworkGeneratedQrCodeImage;
+    private ImageSource? _fileTransferShareQrCodeImage;
     private string _discoveryTxtRecord = "";
     private string _pairingConnectionCode = "";
     private string _discoveryStatus = "";
@@ -308,7 +309,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceBusyCoordinator,
             _fileTransferClient,
             value => FileTransferStatus = value,
-            value => StatusMessage = value);
+            value => StatusMessage = value,
+            value => FileTransferShareQrCodeImage = BuildQrCodeImageSource(value));
         _remoteDesktopWorkspaceActions = new RemoteDesktopWorkspaceActions(
             _workspaceBusyCoordinator,
             _remoteDesktopClient,
@@ -885,6 +887,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public bool IsCrossNetworkGeneratedQrCodeVisible =>
         CrossNetworkGeneratedQrCodeImage is not null;
+
+    public ImageSource? FileTransferShareQrCodeImage
+    {
+        get => _fileTransferShareQrCodeImage;
+        private set
+        {
+            if (SetField(ref _fileTransferShareQrCodeImage, value))
+            {
+                OnPropertyChanged(nameof(IsFileTransferShareQrCodeVisible));
+            }
+        }
+    }
+
+    public bool IsFileTransferShareQrCodeVisible =>
+        FileTransferShareQrCodeImage is not null;
 
     public string DiscoveryTxtRecord
     {

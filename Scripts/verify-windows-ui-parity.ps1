@@ -169,6 +169,7 @@ $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 $parityMatrixDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-matrix.md"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
 $commandGateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-command-gates.ps1"
+$fileTransferQrSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-file-transfer-qr.ps1"
 $uiActionOrderSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-action-order.ps1"
 $uiParityMatrixSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-parity-matrix.ps1"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
@@ -176,7 +177,7 @@ $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-nat
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 $macSshProbePath = Join-Path $RepoRoot "Scripts/probe-mac-ssh.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $fileTransferQrSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (Test-Path -LiteralPath $uiActionOrderSmokePath) -Message "Missing parity file: $uiActionOrderSmokePath"
@@ -264,6 +265,7 @@ $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 $parityMatrixDoc = Get-Content -Raw -LiteralPath $parityMatrixDocPath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
 $commandGateSmoke = Get-Content -Raw -LiteralPath $commandGateSmokePath
+$fileTransferQrSmoke = Get-Content -Raw -LiteralPath $fileTransferQrSmokePath
 $uiActionOrderSmoke = Get-Content -Raw -LiteralPath $uiActionOrderSmokePath
 $uiParityMatrixSmoke = Get-Content -Raw -LiteralPath $uiParityMatrixSmokePath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
@@ -2729,6 +2731,7 @@ foreach ($fileTransferWorkspaceActionsSignal in @(
     "IFileTransferWorkspaceClient fileTransferClient",
     "Action<string> setFileTransferStatus",
     "Action<string> setStatusMessage",
+    "Action<string?> setFileTransferShareQrCodePngBase64",
     "SelectFilesAsync()",
     "SelectFolderAsync()",
     "GenerateQrAsync()",
@@ -2742,7 +2745,8 @@ foreach ($fileTransferWorkspaceActionsSignal in @(
     "_fileTransferClient.BuildShareQrActionAsync",
     "Func<Task<FileTransferWorkspaceActionResult>>",
     "_setFileTransferStatus(result.Status)",
-    "_setStatusMessage(result.Message)"
+    "_setStatusMessage(result.Message)",
+    "_setFileTransferShareQrCodePngBase64(result.ShareQrPngBase64)"
 )) {
     Assert-Contains -Text $fileTransferWorkspaceActions -Needle $fileTransferWorkspaceActionsSignal -Message "FileTransferWorkspaceActions contract missing: $fileTransferWorkspaceActionsSignal"
 }
@@ -3881,6 +3885,18 @@ foreach ($fileTransferSignal in @(
     "DefaultShareQrBlockedStatus",
     "DefaultShareQrReadyStatus",
     "DefaultShareQrReadyMessage",
+    "ShareQrPayload",
+    "ShareQrPngBase64",
+    "FileTransferShareQrPayload",
+    "FileTransferShareQrEnvelope",
+    "FileTransferShareQrCode",
+    "BuildSignedShareQrCode",
+    "skybridge://file-transfer?data=",
+    "PngByteQRCodeHelper",
+    "FileTransferShareQrCodeImage",
+    "IsFileTransferShareQrCodeVisible",
+    "FileTransferShareQrPreview",
+    "FileTransferShareQrImage",
     "FileTransferSelectionIntentSnapshot",
     "Selection intent",
     "CanSelectFiles() => _selectionIntentClient.CanSelectFiles()",
@@ -3892,9 +3908,10 @@ foreach ($fileTransferSignal in @(
     "ChannelMappings",
     "CoreChannelMappingResolver",
     "Transport plan",
-    "EncodeFrameAsync"
+    "EncodeFrameAsync",
+    "windows-file-transfer-qr: ok"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer + $fileTransferWorkspaceActions + $workspaceActionCatalog) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $fileTransfer + $fileTransferWorkspaceActions + $workspaceActionCatalog + $fileTransferQrSmoke) -Needle $fileTransferSignal -Message "File Transfer parity signal missing: $fileTransferSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.FileTransfer, "File Transfer", "\uE8E5", "Queue and history", true)' -Message "File Transfer must be marked implemented once the queue/history workspace exists."

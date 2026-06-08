@@ -1,7 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
+using QRCoder;
 
 namespace Skybridge.WinClient.Services;
 
@@ -137,6 +141,12 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
 {
     private const string DefaultFilesSelectionIntentId = "FT-FILES-0000";
     private const string DefaultFolderSelectionIntentId = "FT-FOLDER-0000";
+    private const string ShareQrQueryPrefix = "skybridge://file-transfer?data=";
+    private const int ShareQrVersion = 1;
+    private const int ShareQrPixelsPerModule = 8;
+    private const double ShareQrLifetimeSeconds = 300;
+    private static readonly IReadOnlyList<string> ShareQrCapabilities = new[] { "file-transfer", "intent-only", "windows" };
+    private static readonly JsonSerializerOptions QrJsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly CoreBridge _coreBridge;
     private readonly IFileTransferSelectionIntentClient _selectionIntentClient;
@@ -261,10 +271,101 @@ public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
             "No local files were read and no transport or signaling session was started.");
 
     public static FileTransferWorkspaceActionResult BuildShareQrIntentActionResult(string intentId) =>
-        new(
+        BuildShareQrIntentActionResultCore(NormalizeShareIntentId(intentId));
+
+    private static FileTransferWorkspaceActionResult BuildShareQrIntentActionResultCore(string normalizedIntentId)
+    {
+        var shareQr = BuildSignedShareQrCode(normalizedIntentId);
+        return new FileTransferWorkspaceActionResult(
             DefaultShareQrReadyStatus,
             DefaultShareQrReadyMessage,
-            $"intent={NormalizeShareIntentId(intentId)}; no QR payload was emitted, and no transport or signaling session was started.");
+            $"intent={normalizedIntentId}; qr={shareQr.Uri}; png={shareQr.PngByteLength} bytes; no local files were read, and no transport or signaling session was started.",
+            shareQr.Uri,
+            shareQr.PngBase64);
+    }
+
+    private static FileTransferShareQrCode BuildSignedShareQrCode(string intentId)
+    {
+        using var signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var publicKey = ExportRawP256PublicKey(signingKey);
+        var publicKeyBase64 = Convert.ToBase64String(publicKey);
+        var publicKeyFingerprint = Convert.ToHexString(SHA256.HashData(publicKey)).ToLowerInvariant();
+        var timestampSeconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        var timestamp = timestampSeconds.ToString("0.###", CultureInfo.InvariantCulture);
+        var expiresAt = (timestampSeconds + ShareQrLifetimeSeconds).ToString("0.###", CultureInfo.InvariantCulture);
+        var payload = new FileTransferShareQrPayload(
+            ShareQrVersion,
+            intentId,
+            Environment.MachineName,
+            "Windows",
+            "intent-only",
+            0,
+            0,
+            expiresAt,
+            ShareQrCapabilities);
+        var canonical = BuildShareQrCanonicalPayload(payload, timestamp, publicKeyFingerprint);
+        var signature = signingKey.SignData(
+            Encoding.UTF8.GetBytes(canonical),
+            HashAlgorithmName.SHA256,
+            DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        var envelope = new FileTransferShareQrEnvelope(
+            payload,
+            Convert.ToBase64String(signature),
+            publicKeyBase64,
+            timestamp,
+            publicKeyFingerprint);
+        var envelopeJson = JsonSerializer.Serialize(envelope, QrJsonOptions);
+        var uri = $"{ShareQrQueryPrefix}{Base64UrlEncode(Encoding.UTF8.GetBytes(envelopeJson))}";
+        var pngBytes = PngByteQRCodeHelper.GetQRCode(
+            uri,
+            QRCodeGenerator.ECCLevel.Q,
+            ShareQrPixelsPerModule);
+
+        return new FileTransferShareQrCode(
+            uri,
+            Convert.ToBase64String(pngBytes),
+            pngBytes.Length);
+    }
+
+    private static string BuildShareQrCanonicalPayload(
+        FileTransferShareQrPayload payload,
+        string timestamp,
+        string publicKeyFingerprint) =>
+        string.Join(
+            "|",
+            "file-transfer",
+            payload.Version.ToString(CultureInfo.InvariantCulture),
+            payload.IntentId,
+            payload.DeviceName,
+            payload.DeviceType,
+            payload.ShareMode,
+            payload.ManifestFileCount.ToString(CultureInfo.InvariantCulture),
+            payload.ManifestBytes.ToString(CultureInfo.InvariantCulture),
+            payload.ExpiresAt,
+            string.Join(",", payload.Capabilities),
+            timestamp,
+            publicKeyFingerprint);
+
+    private static byte[] ExportRawP256PublicKey(ECDsa signingKey)
+    {
+        var publicParameters = signingKey.ExportParameters(false);
+        if (publicParameters.Q.X is not { Length: 32 } x
+            || publicParameters.Q.Y is not { Length: 32 } y)
+        {
+            throw new InvalidOperationException("File transfer QR signing key export must produce a raw P256 public key.");
+        }
+
+        var publicKey = new byte[64];
+        Buffer.BlockCopy(x, 0, publicKey, 0, x.Length);
+        Buffer.BlockCopy(y, 0, publicKey, x.Length, y.Length);
+        return publicKey;
+    }
+
+    private static string Base64UrlEncode(byte[] bytes) =>
+        Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
 
     private static string NormalizeShareIntentId(string intentId)
     {
@@ -444,4 +545,29 @@ public sealed record FileTransferSelectionIntentSnapshot(
 public sealed record FileTransferWorkspaceActionResult(
     string Status,
     string Message,
-    string Detail);
+    string Detail,
+    string? ShareQrPayload = null,
+    string? ShareQrPngBase64 = null);
+
+internal sealed record FileTransferShareQrPayload(
+    int Version,
+    string IntentId,
+    string DeviceName,
+    string DeviceType,
+    string ShareMode,
+    int ManifestFileCount,
+    long ManifestBytes,
+    string ExpiresAt,
+    IReadOnlyList<string> Capabilities);
+
+internal sealed record FileTransferShareQrEnvelope(
+    FileTransferShareQrPayload Payload,
+    string SignatureBase64,
+    string PublicKeyBase64,
+    string Timestamp,
+    string PublicKeyFingerprint);
+
+internal sealed record FileTransferShareQrCode(
+    string Uri,
+    string PngBase64,
+    int PngByteLength);

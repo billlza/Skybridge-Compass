@@ -125,6 +125,11 @@ Invoke-SmokeGate `
     -Parameters @{ RepoRoot = $RepoRoot }
 
 Invoke-SmokeGate `
+    -Name "windows-file-transfer-qr" `
+    -RelativeScriptPath "Scripts/verify-windows-file-transfer-qr.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
+
+Invoke-SmokeGate `
     -Name "windows-native-runtime-profile" `
     -RelativeScriptPath "Scripts/verify-windows-native-runtime-profile.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
