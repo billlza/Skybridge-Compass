@@ -58,8 +58,9 @@ $dependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Sessio
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
+$nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -96,6 +97,7 @@ $dependencyFactory = Get-Content -Raw -LiteralPath $dependencyFactoryPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
+$nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
 
 foreach ($member in @("ConnectAsync", "DisconnectAsync", "SendHeartbeatAsync")) {
     Assert-Contains -Text $interface -Needle $member -Message "IEngineClient missing member: $member"
@@ -325,6 +327,23 @@ foreach ($signal in @(
     Assert-Contains -Text $nativeDnsSdBrowse -Needle $signal -Message "NativeWindowsDnsSdBrowseClient missing Win32 DNS-SD signal: $signal"
 }
 Assert-True -Condition (-not $nativeDnsSdBrowse.Contains("DnssdServiceWatcher")) -Message "NativeWindowsDnsSdBrowseClient must not use unsupported WinRT DnssdServiceWatcher."
+foreach ($signal in @(
+    "windows-native-dns-sd-acceptance: ok",
+    "NativeWindowsDnsSdBrowseClient",
+    "CoreDiscoveryClient(new CoreBridge())",
+    "DnsServiceBrowse",
+    "DnsServiceResolve",
+    "DnsServiceBrowseCancel",
+    "DnsServiceResolveCancel",
+    "DnsRecordListFree",
+    "DnsServiceFreeInstance",
+    "--require-peer",
+    "--expected-device-id",
+    "--expected-fingerprint",
+    "fingerprint-only trust summary"
+)) {
+    Assert-Contains -Text $nativeDnsSdAcceptance -Needle $signal -Message "Windows native DNS-SD acceptance missing signal: $signal"
+}
 
 Assert-Contains -Text $architecture -Needle "WindowsDiscoveryBrowserClient" -Message "Architecture doc missing WindowsDiscoveryBrowserClient status."
 

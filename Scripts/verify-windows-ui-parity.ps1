@@ -160,8 +160,9 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
+$nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -239,6 +240,7 @@ $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $mainWindowCode = Get-Content -Raw -LiteralPath $mainWindowCodePath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
+$nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
 
 $parsedXaml = [xml]$mainWindow
 Assert-True -Condition ($null -ne $parsedXaml) -Message "MainWindow.xaml is not well-formed XML."
@@ -2838,6 +2840,10 @@ foreach ($discoverySignal in @(
     "DnsServiceResolveCancel",
     "DnsRecordListFree",
     "DnsServiceFreeInstance",
+    "windows-native-dns-sd-acceptance: ok",
+    "--require-peer",
+    "--expected-device-id",
+    "--expected-fingerprint",
     "WindowsDnsSdResolvedTxtRecord",
     "Manual Host / IP",
     "Port",
@@ -2928,7 +2934,7 @@ foreach ($discoverySignal in @(
     "Prepare Core connection preflight before connection launch.",
     "No connection attempt is started"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $nativeDnsSdBrowse + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionLaunchRequest + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $discoveryBrowser + $nativeDnsSdBrowse + $nativeDnsSdAcceptance + $deviceDiscoveryInputDefaults + $manualConnection + $crossNetwork + $pairing + $connectionPreflight + $connectionLaunchRequest + $connectionWorkspaceState + $workspaceActionCatalog) -Needle $discoverySignal -Message "Device Discovery parity signal missing: $discoverySignal"
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("PairingFacts.Add(new PairingFactView")) -Message "SessionViewModel must map pairing facts from PairingMaterialClient instead of constructing pairing/trust facts inline."
@@ -3281,6 +3287,7 @@ foreach ($docSignal in @(
     "CrossNetworkConnectionClient",
     "IWindowsDnsSdBrowseClient",
     "NativeWindowsDnsSdBrowseClient",
+    "verify-windows-native-dns-sd-acceptance.ps1",
     "Generate QR Code",
     "Smart Connection Code",
     "CoreBridge.PlanConnectionAsync",
