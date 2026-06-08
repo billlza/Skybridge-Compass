@@ -29,6 +29,7 @@ $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngin
 $coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
 $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
+$nativeDnsSdBrowsePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs"
 $deviceDiscoveryInputDefaultsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DeviceDiscoveryInputDefaultsClient.cs"
 $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
 $crossNetworkPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs"
@@ -58,7 +59,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -66,6 +67,7 @@ $client = Get-Content -Raw -LiteralPath $clientPath
 $coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
 $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
+$nativeDnsSdBrowse = Get-Content -Raw -LiteralPath $nativeDnsSdBrowsePath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
 $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $crossNetwork = Get-Content -Raw -LiteralPath $crossNetworkPath
@@ -164,6 +166,7 @@ foreach ($signal in @(
     "IWindowsDnsSdBrowseClient",
     "RecordingDnsSdBrowseClient",
     "RecordingDiscoveryClient",
+    "NativeWindowsDnsSdBrowseClient",
     "DNS-SD query order",
     "DnsServiceBrowse/DnsServiceResolve",
     "desk-mac.local:11550",
@@ -182,6 +185,7 @@ Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architec
 Assert-Contains -Text $dependencyFactory -Needle "var coreBridge = new CoreBridge();" -Message "Default dependency factory should create one explicit CoreBridge for manual Core tools."
 Assert-Contains -Text $dependencyFactory -Needle "var discoveryClient = new CoreDiscoveryClient(coreBridge);" -Message "Default dependency factory should create one explicit CoreDiscoveryClient for discovery parsing and browsing."
 Assert-Contains -Text $dependencyFactory -Needle "new WindowsDiscoveryBrowserClient(discoveryClient)" -Message "Default dependency factory should wire WindowsDiscoveryBrowserClient for explicit DNS-SD browse boundary snapshots."
+Assert-True -Condition (-not $dependencyFactory.Contains("new NativeWindowsDnsSdBrowseClient()")) -Message "Default dependency factory must not silently switch to the live DNS-SD provider before local-network acceptance."
 Assert-Contains -Text $dependencyFactory -Needle "new DeviceDiscoveryInputDefaultsClient()" -Message "Default dependency factory should wire DeviceDiscoveryInputDefaultsClient for explicit Device Discovery default inputs."
 Assert-Contains -Text $dependencyFactory -Needle "new ManualConnectionClient()" -Message "Default dependency factory should wire ManualConnectionClient for explicit manual target validation."
 Assert-Contains -Text $dependencyFactory -Needle "new CrossNetworkConnectionClient()" -Message "Default dependency factory should wire CrossNetworkConnectionClient for explicit QR/code envelope validation."
@@ -301,6 +305,26 @@ foreach ($signal in @(
 )) {
     Assert-Contains -Text $discoveryBrowser -Needle $signal -Message "DiscoveryBrowserClient missing browse boundary signal: $signal"
 }
+foreach ($signal in @(
+    "public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient",
+    "OperatingSystem.IsWindowsVersionAtLeast(10)",
+    "DnsServiceBrowse",
+    "DnsServiceBrowseCancel",
+    "DnsServiceResolve",
+    "DnsServiceResolveCancel",
+    "DnsRecordListFree",
+    "DnsServiceFreeInstance",
+    "Marshal.StringToHGlobalUni",
+    "Marshal.GetFunctionPointerForDelegate",
+    "GCHandle.Alloc",
+    "CallbackDrainDelay",
+    "WindowsDnsSdResolvedTxtRecord",
+    "DnsServiceBrowse callback returned a non-success status.",
+    "TXT is still parsed by CoreDiscoveryClient."
+)) {
+    Assert-Contains -Text $nativeDnsSdBrowse -Needle $signal -Message "NativeWindowsDnsSdBrowseClient missing Win32 DNS-SD signal: $signal"
+}
+Assert-True -Condition (-not $nativeDnsSdBrowse.Contains("DnssdServiceWatcher")) -Message "NativeWindowsDnsSdBrowseClient must not use unsupported WinRT DnssdServiceWatcher."
 
 Assert-Contains -Text $architecture -Needle "WindowsDiscoveryBrowserClient" -Message "Architecture doc missing WindowsDiscoveryBrowserClient status."
 

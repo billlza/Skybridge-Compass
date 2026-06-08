@@ -24,6 +24,7 @@ $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/DummyEngineClient.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryClient.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs",
+    "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs",
     "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs",
     "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs",
     "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs",
@@ -168,6 +169,7 @@ var recordingDnsSd = new RecordingDnsSdBrowseClient(new WindowsDnsSdBrowseSnapsh
             "Injected DNS-SD smoke record; production provider must use DnsServiceBrowse/DnsServiceResolve.")
     }));
 var discoveryBrowser = new WindowsDiscoveryBrowserClient(recordingDiscovery, recordingDnsSd);
+AssertEqual(true, typeof(IWindowsDnsSdBrowseClient).IsAssignableFrom(typeof(NativeWindowsDnsSdBrowseClient)), "native DNS-SD provider interface");
 var browserSnapshot = await discoveryBrowser.BuildReadOnlySnapshotAsync(
     new DiscoveryBrowserRequest(
         DiscoveryBrowserAction.Start,
