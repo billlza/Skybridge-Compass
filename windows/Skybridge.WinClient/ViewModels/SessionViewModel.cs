@@ -53,6 +53,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceViewStateBuilder _workspaceViewStateBuilder;
     private readonly RemoteDesktopProfileSelectionCoordinator _remoteDesktopProfileSelectionCoordinator;
     private readonly CrossNetworkCodeInputCoordinator _crossNetworkCodeInputCoordinator;
+    private readonly DiscoveryBrowserActions _discoveryBrowserActions;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
     private string _statusMessage = "";
@@ -327,6 +328,20 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             CrossNetworkConnectionFacts,
             PairingFacts,
             ConnectionPreflightFacts);
+        _discoveryBrowserActions = new DiscoveryBrowserActions(
+            _discoveryBrowserInputPolicy,
+            _workspaceBusyCoordinator,
+            _discoveryBrowserClient,
+            _workspaceViewStateBuilder,
+            _connectionResultProjector,
+            () => DiscoveryService,
+            () => DiscoveryTxtRecord,
+            () => DiscoverySearchText,
+            () => IsDiscoveryCompatibilityModeEnabled,
+            () => ExtendedSearchCountdown,
+            () => PairingStatus,
+            value => ExtendedSearchCountdown = value,
+            value => DiscoveryBrowserStatus = value);
         CoreDiagnosticFacts = collections.CoreDiagnosticFacts;
         DeviceDiscoveryPrimaryActions = collections.DeviceDiscoveryPrimaryActions;
         DeviceDiscoveryScanActions = collections.DeviceDiscoveryScanActions;
@@ -976,40 +991,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _sessionEngineActions.SendHeartbeatAsync();
 
     private Task StartDiscoveryAsync() =>
-        RunDiscoveryBrowserAsync(DiscoveryBrowserAction.Start);
+        _discoveryBrowserActions.StartAsync();
 
     private Task StopDiscoveryAsync() =>
-        RunDiscoveryBrowserAsync(DiscoveryBrowserAction.Stop);
+        _discoveryBrowserActions.StopAsync();
 
     private Task RefreshDiscoveryAsync() =>
-        RunDiscoveryBrowserAsync(DiscoveryBrowserAction.Refresh);
+        _discoveryBrowserActions.RefreshAsync();
 
-    private async Task RunExtendedDiscoveryAsync()
-    {
-        ExtendedSearchCountdown = _discoveryBrowserInputPolicy.ExtendedSearchSeconds;
-        await RunDiscoveryBrowserAsync(DiscoveryBrowserAction.ExtendedSearch);
-    }
-
-    private async Task RunDiscoveryBrowserAsync(DiscoveryBrowserAction action)
-    {
-        await RunDeviceDiscoveryActionAsync(async () =>
-        {
-            DiscoveryBrowserStatus = _discoveryBrowserClient.BuildPendingStatus(action);
-            var snapshot = await _discoveryBrowserClient.BuildReadOnlySnapshotAsync(
-                _workspaceViewStateBuilder.BuildDiscoveryBrowserRequest(
-                    action,
-                    DiscoveryService,
-                    DiscoveryTxtRecord,
-                    DiscoverySearchText,
-                    IsDiscoveryCompatibilityModeEnabled,
-                    ExtendedSearchCountdown));
-
-            _connectionResultProjector.ApplyDiscoveryBrowserResult(
-                action,
-                snapshot,
-                PairingStatus);
-        });
-    }
+    private Task RunExtendedDiscoveryAsync() =>
+        _discoveryBrowserActions.RunExtendedSearchAsync();
 
     private async Task PrepareManualConnectionAsync()
     {
