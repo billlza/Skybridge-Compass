@@ -106,6 +106,7 @@ $workspaceActionSurfaceTargetsPath = Join-Path $RepoRoot "windows/Skybridge.WinC
 $workspaceActionSurfaceLoaderPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionSurfaceLoader.cs"
 $workspaceActionRenderContextBuilderPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionRenderContextBuilder.cs"
 $workspaceShellRefreshCoordinatorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceShellRefreshCoordinator.cs"
+$workspaceInputChangeRouterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceInputChangeRouter.cs"
 $workspaceShellNotificationCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceShellNotificationCatalog.cs"
 $workspaceShellStateAccessorPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceShellStateAccessor.cs"
 $workspaceShellStateSourcePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceShellStateSource.cs"
@@ -155,7 +156,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -178,6 +179,7 @@ $workspaceActionSurfaceTargets = Get-Content -Raw -LiteralPath $workspaceActionS
 $workspaceActionSurfaceLoader = Get-Content -Raw -LiteralPath $workspaceActionSurfaceLoaderPath
 $workspaceActionRenderContextBuilder = Get-Content -Raw -LiteralPath $workspaceActionRenderContextBuilderPath
 $workspaceShellRefreshCoordinator = Get-Content -Raw -LiteralPath $workspaceShellRefreshCoordinatorPath
+$workspaceInputChangeRouter = Get-Content -Raw -LiteralPath $workspaceInputChangeRouterPath
 $workspaceShellNotificationCatalog = Get-Content -Raw -LiteralPath $workspaceShellNotificationCatalogPath
 $workspaceShellStateAccessor = Get-Content -Raw -LiteralPath $workspaceShellStateAccessorPath
 $workspaceShellStateSource = Get-Content -Raw -LiteralPath $workspaceShellStateSourcePath
@@ -200,7 +202,7 @@ $connectionWorkspaceInputCoordinator = Get-Content -Raw -LiteralPath $connection
 $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionWorkspaceResultProjectorPath
 $remoteDesktopProfileSelectionCoordinator = Get-Content -Raw -LiteralPath $remoteDesktopProfileSelectionCoordinatorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceShellNotificationCatalog + $workspaceShellStateAccessor + $workspaceShellStateSource + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceDeferredRefreshAction + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceInputChangeRouter + $workspaceShellNotificationCatalog + $workspaceShellStateAccessor + $workspaceShellStateSource + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceDeferredRefreshAction + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -289,7 +291,7 @@ foreach ($featureCatalogSignal in @(
     "Entries",
     "_featureCatalogClient.BuildReadOnlySnapshot()",
     "_featureCatalogClient.ResolveDefaultSelection(featureEntries)",
-    "_workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(",
+    "_workspaceInputChangeRouter.DiscoveryInputChanged();",
     "_workspaceShellRefreshCoordinator.RefreshSelectedFeatureState();",
     "_workspaceShellRefreshCoordinator.RefreshConnectionState();",
     "_workspaceShellRefreshCoordinator.RefreshShellRuntimeState();",
@@ -312,13 +314,14 @@ Assert-True -Condition ($sessionViewModelSource.Contains("_workspaceShellRefresh
 Assert-True -Condition ($sessionViewModelSource.Contains("_workspaceShellRefreshCoordinator.RefreshConnectionState();")) -Message "ConnectionState setter must delegate shell refresh to WorkspaceShellRefreshCoordinator."
 Assert-True -Condition ($sessionViewModelSource.Contains("_workspaceShellRefreshCoordinator.RefreshShellRuntimeState();")) -Message "Runtime shell refresh must be centralized through WorkspaceShellRefreshCoordinator."
 foreach ($inputChangeSignal in @(
-    "_workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(",
-    "_connectionInputCoordinator.InvalidatePairingAndPreflight",
-    "_connectionInputCoordinator.ResetManualConnectionInput",
-    "_connectionInputCoordinator.ResetCrossNetworkInput",
-    "_connectionInputCoordinator.ResetPairingInput"
+    "new WorkspaceInputChangeRouter(",
+    "_workspaceInputChangeRouter.DiscoveryInputChanged();",
+    "_workspaceInputChangeRouter.DiscoverySearchChanged();",
+    "_workspaceInputChangeRouter.ManualTargetChanged();",
+    "_workspaceInputChangeRouter.CrossNetworkInputChanged();",
+    "_workspaceInputChangeRouter.PairingInputChanged();"
 )) {
-    Assert-Contains -Text $sessionViewModelSource -Needle $inputChangeSignal -Message "Workspace input change coordinator signal missing: $inputChangeSignal"
+    Assert-Contains -Text $sessionViewModelSource -Needle $inputChangeSignal -Message "Workspace input change router signal missing: $inputChangeSignal"
 }
 
 foreach ($workspaceItemViewSignal in @(
@@ -1110,6 +1113,23 @@ foreach ($shellRefreshCoordinatorSignal in @(
 )) {
     Assert-Contains -Text $workspaceShellRefreshCoordinator -Needle $shellRefreshCoordinatorSignal -Message "WorkspaceShellRefreshCoordinator contract missing: $shellRefreshCoordinatorSignal"
 }
+foreach ($workspaceInputChangeRouterSignal in @(
+    "internal sealed class WorkspaceInputChangeRouter",
+    "WorkspaceShellRefreshCoordinator shellRefreshCoordinator",
+    "ConnectionWorkspaceInputCoordinator inputCoordinator",
+    "DiscoveryInputChanged()",
+    "_shellRefreshCoordinator.ApplyWorkspaceInputChange(",
+    "_inputCoordinator.InvalidatePairingAndPreflight",
+    "DiscoverySearchChanged()",
+    "ManualTargetChanged()",
+    "_inputCoordinator.ResetManualConnectionInput",
+    "CrossNetworkInputChanged()",
+    "_inputCoordinator.ResetCrossNetworkInput",
+    "PairingInputChanged()",
+    "_inputCoordinator.ResetPairingInput"
+)) {
+    Assert-Contains -Text $workspaceInputChangeRouter -Needle $workspaceInputChangeRouterSignal -Message "WorkspaceInputChangeRouter contract missing: $workspaceInputChangeRouterSignal"
+}
 foreach ($shellNotificationCatalogSignal in @(
     "internal static class WorkspaceShellNotificationCatalog",
     "public static IReadOnlyList<string> SelectedFeaturePropertyNames",
@@ -1128,7 +1148,7 @@ foreach ($shellNotificationCatalogSignal in @(
 foreach ($sessionViewModelShellRefreshSignal in @(
     "WorkspaceShellNotificationCatalog.SelectedFeaturePropertyNames",
     "WorkspaceShellNotificationCatalog.ConnectionStatusPropertyName",
-    "_workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(",
+    "_workspaceInputChangeRouter.DiscoveryInputChanged();",
     "_workspaceShellRefreshCoordinator.RefreshSelectedFeatureState();",
     "_workspaceShellRefreshCoordinator.RefreshConnectionState();",
     "_workspaceShellRefreshCoordinator.RefreshShellRuntimeState();",
@@ -1138,6 +1158,7 @@ foreach ($sessionViewModelShellRefreshSignal in @(
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelShellRefreshSignal -Message "SessionViewModel must delegate shell refresh cadence through WorkspaceShellRefreshCoordinator: $sessionViewModelShellRefreshSignal"
 }
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(")) -Message "SessionViewModel setters must route editable input changes through WorkspaceInputChangeRouter."
 foreach ($sessionViewModelForwardingShellRefreshWrapper in @(
     "private void RefreshCommandStates()",
     "private void ApplyWorkspaceInputChange(",
@@ -1698,12 +1719,20 @@ foreach ($inputCoordinatorSignal in @(
     Assert-Contains -Text $connectionWorkspaceInputCoordinator -Needle $inputCoordinatorSignal -Message "ConnectionWorkspaceInputCoordinator contract missing: $inputCoordinatorSignal"
 }
 foreach ($inputResetSignal in @(
+    "_inputCoordinator.ResetManualConnectionInput",
+    "_inputCoordinator.ResetCrossNetworkInput",
+    "_inputCoordinator.ResetPairingInput",
+    "_inputCoordinator.InvalidatePairingAndPreflight"
+)) {
+    Assert-Contains -Text $workspaceInputChangeRouter -Needle $inputResetSignal -Message "WorkspaceInputChangeRouter reset path must call input coordinator: $inputResetSignal"
+}
+foreach ($sessionViewModelDirectInputResetSignal in @(
     "_connectionInputCoordinator.ResetManualConnectionInput",
     "_connectionInputCoordinator.ResetCrossNetworkInput",
     "_connectionInputCoordinator.ResetPairingInput",
     "_connectionInputCoordinator.InvalidatePairingAndPreflight"
 )) {
-    Assert-Contains -Text $sessionViewModelSource -Needle $inputResetSignal -Message "SessionViewModel setter reset path must call input coordinator: $inputResetSignal"
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelDirectInputResetSignal)) -Message "SessionViewModel setters must not call input reset helpers directly; use WorkspaceInputChangeRouter: $sessionViewModelDirectInputResetSignal"
 }
 foreach ($resultProjectionSignal in @(
     "internal sealed class ConnectionWorkspaceResultProjector",
