@@ -567,6 +567,9 @@ foreach ($topBarLabelLookup in @(
 }
 
 foreach ($viewModelTopBarDefaultLiteral in @(
+    '_performanceStatus = "Nominal"',
+    '_topBarConnectionStatus = "Disconnected"',
+    '_topBarDiagnosticsStatus = "Nominal"',
     '_topBarNotificationsStatus = "Off"',
     '_topBarThemeStatus = "System"',
     'TopBarStatusSlot.Notifications, "Off"',
@@ -1011,6 +1014,10 @@ foreach ($profileCatalogSignal in @(
     "BuildReadOnlySnapshot",
     "DefaultBitrateProfile",
     "DefaultFramerateProfile",
+    "BuildBitrateSelectionStatus",
+    "BuildFramerateSelectionStatus",
+    "_remoteDesktopProfileCatalogClient.BuildBitrateSelectionStatus(value)",
+    "_remoteDesktopProfileCatalogClient.BuildFramerateSelectionStatus(value)",
     "new RemoteDesktopProfileCatalogClient()"
 )) {
     Assert-Contains -Text ($remoteDesktopProfileCatalog + $sessionViewModel + $mainWindow) -Needle $profileCatalogSignal -Message "Remote Desktop profile catalog signal missing: $profileCatalogSignal"
@@ -1019,6 +1026,8 @@ foreach ($profileCatalogSignal in @(
 Assert-True -Condition (-not $sessionViewModel.Contains("Enum.GetValues")) -Message "SessionViewModel must not build Remote Desktop profile lists from local enum reflection."
 Assert-True -Condition (-not $sessionViewModel.Contains('_selectedBitrate = "Medium"')) -Message "SessionViewModel must source default bitrate profile from RemoteDesktopProfileCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains('_selectedFramerate = "Fps60"')) -Message "SessionViewModel must source default framerate profile from RemoteDesktopProfileCatalogClient."
+Assert-True -Condition (-not $sessionViewModel.Contains('StatusMessage = $"Bitrate set to {value}"')) -Message "SessionViewModel must source bitrate selection status from RemoteDesktopProfileCatalogClient."
+Assert-True -Condition (-not $sessionViewModel.Contains('StatusMessage = $"Framerate set to {value}"')) -Message "SessionViewModel must source framerate selection status from RemoteDesktopProfileCatalogClient."
 
 Assert-Ordered -Text $mainWindow -Context "Quantum diagnostics action order" -Needles @(
     '<TextBlock Text="Quantum / Core Diagnostics"',

@@ -58,9 +58,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private int _onlineDeviceCount;
     private int _activeSessionCount;
     private int _transferTaskCount;
-    private string _performanceStatus = "Nominal";
-    private string _topBarConnectionStatus = "Disconnected";
-    private string _topBarDiagnosticsStatus = "Nominal";
+    private string _performanceStatus = "";
+    private string _topBarConnectionStatus = "";
+    private string _topBarDiagnosticsStatus = "";
     private string _topBarNotificationsStatus = "";
     private string _topBarThemeStatus = "";
     private string _selectedBitrate = "";
@@ -698,7 +698,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _selectedBitrate, value))
             {
-                StatusMessage = $"Bitrate set to {value}";
+                StatusMessage = _remoteDesktopProfileCatalogClient.BuildBitrateSelectionStatus(value);
             }
         }
     }
@@ -710,7 +710,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _selectedFramerate, value))
             {
-                StatusMessage = $"Framerate set to {value}";
+                StatusMessage = _remoteDesktopProfileCatalogClient.BuildFramerateSelectionStatus(value);
             }
         }
     }

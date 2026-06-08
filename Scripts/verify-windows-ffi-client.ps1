@@ -724,7 +724,9 @@ foreach ($signal in @(
     "BuildReadOnlySnapshot",
     "RemoteDesktopProfileCatalogSnapshot",
     "DefaultBitrateProfile",
-    "DefaultFramerateProfile"
+    "DefaultFramerateProfile",
+    "BuildBitrateSelectionStatus",
+    "BuildFramerateSelectionStatus"
 )) {
     Assert-Contains -Text $remoteDesktopProfileCatalog -Needle $signal -Message "RemoteDesktopProfileCatalogClient missing profile catalog signal: $signal"
 }
