@@ -7,6 +7,7 @@ param(
     [switch]$CiMode,
     [switch]$ProbeMacSsh,
     [switch]$RequireMacSshReady,
+    [switch]$RequireMacRustCliSmoke,
     [switch]$RequireNativeDnsSdPeer,
     [string]$ExpectedDeviceId = "",
     [string]$ExpectedFingerprint = "",
@@ -18,6 +19,7 @@ param(
     [string]$MacKnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
     [string]$MacExpectedHostAddress = "192.168.0.102",
     [string]$MacDirectSourceAddress = "",
+    [string]$MacRemoteRepoRoot = "",
     [ValidateRange(1, 30)]
     [int]$ExtendedSearchSeconds = 2,
     [switch]$RequireGitRemoteAccess
@@ -130,7 +132,7 @@ Invoke-SmokeGate `
     -RelativeScriptPath "Scripts/verify-windows-connection-launch.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
 
-if ($ProbeMacSsh -or $RequireMacSshReady) {
+if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacRustCliSmoke) {
     $macSshParameters = @{
         HostName = $MacHostName
         Port = $MacPort
@@ -148,13 +150,19 @@ if ($ProbeMacSsh -or $RequireMacSshReady) {
         $macSshParameters.RequireReady = $true
     }
 
+    if ($RequireMacRustCliSmoke) {
+        $macSshParameters.RequireReady = $true
+        $macSshParameters.RequireRustCliSmoke = $true
+        $macSshParameters.RemoteRepoRoot = $MacRemoteRepoRoot
+    }
+
     Invoke-SmokeGate `
         -Name "mac-ssh-readiness" `
         -RelativeScriptPath "Scripts/probe-mac-ssh.ps1" `
         -Parameters $macSshParameters
 }
 else {
-    Write-Output "windows-portability-smoke: skipped mac-ssh-readiness; pass -ProbeMacSsh for diagnostics or -RequireMacSshReady before Rust CLI co-debugging."
+    Write-Output "windows-portability-smoke: skipped mac-ssh-readiness; pass -ProbeMacSsh for diagnostics, -RequireMacSshReady before Rust CLI co-debugging, or -RequireMacRustCliSmoke -MacRemoteRepoRoot <path> for a Mac-side CLI smoke."
 }
 
 if ($IncludeNativeDnsSdAcceptance -or $RequireNativeDnsSdPeer) {

@@ -4080,10 +4080,10 @@ foreach ($settingsSignal in @(
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", true)' -Message "Settings must be marked implemented once the read-only preferences workspace exists."
 
 foreach ($docSignal in @(
-    "origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
-    "origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift",
-    "origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
-    "origin/tdsc-2026-01-0318-ios-sim-fix:Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift",
+    "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
+    "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift",
+    "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
+    "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c:Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift",
     "origin/tdsc-2026-01-0318-ios-sim-fix:Docs/CoreLayering.md",
     "origin/tdsc-2026-01-0318-ios-sim-fix:Docs/ProtocolAlignmentPlan.md",
     "origin/tdsc-2026-01-0318-ios-sim-fix-20260211-adr:Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md",

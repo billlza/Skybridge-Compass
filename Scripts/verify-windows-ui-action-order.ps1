@@ -137,9 +137,13 @@ AssertSequence(
         "FileTransferHeader",
         "FileTransfer",
         "RemoteDesktopHeader",
+        "RemoteDesktop",
         "QuantumDiagnosticsHeader",
         "SystemMonitorHeader",
-        "SettingsHeader"
+        "SystemMonitorControls",
+        "SettingsHeader",
+        "SettingsToolbar",
+        "SettingsMaintenance"
     });
 
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.SidebarSession, new[] { "Connect", "Disconnect" });

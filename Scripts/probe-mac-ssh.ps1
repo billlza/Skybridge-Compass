@@ -7,6 +7,8 @@ param(
     [string]$ExpectedHostAddress = "",
     [string]$DirectSourceAddress = "",
     [int]$ConnectTimeoutSeconds = 5,
+    [switch]$RequireRustCliSmoke,
+    [string]$RemoteRepoRoot = "",
     [switch]$RequireReady
 )
 
@@ -17,6 +19,16 @@ function Write-Probe {
     param([string]$Message)
 
     Write-Output "mac-ssh-probe: $Message"
+}
+
+function ConvertTo-PosixSingleQuoted {
+    param([string]$Value)
+
+    if ($Value.Contains("'")) {
+        throw "Mac remote path cannot contain a single quote: $Value"
+    }
+
+    return "'$Value'"
 }
 
 function Test-IsProxySourceAddress {
@@ -165,7 +177,10 @@ function Write-LanRouteDiagnostics {
 }
 
 function Invoke-SshCommand {
-    param([string]$UserName)
+    param(
+        [string]$UserName,
+        [string]$Command = "whoami; hostname; pwd"
+    )
 
     $target = "$UserName@$HostName"
     $sshArgs = @(
@@ -184,7 +199,7 @@ function Invoke-SshCommand {
         $sshArgs += @("-b", $DirectSourceAddress)
     }
 
-    $sshArgs += @($target, "whoami; hostname; pwd")
+    $sshArgs += @($target, $Command)
 
     $nativeErrorPreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
     if ($nativeErrorPreference) {
@@ -212,6 +227,24 @@ function Invoke-SshCommand {
         ExitCode = $sshExitCode
         Text = $text
     }
+}
+
+function Invoke-MacRustCliSmoke {
+    param([string]$UserName)
+
+    if ([string]::IsNullOrWhiteSpace($RemoteRepoRoot)) {
+        throw "Mac Rust CLI smoke requires -RemoteRepoRoot with the Skybridge-Compass path on the Mac."
+    }
+
+    $remoteRepo = ConvertTo-PosixSingleQuoted -Value $RemoteRepoRoot
+    $command = "set -eu; cd $remoteRepo; cargo test --manifest-path core/skybridge-core/Cargo.toml --test cli_smoke cli_apple_to_apple_selects_apple_native -- --exact"
+    $probe = Invoke-SshCommand -UserName $UserName -Command $command
+    if ($probe.ExitCode -ne 0) {
+        throw "Mac Rust CLI smoke failed for $UserName@$HostName`: $($probe.Text)"
+    }
+
+    Write-Probe "$UserName rust cli smoke ready: cli_apple_to_apple_selects_apple_native"
+    Write-Output $probe.Text
 }
 
 function Test-IsReadyProbeResult {
@@ -282,10 +315,15 @@ if (-not [string]::IsNullOrWhiteSpace($DirectSourceAddress)) {
 }
 
 $ready = $false
+$readyUserName = ""
 foreach ($userName in $UserNames) {
     $probe = Invoke-SshCommand -UserName $userName
     if (Test-IsReadyProbeResult -Probe $probe) {
         $ready = $true
+        if ([string]::IsNullOrWhiteSpace($readyUserName)) {
+            $readyUserName = $probe.UserName
+        }
+
         Write-Probe "$($probe.UserName) ready"
         Write-Output $probe.Text
         continue
@@ -309,11 +347,15 @@ foreach ($userName in $UserNames) {
 }
 
 if ($ready) {
+    if ($RequireRustCliSmoke) {
+        Invoke-MacRustCliSmoke -UserName $readyUserName
+    }
+
     Write-Probe "ready"
     return
 }
 
 Write-Probe "not ready"
-if ($RequireReady) {
+if ($RequireReady -or $RequireRustCliSmoke) {
     throw "Mac SSH probe is not ready"
 }

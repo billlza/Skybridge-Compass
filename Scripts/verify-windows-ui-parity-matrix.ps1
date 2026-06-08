@@ -302,6 +302,25 @@ $macBaselineSignals = @(
         Anchors = @("FeatureCatalogClient.Entries")
     },
     [pscustomobject]@{
+        Source = "DashboardContentView.swift"
+        Path = "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift"
+        Symbols = @(
+            "topStatsRow",
+            "WeatherDashboardCard()",
+            "DeviceDiscoveryPanelView(",
+            'RemoteSessionsPanelView(selectedSession: $selectedSession)',
+            'QuickActionsPanelView(selectedNavigation: $selectedNavigation)',
+            "AppleSiliconInfoCardView()"
+        )
+        Anchors = @(
+            "DashboardMetrics",
+            "DeviceDiscoveryScan",
+            "RemoteDesktopSessions",
+            "DashboardQuickActions",
+            "QuantumDiagnosticsHeader"
+        )
+    },
+    [pscustomobject]@{
         Source = "QuickActionsPanelView.swift"
         Path = "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift"
         Symbols = @(
@@ -335,7 +354,7 @@ $macBaselineSignals = @(
             "device.action.connect",
             "appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode)"
         )
-        Anchors = @("TopBarStatusItems", "TopBarActions", "DeviceDiscoveryScan", "ManualConnectionClient", "DeviceDiscoveryManualConnectFinal")
+        Anchors = @("TopBarStatusClient", "TopBarStatusSlot", "TopBarActions", "DeviceDiscoveryScan", "ManualConnectionClient", "DeviceDiscoveryManualConnectFinal")
     }
 )
 
@@ -563,6 +582,28 @@ $surfaceActions = @(
 )
 
 $expectedSurfaceNames = @($surfaceActions | ForEach-Object { $_.Surface })
+$expectedDynamicSurfaceNames = @(
+    "SidebarSession",
+    "TopBarActions",
+    "SessionControls",
+    "DeviceDiscoveryPrimary",
+    "DeviceDiscoveryScan",
+    "DeviceDiscoveryManualConnectFinal",
+    "CrossNetworkQr",
+    "CrossNetworkCodePrimary",
+    "CrossNetworkCodeConnect",
+    "UsbManagementHeader",
+    "FileTransferHeader",
+    "FileTransfer",
+    "RemoteDesktopHeader",
+    "RemoteDesktop",
+    "QuantumDiagnosticsHeader",
+    "SystemMonitorHeader",
+    "SystemMonitorControls",
+    "SettingsHeader",
+    "SettingsToolbar",
+    "SettingsMaintenance"
+)
 $actionMatrixRows = Get-MarkdownTableRows `
     -Text $matrix `
     -Heading "Action Order Matrix" `
@@ -575,6 +616,15 @@ Assert-SequenceEqual -Actual $actionMatrixSurfaceNames -Expected $expectedSurfac
 $enumSurfaceNames = Get-CSharpEnumMembers -Text $actionCatalog -EnumName "WorkspaceActionSurface"
 Assert-SequenceEqual -Actual $enumSurfaceNames -Expected $expectedSurfaceNames -Context "WorkspaceActionSurface enum order"
 Assert-SequenceEqual -Actual (Get-WorkspaceActionSurfaceArray -Text $actionCatalog -ArrayName "InitialSurfaces") -Expected $expectedSurfaceNames -Context "WorkspaceActionCatalog InitialSurfaces order"
+Assert-SequenceEqual -Actual (Get-WorkspaceActionSurfaceArray -Text $actionCatalog -ArrayName "DynamicRefreshSurfaces") -Expected $expectedDynamicSurfaceNames -Context "WorkspaceActionCatalog DynamicRefreshSurfaces order"
+
+$dynamicMatrixRows = @(Get-MarkdownTableRows `
+    -Text $matrix `
+    -Heading "Dynamic Refresh Surface Matrix" `
+    -Columns @("Source", "Required dynamic surface order"))
+Assert-True -Condition ($dynamicMatrixRows.Count -eq 1) -Message "Dynamic refresh surface matrix must have exactly one row."
+Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $dynamicMatrixRows[0].Source) -Expected @("WorkspaceActionCatalogClient.DynamicRefreshSurfaces") -Context "Dynamic refresh surface matrix source"
+Assert-SequenceEqual -Actual (Get-MarkdownCodeValues -Text $dynamicMatrixRows[0].'Required dynamic surface order') -Expected $expectedDynamicSurfaceNames -Context "Dynamic refresh surface matrix order"
 
 foreach ($surface in $surfaceActions) {
     $actionRow = @($actionMatrixRows | Where-Object { (Get-SingleMarkdownCodeValue -Text $_.Surface -Context "Action-order matrix surface") -eq $surface.Surface })
@@ -615,6 +665,7 @@ foreach ($matrixSignal in @(
     "Navigation And Workspace Matrix",
     "Global Shell Matrix",
     "Action Order Matrix",
+    "Dynamic Refresh Surface Matrix",
     "verify-windows-ui-parity-matrix.ps1",
     "verify-windows-ui-action-order.ps1",
     "verify-windows-ui-parity.ps1"

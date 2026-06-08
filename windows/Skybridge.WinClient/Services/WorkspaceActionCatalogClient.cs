@@ -69,9 +69,13 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
         WorkspaceActionSurface.FileTransferHeader,
         WorkspaceActionSurface.FileTransfer,
         WorkspaceActionSurface.RemoteDesktopHeader,
+        WorkspaceActionSurface.RemoteDesktop,
         WorkspaceActionSurface.QuantumDiagnosticsHeader,
         WorkspaceActionSurface.SystemMonitorHeader,
-        WorkspaceActionSurface.SettingsHeader
+        WorkspaceActionSurface.SystemMonitorControls,
+        WorkspaceActionSurface.SettingsHeader,
+        WorkspaceActionSurface.SettingsToolbar,
+        WorkspaceActionSurface.SettingsMaintenance
     };
 
     public IReadOnlyList<WorkspaceActionSurface> BuildInitialSurfaces() => InitialSurfaces;

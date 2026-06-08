@@ -329,8 +329,10 @@ foreach ($portabilitySmokeSignal in @(
     "CheckOnlineStackFreshness",
     "ProbeMacSsh",
     "RequireMacSshReady",
+    "RequireMacRustCliSmoke",
     "MacExpectedHostAddress",
     "MacDirectSourceAddress",
+    "MacRemoteRepoRoot",
     "LASTEXITCODE",
     "Smoke gate failed: `$Name exitCode=`$LASTEXITCODE",
     "RequireGitRemoteAccess",
@@ -377,6 +379,7 @@ foreach ($githubWorkflowSignal in @(
 foreach ($forbiddenWorkflowSignal in @(
     "-RequireGitRemoteAccess",
     "-RequireMacSshReady",
+    "-RequireMacRustCliSmoke",
     "-RequireNativeDnsSdPeer"
 )) {
     Assert-True -Condition (-not $githubWorkflow.Contains($forbiddenWorkflowSignal)) -Message "GitHub workflow must not require local-only readiness gate: $forbiddenWorkflowSignal"
@@ -397,7 +400,10 @@ foreach ($macSshProbeSignal in @(
     "timed out during banner exchange",
     "Permission denied \(publickey\)",
     "bypass or disable the proxy/tunnel route",
-    "RequireReady"
+    "RequireReady",
+    "RequireRustCliSmoke",
+    "RemoteRepoRoot",
+    "cargo test --manifest-path core/skybridge-core/Cargo.toml --test cli_smoke cli_apple_to_apple_selects_apple_native -- --exact"
 )) {
     Assert-Contains -Text $macSshProbe -Needle $macSshProbeSignal -Message "Mac SSH probe missing signal: $macSshProbeSignal"
 }
@@ -448,6 +454,8 @@ Assert-Contains -Text $architecture -Needle "WorkspaceActionButtonWithDetailTemp
 Assert-Contains -Text $architecture -Needle 'must not introduce inline `Button` controls' -Message "Architecture doc missing inline button prohibition."
 Assert-Contains -Text $architecture -Needle "probe-mac-ssh.ps1" -Message "Architecture doc missing Mac SSH probe entrypoint."
 Assert-Contains -Text $architecture -Needle "-RequireMacSshReady" -Message "Architecture doc missing Mac SSH readiness gate."
+Assert-Contains -Text $architecture -Needle "-RequireMacRustCliSmoke -MacRemoteRepoRoot <path>" -Message "Architecture doc missing Mac Rust CLI smoke gate."
+Assert-Contains -Text $architecture -Needle "cli_apple_to_apple_selects_apple_native" -Message "Architecture doc missing Mac Rust CLI AppleNative smoke."
 Assert-Contains -Text $architecture -Needle "-ExpectedHostAddress" -Message "Architecture doc missing Mac SSH expected-address diagnostic."
 Assert-Contains -Text $architecture -Needle "198.18.0.0/15" -Message "Architecture doc missing proxy-route diagnostic."
 Assert-Contains -Text $architecture -Needle "verify-windows-startup-state.ps1" -Message "Architecture doc missing startup-state smoke entrypoint."

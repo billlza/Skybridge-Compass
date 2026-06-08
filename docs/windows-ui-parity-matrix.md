@@ -30,15 +30,16 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | Mac source | Required ordered mac symbols | Windows parity anchor |
 | --- | --- | --- |
 | `NavigationItem.swift` | `case dashboard = "sidebar.dashboard"`; `case deviceManagement = "sidebar.deviceDiscovery"`; `case usbDeviceManagement = "sidebar.usbManagement"`; `case fileTransfer = "sidebar.fileTransfer"`; `case remoteDesktop = "sidebar.remoteDesktop"`; `case quantumCommunication = "quantum.title"`; `case systemMonitor = "sidebar.systemMonitor"`; `case settings = "sidebar.settings"` | `FeatureCatalogClient.Entries` |
+| `DashboardContentView.swift` | `topStatsRow`; `WeatherDashboardCard()`; `DeviceDiscoveryPanelView(`; `RemoteSessionsPanelView(selectedSession: $selectedSession)`; `QuickActionsPanelView(selectedNavigation: $selectedNavigation)`; `AppleSiliconInfoCardView()` | `DashboardMetrics`; `DeviceDiscoveryScan`; `RemoteDesktopSessions`; `DashboardQuickActions`; `QuantumDiagnosticsHeader` |
 | `QuickActionsPanelView.swift` | `action.scanDevices`; `appModel.triggerDiscoveryRefresh()`; `dashboard.fileTransfer`; `selectedNavigation = .fileTransfer`; `action.systemMonitor`; `selectedNavigation = .systemMonitor`; `action.settings`; `selectedNavigation = .settings` | `DashboardQuickActions` |
-| `TopNavigationBarView.swift` | `ipLocationIndicator`; `networkSpeedIndicator`; `networkLatencyIndicator`; `connectionStatusIndicator`; `fpsIndicator`; `NotificationBellView()`; `themeToggleButton`; `manualConnect.title`; `manualConnect.ipAddress`; `manualConnect.port`; `manualConnect.pairingCode`; `action.cancel`; `device.action.connect`; `appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode)` | `TopBarStatusItems`; `TopBarActions`; `DeviceDiscoveryScan`; `ManualConnectionClient`; `DeviceDiscoveryManualConnectFinal` |
+| `TopNavigationBarView.swift` | `ipLocationIndicator`; `networkSpeedIndicator`; `networkLatencyIndicator`; `connectionStatusIndicator`; `fpsIndicator`; `NotificationBellView()`; `themeToggleButton`; `manualConnect.title`; `manualConnect.ipAddress`; `manualConnect.port`; `manualConnect.pairingCode`; `action.cancel`; `device.action.connect`; `appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode)` | `TopBarStatusClient`; `TopBarStatusSlot`; `TopBarActions`; `DeviceDiscoveryScan`; `ManualConnectionClient`; `DeviceDiscoveryManualConnectFinal` |
 
 ## Global Shell Matrix
 
 | Region | Mac position | Windows binding | Required order |
 | --- | --- | --- | --- |
 | Sidebar | Product name, navigation, session actions | `NavigationItems`; `SidebarSessionActions` | Navigation list before sidebar connect/disconnect |
-| Top bar | Selected feature, Core/connection state, diagnostics, notifications, theme | `SelectedFeature`; `ConnectionStatus`; `TopBarStatusItems`; `TopBarActions` | selected feature, status message, connection status, diagnostics status, notifications/theme actions |
+| Top bar | Selected feature, Core/connection state, diagnostics, notifications, theme | `SelectedFeature`; `ConnectionStatus`; `TopBarConnectionStatus`; `PerformanceStatus`; `TopBarDiagnosticsStatus`; `TopBarActions` | selected feature, status message, connection status, diagnostics status, notifications/theme actions |
 | Session controls | Global connection controls | `SessionControlActions`; `BitrateProfiles`; `FramerateProfiles` | Connect, Heartbeat, Disconnect before bitrate/framerate selectors |
 
 ## Action Order Matrix
@@ -67,6 +68,12 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | `SettingsToolbar` | `ExportSettings`, `ImportSettings`, `ResetSettings`, `RequestPermission`, `OpenSystemPreferences` |
 | `SettingsMaintenance` | `ApplySettings`, `RestoreDefaults`, `ResetMonitorData` |
 
+## Dynamic Refresh Surface Matrix
+
+| Source | Required dynamic surface order |
+| --- | --- |
+| `WorkspaceActionCatalogClient.DynamicRefreshSurfaces` | `SidebarSession`; `TopBarActions`; `SessionControls`; `DeviceDiscoveryPrimary`; `DeviceDiscoveryScan`; `DeviceDiscoveryManualConnectFinal`; `CrossNetworkQr`; `CrossNetworkCodePrimary`; `CrossNetworkCodeConnect`; `UsbManagementHeader`; `FileTransferHeader`; `FileTransfer`; `RemoteDesktopHeader`; `RemoteDesktop`; `QuantumDiagnosticsHeader`; `SystemMonitorHeader`; `SystemMonitorControls`; `SettingsHeader`; `SettingsToolbar`; `SettingsMaintenance` |
+
 ## Shared Style And Template Matrix
 
 | Region | Required shared template | Required panel/style ownership |
@@ -83,5 +90,6 @@ All action buttons must be rendered through these shared templates. Feature sect
 
 - `Scripts/verify-windows-ui-parity-matrix.ps1` parses these markdown tables and verifies exact row counts, row order, duplicate prevention, pinned mac baseline objects, ordered mac source symbols, `MainWindow.xaml`, `FeatureCatalogClient`, and `WorkspaceActionCatalogClient` agree on feature order, workspace visibility order, top-bar/session anchors, and per-surface action order.
 - The matrix smoke also verifies shared action templates and rejects inline XAML action buttons outside the approved templates.
+- The matrix smoke verifies both initial and dynamic workspace action surface orders so selected-feature, readiness, and pending-provider state changes cannot leave visible buttons stale.
 - `Scripts/verify-windows-ui-action-order.ps1` remains the executable catalog smoke for action keys and automation ids.
 - `Scripts/verify-windows-ui-parity.ps1` remains the broader static modularity gate.
