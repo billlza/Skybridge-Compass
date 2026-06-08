@@ -6,6 +6,21 @@ public interface IConnectionWorkspaceStateClient
 
     ConnectionWorkspaceStatusPatch BuildInputResetPatch(ConnectionWorkspaceResetReason reason);
 
+    ConnectionWorkspaceValidatedState BuildInputInvalidatedState();
+
+    ConnectionWorkspaceValidatedState BuildDiscoveryBrowserValidatedState(
+        DiscoveryBrowserSnapshot snapshot);
+
+    ConnectionWorkspaceValidatedState BuildDiscoveryPeerValidatedState(
+        DiscoveredPeer peer);
+
+    ConnectionWorkspaceValidatedState BuildPairingValidatedState(
+        ConnectionWorkspaceValidatedState currentState,
+        PairingMaterial material);
+
+    ConnectionWorkspaceValidatedState BuildPairingInputResetState(
+        ConnectionWorkspaceValidatedState currentState);
+
     ConnectionWorkspaceStatusPatch BuildDiscoveryBrowserResultPatch(
         DiscoveryBrowserAction action,
         DiscoveryBrowserSnapshot snapshot,
@@ -64,6 +79,28 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
                 ConnectionPreflightStatus: DefaultReadyStatus),
             _ => new ConnectionWorkspaceStatusPatch()
         };
+
+    public ConnectionWorkspaceValidatedState BuildInputInvalidatedState() =>
+        new(null, null);
+
+    public ConnectionWorkspaceValidatedState BuildDiscoveryBrowserValidatedState(
+        DiscoveryBrowserSnapshot snapshot) =>
+        new(
+            snapshot.Peers.Count == 1 ? snapshot.Peers[0].Peer : null,
+            null);
+
+    public ConnectionWorkspaceValidatedState BuildDiscoveryPeerValidatedState(
+        DiscoveredPeer peer) =>
+        new(peer, null);
+
+    public ConnectionWorkspaceValidatedState BuildPairingValidatedState(
+        ConnectionWorkspaceValidatedState currentState,
+        PairingMaterial material) =>
+        new(currentState.DiscoveredPeer, material);
+
+    public ConnectionWorkspaceValidatedState BuildPairingInputResetState(
+        ConnectionWorkspaceValidatedState currentState) =>
+        new(currentState.DiscoveredPeer, null);
 
     public ConnectionWorkspaceStatusPatch BuildDiscoveryBrowserResultPatch(
         DiscoveryBrowserAction action,
@@ -157,3 +194,7 @@ public sealed record ConnectionWorkspaceStatusPatch(
 public sealed record ConnectionWorkspacePreflightReadiness(
     bool IsReady,
     string ErrorMessage);
+
+public sealed record ConnectionWorkspaceValidatedState(
+    DiscoveredPeer? DiscoveredPeer,
+    PairingMaterial? PairingMaterial);

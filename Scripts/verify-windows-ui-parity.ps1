@@ -785,6 +785,11 @@ foreach ($connectionStateSignal in @(
     "BuildInitialStatusPatch",
     "DefaultReadyStatus",
     "BuildInputResetPatch",
+    "BuildInputInvalidatedState",
+    "BuildDiscoveryBrowserValidatedState",
+    "BuildDiscoveryPeerValidatedState",
+    "BuildPairingValidatedState",
+    "BuildPairingInputResetState",
     "BuildDiscoveryBrowserResultPatch",
     "BuildManualTargetPreparedPatch",
     "BuildCrossNetworkPreparedPatch",
@@ -794,6 +799,7 @@ foreach ($connectionStateSignal in @(
     "BuildPreflightPreparedPatch",
     "ConnectionWorkspaceResetReason",
     "ConnectionWorkspaceStatusPatch",
+    "ConnectionWorkspaceValidatedState",
     "ConnectionWorkspacePreflightReadiness",
     "DiscoveryInputChanged",
     "ManualTargetInputChanged",
@@ -803,10 +809,20 @@ foreach ($connectionStateSignal in @(
     "Parse a Core-validated discovery TXT record before connection preflight.",
     "Validate pairing material before connection preflight.",
     "_connectionWorkspaceStateClient.BuildInitialStatusPatch()",
+    "_connectionWorkspaceStateClient.BuildInputInvalidatedState()",
+    "_connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot)",
+    "_connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer)",
+    "_connectionWorkspaceStateClient.BuildPairingValidatedState(",
+    "_connectionWorkspaceStateClient.BuildPairingInputResetState(_connectionValidatedState)",
     "new ConnectionWorkspaceStateClient()"
 )) {
     Assert-Contains -Text ($connectionWorkspaceState + $sessionViewModel + $mainWindow) -Needle $connectionStateSignal -Message "Connection workspace state signal missing: $connectionStateSignal"
 }
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_validatedDiscoveredPeer")) -Message "SessionViewModel must store validated connection material in ConnectionWorkspaceValidatedState."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_validatedPairingMaterial")) -Message "SessionViewModel must store validated connection material in ConnectionWorkspaceValidatedState."
+Assert-True -Condition (-not $connectionWorkspaceState.Contains("FfiEngineClient")) -Message "ConnectionWorkspaceStateClient must not call or reference FfiEngineClient."
+Assert-True -Condition (-not $connectionWorkspaceState.Contains("WebRTC")) -Message "ConnectionWorkspaceStateClient must not start or own WebRTC adapters."
+Assert-True -Condition (-not $connectionWorkspaceState.Contains("signaling")) -Message "ConnectionWorkspaceStateClient must not own signaling side effects."
 
 foreach ($inputResetSignal in @(
     "ResetManualConnectionInput",

@@ -72,8 +72,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _selectedFramerate = "";
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
-    private DiscoveredPeer? _validatedDiscoveredPeer;
-    private PairingMaterial? _validatedPairingMaterial;
+    private ConnectionWorkspaceValidatedState _connectionValidatedState;
     private bool _isDiscoveryScanning;
     private bool _isDiscoveryCompatibilityModeEnabled;
     private int _extendedSearchCountdown;
@@ -145,6 +144,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _systemMonitorStatus = _systemMonitorClient.BuildInitialStatus();
         _usbManagementStatus = _usbManagementClient.BuildInitialStatus();
         _settingsStatus = _settingsClient.BuildInitialStatus();
+        _connectionValidatedState = _connectionWorkspaceStateClient.BuildInputInvalidatedState();
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
         _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
         _manualConnectionPort = deviceDiscoveryInputDefaults.ManualConnectionPort;
@@ -862,8 +862,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
             if (action != DiscoveryBrowserAction.Stop)
             {
-                _validatedDiscoveredPeer = snapshot.Peers.Count == 1 ? snapshot.Peers[0].Peer : null;
-                _validatedPairingMaterial = null;
+                ApplyConnectionValidatedState(
+                    _connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot));
                 ReplaceCollection(DiscoveredPeers, snapshot.Peers, DiscoveredPeerView.FromCandidate);
 
                 PairingFacts.Clear();
@@ -898,8 +898,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     ManualConnectionCode));
             ReplaceCollection(ManualConnectionFacts, snapshot.Facts, ManualConnectionFactView.FromFact);
 
-            _validatedDiscoveredPeer = null;
-            _validatedPairingMaterial = null;
+            ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
             PairingFacts.Clear();
             ClearConnectionPreflight();
             OnPropertyChanged(nameof(ManualConnectionFactCount));
@@ -956,8 +955,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 CrossNetworkGeneratedCode = snapshot.GeneratedCode;
             }
 
-            _validatedDiscoveredPeer = null;
-            _validatedPairingMaterial = null;
+            ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
             PairingFacts.Clear();
             ClearConnectionPreflight();
             OnPropertyChanged(nameof(CrossNetworkConnectionFactCount));
@@ -978,8 +976,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             DiscoveryStatus = _discoveryClient.BuildPendingStatus();
             var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
-            _validatedDiscoveredPeer = peer;
-            _validatedPairingMaterial = null;
+            ApplyConnectionValidatedState(
+                _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer));
             DiscoveredPeers.Clear();
             DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(_discoveryBrowserClient.BuildPeerCandidate(peer)));
             PairingFacts.Clear();
@@ -1008,7 +1006,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 PairingConnectionCode,
                 expectedFingerprint);
             var material = snapshot.Material;
-            _validatedPairingMaterial = material;
+            ApplyConnectionValidatedState(
+                _connectionWorkspaceStateClient.BuildPairingValidatedState(
+                    _connectionValidatedState,
+                    material));
             ClearConnectionPreflight();
             ReplaceCollection(PairingFacts, snapshot.Facts, PairingFactView.FromFact);
 
@@ -1027,8 +1028,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         await RunWithBusyState(WorkspaceErrorScope.DeviceDiscovery, async () =>
         {
-            var discoveredPeer = _validatedDiscoveredPeer;
-            var pairingMaterial = _validatedPairingMaterial;
+            var discoveredPeer = _connectionValidatedState.DiscoveredPeer;
+            var pairingMaterial = _connectionValidatedState.PairingMaterial;
             var readiness = _connectionWorkspaceStateClient.BuildPreflightReadiness(
                 discoveredPeer,
                 pairingMaterial);
@@ -1237,8 +1238,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             IsBusy,
             IsDeviceDiscoverySelected,
             _connectionWorkspaceStateClient.CanPreparePreflight(
-                _validatedDiscoveredPeer,
-                _validatedPairingMaterial));
+                _connectionValidatedState.DiscoveredPeer,
+                _connectionValidatedState.PairingMaterial));
 
     private bool CanRefreshUsbManagement() =>
         _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsUsbManagementSelected);
@@ -1518,10 +1519,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
 
+    private void ApplyConnectionValidatedState(ConnectionWorkspaceValidatedState state)
+    {
+        _connectionValidatedState = state;
+    }
+
     private void InvalidatePairingAndPreflight()
     {
-        _validatedDiscoveredPeer = null;
-        _validatedPairingMaterial = null;
+        ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
         DiscoveredPeers.Clear();
         DiscoveryBrowserFacts.Clear();
         PairingFacts.Clear();
@@ -1552,7 +1557,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void ResetPairingInput()
     {
-        _validatedPairingMaterial = null;
+        ApplyConnectionValidatedState(
+            _connectionWorkspaceStateClient.BuildPairingInputResetState(_connectionValidatedState));
         PairingFacts.Clear();
         ClearConnectionPreflight();
         ApplyConnectionWorkspaceStatusPatch(
