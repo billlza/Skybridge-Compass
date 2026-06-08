@@ -33,7 +33,7 @@ internal sealed class WorkspaceActionSurfaceTargets
     {
     }
 
-    public WorkspaceActionSurfaceTargets(
+    private WorkspaceActionSurfaceTargets(
         ObservableCollection<WorkspaceActionItemView> sidebarSessionActions,
         ObservableCollection<WorkspaceActionItemView> topBarActions,
         ObservableCollection<WorkspaceActionItemView> sessionControlActions,

@@ -1283,6 +1283,7 @@ foreach ($workspaceActionRoleSignal in @(
 
 foreach ($surfaceTargetsSignal in @(
     "public WorkspaceActionSurfaceTargets(WorkspaceObservableCollections collections)",
+    "private WorkspaceActionSurfaceTargets(",
     "collections.SidebarSessionActions",
     "collections.TopBarActions",
     "collections.SessionControlActions",
