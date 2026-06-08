@@ -1354,7 +1354,11 @@ Assert-Contains -Text $architecture -Needle "FeatureCatalogClient" -Message "Arc
 
 foreach ($signal in @(
     "public interface ITopBarStatusClient",
+    "public interface ITopBarThemePreferenceClient",
+    "public sealed class InMemoryTopBarThemePreferenceClient : ITopBarThemePreferenceClient",
     "public sealed class TopBarStatusClient : ITopBarStatusClient",
+    "BuildNextThemeStatus",
+    "NormalizeThemeStatus",
     "BuildReadOnlySnapshot",
     "BuildResolvedStatusSnapshot",
     "BuildStatusUpdate",
@@ -1363,6 +1367,11 @@ foreach ($signal in @(
     "BuildWorkspaceActionDetailSnapshot",
     "DefaultNotificationsStatus",
     "DefaultThemeStatus",
+    "DarkThemeStatus",
+    "LightThemeStatus",
+    "DefaultThemeUpdatedMessage",
+    "BuildThemeUpdatedActionResult",
+    "CanToggleTheme() => true",
     "TopBarStatusRequest",
     "TopBarStatusSnapshot",
     "TopBarResolvedStatusSnapshot",

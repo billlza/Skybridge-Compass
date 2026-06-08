@@ -35,11 +35,92 @@ public interface ITopBarStatusClient
     Task<TopBarWorkspaceActionResult> BuildThemeActionAsync();
 }
 
+public interface ITopBarThemePreferenceClient
+{
+    string CurrentStatus { get; }
+
+    string Toggle();
+}
+
+public sealed class InMemoryTopBarThemePreferenceClient : ITopBarThemePreferenceClient
+{
+    private readonly object _sync = new();
+    private string _currentStatus;
+
+    public InMemoryTopBarThemePreferenceClient()
+        : this(TopBarStatusClient.DefaultThemeStatus)
+    {
+    }
+
+    public InMemoryTopBarThemePreferenceClient(string initialStatus)
+    {
+        _currentStatus = NormalizeThemeStatus(initialStatus);
+    }
+
+    public string CurrentStatus
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _currentStatus;
+            }
+        }
+    }
+
+    public string Toggle()
+    {
+        lock (_sync)
+        {
+            _currentStatus = BuildNextThemeStatus(_currentStatus);
+            return _currentStatus;
+        }
+    }
+
+    public static string NormalizeThemeStatus(string status) =>
+        status switch
+        {
+            var value when string.Equals(value, TopBarStatusClient.DefaultThemeStatus, StringComparison.Ordinal) =>
+                TopBarStatusClient.DefaultThemeStatus,
+            var value when string.Equals(value, TopBarStatusClient.DarkThemeStatus, StringComparison.Ordinal) =>
+                TopBarStatusClient.DarkThemeStatus,
+            var value when string.Equals(value, TopBarStatusClient.LightThemeStatus, StringComparison.Ordinal) =>
+                TopBarStatusClient.LightThemeStatus,
+            _ => TopBarStatusClient.DefaultThemeStatus
+        };
+
+    public static string BuildNextThemeStatus(string currentStatus) =>
+        NormalizeThemeStatus(currentStatus) switch
+        {
+            var value when string.Equals(value, TopBarStatusClient.DefaultThemeStatus, StringComparison.Ordinal) =>
+                TopBarStatusClient.DarkThemeStatus,
+            var value when string.Equals(value, TopBarStatusClient.DarkThemeStatus, StringComparison.Ordinal) =>
+                TopBarStatusClient.LightThemeStatus,
+            _ => TopBarStatusClient.DefaultThemeStatus
+        };
+}
+
 public sealed class TopBarStatusClient : ITopBarStatusClient
 {
+    private readonly ITopBarThemePreferenceClient _themePreferenceClient;
+
+    public TopBarStatusClient()
+        : this(new InMemoryTopBarThemePreferenceClient())
+    {
+    }
+
+    public TopBarStatusClient(ITopBarThemePreferenceClient themePreferenceClient)
+    {
+        _themePreferenceClient = themePreferenceClient ?? throw new ArgumentNullException(nameof(themePreferenceClient));
+    }
+
     public static string DefaultNotificationsStatus { get; } = "Off";
 
     public static string DefaultThemeStatus { get; } = "System";
+
+    public static string DarkThemeStatus { get; } = "Dark";
+
+    public static string LightThemeStatus { get; } = "Light";
 
     public TopBarStatusSnapshot BuildReadOnlySnapshot(TopBarStatusRequest request) =>
         new(
@@ -99,7 +180,7 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
         slot switch
         {
             TopBarStatusSlot.Notifications => DefaultNotificationsStatus,
-            TopBarStatusSlot.Theme => DefaultThemeStatus,
+            TopBarStatusSlot.Theme => _themePreferenceClient.CurrentStatus,
             _ => ""
         };
 
@@ -125,7 +206,7 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
 
     public bool CanOpenNotifications() => false;
 
-    public bool CanToggleTheme() => false;
+    public bool CanToggleTheme() => true;
 
     public string BuildNotificationsPendingStatus() => DefaultNotificationsPendingStatus;
 
@@ -135,7 +216,7 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
         Task.FromResult(BuildDefaultNotificationsActionResult());
 
     public Task<TopBarWorkspaceActionResult> BuildThemeActionAsync() =>
-        Task.FromResult(BuildDefaultThemeActionResult());
+        Task.FromResult(BuildThemeUpdatedActionResult(_themePreferenceClient.Toggle()));
 
     public static string DefaultNotificationsPendingStatus { get; } = "Preparing notifications...";
 
@@ -151,11 +232,17 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
     public static string DefaultThemeBlockedMessage { get; } =
         "Theme mutation and persistence remain behind the Settings workspace provider.";
 
+    public static string DefaultThemeUpdatedMessage { get; } =
+        "Top-bar theme preference changed in memory only; no Windows theme or persisted settings were written.";
+
     public static TopBarWorkspaceActionResult BuildDefaultNotificationsActionResult() =>
         new(DefaultNotificationsBlockedStatus, DefaultNotificationsBlockedMessage);
 
     public static TopBarWorkspaceActionResult BuildDefaultThemeActionResult() =>
         new(DefaultThemeBlockedStatus, DefaultThemeBlockedMessage);
+
+    public static TopBarWorkspaceActionResult BuildThemeUpdatedActionResult(string status) =>
+        new(InMemoryTopBarThemePreferenceClient.NormalizeThemeStatus(status), DefaultThemeUpdatedMessage);
 }
 
 public enum TopBarStatusSlot

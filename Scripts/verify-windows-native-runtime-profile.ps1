@@ -104,6 +104,22 @@ try
     AssertType<SettingsWorkspaceClient>(defaultDependencies.SettingsClient, "default settings client");
     AssertNestedType<DisabledSystemPreferencesLauncher>(defaultDependencies.SettingsClient, "_systemPreferencesLauncher", "default system preferences launcher");
     AssertEqual(false, defaultDependencies.SettingsClient.CanOpenSystemPreferences(), "default system preferences gate");
+    AssertType<TopBarStatusClient>(defaultDependencies.TopBarStatusClient, "default top-bar status client");
+    AssertEqual(false, defaultDependencies.TopBarStatusClient.CanOpenNotifications(), "default top-bar notifications gate");
+    AssertEqual(true, defaultDependencies.TopBarStatusClient.CanToggleTheme(), "default top-bar theme gate");
+    var initialTopBarUpdate = defaultDependencies.TopBarStatusClient.BuildStatusUpdate(
+        new TopBarStatusRequest("Disconnected", "Nominal", "Dashboard"));
+    AssertEqual(TopBarStatusClient.DefaultThemeStatus, initialTopBarUpdate.ResolvedStatus.ThemeStatus, "initial top-bar theme status");
+    var firstThemeToggle = await defaultDependencies.TopBarStatusClient.BuildThemeActionAsync();
+    AssertEqual(TopBarStatusClient.DarkThemeStatus, firstThemeToggle.Status, "first top-bar theme toggle");
+    AssertEqual(TopBarStatusClient.DefaultThemeUpdatedMessage, firstThemeToggle.Message, "top-bar theme update message");
+    var secondThemeToggle = await defaultDependencies.TopBarStatusClient.BuildThemeActionAsync();
+    AssertEqual(TopBarStatusClient.LightThemeStatus, secondThemeToggle.Status, "second top-bar theme toggle");
+    var thirdThemeToggle = await defaultDependencies.TopBarStatusClient.BuildThemeActionAsync();
+    AssertEqual(TopBarStatusClient.DefaultThemeStatus, thirdThemeToggle.Status, "third top-bar theme toggle");
+    var cycledTopBarUpdate = defaultDependencies.TopBarStatusClient.BuildStatusUpdate(
+        new TopBarStatusRequest("Disconnected", "Nominal", "Dashboard"));
+    AssertEqual(TopBarStatusClient.DefaultThemeStatus, cycledTopBarUpdate.ResolvedStatus.ThemeStatus, "cycled top-bar theme status");
 
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "external");
