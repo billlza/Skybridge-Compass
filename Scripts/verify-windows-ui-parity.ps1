@@ -225,6 +225,16 @@ foreach ($viewModelOwnedItemView in @(
     Assert-True -Condition (-not $sessionViewModelSource.Contains($viewModelOwnedItemView)) -Message "SessionViewModel.cs must not own reusable workspace item view records: $viewModelOwnedItemView"
 }
 
+foreach ($viewModelProjectionSignal in @(
+    "ReplaceCollection<TSource, TItem>",
+    "IEnumerable<TSource>",
+    "ReplaceCollection(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric)",
+    "ReplaceCollection(FileTransferQueue, snapshot.Queue, FileTransferQueueItemView.FromItem)",
+    "ReplaceCollection(SettingsDetails, snapshot.Details, SettingsDetailItemView.FromItem)"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $viewModelProjectionSignal -Message "SessionViewModel reusable projection helper missing: $viewModelProjectionSignal"
+}
+
 foreach ($asyncRelayCommandSignal in @(
     "public sealed class AsyncRelayCommand : ICommand",
     "Func<Task>",
@@ -1608,6 +1618,7 @@ foreach ($docSignal in @(
     "DashboardMetricsClient",
     "ConnectionPreflightClient",
     "ConnectionWorkspaceStateClient",
+    "ReplaceCollection",
     "Prepare Connection",
     "WindowsDiscoveryBrowserClient",
     "DeviceDiscoveryInputDefaultsClient",

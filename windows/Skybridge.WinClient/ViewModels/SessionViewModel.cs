@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -854,21 +855,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     IsDiscoveryCompatibilityModeEnabled,
                     ExtendedSearchCountdown));
 
-            DiscoveryBrowserFacts.Clear();
-            foreach (var fact in snapshot.Facts)
-            {
-                DiscoveryBrowserFacts.Add(DiscoveryBrowserFactView.FromFact(fact));
-            }
+            ReplaceCollection(DiscoveryBrowserFacts, snapshot.Facts, DiscoveryBrowserFactView.FromFact);
 
             if (action != DiscoveryBrowserAction.Stop)
             {
                 _validatedDiscoveredPeer = snapshot.Peers.Count == 1 ? snapshot.Peers[0].Peer : null;
                 _validatedPairingMaterial = null;
-                DiscoveredPeers.Clear();
-                foreach (var peer in snapshot.Peers)
-                {
-                    DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(peer));
-                }
+                ReplaceCollection(DiscoveredPeers, snapshot.Peers, DiscoveredPeerView.FromCandidate);
 
                 PairingFacts.Clear();
                 ClearConnectionPreflight();
@@ -900,11 +893,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     ManualConnectionHost,
                     ManualConnectionPort,
                     ManualConnectionCode));
-            ManualConnectionFacts.Clear();
-            foreach (var fact in snapshot.Facts)
-            {
-                ManualConnectionFacts.Add(ManualConnectionFactView.FromFact(fact));
-            }
+            ReplaceCollection(ManualConnectionFacts, snapshot.Facts, ManualConnectionFactView.FromFact);
 
             _validatedDiscoveredPeer = null;
             _validatedPairingMaterial = null;
@@ -954,11 +943,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     CrossNetworkCodeInput,
                     CrossNetworkGeneratedCode));
 
-            CrossNetworkConnectionFacts.Clear();
-            foreach (var fact in snapshot.Facts)
-            {
-                CrossNetworkConnectionFacts.Add(CrossNetworkConnectionFactView.FromFact(fact));
-            }
+            ReplaceCollection(
+                CrossNetworkConnectionFacts,
+                snapshot.Facts,
+                CrossNetworkConnectionFactView.FromFact);
 
             if (!string.IsNullOrWhiteSpace(snapshot.GeneratedCode))
             {
@@ -1019,11 +1007,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var material = snapshot.Material;
             _validatedPairingMaterial = material;
             ClearConnectionPreflight();
-            PairingFacts.Clear();
-            foreach (var fact in snapshot.Facts)
-            {
-                PairingFacts.Add(PairingFactView.FromFact(fact));
-            }
+            ReplaceCollection(PairingFacts, snapshot.Facts, PairingFactView.FromFact);
 
             OnPropertyChanged(nameof(PairingFactCount));
             ApplyConnectionWorkspaceStatusPatch(
@@ -1054,11 +1038,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var snapshot = await _connectionPreflightClient.BuildReadOnlySnapshotAsync(
                 discoveredPeer!,
                 pairingMaterial!);
-            ConnectionPreflightFacts.Clear();
-            foreach (var fact in snapshot.Facts)
-            {
-                ConnectionPreflightFacts.Add(ConnectionPreflightFactView.FromFact(fact));
-            }
+            ReplaceCollection(ConnectionPreflightFacts, snapshot.Facts, ConnectionPreflightFactView.FromFact);
 
             OnPropertyChanged(nameof(ConnectionPreflightFactCount));
             ApplyConnectionWorkspaceStatusPatch(
@@ -1077,11 +1057,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             CoreDiagnosticsStatus = _coreDiagnosticsClient.BuildPendingStatus();
             var snapshot = await _coreDiagnosticsClient.BuildInteropSnapshotAsync();
-            CoreDiagnosticFacts.Clear();
-            foreach (var fact in snapshot.Facts)
-            {
-                CoreDiagnosticFacts.Add(CoreDiagnosticFactView.FromFact(fact));
-            }
+            ReplaceCollection(CoreDiagnosticFacts, snapshot.Facts, CoreDiagnosticFactView.FromFact);
 
             OnPropertyChanged(nameof(CoreDiagnosticFactCount));
             CoreDiagnosticsStatus = _coreDiagnosticsClient.BuildCompletedStatus(snapshot);
@@ -1100,23 +1076,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             FileTransferStatus = _fileTransferClient.BuildPendingStatus();
             var snapshot = await _fileTransferClient.BuildReadOnlySnapshotAsync();
-            FileTransferQueue.Clear();
-            foreach (var item in snapshot.Queue)
-            {
-                FileTransferQueue.Add(FileTransferQueueItemView.FromItem(item));
-            }
+            ReplaceCollection(FileTransferQueue, snapshot.Queue, FileTransferQueueItemView.FromItem);
 
-            FileTransferHistory.Clear();
-            foreach (var item in snapshot.History)
-            {
-                FileTransferHistory.Add(FileTransferHistoryItemView.FromItem(item));
-            }
+            ReplaceCollection(FileTransferHistory, snapshot.History, FileTransferHistoryItemView.FromItem);
 
-            FileTransferSecurityFacts.Clear();
-            foreach (var fact in snapshot.Security)
-            {
-                FileTransferSecurityFacts.Add(FileTransferSecurityFactView.FromFact(fact));
-            }
+            ReplaceCollection(FileTransferSecurityFacts, snapshot.Security, FileTransferSecurityFactView.FromFact);
 
             RefreshDashboardMetrics();
             OnPropertyChanged(nameof(FileTransferHistoryCount));
@@ -1136,17 +1100,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             UsbManagementStatus = _usbManagementClient.BuildPendingStatus();
             var snapshot = await _usbManagementClient.BuildReadOnlySnapshotAsync();
-            UsbDeviceStats.Clear();
-            foreach (var stat in snapshot.Stats)
-            {
-                UsbDeviceStats.Add(UsbDeviceStatView.FromStat(stat));
-            }
+            ReplaceCollection(UsbDeviceStats, snapshot.Stats, UsbDeviceStatView.FromStat);
 
-            UsbDevices.Clear();
-            foreach (var device in snapshot.Devices)
-            {
-                UsbDevices.Add(UsbDeviceItemView.FromItem(device));
-            }
+            ReplaceCollection(UsbDevices, snapshot.Devices, UsbDeviceItemView.FromItem);
 
             OnPropertyChanged(nameof(UsbDeviceCount));
             UsbManagementStatus = _usbManagementClient.BuildCompletedStatus(snapshot);
@@ -1167,17 +1123,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var snapshot = await _remoteDesktopClient.BuildReadOnlySnapshotAsync(
                 SelectedBitrate,
                 SelectedFramerate);
-            RemoteDesktopSessions.Clear();
-            foreach (var item in snapshot.Sessions)
-            {
-                RemoteDesktopSessions.Add(RemoteDesktopSessionItemView.FromItem(item));
-            }
+            ReplaceCollection(RemoteDesktopSessions, snapshot.Sessions, RemoteDesktopSessionItemView.FromItem);
 
-            RemoteDesktopControlFacts.Clear();
-            foreach (var fact in snapshot.ControlFacts)
-            {
-                RemoteDesktopControlFacts.Add(RemoteDesktopControlFactView.FromFact(fact));
-            }
+            ReplaceCollection(RemoteDesktopControlFacts, snapshot.ControlFacts, RemoteDesktopControlFactView.FromFact);
 
             OnPropertyChanged(nameof(RemoteDesktopSessionCount));
             RemoteDesktopStatus = _remoteDesktopClient.BuildCompletedStatus(snapshot);
@@ -1196,23 +1144,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             SystemMonitorStatus = _systemMonitorClient.BuildPendingStatus();
             var snapshot = await _systemMonitorClient.BuildReadOnlySnapshotAsync();
-            SystemMonitorOverview.Clear();
-            foreach (var metric in snapshot.Overview)
-            {
-                SystemMonitorOverview.Add(SystemMonitorMetricView.FromMetric(metric));
-            }
+            ReplaceCollection(SystemMonitorOverview, snapshot.Overview, SystemMonitorMetricView.FromMetric);
 
-            SystemMonitorDetails.Clear();
-            foreach (var metric in snapshot.Details)
-            {
-                SystemMonitorDetails.Add(SystemMonitorMetricView.FromMetric(metric));
-            }
+            ReplaceCollection(SystemMonitorDetails, snapshot.Details, SystemMonitorMetricView.FromMetric);
 
-            SystemMonitorIndicators.Clear();
-            foreach (var indicator in snapshot.Indicators)
-            {
-                SystemMonitorIndicators.Add(SystemMonitorIndicatorView.FromIndicator(indicator));
-            }
+            ReplaceCollection(SystemMonitorIndicators, snapshot.Indicators, SystemMonitorIndicatorView.FromIndicator);
 
             OnPropertyChanged(nameof(SystemMonitorMetricCount));
             SystemMonitorStatus = _systemMonitorClient.BuildCompletedStatus(snapshot);
@@ -1231,23 +1167,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             SettingsStatus = _settingsClient.BuildPendingStatus();
             var snapshot = await _settingsClient.BuildReadOnlySnapshotAsync();
-            SettingsTabs.Clear();
-            foreach (var tab in snapshot.Tabs)
-            {
-                SettingsTabs.Add(SettingsTabItemView.FromItem(tab));
-            }
+            ReplaceCollection(SettingsTabs, snapshot.Tabs, SettingsTabItemView.FromItem);
 
-            SettingsActions.Clear();
-            foreach (var action in snapshot.Actions)
-            {
-                SettingsActions.Add(SettingsActionItemView.FromItem(action));
-            }
+            ReplaceCollection(SettingsActions, snapshot.Actions, SettingsActionItemView.FromItem);
 
-            SettingsDetails.Clear();
-            foreach (var detail in snapshot.Details)
-            {
-                SettingsDetails.Add(SettingsDetailItemView.FromItem(detail));
-            }
+            ReplaceCollection(SettingsDetails, snapshot.Details, SettingsDetailItemView.FromItem);
 
             OnPropertyChanged(nameof(SettingsActionCount));
             SettingsStatus = _settingsClient.BuildCompletedStatus(snapshot);
@@ -1485,11 +1409,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ActiveSessionCount = snapshot.ActiveSessionCount;
         TransferTaskCount = snapshot.TransferTaskCount;
         PerformanceStatus = snapshot.PerformanceStatus;
-        DashboardMetrics.Clear();
-        foreach (var metric in snapshot.Metrics)
-        {
-            DashboardMetrics.Add(DashboardMetricView.FromMetric(metric));
-        }
+        ReplaceCollection(DashboardMetrics, snapshot.Metrics, DashboardMetricView.FromMetric);
 
         OnPropertyChanged(nameof(DashboardMetricCount));
     }
@@ -1512,13 +1432,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             actionDetails ?? BuildWorkspaceActionDetailSnapshot());
         var target = GetWorkspaceActionSurfaceTarget(surface);
 
-        target.Clear();
-        foreach (var action in snapshot.Actions)
-        {
-            target.Add(WorkspaceActionItemView.FromItem(
+        ReplaceCollection(
+            target,
+            snapshot.Actions,
+            action => WorkspaceActionItemView.FromItem(
                 action,
                 ResolveWorkspaceActionCommand(action.CommandId)));
-        }
     }
 
     private ObservableCollection<WorkspaceActionItemView> GetWorkspaceActionSurfaceTarget(
@@ -1612,6 +1531,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         ConnectionState = newState;
         StatusMessage = _sessionStatusClient.BuildEngineStateStatus(newState);
+    }
+
+    private static void ReplaceCollection<TSource, TItem>(
+        ObservableCollection<TItem> target,
+        IEnumerable<TSource> source,
+        Func<TSource, TItem> map)
+    {
+        target.Clear();
+        foreach (var item in source)
+        {
+            target.Add(map(item));
+        }
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
