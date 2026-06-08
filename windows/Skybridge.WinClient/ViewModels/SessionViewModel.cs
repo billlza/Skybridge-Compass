@@ -55,6 +55,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly CrossNetworkCodeInputCoordinator _crossNetworkCodeInputCoordinator;
     private readonly DiscoveryBrowserActions _discoveryBrowserActions;
     private readonly CrossNetworkConnectionActions _crossNetworkConnectionActions;
+    private readonly ConnectionWorkspaceActions _connectionWorkspaceActions;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
     private string _statusMessage = "";
@@ -353,6 +354,29 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             () => CrossNetworkGeneratedCode,
             value => CrossNetworkStatus = value,
             value => CrossNetworkGeneratedCode = value);
+        _connectionWorkspaceActions = new ConnectionWorkspaceActions(
+            _workspaceBusyCoordinator,
+            _manualConnectionClient,
+            _discoveryClient,
+            _discoveryBrowserClient,
+            _pairingMaterialClient,
+            _connectionPreflightClient,
+            _connectionWorkspaceStateClient,
+            _workspaceViewStateBuilder,
+            _connectionInputCoordinator,
+            _connectionResultProjector,
+            DiscoveredPeers,
+            () => ManualConnectionHost,
+            () => ManualConnectionPort,
+            () => ManualConnectionCode,
+            () => DiscoveryService,
+            () => DiscoveryTxtRecord,
+            () => PairingConnectionCode,
+            value => ManualConnectionStatus = value,
+            value => DiscoveryStatus = value,
+            value => PairingStatus = value,
+            value => ConnectionPreflightStatus = value,
+            value => DiscoveryService = value);
         CoreDiagnosticFacts = collections.CoreDiagnosticFacts;
         DeviceDiscoveryPrimaryActions = collections.DeviceDiscoveryPrimaryActions;
         DeviceDiscoveryScanActions = collections.DeviceDiscoveryScanActions;
@@ -1013,21 +1037,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private Task RunExtendedDiscoveryAsync() =>
         _discoveryBrowserActions.RunExtendedSearchAsync();
 
-    private async Task PrepareManualConnectionAsync()
-    {
-        await RunDeviceDiscoveryActionAsync(async () =>
-        {
-            ManualConnectionStatus = _manualConnectionClient.BuildPendingStatus();
-            var snapshot = await _manualConnectionClient.BuildReadOnlySnapshotAsync(
-                _workspaceViewStateBuilder.BuildManualConnectionRequest(
-                    ManualConnectionHost,
-                    ManualConnectionPort,
-                    ManualConnectionCode));
-            _connectionResultProjector.ApplyManualTargetPrepared(
-                snapshot,
-                value => DiscoveryService = value);
-        });
-    }
+    private Task PrepareManualConnectionAsync() =>
+        _connectionWorkspaceActions.PrepareManualConnectionAsync();
 
     private Task GenerateQRCodeAsync() =>
         _crossNetworkConnectionActions.GenerateQrCodeAsync();
@@ -1047,54 +1058,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private Task ConnectConnectionCodeAsync() =>
         _crossNetworkConnectionActions.ConnectWithCodeAsync();
 
-    private async Task ParseAdvertisementAsync()
-    {
-        await RunDeviceDiscoveryActionAsync(async () =>
-        {
-            DiscoveryStatus = _discoveryClient.BuildPendingStatus();
-            var peer = await _discoveryClient.ParseAdvertisementAsync(DiscoveryService, DiscoveryTxtRecord);
-            _connectionResultProjector.ApplyDiscoveryPeerValidated(
-                peer,
-                _discoveryBrowserClient.BuildPeerCandidate(peer));
-        });
-    }
+    private Task ParseAdvertisementAsync() =>
+        _connectionWorkspaceActions.ParseAdvertisementAsync();
 
-    private async Task ValidatePairingCodeAsync()
-    {
-        await RunDeviceDiscoveryActionAsync(async () =>
-        {
-            PairingStatus = _pairingMaterialClient.BuildPendingStatus();
-            var expectedFingerprint = DiscoveredPeers.Count == 1
-                ? DiscoveredPeers[0].PublicKeyFingerprint
-                : null;
-            var snapshot = await _pairingMaterialClient.BuildReadOnlySnapshotAsync(
-                PairingConnectionCode,
-                expectedFingerprint);
-            _connectionResultProjector.ApplyPairingValidated(snapshot);
-        });
-    }
+    private Task ValidatePairingCodeAsync() =>
+        _connectionWorkspaceActions.ValidatePairingCodeAsync();
 
-    private async Task PrepareConnectionAsync()
-    {
-        await RunDeviceDiscoveryActionAsync(async () =>
-        {
-            var discoveredPeer = _connectionInputCoordinator.ValidatedState.DiscoveredPeer;
-            var pairingMaterial = _connectionInputCoordinator.ValidatedState.PairingMaterial;
-            var readiness = _connectionWorkspaceStateClient.BuildPreflightReadiness(
-                discoveredPeer,
-                pairingMaterial);
-            if (!readiness.IsReady)
-            {
-                throw new InvalidOperationException(readiness.ErrorMessage);
-            }
-
-            ConnectionPreflightStatus = _connectionPreflightClient.BuildPendingStatus();
-            var snapshot = await _connectionPreflightClient.BuildReadOnlySnapshotAsync(
-                discoveredPeer!,
-                pairingMaterial!);
-            _connectionResultProjector.ApplyPreflightPrepared(snapshot);
-        });
-    }
+    private Task PrepareConnectionAsync() =>
+        _connectionWorkspaceActions.PrepareConnectionAsync();
 
     private Task RunCoreDiagnosticsAsync() =>
         _readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync();
@@ -1172,9 +1143,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool CanRefreshSettings() =>
         _workspaceCommandAvailability.CanRefreshSettings();
-
-    private Task RunDeviceDiscoveryActionAsync(Func<Task> action) =>
-        _workspaceBusyCoordinator.RunAsync(WorkspaceErrorScope.DeviceDiscovery, action);
 
     private void RefreshCommandStates() =>
         _workspaceShellRefreshCoordinator.RefreshCommandStates();
