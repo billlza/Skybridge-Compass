@@ -112,27 +112,170 @@ public sealed class InMemorySettingsExportPreviewClient : ISettingsExportPreview
     }
 }
 
+public interface ISettingsActionIntentClient
+{
+    bool CanImportSettings();
+
+    bool CanResetSettings();
+
+    bool CanRequestPermission();
+
+    bool CanApplySettings();
+
+    bool CanRestoreDefaults();
+
+    bool CanResetMonitorData();
+
+    SettingsActionIntentSnapshot CaptureSnapshot();
+
+    SettingsWorkspaceActionResult BuildImportSettingsIntent();
+
+    SettingsWorkspaceActionResult BuildResetSettingsIntent();
+
+    SettingsWorkspaceActionResult BuildPermissionRequestIntent();
+
+    SettingsWorkspaceActionResult BuildApplySettingsIntent();
+
+    SettingsWorkspaceActionResult BuildRestoreDefaultsIntent();
+
+    SettingsWorkspaceActionResult BuildResetMonitorDataIntent();
+}
+
+public sealed class InMemorySettingsActionIntentClient : ISettingsActionIntentClient
+{
+    private readonly object _sync = new();
+    private int _nextIntentId;
+    private string? _latestActionKey;
+    private string? _latestIntentId;
+    private DateTimeOffset? _latestIntentAt;
+
+    public bool CanImportSettings() => true;
+
+    public bool CanResetSettings() => true;
+
+    public bool CanRequestPermission() => true;
+
+    public bool CanApplySettings() => true;
+
+    public bool CanRestoreDefaults() => true;
+
+    public bool CanResetMonitorData() => true;
+
+    public SettingsActionIntentSnapshot CaptureSnapshot()
+    {
+        lock (_sync)
+        {
+            return new SettingsActionIntentSnapshot(
+                _latestActionKey is not null,
+                _latestActionKey,
+                _latestIntentId,
+                _latestIntentAt,
+                _nextIntentId);
+        }
+    }
+
+    public SettingsWorkspaceActionResult BuildImportSettingsIntent() =>
+        BuildIntent(
+            "ImportSettings",
+            "SET-IMPORT",
+            SettingsWorkspaceClient.DefaultImportSettingsIntentReadyStatus,
+            SettingsWorkspaceClient.DefaultImportSettingsIntentReadyMessage);
+
+    public SettingsWorkspaceActionResult BuildResetSettingsIntent() =>
+        BuildIntent(
+            "ResetSettings",
+            "SET-RESET",
+            SettingsWorkspaceClient.DefaultResetSettingsIntentReadyStatus,
+            SettingsWorkspaceClient.DefaultResetSettingsIntentReadyMessage);
+
+    public SettingsWorkspaceActionResult BuildPermissionRequestIntent() =>
+        BuildIntent(
+            "RequestPermission",
+            "SET-PERM",
+            SettingsWorkspaceClient.DefaultPermissionRequestIntentReadyStatus,
+            SettingsWorkspaceClient.DefaultPermissionRequestIntentReadyMessage);
+
+    public SettingsWorkspaceActionResult BuildApplySettingsIntent() =>
+        BuildIntent(
+            "ApplySettings",
+            "SET-APPLY",
+            SettingsWorkspaceClient.DefaultApplySettingsIntentReadyStatus,
+            SettingsWorkspaceClient.DefaultApplySettingsIntentReadyMessage);
+
+    public SettingsWorkspaceActionResult BuildRestoreDefaultsIntent() =>
+        BuildIntent(
+            "RestoreDefaults",
+            "SET-DEFAULTS",
+            SettingsWorkspaceClient.DefaultRestoreDefaultsIntentReadyStatus,
+            SettingsWorkspaceClient.DefaultRestoreDefaultsIntentReadyMessage);
+
+    public SettingsWorkspaceActionResult BuildResetMonitorDataIntent() =>
+        BuildIntent(
+            "ResetMonitorData",
+            "SET-MONITOR",
+            SettingsWorkspaceClient.DefaultResetMonitorDataIntentReadyStatus,
+            SettingsWorkspaceClient.DefaultResetMonitorDataIntentReadyMessage);
+
+    private SettingsWorkspaceActionResult BuildIntent(
+        string actionKey,
+        string intentPrefix,
+        string status,
+        string message)
+    {
+        string intentId;
+        lock (_sync)
+        {
+            _nextIntentId++;
+            intentId = $"{intentPrefix}-{_nextIntentId:0000}";
+            _latestActionKey = actionKey;
+            _latestIntentId = intentId;
+            _latestIntentAt = DateTimeOffset.UtcNow;
+        }
+
+        return SettingsWorkspaceClient.BuildActionIntentReadyActionResult(status, message, intentId);
+    }
+}
+
 public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 {
     private readonly ISettingsExportPreviewClient _exportPreviewClient;
+    private readonly ISettingsActionIntentClient _actionIntentClient;
     private readonly ISystemPreferencesLauncher _systemPreferencesLauncher;
 
     public SettingsWorkspaceClient()
-        : this(new DisabledSystemPreferencesLauncher(), new InMemorySettingsExportPreviewClient())
+        : this(
+            new DisabledSystemPreferencesLauncher(),
+            new InMemorySettingsExportPreviewClient(),
+            new InMemorySettingsActionIntentClient())
     {
     }
 
     public SettingsWorkspaceClient(ISystemPreferencesLauncher systemPreferencesLauncher)
-        : this(systemPreferencesLauncher, new InMemorySettingsExportPreviewClient())
+        : this(
+            systemPreferencesLauncher,
+            new InMemorySettingsExportPreviewClient(),
+            new InMemorySettingsActionIntentClient())
     {
     }
 
     public SettingsWorkspaceClient(
         ISystemPreferencesLauncher systemPreferencesLauncher,
         ISettingsExportPreviewClient exportPreviewClient)
+        : this(
+            systemPreferencesLauncher,
+            exportPreviewClient,
+            new InMemorySettingsActionIntentClient())
+    {
+    }
+
+    public SettingsWorkspaceClient(
+        ISystemPreferencesLauncher systemPreferencesLauncher,
+        ISettingsExportPreviewClient exportPreviewClient,
+        ISettingsActionIntentClient actionIntentClient)
     {
         _systemPreferencesLauncher = systemPreferencesLauncher ?? throw new ArgumentNullException(nameof(systemPreferencesLauncher));
         _exportPreviewClient = exportPreviewClient ?? throw new ArgumentNullException(nameof(exportPreviewClient));
+        _actionIntentClient = actionIntentClient ?? throw new ArgumentNullException(nameof(actionIntentClient));
     }
 
     public string BuildInitialStatus() => DefaultInitialStatus;
@@ -146,19 +289,19 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 
     public bool CanExportSettings() => _exportPreviewClient.CanExportSettings();
 
-    public bool CanImportSettings() => false;
+    public bool CanImportSettings() => _actionIntentClient.CanImportSettings();
 
-    public bool CanResetSettings() => false;
+    public bool CanResetSettings() => _actionIntentClient.CanResetSettings();
 
-    public bool CanRequestPermission() => false;
+    public bool CanRequestPermission() => _actionIntentClient.CanRequestPermission();
 
     public bool CanOpenSystemPreferences() => _systemPreferencesLauncher.CanOpenSystemPreferences();
 
-    public bool CanApplySettings() => false;
+    public bool CanApplySettings() => _actionIntentClient.CanApplySettings();
 
-    public bool CanRestoreDefaults() => false;
+    public bool CanRestoreDefaults() => _actionIntentClient.CanRestoreDefaults();
 
-    public bool CanResetMonitorData() => false;
+    public bool CanResetMonitorData() => _actionIntentClient.CanResetMonitorData();
 
     public string BuildExportSettingsPendingStatus() => DefaultExportSettingsPendingStatus;
 
@@ -204,17 +347,29 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 
     public static string DefaultImportSettingsBlockedStatus { get; } = "Settings import unavailable";
 
+    public static string DefaultImportSettingsIntentReadyStatus { get; } = "Settings import intent ready";
+
     public static string DefaultResetSettingsBlockedStatus { get; } = "Settings reset unavailable";
 
+    public static string DefaultResetSettingsIntentReadyStatus { get; } = "Settings reset intent ready";
+
     public static string DefaultPermissionRequestBlockedStatus { get; } = "Permission request unavailable";
+
+    public static string DefaultPermissionRequestIntentReadyStatus { get; } = "Permission request intent ready";
 
     public static string DefaultSystemPreferencesBlockedStatus { get; } = "System preferences unavailable";
 
     public static string DefaultApplySettingsBlockedStatus { get; } = "Settings apply unavailable";
 
+    public static string DefaultApplySettingsIntentReadyStatus { get; } = "Settings apply intent ready";
+
     public static string DefaultRestoreDefaultsBlockedStatus { get; } = "Restore defaults unavailable";
 
+    public static string DefaultRestoreDefaultsIntentReadyStatus { get; } = "Restore defaults intent ready";
+
     public static string DefaultResetMonitorDataBlockedStatus { get; } = "Monitor data reset unavailable";
+
+    public static string DefaultResetMonitorDataIntentReadyStatus { get; } = "Monitor data reset intent ready";
 
     public static string DefaultExportSettingsBlockedMessage { get; } =
         "Settings export requires persisted preferences and an explicit user-selected destination.";
@@ -225,11 +380,20 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
     public static string DefaultImportSettingsBlockedMessage { get; } =
         "Settings import requires file validation before writing preferences.";
 
+    public static string DefaultImportSettingsIntentReadyMessage { get; } =
+        "Settings import validation intent prepared in memory only; no file was opened, read, or written.";
+
     public static string DefaultResetSettingsBlockedMessage { get; } =
         "Settings reset is a destructive preference write that requires confirmation and scoped defaults.";
 
+    public static string DefaultResetSettingsIntentReadyMessage { get; } =
+        "Settings reset intent prepared in memory only; no preference was changed.";
+
     public static string DefaultPermissionRequestBlockedMessage { get; } =
         "Permission prompts are high-risk platform writes and require an explicit provider.";
+
+    public static string DefaultPermissionRequestIntentReadyMessage { get; } =
+        "Permission request intent prepared in memory only; no permission prompt was shown.";
 
     public static string DefaultSystemPreferencesBlockedMessage { get; } =
         "Windows Settings deep links require SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES=enabled before opening system preferences.";
@@ -244,11 +408,20 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
     public static string DefaultApplySettingsBlockedMessage { get; } =
         "Runtime settings apply requires a persistence bridge and scoped runtime update providers.";
 
+    public static string DefaultApplySettingsIntentReadyMessage { get; } =
+        "Settings apply intent prepared in memory only; no runtime settings were applied.";
+
     public static string DefaultRestoreDefaultsBlockedMessage { get; } =
         "Restoring defaults is a destructive preference write that requires confirmation.";
 
+    public static string DefaultRestoreDefaultsIntentReadyMessage { get; } =
+        "Restore defaults intent prepared in memory only; no defaults were restored.";
+
     public static string DefaultResetMonitorDataBlockedMessage { get; } =
         "Monitor retention deletion requires a retention store and explicit confirmation.";
+
+    public static string DefaultResetMonitorDataIntentReadyMessage { get; } =
+        "Monitor data reset intent prepared in memory only; no monitor data was deleted.";
 
     public static string BuildDefaultCompletedStatus(SettingsWorkspaceSnapshot snapshot) =>
         $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
@@ -260,6 +433,12 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
         new(
             DefaultExportSettingsPreviewReadyStatus,
             $"{DefaultExportSettingsPreviewReadyMessage} preview={NormalizeExportPreviewId(previewId)}");
+
+    public static SettingsWorkspaceActionResult BuildActionIntentReadyActionResult(
+        string status,
+        string message,
+        string intentId) =>
+        new(status, $"{message} intent={NormalizeSettingsActionIntentId(intentId)}");
 
     public static SettingsWorkspaceActionResult BuildDefaultImportSettingsActionResult() =>
         new(DefaultImportSettingsBlockedStatus, DefaultImportSettingsBlockedMessage);
@@ -285,36 +464,37 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
     public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         var exportPreview = _exportPreviewClient.CaptureSnapshot();
+        var actionIntent = _actionIntentClient.CaptureSnapshot();
         return Task.FromResult(new SettingsWorkspaceSnapshot(
             DateTimeOffset.UtcNow,
             BuildTabs(),
-            BuildActions(exportPreview),
-            BuildDetails(exportPreview)));
+            BuildActions(exportPreview, actionIntent),
+            BuildDetails(exportPreview, actionIntent)));
     }
 
     public Task<SettingsWorkspaceActionResult> BuildExportSettingsActionAsync() =>
         Task.FromResult(_exportPreviewClient.BuildExportPreview());
 
     public Task<SettingsWorkspaceActionResult> BuildImportSettingsActionAsync() =>
-        Task.FromResult(BuildDefaultImportSettingsActionResult());
+        Task.FromResult(_actionIntentClient.BuildImportSettingsIntent());
 
     public Task<SettingsWorkspaceActionResult> BuildResetSettingsActionAsync() =>
-        Task.FromResult(BuildDefaultResetSettingsActionResult());
+        Task.FromResult(_actionIntentClient.BuildResetSettingsIntent());
 
     public Task<SettingsWorkspaceActionResult> BuildPermissionRequestActionAsync() =>
-        Task.FromResult(BuildDefaultPermissionRequestActionResult());
+        Task.FromResult(_actionIntentClient.BuildPermissionRequestIntent());
 
     public Task<SettingsWorkspaceActionResult> BuildSystemPreferencesActionAsync() =>
         _systemPreferencesLauncher.OpenSystemPreferencesAsync();
 
     public Task<SettingsWorkspaceActionResult> BuildApplySettingsActionAsync() =>
-        Task.FromResult(BuildDefaultApplySettingsActionResult());
+        Task.FromResult(_actionIntentClient.BuildApplySettingsIntent());
 
     public Task<SettingsWorkspaceActionResult> BuildRestoreDefaultsActionAsync() =>
-        Task.FromResult(BuildDefaultRestoreDefaultsActionResult());
+        Task.FromResult(_actionIntentClient.BuildRestoreDefaultsIntent());
 
     public Task<SettingsWorkspaceActionResult> BuildResetMonitorDataActionAsync() =>
-        Task.FromResult(BuildDefaultResetMonitorDataActionResult());
+        Task.FromResult(_actionIntentClient.BuildResetMonitorDataIntent());
 
     private static IReadOnlyList<SettingsTabItem> BuildTabs() =>
         new List<SettingsTabItem>
@@ -329,28 +509,33 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
             new("Advanced", "PQC, diagnostics, logs, custom services")
         };
 
-    private static IReadOnlyList<SettingsActionItem> BuildActions(SettingsExportPreviewSnapshot exportPreview) =>
+    private static IReadOnlyList<SettingsActionItem> BuildActions(
+        SettingsExportPreviewSnapshot exportPreview,
+        SettingsActionIntentSnapshot actionIntent) =>
         new List<SettingsActionItem>
         {
             new("ExportSettings", "Export settings", exportPreview.HasPreview ? "Preview ready" : "Ready", BuildExportPreviewDetail(exportPreview)),
-            new("ImportSettings", "Import settings", "Disabled", "Validate file format before writing preferences."),
-            new("ResetSettings", "Reset settings", "Disabled", "Destructive reset requires confirmation and scoped defaults."),
+            new("ImportSettings", "Import settings", BuildActionIntentState(actionIntent, "ImportSettings"), BuildActionIntentDetail(actionIntent, "ImportSettings", "Prepares a settings import validation intent in memory only; no file is opened, read, or written.")),
+            new("ResetSettings", "Reset settings", BuildActionIntentState(actionIntent, "ResetSettings"), BuildActionIntentDetail(actionIntent, "ResetSettings", "Prepares a reset intent in memory only; no preference is changed.")),
             new("RefreshSettingsStatus", "Refresh Status", "Ready", "Read-only snapshot can be refreshed safely."),
-            new("RequestPermission", "Request Permission", "Disabled", "Permission prompts are high-risk platform writes."),
+            new("RequestPermission", "Request Permission", BuildActionIntentState(actionIntent, "RequestPermission"), BuildActionIntentDetail(actionIntent, "RequestPermission", "Prepares a permission-request intent in memory only; no permission prompt is shown.")),
             new("OpenSystemPreferences", "Open System Preferences", "Disabled", "Windows Settings deep link requires explicit user click."),
-            new("ApplyFileTransferSettings", "Apply file transfer settings", "Disabled", "Separate saved preferences from runtime updateReceiveDirectory/apply bridge."),
-            new("ApplyRemoteDesktopSettings", "Apply remote desktop settings", "Disabled", "Runtime session settings must be applied explicitly."),
-            new("RestoreDefaults", "Restore Defaults", "Disabled", "Default restore is a destructive preference write."),
-            new("ResetMonitorData", "Reset Monitor Data", "Disabled", "Monitor retention store deletion requires explicit confirmation."),
+            new("ApplyFileTransferSettings", "Apply file transfer settings", BuildActionIntentState(actionIntent, "ApplySettings"), BuildActionIntentDetail(actionIntent, "ApplySettings", "Prepares a runtime-apply intent in memory only; no runtime setting is changed.")),
+            new("ApplyRemoteDesktopSettings", "Apply remote desktop settings", BuildActionIntentState(actionIntent, "ApplySettings"), BuildActionIntentDetail(actionIntent, "ApplySettings", "Prepares a runtime-apply intent in memory only; no live session setting is changed.")),
+            new("RestoreDefaults", "Restore Defaults", BuildActionIntentState(actionIntent, "RestoreDefaults"), BuildActionIntentDetail(actionIntent, "RestoreDefaults", "Prepares a restore-defaults intent in memory only; no defaults are restored.")),
+            new("ResetMonitorData", "Reset Monitor Data", BuildActionIntentState(actionIntent, "ResetMonitorData"), BuildActionIntentDetail(actionIntent, "ResetMonitorData", "Prepares a monitor-data reset intent in memory only; no monitor data is deleted.")),
             new("ClearHistoryData", "Clear History Data", "Disabled", "History deletion must never run from toggle or refresh paths.")
         };
 
-    private static IReadOnlyList<SettingsDetailItem> BuildDetails(SettingsExportPreviewSnapshot exportPreview) =>
+    private static IReadOnlyList<SettingsDetailItem> BuildDetails(
+        SettingsExportPreviewSnapshot exportPreview,
+        SettingsActionIntentSnapshot actionIntent) =>
         new List<SettingsDetailItem>
         {
             new("General", "Theme", "System", "Theme color and compact mode are visible but not persisted."),
             new("General", "Notifications", "Pending", "Notification permission request remains disabled."),
             new("General", "Export preview", exportPreview.HasPreview ? NormalizeExportPreviewId(exportPreview.PreviewId) : "Ready", BuildExportPreviewDetail(exportPreview)),
+            new("General", "Latest settings action", BuildLatestActionIntentValue(actionIntent), BuildLatestActionIntentDetail(actionIntent)),
             new("Network", "Transport policy", "Core-owned", "Transport selection remains in Rust Core contracts."),
             new("Network", "Relay policy", "Pending", "TURN/signaling credentials must not be hardcoded."),
             new("Devices", "USB provider", "Read-only", "USB Management currently scans removable storage only."),
@@ -409,10 +594,61 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
         return $"preview={NormalizeExportPreviewId(exportPreview.PreviewId)}; built={exportPreview.BuiltAt.Value:HH:mm:ss} UTC; no file was written";
     }
 
+    private static string BuildActionIntentState(
+        SettingsActionIntentSnapshot actionIntent,
+        string actionKey) =>
+        IsLatestActionIntent(actionIntent, actionKey) ? "Intent ready" : "Ready";
+
+    private static string BuildActionIntentDetail(
+        SettingsActionIntentSnapshot actionIntent,
+        string actionKey,
+        string readyDetail)
+    {
+        if (!IsLatestActionIntent(actionIntent, actionKey) || !actionIntent.BuiltAt.HasValue)
+        {
+            return readyDetail;
+        }
+
+        return $"intent={NormalizeSettingsActionIntentId(actionIntent.IntentId)}; built={actionIntent.BuiltAt.Value:HH:mm:ss} UTC; {readyDetail}";
+    }
+
+    private static string BuildLatestActionIntentValue(SettingsActionIntentSnapshot actionIntent) =>
+        actionIntent.HasIntent
+            ? NormalizeSettingsActionIntentId(actionIntent.IntentId)
+            : "Ready";
+
+    private static string BuildLatestActionIntentDetail(SettingsActionIntentSnapshot actionIntent)
+    {
+        if (!actionIntent.HasIntent || !actionIntent.BuiltAt.HasValue)
+        {
+            return "Settings actions prepare in-memory intents only; no preferences, files, permissions, runtime settings, defaults, or monitor data are changed.";
+        }
+
+        return $"action={NormalizeSettingsActionKey(actionIntent.ActionKey)}; intent={NormalizeSettingsActionIntentId(actionIntent.IntentId)}; built={actionIntent.BuiltAt.Value:HH:mm:ss} UTC; no settings side effect was performed";
+    }
+
+    private static bool IsLatestActionIntent(
+        SettingsActionIntentSnapshot actionIntent,
+        string actionKey) =>
+        actionIntent.HasIntent
+            && string.Equals(actionIntent.ActionKey, actionKey, StringComparison.Ordinal);
+
     private static string NormalizeExportPreviewId(string? previewId)
     {
         var normalized = (previewId ?? "").Trim();
         return normalized.Length == 0 ? "SET-0000" : normalized;
+    }
+
+    private static string NormalizeSettingsActionIntentId(string? intentId)
+    {
+        var normalized = (intentId ?? "").Trim();
+        return normalized.Length == 0 ? "SET-ACTION-0000" : normalized;
+    }
+
+    private static string NormalizeSettingsActionKey(string? actionKey)
+    {
+        var normalized = (actionKey ?? "").Trim();
+        return normalized.Length == 0 ? "SettingsAction" : normalized;
     }
 }
 
@@ -443,6 +679,13 @@ public sealed record SettingsExportPreviewSnapshot(
     string? PreviewId,
     DateTimeOffset? BuiltAt,
     int PreviewCount);
+
+public sealed record SettingsActionIntentSnapshot(
+    bool HasIntent,
+    string? ActionKey,
+    string? IntentId,
+    DateTimeOffset? BuiltAt,
+    int IntentCount);
 
 public sealed record SettingsWorkspaceActionResult(
     string Status,
