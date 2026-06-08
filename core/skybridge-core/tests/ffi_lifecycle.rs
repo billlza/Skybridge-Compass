@@ -644,6 +644,117 @@ fn ffi_connection_plan_exports_full_core_contract() {
 }
 
 #[test]
+fn ffi_connection_plan_keeps_apple_to_apple_native() {
+    let apple = SkybridgePeerCapabilities {
+        platform: SkybridgePeerPlatform::Apple,
+        supports_apple_native: 1,
+        supports_msquic: 0,
+        supports_skybridge_ice_msquic: 0,
+        supports_webrtc_data_channel: 1,
+        supports_tcp_fallback: 1,
+        supports_relay: 1,
+    };
+    let same_lan = SkybridgeNetworkPath {
+        same_lan: 1,
+        cross_nat: 0,
+    };
+    let local_crypto = SkybridgeCryptoProviderCapabilities {
+        supports_xwing_hybrid: 1,
+        supports_mlkem_768_mldsa_65: 1,
+        supports_x25519_ed25519: 1,
+        supports_p256_ecdsa: 0,
+    };
+    let remote_suites = [0x1001, 0x0101, 0x0001];
+    let suite_policy = SkybridgeCryptoSuitePolicy {
+        allow_classic_fallback: 1,
+        allow_legacy_p256: 0,
+        timeout_observed: 0,
+    };
+    let traffic_padding = SkybridgeTrafficPaddingPlan {
+        sbp2_enabled: 1,
+        fixed_payload_len: 512,
+    };
+    let empty_mapping = SkybridgeChannelMapping {
+        channel: SkybridgeChannelKind::Control,
+        reliability: SkybridgeReliabilityKind::ReliableOrdered,
+        max_retransmits: 0,
+        binding_kind: SkybridgeAdapterBindingKind::MsQuicStream,
+        head_of_line_isolated: 0,
+    };
+    let mut plan = SkybridgeConnectionPlan {
+        transport: SkybridgeTransportSelection {
+            kind: SkybridgeTransportKind::Unsupported,
+            audit_code: SkybridgeTransportAuditCode::UnsupportedNoCompatibleTransport,
+            priority: 0,
+            relay_required: 0,
+            relay_allowed: 0,
+        },
+        selected_suite: SkybridgeCryptoSuiteKind::Unknown,
+        selected_suite_wire_id: 0,
+        suite_audit: SkybridgeCryptoSuiteAuditCode::None,
+        offered_suites: [SkybridgeCryptoSuiteKind::Unknown; 4],
+        offered_suite_wire_ids: [0; 4],
+        offered_suite_count: 0,
+        channel_mappings: [empty_mapping; 5],
+        channel_mapping_count: 0,
+        sbp2_enabled: 0,
+        sbp2_fixed_payload_len: 0,
+        frame_header_len: 0,
+    };
+
+    let result = unsafe {
+        skybridge_plan_connection(
+            apple,
+            apple,
+            same_lan,
+            local_crypto,
+            remote_suites.as_ptr(),
+            remote_suites.len(),
+            suite_policy,
+            traffic_padding,
+            &mut plan,
+        )
+    };
+
+    assert_eq!(result, SkybridgeErrorCode::Ok);
+    assert_eq!(plan.transport.kind, SkybridgeTransportKind::AppleNative);
+    assert_eq!(
+        plan.transport.audit_code,
+        SkybridgeTransportAuditCode::AppleNativeDefault
+    );
+    assert_eq!(plan.transport.relay_required, 0);
+    assert_eq!(plan.transport.relay_allowed, 0);
+    assert_eq!(plan.selected_suite, SkybridgeCryptoSuiteKind::XWingHybrid);
+    assert_eq!(plan.channel_mapping_count, 5);
+    assert_eq!(
+        plan.channel_mappings[0].binding_kind,
+        SkybridgeAdapterBindingKind::AppleStream
+    );
+    assert_eq!(
+        plan.channel_mappings[1].binding_kind,
+        SkybridgeAdapterBindingKind::AppleStream
+    );
+    assert_eq!(
+        plan.channel_mappings[2].binding_kind,
+        SkybridgeAdapterBindingKind::AppleStream
+    );
+    assert_eq!(
+        plan.channel_mappings[3].binding_kind,
+        SkybridgeAdapterBindingKind::AppleDatagram
+    );
+    assert_eq!(
+        plan.channel_mappings[4].binding_kind,
+        SkybridgeAdapterBindingKind::AppleDatagram
+    );
+    assert!(plan
+        .channel_mappings
+        .iter()
+        .all(|mapping| { mapping.binding_kind != SkybridgeAdapterBindingKind::WebRtcDataChannel }));
+    assert_eq!(plan.sbp2_enabled, 1);
+    assert_eq!(plan.sbp2_fixed_payload_len, 512);
+}
+
+#[test]
 fn ffi_channel_mapping_exports_adapter_contracts() {
     let mut mapping = SkybridgeChannelMapping {
         channel: SkybridgeChannelKind::Control,

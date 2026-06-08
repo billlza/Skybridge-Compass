@@ -56,8 +56,9 @@ $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngi
 $dependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/SessionViewModelDependencyFactory.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
+$connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $mainWindowPath, $architecturePath, $connectionLaunchSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -92,6 +93,7 @@ $interface = Get-Content -Raw -LiteralPath $interfacePath
 $dependencyFactory = Get-Content -Raw -LiteralPath $dependencyFactoryPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
+$connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
 
 foreach ($member in @("ConnectAsync", "DisconnectAsync", "SendHeartbeatAsync")) {
     Assert-Contains -Text $interface -Needle $member -Message "IEngineClient missing member: $member"
@@ -148,6 +150,23 @@ foreach ($signal in @(
     "Connection launch request fingerprint does not match pairing material."
 )) {
     Assert-Contains -Text $connectionLaunchRequest -Needle $signal -Message "ConnectionLaunchRequest missing launch signal: $signal"
+}
+foreach ($signal in @(
+    "windows-connection-launch-smoke: ok",
+    "BuildConnectionLaunchRequest",
+    "Parse a Core-validated discovery TXT record before connection launch.",
+    "Validate pairing material before connection launch.",
+    "Prepare Core connection preflight before connection launch.",
+    "Connection launch request peer does not match pairing material.",
+    "Connection launch request fingerprint does not match pairing material.",
+    "Connection launch requires a 32-byte transport binding digest from Core preflight.",
+    "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
+    "DummyEngineClient().ConnectAsync",
+    "adapter pending",
+    "digestLength: 31",
+    "smoke live adapter"
+)) {
+    Assert-Contains -Text $connectionLaunchSmoke -Needle $signal -Message "Windows connection launch smoke missing signal: $signal"
 }
 Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateDefault()" -Message "MainWindow should create SessionViewModel through the dependency factory."
 Assert-Contains -Text $dependencyFactory -Needle "new DummyEngineClient()" -Message "Default dependency factory should keep the dummy client until native DLL deployment is explicit."

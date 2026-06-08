@@ -81,6 +81,29 @@ fn cli_windows_to_apple_selects_webrtc_interop() {
 }
 
 #[test]
+fn cli_apple_to_apple_selects_apple_native() {
+    let output = skybridge()
+        .args([
+            "transport",
+            "select",
+            "--local",
+            "macos",
+            "--remote",
+            "ios",
+            "--path",
+            "same-lan",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("kind=AppleNative"));
+    assert!(stdout.contains("audit=AppleNativeDefault"));
+    assert!(stdout.contains("relay_allowed=false"));
+}
+
+#[test]
 fn cli_transport_bind_reports_binding_digest() {
     let output = skybridge()
         .args([
@@ -328,6 +351,39 @@ fn cli_connection_plan_reports_core_contract() {
     assert!(stdout.contains("suite=x-wing-hybrid (0x0001)"));
     assert!(stdout.contains("channel_count=5"));
     assert!(stdout.contains("channel.realtime=WebRtcDataChannel:skybridge.realtime"));
+    assert!(stdout.contains("sbp2_enabled=true"));
+}
+
+#[test]
+fn cli_apple_to_apple_connection_plan_keeps_apple_native_channels() {
+    let output = skybridge()
+        .args([
+            "connection",
+            "plan",
+            "--local",
+            "macos",
+            "--remote",
+            "ios",
+            "--path",
+            "same-lan",
+            "--local-caps",
+            "xwing,mlkem,x25519",
+            "--remote-suites",
+            "0x1001,0x0101,0x0001",
+            "--allow-classic",
+            "--sbp2-fixed",
+            "512",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("transport=AppleNative"));
+    assert!(stdout.contains("channel.control=AppleStream:skybridge.control"));
+    assert!(stdout.contains("channel.file=AppleStream:skybridge.file"));
+    assert!(stdout.contains("channel.telemetry=AppleDatagram:skybridge.telemetry"));
+    assert!(stdout.contains("channel.realtime=AppleDatagram:skybridge.realtime"));
     assert!(stdout.contains("sbp2_enabled=true"));
 }
 

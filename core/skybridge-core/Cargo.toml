@@ -9,6 +9,7 @@ license = "MIT"
 [lib]
 name = "skybridge_core"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 thiserror = "1.0"

@@ -32,15 +32,32 @@ function Get-LineCoverage {
     return [double]::Parse($matches[2].Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
 }
 
+function Get-NativeLibraryFileName {
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+        return "skybridge_core.dll"
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
+        return "libskybridge_core.dylib"
+    }
+
+    return "libskybridge_core.so"
+}
+
 $coreRoot = Join-Path $RepoRoot "core/skybridge-core"
 Assert-True -Condition (Test-Path -LiteralPath (Join-Path $coreRoot "Cargo.toml")) -Message "Missing Rust core Cargo.toml: $coreRoot"
 
 $cliSmokePath = Join-Path $coreRoot "tests/cli_smoke.rs"
 Assert-True -Condition (Test-Path -LiteralPath $cliSmokePath) -Message "Missing CLI smoke tests: $cliSmokePath"
 $cliSmoke = Get-Content -Raw -LiteralPath $cliSmokePath
+$ffiLifecyclePath = Join-Path $coreRoot "tests/ffi_lifecycle.rs"
+Assert-True -Condition (Test-Path -LiteralPath $ffiLifecyclePath) -Message "Missing FFI lifecycle tests: $ffiLifecyclePath"
+$ffiLifecycle = Get-Content -Raw -LiteralPath $ffiLifecyclePath
 
 foreach ($signal in @(
     "cli_version_smoke",
+    "cli_apple_to_apple_selects_apple_native",
+    "cli_apple_to_apple_connection_plan_keeps_apple_native_channels",
     "cli_windows_same_lan_selects_msquic",
     "cli_windows_to_apple_selects_webrtc_interop",
     "cli_transport_bind_reports_binding_digest",
@@ -69,8 +86,23 @@ foreach ($signal in @(
     Assert-True -Condition ($cliSmoke.Contains($signal)) -Message "CLI smoke coverage missing signal: $signal"
 }
 
+foreach ($signal in @(
+    "ffi_connection_plan_keeps_apple_to_apple_native",
+    "SkybridgeTransportKind::AppleNative",
+    "SkybridgeTransportAuditCode::AppleNativeDefault",
+    "SkybridgeAdapterBindingKind::AppleStream",
+    "SkybridgeAdapterBindingKind::AppleDatagram"
+)) {
+    Assert-True -Condition ($ffiLifecycle.Contains($signal)) -Message "FFI Apple-native coverage missing signal: $signal"
+}
+
 Push-Location $coreRoot
 try {
+    & cargo build --lib
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "cargo build --lib failed."
+    $nativeLibraryPath = Join-Path (Join-Path $coreRoot "target/debug") (Get-NativeLibraryFileName)
+    Assert-True -Condition (Test-Path -LiteralPath $nativeLibraryPath) -Message "Missing native skybridge_core library after cargo build --lib: $nativeLibraryPath"
+
     & cargo test
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "cargo test failed."
 
