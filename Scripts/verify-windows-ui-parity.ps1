@@ -319,9 +319,20 @@ foreach ($commandGateSmokeSignal in @(
     "WorkspaceActionSurface.SessionControls",
     "WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal",
     "WorkspaceActionCommandId.Connect",
+    "WorkspaceActionCommandId.Disconnect",
+    "WorkspaceActionCommandId.Heartbeat",
     "WorkspaceActionGateId.CanConnect",
+    "WorkspaceActionGateId.CanDisconnect",
+    "WorkspaceActionGateId.CanSendHeartbeat",
     "preflight-only manual-final Connect",
-    "live manual-final Connect"
+    "live manual-final Connect",
+    "connected WorkspaceCommandAvailability.Disconnect",
+    "connected WorkspaceCommandAvailability.Heartbeat",
+    "connected session control Heartbeat",
+    "connected session control Disconnect",
+    "reconnecting WorkspaceCommandAvailability.Disconnect",
+    "reconnecting session control Heartbeat",
+    "reconnecting session control Disconnect"
 )) {
     Assert-Contains -Text $commandGateSmoke -Needle $commandGateSmokeSignal -Message "Windows command gate smoke missing signal: $commandGateSmokeSignal"
 }

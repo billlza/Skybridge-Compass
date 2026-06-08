@@ -135,14 +135,93 @@ AssertResolvedConnect(
     true,
     "live manual-final Connect");
 
+var connectedState = BuildCommandState(liveReady: true, connectionState: EngineConnectionState.Connected);
+var connectedAvailability = new WorkspaceCommandAvailability(coordinator, () => connectedState);
+AssertEqual(false, connectedAvailability.CanConnect(), "connected WorkspaceCommandAvailability.Connect");
+AssertEqual(true, connectedAvailability.CanDisconnect(), "connected WorkspaceCommandAvailability.Disconnect");
+AssertEqual(true, connectedAvailability.CanSendHeartbeat(), "connected WorkspaceCommandAvailability.Heartbeat");
+var connectedGates = coordinator.BuildActionGateSnapshot(connectedState);
+AssertEqual(false, connectedGates.CanConnect, "connected action gate Connect");
+AssertEqual(true, connectedGates.CanDisconnect, "connected action gate Disconnect");
+AssertEqual(true, connectedGates.CanSendHeartbeat, "connected action gate Heartbeat");
+AssertResolvedAction(
+    catalog,
+    details,
+    connectedGates,
+    WorkspaceActionSurface.SidebarSession,
+    "Connect",
+    WorkspaceActionCommandId.Connect,
+    WorkspaceActionGateId.CanConnect,
+    false,
+    "connected sidebar Connect");
+AssertResolvedAction(
+    catalog,
+    details,
+    connectedGates,
+    WorkspaceActionSurface.SidebarSession,
+    "Disconnect",
+    WorkspaceActionCommandId.Disconnect,
+    WorkspaceActionGateId.CanDisconnect,
+    true,
+    "connected sidebar Disconnect");
+AssertResolvedAction(
+    catalog,
+    details,
+    connectedGates,
+    WorkspaceActionSurface.SessionControls,
+    "Heartbeat",
+    WorkspaceActionCommandId.Heartbeat,
+    WorkspaceActionGateId.CanSendHeartbeat,
+    true,
+    "connected session control Heartbeat");
+AssertResolvedAction(
+    catalog,
+    details,
+    connectedGates,
+    WorkspaceActionSurface.SessionControls,
+    "Disconnect",
+    WorkspaceActionCommandId.Disconnect,
+    WorkspaceActionGateId.CanDisconnect,
+    true,
+    "connected session control Disconnect");
+
+var reconnectingState = BuildCommandState(liveReady: true, connectionState: EngineConnectionState.Reconnecting);
+var reconnectingAvailability = new WorkspaceCommandAvailability(coordinator, () => reconnectingState);
+AssertEqual(false, reconnectingAvailability.CanConnect(), "reconnecting WorkspaceCommandAvailability.Connect");
+AssertEqual(true, reconnectingAvailability.CanDisconnect(), "reconnecting WorkspaceCommandAvailability.Disconnect");
+AssertEqual(false, reconnectingAvailability.CanSendHeartbeat(), "reconnecting WorkspaceCommandAvailability.Heartbeat");
+var reconnectingGates = coordinator.BuildActionGateSnapshot(reconnectingState);
+AssertResolvedAction(
+    catalog,
+    details,
+    reconnectingGates,
+    WorkspaceActionSurface.SessionControls,
+    "Heartbeat",
+    WorkspaceActionCommandId.Heartbeat,
+    WorkspaceActionGateId.CanSendHeartbeat,
+    false,
+    "reconnecting session control Heartbeat");
+AssertResolvedAction(
+    catalog,
+    details,
+    reconnectingGates,
+    WorkspaceActionSurface.SessionControls,
+    "Disconnect",
+    WorkspaceActionCommandId.Disconnect,
+    WorkspaceActionGateId.CanDisconnect,
+    true,
+    "reconnecting session control Disconnect");
+
 Console.WriteLine("windows-command-gates: ok");
 
-WorkspaceCommandGateState BuildCommandState(bool liveReady)
+WorkspaceCommandGateState BuildCommandState(
+    bool liveReady,
+    EngineConnectionState connectionState = EngineConnectionState.Disconnected)
 {
     var selectedFeature = FeatureCatalogClient.Entries.Single(entry => entry.Id == FeatureEntryId.DeviceDiscovery);
     return new WorkspaceCommandGateState(
         IsBusy: false,
-        EngineConnectionState.Disconnected,
+        connectionState,
         selectedFeature,
         "192.0.2.10",
         "11550",
@@ -237,6 +316,27 @@ void AssertResolvedConnect(
     var action = snapshot.Actions.Single(item => item.Key == key);
     AssertEqual(WorkspaceActionCommandId.Connect, action.CommandId, label + " command id");
     AssertEqual(WorkspaceActionGateId.CanConnect, action.GateId, label + " gate id");
+    AssertEqual(expectedEnabled, action.IsEnabled, label + " enabled");
+}
+
+void AssertResolvedAction(
+    WorkspaceActionCatalogClient catalog,
+    WorkspaceActionDetailSnapshot details,
+    WorkspaceActionGateSnapshot gates,
+    WorkspaceActionSurface surface,
+    string key,
+    WorkspaceActionCommandId expectedCommand,
+    WorkspaceActionGateId expectedGate,
+    bool expectedEnabled,
+    string label)
+{
+    var snapshot = catalog.BuildResolvedSnapshot(
+        new WorkspaceActionCatalogRequest(surface),
+        gates,
+        details);
+    var action = snapshot.Actions.Single(item => item.Key == key);
+    AssertEqual(expectedCommand, action.CommandId, label + " command id");
+    AssertEqual(expectedGate, action.GateId, label + " gate id");
     AssertEqual(expectedEnabled, action.IsEnabled, label + " enabled");
 }
 
