@@ -662,7 +662,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Export",
                 "\uE74E",
                 true,
-                "Visible mac-parity settings action; fail-closed command does not export preferences.",
+                "Visible mac-parity settings action; prepares an in-memory export preview without writing preference files.",
                 CommandId: WorkspaceActionCommandId.ExportSettings,
                 GateId: WorkspaceActionGateId.CanExportSettings),
             new(

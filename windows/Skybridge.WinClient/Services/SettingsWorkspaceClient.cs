@@ -67,18 +67,72 @@ public interface ISettingsWorkspaceClient
     Task<SettingsWorkspaceActionResult> BuildResetMonitorDataActionAsync();
 }
 
+public interface ISettingsExportPreviewClient
+{
+    bool CanExportSettings();
+
+    SettingsExportPreviewSnapshot CaptureSnapshot();
+
+    SettingsWorkspaceActionResult BuildExportPreview();
+}
+
+public sealed class InMemorySettingsExportPreviewClient : ISettingsExportPreviewClient
+{
+    private readonly object _sync = new();
+    private int _nextPreviewId;
+    private string? _latestPreviewId;
+    private DateTimeOffset? _latestPreviewAt;
+
+    public bool CanExportSettings() => true;
+
+    public SettingsExportPreviewSnapshot CaptureSnapshot()
+    {
+        lock (_sync)
+        {
+            return new SettingsExportPreviewSnapshot(
+                _latestPreviewId is not null,
+                _latestPreviewId,
+                _latestPreviewAt,
+                _nextPreviewId);
+        }
+    }
+
+    public SettingsWorkspaceActionResult BuildExportPreview()
+    {
+        string previewId;
+        lock (_sync)
+        {
+            _nextPreviewId++;
+            previewId = $"SET-{_nextPreviewId:0000}";
+            _latestPreviewId = previewId;
+            _latestPreviewAt = DateTimeOffset.UtcNow;
+        }
+
+        return SettingsWorkspaceClient.BuildExportPreviewReadyActionResult(previewId);
+    }
+}
+
 public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 {
+    private readonly ISettingsExportPreviewClient _exportPreviewClient;
     private readonly ISystemPreferencesLauncher _systemPreferencesLauncher;
 
     public SettingsWorkspaceClient()
-        : this(new DisabledSystemPreferencesLauncher())
+        : this(new DisabledSystemPreferencesLauncher(), new InMemorySettingsExportPreviewClient())
     {
     }
 
     public SettingsWorkspaceClient(ISystemPreferencesLauncher systemPreferencesLauncher)
+        : this(systemPreferencesLauncher, new InMemorySettingsExportPreviewClient())
+    {
+    }
+
+    public SettingsWorkspaceClient(
+        ISystemPreferencesLauncher systemPreferencesLauncher,
+        ISettingsExportPreviewClient exportPreviewClient)
     {
         _systemPreferencesLauncher = systemPreferencesLauncher ?? throw new ArgumentNullException(nameof(systemPreferencesLauncher));
+        _exportPreviewClient = exportPreviewClient ?? throw new ArgumentNullException(nameof(exportPreviewClient));
     }
 
     public string BuildInitialStatus() => DefaultInitialStatus;
@@ -90,7 +144,7 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
 
-    public bool CanExportSettings() => false;
+    public bool CanExportSettings() => _exportPreviewClient.CanExportSettings();
 
     public bool CanImportSettings() => false;
 
@@ -146,6 +200,8 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 
     public static string DefaultExportSettingsBlockedStatus { get; } = "Settings export unavailable";
 
+    public static string DefaultExportSettingsPreviewReadyStatus { get; } = "Settings export preview ready";
+
     public static string DefaultImportSettingsBlockedStatus { get; } = "Settings import unavailable";
 
     public static string DefaultResetSettingsBlockedStatus { get; } = "Settings reset unavailable";
@@ -162,6 +218,9 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 
     public static string DefaultExportSettingsBlockedMessage { get; } =
         "Settings export requires persisted preferences and an explicit user-selected destination.";
+
+    public static string DefaultExportSettingsPreviewReadyMessage { get; } =
+        "Settings export preview prepared in memory only; no file was written and no preference was changed.";
 
     public static string DefaultImportSettingsBlockedMessage { get; } =
         "Settings import requires file validation before writing preferences.";
@@ -197,6 +256,11 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
     public static SettingsWorkspaceActionResult BuildDefaultExportSettingsActionResult() =>
         new(DefaultExportSettingsBlockedStatus, DefaultExportSettingsBlockedMessage);
 
+    public static SettingsWorkspaceActionResult BuildExportPreviewReadyActionResult(string previewId) =>
+        new(
+            DefaultExportSettingsPreviewReadyStatus,
+            $"{DefaultExportSettingsPreviewReadyMessage} preview={NormalizeExportPreviewId(previewId)}");
+
     public static SettingsWorkspaceActionResult BuildDefaultImportSettingsActionResult() =>
         new(DefaultImportSettingsBlockedStatus, DefaultImportSettingsBlockedMessage);
 
@@ -220,15 +284,16 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 
     public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
+        var exportPreview = _exportPreviewClient.CaptureSnapshot();
         return Task.FromResult(new SettingsWorkspaceSnapshot(
             DateTimeOffset.UtcNow,
             BuildTabs(),
-            BuildActions(),
-            BuildDetails()));
+            BuildActions(exportPreview),
+            BuildDetails(exportPreview)));
     }
 
     public Task<SettingsWorkspaceActionResult> BuildExportSettingsActionAsync() =>
-        Task.FromResult(BuildDefaultExportSettingsActionResult());
+        Task.FromResult(_exportPreviewClient.BuildExportPreview());
 
     public Task<SettingsWorkspaceActionResult> BuildImportSettingsActionAsync() =>
         Task.FromResult(BuildDefaultImportSettingsActionResult());
@@ -264,10 +329,10 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
             new("Advanced", "PQC, diagnostics, logs, custom services")
         };
 
-    private static IReadOnlyList<SettingsActionItem> BuildActions() =>
+    private static IReadOnlyList<SettingsActionItem> BuildActions(SettingsExportPreviewSnapshot exportPreview) =>
         new List<SettingsActionItem>
         {
-            new("ExportSettings", "Export settings", "Disabled", "Only write a user-selected or temporary export file after persistence is wired."),
+            new("ExportSettings", "Export settings", exportPreview.HasPreview ? "Preview ready" : "Ready", BuildExportPreviewDetail(exportPreview)),
             new("ImportSettings", "Import settings", "Disabled", "Validate file format before writing preferences."),
             new("ResetSettings", "Reset settings", "Disabled", "Destructive reset requires confirmation and scoped defaults."),
             new("RefreshSettingsStatus", "Refresh Status", "Ready", "Read-only snapshot can be refreshed safely."),
@@ -280,11 +345,12 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
             new("ClearHistoryData", "Clear History Data", "Disabled", "History deletion must never run from toggle or refresh paths.")
         };
 
-    private static IReadOnlyList<SettingsDetailItem> BuildDetails() =>
+    private static IReadOnlyList<SettingsDetailItem> BuildDetails(SettingsExportPreviewSnapshot exportPreview) =>
         new List<SettingsDetailItem>
         {
             new("General", "Theme", "System", "Theme color and compact mode are visible but not persisted."),
             new("General", "Notifications", "Pending", "Notification permission request remains disabled."),
+            new("General", "Export preview", exportPreview.HasPreview ? NormalizeExportPreviewId(exportPreview.PreviewId) : "Ready", BuildExportPreviewDetail(exportPreview)),
             new("Network", "Transport policy", "Core-owned", "Transport selection remains in Rust Core contracts."),
             new("Network", "Relay policy", "Pending", "TURN/signaling credentials must not be hardcoded."),
             new("Devices", "USB provider", "Read-only", "USB Management currently scans removable storage only."),
@@ -332,6 +398,22 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
             new("Advanced", "PQC policy", "Strict/Core-owned", "Suite IDs and fallback policy remain in Rust Core."),
             new("Advanced", "Diagnostics", "Text gates", "UI parity and service boundary scripts are the current acceptance checks.")
         };
+
+    private static string BuildExportPreviewDetail(SettingsExportPreviewSnapshot exportPreview)
+    {
+        if (!exportPreview.HasPreview || !exportPreview.BuiltAt.HasValue)
+        {
+            return "Prepares a settings export preview in memory only; no destination file is opened or written.";
+        }
+
+        return $"preview={NormalizeExportPreviewId(exportPreview.PreviewId)}; built={exportPreview.BuiltAt.Value:HH:mm:ss} UTC; no file was written";
+    }
+
+    private static string NormalizeExportPreviewId(string? previewId)
+    {
+        var normalized = (previewId ?? "").Trim();
+        return normalized.Length == 0 ? "SET-0000" : normalized;
+    }
 }
 
 public sealed record SettingsWorkspaceSnapshot(
@@ -355,6 +437,12 @@ public sealed record SettingsDetailItem(
     string Label,
     string Value,
     string Detail);
+
+public sealed record SettingsExportPreviewSnapshot(
+    bool HasPreview,
+    string? PreviewId,
+    DateTimeOffset? BuiltAt,
+    int PreviewCount);
 
 public sealed record SettingsWorkspaceActionResult(
     string Status,

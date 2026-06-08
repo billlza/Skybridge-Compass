@@ -121,7 +121,17 @@ try
     AssertContains(shareQrIntent.Detail, "no transport or signaling session was started", "file transfer QR share intent detail should keep transport/signaling disabled.");
     AssertType<SettingsWorkspaceClient>(defaultDependencies.SettingsClient, "default settings client");
     AssertNestedType<DisabledSystemPreferencesLauncher>(defaultDependencies.SettingsClient, "_systemPreferencesLauncher", "default system preferences launcher");
+    AssertNestedType<InMemorySettingsExportPreviewClient>(defaultDependencies.SettingsClient, "_exportPreviewClient", "default settings export preview client");
+    AssertEqual(true, defaultDependencies.SettingsClient.CanExportSettings(), "default settings export gate");
+    AssertEqual(false, defaultDependencies.SettingsClient.CanImportSettings(), "default settings import gate");
+    AssertEqual(false, defaultDependencies.SettingsClient.CanResetSettings(), "default settings reset gate");
     AssertEqual(false, defaultDependencies.SettingsClient.CanOpenSystemPreferences(), "default system preferences gate");
+    var exportPreview = await defaultDependencies.SettingsClient.BuildExportSettingsActionAsync();
+    AssertEqual(SettingsWorkspaceClient.DefaultExportSettingsPreviewReadyStatus, exportPreview.Status, "settings export preview status");
+    AssertEqual($"{SettingsWorkspaceClient.DefaultExportSettingsPreviewReadyMessage} preview=SET-0001", exportPreview.Message, "settings export preview message");
+    var settingsSnapshot = await defaultDependencies.SettingsClient.BuildReadOnlySnapshotAsync();
+    AssertSettingsAction(settingsSnapshot, "ExportSettings", "Preview ready", "settings export preview action");
+    AssertSettingsDetail(settingsSnapshot, "General", "Export preview", "SET-0001", "settings export preview detail");
     AssertType<TopBarStatusClient>(defaultDependencies.TopBarStatusClient, "default top-bar status client");
     AssertEqual(true, defaultDependencies.TopBarStatusClient.CanOpenNotifications(), "default top-bar notifications gate");
     AssertEqual(true, defaultDependencies.TopBarStatusClient.CanToggleTheme(), "default top-bar theme gate");
@@ -401,6 +411,28 @@ static void AssertContains(string text, string expected, string label)
     {
         throw new InvalidOperationException($"{label}: expected to find '{expected}' in '{text}'.");
     }
+}
+
+static void AssertSettingsAction(SettingsWorkspaceSnapshot snapshot, string key, string state, string assertionLabel)
+{
+    var action = snapshot.Actions.FirstOrDefault(item => item.Key == key);
+    if (action is null)
+    {
+        throw new InvalidOperationException($"{assertionLabel}: missing settings action '{key}'.");
+    }
+
+    AssertEqual(state, action.State, assertionLabel);
+}
+
+static void AssertSettingsDetail(SettingsWorkspaceSnapshot snapshot, string section, string label, string value, string assertionLabel)
+{
+    var detail = snapshot.Details.FirstOrDefault(item => item.Section == section && item.Label == label);
+    if (detail is null)
+    {
+        throw new InvalidOperationException($"{assertionLabel}: missing settings detail '{section}/{label}'.");
+    }
+
+    AssertEqual(value, detail.Value, assertionLabel);
 }
 
 static void AssertIndicator(SystemMonitorWorkspaceSnapshot snapshot, string label, string state, string assertionLabel)
