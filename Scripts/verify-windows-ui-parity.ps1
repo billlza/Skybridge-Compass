@@ -464,6 +464,9 @@ foreach ($topBarSignal in @(
     "public interface ITopBarStatusClient",
     "public sealed class TopBarStatusClient : ITopBarStatusClient",
     "BuildReadOnlySnapshot",
+    "BuildDefaultStatusValue",
+    "DefaultNotificationsStatus",
+    "DefaultThemeStatus",
     "TopBarStatusRequest",
     "TopBarStatusSnapshot",
     "TopBarStatusItem",
@@ -488,6 +491,8 @@ foreach ($topBarSignal in @(
     "ResolveWorkspaceActionCommand",
     "ResolveEnabled",
     "ResolveDetail",
+    "_topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications)",
+    "_topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme)",
     "WorkspaceActionGateSnapshot",
     "WorkspaceActionDetailSnapshot",
     "new TopBarStatusClient()",
@@ -559,6 +564,15 @@ foreach ($topBarLabelLookup in @(
     'GetTopBarStatusValue(snapshot, "Theme"'
 )) {
     Assert-True -Condition (-not $sessionViewModel.Contains($topBarLabelLookup)) -Message "SessionViewModel must map top-bar scalar status by TopBarStatusSlot instead of display label: $topBarLabelLookup"
+}
+
+foreach ($viewModelTopBarDefaultLiteral in @(
+    '_topBarNotificationsStatus = "Off"',
+    '_topBarThemeStatus = "System"',
+    'TopBarStatusSlot.Notifications, "Off"',
+    'TopBarStatusSlot.Theme, "System"'
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelTopBarDefaultLiteral)) -Message "SessionViewModel must source top-bar default status values from TopBarStatusClient instead of literal: $viewModelTopBarDefaultLiteral"
 }
 
 foreach ($connectionStateSignal in @(
@@ -966,6 +980,8 @@ foreach ($profileCatalogSignal in @(
 }
 
 Assert-True -Condition (-not $sessionViewModel.Contains("Enum.GetValues")) -Message "SessionViewModel must not build Remote Desktop profile lists from local enum reflection."
+Assert-True -Condition (-not $sessionViewModel.Contains('_selectedBitrate = "Medium"')) -Message "SessionViewModel must source default bitrate profile from RemoteDesktopProfileCatalogClient."
+Assert-True -Condition (-not $sessionViewModel.Contains('_selectedFramerate = "Fps60"')) -Message "SessionViewModel must source default framerate profile from RemoteDesktopProfileCatalogClient."
 
 Assert-Ordered -Text $mainWindow -Context "Quantum diagnostics action order" -Needles @(
     '<TextBlock Text="Quantum / Core Diagnostics"',

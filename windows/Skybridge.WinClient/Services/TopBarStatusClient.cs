@@ -6,10 +6,16 @@ namespace Skybridge.WinClient.Services;
 public interface ITopBarStatusClient
 {
     TopBarStatusSnapshot BuildReadOnlySnapshot(TopBarStatusRequest request);
+
+    string BuildDefaultStatusValue(TopBarStatusSlot slot);
 }
 
 public sealed class TopBarStatusClient : ITopBarStatusClient
 {
+    public static string DefaultNotificationsStatus { get; } = "Off";
+
+    public static string DefaultThemeStatus { get; } = "System";
+
     public TopBarStatusSnapshot BuildReadOnlySnapshot(TopBarStatusRequest request) =>
         new(
             DateTimeOffset.UtcNow,
@@ -28,14 +34,22 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
                 new(
                     TopBarStatusSlot.Notifications,
                     "Notifications",
-                    "Off",
+                    BuildDefaultStatusValue(TopBarStatusSlot.Notifications),
                     "Visible mac-parity notification entry point; permission prompts remain disabled until Settings owns the explicit write."),
                 new(
                     TopBarStatusSlot.Theme,
                     "Theme",
-                    "System",
+                    BuildDefaultStatusValue(TopBarStatusSlot.Theme),
                     "Visible mac-parity theme entry point; persistence remains behind Settings.")
             });
+
+    public string BuildDefaultStatusValue(TopBarStatusSlot slot) =>
+        slot switch
+        {
+            TopBarStatusSlot.Notifications => DefaultNotificationsStatus,
+            TopBarStatusSlot.Theme => DefaultThemeStatus,
+            _ => ""
+        };
 }
 
 public enum TopBarStatusSlot

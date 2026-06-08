@@ -61,10 +61,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private string _performanceStatus = "Nominal";
     private string _topBarConnectionStatus = "Disconnected";
     private string _topBarDiagnosticsStatus = "Nominal";
-    private string _topBarNotificationsStatus = "Off";
-    private string _topBarThemeStatus = "System";
-    private string _selectedBitrate = "Medium";
-    private string _selectedFramerate = "Fps60";
+    private string _topBarNotificationsStatus = "";
+    private string _topBarThemeStatus = "";
+    private string _selectedBitrate = "";
+    private string _selectedFramerate = "";
     private EngineConnectionState _connectionState;
     private FeatureEntry _selectedFeature;
     private DiscoveredPeer? _validatedDiscoveredPeer;
@@ -120,6 +120,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceErrorStatusClient = workspaceErrorStatusClient ?? new WorkspaceErrorStatusClient();
         _sessionStatusClient = sessionStatusClient ?? new SessionStatusClient();
         _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
+        _topBarNotificationsStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications);
+        _topBarThemeStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme);
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
         _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
         _manualConnectionPort = deviceDiscoveryInputDefaults.ManualConnectionPort;
@@ -1545,8 +1547,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         TopBarConnectionStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Connection, ConnectionStatus);
         TopBarDiagnosticsStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Diagnostics, PerformanceStatus);
-        TopBarNotificationsStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Notifications, "Off");
-        TopBarThemeStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Theme, "System");
+        TopBarNotificationsStatus = GetTopBarStatusValue(
+            snapshot,
+            TopBarStatusSlot.Notifications,
+            _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications));
+        TopBarThemeStatus = GetTopBarStatusValue(
+            snapshot,
+            TopBarStatusSlot.Theme,
+            _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme));
         LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
     }
 
