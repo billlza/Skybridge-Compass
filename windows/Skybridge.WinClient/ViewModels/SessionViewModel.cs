@@ -436,17 +436,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             BuildDashboardMetricsRequest,
             BuildWorkspaceActionRenderState,
             OnPropertyChanged,
-            new[]
-            {
-                nameof(IsDeviceDiscoverySelected),
-                nameof(IsUsbManagementSelected),
-                nameof(IsFileTransferSelected),
-                nameof(IsRemoteDesktopSelected),
-                nameof(IsQuantumSelected),
-                nameof(IsSystemMonitorSelected),
-                nameof(IsSettingsSelected)
-            },
-            nameof(ConnectionStatus));
+            WorkspaceShellNotificationCatalog.SelectedFeaturePropertyNames,
+            WorkspaceShellNotificationCatalog.ConnectionStatusPropertyName);
         LoadWorkspaceActions();
         RefreshDashboardMetrics();
         RefreshTopBarStatus();
