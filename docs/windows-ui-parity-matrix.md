@@ -52,7 +52,7 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | `DashboardQuickActions` | `ScanDevices`, `FileTransfer`, `SystemMonitor`, `Settings` |
 | `DeviceDiscoveryPrimary` | `ParseTxt`, `ValidatePairing`, `PrepareConnection` |
 | `DeviceDiscoveryScan` | `ExtendedSearch`, `ManualConnect`, `StartScan`, `StopScan`, `Refresh` |
-| `DeviceDiscoveryManualConnectFinal` | `Connect` |
+| `DeviceDiscoveryManualConnectFinal` | `Cancel`, `Connect` |
 | `CrossNetworkQr` | `GenerateQrCode`, `ScanQrCode` |
 | `CrossNetworkCodePrimary` | `GenerateCode`, `CopyCode`, `RegenerateCode` |
 | `CrossNetworkCodeConnect` | `ConnectWithCode` |

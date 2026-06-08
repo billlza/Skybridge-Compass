@@ -485,6 +485,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         RefreshDiscoveryCommand = commandBindings.RefreshDiscoveryCommand;
         RunExtendedDiscoveryCommand = commandBindings.RunExtendedDiscoveryCommand;
         PrepareManualConnectionCommand = commandBindings.PrepareManualConnectionCommand;
+        CancelManualConnectionCommand = commandBindings.CancelManualConnectionCommand;
         GenerateQRCodeCommand = commandBindings.GenerateQRCodeCommand;
         ScanQRCodeCommand = commandBindings.ScanQRCodeCommand;
         GenerateConnectionCodeCommand = commandBindings.GenerateConnectionCodeCommand;
@@ -1045,6 +1046,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RunExtendedDiscoveryCommand { get; }
 
     public ICommand PrepareManualConnectionCommand { get; }
+
+    public ICommand CancelManualConnectionCommand { get; }
 
     public ICommand GenerateQRCodeCommand { get; }
 

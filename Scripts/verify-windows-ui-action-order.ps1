@@ -152,7 +152,7 @@ AssertActionSurface(actionCatalog, WorkspaceActionSurface.SessionControls, new[]
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.DashboardQuickActions, new[] { "ScanDevices", "FileTransfer", "SystemMonitor", "Settings" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.DeviceDiscoveryPrimary, new[] { "ParseTxt", "ValidatePairing", "PrepareConnection" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.DeviceDiscoveryScan, new[] { "ExtendedSearch", "ManualConnect", "StartScan", "StopScan", "Refresh" });
-AssertActionSurface(actionCatalog, WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal, new[] { "Connect" });
+AssertActionSurface(actionCatalog, WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal, new[] { "Cancel", "Connect" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.CrossNetworkQr, new[] { "GenerateQrCode", "ScanQrCode" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.CrossNetworkCodePrimary, new[] { "GenerateCode", "CopyCode", "RegenerateCode" });
 AssertActionSurface(actionCatalog, WorkspaceActionSurface.CrossNetworkCodeConnect, new[] { "ConnectWithCode" });

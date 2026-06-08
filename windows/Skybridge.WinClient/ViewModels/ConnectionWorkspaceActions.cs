@@ -92,6 +92,13 @@ internal sealed class ConnectionWorkspaceActions
                 _setDiscoveryService);
         });
 
+    public Task CancelManualConnectionAsync() =>
+        RunAsync(() =>
+        {
+            _connectionInputCoordinator.ResetManualConnectionInput();
+            return Task.CompletedTask;
+        });
+
     public Task ParseAdvertisementAsync() =>
         RunAsync(async () =>
         {

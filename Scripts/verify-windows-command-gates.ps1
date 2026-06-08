@@ -113,6 +113,16 @@ var preflightOnlyAvailability = new WorkspaceCommandAvailability(coordinator, ()
 AssertEqual(false, preflightOnlyAvailability.CanConnect(), "preflight-only WorkspaceCommandAvailability.Connect");
 var preflightOnlyGates = coordinator.BuildActionGateSnapshot(preflightOnlyState);
 AssertEqual(false, preflightOnlyGates.CanConnect, "preflight-only action gate Connect");
+AssertResolvedAction(
+    catalog,
+    details,
+    preflightOnlyGates,
+    WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal,
+    "Cancel",
+    WorkspaceActionCommandId.CancelManualConnection,
+    WorkspaceActionGateId.CanUseDiscoveryBrowser,
+    true,
+    "preflight-only manual-final Cancel");
 AssertResolvedConnect(
     catalog,
     details,
@@ -143,6 +153,16 @@ var liveAvailability = new WorkspaceCommandAvailability(coordinator, () => liveS
 AssertEqual(true, liveAvailability.CanConnect(), "live WorkspaceCommandAvailability.Connect");
 var liveGates = coordinator.BuildActionGateSnapshot(liveState);
 AssertEqual(true, liveGates.CanConnect, "live action gate Connect");
+AssertResolvedAction(
+    catalog,
+    details,
+    liveGates,
+    WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal,
+    "Cancel",
+    WorkspaceActionCommandId.CancelManualConnection,
+    WorkspaceActionGateId.CanUseDiscoveryBrowser,
+    true,
+    "live manual-final Cancel");
 AssertResolvedConnect(
     catalog,
     details,

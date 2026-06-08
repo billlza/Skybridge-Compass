@@ -33,6 +33,7 @@ internal sealed class WorkspaceCommandBindings
         RefreshDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser);
         RunExtendedDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.RunExtendedSearchAsync, commandAvailability.CanUseDiscoveryBrowser);
         PrepareManualConnectionCommand = new AsyncRelayCommand(connectionWorkspaceActions.PrepareManualConnectionAsync, commandAvailability.CanPrepareManualConnection);
+        CancelManualConnectionCommand = new AsyncRelayCommand(connectionWorkspaceActions.CancelManualConnectionAsync, commandAvailability.CanUseDiscoveryBrowser);
         GenerateQRCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.GenerateQrCodeAsync, commandAvailability.CanUseCrossNetworkConnection);
         ScanQRCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.ScanQrCodeAsync, commandAvailability.CanScanQrCode);
         GenerateConnectionCodeCommand = new AsyncRelayCommand(crossNetworkConnectionActions.GenerateCodeAsync, commandAvailability.CanUseCrossNetworkConnection);
@@ -85,6 +86,7 @@ internal sealed class WorkspaceCommandBindings
             new(WorkspaceActionCommandId.RefreshDiscovery, RefreshDiscoveryCommand),
             new(WorkspaceActionCommandId.RunExtendedDiscovery, RunExtendedDiscoveryCommand),
             new(WorkspaceActionCommandId.PrepareManualConnection, PrepareManualConnectionCommand),
+            new(WorkspaceActionCommandId.CancelManualConnection, CancelManualConnectionCommand),
             new(WorkspaceActionCommandId.GenerateQrCode, GenerateQRCodeCommand),
             new(WorkspaceActionCommandId.ScanQrCode, ScanQRCodeCommand),
             new(WorkspaceActionCommandId.GenerateConnectionCode, GenerateConnectionCodeCommand),
@@ -150,6 +152,8 @@ internal sealed class WorkspaceCommandBindings
     public ICommand RunExtendedDiscoveryCommand { get; }
 
     public ICommand PrepareManualConnectionCommand { get; }
+
+    public ICommand CancelManualConnectionCommand { get; }
 
     public ICommand GenerateQRCodeCommand { get; }
 

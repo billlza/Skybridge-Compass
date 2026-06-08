@@ -564,7 +564,7 @@ $surfaceActions = @(
     [pscustomobject]@{ Surface = "DashboardQuickActions"; Method = "BuildDashboardQuickActions"; Keys = @('"ScanDevices"', '"FileTransfer"', '"SystemMonitor"', '"Settings"') },
     [pscustomobject]@{ Surface = "DeviceDiscoveryPrimary"; Method = "BuildDeviceDiscoveryPrimaryActions"; Keys = @('"ParseTxt"', '"ValidatePairing"', '"PrepareConnection"') },
     [pscustomobject]@{ Surface = "DeviceDiscoveryScan"; Method = "BuildDeviceDiscoveryScanActions"; Keys = @('"ExtendedSearch"', '"ManualConnect"', '"StartScan"', '"StopScan"', '"Refresh"') },
-    [pscustomobject]@{ Surface = "DeviceDiscoveryManualConnectFinal"; Method = "BuildDeviceDiscoveryManualConnectFinalActions"; Keys = @('"Connect"') },
+    [pscustomobject]@{ Surface = "DeviceDiscoveryManualConnectFinal"; Method = "BuildDeviceDiscoveryManualConnectFinalActions"; Keys = @('"Cancel"', '"Connect"') },
     [pscustomobject]@{ Surface = "CrossNetworkQr"; Method = "BuildCrossNetworkQrActions"; Keys = @('"GenerateQrCode"', '"ScanQrCode"') },
     [pscustomobject]@{ Surface = "CrossNetworkCodePrimary"; Method = "BuildCrossNetworkCodePrimaryActions"; Keys = @('"GenerateCode"', '"CopyCode"', '"RegenerateCode"') },
     [pscustomobject]@{ Surface = "CrossNetworkCodeConnect"; Method = "BuildCrossNetworkCodeConnectActions"; Keys = @('"ConnectWithCode"') },

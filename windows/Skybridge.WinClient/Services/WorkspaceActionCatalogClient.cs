@@ -377,6 +377,14 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
         new List<WorkspaceActionItem>
         {
             new(
+                "Cancel",
+                "Cancel",
+                "\uE711",
+                true,
+                "Mac-parity manual connection cancel action; clears prepared manual-target facts without starting transport.",
+                CommandId: WorkspaceActionCommandId.CancelManualConnection,
+                GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser),
+            new(
                 "Connect",
                 "Connect",
                 "\uE768",
@@ -763,6 +771,7 @@ public enum WorkspaceActionCommandId
     PrepareConnection,
     RunExtendedDiscovery,
     PrepareManualConnection,
+    CancelManualConnection,
     StartDiscovery,
     StopDiscovery,
     RefreshDiscovery,

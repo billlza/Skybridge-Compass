@@ -732,6 +732,7 @@ foreach ($commandBindingsSignal in @(
     "new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser)",
     "new AsyncRelayCommand(discoveryBrowserActions.RunExtendedSearchAsync, commandAvailability.CanUseDiscoveryBrowser)",
     "new AsyncRelayCommand(connectionWorkspaceActions.PrepareManualConnectionAsync, commandAvailability.CanPrepareManualConnection)",
+    "new AsyncRelayCommand(connectionWorkspaceActions.CancelManualConnectionAsync, commandAvailability.CanUseDiscoveryBrowser)",
     "new AsyncRelayCommand(crossNetworkConnectionActions.GenerateQrCodeAsync, commandAvailability.CanUseCrossNetworkConnection)",
     "new AsyncRelayCommand(crossNetworkConnectionActions.ScanQrCodeAsync, commandAvailability.CanScanQrCode)",
     "new AsyncRelayCommand(crossNetworkConnectionActions.GenerateCodeAsync, commandAvailability.CanUseCrossNetworkConnection)",
@@ -933,11 +934,11 @@ foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferComman
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenTopBarNotificationsCommand", "ToggleTopBarThemeCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenTopBarNotificationsCommand", "ToggleTopBarThemeCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "CancelManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
 }
 
-foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenTopBarNotificationsCommand", "ToggleTopBarThemeCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
+foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenTopBarNotificationsCommand", "ToggleTopBarThemeCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "CancelManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
     Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
 
@@ -1951,6 +1952,7 @@ foreach ($sessionViewModelDirectCommandDelegateSignal in @(
     "_workspaceCommandAvailability.CanToggleTopBarTheme,",
     "_discoveryBrowserActions.StartAsync,",
     "_connectionWorkspaceActions.PrepareManualConnectionAsync,",
+    "_connectionWorkspaceActions.CancelManualConnectionAsync,",
     "_crossNetworkConnectionActions.GenerateQrCodeAsync,",
     "_fileTransferWorkspaceActions.SelectFilesAsync,",
     "_fileTransferWorkspaceActions.SelectFolderAsync,",
@@ -2104,6 +2106,7 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionCommandId.OpenSystemMonitor",
     "WorkspaceActionCommandId.OpenSettings",
     "WorkspaceActionCommandId.ParseTxt",
+    "WorkspaceActionCommandId.CancelManualConnection",
     "WorkspaceActionCommandId.SelectFileTransferFiles",
     "WorkspaceActionCommandId.SelectFileTransferFolder",
     "WorkspaceActionCommandId.GenerateFileTransferQr",
@@ -2165,6 +2168,7 @@ foreach ($workspaceActionRoleSignal in @(
     "GateId: WorkspaceActionGateId.CanPrepareConnection",
     "GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser",
     "GateId: WorkspaceActionGateId.CanPrepareManualConnection",
+    "CommandId: WorkspaceActionCommandId.CancelManualConnection",
     "GateId: WorkspaceActionGateId.CanUseCrossNetworkConnection",
     "GateId: WorkspaceActionGateId.CanScanQrCode",
     "GateId: WorkspaceActionGateId.CanCopyConnectionCode",
@@ -2500,6 +2504,12 @@ foreach ($inputResetSignal in @(
     "_inputCoordinator.InvalidatePairingAndPreflight"
 )) {
     Assert-Contains -Text $workspaceInputChangeRouter -Needle $inputResetSignal -Message "WorkspaceInputChangeRouter reset path must call input coordinator: $inputResetSignal"
+}
+foreach ($manualCancelSignal in @(
+    "CancelManualConnectionAsync()",
+    "_connectionInputCoordinator.ResetManualConnectionInput()"
+)) {
+    Assert-Contains -Text $connectionWorkspaceActions -Needle $manualCancelSignal -Message "ConnectionWorkspaceActions manual cancel contract missing: $manualCancelSignal"
 }
 foreach ($sessionViewModelDirectInputResetSignal in @(
     "_connectionInputCoordinator.ResetManualConnectionInput",
@@ -3385,6 +3395,13 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Device Discovery scan act
     '"Refresh"'
 )
 
+Assert-Ordered -Text $workspaceActionCatalog -Context "Device Discovery manual final action catalog order" -Needles @(
+    '"Cancel"',
+    '"Cancel"',
+    '"Connect"',
+    '"Connect"'
+)
+
 Assert-Ordered -Text $workspaceActionCatalog -Context "Cross-network QR action catalog order" -Needles @(
     '"GenerateQrCode"',
     '"Generate QR Code"',
@@ -3634,6 +3651,7 @@ foreach ($discoverySignal in @(
     "11550",
     "Code",
     "Manual Connect",
+    "Cancel",
     "ManualConnectionClient",
     "ManualConnectionFactView",
     "Manual connection port must be between 1 and 65535",
