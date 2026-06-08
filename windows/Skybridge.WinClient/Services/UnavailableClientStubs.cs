@@ -309,8 +309,72 @@ internal sealed class UnavailableSettingsWorkspaceClient : ISettingsWorkspaceCli
     public string BuildCompletedStatusMessage() =>
         SettingsWorkspaceClient.DefaultCompletedStatusMessage;
 
+    public bool CanExportSettings() => false;
+
+    public bool CanImportSettings() => false;
+
+    public bool CanResetSettings() => false;
+
+    public bool CanRequestPermission() => false;
+
+    public bool CanOpenSystemPreferences() => false;
+
+    public bool CanApplySettings() => false;
+
+    public bool CanRestoreDefaults() => false;
+
+    public bool CanResetMonitorData() => false;
+
+    public string BuildExportSettingsPendingStatus() =>
+        SettingsWorkspaceClient.DefaultExportSettingsPendingStatus;
+
+    public string BuildImportSettingsPendingStatus() =>
+        SettingsWorkspaceClient.DefaultImportSettingsPendingStatus;
+
+    public string BuildResetSettingsPendingStatus() =>
+        SettingsWorkspaceClient.DefaultResetSettingsPendingStatus;
+
+    public string BuildPermissionRequestPendingStatus() =>
+        SettingsWorkspaceClient.DefaultPermissionRequestPendingStatus;
+
+    public string BuildSystemPreferencesPendingStatus() =>
+        SettingsWorkspaceClient.DefaultSystemPreferencesPendingStatus;
+
+    public string BuildApplySettingsPendingStatus() =>
+        SettingsWorkspaceClient.DefaultApplySettingsPendingStatus;
+
+    public string BuildRestoreDefaultsPendingStatus() =>
+        SettingsWorkspaceClient.DefaultRestoreDefaultsPendingStatus;
+
+    public string BuildResetMonitorDataPendingStatus() =>
+        SettingsWorkspaceClient.DefaultResetMonitorDataPendingStatus;
+
     public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("Settings workspace client is not configured.");
     }
+
+    public Task<SettingsWorkspaceActionResult> BuildExportSettingsActionAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultExportSettingsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildImportSettingsActionAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultImportSettingsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildResetSettingsActionAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultResetSettingsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildPermissionRequestActionAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultPermissionRequestActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildSystemPreferencesActionAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultSystemPreferencesActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildApplySettingsActionAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultApplySettingsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildRestoreDefaultsActionAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultRestoreDefaultsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildResetMonitorDataActionAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultResetMonitorDataActionResult());
 }

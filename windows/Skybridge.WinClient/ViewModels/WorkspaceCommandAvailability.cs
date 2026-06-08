@@ -77,5 +77,21 @@ internal sealed class WorkspaceCommandAvailability
 
     public bool CanRefreshSettings() => _coordinator.CanRefreshSettings(BuildState());
 
+    public bool CanExportSettings() => _coordinator.CanExportSettings(BuildState());
+
+    public bool CanImportSettings() => _coordinator.CanImportSettings(BuildState());
+
+    public bool CanResetSettings() => _coordinator.CanResetSettings(BuildState());
+
+    public bool CanRequestSettingsPermission() => _coordinator.CanRequestSettingsPermission(BuildState());
+
+    public bool CanOpenSystemPreferences() => _coordinator.CanOpenSystemPreferences(BuildState());
+
+    public bool CanApplySettings() => _coordinator.CanApplySettings(BuildState());
+
+    public bool CanRestoreDefaults() => _coordinator.CanRestoreDefaults(BuildState());
+
+    public bool CanResetMonitorData() => _coordinator.CanResetMonitorData(BuildState());
+
     private WorkspaceCommandGateState BuildState() => _buildState();
 }

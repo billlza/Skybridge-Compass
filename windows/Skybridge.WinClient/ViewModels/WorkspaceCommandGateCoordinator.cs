@@ -12,6 +12,7 @@ internal sealed class WorkspaceCommandGateCoordinator
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
     private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
     private readonly ISystemMonitorWorkspaceClient _systemMonitorClient;
+    private readonly ISettingsWorkspaceClient _settingsClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
@@ -25,6 +26,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         IFileTransferWorkspaceClient fileTransferClient,
         IRemoteDesktopWorkspaceClient remoteDesktopClient,
         ISystemMonitorWorkspaceClient systemMonitorClient,
+        ISettingsWorkspaceClient settingsClient,
         IDiscoveryClient discoveryClient,
         IPairingMaterialClient pairingMaterialClient,
         IConnectionWorkspaceStateClient connectionWorkspaceStateClient)
@@ -37,6 +39,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         _fileTransferClient = fileTransferClient;
         _remoteDesktopClient = remoteDesktopClient;
         _systemMonitorClient = systemMonitorClient;
+        _settingsClient = settingsClient;
         _discoveryClient = discoveryClient;
         _pairingMaterialClient = pairingMaterialClient;
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient;
@@ -190,6 +193,46 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanRefreshSettings(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.Settings);
 
+    public bool CanExportSettings(WorkspaceCommandGateState state) =>
+        CanUseSettingsAction(
+            state,
+            _settingsClient.CanExportSettings());
+
+    public bool CanImportSettings(WorkspaceCommandGateState state) =>
+        CanUseSettingsAction(
+            state,
+            _settingsClient.CanImportSettings());
+
+    public bool CanResetSettings(WorkspaceCommandGateState state) =>
+        CanUseSettingsAction(
+            state,
+            _settingsClient.CanResetSettings());
+
+    public bool CanRequestSettingsPermission(WorkspaceCommandGateState state) =>
+        CanUseSettingsAction(
+            state,
+            _settingsClient.CanRequestPermission());
+
+    public bool CanOpenSystemPreferences(WorkspaceCommandGateState state) =>
+        CanUseSettingsAction(
+            state,
+            _settingsClient.CanOpenSystemPreferences());
+
+    public bool CanApplySettings(WorkspaceCommandGateState state) =>
+        CanUseSettingsAction(
+            state,
+            _settingsClient.CanApplySettings());
+
+    public bool CanRestoreDefaults(WorkspaceCommandGateState state) =>
+        CanUseSettingsAction(
+            state,
+            _settingsClient.CanRestoreDefaults());
+
+    public bool CanResetMonitorData(WorkspaceCommandGateState state) =>
+        CanUseSettingsAction(
+            state,
+            _settingsClient.CanResetMonitorData());
+
     public WorkspaceActionGateSnapshot BuildActionGateSnapshot(
         WorkspaceCommandGateState state)
     {
@@ -232,7 +275,15 @@ internal sealed class WorkspaceCommandGateCoordinator
                 CanDisconnectRemoteDesktopSession(state),
                 CanStartSystemMonitoring(state),
                 CanStopSystemMonitoring(state),
-                CanEnableAdvancedSystemMonitoring(state)));
+                CanEnableAdvancedSystemMonitoring(state),
+                CanExportSettings(state),
+                CanImportSettings(state),
+                CanResetSettings(state),
+                CanRequestSettingsPermission(state),
+                CanOpenSystemPreferences(state),
+                CanApplySettings(state),
+                CanRestoreDefaults(state),
+                CanResetMonitorData(state)));
     }
 
     private bool CanUseDeviceDiscoveryAction(
@@ -273,6 +324,14 @@ internal sealed class WorkspaceCommandGateCoordinator
         _workspaceCommandStateClient.CanUseSystemMonitorAction(
             state.IsBusy,
             IsFeatureSelected(state.SelectedFeature, FeatureEntryId.SystemMonitor),
+            readiness);
+
+    private bool CanUseSettingsAction(
+        WorkspaceCommandGateState state,
+        bool readiness) =>
+        _workspaceCommandStateClient.CanUseSettingsAction(
+            state.IsBusy,
+            IsFeatureSelected(state.SelectedFeature, FeatureEntryId.Settings),
             readiness);
 
     private bool CanUseSelectedWorkspaceFeature(

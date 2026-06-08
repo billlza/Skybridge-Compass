@@ -15,6 +15,7 @@ internal sealed class WorkspaceCommandBindings
         FileTransferWorkspaceActions fileTransferWorkspaceActions,
         RemoteDesktopWorkspaceActions remoteDesktopWorkspaceActions,
         SystemMonitorWorkspaceActions systemMonitorWorkspaceActions,
+        SettingsWorkspaceActions settingsWorkspaceActions,
         WorkspaceCommandAvailability commandAvailability)
     {
         ConnectCommand = new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect);
@@ -57,6 +58,14 @@ internal sealed class WorkspaceCommandBindings
         EnableAdvancedSystemMonitoringCommand = new AsyncRelayCommand(systemMonitorWorkspaceActions.EnableAdvancedMonitoringAsync, commandAvailability.CanEnableAdvancedSystemMonitoring);
         RefreshUsbManagementCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync, commandAvailability.CanRefreshUsbManagement);
         RefreshSettingsCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSettingsAsync, commandAvailability.CanRefreshSettings);
+        ExportSettingsCommand = new AsyncRelayCommand(settingsWorkspaceActions.ExportSettingsAsync, commandAvailability.CanExportSettings);
+        ImportSettingsCommand = new AsyncRelayCommand(settingsWorkspaceActions.ImportSettingsAsync, commandAvailability.CanImportSettings);
+        ResetSettingsCommand = new AsyncRelayCommand(settingsWorkspaceActions.ResetSettingsAsync, commandAvailability.CanResetSettings);
+        RequestSettingsPermissionCommand = new AsyncRelayCommand(settingsWorkspaceActions.RequestPermissionAsync, commandAvailability.CanRequestSettingsPermission);
+        OpenSystemPreferencesCommand = new AsyncRelayCommand(settingsWorkspaceActions.OpenSystemPreferencesAsync, commandAvailability.CanOpenSystemPreferences);
+        ApplySettingsCommand = new AsyncRelayCommand(settingsWorkspaceActions.ApplySettingsAsync, commandAvailability.CanApplySettings);
+        RestoreDefaultsCommand = new AsyncRelayCommand(settingsWorkspaceActions.RestoreDefaultsAsync, commandAvailability.CanRestoreDefaults);
+        ResetMonitorDataCommand = new AsyncRelayCommand(settingsWorkspaceActions.ResetMonitorDataAsync, commandAvailability.CanResetMonitorData);
 
         Registry = WorkspaceCommandRegistry.Create(
             new(WorkspaceActionCommandId.Connect, ConnectCommand),
@@ -98,7 +107,15 @@ internal sealed class WorkspaceCommandBindings
             new(WorkspaceActionCommandId.StopSystemMonitoring, StopSystemMonitoringCommand),
             new(WorkspaceActionCommandId.EnableAdvancedSystemMonitoring, EnableAdvancedSystemMonitoringCommand),
             new(WorkspaceActionCommandId.RefreshUsbManagement, RefreshUsbManagementCommand),
-            new(WorkspaceActionCommandId.RefreshSettings, RefreshSettingsCommand));
+            new(WorkspaceActionCommandId.RefreshSettings, RefreshSettingsCommand),
+            new(WorkspaceActionCommandId.ExportSettings, ExportSettingsCommand),
+            new(WorkspaceActionCommandId.ImportSettings, ImportSettingsCommand),
+            new(WorkspaceActionCommandId.ResetSettings, ResetSettingsCommand),
+            new(WorkspaceActionCommandId.RequestSettingsPermission, RequestSettingsPermissionCommand),
+            new(WorkspaceActionCommandId.OpenSystemPreferences, OpenSystemPreferencesCommand),
+            new(WorkspaceActionCommandId.ApplySettings, ApplySettingsCommand),
+            new(WorkspaceActionCommandId.RestoreDefaults, RestoreDefaultsCommand),
+            new(WorkspaceActionCommandId.ResetMonitorData, ResetMonitorDataCommand));
     }
 
     public ICommand ConnectCommand { get; }
@@ -180,6 +197,22 @@ internal sealed class WorkspaceCommandBindings
     public ICommand RefreshUsbManagementCommand { get; }
 
     public ICommand RefreshSettingsCommand { get; }
+
+    public ICommand ExportSettingsCommand { get; }
+
+    public ICommand ImportSettingsCommand { get; }
+
+    public ICommand ResetSettingsCommand { get; }
+
+    public ICommand RequestSettingsPermissionCommand { get; }
+
+    public ICommand OpenSystemPreferencesCommand { get; }
+
+    public ICommand ApplySettingsCommand { get; }
+
+    public ICommand RestoreDefaultsCommand { get; }
+
+    public ICommand ResetMonitorDataCommand { get; }
 
     public WorkspaceCommandRegistry Registry { get; }
 }

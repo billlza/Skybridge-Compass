@@ -165,6 +165,14 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             WorkspaceActionGateId.CanStopSystemMonitoring => gates.CanStopSystemMonitoring,
             WorkspaceActionGateId.CanEnableAdvancedSystemMonitoring => gates.CanEnableAdvancedSystemMonitoring,
             WorkspaceActionGateId.CanRefreshSettings => gates.CanRefreshSettings,
+            WorkspaceActionGateId.CanExportSettings => gates.CanExportSettings,
+            WorkspaceActionGateId.CanImportSettings => gates.CanImportSettings,
+            WorkspaceActionGateId.CanResetSettings => gates.CanResetSettings,
+            WorkspaceActionGateId.CanRequestSettingsPermission => gates.CanRequestSettingsPermission,
+            WorkspaceActionGateId.CanOpenSystemPreferences => gates.CanOpenSystemPreferences,
+            WorkspaceActionGateId.CanApplySettings => gates.CanApplySettings,
+            WorkspaceActionGateId.CanRestoreDefaults => gates.CanRestoreDefaults,
+            WorkspaceActionGateId.CanResetMonitorData => gates.CanResetMonitorData,
             _ => fallback
         };
 
@@ -635,32 +643,42 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "ExportSettings",
                 "Export",
                 "\uE74E",
-                false,
-                "Visible mac-parity settings action; exporting user preferences is pending."),
+                true,
+                "Visible mac-parity settings action; fail-closed command does not export preferences.",
+                CommandId: WorkspaceActionCommandId.ExportSettings,
+                GateId: WorkspaceActionGateId.CanExportSettings),
             new(
                 "ImportSettings",
                 "Import",
                 "\uE8B5",
-                false,
-                "Visible mac-parity settings action; importing preference files is pending validation."),
+                true,
+                "Visible mac-parity settings action; fail-closed command does not import preference files.",
+                CommandId: WorkspaceActionCommandId.ImportSettings,
+                GateId: WorkspaceActionGateId.CanImportSettings),
             new(
                 "ResetSettings",
                 "Reset",
                 "\uE72C",
-                false,
-                "Visible mac-parity settings action; destructive preference reset requires confirmation."),
+                true,
+                "Visible mac-parity settings action; fail-closed command does not reset preferences.",
+                CommandId: WorkspaceActionCommandId.ResetSettings,
+                GateId: WorkspaceActionGateId.CanResetSettings),
             new(
                 "RequestPermission",
                 "Request Permission",
                 "\uE72E",
-                false,
-                "Visible mac-parity settings action; permission prompts remain explicit high-risk writes."),
+                true,
+                "Visible mac-parity settings action; fail-closed command does not request permissions.",
+                CommandId: WorkspaceActionCommandId.RequestSettingsPermission,
+                GateId: WorkspaceActionGateId.CanRequestSettingsPermission),
             new(
                 "OpenSystemPreferences",
                 "Open System Preferences",
                 "\uE8A7",
-                false,
-                "Visible mac-parity settings action; Windows Settings deep links require explicit wiring.")
+                true,
+                "Visible mac-parity settings action; fail-closed command does not open Windows Settings.",
+                CommandId: WorkspaceActionCommandId.OpenSystemPreferences,
+                GateId: WorkspaceActionGateId.CanOpenSystemPreferences)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildSettingsMaintenanceActions() =>
@@ -670,20 +688,26 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "ApplySettings",
                 "Apply Settings",
                 "\uE930",
-                false,
-                "Visible mac-parity settings action; runtime preference application is pending."),
+                true,
+                "Visible mac-parity settings action; fail-closed command does not apply runtime preferences.",
+                CommandId: WorkspaceActionCommandId.ApplySettings,
+                GateId: WorkspaceActionGateId.CanApplySettings),
             new(
                 "RestoreDefaults",
                 "Restore Defaults",
                 "\uE777",
-                false,
-                "Visible mac-parity settings action; restoring defaults is a destructive preference write."),
+                true,
+                "Visible mac-parity settings action; fail-closed command does not restore defaults.",
+                CommandId: WorkspaceActionCommandId.RestoreDefaults,
+                GateId: WorkspaceActionGateId.CanRestoreDefaults),
             new(
                 "ResetMonitorData",
                 "Reset Monitor Data",
                 "\uE9D9",
-                false,
-                "Visible mac-parity settings action; monitor retention deletion requires confirmation.")
+                true,
+                "Visible mac-parity settings action; fail-closed command does not delete monitor retention data.",
+                CommandId: WorkspaceActionCommandId.ResetMonitorData,
+                GateId: WorkspaceActionGateId.CanResetMonitorData)
         };
 }
 
@@ -754,7 +778,15 @@ public enum WorkspaceActionCommandId
     StartSystemMonitoring,
     StopSystemMonitoring,
     EnableAdvancedSystemMonitoring,
-    RefreshSettings
+    RefreshSettings,
+    ExportSettings,
+    ImportSettings,
+    ResetSettings,
+    RequestSettingsPermission,
+    OpenSystemPreferences,
+    ApplySettings,
+    RestoreDefaults,
+    ResetMonitorData
 }
 
 public enum WorkspaceActionGateId
@@ -790,7 +822,15 @@ public enum WorkspaceActionGateId
     CanStartSystemMonitoring,
     CanStopSystemMonitoring,
     CanEnableAdvancedSystemMonitoring,
-    CanRefreshSettings
+    CanRefreshSettings,
+    CanExportSettings,
+    CanImportSettings,
+    CanResetSettings,
+    CanRequestSettingsPermission,
+    CanOpenSystemPreferences,
+    CanApplySettings,
+    CanRestoreDefaults,
+    CanResetMonitorData
 }
 
 public enum WorkspaceActionDetailSlot
@@ -839,7 +879,15 @@ public sealed record WorkspaceActionGateSnapshot(
     bool CanStartSystemMonitoring,
     bool CanStopSystemMonitoring,
     bool CanEnableAdvancedSystemMonitoring,
-    bool CanRefreshSettings);
+    bool CanRefreshSettings,
+    bool CanExportSettings,
+    bool CanImportSettings,
+    bool CanResetSettings,
+    bool CanRequestSettingsPermission,
+    bool CanOpenSystemPreferences,
+    bool CanApplySettings,
+    bool CanRestoreDefaults,
+    bool CanResetMonitorData);
 
 public sealed record WorkspaceActionDetailSnapshot(
     string TopBarNotificationsStatus,

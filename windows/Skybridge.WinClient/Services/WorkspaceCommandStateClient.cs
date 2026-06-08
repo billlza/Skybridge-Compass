@@ -31,6 +31,11 @@ public interface IWorkspaceCommandStateClient
         bool isSystemMonitorSelected,
         bool isActionReady);
 
+    bool CanUseSettingsAction(
+        bool isBusy,
+        bool isSettingsSelected,
+        bool isActionReady);
+
     bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected);
 
     WorkspaceActionGateSnapshot BuildActionGateSnapshot(WorkspaceCommandGateRequest request);
@@ -74,6 +79,12 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
         bool isActionReady) =>
         CanUseWorkspaceFeature(isBusy, isSystemMonitorSelected) && isActionReady;
 
+    public bool CanUseSettingsAction(
+        bool isBusy,
+        bool isSettingsSelected,
+        bool isActionReady) =>
+        CanUseWorkspaceFeature(isBusy, isSettingsSelected) && isActionReady;
+
     public bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected) =>
         !isBusy && isFeatureSelected;
 
@@ -109,7 +120,15 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
             request.CanStartSystemMonitoring,
             request.CanStopSystemMonitoring,
             request.CanEnableAdvancedSystemMonitoring,
-            CanUseWorkspaceFeature(request.IsBusy, request.IsSettingsSelected));
+            CanUseWorkspaceFeature(request.IsBusy, request.IsSettingsSelected),
+            request.CanExportSettings,
+            request.CanImportSettings,
+            request.CanResetSettings,
+            request.CanRequestSettingsPermission,
+            request.CanOpenSystemPreferences,
+            request.CanApplySettings,
+            request.CanRestoreDefaults,
+            request.CanResetMonitorData);
 }
 
 public sealed record WorkspaceCommandGateRequest(
@@ -142,4 +161,12 @@ public sealed record WorkspaceCommandGateRequest(
     bool CanDisconnectRemoteDesktopSession,
     bool CanStartSystemMonitoring,
     bool CanStopSystemMonitoring,
-    bool CanEnableAdvancedSystemMonitoring);
+    bool CanEnableAdvancedSystemMonitoring,
+    bool CanExportSettings,
+    bool CanImportSettings,
+    bool CanResetSettings,
+    bool CanRequestSettingsPermission,
+    bool CanOpenSystemPreferences,
+    bool CanApplySettings,
+    bool CanRestoreDefaults,
+    bool CanResetMonitorData);

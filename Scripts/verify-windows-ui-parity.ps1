@@ -122,6 +122,7 @@ $readOnlyWorkspaceRefreshActionsPath = Join-Path $RepoRoot "windows/Skybridge.Wi
 $fileTransferWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FileTransferWorkspaceActions.cs"
 $remoteDesktopWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/RemoteDesktopWorkspaceActions.cs"
 $systemMonitorWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SystemMonitorWorkspaceActions.cs"
+$settingsWorkspaceActionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SettingsWorkspaceActions.cs"
 $readOnlyWorkspaceSnapshotHandlersPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/ReadOnlyWorkspaceSnapshotHandlers.cs"
 $workspaceCountNotifierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCountNotifier.cs"
 $workspaceObservableCollectionsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceObservableCollections.cs"
@@ -169,7 +170,7 @@ $commandGateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-command-gate
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -208,6 +209,7 @@ $readOnlyWorkspaceRefreshActions = Get-Content -Raw -LiteralPath $readOnlyWorksp
 $fileTransferWorkspaceActions = Get-Content -Raw -LiteralPath $fileTransferWorkspaceActionsPath
 $remoteDesktopWorkspaceActions = Get-Content -Raw -LiteralPath $remoteDesktopWorkspaceActionsPath
 $systemMonitorWorkspaceActions = Get-Content -Raw -LiteralPath $systemMonitorWorkspaceActionsPath
+$settingsWorkspaceActions = Get-Content -Raw -LiteralPath $settingsWorkspaceActionsPath
 $readOnlyWorkspaceSnapshotHandlers = Get-Content -Raw -LiteralPath $readOnlyWorkspaceSnapshotHandlersPath
 $workspaceCountNotifier = Get-Content -Raw -LiteralPath $workspaceCountNotifierPath
 $workspaceObservableCollections = Get-Content -Raw -LiteralPath $workspaceObservableCollectionsPath
@@ -221,7 +223,7 @@ $connectionWorkspaceResultProjector = Get-Content -Raw -LiteralPath $connectionW
 $remoteDesktopProfileSelectionCoordinator = Get-Content -Raw -LiteralPath $remoteDesktopProfileSelectionCoordinatorPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
 $booleanToVisibilityConverter = Get-Content -Raw -LiteralPath $booleanToVisibilityConverterPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $dashboardNavigationActions + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceInputChangeRouter + $workspaceShellNotificationCatalog + $workspaceShellStateAccessor + $workspaceShellStateSource + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceDeferredRefreshAction + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $fileTransferWorkspaceActions + $remoteDesktopWorkspaceActions + $systemMonitorWorkspaceActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $sessionEngineActions + $sessionEngineStateProjector + $dashboardNavigationActions + $discoveryBrowserActions + $crossNetworkConnectionActions + $connectionWorkspaceActions + $workspaceItemViews + $workspaceCommandGateCoordinator + $workspaceCommandAvailability + $workspaceCommandBindings + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceActionSurfaceLoader + $workspaceActionRenderContextBuilder + $workspaceShellRefreshCoordinator + $workspaceInputChangeRouter + $workspaceShellNotificationCatalog + $workspaceShellStateAccessor + $workspaceShellStateSource + $workspaceViewStateBuilder + $workspaceStartupStateBuilder + $workspaceStatusPatchApplier + $workspaceBusyCoordinator + $workspaceDeferredRefreshAction + $readOnlyWorkspaceRefreshCoordinator + $readOnlyWorkspaceRefreshActions + $fileTransferWorkspaceActions + $remoteDesktopWorkspaceActions + $systemMonitorWorkspaceActions + $settingsWorkspaceActions + $readOnlyWorkspaceSnapshotHandlers + $workspaceCountNotifier + $workspaceObservableCollections + $workspaceCollectionProjector + $workspaceSnapshotApplier + $dashboardMetricsUpdater + $topBarStatusUpdater + $crossNetworkCodeInputCoordinator + $connectionWorkspaceInputCoordinator + $connectionWorkspaceResultProjector + $remoteDesktopProfileSelectionCoordinator
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $nativeDnsSdBrowse = Get-Content -Raw -LiteralPath $nativeDnsSdBrowsePath
@@ -331,6 +333,7 @@ foreach ($commandGateSmokeSignal in @(
     "WorkspaceActionGateId.CanDisconnect",
     "WorkspaceActionGateId.CanSendHeartbeat",
     "WorkspaceActionGateId.CanStartSystemMonitoring",
+    "WorkspaceActionGateId.CanExportSettings",
     "preflight-only manual-final Connect",
     "live manual-final Connect",
     "connected WorkspaceCommandAvailability.Disconnect",
@@ -341,7 +344,11 @@ foreach ($commandGateSmokeSignal in @(
     "reconnecting session control Heartbeat",
     "reconnecting session control Disconnect",
     "system monitor WorkspaceCommandAvailability.Monitoring",
-    "blocked system monitor WorkspaceCommandAvailability.Monitoring"
+    "blocked system monitor WorkspaceCommandAvailability.Monitoring",
+    "settings WorkspaceCommandAvailability.Export",
+    "blocked settings WorkspaceCommandAvailability.Export",
+    "settings Apply Settings",
+    "blocked settings Reset Monitor Data"
 )) {
     Assert-Contains -Text $commandGateSmoke -Needle $commandGateSmokeSignal -Message "Windows command gate smoke missing signal: $commandGateSmokeSignal"
 }
@@ -637,6 +644,7 @@ foreach ($commandBindingsSignal in @(
     "FileTransferWorkspaceActions fileTransferWorkspaceActions",
     "RemoteDesktopWorkspaceActions remoteDesktopWorkspaceActions",
     "SystemMonitorWorkspaceActions systemMonitorWorkspaceActions",
+    "SettingsWorkspaceActions settingsWorkspaceActions",
     "WorkspaceCommandAvailability commandAvailability",
     "new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect)",
     "new AsyncRelayCommand(sessionEngineActions.DisconnectAsync, commandAvailability.CanDisconnect)",
@@ -678,6 +686,14 @@ foreach ($commandBindingsSignal in @(
     "new AsyncRelayCommand(systemMonitorWorkspaceActions.EnableAdvancedMonitoringAsync, commandAvailability.CanEnableAdvancedSystemMonitoring)",
     "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync, commandAvailability.CanRefreshUsbManagement)",
     "new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSettingsAsync, commandAvailability.CanRefreshSettings)",
+    "new AsyncRelayCommand(settingsWorkspaceActions.ExportSettingsAsync, commandAvailability.CanExportSettings)",
+    "new AsyncRelayCommand(settingsWorkspaceActions.ImportSettingsAsync, commandAvailability.CanImportSettings)",
+    "new AsyncRelayCommand(settingsWorkspaceActions.ResetSettingsAsync, commandAvailability.CanResetSettings)",
+    "new AsyncRelayCommand(settingsWorkspaceActions.RequestPermissionAsync, commandAvailability.CanRequestSettingsPermission)",
+    "new AsyncRelayCommand(settingsWorkspaceActions.OpenSystemPreferencesAsync, commandAvailability.CanOpenSystemPreferences)",
+    "new AsyncRelayCommand(settingsWorkspaceActions.ApplySettingsAsync, commandAvailability.CanApplySettings)",
+    "new AsyncRelayCommand(settingsWorkspaceActions.RestoreDefaultsAsync, commandAvailability.CanRestoreDefaults)",
+    "new AsyncRelayCommand(settingsWorkspaceActions.ResetMonitorDataAsync, commandAvailability.CanResetMonitorData)",
     "Registry = WorkspaceCommandRegistry.Create(",
     "WorkspaceActionCommandId.Connect",
     "WorkspaceActionCommandId.OpenDeviceDiscovery",
@@ -698,6 +714,14 @@ foreach ($commandBindingsSignal in @(
     "WorkspaceActionCommandId.StopSystemMonitoring",
     "WorkspaceActionCommandId.EnableAdvancedSystemMonitoring",
     "WorkspaceActionCommandId.RefreshSettings",
+    "WorkspaceActionCommandId.ExportSettings",
+    "WorkspaceActionCommandId.ImportSettings",
+    "WorkspaceActionCommandId.ResetSettings",
+    "WorkspaceActionCommandId.RequestSettingsPermission",
+    "WorkspaceActionCommandId.OpenSystemPreferences",
+    "WorkspaceActionCommandId.ApplySettings",
+    "WorkspaceActionCommandId.RestoreDefaults",
+    "WorkspaceActionCommandId.ResetMonitorData",
     "public WorkspaceCommandRegistry Registry { get; }"
 )) {
     Assert-Contains -Text $workspaceCommandBindings -Needle $commandBindingsSignal -Message "WorkspaceCommandBindings contract missing: $commandBindingsSignal"
@@ -829,15 +853,15 @@ foreach ($dashboardScalar in @(
     Assert-Contains -Text ($sessionViewModel + $dashboardMetrics) -Needle $dashboardScalar -Message "Dashboard scalar status signal missing: $dashboardScalar"
 }
 
-foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "RunCoreDiagnosticsCommand")) {
+foreach ($command in @("RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand", "RunCoreDiagnosticsCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing command: $command"
 }
 
-foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand")) {
+foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
 }
 
-foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand")) {
+foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
     Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
 
@@ -1539,6 +1563,7 @@ foreach ($workspaceCommandStateSignal in @(
     "CanUseCrossNetworkConnection",
     "CanUseCrossNetworkConnectionAction",
     "CanUseSystemMonitorAction",
+    "CanUseSettingsAction",
     "CanUseWorkspaceFeature",
     "BuildActionGateSnapshot",
     "new WorkspaceCommandStateClient()",
@@ -1557,6 +1582,14 @@ foreach ($workspaceCommandStateSignal in @(
     "request.CanStartSystemMonitoring",
     "request.CanStopSystemMonitoring",
     "request.CanEnableAdvancedSystemMonitoring",
+    "request.CanExportSettings",
+    "request.CanImportSettings",
+    "request.CanResetSettings",
+    "request.CanRequestSettingsPermission",
+    "request.CanOpenSystemPreferences",
+    "request.CanApplySettings",
+    "request.CanRestoreDefaults",
+    "request.CanResetMonitorData",
     "commandAvailability.CanUseDiscoveryBrowser",
     "CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
@@ -1564,6 +1597,7 @@ foreach ($workspaceCommandStateSignal in @(
     "CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseSystemMonitorAction(",
+    "_workspaceCommandStateClient.CanUseSettingsAction(",
     "CanUseSelectedWorkspaceFeature(",
     "_workspaceCommandStateClient.CanUseWorkspaceFeature(",
     "_workspaceCommandStateClient.BuildActionGateSnapshot(",
@@ -1580,6 +1614,7 @@ foreach ($workspaceGateCoordinatorSignal in @(
     "IManualConnectionClient manualConnectionClient",
     "ICrossNetworkConnectionClient crossNetworkConnectionClient",
     "ISystemMonitorWorkspaceClient systemMonitorClient",
+    "ISettingsWorkspaceClient settingsClient",
     "IDiscoveryClient discoveryClient",
     "IPairingMaterialClient pairingMaterialClient",
     "IConnectionWorkspaceStateClient connectionWorkspaceStateClient",
@@ -1612,12 +1647,29 @@ foreach ($workspaceGateCoordinatorSignal in @(
     "CanStartSystemMonitoring(state)",
     "CanStopSystemMonitoring(state)",
     "CanEnableAdvancedSystemMonitoring(state)",
+    "CanExportSettings(state)",
+    "CanImportSettings(state)",
+    "CanResetSettings(state)",
+    "CanRequestSettingsPermission(state)",
+    "CanOpenSystemPreferences(state)",
+    "CanApplySettings(state)",
+    "CanRestoreDefaults(state)",
+    "CanResetMonitorData(state)",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseSystemMonitorAction(",
+    "_workspaceCommandStateClient.CanUseSettingsAction(",
     "_systemMonitorClient.CanStartMonitoring()",
     "_systemMonitorClient.CanStopMonitoring()",
     "_systemMonitorClient.CanEnableAdvancedMonitoring()",
+    "_settingsClient.CanExportSettings()",
+    "_settingsClient.CanImportSettings()",
+    "_settingsClient.CanResetSettings()",
+    "_settingsClient.CanRequestPermission()",
+    "_settingsClient.CanOpenSystemPreferences()",
+    "_settingsClient.CanApplySettings()",
+    "_settingsClient.CanRestoreDefaults()",
+    "_settingsClient.CanResetMonitorData()",
     "_workspaceCommandStateClient.CanUseWorkspaceFeature(",
     "internal sealed record WorkspaceCommandGateState("
 )) {
@@ -1659,7 +1711,15 @@ foreach ($workspaceCommandAvailabilitySignal in @(
     "_coordinator.CanStartSystemMonitoring(BuildState())",
     "_coordinator.CanStopSystemMonitoring(BuildState())",
     "_coordinator.CanEnableAdvancedSystemMonitoring(BuildState())",
-    "_coordinator.CanRefreshSettings(BuildState())"
+    "_coordinator.CanRefreshSettings(BuildState())",
+    "_coordinator.CanExportSettings(BuildState())",
+    "_coordinator.CanImportSettings(BuildState())",
+    "_coordinator.CanResetSettings(BuildState())",
+    "_coordinator.CanRequestSettingsPermission(BuildState())",
+    "_coordinator.CanOpenSystemPreferences(BuildState())",
+    "_coordinator.CanApplySettings(BuildState())",
+    "_coordinator.CanRestoreDefaults(BuildState())",
+    "_coordinator.CanResetMonitorData(BuildState())"
 )) {
     Assert-Contains -Text $workspaceCommandAvailability -Needle $workspaceCommandAvailabilitySignal -Message "WorkspaceCommandAvailability contract missing: $workspaceCommandAvailabilitySignal"
 }
@@ -1706,7 +1766,15 @@ foreach ($sessionViewModelForwardingGateWrapper in @(
     "private bool CanStartSystemMonitoring()",
     "private bool CanStopSystemMonitoring()",
     "private bool CanEnableAdvancedSystemMonitoring()",
-    "private bool CanRefreshSettings()"
+    "private bool CanRefreshSettings()",
+    "private bool CanExportSettings()",
+    "private bool CanImportSettings()",
+    "private bool CanResetSettings()",
+    "private bool CanRequestSettingsPermission()",
+    "private bool CanOpenSystemPreferences()",
+    "private bool CanApplySettings()",
+    "private bool CanRestoreDefaults()",
+    "private bool CanResetMonitorData()"
 )) {
     Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingGateWrapper)) -Message "SessionViewModel must pass WorkspaceCommandAvailability into WorkspaceCommandBindings instead of reintroducing forwarding command gate wrappers: $sessionViewModelForwardingGateWrapper"
 }
@@ -1747,7 +1815,15 @@ foreach ($sessionViewModelForwardingActionWrapper in @(
     "private Task StartSystemMonitoringAsync()",
     "private Task StopSystemMonitoringAsync()",
     "private Task EnableAdvancedSystemMonitoringAsync()",
-    "private Task RefreshSettingsAsync()"
+    "private Task RefreshSettingsAsync()",
+    "private Task ExportSettingsAsync()",
+    "private Task ImportSettingsAsync()",
+    "private Task ResetSettingsAsync()",
+    "private Task RequestSettingsPermissionAsync()",
+    "private Task OpenSystemPreferencesAsync()",
+    "private Task ApplySettingsAsync()",
+    "private Task RestoreDefaultsAsync()",
+    "private Task ResetMonitorDataAsync()"
 )) {
     Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingActionWrapper)) -Message "SessionViewModel must pass grouped action helpers into WorkspaceCommandBindings instead of reintroducing forwarding command action wrappers: $sessionViewModelForwardingActionWrapper"
 }
@@ -1775,6 +1851,14 @@ foreach ($sessionViewModelDirectCommandDelegateSignal in @(
     "_systemMonitorWorkspaceActions.StartMonitoringAsync,",
     "_systemMonitorWorkspaceActions.StopMonitoringAsync,",
     "_systemMonitorWorkspaceActions.EnableAdvancedMonitoringAsync,",
+    "_settingsWorkspaceActions.ExportSettingsAsync,",
+    "_settingsWorkspaceActions.ImportSettingsAsync,",
+    "_settingsWorkspaceActions.ResetSettingsAsync,",
+    "_settingsWorkspaceActions.RequestPermissionAsync,",
+    "_settingsWorkspaceActions.OpenSystemPreferencesAsync,",
+    "_settingsWorkspaceActions.ApplySettingsAsync,",
+    "_settingsWorkspaceActions.RestoreDefaultsAsync,",
+    "_settingsWorkspaceActions.ResetMonitorDataAsync,",
     "_readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync,"
 )) {
     Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelDirectCommandDelegateSignal)) -Message "SessionViewModel must pass grouped helpers to WorkspaceCommandBindings instead of per-command delegates: $sessionViewModelDirectCommandDelegateSignal"
@@ -1812,6 +1896,14 @@ foreach ($sessionViewModelDirectGateSignal in @(
     "_workspaceCommandGateCoordinator.CanStopSystemMonitoring(",
     "_workspaceCommandGateCoordinator.CanEnableAdvancedSystemMonitoring(",
     "_workspaceCommandGateCoordinator.CanRefreshSettings(",
+    "_workspaceCommandGateCoordinator.CanExportSettings(",
+    "_workspaceCommandGateCoordinator.CanImportSettings(",
+    "_workspaceCommandGateCoordinator.CanResetSettings(",
+    "_workspaceCommandGateCoordinator.CanRequestSettingsPermission(",
+    "_workspaceCommandGateCoordinator.CanOpenSystemPreferences(",
+    "_workspaceCommandGateCoordinator.CanApplySettings(",
+    "_workspaceCommandGateCoordinator.CanRestoreDefaults(",
+    "_workspaceCommandGateCoordinator.CanResetMonitorData(",
     "_sessionCommandStateClient.CanConnect(",
     "_sessionCommandStateClient.CanDisconnect(",
     "_sessionCommandStateClient.CanSendHeartbeat(",
@@ -1821,6 +1913,7 @@ foreach ($sessionViewModelDirectGateSignal in @(
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
     "_workspaceCommandStateClient.CanUseFileTransferAction(",
     "_workspaceCommandStateClient.CanUseSystemMonitorAction(",
+    "_workspaceCommandStateClient.CanUseSettingsAction(",
     "_workspaceCommandStateClient.CanUseWorkspaceFeature(",
     "_manualConnectionClient.CanPrepareTarget(",
     "_crossNetworkConnectionClient.CanScanQrCode(",
@@ -1839,6 +1932,14 @@ foreach ($sessionViewModelDirectGateSignal in @(
     "_systemMonitorClient.CanStartMonitoring(",
     "_systemMonitorClient.CanStopMonitoring(",
     "_systemMonitorClient.CanEnableAdvancedMonitoring(",
+    "_settingsClient.CanExportSettings(",
+    "_settingsClient.CanImportSettings(",
+    "_settingsClient.CanResetSettings(",
+    "_settingsClient.CanRequestPermission(",
+    "_settingsClient.CanOpenSystemPreferences(",
+    "_settingsClient.CanApplySettings(",
+    "_settingsClient.CanRestoreDefaults(",
+    "_settingsClient.CanResetMonitorData(",
     "_discoveryClient.CanParseAdvertisement(",
     "_pairingMaterialClient.CanValidate("
 )) {
@@ -1896,6 +1997,14 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionCommandId.StopSystemMonitoring",
     "WorkspaceActionCommandId.EnableAdvancedSystemMonitoring",
     "WorkspaceActionCommandId.RefreshSettings",
+    "WorkspaceActionCommandId.ExportSettings",
+    "WorkspaceActionCommandId.ImportSettings",
+    "WorkspaceActionCommandId.ResetSettings",
+    "WorkspaceActionCommandId.RequestSettingsPermission",
+    "WorkspaceActionCommandId.OpenSystemPreferences",
+    "WorkspaceActionCommandId.ApplySettings",
+    "WorkspaceActionCommandId.RestoreDefaults",
+    "WorkspaceActionCommandId.ResetMonitorData",
     "WorkspaceActionGateId.CanConnect",
     "WorkspaceActionGateId.CanUseDiscoveryBrowser",
     "WorkspaceActionGateId.CanPrepareManualConnection",
@@ -1920,6 +2029,14 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionGateId.CanStopSystemMonitoring",
     "WorkspaceActionGateId.CanEnableAdvancedSystemMonitoring",
     "WorkspaceActionGateId.CanRefreshSettings",
+    "WorkspaceActionGateId.CanExportSettings",
+    "WorkspaceActionGateId.CanImportSettings",
+    "WorkspaceActionGateId.CanResetSettings",
+    "WorkspaceActionGateId.CanRequestSettingsPermission",
+    "WorkspaceActionGateId.CanOpenSystemPreferences",
+    "WorkspaceActionGateId.CanApplySettings",
+    "WorkspaceActionGateId.CanRestoreDefaults",
+    "WorkspaceActionGateId.CanResetMonitorData",
     "GateId: WorkspaceActionGateId.CanParseAdvertisement",
     "GateId: WorkspaceActionGateId.CanValidatePairing",
     "GateId: WorkspaceActionGateId.CanPrepareConnection",
@@ -1953,6 +2070,22 @@ foreach ($workspaceActionRoleSignal in @(
     "GateId: WorkspaceActionGateId.CanStopSystemMonitoring",
     "CommandId: WorkspaceActionCommandId.EnableAdvancedSystemMonitoring",
     "GateId: WorkspaceActionGateId.CanEnableAdvancedSystemMonitoring",
+    "CommandId: WorkspaceActionCommandId.ExportSettings",
+    "GateId: WorkspaceActionGateId.CanExportSettings",
+    "CommandId: WorkspaceActionCommandId.ImportSettings",
+    "GateId: WorkspaceActionGateId.CanImportSettings",
+    "CommandId: WorkspaceActionCommandId.ResetSettings",
+    "GateId: WorkspaceActionGateId.CanResetSettings",
+    "CommandId: WorkspaceActionCommandId.RequestSettingsPermission",
+    "GateId: WorkspaceActionGateId.CanRequestSettingsPermission",
+    "CommandId: WorkspaceActionCommandId.OpenSystemPreferences",
+    "GateId: WorkspaceActionGateId.CanOpenSystemPreferences",
+    "CommandId: WorkspaceActionCommandId.ApplySettings",
+    "GateId: WorkspaceActionGateId.CanApplySettings",
+    "CommandId: WorkspaceActionCommandId.RestoreDefaults",
+    "GateId: WorkspaceActionGateId.CanRestoreDefaults",
+    "CommandId: WorkspaceActionCommandId.ResetMonitorData",
+    "GateId: WorkspaceActionGateId.CanResetMonitorData",
     "CommandId: WorkspaceActionCommandId.Connect",
     "GateId: WorkspaceActionGateId.CanConnect",
     "WorkspaceActionSurface.DashboardQuickActions",
@@ -1963,6 +2096,8 @@ foreach ($workspaceActionRoleSignal in @(
     "WorkspaceActionSurface.CrossNetworkCodePrimary",
     "WorkspaceActionSurface.CrossNetworkCodeConnect",
     "WorkspaceActionSurface.FileTransfer",
+    "WorkspaceActionSurface.SettingsToolbar",
+    "WorkspaceActionSurface.SettingsMaintenance",
     "WorkspaceActionDetailSlot.TopBarNotifications",
     "WorkspaceActionDetailSlot.TopBarTheme"
 )) {
@@ -1979,11 +2114,13 @@ foreach ($surfaceTargetsSignal in @(
     "collections.DeviceDiscoveryPrimaryActions",
     "collections.DeviceDiscoveryManualConnectFinalActions",
     "collections.CrossNetworkCodeConnectActions",
+    "collections.SettingsToolbarActions",
     "collections.SettingsMaintenanceActions",
     "WorkspaceActionSurface.SidebarSession",
     "WorkspaceActionSurface.TopBarActions",
     "WorkspaceActionSurface.DashboardQuickActions",
     "WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal",
+    "WorkspaceActionSurface.SettingsToolbar",
     "WorkspaceActionSurface.SettingsMaintenance"
 )) {
     Assert-Contains -Text $workspaceActionSurfaceTargets -Needle $surfaceTargetsSignal -Message "WorkspaceActionSurfaceTargets collection-entry contract missing: $surfaceTargetsSignal"
@@ -2499,12 +2636,51 @@ foreach ($systemMonitorWorkspaceActionsSignal in @(
 )) {
     Assert-Contains -Text $systemMonitorWorkspaceActions -Needle $systemMonitorWorkspaceActionsSignal -Message "SystemMonitorWorkspaceActions contract missing: $systemMonitorWorkspaceActionsSignal"
 }
+foreach ($settingsWorkspaceActionsSignal in @(
+    "internal sealed class SettingsWorkspaceActions",
+    "WorkspaceBusyCoordinator busyCoordinator",
+    "ISettingsWorkspaceClient settingsClient",
+    "Action<string> setSettingsStatus",
+    "Action<string> setStatusMessage",
+    "ExportSettingsAsync()",
+    "ImportSettingsAsync()",
+    "ResetSettingsAsync()",
+    "RequestPermissionAsync()",
+    "OpenSystemPreferencesAsync()",
+    "ApplySettingsAsync()",
+    "RestoreDefaultsAsync()",
+    "ResetMonitorDataAsync()",
+    "_busyCoordinator.RunAsync(",
+    "WorkspaceErrorScope.Settings",
+    "_settingsClient.BuildExportSettingsPendingStatus",
+    "_settingsClient.BuildImportSettingsPendingStatus",
+    "_settingsClient.BuildResetSettingsPendingStatus",
+    "_settingsClient.BuildPermissionRequestPendingStatus",
+    "_settingsClient.BuildSystemPreferencesPendingStatus",
+    "_settingsClient.BuildApplySettingsPendingStatus",
+    "_settingsClient.BuildRestoreDefaultsPendingStatus",
+    "_settingsClient.BuildResetMonitorDataPendingStatus",
+    "_settingsClient.BuildExportSettingsActionAsync",
+    "_settingsClient.BuildImportSettingsActionAsync",
+    "_settingsClient.BuildResetSettingsActionAsync",
+    "_settingsClient.BuildPermissionRequestActionAsync",
+    "_settingsClient.BuildSystemPreferencesActionAsync",
+    "_settingsClient.BuildApplySettingsActionAsync",
+    "_settingsClient.BuildRestoreDefaultsActionAsync",
+    "_settingsClient.BuildResetMonitorDataActionAsync",
+    "Func<Task<SettingsWorkspaceActionResult>>",
+    "_setSettingsStatus(result.Status)",
+    "_setStatusMessage(result.Message)"
+)) {
+    Assert-Contains -Text $settingsWorkspaceActions -Needle $settingsWorkspaceActionsSignal -Message "SettingsWorkspaceActions contract missing: $settingsWorkspaceActionsSignal"
+}
 foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "new ReadOnlyWorkspaceRefreshCoordinator(",
     "new ReadOnlyWorkspaceRefreshActions(",
     "new FileTransferWorkspaceActions(",
     "new RemoteDesktopWorkspaceActions(",
     "new SystemMonitorWorkspaceActions(",
+    "new SettingsWorkspaceActions(",
     "readOnlyWorkspaceRefreshCoordinator,",
     "_readOnlyWorkspaceSnapshotHandlers,",
     "() => SelectedBitrate",
@@ -2512,6 +2688,7 @@ foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "_fileTransferWorkspaceActions,",
     "_remoteDesktopWorkspaceActions,",
     "_systemMonitorWorkspaceActions,",
+    "_settingsWorkspaceActions,",
     "_readOnlyWorkspaceRefreshActions,"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshActions: $sessionViewModelReadOnlyRefreshSignal"
@@ -3238,23 +3415,39 @@ Assert-Ordered -Text $workspaceActionCatalog -Context "Settings header action ca
 Assert-Ordered -Text $workspaceActionCatalog -Context "Settings toolbar action catalog order" -Needles @(
     '"ExportSettings"',
     '"Export"',
+    "WorkspaceActionCommandId.ExportSettings",
+    "WorkspaceActionGateId.CanExportSettings",
     '"ImportSettings"',
     '"Import"',
+    "WorkspaceActionCommandId.ImportSettings",
+    "WorkspaceActionGateId.CanImportSettings",
     '"ResetSettings"',
     '"Reset"',
+    "WorkspaceActionCommandId.ResetSettings",
+    "WorkspaceActionGateId.CanResetSettings",
     '"RequestPermission"',
     '"Request Permission"',
+    "WorkspaceActionCommandId.RequestSettingsPermission",
+    "WorkspaceActionGateId.CanRequestSettingsPermission",
     '"OpenSystemPreferences"',
-    '"Open System Preferences"'
+    '"Open System Preferences"',
+    "WorkspaceActionCommandId.OpenSystemPreferences",
+    "WorkspaceActionGateId.CanOpenSystemPreferences"
 )
 
 Assert-Ordered -Text $workspaceActionCatalog -Context "Settings maintenance action catalog order" -Needles @(
     '"ApplySettings"',
     '"Apply Settings"',
+    "WorkspaceActionCommandId.ApplySettings",
+    "WorkspaceActionGateId.CanApplySettings",
     '"RestoreDefaults"',
     '"Restore Defaults"',
+    "WorkspaceActionCommandId.RestoreDefaults",
+    "WorkspaceActionGateId.CanRestoreDefaults",
     '"ResetMonitorData"',
-    '"Reset Monitor Data"'
+    '"Reset Monitor Data"',
+    "WorkspaceActionCommandId.ResetMonitorData",
+    "WorkspaceActionGateId.CanResetMonitorData"
 )
 
 foreach ($discoverySignal in @(
@@ -3655,7 +3848,33 @@ foreach ($settingsSignal in @(
     "WorkspaceActionSurface.SettingsMaintenance",
     "RefreshStatus",
     "SettingsWorkspaceClient",
+    "SettingsWorkspaceActions",
     "BuildReadOnlySnapshotAsync",
+    "CanExportSettings",
+    "CanImportSettings",
+    "CanResetSettings",
+    "CanRequestPermission",
+    "CanOpenSystemPreferences",
+    "CanApplySettings",
+    "CanRestoreDefaults",
+    "CanResetMonitorData",
+    "BuildExportSettingsPendingStatus",
+    "BuildImportSettingsPendingStatus",
+    "BuildResetSettingsPendingStatus",
+    "BuildPermissionRequestPendingStatus",
+    "BuildSystemPreferencesPendingStatus",
+    "BuildApplySettingsPendingStatus",
+    "BuildRestoreDefaultsPendingStatus",
+    "BuildResetMonitorDataPendingStatus",
+    "BuildExportSettingsActionAsync",
+    "BuildImportSettingsActionAsync",
+    "BuildResetSettingsActionAsync",
+    "BuildPermissionRequestActionAsync",
+    "BuildSystemPreferencesActionAsync",
+    "BuildApplySettingsActionAsync",
+    "BuildRestoreDefaultsActionAsync",
+    "BuildResetMonitorDataActionAsync",
+    "SettingsWorkspaceActionResult",
     "SettingsTabItem",
     "SettingsActionItem",
     "SettingsDetailItem",
@@ -3705,7 +3924,7 @@ foreach ($settingsSignal in @(
     "PQC policy",
     "Disabled"
 )) {
-    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $settings + $workspaceActionCatalog) -Needle $settingsSignal -Message "Settings parity signal missing: $settingsSignal"
+    Assert-Contains -Text ($mainWindow + $sessionViewModel + $featureContract + $settings + $settingsWorkspaceActions + $workspaceActionCatalog) -Needle $settingsSignal -Message "Settings parity signal missing: $settingsSignal"
 }
 
 Assert-Contains -Text $featureContract -Needle 'new(FeatureEntryId.Settings, "Settings", "\uE713", "Preferences", true)' -Message "Settings must be marked implemented once the read-only preferences workspace exists."
@@ -3747,6 +3966,7 @@ foreach ($docSignal in @(
     "FileTransferWorkspaceActions",
     "RemoteDesktopWorkspaceActions",
     "SystemMonitorWorkspaceActions",
+    "SettingsWorkspaceActions",
     "ReadOnlyWorkspaceSnapshotHandlers",
     "RemoteDesktopProfileSelectionCoordinator",
     "WorkspaceCollectionProjector.Replace",

@@ -46,6 +46,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly FileTransferWorkspaceActions _fileTransferWorkspaceActions;
     private readonly RemoteDesktopWorkspaceActions _remoteDesktopWorkspaceActions;
     private readonly SystemMonitorWorkspaceActions _systemMonitorWorkspaceActions;
+    private readonly SettingsWorkspaceActions _settingsWorkspaceActions;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly ReadOnlyWorkspaceSnapshotHandlers _readOnlyWorkspaceSnapshotHandlers;
@@ -190,6 +191,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _fileTransferClient,
             _remoteDesktopClient,
             _systemMonitorClient,
+            _settingsClient,
             _discoveryClient,
             _pairingMaterialClient,
             _connectionWorkspaceStateClient);
@@ -310,6 +312,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceBusyCoordinator,
             _systemMonitorClient,
             value => SystemMonitorStatus = value,
+            value => StatusMessage = value);
+        _settingsWorkspaceActions = new SettingsWorkspaceActions(
+            _workspaceBusyCoordinator,
+            _settingsClient,
+            value => SettingsStatus = value,
             value => StatusMessage = value);
         _dashboardMetricsUpdater = new DashboardMetricsUpdater(
             _dashboardMetricsClient,
@@ -457,6 +464,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _fileTransferWorkspaceActions,
             _remoteDesktopWorkspaceActions,
             _systemMonitorWorkspaceActions,
+            _settingsWorkspaceActions,
             _workspaceCommandAvailability);
         ConnectCommand = commandBindings.ConnectCommand;
         DisconnectCommand = commandBindings.DisconnectCommand;
@@ -494,6 +502,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         EnableAdvancedSystemMonitoringCommand = commandBindings.EnableAdvancedSystemMonitoringCommand;
         RefreshUsbManagementCommand = commandBindings.RefreshUsbManagementCommand;
         RefreshSettingsCommand = commandBindings.RefreshSettingsCommand;
+        ExportSettingsCommand = commandBindings.ExportSettingsCommand;
+        ImportSettingsCommand = commandBindings.ImportSettingsCommand;
+        ResetSettingsCommand = commandBindings.ResetSettingsCommand;
+        RequestSettingsPermissionCommand = commandBindings.RequestSettingsPermissionCommand;
+        OpenSystemPreferencesCommand = commandBindings.OpenSystemPreferencesCommand;
+        ApplySettingsCommand = commandBindings.ApplySettingsCommand;
+        RestoreDefaultsCommand = commandBindings.RestoreDefaultsCommand;
+        ResetMonitorDataCommand = commandBindings.ResetMonitorDataCommand;
         _workspaceCommandRegistry = commandBindings.Registry;
         _workspaceActionSurfaceLoader = new WorkspaceActionSurfaceLoader(
             _workspaceActionCatalogClient,
@@ -1070,6 +1086,22 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RefreshUsbManagementCommand { get; }
 
     public ICommand RefreshSettingsCommand { get; }
+
+    public ICommand ExportSettingsCommand { get; }
+
+    public ICommand ImportSettingsCommand { get; }
+
+    public ICommand ResetSettingsCommand { get; }
+
+    public ICommand RequestSettingsPermissionCommand { get; }
+
+    public ICommand OpenSystemPreferencesCommand { get; }
+
+    public ICommand ApplySettingsCommand { get; }
+
+    public ICommand RestoreDefaultsCommand { get; }
+
+    public ICommand ResetMonitorDataCommand { get; }
 
     private bool IsFeatureSelected(FeatureEntryId featureId) =>
         _workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId);

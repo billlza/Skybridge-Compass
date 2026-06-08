@@ -79,6 +79,15 @@ var systemMonitorClient = new TestSystemMonitorWorkspaceClient(
     canStartMonitoring: true,
     canStopMonitoring: true,
     canEnableAdvancedMonitoring: true);
+var settingsClient = new TestSettingsWorkspaceClient(
+    canExportSettings: true,
+    canImportSettings: true,
+    canResetSettings: true,
+    canRequestPermission: true,
+    canOpenSystemPreferences: true,
+    canApplySettings: true,
+    canRestoreDefaults: true,
+    canResetMonitorData: true);
 var coordinator = new WorkspaceCommandGateCoordinator(
     new SessionCommandStateClient(),
     new FeatureCatalogClient(),
@@ -88,6 +97,7 @@ var coordinator = new WorkspaceCommandGateCoordinator(
     fileTransferClient,
     remoteDesktopClient,
     systemMonitorClient,
+    settingsClient,
     new TestDiscoveryClient(),
     new PairingMaterialClient(),
     new ConnectionWorkspaceStateClient());
@@ -588,6 +598,213 @@ AssertResolvedAction(
     false,
     "blocked system monitor Enable Advanced Monitoring");
 
+var settingsReadyState = BuildCommandState(
+    liveReady: true,
+    selectedFeatureId: FeatureEntryId.Settings);
+var settingsReadyAvailability = new WorkspaceCommandAvailability(coordinator, () => settingsReadyState);
+AssertEqual(true, settingsReadyAvailability.CanRefreshSettings(), "settings WorkspaceCommandAvailability.Refresh");
+AssertEqual(true, settingsReadyAvailability.CanExportSettings(), "settings WorkspaceCommandAvailability.Export");
+AssertEqual(true, settingsReadyAvailability.CanImportSettings(), "settings WorkspaceCommandAvailability.Import");
+AssertEqual(true, settingsReadyAvailability.CanResetSettings(), "settings WorkspaceCommandAvailability.Reset");
+AssertEqual(true, settingsReadyAvailability.CanRequestSettingsPermission(), "settings WorkspaceCommandAvailability.RequestPermission");
+AssertEqual(true, settingsReadyAvailability.CanOpenSystemPreferences(), "settings WorkspaceCommandAvailability.OpenSystemPreferences");
+AssertEqual(true, settingsReadyAvailability.CanApplySettings(), "settings WorkspaceCommandAvailability.ApplySettings");
+AssertEqual(true, settingsReadyAvailability.CanRestoreDefaults(), "settings WorkspaceCommandAvailability.RestoreDefaults");
+AssertEqual(true, settingsReadyAvailability.CanResetMonitorData(), "settings WorkspaceCommandAvailability.ResetMonitorData");
+var settingsReadyGates = coordinator.BuildActionGateSnapshot(settingsReadyState);
+AssertEqual(true, settingsReadyGates.CanRefreshSettings, "settings action gate Refresh");
+AssertEqual(true, settingsReadyGates.CanExportSettings, "settings action gate Export");
+AssertEqual(true, settingsReadyGates.CanImportSettings, "settings action gate Import");
+AssertEqual(true, settingsReadyGates.CanResetSettings, "settings action gate Reset");
+AssertEqual(true, settingsReadyGates.CanRequestSettingsPermission, "settings action gate RequestPermission");
+AssertEqual(true, settingsReadyGates.CanOpenSystemPreferences, "settings action gate OpenSystemPreferences");
+AssertEqual(true, settingsReadyGates.CanApplySettings, "settings action gate ApplySettings");
+AssertEqual(true, settingsReadyGates.CanRestoreDefaults, "settings action gate RestoreDefaults");
+AssertEqual(true, settingsReadyGates.CanResetMonitorData, "settings action gate ResetMonitorData");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsReadyGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "ExportSettings",
+    WorkspaceActionCommandId.ExportSettings,
+    WorkspaceActionGateId.CanExportSettings,
+    true,
+    "settings Export");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsReadyGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "ImportSettings",
+    WorkspaceActionCommandId.ImportSettings,
+    WorkspaceActionGateId.CanImportSettings,
+    true,
+    "settings Import");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsReadyGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "ResetSettings",
+    WorkspaceActionCommandId.ResetSettings,
+    WorkspaceActionGateId.CanResetSettings,
+    true,
+    "settings Reset");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsReadyGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "RequestPermission",
+    WorkspaceActionCommandId.RequestSettingsPermission,
+    WorkspaceActionGateId.CanRequestSettingsPermission,
+    true,
+    "settings Request Permission");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsReadyGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "OpenSystemPreferences",
+    WorkspaceActionCommandId.OpenSystemPreferences,
+    WorkspaceActionGateId.CanOpenSystemPreferences,
+    true,
+    "settings Open System Preferences");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsReadyGates,
+    WorkspaceActionSurface.SettingsMaintenance,
+    "ApplySettings",
+    WorkspaceActionCommandId.ApplySettings,
+    WorkspaceActionGateId.CanApplySettings,
+    true,
+    "settings Apply Settings");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsReadyGates,
+    WorkspaceActionSurface.SettingsMaintenance,
+    "RestoreDefaults",
+    WorkspaceActionCommandId.RestoreDefaults,
+    WorkspaceActionGateId.CanRestoreDefaults,
+    true,
+    "settings Restore Defaults");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsReadyGates,
+    WorkspaceActionSurface.SettingsMaintenance,
+    "ResetMonitorData",
+    WorkspaceActionCommandId.ResetMonitorData,
+    WorkspaceActionGateId.CanResetMonitorData,
+    true,
+    "settings Reset Monitor Data");
+
+var settingsBlockedState = BuildCommandState(
+    liveReady: true,
+    selectedFeatureId: FeatureEntryId.Settings);
+settingsClient.CanExportSettingsValue = false;
+settingsClient.CanImportSettingsValue = false;
+settingsClient.CanResetSettingsValue = false;
+settingsClient.CanRequestPermissionValue = false;
+settingsClient.CanOpenSystemPreferencesValue = false;
+settingsClient.CanApplySettingsValue = false;
+settingsClient.CanRestoreDefaultsValue = false;
+settingsClient.CanResetMonitorDataValue = false;
+var settingsBlockedAvailability = new WorkspaceCommandAvailability(coordinator, () => settingsBlockedState);
+AssertEqual(true, settingsBlockedAvailability.CanRefreshSettings(), "blocked settings WorkspaceCommandAvailability.Refresh");
+AssertEqual(false, settingsBlockedAvailability.CanExportSettings(), "blocked settings WorkspaceCommandAvailability.Export");
+AssertEqual(false, settingsBlockedAvailability.CanImportSettings(), "blocked settings WorkspaceCommandAvailability.Import");
+AssertEqual(false, settingsBlockedAvailability.CanResetSettings(), "blocked settings WorkspaceCommandAvailability.Reset");
+AssertEqual(false, settingsBlockedAvailability.CanRequestSettingsPermission(), "blocked settings WorkspaceCommandAvailability.RequestPermission");
+AssertEqual(false, settingsBlockedAvailability.CanOpenSystemPreferences(), "blocked settings WorkspaceCommandAvailability.OpenSystemPreferences");
+AssertEqual(false, settingsBlockedAvailability.CanApplySettings(), "blocked settings WorkspaceCommandAvailability.ApplySettings");
+AssertEqual(false, settingsBlockedAvailability.CanRestoreDefaults(), "blocked settings WorkspaceCommandAvailability.RestoreDefaults");
+AssertEqual(false, settingsBlockedAvailability.CanResetMonitorData(), "blocked settings WorkspaceCommandAvailability.ResetMonitorData");
+var settingsBlockedGates = coordinator.BuildActionGateSnapshot(settingsBlockedState);
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsBlockedGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "ExportSettings",
+    WorkspaceActionCommandId.ExportSettings,
+    WorkspaceActionGateId.CanExportSettings,
+    false,
+    "blocked settings Export");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsBlockedGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "ImportSettings",
+    WorkspaceActionCommandId.ImportSettings,
+    WorkspaceActionGateId.CanImportSettings,
+    false,
+    "blocked settings Import");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsBlockedGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "ResetSettings",
+    WorkspaceActionCommandId.ResetSettings,
+    WorkspaceActionGateId.CanResetSettings,
+    false,
+    "blocked settings Reset");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsBlockedGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "RequestPermission",
+    WorkspaceActionCommandId.RequestSettingsPermission,
+    WorkspaceActionGateId.CanRequestSettingsPermission,
+    false,
+    "blocked settings Request Permission");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsBlockedGates,
+    WorkspaceActionSurface.SettingsToolbar,
+    "OpenSystemPreferences",
+    WorkspaceActionCommandId.OpenSystemPreferences,
+    WorkspaceActionGateId.CanOpenSystemPreferences,
+    false,
+    "blocked settings Open System Preferences");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsBlockedGates,
+    WorkspaceActionSurface.SettingsMaintenance,
+    "ApplySettings",
+    WorkspaceActionCommandId.ApplySettings,
+    WorkspaceActionGateId.CanApplySettings,
+    false,
+    "blocked settings Apply Settings");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsBlockedGates,
+    WorkspaceActionSurface.SettingsMaintenance,
+    "RestoreDefaults",
+    WorkspaceActionCommandId.RestoreDefaults,
+    WorkspaceActionGateId.CanRestoreDefaults,
+    false,
+    "blocked settings Restore Defaults");
+AssertResolvedAction(
+    catalog,
+    details,
+    settingsBlockedGates,
+    WorkspaceActionSurface.SettingsMaintenance,
+    "ResetMonitorData",
+    WorkspaceActionCommandId.ResetMonitorData,
+    WorkspaceActionGateId.CanResetMonitorData,
+    false,
+    "blocked settings Reset Monitor Data");
+
 Console.WriteLine("windows-command-gates: ok");
 
 WorkspaceCommandGateState BuildCommandState(
@@ -936,6 +1153,112 @@ sealed class TestSystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 
     public Task<SystemMonitorWorkspaceActionResult> BuildAdvancedMonitoringActionAsync() =>
         throw new NotSupportedException("Command-gate smoke only needs system monitor action readiness.");
+}
+
+sealed class TestSettingsWorkspaceClient : ISettingsWorkspaceClient
+{
+    public TestSettingsWorkspaceClient(
+        bool canExportSettings,
+        bool canImportSettings,
+        bool canResetSettings,
+        bool canRequestPermission,
+        bool canOpenSystemPreferences,
+        bool canApplySettings,
+        bool canRestoreDefaults,
+        bool canResetMonitorData)
+    {
+        CanExportSettingsValue = canExportSettings;
+        CanImportSettingsValue = canImportSettings;
+        CanResetSettingsValue = canResetSettings;
+        CanRequestPermissionValue = canRequestPermission;
+        CanOpenSystemPreferencesValue = canOpenSystemPreferences;
+        CanApplySettingsValue = canApplySettings;
+        CanRestoreDefaultsValue = canRestoreDefaults;
+        CanResetMonitorDataValue = canResetMonitorData;
+    }
+
+    public bool CanExportSettingsValue { get; set; }
+
+    public bool CanImportSettingsValue { get; set; }
+
+    public bool CanResetSettingsValue { get; set; }
+
+    public bool CanRequestPermissionValue { get; set; }
+
+    public bool CanOpenSystemPreferencesValue { get; set; }
+
+    public bool CanApplySettingsValue { get; set; }
+
+    public bool CanRestoreDefaultsValue { get; set; }
+
+    public bool CanResetMonitorDataValue { get; set; }
+
+    public string BuildInitialStatus() => "Ready";
+
+    public string BuildPendingStatus() => "Refreshing...";
+
+    public string BuildCompletedStatus(SettingsWorkspaceSnapshot snapshot) => "Snapshot";
+
+    public string BuildCompletedStatusMessage() => "Updated";
+
+    public bool CanExportSettings() => CanExportSettingsValue;
+
+    public bool CanImportSettings() => CanImportSettingsValue;
+
+    public bool CanResetSettings() => CanResetSettingsValue;
+
+    public bool CanRequestPermission() => CanRequestPermissionValue;
+
+    public bool CanOpenSystemPreferences() => CanOpenSystemPreferencesValue;
+
+    public bool CanApplySettings() => CanApplySettingsValue;
+
+    public bool CanRestoreDefaults() => CanRestoreDefaultsValue;
+
+    public bool CanResetMonitorData() => CanResetMonitorDataValue;
+
+    public string BuildExportSettingsPendingStatus() => "Preparing settings export...";
+
+    public string BuildImportSettingsPendingStatus() => "Preparing settings import...";
+
+    public string BuildResetSettingsPendingStatus() => "Preparing settings reset...";
+
+    public string BuildPermissionRequestPendingStatus() => "Preparing permission request...";
+
+    public string BuildSystemPreferencesPendingStatus() => "Preparing system preferences...";
+
+    public string BuildApplySettingsPendingStatus() => "Preparing settings apply...";
+
+    public string BuildRestoreDefaultsPendingStatus() => "Preparing default restore...";
+
+    public string BuildResetMonitorDataPendingStatus() => "Preparing monitor data reset...";
+
+    public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
+
+    public Task<SettingsWorkspaceActionResult> BuildExportSettingsActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
+
+    public Task<SettingsWorkspaceActionResult> BuildImportSettingsActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
+
+    public Task<SettingsWorkspaceActionResult> BuildResetSettingsActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
+
+    public Task<SettingsWorkspaceActionResult> BuildPermissionRequestActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
+
+    public Task<SettingsWorkspaceActionResult> BuildSystemPreferencesActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
+
+    public Task<SettingsWorkspaceActionResult> BuildApplySettingsActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
+
+    public Task<SettingsWorkspaceActionResult> BuildRestoreDefaultsActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
+
+    public Task<SettingsWorkspaceActionResult> BuildResetMonitorDataActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs settings action readiness.");
 }
 '@
 

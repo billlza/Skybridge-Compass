@@ -15,7 +15,55 @@ public interface ISettingsWorkspaceClient
 
     string BuildCompletedStatusMessage();
 
+    bool CanExportSettings();
+
+    bool CanImportSettings();
+
+    bool CanResetSettings();
+
+    bool CanRequestPermission();
+
+    bool CanOpenSystemPreferences();
+
+    bool CanApplySettings();
+
+    bool CanRestoreDefaults();
+
+    bool CanResetMonitorData();
+
+    string BuildExportSettingsPendingStatus();
+
+    string BuildImportSettingsPendingStatus();
+
+    string BuildResetSettingsPendingStatus();
+
+    string BuildPermissionRequestPendingStatus();
+
+    string BuildSystemPreferencesPendingStatus();
+
+    string BuildApplySettingsPendingStatus();
+
+    string BuildRestoreDefaultsPendingStatus();
+
+    string BuildResetMonitorDataPendingStatus();
+
     Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
+
+    Task<SettingsWorkspaceActionResult> BuildExportSettingsActionAsync();
+
+    Task<SettingsWorkspaceActionResult> BuildImportSettingsActionAsync();
+
+    Task<SettingsWorkspaceActionResult> BuildResetSettingsActionAsync();
+
+    Task<SettingsWorkspaceActionResult> BuildPermissionRequestActionAsync();
+
+    Task<SettingsWorkspaceActionResult> BuildSystemPreferencesActionAsync();
+
+    Task<SettingsWorkspaceActionResult> BuildApplySettingsActionAsync();
+
+    Task<SettingsWorkspaceActionResult> BuildRestoreDefaultsActionAsync();
+
+    Task<SettingsWorkspaceActionResult> BuildResetMonitorDataActionAsync();
 }
 
 public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
@@ -29,14 +77,126 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
 
+    public bool CanExportSettings() => false;
+
+    public bool CanImportSettings() => false;
+
+    public bool CanResetSettings() => false;
+
+    public bool CanRequestPermission() => false;
+
+    public bool CanOpenSystemPreferences() => false;
+
+    public bool CanApplySettings() => false;
+
+    public bool CanRestoreDefaults() => false;
+
+    public bool CanResetMonitorData() => false;
+
+    public string BuildExportSettingsPendingStatus() => DefaultExportSettingsPendingStatus;
+
+    public string BuildImportSettingsPendingStatus() => DefaultImportSettingsPendingStatus;
+
+    public string BuildResetSettingsPendingStatus() => DefaultResetSettingsPendingStatus;
+
+    public string BuildPermissionRequestPendingStatus() => DefaultPermissionRequestPendingStatus;
+
+    public string BuildSystemPreferencesPendingStatus() => DefaultSystemPreferencesPendingStatus;
+
+    public string BuildApplySettingsPendingStatus() => DefaultApplySettingsPendingStatus;
+
+    public string BuildRestoreDefaultsPendingStatus() => DefaultRestoreDefaultsPendingStatus;
+
+    public string BuildResetMonitorDataPendingStatus() => DefaultResetMonitorDataPendingStatus;
+
     public static string DefaultInitialStatus { get; } = "Ready";
 
     public static string DefaultPendingStatus { get; } = "Refreshing...";
 
     public static string DefaultCompletedStatusMessage { get; } = "Settings workspace updated";
 
+    public static string DefaultExportSettingsPendingStatus { get; } = "Preparing settings export...";
+
+    public static string DefaultImportSettingsPendingStatus { get; } = "Preparing settings import...";
+
+    public static string DefaultResetSettingsPendingStatus { get; } = "Preparing settings reset...";
+
+    public static string DefaultPermissionRequestPendingStatus { get; } = "Preparing permission request...";
+
+    public static string DefaultSystemPreferencesPendingStatus { get; } = "Preparing system preferences...";
+
+    public static string DefaultApplySettingsPendingStatus { get; } = "Preparing settings apply...";
+
+    public static string DefaultRestoreDefaultsPendingStatus { get; } = "Preparing default restore...";
+
+    public static string DefaultResetMonitorDataPendingStatus { get; } = "Preparing monitor data reset...";
+
+    public static string DefaultExportSettingsBlockedStatus { get; } = "Settings export unavailable";
+
+    public static string DefaultImportSettingsBlockedStatus { get; } = "Settings import unavailable";
+
+    public static string DefaultResetSettingsBlockedStatus { get; } = "Settings reset unavailable";
+
+    public static string DefaultPermissionRequestBlockedStatus { get; } = "Permission request unavailable";
+
+    public static string DefaultSystemPreferencesBlockedStatus { get; } = "System preferences unavailable";
+
+    public static string DefaultApplySettingsBlockedStatus { get; } = "Settings apply unavailable";
+
+    public static string DefaultRestoreDefaultsBlockedStatus { get; } = "Restore defaults unavailable";
+
+    public static string DefaultResetMonitorDataBlockedStatus { get; } = "Monitor data reset unavailable";
+
+    public static string DefaultExportSettingsBlockedMessage { get; } =
+        "Settings export requires persisted preferences and an explicit user-selected destination.";
+
+    public static string DefaultImportSettingsBlockedMessage { get; } =
+        "Settings import requires file validation before writing preferences.";
+
+    public static string DefaultResetSettingsBlockedMessage { get; } =
+        "Settings reset is a destructive preference write that requires confirmation and scoped defaults.";
+
+    public static string DefaultPermissionRequestBlockedMessage { get; } =
+        "Permission prompts are high-risk platform writes and require an explicit provider.";
+
+    public static string DefaultSystemPreferencesBlockedMessage { get; } =
+        "Windows Settings deep links require explicit wiring before opening system preferences.";
+
+    public static string DefaultApplySettingsBlockedMessage { get; } =
+        "Runtime settings apply requires a persistence bridge and scoped runtime update providers.";
+
+    public static string DefaultRestoreDefaultsBlockedMessage { get; } =
+        "Restoring defaults is a destructive preference write that requires confirmation.";
+
+    public static string DefaultResetMonitorDataBlockedMessage { get; } =
+        "Monitor retention deletion requires a retention store and explicit confirmation.";
+
     public static string BuildDefaultCompletedStatus(SettingsWorkspaceSnapshot snapshot) =>
         $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
+
+    public static SettingsWorkspaceActionResult BuildDefaultExportSettingsActionResult() =>
+        new(DefaultExportSettingsBlockedStatus, DefaultExportSettingsBlockedMessage);
+
+    public static SettingsWorkspaceActionResult BuildDefaultImportSettingsActionResult() =>
+        new(DefaultImportSettingsBlockedStatus, DefaultImportSettingsBlockedMessage);
+
+    public static SettingsWorkspaceActionResult BuildDefaultResetSettingsActionResult() =>
+        new(DefaultResetSettingsBlockedStatus, DefaultResetSettingsBlockedMessage);
+
+    public static SettingsWorkspaceActionResult BuildDefaultPermissionRequestActionResult() =>
+        new(DefaultPermissionRequestBlockedStatus, DefaultPermissionRequestBlockedMessage);
+
+    public static SettingsWorkspaceActionResult BuildDefaultSystemPreferencesActionResult() =>
+        new(DefaultSystemPreferencesBlockedStatus, DefaultSystemPreferencesBlockedMessage);
+
+    public static SettingsWorkspaceActionResult BuildDefaultApplySettingsActionResult() =>
+        new(DefaultApplySettingsBlockedStatus, DefaultApplySettingsBlockedMessage);
+
+    public static SettingsWorkspaceActionResult BuildDefaultRestoreDefaultsActionResult() =>
+        new(DefaultRestoreDefaultsBlockedStatus, DefaultRestoreDefaultsBlockedMessage);
+
+    public static SettingsWorkspaceActionResult BuildDefaultResetMonitorDataActionResult() =>
+        new(DefaultResetMonitorDataBlockedStatus, DefaultResetMonitorDataBlockedMessage);
 
     public Task<SettingsWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
@@ -46,6 +206,30 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
             BuildActions(),
             BuildDetails()));
     }
+
+    public Task<SettingsWorkspaceActionResult> BuildExportSettingsActionAsync() =>
+        Task.FromResult(BuildDefaultExportSettingsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildImportSettingsActionAsync() =>
+        Task.FromResult(BuildDefaultImportSettingsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildResetSettingsActionAsync() =>
+        Task.FromResult(BuildDefaultResetSettingsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildPermissionRequestActionAsync() =>
+        Task.FromResult(BuildDefaultPermissionRequestActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildSystemPreferencesActionAsync() =>
+        Task.FromResult(BuildDefaultSystemPreferencesActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildApplySettingsActionAsync() =>
+        Task.FromResult(BuildDefaultApplySettingsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildRestoreDefaultsActionAsync() =>
+        Task.FromResult(BuildDefaultRestoreDefaultsActionResult());
+
+    public Task<SettingsWorkspaceActionResult> BuildResetMonitorDataActionAsync() =>
+        Task.FromResult(BuildDefaultResetMonitorDataActionResult());
 
     private static IReadOnlyList<SettingsTabItem> BuildTabs() =>
         new List<SettingsTabItem>
@@ -151,3 +335,7 @@ public sealed record SettingsDetailItem(
     string Label,
     string Value,
     string Detail);
+
+public sealed record SettingsWorkspaceActionResult(
+    string Status,
+    string Message);
