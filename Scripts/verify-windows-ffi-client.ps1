@@ -464,6 +464,8 @@ Assert-Contains -Text $architecture -Needle "cli_apple_to_apple_selects_apple_na
 Assert-Contains -Text $architecture -Needle "-ExpectedHostAddress" -Message "Architecture doc missing Mac SSH expected-address diagnostic."
 Assert-Contains -Text $architecture -Needle "LzadeMacBook-Pro.local" -Message "Architecture doc missing Mac .local alternate host diagnostic."
 Assert-Contains -Text $architecture -Needle "198.18.0.0/15" -Message "Architecture doc missing proxy-route diagnostic."
+Assert-Contains -Text $architecture -Needle 'final manual action surface is explicitly `Cancel` followed by `Connect`' -Message "Architecture doc missing manual final Cancel/Connect action order."
+Assert-Contains -Text $architecture -Needle "WorkspaceActionCommandId.CancelManualConnection" -Message "Architecture doc missing manual Cancel command role."
 Assert-Contains -Text $architecture -Needle "verify-windows-startup-state.ps1" -Message "Architecture doc missing startup-state smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "FfiEngineClient" -Message "Architecture doc missing FfiEngineClient status."
 Assert-Contains -Text $dependencyFactory -Needle "var coreBridge = new CoreBridge();" -Message "Default dependency factory should create one explicit CoreBridge for manual Core tools."
