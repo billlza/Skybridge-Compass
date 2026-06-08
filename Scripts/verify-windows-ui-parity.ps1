@@ -90,6 +90,7 @@ function Assert-ItemsControlTemplate {
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FeatureCatalogClient.cs"
 $legacyFeatureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
+$workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
 $deviceDiscoveryInputDefaultsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DeviceDiscoveryInputDefaultsClient.cs"
@@ -115,13 +116,15 @@ $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/S
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
 
 $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
-$sessionViewModel = Get-Content -Raw -LiteralPath $sessionViewModelPath
+$sessionViewModelSource = Get-Content -Raw -LiteralPath $sessionViewModelPath
+$workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
+$sessionViewModel = $sessionViewModelSource + $workspaceItemViews
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -188,6 +191,33 @@ foreach ($featureCatalogSignal in @(
 }
 Assert-True -Condition (-not $sessionViewModel.Contains("FeatureEntryContract")) -Message "SessionViewModel must source navigation entries from FeatureCatalogClient instead of FeatureEntryContract."
 Assert-True -Condition (-not $sessionViewModel.Contains("NavigationItems[0]")) -Message "SessionViewModel must source default navigation selection from FeatureCatalogClient."
+
+foreach ($workspaceItemViewSignal in @(
+    "public sealed record SettingsTabItemView",
+    "public sealed record DashboardMetricView",
+    "public sealed record WorkspaceActionItemView",
+    "public sealed record DiscoveredPeerView",
+    "public sealed record DiscoveryBrowserFactView",
+    "public sealed record ManualConnectionFactView",
+    "public sealed record CrossNetworkConnectionFactView",
+    "public sealed record ConnectionPreflightFactView",
+    "public sealed record PairingFactView",
+    "public sealed record CoreDiagnosticFactView",
+    "FromItem",
+    "FromFact",
+    "FromCandidate"
+)) {
+    Assert-Contains -Text $workspaceItemViews -Needle $workspaceItemViewSignal -Message "Workspace item view contract missing from WorkspaceItemViews.cs: $workspaceItemViewSignal"
+}
+
+foreach ($viewModelOwnedItemView in @(
+    "public sealed record SettingsTabItemView",
+    "public sealed record DashboardMetricView",
+    "public sealed record WorkspaceActionItemView",
+    "public sealed record DiscoveredPeerView"
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($viewModelOwnedItemView)) -Message "SessionViewModel.cs must not own reusable workspace item view records: $viewModelOwnedItemView"
+}
 
 foreach ($binding in @(
     "NavigationItems",
