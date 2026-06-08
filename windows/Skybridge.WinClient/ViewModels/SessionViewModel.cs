@@ -1156,69 +1156,66 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private bool CanUseDiscoveryBrowser() => CanUseDeviceDiscovery();
 
     private bool CanPrepareManualConnection() =>
-        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
+        CanUseDeviceDiscoveryAction(
             _manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort));
 
     private bool CanUseCrossNetworkConnection() =>
         _workspaceCommandStateClient.CanUseCrossNetworkConnection(IsBusy, IsDeviceDiscoverySelected);
 
     private bool CanScanQRCode() =>
-        _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
-            _crossNetworkConnectionClient.CanScanQrCode(CrossNetworkQrInput));
+        CanUseCrossNetworkConnectionAction(_crossNetworkConnectionClient.CanScanQrCode(CrossNetworkQrInput));
 
     private bool CanCopyConnectionCode() =>
-        _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
-            _crossNetworkConnectionClient.CanCopyCode(CrossNetworkGeneratedCode));
+        CanUseCrossNetworkConnectionAction(_crossNetworkConnectionClient.CanCopyCode(CrossNetworkGeneratedCode));
 
     private bool CanConnectConnectionCode() =>
-        _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
-            _crossNetworkConnectionClient.CanConnectWithCode(CrossNetworkCodeInput));
+        CanUseCrossNetworkConnectionAction(_crossNetworkConnectionClient.CanConnectWithCode(CrossNetworkCodeInput));
 
     private bool CanParseAdvertisement() =>
-        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
+        CanUseDeviceDiscoveryAction(
             _discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord));
 
     private bool CanValidatePairingCode() =>
-        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
-            _pairingMaterialClient.CanValidate(PairingConnectionCode));
+        CanUseDeviceDiscoveryAction(_pairingMaterialClient.CanValidate(PairingConnectionCode));
 
     private bool CanPrepareConnection() =>
-        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
-            IsBusy,
-            IsDeviceDiscoverySelected,
+        CanUseDeviceDiscoveryAction(
             _connectionWorkspaceStateClient.CanPreparePreflight(
                 _connectionValidatedState.DiscoveredPeer,
                 _connectionValidatedState.PairingMaterial));
 
     private bool CanRefreshUsbManagement() =>
-        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsUsbManagementSelected);
+        CanUseSelectedWorkspaceFeature(IsUsbManagementSelected);
 
     private bool CanRunCoreDiagnostics() =>
-        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsQuantumSelected);
+        CanUseSelectedWorkspaceFeature(IsQuantumSelected);
 
     private bool CanRefreshFileTransfer() =>
-        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsFileTransferSelected);
+        CanUseSelectedWorkspaceFeature(IsFileTransferSelected);
 
     private bool CanRefreshRemoteDesktop() =>
-        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsRemoteDesktopSelected);
+        CanUseSelectedWorkspaceFeature(IsRemoteDesktopSelected);
 
     private bool CanRefreshSystemMonitor() =>
-        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsSystemMonitorSelected);
+        CanUseSelectedWorkspaceFeature(IsSystemMonitorSelected);
 
     private bool CanRefreshSettings() =>
-        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsSettingsSelected);
+        CanUseSelectedWorkspaceFeature(IsSettingsSelected);
+
+    private bool CanUseDeviceDiscoveryAction(bool readiness) =>
+        _workspaceCommandStateClient.CanUseDeviceDiscoveryAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            readiness);
+
+    private bool CanUseCrossNetworkConnectionAction(bool readiness) =>
+        _workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(
+            IsBusy,
+            IsDeviceDiscoverySelected,
+            readiness);
+
+    private bool CanUseSelectedWorkspaceFeature(bool isSelected) =>
+        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, isSelected);
 
     private async Task RunWithBusyState(
         WorkspaceErrorScope errorScope,

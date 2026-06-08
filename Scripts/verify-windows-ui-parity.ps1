@@ -719,14 +719,26 @@ foreach ($workspaceCommandStateSignal in @(
     "BuildActionGateSnapshot",
     "new WorkspaceCommandStateClient()",
     "_workspaceCommandStateClient.CanUseDeviceDiscovery(IsBusy, IsDeviceDiscoverySelected)",
+    "CanUseDeviceDiscoveryAction(bool readiness)",
     "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnection(IsBusy, IsDeviceDiscoverySelected)",
+    "CanUseCrossNetworkConnectionAction(bool readiness)",
     "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
-    "_workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsUsbManagementSelected)",
+    "CanUseSelectedWorkspaceFeature(bool isSelected)",
+    "_workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, isSelected)",
     "_workspaceCommandStateClient.BuildActionGateSnapshot(",
     "new WorkspaceCommandGateRequest("
 )) {
     Assert-Contains -Text ($workspaceCommandState + $sessionViewModel + $mainWindow) -Needle $workspaceCommandStateSignal -Message "Workspace command state service signal missing: $workspaceCommandStateSignal"
+}
+
+foreach ($workspaceGateCall in @(
+    "_workspaceCommandStateClient.CanUseDeviceDiscoveryAction(",
+    "_workspaceCommandStateClient.CanUseCrossNetworkConnectionAction(",
+    "_workspaceCommandStateClient.CanUseWorkspaceFeature("
+)) {
+    $matches = [regex]::Matches($sessionViewModelSource, [regex]::Escape($workspaceGateCall))
+    Assert-True -Condition ($matches.Count -eq 1) -Message "SessionViewModel must centralize workspace gate calls through helper methods: $workspaceGateCall"
 }
 
 foreach ($viewModelWorkspaceCommandGate in @(
@@ -1741,6 +1753,9 @@ foreach ($docSignal in @(
     "SessionStatusClient",
     "RunSessionEngineActionAsync",
     "IsFeatureSelected",
+    "CanUseDeviceDiscoveryAction",
+    "CanUseCrossNetworkConnectionAction",
+    "CanUseSelectedWorkspaceFeature",
     "WorkspaceActionCommandId",
     "WorkspaceActionGateId",
     "WorkspaceActionDetailSlot",
