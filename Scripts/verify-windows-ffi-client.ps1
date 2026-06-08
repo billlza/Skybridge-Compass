@@ -579,6 +579,7 @@ foreach ($signal in @(
     "InitialSurfaces",
     "DynamicRefreshSurfaces",
     "BuildReadOnlySnapshot",
+    "BuildResolvedSnapshot",
     "ResolveEnabled",
     "ResolveDetail",
     "WorkspaceActionSurface.SidebarSession",

@@ -11,6 +11,11 @@ public interface IWorkspaceActionCatalogClient
 
     WorkspaceActionCatalogSnapshot BuildReadOnlySnapshot(WorkspaceActionCatalogRequest request);
 
+    WorkspaceActionCatalogSnapshot BuildResolvedSnapshot(
+        WorkspaceActionCatalogRequest request,
+        WorkspaceActionGateSnapshot gates,
+        WorkspaceActionDetailSnapshot details);
+
     bool ResolveEnabled(
         WorkspaceActionGateId gateId,
         WorkspaceActionGateSnapshot gates,
@@ -91,6 +96,26 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 WorkspaceActionSurface.SettingsMaintenance => BuildSettingsMaintenanceActions(),
                 _ => new List<WorkspaceActionItem>()
             });
+
+    public WorkspaceActionCatalogSnapshot BuildResolvedSnapshot(
+        WorkspaceActionCatalogRequest request,
+        WorkspaceActionGateSnapshot gates,
+        WorkspaceActionDetailSnapshot details)
+    {
+        var snapshot = BuildReadOnlySnapshot(request);
+        var resolvedActions = new List<WorkspaceActionItem>();
+
+        foreach (var action in snapshot.Actions)
+        {
+            resolvedActions.Add(action with
+            {
+                IsEnabled = ResolveEnabled(action.GateId, gates, action.IsEnabled),
+                Detail = ResolveDetail(action.DetailSlot, details, action.Detail)
+            });
+        }
+
+        return new(snapshot.CapturedAt, snapshot.Surface, resolvedActions);
+    }
 
     public bool ResolveEnabled(
         WorkspaceActionGateId gateId,

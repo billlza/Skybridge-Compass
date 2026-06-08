@@ -678,10 +678,12 @@ Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "CanUseCr
 foreach ($workspaceActionRoleSignal in @(
     "BuildInitialSurfaces",
     "BuildDynamicRefreshSurfaces",
+    "BuildResolvedSnapshot",
     "InitialSurfaces",
     "DynamicRefreshSurfaces",
     "_workspaceActionCatalogClient.BuildInitialSurfaces()",
     "_workspaceActionCatalogClient.BuildDynamicRefreshSurfaces()",
+    "_workspaceActionCatalogClient.BuildResolvedSnapshot(",
     "WorkspaceActionCommandId.Connect",
     "WorkspaceActionCommandId.Heartbeat",
     "WorkspaceActionCommandId.ParseTxt",
@@ -698,6 +700,8 @@ Assert-True -Condition (-not $sessionViewModel.Contains("string actionKey")) -Me
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionCommand(surface")) -Message "SessionViewModel must not pass surface/key pairs to action command resolution."
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionEnabled")) -Message "SessionViewModel must delegate workspace action gate resolution to WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionDetail")) -Message "SessionViewModel must delegate workspace action detail resolution to WorkspaceActionCatalogClient."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionCatalogClient.ResolveEnabled(")) -Message "SessionViewModel must use WorkspaceActionCatalogClient.BuildResolvedSnapshot instead of resolving action gates inline."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("_workspaceActionCatalogClient.ResolveDetail(")) -Message "SessionViewModel must use WorkspaceActionCatalogClient.BuildResolvedSnapshot instead of resolving action details inline."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.SidebarSession,")) -Message "SessionViewModel must source the initial workspace action surface plan from WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("LoadWorkspaceActionSurface(WorkspaceActionSurface.UsbManagementHeader,")) -Message "SessionViewModel must source the dynamic workspace action refresh plan from WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("GetTopBarStatusValue")) -Message "SessionViewModel must delegate top-bar status lookup to TopBarStatusClient.BuildResolvedStatusSnapshot."

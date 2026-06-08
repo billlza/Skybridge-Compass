@@ -1505,20 +1505,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void LoadWorkspaceActionSurface(WorkspaceActionSurface surface)
     {
-        var snapshot = _workspaceActionCatalogClient.BuildReadOnlySnapshot(
-            new WorkspaceActionCatalogRequest(surface));
+        var snapshot = _workspaceActionCatalogClient.BuildResolvedSnapshot(
+            new WorkspaceActionCatalogRequest(surface),
+            BuildWorkspaceActionGateSnapshot(),
+            BuildWorkspaceActionDetailSnapshot());
         var target = GetWorkspaceActionSurfaceTarget(surface);
 
         target.Clear();
-        var gates = BuildWorkspaceActionGateSnapshot();
-        var details = BuildWorkspaceActionDetailSnapshot();
         foreach (var action in snapshot.Actions)
         {
             target.Add(WorkspaceActionItemView.FromItem(
                 action,
-                ResolveWorkspaceActionCommand(action.CommandId),
-                _workspaceActionCatalogClient.ResolveEnabled(action.GateId, gates, action.IsEnabled),
-                _workspaceActionCatalogClient.ResolveDetail(action.DetailSlot, details, action.Detail)));
+                ResolveWorkspaceActionCommand(action.CommandId)));
         }
     }
 
