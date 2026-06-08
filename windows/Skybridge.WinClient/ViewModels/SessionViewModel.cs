@@ -52,6 +52,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
     private readonly WorkspaceViewStateBuilder _workspaceViewStateBuilder;
     private readonly RemoteDesktopProfileSelectionCoordinator _remoteDesktopProfileSelectionCoordinator;
+    private readonly CrossNetworkCodeInputCoordinator _crossNetworkCodeInputCoordinator;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
     private string _statusMessage = "";
@@ -189,6 +190,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _remoteDesktopProfileSelectionCoordinator = new RemoteDesktopProfileSelectionCoordinator(
             _remoteDesktopProfileCatalogClient,
             value => StatusMessage = value);
+        _crossNetworkCodeInputCoordinator = new CrossNetworkCodeInputCoordinator(
+            _crossNetworkConnectionClient);
         var workspaceStartupStateBuilder = new WorkspaceStartupStateBuilder(
             _engineClient,
             _discoveryBrowserClient,
@@ -733,12 +736,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         get => _crossNetworkCodeInput;
         set
         {
-            var normalized = _crossNetworkConnectionClient.NormalizeCodeInput(value);
-            if (SetField(ref _crossNetworkCodeInput, normalized))
+            var update = _crossNetworkCodeInputCoordinator.BuildInputUpdate(
+                _crossNetworkCodeInput,
+                value);
+            if (update.ShouldUpdateValue && SetField(ref _crossNetworkCodeInput, update.NormalizedValue))
             {
                 ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetCrossNetworkInput);
             }
-            else if (!string.Equals(value, normalized, StringComparison.Ordinal))
+            else if (update.ShouldNotifyNormalizedValue)
             {
                 OnPropertyChanged(nameof(CrossNetworkCodeInput));
             }
