@@ -831,6 +831,8 @@ foreach ($connectionStateSignal in @(
     "Validate pairing material before connection preflight.",
     "_connectionWorkspaceStateClient.BuildInitialStatusPatch()",
     "_connectionWorkspaceStateClient.BuildInputInvalidatedState()",
+    "ApplyConnectionInputInvalidation",
+    "ClearPairingAndPreflight",
     "_connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot)",
     "_connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer)",
     "_connectionWorkspaceStateClient.BuildPairingValidatedState(",
@@ -844,6 +846,10 @@ Assert-True -Condition (-not $sessionViewModelSource.Contains("_validatedPairing
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("FfiEngineClient")) -Message "ConnectionWorkspaceStateClient must not call or reference FfiEngineClient."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("WebRTC")) -Message "ConnectionWorkspaceStateClient must not start or own WebRTC adapters."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("signaling")) -Message "ConnectionWorkspaceStateClient must not own signaling side effects."
+$inputInvalidatedMatches = [regex]::Matches($sessionViewModelSource, [regex]::Escape("_connectionWorkspaceStateClient.BuildInputInvalidatedState()"))
+Assert-True -Condition ($inputInvalidatedMatches.Count -le 3) -Message "SessionViewModel must centralize input invalidation through constructor initialization, ApplyConnectionInputInvalidation, and the discovery-input reset helper."
+$pairingFactsClearMatches = [regex]::Matches($sessionViewModelSource, [regex]::Escape("PairingFacts.Clear()"))
+Assert-True -Condition ($pairingFactsClearMatches.Count -eq 1) -Message "SessionViewModel must clear pairing facts only through ClearPairingAndPreflight."
 
 foreach ($inputResetSignal in @(
     "ResetManualConnectionInput",
@@ -1708,6 +1714,8 @@ foreach ($docSignal in @(
     "DashboardMetricsClient",
     "ConnectionPreflightClient",
     "ConnectionWorkspaceStateClient",
+    "ApplyConnectionInputInvalidation",
+    "ClearPairingAndPreflight",
     "ReplaceCollection",
     "RefreshReadOnlyWorkspaceAsync",
     "Prepare Connection",

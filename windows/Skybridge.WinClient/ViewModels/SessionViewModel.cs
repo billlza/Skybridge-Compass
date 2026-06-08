@@ -897,10 +897,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     _connectionWorkspaceStateClient.BuildDiscoveryBrowserValidatedState(snapshot));
                 ReplaceCollection(DiscoveredPeers, snapshot.Peers, DiscoveredPeerView.FromCandidate);
 
-                PairingFacts.Clear();
-                ClearConnectionPreflight();
+                ClearPairingAndPreflight();
                 OnPropertyChanged(nameof(DiscoveredPeerCount));
-                OnPropertyChanged(nameof(PairingFactCount));
             }
 
             OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
@@ -929,11 +927,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     ManualConnectionCode));
             ReplaceCollection(ManualConnectionFacts, snapshot.Facts, ManualConnectionFactView.FromFact);
 
-            ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
-            PairingFacts.Clear();
-            ClearConnectionPreflight();
+            ApplyConnectionInputInvalidation();
             OnPropertyChanged(nameof(ManualConnectionFactCount));
-            OnPropertyChanged(nameof(PairingFactCount));
             DiscoveryService = snapshot.Target.Service;
             ApplyConnectionWorkspaceStatusPatch(
                 _connectionWorkspaceStateClient.BuildManualTargetPreparedPatch(snapshot));
@@ -986,11 +981,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 CrossNetworkGeneratedCode = snapshot.GeneratedCode;
             }
 
-            ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
-            PairingFacts.Clear();
-            ClearConnectionPreflight();
+            ApplyConnectionInputInvalidation();
             OnPropertyChanged(nameof(CrossNetworkConnectionFactCount));
-            OnPropertyChanged(nameof(PairingFactCount));
             ApplyConnectionWorkspaceStatusPatch(
                 _connectionWorkspaceStateClient.BuildCrossNetworkPreparedPatch(snapshot));
         });
@@ -1011,10 +1003,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer));
             DiscoveredPeers.Clear();
             DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(_discoveryBrowserClient.BuildPeerCandidate(peer)));
-            PairingFacts.Clear();
-            ClearConnectionPreflight();
+            ClearPairingAndPreflight();
             OnPropertyChanged(nameof(DiscoveredPeerCount));
-            OnPropertyChanged(nameof(PairingFactCount));
             ApplyConnectionWorkspaceStatusPatch(
                 _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedPatch(peer));
         });
@@ -1558,19 +1548,30 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _connectionValidatedState = state;
     }
 
+    private void ApplyConnectionInputInvalidation()
+    {
+        ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
+        ClearPairingAndPreflight();
+    }
+
+    private void ClearPairingAndPreflight()
+    {
+        PairingFacts.Clear();
+        ClearConnectionPreflight();
+        OnPropertyChanged(nameof(PairingFactCount));
+    }
+
     private void InvalidatePairingAndPreflight()
     {
         ApplyConnectionValidatedState(_connectionWorkspaceStateClient.BuildInputInvalidatedState());
         DiscoveredPeers.Clear();
         DiscoveryBrowserFacts.Clear();
-        PairingFacts.Clear();
-        ClearConnectionPreflight();
+        ClearPairingAndPreflight();
         ApplyConnectionWorkspaceStatusPatch(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.DiscoveryInputChanged));
         OnPropertyChanged(nameof(DiscoveredPeerCount));
         OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
-        OnPropertyChanged(nameof(PairingFactCount));
     }
 
     private void ResetManualConnectionInput()
@@ -1593,12 +1594,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         ApplyConnectionValidatedState(
             _connectionWorkspaceStateClient.BuildPairingInputResetState(_connectionValidatedState));
-        PairingFacts.Clear();
-        ClearConnectionPreflight();
+        ClearPairingAndPreflight();
         ApplyConnectionWorkspaceStatusPatch(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.PairingInputChanged));
-        OnPropertyChanged(nameof(PairingFactCount));
     }
 
     private void ClearConnectionPreflight()
