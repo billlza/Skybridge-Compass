@@ -1559,33 +1559,23 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 PerformanceStatus,
                 SelectedFeature.Title));
 
-        TopBarConnectionStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Connection, ConnectionStatus);
-        TopBarDiagnosticsStatus = GetTopBarStatusValue(snapshot, TopBarStatusSlot.Diagnostics, PerformanceStatus);
-        TopBarNotificationsStatus = GetTopBarStatusValue(
+        TopBarConnectionStatus = _topBarStatusClient.ResolveStatusValue(
+            snapshot,
+            TopBarStatusSlot.Connection,
+            ConnectionStatus);
+        TopBarDiagnosticsStatus = _topBarStatusClient.ResolveStatusValue(
+            snapshot,
+            TopBarStatusSlot.Diagnostics,
+            PerformanceStatus);
+        TopBarNotificationsStatus = _topBarStatusClient.ResolveStatusValue(
             snapshot,
             TopBarStatusSlot.Notifications,
             _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications));
-        TopBarThemeStatus = GetTopBarStatusValue(
+        TopBarThemeStatus = _topBarStatusClient.ResolveStatusValue(
             snapshot,
             TopBarStatusSlot.Theme,
             _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme));
         LoadWorkspaceActionSurface(WorkspaceActionSurface.TopBarActions, TopBarActions);
-    }
-
-    private static string GetTopBarStatusValue(
-        TopBarStatusSnapshot snapshot,
-        TopBarStatusSlot slot,
-        string fallback)
-    {
-        foreach (var item in snapshot.Items)
-        {
-            if (item.Slot == slot)
-            {
-                return item.Value;
-            }
-        }
-
-        return fallback;
     }
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)

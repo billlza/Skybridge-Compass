@@ -8,6 +8,11 @@ public interface ITopBarStatusClient
     TopBarStatusSnapshot BuildReadOnlySnapshot(TopBarStatusRequest request);
 
     string BuildDefaultStatusValue(TopBarStatusSlot slot);
+
+    string ResolveStatusValue(
+        TopBarStatusSnapshot snapshot,
+        TopBarStatusSlot slot,
+        string fallback);
 }
 
 public sealed class TopBarStatusClient : ITopBarStatusClient
@@ -50,6 +55,22 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
             TopBarStatusSlot.Theme => DefaultThemeStatus,
             _ => ""
         };
+
+    public string ResolveStatusValue(
+        TopBarStatusSnapshot snapshot,
+        TopBarStatusSlot slot,
+        string fallback)
+    {
+        foreach (var item in snapshot.Items)
+        {
+            if (item.Slot == slot)
+            {
+                return item.Value;
+            }
+        }
+
+        return fallback;
+    }
 }
 
 public enum TopBarStatusSlot

@@ -465,6 +465,7 @@ foreach ($topBarSignal in @(
     "public sealed class TopBarStatusClient : ITopBarStatusClient",
     "BuildReadOnlySnapshot",
     "BuildDefaultStatusValue",
+    "ResolveStatusValue",
     "DefaultNotificationsStatus",
     "DefaultThemeStatus",
     "TopBarStatusRequest",
@@ -491,6 +492,7 @@ foreach ($topBarSignal in @(
     "ResolveWorkspaceActionCommand",
     "ResolveEnabled",
     "ResolveDetail",
+    "_topBarStatusClient.ResolveStatusValue(",
     "_topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications)",
     "_topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme)",
     "WorkspaceActionGateSnapshot",
@@ -556,6 +558,7 @@ Assert-True -Condition (-not $sessionViewModel.Contains("string actionKey")) -Me
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionCommand(surface")) -Message "SessionViewModel must not pass surface/key pairs to action command resolution."
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionEnabled")) -Message "SessionViewModel must delegate workspace action gate resolution to WorkspaceActionCatalogClient."
 Assert-True -Condition (-not $sessionViewModel.Contains("ResolveWorkspaceActionDetail")) -Message "SessionViewModel must delegate workspace action detail resolution to WorkspaceActionCatalogClient."
+Assert-True -Condition (-not $sessionViewModel.Contains("GetTopBarStatusValue")) -Message "SessionViewModel must delegate top-bar status lookup to TopBarStatusClient.ResolveStatusValue."
 
 foreach ($topBarLabelLookup in @(
     'GetTopBarStatusValue(snapshot, "Connection"',

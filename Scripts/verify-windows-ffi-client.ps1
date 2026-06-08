@@ -821,6 +821,7 @@ foreach ($signal in @(
     "public sealed class TopBarStatusClient : ITopBarStatusClient",
     "BuildReadOnlySnapshot",
     "BuildDefaultStatusValue",
+    "ResolveStatusValue",
     "DefaultNotificationsStatus",
     "DefaultThemeStatus",
     "TopBarStatusRequest",
