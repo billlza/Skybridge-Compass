@@ -24,6 +24,26 @@ function Write-Probe {
     Write-Output "mac-ssh-probe: $Message"
 }
 
+function ConvertFrom-CommaSeparatedList {
+    param([string[]]$Values)
+
+    $items = [System.Collections.Generic.List[string]]::new()
+    foreach ($value in $Values) {
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            continue
+        }
+
+        foreach ($item in ($value -split ",")) {
+            $trimmed = $item.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+                $items.Add($trimmed)
+            }
+        }
+    }
+
+    return @($items | Select-Object -Unique)
+}
+
 function ConvertTo-PosixSingleQuoted {
     param([string]$Value)
 
@@ -347,6 +367,13 @@ function Invoke-HostReadinessProbe {
     $script:HostProbeReady = -not [string]::IsNullOrWhiteSpace($readyUserName)
     $script:HostProbeUserName = $readyUserName
     $script:HostProbeHostName = $script:CurrentHostName
+}
+
+$AlternateHostNames = @(ConvertFrom-CommaSeparatedList -Values $AlternateHostNames)
+$UserNames = @(ConvertFrom-CommaSeparatedList -Values $UserNames)
+
+if ($UserNames.Count -eq 0) {
+    throw "Mac SSH probe requires at least one username."
 }
 
 if (-not (Test-Path -LiteralPath $KeyPath)) {
