@@ -1,12 +1,14 @@
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$SshKeyPath = $env:SKYBRIDGE_GITHUB_SSH_KEY,
+    [string]$KnownHostsPath = (Join-Path $env:USERPROFILE ".ssh\known_hosts"),
     [switch]$CheckOnly
 )
 
 $ErrorActionPreference = "Stop"
 
 $originSsh = "git@github.com:billlza/Skybridge-Compass.git"
+$githubEd25519KnownHost = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 
 function Join-SshCommand {
     param([string[]]$Parts)
@@ -22,9 +24,17 @@ function Join-SshCommand {
 }
 
 function Resolve-SkybridgeSshCommand {
-    param([string]$PreferredKeyPath)
+    param(
+        [string]$PreferredKeyPath,
+        [string]$KnownHosts
+    )
 
-    $parts = @("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new")
+    $resolvedKnownHosts = (Resolve-Path -LiteralPath $KnownHosts -ErrorAction Stop).Path -replace "\\", "/"
+    $parts = @(
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "UserKnownHostsFile=$resolvedKnownHosts")
     $keyPath = $PreferredKeyPath
     if ([string]::IsNullOrWhiteSpace($keyPath)) {
         $candidateKey = Join-Path $env:USERPROFILE ".ssh\skybridge_zk_reverse_ed25519"
@@ -37,11 +47,71 @@ function Resolve-SkybridgeSshCommand {
         $resolvedKeyPath = (Resolve-Path -LiteralPath $keyPath -ErrorAction Stop).Path -replace "\\", "/"
         $parts += @("-i", $resolvedKeyPath, "-o", "IdentitiesOnly=yes")
     }
+    else {
+        throw "No SSH key path configured. Set SKYBRIDGE_GITHUB_SSH_KEY or create ~/.ssh/skybridge_zk_reverse_ed25519."
+    }
 
     return Join-SshCommand -Parts $parts
 }
 
-$sshCommand = Resolve-SkybridgeSshCommand -PreferredKeyPath $SshKeyPath
+function Ensure-PublicKeyFile {
+    param([string]$PrivateKeyPath)
+
+    $publicKeyPath = "$PrivateKeyPath.pub"
+    if (Test-Path -LiteralPath $publicKeyPath) {
+        return
+    }
+
+    if ($CheckOnly) {
+        throw "SSH public key file is missing: $publicKeyPath"
+    }
+
+    $publicKey = & ssh-keygen -y -f $PrivateKeyPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to derive SSH public key from $PrivateKeyPath`: $($publicKey -join [Environment]::NewLine)"
+    }
+
+    Set-Content -LiteralPath $publicKeyPath -Encoding ascii -Value (($publicKey | Select-Object -First 1) -as [string])
+}
+
+function Ensure-GitHubKnownHost {
+    param([string]$Path)
+
+    $sshDir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $sshDir)) {
+        if ($CheckOnly) {
+            throw "SSH directory is missing: $sshDir"
+        }
+
+        New-Item -ItemType Directory -Path $sshDir | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        if ($CheckOnly) {
+            throw "known_hosts is missing: $Path"
+        }
+
+        New-Item -ItemType File -Path $Path | Out-Null
+    }
+
+    $knownHosts = Get-Content -LiteralPath $Path -ErrorAction Stop
+    if ($githubEd25519KnownHost -notin $knownHosts) {
+        if ($CheckOnly) {
+            throw "known_hosts is missing GitHub's Ed25519 host key entry."
+        }
+
+        Add-Content -LiteralPath $Path -Value $githubEd25519KnownHost
+    }
+}
+
+Ensure-GitHubKnownHost -Path $KnownHostsPath
+$sshCommand = Resolve-SkybridgeSshCommand -PreferredKeyPath $SshKeyPath -KnownHosts $KnownHostsPath
+$resolvedPrivateKey = if ([string]::IsNullOrWhiteSpace($SshKeyPath)) {
+    Join-Path $env:USERPROFILE ".ssh\skybridge_zk_reverse_ed25519"
+} else {
+    $SshKeyPath
+}
+Ensure-PublicKeyFile -PrivateKeyPath (Resolve-Path -LiteralPath $resolvedPrivateKey -ErrorAction Stop).Path
 
 function Invoke-Git {
     param(
@@ -96,6 +166,7 @@ if (-not $CheckOnly) {
     Invoke-Git remote set-url origin $originSsh | Out-Null
     Invoke-Git remote set-url --push origin $originSsh | Out-Null
     Invoke-Git config --local core.sshCommand $sshCommand | Out-Null
+    Invoke-Git config --local credential.helper "" | Out-Null
     Invoke-Git config --local credential.interactive false | Out-Null
     Invoke-Git config --local core.hooksPath .githooks | Out-Null
     Invoke-Git config --local url.git@github.com:billlza/Skybridge-Compass.git.insteadOf https://github.com/billlza/Skybridge-Compass.git | Out-Null
@@ -114,6 +185,11 @@ Assert-Equal -Actual (Get-ConfigValue "remote.origin.pushurl") -Expected $origin
 Assert-Equal -Actual (Get-ConfigValue "core.sshCommand") -Expected $sshCommand -Message "core.sshCommand must force non-interactive SSH."
 Assert-Equal -Actual (Get-ConfigValue "credential.interactive") -Expected "false" -Message "credential.interactive must stay disabled for this repo."
 Assert-Equal -Actual (Get-ConfigValue "core.hooksPath") -Expected ".githooks" -Message "core.hooksPath must install the tracked HTTPS guard."
+
+$localCredentialHelpers = @(& git -C $RepoRoot config --local --get-all credential.helper 2>$null)
+if ($LASTEXITCODE -ne 0 -or $localCredentialHelpers.Count -eq 0 -or $localCredentialHelpers[0] -ne "") {
+    throw "credential.helper must be reset to an empty local value so Git Credential Manager cannot handle GitHub HTTPS fallback."
+}
 
 $repoRewriteGit = Invoke-Git config --local --get-all url.git@github.com:billlza/Skybridge-Compass.git.insteadOf
 $repoRewriteNoGit = Invoke-Git config --local --get-all url.git@github.com:billlza/Skybridge-Compass.insteadOf

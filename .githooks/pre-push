@@ -25,4 +25,26 @@ if [ -n "$remote_name" ]; then
     block_https_url "$push_url"
 fi
 
+ssh_command="$(git config --get core.sshCommand 2>/dev/null || true)"
+for required_ssh_option in "BatchMode=yes" "IdentitiesOnly=yes" "StrictHostKeyChecking=yes" "UserKnownHostsFile="; do
+    case "$ssh_command" in
+        *"$required_ssh_option"*)
+            ;;
+        *)
+            echo "pre-push: refusing push because core.sshCommand is not pinned to the non-interactive GitHub SSH policy." >&2
+            echo "pre-push: missing $required_ssh_option" >&2
+            echo "pre-push: run Scripts/ensure-github-ssh-remote.ps1, then retry." >&2
+            exit 1
+            ;;
+    esac
+done
+
+helper_count="$(git config --local --get-all credential.helper 2>/dev/null | wc -l | tr -d ' ')"
+first_helper="$(git config --local --get-all credential.helper 2>/dev/null | sed -n '1p')"
+if [ "$helper_count" = "0" ] || [ -n "$first_helper" ]; then
+    echo "pre-push: refusing push because local credential.helper is not reset." >&2
+    echo "pre-push: run Scripts/ensure-github-ssh-remote.ps1, then retry." >&2
+    exit 1
+fi
+
 exit 0
