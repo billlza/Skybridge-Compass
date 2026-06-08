@@ -436,46 +436,46 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceShellStateAccessor.BuildCommandGateState);
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
         var commandBindings = new WorkspaceCommandBindings(
-            ConnectAsync,
+            _sessionEngineActions.ConnectAsync,
             _workspaceCommandAvailability.CanConnect,
-            DisconnectAsync,
+            _sessionEngineActions.DisconnectAsync,
             _workspaceCommandAvailability.CanDisconnect,
-            SendHeartbeatAsync,
+            _sessionEngineActions.SendHeartbeatAsync,
             _workspaceCommandAvailability.CanSendHeartbeat,
-            StartDiscoveryAsync,
+            _discoveryBrowserActions.StartAsync,
             _workspaceCommandAvailability.CanUseDiscoveryBrowser,
-            StopDiscoveryAsync,
-            RefreshDiscoveryAsync,
-            RunExtendedDiscoveryAsync,
-            PrepareManualConnectionAsync,
+            _discoveryBrowserActions.StopAsync,
+            _discoveryBrowserActions.RefreshAsync,
+            _discoveryBrowserActions.RunExtendedSearchAsync,
+            _connectionWorkspaceActions.PrepareManualConnectionAsync,
             _workspaceCommandAvailability.CanPrepareManualConnection,
-            GenerateQRCodeAsync,
+            _crossNetworkConnectionActions.GenerateQrCodeAsync,
             _workspaceCommandAvailability.CanUseCrossNetworkConnection,
-            ScanQRCodeAsync,
+            _crossNetworkConnectionActions.ScanQrCodeAsync,
             _workspaceCommandAvailability.CanScanQrCode,
-            GenerateConnectionCodeAsync,
-            RegenerateConnectionCodeAsync,
-            CopyConnectionCodeAsync,
+            _crossNetworkConnectionActions.GenerateCodeAsync,
+            _crossNetworkConnectionActions.RegenerateCodeAsync,
+            _crossNetworkConnectionActions.CopyCodeAsync,
             _workspaceCommandAvailability.CanCopyConnectionCode,
-            ConnectConnectionCodeAsync,
+            _crossNetworkConnectionActions.ConnectWithCodeAsync,
             _workspaceCommandAvailability.CanConnectConnectionCode,
-            ParseAdvertisementAsync,
+            _connectionWorkspaceActions.ParseAdvertisementAsync,
             _workspaceCommandAvailability.CanParseAdvertisement,
-            ValidatePairingCodeAsync,
+            _connectionWorkspaceActions.ValidatePairingCodeAsync,
             _workspaceCommandAvailability.CanValidatePairingCode,
-            PrepareConnectionAsync,
+            _connectionWorkspaceActions.PrepareConnectionAsync,
             _workspaceCommandAvailability.CanPrepareConnection,
-            RunCoreDiagnosticsAsync,
+            _readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync,
             _workspaceCommandAvailability.CanRunCoreDiagnostics,
-            RefreshFileTransferAsync,
+            _readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync,
             _workspaceCommandAvailability.CanRefreshFileTransfer,
-            RefreshRemoteDesktopAsync,
+            _readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync,
             _workspaceCommandAvailability.CanRefreshRemoteDesktop,
-            RefreshSystemMonitorAsync,
+            _readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync,
             _workspaceCommandAvailability.CanRefreshSystemMonitor,
-            RefreshUsbManagementAsync,
+            _readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync,
             _workspaceCommandAvailability.CanRefreshUsbManagement,
-            RefreshSettingsAsync,
+            _readOnlyWorkspaceRefreshActions.RefreshSettingsAsync,
             _workspaceCommandAvailability.CanRefreshSettings);
         ConnectCommand = commandBindings.ConnectCommand;
         DisconnectCommand = commandBindings.DisconnectCommand;
@@ -1039,75 +1039,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand RefreshUsbManagementCommand { get; }
 
     public ICommand RefreshSettingsCommand { get; }
-
-    private Task ConnectAsync() =>
-        _sessionEngineActions.ConnectAsync();
-
-    private Task DisconnectAsync() =>
-        _sessionEngineActions.DisconnectAsync();
-
-    private Task SendHeartbeatAsync() =>
-        _sessionEngineActions.SendHeartbeatAsync();
-
-    private Task StartDiscoveryAsync() =>
-        _discoveryBrowserActions.StartAsync();
-
-    private Task StopDiscoveryAsync() =>
-        _discoveryBrowserActions.StopAsync();
-
-    private Task RefreshDiscoveryAsync() =>
-        _discoveryBrowserActions.RefreshAsync();
-
-    private Task RunExtendedDiscoveryAsync() =>
-        _discoveryBrowserActions.RunExtendedSearchAsync();
-
-    private Task PrepareManualConnectionAsync() =>
-        _connectionWorkspaceActions.PrepareManualConnectionAsync();
-
-    private Task GenerateQRCodeAsync() =>
-        _crossNetworkConnectionActions.GenerateQrCodeAsync();
-
-    private Task ScanQRCodeAsync() =>
-        _crossNetworkConnectionActions.ScanQrCodeAsync();
-
-    private Task GenerateConnectionCodeAsync() =>
-        _crossNetworkConnectionActions.GenerateCodeAsync();
-
-    private Task RegenerateConnectionCodeAsync() =>
-        _crossNetworkConnectionActions.RegenerateCodeAsync();
-
-    private Task CopyConnectionCodeAsync() =>
-        _crossNetworkConnectionActions.CopyCodeAsync();
-
-    private Task ConnectConnectionCodeAsync() =>
-        _crossNetworkConnectionActions.ConnectWithCodeAsync();
-
-    private Task ParseAdvertisementAsync() =>
-        _connectionWorkspaceActions.ParseAdvertisementAsync();
-
-    private Task ValidatePairingCodeAsync() =>
-        _connectionWorkspaceActions.ValidatePairingCodeAsync();
-
-    private Task PrepareConnectionAsync() =>
-        _connectionWorkspaceActions.PrepareConnectionAsync();
-
-    private Task RunCoreDiagnosticsAsync() =>
-        _readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync();
-
-    private Task RefreshFileTransferAsync() =>
-        _readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync();
-
-    private Task RefreshUsbManagementAsync() =>
-        _readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync();
-
-    private Task RefreshRemoteDesktopAsync() =>
-        _readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync();
-
-    private Task RefreshSystemMonitorAsync() =>
-        _readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync();
-
-    private Task RefreshSettingsAsync() =>
-        _readOnlyWorkspaceRefreshActions.RefreshSettingsAsync();
 
     private bool IsFeatureSelected(FeatureEntryId featureId) =>
         _workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId);

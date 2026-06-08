@@ -335,7 +335,7 @@ foreach ($viewModelProjectionSignal in @(
     "new WorkspaceSnapshotApplier(_workspaceCountNotifier, RefreshDashboardMetrics)",
     "new ReadOnlyWorkspaceRefreshActions(",
     "new ReadOnlyWorkspaceSnapshotHandlers(",
-    "_readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync()"
+    "_readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $viewModelProjectionSignal -Message "SessionViewModel reusable projection helper missing: $viewModelProjectionSignal"
 }
@@ -1095,9 +1095,9 @@ foreach ($sessionStatusSignal in @(
     "BuildDefaultEngineStateStatus",
     "new SessionStatusClient()",
     "_sessionStatusClient.BuildInitialStatusMessage()",
-    "_sessionEngineActions.ConnectAsync()",
-    "_sessionEngineActions.DisconnectAsync()",
-    "_sessionEngineActions.SendHeartbeatAsync()",
+    "_sessionEngineActions.ConnectAsync",
+    "_sessionEngineActions.DisconnectAsync",
+    "_sessionEngineActions.SendHeartbeatAsync",
     "_sessionEngineStateProjector.Apply(newState)",
     "_sessionStatusClient.BuildPendingStatus(action)",
     "_sessionStatusClient.BuildCompletedStatus(action)",
@@ -1126,9 +1126,9 @@ foreach ($sessionEngineActionsSignal in @(
 }
 foreach ($sessionViewModelEngineActionSignal in @(
     "new SessionEngineActions(",
-    "_sessionEngineActions.ConnectAsync()",
-    "_sessionEngineActions.DisconnectAsync()",
-    "_sessionEngineActions.SendHeartbeatAsync()"
+    "_sessionEngineActions.ConnectAsync",
+    "_sessionEngineActions.DisconnectAsync",
+    "_sessionEngineActions.SendHeartbeatAsync"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelEngineActionSignal -Message "SessionViewModel must delegate session engine actions through SessionEngineActions: $sessionViewModelEngineActionSignal"
 }
@@ -1336,6 +1336,34 @@ foreach ($sessionViewModelForwardingGateWrapper in @(
     "private bool CanRefreshSettings()"
 )) {
     Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingGateWrapper)) -Message "SessionViewModel must inject WorkspaceCommandAvailability delegates directly instead of reintroducing forwarding command gate wrappers: $sessionViewModelForwardingGateWrapper"
+}
+
+foreach ($sessionViewModelForwardingActionWrapper in @(
+    "private Task ConnectAsync()",
+    "private Task DisconnectAsync()",
+    "private Task SendHeartbeatAsync()",
+    "private Task StartDiscoveryAsync()",
+    "private Task StopDiscoveryAsync()",
+    "private Task RefreshDiscoveryAsync()",
+    "private Task RunExtendedDiscoveryAsync()",
+    "private Task PrepareManualConnectionAsync()",
+    "private Task GenerateQRCodeAsync()",
+    "private Task ScanQRCodeAsync()",
+    "private Task GenerateConnectionCodeAsync()",
+    "private Task RegenerateConnectionCodeAsync()",
+    "private Task CopyConnectionCodeAsync()",
+    "private Task ConnectConnectionCodeAsync()",
+    "private Task ParseAdvertisementAsync()",
+    "private Task ValidatePairingCodeAsync()",
+    "private Task PrepareConnectionAsync()",
+    "private Task RunCoreDiagnosticsAsync()",
+    "private Task RefreshFileTransferAsync()",
+    "private Task RefreshUsbManagementAsync()",
+    "private Task RefreshRemoteDesktopAsync()",
+    "private Task RefreshSystemMonitorAsync()",
+    "private Task RefreshSettingsAsync()"
+)) {
+    Assert-True -Condition (-not $sessionViewModelSource.Contains($sessionViewModelForwardingActionWrapper)) -Message "SessionViewModel must inject action delegates directly instead of reintroducing forwarding command action wrappers: $sessionViewModelForwardingActionWrapper"
 }
 
 foreach ($sessionViewModelDirectGateSignal in @(
@@ -1772,12 +1800,12 @@ foreach ($sessionViewModelReadOnlyRefreshSignal in @(
     "_readOnlyWorkspaceSnapshotHandlers,",
     "() => SelectedBitrate",
     "() => SelectedFramerate",
-    "_readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync()",
-    "_readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync()",
-    "_readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync()",
-    "_readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync()",
-    "_readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync()",
-    "_readOnlyWorkspaceRefreshActions.RefreshSettingsAsync()"
+    "_readOnlyWorkspaceRefreshActions.RunCoreDiagnosticsAsync",
+    "_readOnlyWorkspaceRefreshActions.RefreshFileTransferAsync",
+    "_readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync",
+    "_readOnlyWorkspaceRefreshActions.RefreshRemoteDesktopAsync",
+    "_readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync",
+    "_readOnlyWorkspaceRefreshActions.RefreshSettingsAsync"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelReadOnlyRefreshSignal -Message "SessionViewModel must delegate read-only workspace refresh through ReadOnlyWorkspaceRefreshActions: $sessionViewModelReadOnlyRefreshSignal"
 }
@@ -1943,10 +1971,10 @@ foreach ($discoveryBrowserActionsSignal in @(
 }
 foreach ($sessionViewModelDiscoveryBrowserActionSignal in @(
     "new DiscoveryBrowserActions(",
-    "_discoveryBrowserActions.StartAsync()",
-    "_discoveryBrowserActions.StopAsync()",
-    "_discoveryBrowserActions.RefreshAsync()",
-    "_discoveryBrowserActions.RunExtendedSearchAsync()"
+    "_discoveryBrowserActions.StartAsync",
+    "_discoveryBrowserActions.StopAsync",
+    "_discoveryBrowserActions.RefreshAsync",
+    "_discoveryBrowserActions.RunExtendedSearchAsync"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelDiscoveryBrowserActionSignal -Message "SessionViewModel must delegate discovery browser actions through DiscoveryBrowserActions: $sessionViewModelDiscoveryBrowserActionSignal"
 }
@@ -2040,10 +2068,10 @@ foreach ($connectionWorkspaceActionsSignal in @(
 }
 foreach ($sessionViewModelConnectionWorkspaceActionSignal in @(
     "new ConnectionWorkspaceActions(",
-    "_connectionWorkspaceActions.PrepareManualConnectionAsync()",
-    "_connectionWorkspaceActions.ParseAdvertisementAsync()",
-    "_connectionWorkspaceActions.ValidatePairingCodeAsync()",
-    "_connectionWorkspaceActions.PrepareConnectionAsync()"
+    "_connectionWorkspaceActions.PrepareManualConnectionAsync",
+    "_connectionWorkspaceActions.ParseAdvertisementAsync",
+    "_connectionWorkspaceActions.ValidatePairingCodeAsync",
+    "_connectionWorkspaceActions.PrepareConnectionAsync"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelConnectionWorkspaceActionSignal -Message "SessionViewModel must delegate connection workspace actions through ConnectionWorkspaceActions: $sessionViewModelConnectionWorkspaceActionSignal"
 }
@@ -2258,12 +2286,12 @@ foreach ($crossNetworkConnectionActionsSignal in @(
 }
 foreach ($sessionViewModelCrossNetworkActionSignal in @(
     "new CrossNetworkConnectionActions(",
-    "_crossNetworkConnectionActions.GenerateQrCodeAsync()",
-    "_crossNetworkConnectionActions.ScanQrCodeAsync()",
-    "_crossNetworkConnectionActions.GenerateCodeAsync()",
-    "_crossNetworkConnectionActions.RegenerateCodeAsync()",
-    "_crossNetworkConnectionActions.CopyCodeAsync()",
-    "_crossNetworkConnectionActions.ConnectWithCodeAsync()"
+    "_crossNetworkConnectionActions.GenerateQrCodeAsync",
+    "_crossNetworkConnectionActions.ScanQrCodeAsync",
+    "_crossNetworkConnectionActions.GenerateCodeAsync",
+    "_crossNetworkConnectionActions.RegenerateCodeAsync",
+    "_crossNetworkConnectionActions.CopyCodeAsync",
+    "_crossNetworkConnectionActions.ConnectWithCodeAsync"
 )) {
     Assert-Contains -Text $sessionViewModelSource -Needle $sessionViewModelCrossNetworkActionSignal -Message "SessionViewModel must delegate cross-network actions through CrossNetworkConnectionActions: $sessionViewModelCrossNetworkActionSignal"
 }
