@@ -646,16 +646,20 @@ foreach ($sessionStatusSignal in @(
     "BuildDefaultCompletedStatus",
     "BuildDefaultEngineStateStatus",
     "new SessionStatusClient()",
+    "RunSessionEngineActionAsync",
     "_sessionStatusClient.BuildInitialStatusMessage()",
-    "_sessionStatusClient.BuildPendingStatus(SessionStatusAction.Connect)",
-    "_sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Connect)",
-    "_sessionStatusClient.BuildPendingStatus(SessionStatusAction.Disconnect)",
-    "_sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Disconnect)",
-    "_sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Heartbeat)",
+    "RunSessionEngineActionAsync(SessionStatusAction.Connect",
+    "RunSessionEngineActionAsync(SessionStatusAction.Disconnect",
+    "RunSessionEngineActionAsync(SessionStatusAction.Heartbeat",
+    "_sessionStatusClient.BuildPendingStatus(action)",
+    "_sessionStatusClient.BuildCompletedStatus(action)",
     "_sessionStatusClient.BuildEngineStateStatus(newState)"
 )) {
     Assert-Contains -Text ($sessionStatus + $sessionViewModel + $mainWindow) -Needle $sessionStatusSignal -Message "Session status service signal missing: $sessionStatusSignal"
 }
+
+$sessionBusyScopeMatches = [regex]::Matches($sessionViewModelSource, [regex]::Escape("RunWithBusyState(WorkspaceErrorScope.Session"))
+Assert-True -Condition ($sessionBusyScopeMatches.Count -eq 1) -Message "SessionViewModel must route session engine action lifecycle through RunSessionEngineActionAsync."
 
 foreach ($viewModelSessionStatusLiteral in @(
     '_statusMessage = "Idle"',
@@ -1731,6 +1735,7 @@ foreach ($docSignal in @(
     "TopBarStatusUpdateSnapshot",
     "TopBarStatusSlot",
     "SessionStatusClient",
+    "RunSessionEngineActionAsync",
     "WorkspaceActionCommandId",
     "WorkspaceActionGateId",
     "WorkspaceActionDetailSlot",

@@ -811,49 +811,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public ICommand RefreshSettingsCommand { get; }
 
-    private async Task ConnectAsync()
-    {
-        if (IsBusy)
-        {
-            return;
-        }
+    private Task ConnectAsync() =>
+        RunSessionEngineActionAsync(SessionStatusAction.Connect, _engineClient.ConnectAsync);
 
-        await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
-        {
-            StatusMessage = _sessionStatusClient.BuildPendingStatus(SessionStatusAction.Connect);
-            await _engineClient.ConnectAsync();
-            StatusMessage = _sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Connect);
-        });
-    }
+    private Task DisconnectAsync() =>
+        RunSessionEngineActionAsync(SessionStatusAction.Disconnect, _engineClient.DisconnectAsync);
 
-    private async Task DisconnectAsync()
-    {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
-        {
-            StatusMessage = _sessionStatusClient.BuildPendingStatus(SessionStatusAction.Disconnect);
-            await _engineClient.DisconnectAsync();
-            StatusMessage = _sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Disconnect);
-        });
-    }
-
-    private async Task SendHeartbeatAsync()
-    {
-        if (IsBusy)
-        {
-            return;
-        }
-
-        await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
-        {
-            await _engineClient.SendHeartbeatAsync();
-            StatusMessage = _sessionStatusClient.BuildCompletedStatus(SessionStatusAction.Heartbeat);
-        });
-    }
+    private Task SendHeartbeatAsync() =>
+        RunSessionEngineActionAsync(SessionStatusAction.Heartbeat, _engineClient.SendHeartbeatAsync);
 
     private Task StartDiscoveryAsync() =>
         RunDiscoveryBrowserAsync(DiscoveryBrowserAction.Start);
@@ -1270,6 +1235,23 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             IsBusy = false;
         }
+    }
+
+    private async Task RunSessionEngineActionAsync(
+        SessionStatusAction action,
+        Func<Task> engineAction)
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        await RunWithBusyState(WorkspaceErrorScope.Session, async () =>
+        {
+            StatusMessage = _sessionStatusClient.BuildPendingStatus(action);
+            await engineAction();
+            StatusMessage = _sessionStatusClient.BuildCompletedStatus(action);
+        });
     }
 
     private async Task RefreshReadOnlyWorkspaceAsync<TSnapshot>(
