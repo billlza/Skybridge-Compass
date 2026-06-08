@@ -410,29 +410,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SettingsDetails = collections.SettingsDetails;
         _selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;
         _selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;
+        var workspaceShellStateSource = new WorkspaceShellStateSource(this);
         _workspaceShellStateAccessor = new WorkspaceShellStateAccessor(
             _workspaceViewStateBuilder,
-            () => ConnectionState,
-            () => FileTransferQueue.Count,
-            () => IsBusy,
-            () => SelectedFeature,
-            () => ManualConnectionHost,
-            () => ManualConnectionPort,
-            () => CrossNetworkQrInput,
-            () => CrossNetworkCodeInput,
-            () => CrossNetworkGeneratedCode,
-            () => DiscoveryService,
-            () => DiscoveryTxtRecord,
-            () => PairingConnectionCode,
-            () => _connectionInputCoordinator.ValidatedState,
-            () => IsUsbManagementSelected,
-            () => IsFileTransferSelected,
-            () => IsRemoteDesktopSelected,
-            () => IsQuantumSelected,
-            () => IsSystemMonitorSelected,
-            () => IsSettingsSelected,
-            () => ConnectionStatus,
-            () => PerformanceStatus);
+            workspaceShellStateSource);
         _workspaceCommandAvailability = new WorkspaceCommandAvailability(
             _workspaceCommandGateCoordinator,
             _workspaceShellStateAccessor.BuildCommandGateState);
@@ -1018,6 +999,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool IsFeatureSelected(FeatureEntryId featureId) =>
         _workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId);
+
+    internal ConnectionWorkspaceValidatedState ValidatedConnectionState =>
+        _connectionInputCoordinator.ValidatedState;
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
     {
