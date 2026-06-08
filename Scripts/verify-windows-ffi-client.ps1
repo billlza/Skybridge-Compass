@@ -49,12 +49,13 @@ $featureCatalogPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
 $sessionStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionStatusClient.cs"
 $sessionCommandStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionCommandStateClient.cs"
+$workspaceCommandStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceCommandStateClient.cs"
 $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $interfacePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/IEngineClient.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $unavailableClientStubsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $mainWindowPath, $architecturePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -82,6 +83,7 @@ $featureCatalog = Get-Content -Raw -LiteralPath $featureCatalogPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
 $sessionStatus = Get-Content -Raw -LiteralPath $sessionStatusPath
 $sessionCommandState = Get-Content -Raw -LiteralPath $sessionCommandStatePath
+$workspaceCommandState = Get-Content -Raw -LiteralPath $workspaceCommandStatePath
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $interface = Get-Content -Raw -LiteralPath $interfacePath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
@@ -145,6 +147,7 @@ Assert-Contains -Text $mainWindow -Needle "new FeatureCatalogClient()" -Message 
 Assert-Contains -Text $mainWindow -Needle "new TopBarStatusClient()" -Message "MainWindow should wire TopBarStatusClient for explicit top-bar status parity."
 Assert-Contains -Text $mainWindow -Needle "new SessionStatusClient()" -Message "MainWindow should wire SessionStatusClient for explicit session status text."
 Assert-Contains -Text $mainWindow -Needle "new SessionCommandStateClient()" -Message "MainWindow should wire SessionCommandStateClient for explicit session command enablement."
+Assert-Contains -Text $mainWindow -Needle "new WorkspaceCommandStateClient()" -Message "MainWindow should wire WorkspaceCommandStateClient for explicit workspace command enablement."
 
 foreach ($signal in @(
     "ParseDiscoveryAdvertisementAsync",
@@ -911,5 +914,20 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "SessionCommandStateClient" -Message "Architecture doc missing SessionCommandStateClient status."
+
+foreach ($signal in @(
+    "public interface IWorkspaceCommandStateClient",
+    "public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient",
+    "WorkspaceCommandGateRequest",
+    "CanUseDeviceDiscovery",
+    "CanUseCrossNetworkConnection",
+    "CanUseWorkspaceFeature",
+    "BuildActionGateSnapshot",
+    "WorkspaceActionGateSnapshot"
+)) {
+    Assert-Contains -Text $workspaceCommandState -Needle $signal -Message "WorkspaceCommandStateClient missing workspace command gate signal: $signal"
+}
+
+Assert-Contains -Text $architecture -Needle "WorkspaceCommandStateClient" -Message "Architecture doc missing WorkspaceCommandStateClient status."
 
 Write-Output "windows-ffi-client: ok"

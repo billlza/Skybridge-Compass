@@ -110,11 +110,12 @@ $settingsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Settin
 $topBarStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/TopBarStatusClient.cs"
 $sessionStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionStatusClient.cs"
 $sessionCommandStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SessionCommandStateClient.cs"
+$workspaceCommandStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceCommandStateClient.cs"
 $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -141,6 +142,7 @@ $settings = Get-Content -Raw -LiteralPath $settingsPath
 $topBarStatus = Get-Content -Raw -LiteralPath $topBarStatusPath
 $sessionStatus = Get-Content -Raw -LiteralPath $sessionStatusPath
 $sessionCommandState = Get-Content -Raw -LiteralPath $sessionCommandStatePath
+$workspaceCommandState = Get-Content -Raw -LiteralPath $workspaceCommandStatePath
 $unavailableClientStubs = Get-Content -Raw -LiteralPath $unavailableClientStubsPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $parityDoc = Get-Content -Raw -LiteralPath $parityDocPath
@@ -585,6 +587,36 @@ foreach ($viewModelSessionCommandGate in @(
     "ConnectionState == EngineConnectionState.Connected"
 )) {
     Assert-True -Condition (-not $sessionViewModel.Contains($viewModelSessionCommandGate)) -Message "SessionViewModel must source connect/disconnect/heartbeat enablement from SessionCommandStateClient instead of inline gate: $viewModelSessionCommandGate"
+}
+
+foreach ($workspaceCommandStateSignal in @(
+    "public interface IWorkspaceCommandStateClient",
+    "public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient",
+    "WorkspaceCommandGateRequest",
+    "CanUseDeviceDiscovery",
+    "CanUseCrossNetworkConnection",
+    "CanUseWorkspaceFeature",
+    "BuildActionGateSnapshot",
+    "new WorkspaceCommandStateClient()",
+    "_workspaceCommandStateClient.CanUseDeviceDiscovery(IsBusy, IsDeviceDiscoverySelected)",
+    "_workspaceCommandStateClient.CanUseCrossNetworkConnection(IsBusy, IsDeviceDiscoverySelected)",
+    "_workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsUsbManagementSelected)",
+    "_workspaceCommandStateClient.BuildActionGateSnapshot(",
+    "new WorkspaceCommandGateRequest("
+)) {
+    Assert-Contains -Text ($workspaceCommandState + $sessionViewModel + $mainWindow) -Needle $workspaceCommandStateSignal -Message "Workspace command state service signal missing: $workspaceCommandStateSignal"
+}
+
+foreach ($viewModelWorkspaceCommandGate in @(
+    "!IsBusy && IsDeviceDiscoverySelected",
+    "!IsBusy && IsUsbManagementSelected",
+    "!IsBusy && IsFileTransferSelected",
+    "!IsBusy && IsRemoteDesktopSelected",
+    "!IsBusy && IsQuantumSelected",
+    "!IsBusy && IsSystemMonitorSelected",
+    "!IsBusy && IsSettingsSelected"
+)) {
+    Assert-True -Condition (-not $sessionViewModel.Contains($viewModelWorkspaceCommandGate)) -Message "SessionViewModel must source workspace feature command enablement from WorkspaceCommandStateClient instead of inline gate: $viewModelWorkspaceCommandGate"
 }
 
 foreach ($workspaceActionRoleSignal in @(

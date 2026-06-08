@@ -34,6 +34,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ISessionStatusClient _sessionStatusClient;
     private readonly IFeatureCatalogClient _featureCatalogClient;
     private readonly ISessionCommandStateClient _sessionCommandStateClient;
+    private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -99,7 +100,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         IWorkspaceErrorStatusClient? workspaceErrorStatusClient = null,
         ISessionStatusClient? sessionStatusClient = null,
         IFeatureCatalogClient? featureCatalogClient = null,
-        ISessionCommandStateClient? sessionCommandStateClient = null)
+        ISessionCommandStateClient? sessionCommandStateClient = null,
+        IWorkspaceCommandStateClient? workspaceCommandStateClient = null)
     {
         _engineClient = engineClient;
         _discoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
@@ -125,6 +127,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _sessionStatusClient = sessionStatusClient ?? new SessionStatusClient();
         _featureCatalogClient = featureCatalogClient ?? new FeatureCatalogClient();
         _sessionCommandStateClient = sessionCommandStateClient ?? new SessionCommandStateClient();
+        _workspaceCommandStateClient = workspaceCommandStateClient ?? new WorkspaceCommandStateClient();
         _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
         _topBarNotificationsStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Notifications);
         _topBarThemeStatus = _topBarStatusClient.BuildDefaultStatusValue(TopBarStatusSlot.Theme);
@@ -1253,14 +1256,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool CanSendHeartbeat() => _sessionCommandStateClient.CanSendHeartbeat(ConnectionState, IsBusy);
 
-    private bool CanUseDiscoveryBrowser() => !IsBusy && IsDeviceDiscoverySelected;
+    private bool CanUseDeviceDiscovery() =>
+        _workspaceCommandStateClient.CanUseDeviceDiscovery(IsBusy, IsDeviceDiscoverySelected);
+
+    private bool CanUseDiscoveryBrowser() => CanUseDeviceDiscovery();
 
     private bool CanPrepareManualConnection() =>
-        !IsBusy
-        && IsDeviceDiscoverySelected
+        CanUseDeviceDiscovery()
         && _manualConnectionClient.CanPrepareTarget(ManualConnectionHost, ManualConnectionPort);
 
-    private bool CanUseCrossNetworkConnection() => !IsBusy && IsDeviceDiscoverySelected;
+    private bool CanUseCrossNetworkConnection() =>
+        _workspaceCommandStateClient.CanUseCrossNetworkConnection(IsBusy, IsDeviceDiscoverySelected);
 
     private bool CanScanQRCode() =>
         CanUseCrossNetworkConnection()
@@ -1275,33 +1281,36 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         && _crossNetworkConnectionClient.CanConnectWithCode(CrossNetworkCodeInput);
 
     private bool CanParseAdvertisement() =>
-        !IsBusy
-        && IsDeviceDiscoverySelected
+        CanUseDeviceDiscovery()
         && _discoveryClient.CanParseAdvertisement(DiscoveryService, DiscoveryTxtRecord);
 
     private bool CanValidatePairingCode() =>
-        !IsBusy
-        && IsDeviceDiscoverySelected
+        CanUseDeviceDiscovery()
         && _pairingMaterialClient.CanValidate(PairingConnectionCode);
 
     private bool CanPrepareConnection() =>
-        !IsBusy
-        && IsDeviceDiscoverySelected
+        CanUseDeviceDiscovery()
         && _connectionWorkspaceStateClient.CanPreparePreflight(
             _validatedDiscoveredPeer,
             _validatedPairingMaterial);
 
-    private bool CanRefreshUsbManagement() => !IsBusy && IsUsbManagementSelected;
+    private bool CanRefreshUsbManagement() =>
+        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsUsbManagementSelected);
 
-    private bool CanRunCoreDiagnostics() => !IsBusy && IsQuantumSelected;
+    private bool CanRunCoreDiagnostics() =>
+        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsQuantumSelected);
 
-    private bool CanRefreshFileTransfer() => !IsBusy && IsFileTransferSelected;
+    private bool CanRefreshFileTransfer() =>
+        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsFileTransferSelected);
 
-    private bool CanRefreshRemoteDesktop() => !IsBusy && IsRemoteDesktopSelected;
+    private bool CanRefreshRemoteDesktop() =>
+        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsRemoteDesktopSelected);
 
-    private bool CanRefreshSystemMonitor() => !IsBusy && IsSystemMonitorSelected;
+    private bool CanRefreshSystemMonitor() =>
+        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsSystemMonitorSelected);
 
-    private bool CanRefreshSettings() => !IsBusy && IsSettingsSelected;
+    private bool CanRefreshSettings() =>
+        _workspaceCommandStateClient.CanUseWorkspaceFeature(IsBusy, IsSettingsSelected);
 
     private async Task RunWithBusyState(
         WorkspaceErrorScope errorScope,
@@ -1549,16 +1558,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         };
 
     private WorkspaceActionGateSnapshot BuildWorkspaceActionGateSnapshot() =>
-        new(
-            CanConnect(),
-            CanDisconnect(),
-            CanSendHeartbeat(),
-            CanRefreshUsbManagement(),
-            CanRefreshFileTransfer(),
-            CanRefreshRemoteDesktop(),
-            CanRunCoreDiagnostics(),
-            CanRefreshSystemMonitor(),
-            CanRefreshSettings());
+        _workspaceCommandStateClient.BuildActionGateSnapshot(
+            new WorkspaceCommandGateRequest(
+                IsBusy,
+                IsUsbManagementSelected,
+                IsFileTransferSelected,
+                IsRemoteDesktopSelected,
+                IsQuantumSelected,
+                IsSystemMonitorSelected,
+                IsSettingsSelected,
+                CanConnect(),
+                CanDisconnect(),
+                CanSendHeartbeat()));
 
     private WorkspaceActionDetailSnapshot BuildWorkspaceActionDetailSnapshot() =>
         new(TopBarNotificationsStatus, TopBarThemeStatus);
