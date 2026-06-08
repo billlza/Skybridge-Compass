@@ -10,6 +10,8 @@ internal static class WindowsNativeRuntimeDependencyFactory
     private const string NativeRuntimeMode = "native";
     private const string TransportAdapterVariable = "SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER";
     private const string ExternalTransportAdapterMode = "external";
+    private const string SettingsSystemPreferencesVariable = "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES";
+    private const string EnabledMode = "enabled";
 
     public static bool IsNativeRuntimeRequested() =>
         string.Equals(
@@ -38,7 +40,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
             new RemoteDesktopProfileCatalogClient(),
             new SystemMonitorWorkspaceClient(),
             new UsbManagementWorkspaceClient(),
-            new SettingsWorkspaceClient(),
+            CreateSettingsWorkspaceClientFromEnvironment(),
             new DashboardMetricsClient(),
             new TopBarStatusClient(),
             new ConnectionWorkspaceStateClient(),
@@ -49,6 +51,11 @@ internal static class WindowsNativeRuntimeDependencyFactory
             new SessionCommandStateClient(),
             new WorkspaceCommandStateClient());
     }
+
+    public static ISettingsWorkspaceClient CreateSettingsWorkspaceClientFromEnvironment() =>
+        IsEnabled(SettingsSystemPreferencesVariable)
+            ? new SettingsWorkspaceClient(new WindowsSystemPreferencesLauncher())
+            : new SettingsWorkspaceClient();
 
     private static IWindowsTransportAdapterClient CreateTransportAdapterFromEnvironment()
     {
@@ -70,6 +77,12 @@ internal static class WindowsNativeRuntimeDependencyFactory
                 Environment.GetEnvironmentVariable("SKYBRIDGE_WINDOWS_RELAY_ID"),
                 ReadTimestampWindowMs()));
     }
+
+    private static bool IsEnabled(string variable) =>
+        string.Equals(
+            Environment.GetEnvironmentVariable(variable),
+            EnabledMode,
+            StringComparison.OrdinalIgnoreCase);
 
     private static ConnectionLaunchAdapterKind ReadAdapterKind()
     {

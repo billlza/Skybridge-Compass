@@ -283,6 +283,9 @@ foreach ($nativeRuntimeSignal in @(
     "SKYBRIDGE_WINDOWS_RELAY_ID",
     "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
     "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
+    "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES",
+    "CreateSettingsWorkspaceClientFromEnvironment",
+    "new WindowsSystemPreferencesLauncher()",
     "new FfiEngineClient()",
     "new NativeWindowsDnsSdBrowseClient()",
     "new ExternalWindowsTransportAdapterClient",
@@ -300,6 +303,9 @@ foreach ($nativeRuntimeSmokeSignal in @(
     "SKYBRIDGE_WINDOWS_RELAY_ID",
     "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
     "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
+    "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES",
+    "DisabledSystemPreferencesLauncher",
+    "WindowsSystemPreferencesLauncher",
     "SKYBRIDGE_WINDOWS_TRANSPORT_SECRET_FP_HEX must be 64 lowercase hex characters.",
     "Windows external adapter must not select AppleNative"
 )) {
@@ -485,7 +491,7 @@ Assert-Contains -Text $dependencyFactory -Needle "new RemoteDesktopWorkspaceClie
 Assert-Contains -Text $dependencyFactory -Needle "new RemoteDesktopProfileCatalogClient()" -Message "Default dependency factory should wire RemoteDesktopProfileCatalogClient for explicit Remote Desktop profile parity."
 Assert-Contains -Text $dependencyFactory -Needle "new SystemMonitorWorkspaceClient()" -Message "Default dependency factory should wire SystemMonitorWorkspaceClient for explicit System Monitor diagnostics."
 Assert-Contains -Text $dependencyFactory -Needle "new UsbManagementWorkspaceClient()" -Message "Default dependency factory should wire UsbManagementWorkspaceClient for explicit USB Management diagnostics."
-Assert-Contains -Text $dependencyFactory -Needle "new SettingsWorkspaceClient()" -Message "Default dependency factory should wire SettingsWorkspaceClient for explicit Settings diagnostics."
+Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.CreateSettingsWorkspaceClientFromEnvironment()" -Message "Default dependency factory should wire SettingsWorkspaceClient through the explicit Settings provider selector."
 Assert-Contains -Text $dependencyFactory -Needle "new DashboardMetricsClient()" -Message "Default dependency factory should wire DashboardMetricsClient for explicit dashboard metrics parity."
 Assert-Contains -Text $dependencyFactory -Needle "new FeatureCatalogClient()" -Message "Default dependency factory should wire FeatureCatalogClient for explicit navigation parity."
 Assert-Contains -Text $dependencyFactory -Needle "new TopBarStatusClient()" -Message "Default dependency factory should wire TopBarStatusClient for explicit top-bar status parity."
@@ -1257,6 +1263,14 @@ foreach ($signal in @(
     "SettingsTabItem",
     "SettingsActionItem",
     "SettingsDetailItem",
+    "public interface ISystemPreferencesLauncher",
+    "public sealed class DisabledSystemPreferencesLauncher : ISystemPreferencesLauncher",
+    "public sealed class WindowsSystemPreferencesLauncher : ISystemPreferencesLauncher",
+    "CanOpenSystemPreferences() => _systemPreferencesLauncher.CanOpenSystemPreferences()",
+    "_systemPreferencesLauncher.OpenSystemPreferencesAsync()",
+    "ProcessStartInfo(SettingsUri)",
+    "ms-settings:",
+    "UseShellExecute = true",
     "ExportSettings",
     "ImportSettings",
     "ResetSettings",
@@ -1281,6 +1295,15 @@ foreach ($signal in @(
 }
 
 Assert-Contains -Text $architecture -Needle "SettingsWorkspaceClient" -Message "Architecture doc missing SettingsWorkspaceClient status."
+foreach ($signal in @(
+    "ISystemPreferencesLauncher",
+    "DisabledSystemPreferencesLauncher",
+    "WindowsSystemPreferencesLauncher",
+    "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES=enabled",
+    "ms-settings:"
+)) {
+    Assert-Contains -Text $architecture -Needle $signal -Message "Architecture doc missing Settings system-preferences launcher signal: $signal"
+}
 
 foreach ($signal in @(
     "public interface IDashboardMetricsClient",

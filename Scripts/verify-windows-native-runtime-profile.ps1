@@ -76,7 +76,8 @@ var runtimeVariables = new[]
     "SKYBRIDGE_WINDOWS_CAPABILITY_DIGEST_HEX",
     "SKYBRIDGE_WINDOWS_RELAY_ID",
     "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
-    "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS"
+    "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
+    "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES"
 };
 
 try
@@ -87,12 +88,23 @@ try
     AssertType<DummyEngineClient>(defaultDependencies.EngineClient, "default engine");
     AssertNestedType<PendingWindowsDnsSdBrowseClient>(defaultDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
     AssertNestedType<PendingWindowsTransportAdapterClient>(defaultDependencies.ConnectionPreflightClient, "_transportAdapterClient", "default transport adapter");
+    AssertType<SettingsWorkspaceClient>(defaultDependencies.SettingsClient, "default settings client");
+    AssertNestedType<DisabledSystemPreferencesLauncher>(defaultDependencies.SettingsClient, "_systemPreferencesLauncher", "default system preferences launcher");
+    AssertEqual(false, defaultDependencies.SettingsClient.CanOpenSystemPreferences(), "default system preferences gate");
 
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "external");
     var transportEnvWithoutNative = SessionViewModelDependencyFactory.CreateConfigured();
     AssertType<DummyEngineClient>(transportEnvWithoutNative.EngineClient, "transport env without native engine");
     AssertNestedType<PendingWindowsTransportAdapterClient>(transportEnvWithoutNative.ConnectionPreflightClient, "_transportAdapterClient", "transport env without native adapter");
+
+    ClearRuntimeEnvironment();
+    Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES", "enabled");
+    var systemPreferencesDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    AssertType<DummyEngineClient>(systemPreferencesDependencies.EngineClient, "system preferences env without native engine");
+    AssertType<SettingsWorkspaceClient>(systemPreferencesDependencies.SettingsClient, "system preferences settings client");
+    AssertNestedType<WindowsSystemPreferencesLauncher>(systemPreferencesDependencies.SettingsClient, "_systemPreferencesLauncher", "enabled system preferences launcher");
+    AssertEqual(true, systemPreferencesDependencies.SettingsClient.CanOpenSystemPreferences(), "enabled system preferences gate");
 
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");

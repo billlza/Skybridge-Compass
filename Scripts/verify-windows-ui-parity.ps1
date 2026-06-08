@@ -312,6 +312,8 @@ foreach ($nativeRuntimeSignal in @(
     "SKYBRIDGE_WINDOWS_RELAY_ID",
     "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
     "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
+    "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES",
+    "CreateSettingsWorkspaceClientFromEnvironment",
     "new FfiEngineClient()",
     "new NativeWindowsDnsSdBrowseClient()",
     "new ExternalWindowsTransportAdapterClient",
@@ -327,6 +329,7 @@ foreach ($nativeRuntimeSmokeSignal in @(
     "SKYBRIDGE_WINDOWS_RELAY_ID",
     "SKYBRIDGE_WINDOWS_ADAPTER_KIND",
     "SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS",
+    "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES",
     "Windows external adapter must not select AppleNative"
 )) {
     Assert-Contains -Text $nativeRuntimeProfileSmoke -Needle $nativeRuntimeSmokeSignal -Message "Native runtime profile smoke missing signal: $nativeRuntimeSmokeSignal"
@@ -4043,6 +4046,13 @@ foreach ($settingsSignal in @(
     "BuildRestoreDefaultsActionAsync",
     "BuildResetMonitorDataActionAsync",
     "SettingsWorkspaceActionResult",
+    "ISystemPreferencesLauncher",
+    "DisabledSystemPreferencesLauncher",
+    "WindowsSystemPreferencesLauncher",
+    "_systemPreferencesLauncher.OpenSystemPreferencesAsync()",
+    "ProcessStartInfo(SettingsUri)",
+    "UseShellExecute = true",
+    "ms-settings:",
     "SettingsTabItem",
     "SettingsActionItem",
     "SettingsDetailItem",
@@ -4219,6 +4229,10 @@ foreach ($docSignal in @(
     "live Windows transport adapter",
     "adapter pending",
     "WindowsTransportAdapterClient",
+    "SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES=enabled",
+    "DisabledSystemPreferencesLauncher",
+    "WindowsSystemPreferencesLauncher",
+    "ms-settings:",
     "Visual QA"
 )) {
     Assert-Contains -Text $parityDoc -Needle $docSignal -Message "windows-ui-parity-contract.md missing signal: $docSignal"

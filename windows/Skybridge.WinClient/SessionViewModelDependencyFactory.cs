@@ -30,7 +30,7 @@ internal static class SessionViewModelDependencyFactory
             new RemoteDesktopProfileCatalogClient(),
             new SystemMonitorWorkspaceClient(),
             new UsbManagementWorkspaceClient(),
-            new SettingsWorkspaceClient(),
+            WindowsNativeRuntimeDependencyFactory.CreateSettingsWorkspaceClientFromEnvironment(),
             new DashboardMetricsClient(),
             new TopBarStatusClient(),
             new ConnectionWorkspaceStateClient(),

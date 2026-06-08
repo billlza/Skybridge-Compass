@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
@@ -68,6 +69,18 @@ public interface ISettingsWorkspaceClient
 
 public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 {
+    private readonly ISystemPreferencesLauncher _systemPreferencesLauncher;
+
+    public SettingsWorkspaceClient()
+        : this(new DisabledSystemPreferencesLauncher())
+    {
+    }
+
+    public SettingsWorkspaceClient(ISystemPreferencesLauncher systemPreferencesLauncher)
+    {
+        _systemPreferencesLauncher = systemPreferencesLauncher ?? throw new ArgumentNullException(nameof(systemPreferencesLauncher));
+    }
+
     public string BuildInitialStatus() => DefaultInitialStatus;
 
     public string BuildPendingStatus() => DefaultPendingStatus;
@@ -85,7 +98,7 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
 
     public bool CanRequestPermission() => false;
 
-    public bool CanOpenSystemPreferences() => false;
+    public bool CanOpenSystemPreferences() => _systemPreferencesLauncher.CanOpenSystemPreferences();
 
     public bool CanApplySettings() => false;
 
@@ -160,7 +173,14 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
         "Permission prompts are high-risk platform writes and require an explicit provider.";
 
     public static string DefaultSystemPreferencesBlockedMessage { get; } =
-        "Windows Settings deep links require explicit wiring before opening system preferences.";
+        "Windows Settings deep links require SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES=enabled before opening system preferences.";
+
+    public static string DefaultSystemPreferencesOpenedStatus { get; } = "System preferences opened";
+
+    public static string DefaultSystemPreferencesOpenedMessage { get; } =
+        "Opened Windows Settings through the explicit system-preferences launcher.";
+
+    public static string DefaultSystemPreferencesLaunchFailedStatus { get; } = "System preferences launch failed";
 
     public static string DefaultApplySettingsBlockedMessage { get; } =
         "Runtime settings apply requires a persistence bridge and scoped runtime update providers.";
@@ -220,7 +240,7 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
         Task.FromResult(BuildDefaultPermissionRequestActionResult());
 
     public Task<SettingsWorkspaceActionResult> BuildSystemPreferencesActionAsync() =>
-        Task.FromResult(BuildDefaultSystemPreferencesActionResult());
+        _systemPreferencesLauncher.OpenSystemPreferencesAsync();
 
     public Task<SettingsWorkspaceActionResult> BuildApplySettingsActionAsync() =>
         Task.FromResult(BuildDefaultApplySettingsActionResult());
@@ -339,3 +359,46 @@ public sealed record SettingsDetailItem(
 public sealed record SettingsWorkspaceActionResult(
     string Status,
     string Message);
+
+public interface ISystemPreferencesLauncher
+{
+    bool CanOpenSystemPreferences();
+
+    Task<SettingsWorkspaceActionResult> OpenSystemPreferencesAsync();
+}
+
+public sealed class DisabledSystemPreferencesLauncher : ISystemPreferencesLauncher
+{
+    public bool CanOpenSystemPreferences() => false;
+
+    public Task<SettingsWorkspaceActionResult> OpenSystemPreferencesAsync() =>
+        Task.FromResult(SettingsWorkspaceClient.BuildDefaultSystemPreferencesActionResult());
+}
+
+public sealed class WindowsSystemPreferencesLauncher : ISystemPreferencesLauncher
+{
+    private const string SettingsUri = "ms-settings:";
+
+    public bool CanOpenSystemPreferences() => true;
+
+    public Task<SettingsWorkspaceActionResult> OpenSystemPreferencesAsync()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(SettingsUri)
+            {
+                UseShellExecute = true
+            });
+
+            return Task.FromResult(new SettingsWorkspaceActionResult(
+                SettingsWorkspaceClient.DefaultSystemPreferencesOpenedStatus,
+                SettingsWorkspaceClient.DefaultSystemPreferencesOpenedMessage));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return Task.FromResult(new SettingsWorkspaceActionResult(
+                SettingsWorkspaceClient.DefaultSystemPreferencesLaunchFailedStatus,
+                $"Windows Settings launch failed: {ex.Message}"));
+        }
+    }
+}
