@@ -161,6 +161,9 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             WorkspaceActionGateId.CanDisconnectRemoteDesktopSession => gates.CanDisconnectRemoteDesktopSession,
             WorkspaceActionGateId.CanRunCoreDiagnostics => gates.CanRunCoreDiagnostics,
             WorkspaceActionGateId.CanRefreshSystemMonitor => gates.CanRefreshSystemMonitor,
+            WorkspaceActionGateId.CanStartSystemMonitoring => gates.CanStartSystemMonitoring,
+            WorkspaceActionGateId.CanStopSystemMonitoring => gates.CanStopSystemMonitoring,
+            WorkspaceActionGateId.CanEnableAdvancedSystemMonitoring => gates.CanEnableAdvancedSystemMonitoring,
             WorkspaceActionGateId.CanRefreshSettings => gates.CanRefreshSettings,
             _ => fallback
         };
@@ -590,20 +593,26 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Monitoring",
                 "Monitoring",
                 "\uF16B",
-                false,
-                "Visible mac-parity monitoring action; live ETW/EventSource sampling is pending."),
+                true,
+                "Visible mac-parity monitoring action; fail-closed command does not start ETW/EventSource sampling.",
+                CommandId: WorkspaceActionCommandId.StartSystemMonitoring,
+                GateId: WorkspaceActionGateId.CanStartSystemMonitoring),
             new(
                 "StopMonitoring",
                 "Stop Monitoring",
                 "\uE71A",
-                false,
-                "Visible mac-parity monitoring action; no background sampler is running."),
+                true,
+                "Visible mac-parity monitoring action; fail-closed command does not stop a background sampler.",
+                CommandId: WorkspaceActionCommandId.StopSystemMonitoring,
+                GateId: WorkspaceActionGateId.CanStopSystemMonitoring),
             new(
                 "EnableAdvancedMonitoring",
                 "Enable Advanced Monitoring",
                 "\uE72E",
-                false,
-                "Visible mac-parity monitoring action; helper installation and elevation remain pending.")
+                true,
+                "Visible mac-parity monitoring action; fail-closed command does not install helpers or request elevation.",
+                CommandId: WorkspaceActionCommandId.EnableAdvancedSystemMonitoring,
+                GateId: WorkspaceActionGateId.CanEnableAdvancedSystemMonitoring)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildSettingsHeaderActions() =>
@@ -742,6 +751,9 @@ public enum WorkspaceActionCommandId
     DisconnectRemoteDesktopSession,
     RunCoreDiagnostics,
     RefreshSystemMonitor,
+    StartSystemMonitoring,
+    StopSystemMonitoring,
+    EnableAdvancedSystemMonitoring,
     RefreshSettings
 }
 
@@ -775,6 +787,9 @@ public enum WorkspaceActionGateId
     CanDisconnectRemoteDesktopSession,
     CanRunCoreDiagnostics,
     CanRefreshSystemMonitor,
+    CanStartSystemMonitoring,
+    CanStopSystemMonitoring,
+    CanEnableAdvancedSystemMonitoring,
     CanRefreshSettings
 }
 
@@ -821,6 +836,9 @@ public sealed record WorkspaceActionGateSnapshot(
     bool CanDisconnectRemoteDesktopSession,
     bool CanRunCoreDiagnostics,
     bool CanRefreshSystemMonitor,
+    bool CanStartSystemMonitoring,
+    bool CanStopSystemMonitoring,
+    bool CanEnableAdvancedSystemMonitoring,
     bool CanRefreshSettings);
 
 public sealed record WorkspaceActionDetailSnapshot(

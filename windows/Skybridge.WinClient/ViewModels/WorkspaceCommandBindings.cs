@@ -14,6 +14,7 @@ internal sealed class WorkspaceCommandBindings
         ReadOnlyWorkspaceRefreshActions readOnlyWorkspaceRefreshActions,
         FileTransferWorkspaceActions fileTransferWorkspaceActions,
         RemoteDesktopWorkspaceActions remoteDesktopWorkspaceActions,
+        SystemMonitorWorkspaceActions systemMonitorWorkspaceActions,
         WorkspaceCommandAvailability commandAvailability)
     {
         ConnectCommand = new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect);
@@ -51,6 +52,9 @@ internal sealed class WorkspaceCommandBindings
         EnterRemoteDesktopFullScreenCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.EnterFullScreenAsync, commandAvailability.CanEnterRemoteDesktopFullScreen);
         DisconnectRemoteDesktopSessionCommand = new AsyncRelayCommand(remoteDesktopWorkspaceActions.DisconnectSessionAsync, commandAvailability.CanDisconnectRemoteDesktopSession);
         RefreshSystemMonitorCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSystemMonitorAsync, commandAvailability.CanRefreshSystemMonitor);
+        StartSystemMonitoringCommand = new AsyncRelayCommand(systemMonitorWorkspaceActions.StartMonitoringAsync, commandAvailability.CanStartSystemMonitoring);
+        StopSystemMonitoringCommand = new AsyncRelayCommand(systemMonitorWorkspaceActions.StopMonitoringAsync, commandAvailability.CanStopSystemMonitoring);
+        EnableAdvancedSystemMonitoringCommand = new AsyncRelayCommand(systemMonitorWorkspaceActions.EnableAdvancedMonitoringAsync, commandAvailability.CanEnableAdvancedSystemMonitoring);
         RefreshUsbManagementCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshUsbManagementAsync, commandAvailability.CanRefreshUsbManagement);
         RefreshSettingsCommand = new AsyncRelayCommand(readOnlyWorkspaceRefreshActions.RefreshSettingsAsync, commandAvailability.CanRefreshSettings);
 
@@ -90,6 +94,9 @@ internal sealed class WorkspaceCommandBindings
             new(WorkspaceActionCommandId.EnterRemoteDesktopFullScreen, EnterRemoteDesktopFullScreenCommand),
             new(WorkspaceActionCommandId.DisconnectRemoteDesktopSession, DisconnectRemoteDesktopSessionCommand),
             new(WorkspaceActionCommandId.RefreshSystemMonitor, RefreshSystemMonitorCommand),
+            new(WorkspaceActionCommandId.StartSystemMonitoring, StartSystemMonitoringCommand),
+            new(WorkspaceActionCommandId.StopSystemMonitoring, StopSystemMonitoringCommand),
+            new(WorkspaceActionCommandId.EnableAdvancedSystemMonitoring, EnableAdvancedSystemMonitoringCommand),
             new(WorkspaceActionCommandId.RefreshUsbManagement, RefreshUsbManagementCommand),
             new(WorkspaceActionCommandId.RefreshSettings, RefreshSettingsCommand));
     }
@@ -163,6 +170,12 @@ internal sealed class WorkspaceCommandBindings
     public ICommand DisconnectRemoteDesktopSessionCommand { get; }
 
     public ICommand RefreshSystemMonitorCommand { get; }
+
+    public ICommand StartSystemMonitoringCommand { get; }
+
+    public ICommand StopSystemMonitoringCommand { get; }
+
+    public ICommand EnableAdvancedSystemMonitoringCommand { get; }
 
     public ICommand RefreshUsbManagementCommand { get; }
 

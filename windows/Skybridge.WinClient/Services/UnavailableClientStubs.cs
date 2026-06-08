@@ -249,10 +249,34 @@ internal sealed class UnavailableSystemMonitorWorkspaceClient : ISystemMonitorWo
     public string BuildCompletedStatusMessage() =>
         SystemMonitorWorkspaceClient.DefaultCompletedStatusMessage;
 
+    public bool CanStartMonitoring() => false;
+
+    public bool CanStopMonitoring() => false;
+
+    public bool CanEnableAdvancedMonitoring() => false;
+
+    public string BuildStartMonitoringPendingStatus() =>
+        SystemMonitorWorkspaceClient.DefaultStartMonitoringPendingStatus;
+
+    public string BuildStopMonitoringPendingStatus() =>
+        SystemMonitorWorkspaceClient.DefaultStopMonitoringPendingStatus;
+
+    public string BuildAdvancedMonitoringPendingStatus() =>
+        SystemMonitorWorkspaceClient.DefaultAdvancedMonitoringPendingStatus;
+
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         throw new InvalidOperationException("System monitor workspace client is not configured.");
     }
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildStartMonitoringActionAsync() =>
+        Task.FromResult(SystemMonitorWorkspaceClient.BuildDefaultStartMonitoringActionResult());
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildStopMonitoringActionAsync() =>
+        Task.FromResult(SystemMonitorWorkspaceClient.BuildDefaultStopMonitoringActionResult());
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildAdvancedMonitoringActionAsync() =>
+        Task.FromResult(SystemMonitorWorkspaceClient.BuildDefaultAdvancedMonitoringActionResult());
 }
 
 internal sealed class UnavailableUsbManagementWorkspaceClient : IUsbManagementWorkspaceClient

@@ -45,6 +45,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly ReadOnlyWorkspaceRefreshActions _readOnlyWorkspaceRefreshActions;
     private readonly FileTransferWorkspaceActions _fileTransferWorkspaceActions;
     private readonly RemoteDesktopWorkspaceActions _remoteDesktopWorkspaceActions;
+    private readonly SystemMonitorWorkspaceActions _systemMonitorWorkspaceActions;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly ReadOnlyWorkspaceSnapshotHandlers _readOnlyWorkspaceSnapshotHandlers;
@@ -188,6 +189,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _crossNetworkConnectionClient,
             _fileTransferClient,
             _remoteDesktopClient,
+            _systemMonitorClient,
             _discoveryClient,
             _pairingMaterialClient,
             _connectionWorkspaceStateClient);
@@ -303,6 +305,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceBusyCoordinator,
             _remoteDesktopClient,
             value => RemoteDesktopStatus = value,
+            value => StatusMessage = value);
+        _systemMonitorWorkspaceActions = new SystemMonitorWorkspaceActions(
+            _workspaceBusyCoordinator,
+            _systemMonitorClient,
+            value => SystemMonitorStatus = value,
             value => StatusMessage = value);
         _dashboardMetricsUpdater = new DashboardMetricsUpdater(
             _dashboardMetricsClient,
@@ -449,6 +456,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _readOnlyWorkspaceRefreshActions,
             _fileTransferWorkspaceActions,
             _remoteDesktopWorkspaceActions,
+            _systemMonitorWorkspaceActions,
             _workspaceCommandAvailability);
         ConnectCommand = commandBindings.ConnectCommand;
         DisconnectCommand = commandBindings.DisconnectCommand;
@@ -481,6 +489,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         EnterRemoteDesktopFullScreenCommand = commandBindings.EnterRemoteDesktopFullScreenCommand;
         DisconnectRemoteDesktopSessionCommand = commandBindings.DisconnectRemoteDesktopSessionCommand;
         RefreshSystemMonitorCommand = commandBindings.RefreshSystemMonitorCommand;
+        StartSystemMonitoringCommand = commandBindings.StartSystemMonitoringCommand;
+        StopSystemMonitoringCommand = commandBindings.StopSystemMonitoringCommand;
+        EnableAdvancedSystemMonitoringCommand = commandBindings.EnableAdvancedSystemMonitoringCommand;
         RefreshUsbManagementCommand = commandBindings.RefreshUsbManagementCommand;
         RefreshSettingsCommand = commandBindings.RefreshSettingsCommand;
         _workspaceCommandRegistry = commandBindings.Registry;
@@ -1049,6 +1060,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ICommand DisconnectRemoteDesktopSessionCommand { get; }
 
     public ICommand RefreshSystemMonitorCommand { get; }
+
+    public ICommand StartSystemMonitoringCommand { get; }
+
+    public ICommand StopSystemMonitoringCommand { get; }
+
+    public ICommand EnableAdvancedSystemMonitoringCommand { get; }
 
     public ICommand RefreshUsbManagementCommand { get; }
 

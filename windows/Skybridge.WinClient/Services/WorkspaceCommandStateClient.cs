@@ -26,6 +26,11 @@ public interface IWorkspaceCommandStateClient
         bool isRemoteDesktopSelected,
         bool isActionReady);
 
+    bool CanUseSystemMonitorAction(
+        bool isBusy,
+        bool isSystemMonitorSelected,
+        bool isActionReady);
+
     bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected);
 
     WorkspaceActionGateSnapshot BuildActionGateSnapshot(WorkspaceCommandGateRequest request);
@@ -63,6 +68,12 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
         bool isActionReady) =>
         CanUseWorkspaceFeature(isBusy, isRemoteDesktopSelected) && isActionReady;
 
+    public bool CanUseSystemMonitorAction(
+        bool isBusy,
+        bool isSystemMonitorSelected,
+        bool isActionReady) =>
+        CanUseWorkspaceFeature(isBusy, isSystemMonitorSelected) && isActionReady;
+
     public bool CanUseWorkspaceFeature(bool isBusy, bool isFeatureSelected) =>
         !isBusy && isFeatureSelected;
 
@@ -95,6 +106,9 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
             request.CanDisconnectRemoteDesktopSession,
             CanUseWorkspaceFeature(request.IsBusy, request.IsQuantumSelected),
             CanUseWorkspaceFeature(request.IsBusy, request.IsSystemMonitorSelected),
+            request.CanStartSystemMonitoring,
+            request.CanStopSystemMonitoring,
+            request.CanEnableAdvancedSystemMonitoring,
             CanUseWorkspaceFeature(request.IsBusy, request.IsSettingsSelected));
 }
 
@@ -125,4 +139,7 @@ public sealed record WorkspaceCommandGateRequest(
     bool CanApplyRemoteDesktopQuality,
     bool CanOpenRemoteDesktopSettings,
     bool CanEnterRemoteDesktopFullScreen,
-    bool CanDisconnectRemoteDesktopSession);
+    bool CanDisconnectRemoteDesktopSession,
+    bool CanStartSystemMonitoring,
+    bool CanStopSystemMonitoring,
+    bool CanEnableAdvancedSystemMonitoring);

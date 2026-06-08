@@ -75,6 +75,10 @@ var remoteDesktopClient = new TestRemoteDesktopWorkspaceClient(
     canOpenSettings: true,
     canEnterFullScreen: true,
     canDisconnectSession: true);
+var systemMonitorClient = new TestSystemMonitorWorkspaceClient(
+    canStartMonitoring: true,
+    canStopMonitoring: true,
+    canEnableAdvancedMonitoring: true);
 var coordinator = new WorkspaceCommandGateCoordinator(
     new SessionCommandStateClient(),
     new FeatureCatalogClient(),
@@ -83,6 +87,7 @@ var coordinator = new WorkspaceCommandGateCoordinator(
     new CrossNetworkConnectionClient(),
     fileTransferClient,
     remoteDesktopClient,
+    systemMonitorClient,
     new TestDiscoveryClient(),
     new PairingMaterialClient(),
     new ConnectionWorkspaceStateClient());
@@ -496,6 +501,93 @@ AssertResolvedAction(
     false,
     "blocked remote desktop Disconnect Session");
 
+var systemMonitorReadyState = BuildCommandState(
+    liveReady: true,
+    selectedFeatureId: FeatureEntryId.SystemMonitor);
+var systemMonitorReadyAvailability = new WorkspaceCommandAvailability(coordinator, () => systemMonitorReadyState);
+AssertEqual(true, systemMonitorReadyAvailability.CanRefreshSystemMonitor(), "system monitor WorkspaceCommandAvailability.Refresh");
+AssertEqual(true, systemMonitorReadyAvailability.CanStartSystemMonitoring(), "system monitor WorkspaceCommandAvailability.Monitoring");
+AssertEqual(true, systemMonitorReadyAvailability.CanStopSystemMonitoring(), "system monitor WorkspaceCommandAvailability.StopMonitoring");
+AssertEqual(true, systemMonitorReadyAvailability.CanEnableAdvancedSystemMonitoring(), "system monitor WorkspaceCommandAvailability.AdvancedMonitoring");
+var systemMonitorReadyGates = coordinator.BuildActionGateSnapshot(systemMonitorReadyState);
+AssertEqual(true, systemMonitorReadyGates.CanRefreshSystemMonitor, "system monitor action gate Refresh");
+AssertEqual(true, systemMonitorReadyGates.CanStartSystemMonitoring, "system monitor action gate Monitoring");
+AssertEqual(true, systemMonitorReadyGates.CanStopSystemMonitoring, "system monitor action gate StopMonitoring");
+AssertEqual(true, systemMonitorReadyGates.CanEnableAdvancedSystemMonitoring, "system monitor action gate AdvancedMonitoring");
+AssertResolvedAction(
+    catalog,
+    details,
+    systemMonitorReadyGates,
+    WorkspaceActionSurface.SystemMonitorControls,
+    "Monitoring",
+    WorkspaceActionCommandId.StartSystemMonitoring,
+    WorkspaceActionGateId.CanStartSystemMonitoring,
+    true,
+    "system monitor Monitoring");
+AssertResolvedAction(
+    catalog,
+    details,
+    systemMonitorReadyGates,
+    WorkspaceActionSurface.SystemMonitorControls,
+    "StopMonitoring",
+    WorkspaceActionCommandId.StopSystemMonitoring,
+    WorkspaceActionGateId.CanStopSystemMonitoring,
+    true,
+    "system monitor Stop Monitoring");
+AssertResolvedAction(
+    catalog,
+    details,
+    systemMonitorReadyGates,
+    WorkspaceActionSurface.SystemMonitorControls,
+    "EnableAdvancedMonitoring",
+    WorkspaceActionCommandId.EnableAdvancedSystemMonitoring,
+    WorkspaceActionGateId.CanEnableAdvancedSystemMonitoring,
+    true,
+    "system monitor Enable Advanced Monitoring");
+
+var systemMonitorBlockedState = BuildCommandState(
+    liveReady: true,
+    selectedFeatureId: FeatureEntryId.SystemMonitor);
+systemMonitorClient.CanStartMonitoringValue = false;
+systemMonitorClient.CanStopMonitoringValue = false;
+systemMonitorClient.CanEnableAdvancedMonitoringValue = false;
+var systemMonitorBlockedAvailability = new WorkspaceCommandAvailability(coordinator, () => systemMonitorBlockedState);
+AssertEqual(true, systemMonitorBlockedAvailability.CanRefreshSystemMonitor(), "blocked system monitor WorkspaceCommandAvailability.Refresh");
+AssertEqual(false, systemMonitorBlockedAvailability.CanStartSystemMonitoring(), "blocked system monitor WorkspaceCommandAvailability.Monitoring");
+AssertEqual(false, systemMonitorBlockedAvailability.CanStopSystemMonitoring(), "blocked system monitor WorkspaceCommandAvailability.StopMonitoring");
+AssertEqual(false, systemMonitorBlockedAvailability.CanEnableAdvancedSystemMonitoring(), "blocked system monitor WorkspaceCommandAvailability.AdvancedMonitoring");
+var systemMonitorBlockedGates = coordinator.BuildActionGateSnapshot(systemMonitorBlockedState);
+AssertResolvedAction(
+    catalog,
+    details,
+    systemMonitorBlockedGates,
+    WorkspaceActionSurface.SystemMonitorControls,
+    "Monitoring",
+    WorkspaceActionCommandId.StartSystemMonitoring,
+    WorkspaceActionGateId.CanStartSystemMonitoring,
+    false,
+    "blocked system monitor Monitoring");
+AssertResolvedAction(
+    catalog,
+    details,
+    systemMonitorBlockedGates,
+    WorkspaceActionSurface.SystemMonitorControls,
+    "StopMonitoring",
+    WorkspaceActionCommandId.StopSystemMonitoring,
+    WorkspaceActionGateId.CanStopSystemMonitoring,
+    false,
+    "blocked system monitor Stop Monitoring");
+AssertResolvedAction(
+    catalog,
+    details,
+    systemMonitorBlockedGates,
+    WorkspaceActionSurface.SystemMonitorControls,
+    "EnableAdvancedMonitoring",
+    WorkspaceActionCommandId.EnableAdvancedSystemMonitoring,
+    WorkspaceActionGateId.CanEnableAdvancedSystemMonitoring,
+    false,
+    "blocked system monitor Enable Advanced Monitoring");
+
 Console.WriteLine("windows-command-gates: ok");
 
 WorkspaceCommandGateState BuildCommandState(
@@ -793,6 +885,57 @@ sealed class TestRemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
 
     public Task<RemoteDesktopWorkspaceActionResult> BuildDisconnectSessionActionAsync() =>
         throw new NotSupportedException("Command-gate smoke only needs remote desktop action readiness.");
+}
+
+sealed class TestSystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
+{
+    public TestSystemMonitorWorkspaceClient(
+        bool canStartMonitoring,
+        bool canStopMonitoring,
+        bool canEnableAdvancedMonitoring)
+    {
+        CanStartMonitoringValue = canStartMonitoring;
+        CanStopMonitoringValue = canStopMonitoring;
+        CanEnableAdvancedMonitoringValue = canEnableAdvancedMonitoring;
+    }
+
+    public bool CanStartMonitoringValue { get; set; }
+
+    public bool CanStopMonitoringValue { get; set; }
+
+    public bool CanEnableAdvancedMonitoringValue { get; set; }
+
+    public string BuildInitialStatus() => "Ready";
+
+    public string BuildPendingStatus() => "Refreshing...";
+
+    public string BuildCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) => "Snapshot";
+
+    public string BuildCompletedStatusMessage() => "Updated";
+
+    public bool CanStartMonitoring() => CanStartMonitoringValue;
+
+    public bool CanStopMonitoring() => CanStopMonitoringValue;
+
+    public bool CanEnableAdvancedMonitoring() => CanEnableAdvancedMonitoringValue;
+
+    public string BuildStartMonitoringPendingStatus() => "Preparing monitoring...";
+
+    public string BuildStopMonitoringPendingStatus() => "Preparing monitoring stop...";
+
+    public string BuildAdvancedMonitoringPendingStatus() => "Preparing advanced monitoring...";
+
+    public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs system monitor action readiness.");
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildStartMonitoringActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs system monitor action readiness.");
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildStopMonitoringActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs system monitor action readiness.");
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildAdvancedMonitoringActionAsync() =>
+        throw new NotSupportedException("Command-gate smoke only needs system monitor action readiness.");
 }
 '@
 

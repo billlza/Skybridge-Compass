@@ -11,6 +11,7 @@ internal sealed class WorkspaceCommandGateCoordinator
     private readonly ICrossNetworkConnectionClient _crossNetworkConnectionClient;
     private readonly IFileTransferWorkspaceClient _fileTransferClient;
     private readonly IRemoteDesktopWorkspaceClient _remoteDesktopClient;
+    private readonly ISystemMonitorWorkspaceClient _systemMonitorClient;
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
@@ -23,6 +24,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         ICrossNetworkConnectionClient crossNetworkConnectionClient,
         IFileTransferWorkspaceClient fileTransferClient,
         IRemoteDesktopWorkspaceClient remoteDesktopClient,
+        ISystemMonitorWorkspaceClient systemMonitorClient,
         IDiscoveryClient discoveryClient,
         IPairingMaterialClient pairingMaterialClient,
         IConnectionWorkspaceStateClient connectionWorkspaceStateClient)
@@ -34,6 +36,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         _crossNetworkConnectionClient = crossNetworkConnectionClient;
         _fileTransferClient = fileTransferClient;
         _remoteDesktopClient = remoteDesktopClient;
+        _systemMonitorClient = systemMonitorClient;
         _discoveryClient = discoveryClient;
         _pairingMaterialClient = pairingMaterialClient;
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient;
@@ -169,6 +172,21 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanRefreshSystemMonitor(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.SystemMonitor);
 
+    public bool CanStartSystemMonitoring(WorkspaceCommandGateState state) =>
+        CanUseSystemMonitorAction(
+            state,
+            _systemMonitorClient.CanStartMonitoring());
+
+    public bool CanStopSystemMonitoring(WorkspaceCommandGateState state) =>
+        CanUseSystemMonitorAction(
+            state,
+            _systemMonitorClient.CanStopMonitoring());
+
+    public bool CanEnableAdvancedSystemMonitoring(WorkspaceCommandGateState state) =>
+        CanUseSystemMonitorAction(
+            state,
+            _systemMonitorClient.CanEnableAdvancedMonitoring());
+
     public bool CanRefreshSettings(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.Settings);
 
@@ -211,7 +229,10 @@ internal sealed class WorkspaceCommandGateCoordinator
                 CanApplyRemoteDesktopQuality(state),
                 CanOpenRemoteDesktopSettings(state),
                 CanEnterRemoteDesktopFullScreen(state),
-                CanDisconnectRemoteDesktopSession(state)));
+                CanDisconnectRemoteDesktopSession(state),
+                CanStartSystemMonitoring(state),
+                CanStopSystemMonitoring(state),
+                CanEnableAdvancedSystemMonitoring(state)));
     }
 
     private bool CanUseDeviceDiscoveryAction(
@@ -244,6 +265,14 @@ internal sealed class WorkspaceCommandGateCoordinator
         _workspaceCommandStateClient.CanUseRemoteDesktopAction(
             state.IsBusy,
             IsFeatureSelected(state.SelectedFeature, FeatureEntryId.RemoteDesktop),
+            readiness);
+
+    private bool CanUseSystemMonitorAction(
+        WorkspaceCommandGateState state,
+        bool readiness) =>
+        _workspaceCommandStateClient.CanUseSystemMonitorAction(
+            state.IsBusy,
+            IsFeatureSelected(state.SelectedFeature, FeatureEntryId.SystemMonitor),
             readiness);
 
     private bool CanUseSelectedWorkspaceFeature(

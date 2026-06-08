@@ -19,7 +19,25 @@ public interface ISystemMonitorWorkspaceClient
 
     string BuildCompletedStatusMessage();
 
+    bool CanStartMonitoring();
+
+    bool CanStopMonitoring();
+
+    bool CanEnableAdvancedMonitoring();
+
+    string BuildStartMonitoringPendingStatus();
+
+    string BuildStopMonitoringPendingStatus();
+
+    string BuildAdvancedMonitoringPendingStatus();
+
     Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
+
+    Task<SystemMonitorWorkspaceActionResult> BuildStartMonitoringActionAsync();
+
+    Task<SystemMonitorWorkspaceActionResult> BuildStopMonitoringActionAsync();
+
+    Task<SystemMonitorWorkspaceActionResult> BuildAdvancedMonitoringActionAsync();
 }
 
 public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
@@ -33,14 +51,56 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
 
+    public bool CanStartMonitoring() => false;
+
+    public bool CanStopMonitoring() => false;
+
+    public bool CanEnableAdvancedMonitoring() => false;
+
+    public string BuildStartMonitoringPendingStatus() => DefaultStartMonitoringPendingStatus;
+
+    public string BuildStopMonitoringPendingStatus() => DefaultStopMonitoringPendingStatus;
+
+    public string BuildAdvancedMonitoringPendingStatus() => DefaultAdvancedMonitoringPendingStatus;
+
     public static string DefaultInitialStatus { get; } = "Ready";
 
     public static string DefaultPendingStatus { get; } = "Refreshing...";
 
     public static string DefaultCompletedStatusMessage { get; } = "System monitor workspace updated";
 
+    public static string DefaultStartMonitoringPendingStatus { get; } = "Preparing monitoring...";
+
+    public static string DefaultStopMonitoringPendingStatus { get; } = "Preparing monitoring stop...";
+
+    public static string DefaultAdvancedMonitoringPendingStatus { get; } = "Preparing advanced monitoring...";
+
+    public static string DefaultStartMonitoringBlockedStatus { get; } = "Monitoring unavailable";
+
+    public static string DefaultStopMonitoringBlockedStatus { get; } = "Monitoring inactive";
+
+    public static string DefaultAdvancedMonitoringBlockedStatus { get; } = "Advanced monitoring unavailable";
+
+    public static string DefaultStartMonitoringBlockedMessage { get; } =
+        "System monitor live sampling requires an explicit ETW/EventSource provider.";
+
+    public static string DefaultStopMonitoringBlockedMessage { get; } =
+        "System monitor background sampling is not running.";
+
+    public static string DefaultAdvancedMonitoringBlockedMessage { get; } =
+        "Advanced system monitoring requires a helper installation and elevation boundary.";
+
     public static string BuildDefaultCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) =>
         $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
+
+    public static SystemMonitorWorkspaceActionResult BuildDefaultStartMonitoringActionResult() =>
+        new(DefaultStartMonitoringBlockedStatus, DefaultStartMonitoringBlockedMessage);
+
+    public static SystemMonitorWorkspaceActionResult BuildDefaultStopMonitoringActionResult() =>
+        new(DefaultStopMonitoringBlockedStatus, DefaultStopMonitoringBlockedMessage);
+
+    public static SystemMonitorWorkspaceActionResult BuildDefaultAdvancedMonitoringActionResult() =>
+        new(DefaultAdvancedMonitoringBlockedStatus, DefaultAdvancedMonitoringBlockedMessage);
 
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
@@ -99,6 +159,15 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
         });
     }
 
+    public Task<SystemMonitorWorkspaceActionResult> BuildStartMonitoringActionAsync() =>
+        Task.FromResult(BuildDefaultStartMonitoringActionResult());
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildStopMonitoringActionAsync() =>
+        Task.FromResult(BuildDefaultStopMonitoringActionResult());
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildAdvancedMonitoringActionAsync() =>
+        Task.FromResult(BuildDefaultAdvancedMonitoringActionResult());
+
     private static string CalculateHealth(double memoryPercent, double diskPercent, int activeNetworkCount)
     {
         if (memoryPercent >= 85 || diskPercent >= 95)
@@ -151,3 +220,7 @@ public sealed record SystemMonitorIndicator(
     string Label,
     string State,
     string Detail);
+
+public sealed record SystemMonitorWorkspaceActionResult(
+    string Status,
+    string Message);

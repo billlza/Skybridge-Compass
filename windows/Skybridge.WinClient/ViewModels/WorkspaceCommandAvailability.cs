@@ -69,6 +69,12 @@ internal sealed class WorkspaceCommandAvailability
 
     public bool CanRefreshSystemMonitor() => _coordinator.CanRefreshSystemMonitor(BuildState());
 
+    public bool CanStartSystemMonitoring() => _coordinator.CanStartSystemMonitoring(BuildState());
+
+    public bool CanStopSystemMonitoring() => _coordinator.CanStopSystemMonitoring(BuildState());
+
+    public bool CanEnableAdvancedSystemMonitoring() => _coordinator.CanEnableAdvancedSystemMonitoring(BuildState());
+
     public bool CanRefreshSettings() => _coordinator.CanRefreshSettings(BuildState());
 
     private WorkspaceCommandGateState BuildState() => _buildState();
