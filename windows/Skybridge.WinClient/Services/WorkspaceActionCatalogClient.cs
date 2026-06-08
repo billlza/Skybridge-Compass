@@ -34,6 +34,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
         WorkspaceActionSurface.SidebarSession,
         WorkspaceActionSurface.TopBarActions,
         WorkspaceActionSurface.SessionControls,
+        WorkspaceActionSurface.DashboardQuickActions,
         WorkspaceActionSurface.DeviceDiscoveryPrimary,
         WorkspaceActionSurface.DeviceDiscoveryScan,
         WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal,
@@ -79,6 +80,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 WorkspaceActionSurface.SidebarSession => BuildSidebarSessionActions(),
                 WorkspaceActionSurface.TopBarActions => BuildTopBarActions(),
                 WorkspaceActionSurface.SessionControls => BuildSessionControlActions(),
+                WorkspaceActionSurface.DashboardQuickActions => BuildDashboardQuickActions(),
                 WorkspaceActionSurface.DeviceDiscoveryPrimary => BuildDeviceDiscoveryPrimaryActions(),
                 WorkspaceActionSurface.DeviceDiscoveryScan => BuildDeviceDiscoveryScanActions(),
                 WorkspaceActionSurface.DeviceDiscoveryManualConnectFinal => BuildDeviceDiscoveryManualConnectFinalActions(),
@@ -215,6 +217,39 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Global session action; command stays in SessionViewModel.",
                 CommandId: WorkspaceActionCommandId.Disconnect,
                 GateId: WorkspaceActionGateId.CanDisconnect)
+        };
+
+    private static IReadOnlyList<WorkspaceActionItem> BuildDashboardQuickActions() =>
+        new List<WorkspaceActionItem>
+        {
+            new(
+                "ScanDevices",
+                "Scan Devices",
+                "\uE721",
+                true,
+                "Device Discovery",
+                CommandId: WorkspaceActionCommandId.OpenDeviceDiscovery),
+            new(
+                "FileTransfer",
+                "File Transfer",
+                "\uE8E5",
+                true,
+                "Queue and history",
+                CommandId: WorkspaceActionCommandId.OpenFileTransfer),
+            new(
+                "SystemMonitor",
+                "System Monitor",
+                "\uE9D9",
+                true,
+                "Metrics",
+                CommandId: WorkspaceActionCommandId.OpenSystemMonitor),
+            new(
+                "Settings",
+                "Settings",
+                "\uE713",
+                true,
+                "Preferences",
+                CommandId: WorkspaceActionCommandId.OpenSettings)
         };
 
     private static IReadOnlyList<WorkspaceActionItem> BuildDeviceDiscoveryPrimaryActions() =>
@@ -586,6 +621,7 @@ public enum WorkspaceActionSurface
     SidebarSession,
     TopBarActions,
     SessionControls,
+    DashboardQuickActions,
     DeviceDiscoveryPrimary,
     DeviceDiscoveryScan,
     DeviceDiscoveryManualConnectFinal,
@@ -611,6 +647,10 @@ public enum WorkspaceActionCommandId
     Connect,
     Disconnect,
     Heartbeat,
+    OpenDeviceDiscovery,
+    OpenFileTransfer,
+    OpenSystemMonitor,
+    OpenSettings,
     ParseTxt,
     ValidatePairing,
     PrepareConnection,

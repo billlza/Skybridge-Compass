@@ -277,6 +277,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         NavigationItems = collections.NavigationItems;
         _selectedFeature = startupState.SelectedFeature;
         DashboardMetrics = collections.DashboardMetrics;
+        DashboardQuickActions = collections.DashboardQuickActions;
         BitrateProfiles = collections.BitrateProfiles;
         FramerateProfiles = collections.FramerateProfiles;
         _readOnlyWorkspaceSnapshotHandlers = new ReadOnlyWorkspaceSnapshotHandlers(
@@ -420,8 +421,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _workspaceCommandGateCoordinator,
             _workspaceShellStateAccessor.BuildCommandGateState);
         _engineClient.ConnectionStateChanged += OnEngineStateChanged;
+        var dashboardNavigationActions = new DashboardNavigationActions(
+            () => NavigationItems,
+            value => SelectedFeature = value);
         var commandBindings = new WorkspaceCommandBindings(
             _sessionEngineActions,
+            dashboardNavigationActions,
             _discoveryBrowserActions,
             _connectionWorkspaceActions,
             _crossNetworkConnectionActions,
@@ -491,6 +496,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public ObservableCollection<FeatureEntry> NavigationItems { get; }
 
     public ObservableCollection<DashboardMetricView> DashboardMetrics { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> DashboardQuickActions { get; }
 
     public ObservableCollection<string> BitrateProfiles { get; }
 

@@ -7,6 +7,7 @@ internal sealed class WorkspaceCommandBindings
 {
     public WorkspaceCommandBindings(
         SessionEngineActions sessionEngineActions,
+        DashboardNavigationActions dashboardNavigationActions,
         DiscoveryBrowserActions discoveryBrowserActions,
         ConnectionWorkspaceActions connectionWorkspaceActions,
         CrossNetworkConnectionActions crossNetworkConnectionActions,
@@ -16,6 +17,10 @@ internal sealed class WorkspaceCommandBindings
         ConnectCommand = new AsyncRelayCommand(sessionEngineActions.ConnectAsync, commandAvailability.CanConnect);
         DisconnectCommand = new AsyncRelayCommand(sessionEngineActions.DisconnectAsync, commandAvailability.CanDisconnect);
         HeartbeatCommand = new AsyncRelayCommand(sessionEngineActions.SendHeartbeatAsync, commandAvailability.CanSendHeartbeat);
+        OpenDeviceDiscoveryCommand = new AsyncRelayCommand(dashboardNavigationActions.SelectDeviceDiscoveryAsync);
+        OpenFileTransferCommand = new AsyncRelayCommand(dashboardNavigationActions.SelectFileTransferAsync);
+        OpenSystemMonitorCommand = new AsyncRelayCommand(dashboardNavigationActions.SelectSystemMonitorAsync);
+        OpenSettingsCommand = new AsyncRelayCommand(dashboardNavigationActions.SelectSettingsAsync);
         StartDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StartAsync, commandAvailability.CanUseDiscoveryBrowser);
         StopDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanUseDiscoveryBrowser);
         RefreshDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser);
@@ -41,6 +46,10 @@ internal sealed class WorkspaceCommandBindings
             new(WorkspaceActionCommandId.Connect, ConnectCommand),
             new(WorkspaceActionCommandId.Disconnect, DisconnectCommand),
             new(WorkspaceActionCommandId.Heartbeat, HeartbeatCommand),
+            new(WorkspaceActionCommandId.OpenDeviceDiscovery, OpenDeviceDiscoveryCommand),
+            new(WorkspaceActionCommandId.OpenFileTransfer, OpenFileTransferCommand),
+            new(WorkspaceActionCommandId.OpenSystemMonitor, OpenSystemMonitorCommand),
+            new(WorkspaceActionCommandId.OpenSettings, OpenSettingsCommand),
             new(WorkspaceActionCommandId.StartDiscovery, StartDiscoveryCommand),
             new(WorkspaceActionCommandId.StopDiscovery, StopDiscoveryCommand),
             new(WorkspaceActionCommandId.RefreshDiscovery, RefreshDiscoveryCommand),
@@ -68,6 +77,14 @@ internal sealed class WorkspaceCommandBindings
     public ICommand DisconnectCommand { get; }
 
     public ICommand HeartbeatCommand { get; }
+
+    public ICommand OpenDeviceDiscoveryCommand { get; }
+
+    public ICommand OpenFileTransferCommand { get; }
+
+    public ICommand OpenSystemMonitorCommand { get; }
+
+    public ICommand OpenSettingsCommand { get; }
 
     public ICommand StartDiscoveryCommand { get; }
 

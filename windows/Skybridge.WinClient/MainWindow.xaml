@@ -24,6 +24,9 @@
         <ItemsPanelTemplate x:Key="WorkspaceMetricCardItemsPanel">
             <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" />
         </ItemsPanelTemplate>
+        <ItemsPanelTemplate x:Key="DashboardQuickActionItemsPanel">
+            <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="4" />
+        </ItemsPanelTemplate>
         <DataTemplate x:Key="SidebarWorkspaceActionButtonTemplate">
             <Button
                 AutomationProperties.AutomationId="{Binding AutomationId}"
@@ -118,6 +121,38 @@
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="DashboardQuickActionTemplate">
+            <Button
+                AutomationProperties.AutomationId="{Binding AutomationId}"
+                AutomationProperties.Name="{Binding Title}"
+                Command="{Binding Command}"
+                IsEnabled="{Binding IsEnabled}"
+                Width="210"
+                MinHeight="82"
+                Margin="0,0,12,0"
+                Padding="14"
+                HorizontalContentAlignment="Stretch"
+                VerticalContentAlignment="Center">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="32" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon
+                        Glyph="{Binding Glyph}"
+                        FontSize="18"
+                        VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Spacing="3">
+                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <TextBlock
+                            Text="{Binding Detail}"
+                            TextWrapping="Wrap"
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </Grid>
+            </Button>
         </DataTemplate>
         <DataTemplate x:Key="WorkspaceFactRowTemplate">
             <Grid Padding="0,4" ColumnSpacing="12">
@@ -395,11 +430,19 @@
 
             <ScrollViewer Grid.Row="1">
                 <StackPanel Padding="24" Spacing="20">
-                    <ItemsControl
+                    <StackPanel
                         Visibility="{Binding IsDashboardSelected, Converter={StaticResource BoolToVisibilityConverter}}"
-                        ItemsSource="{Binding DashboardMetrics}"
-                        ItemsPanel="{StaticResource WorkspaceMetricCardItemsPanel}"
-                        ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
+                        Spacing="14">
+                        <ItemsControl
+                            ItemsSource="{Binding DashboardMetrics}"
+                            ItemsPanel="{StaticResource WorkspaceMetricCardItemsPanel}"
+                            ItemTemplate="{StaticResource WorkspaceMetricCardTemplate}" />
+                        <ItemsControl
+                            AutomationProperties.AutomationId="Skybridge.Actions.DashboardQuickActions"
+                            ItemsSource="{Binding DashboardQuickActions}"
+                            ItemsPanel="{StaticResource DashboardQuickActionItemsPanel}"
+                            ItemTemplate="{StaticResource DashboardQuickActionTemplate}" />
+                    </StackPanel>
 
                     <Border Visibility="{Binding IsDeviceDiscoverySelected, Converter={StaticResource BoolToVisibilityConverter}}" Padding="18" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                         <StackPanel Spacing="14">

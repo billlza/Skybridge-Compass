@@ -12,6 +12,7 @@ internal sealed class WorkspaceObservableCollections
     {
         NavigationItems = new ObservableCollection<FeatureEntry>(featureEntries);
         DashboardMetrics = new ObservableCollection<DashboardMetricView>();
+        DashboardQuickActions = new ObservableCollection<WorkspaceActionItemView>();
         BitrateProfiles = new ObservableCollection<string>(profileCatalog.BitrateProfiles);
         FramerateProfiles = new ObservableCollection<string>(profileCatalog.FramerateProfiles);
         SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();
@@ -59,6 +60,8 @@ internal sealed class WorkspaceObservableCollections
     public ObservableCollection<FeatureEntry> NavigationItems { get; }
 
     public ObservableCollection<DashboardMetricView> DashboardMetrics { get; }
+
+    public ObservableCollection<WorkspaceActionItemView> DashboardQuickActions { get; }
 
     public ObservableCollection<string> BitrateProfiles { get; }
 
