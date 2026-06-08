@@ -47,6 +47,7 @@ This contract fixes the Windows shell entry points against the macOS reference s
 - `RunSessionEngineActionAsync` centralizes Connect, Disconnect, and Heartbeat busy/error/status lifecycle; those command handlers must only pass the `SessionStatusAction` and engine operation.
 - `RefreshSelectedFeatureState` centralizes selected-workspace boolean notifications plus top-bar/action refresh after `SelectedFeature` changes.
 - `RefreshConnectionState` and `RefreshShellRuntimeState` centralize connection/busy runtime refreshes for dashboard metrics, top-bar status, and command/action state.
+- `ApplyWorkspaceInputChange` centralizes editable workspace-input reset and command/action refresh after text-field changes.
 - `IsFeatureSelected` centralizes `FeatureCatalogClient.IsSelected` calls; feature-specific selected booleans must pass their `FeatureEntryId` through that helper rather than calling the catalog directly.
 - `CanUseDeviceDiscoveryAction`, `CanUseCrossNetworkConnectionAction`, and `CanUseSelectedWorkspaceFeature` centralize command-gate requests that combine `IsBusy`, selected-feature state, and service readiness before delegating to `WorkspaceCommandStateClient`.
 - `SessionViewModel.ReplaceCollection` centralizes snapshot row projection into observable collections while leaving reset policy, pending/completed status text, and service-owned snapshots outside the view model.
@@ -84,6 +85,7 @@ This contract fixes the Windows shell entry points against the macOS reference s
 - Static test: `Scripts/verify-windows-ui-parity.ps1` must require `IsFeatureSelected` and keep direct `_featureCatalogClient.IsSelected` calls centralized in that helper.
 - Static test: `Scripts/verify-windows-ui-parity.ps1` must require `RefreshSelectedFeatureState` as the `SelectedFeature` setter boundary for selected-workspace property notifications and top-bar/action refresh.
 - Static test: `Scripts/verify-windows-ui-parity.ps1` must require `RefreshConnectionState` and `RefreshShellRuntimeState` as the connection/busy runtime refresh boundary.
+- Static test: `Scripts/verify-windows-ui-parity.ps1` must require `ApplyWorkspaceInputChange` for editable workspace input setters that reset state and refresh commands.
 - Static test: `Scripts/verify-windows-ui-parity.ps1` must require `PairingMaterialSnapshot` / `PairingFact` and reject `SessionViewModel` inline pairing/trust fact construction.
 - Static test: `Scripts/verify-windows-ui-parity.ps1` must require `WorkspaceActionCommandId`, `WorkspaceActionGateId`, `WorkspaceActionDetailSlot`, `WorkspaceActionRenderContext`, `BuildResolvedSnapshot`, `BuildInitialSurfaces`, and `BuildDynamicRefreshSurfaces`; it must reject `SessionViewModel` action dispatch by `string actionKey`, direct `_workspaceActionCatalogClient.ResolveEnabled` / `ResolveDetail` calls, per-surface gate/detail snapshot construction, or hardcoded load/refresh surface call lists.
 - Static test: `Scripts/verify-windows-ui-parity.ps1` must require `WorkspaceErrorStatusClient`, `WorkspaceErrorScope`, and scoped `RunWithBusyState` call sites, and reject catch-path error routing that depends on the currently selected feature.

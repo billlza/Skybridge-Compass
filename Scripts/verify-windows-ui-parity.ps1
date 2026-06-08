@@ -207,6 +207,7 @@ foreach ($featureCatalogSignal in @(
     "Entries",
     "_featureCatalogClient.BuildReadOnlySnapshot()",
     "_featureCatalogClient.ResolveDefaultSelection(featureEntries)",
+    "ApplyWorkspaceInputChange",
     "RefreshSelectedFeatureState",
     "RefreshConnectionState",
     "RefreshShellRuntimeState",
@@ -226,6 +227,14 @@ Assert-True -Condition ($featureSelectedMatches.Count -eq 1) -Message "SessionVi
 Assert-True -Condition ($sessionViewModelSource.Contains("RefreshSelectedFeatureState();")) -Message "SelectedFeature setter must delegate selected-state notifications to RefreshSelectedFeatureState."
 Assert-True -Condition ($sessionViewModelSource.Contains("RefreshConnectionState();")) -Message "ConnectionState setter must delegate shell refresh to RefreshConnectionState."
 Assert-True -Condition ($sessionViewModelSource.Contains("RefreshShellRuntimeState();")) -Message "Runtime shell refresh must be centralized through RefreshShellRuntimeState."
+foreach ($inputChangeSignal in @(
+    "ApplyWorkspaceInputChange(InvalidatePairingAndPreflight)",
+    "ApplyWorkspaceInputChange(ResetManualConnectionInput)",
+    "ApplyWorkspaceInputChange(ResetCrossNetworkInput)",
+    "ApplyWorkspaceInputChange(ResetPairingInput)"
+)) {
+    Assert-Contains -Text $sessionViewModelSource -Needle $inputChangeSignal -Message "Workspace input change helper missing signal: $inputChangeSignal"
+}
 
 foreach ($workspaceItemViewSignal in @(
     "public sealed record SettingsTabItemView",
@@ -1758,6 +1767,7 @@ foreach ($docSignal in @(
     "TopBarStatusSlot",
     "SessionStatusClient",
     "RunSessionEngineActionAsync",
+    "ApplyWorkspaceInputChange",
     "RefreshSelectedFeatureState",
     "RefreshConnectionState",
     "RefreshShellRuntimeState",

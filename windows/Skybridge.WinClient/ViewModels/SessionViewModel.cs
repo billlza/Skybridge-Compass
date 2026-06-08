@@ -492,8 +492,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoveryService, value))
             {
-                InvalidatePairingAndPreflight();
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange(InvalidatePairingAndPreflight);
             }
         }
     }
@@ -505,7 +504,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoverySearchText, value))
             {
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange();
             }
         }
     }
@@ -517,8 +516,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionHost, value))
             {
-                ResetManualConnectionInput();
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange(ResetManualConnectionInput);
             }
         }
     }
@@ -530,8 +528,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionPort, value))
             {
-                ResetManualConnectionInput();
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange(ResetManualConnectionInput);
             }
         }
     }
@@ -543,8 +540,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionCode, value))
             {
-                ResetManualConnectionInput();
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange(ResetManualConnectionInput);
             }
         }
     }
@@ -556,8 +552,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _crossNetworkQrInput, value))
             {
-                ResetCrossNetworkInput();
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange(ResetCrossNetworkInput);
             }
         }
     }
@@ -570,8 +565,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             var normalized = _crossNetworkConnectionClient.NormalizeCodeInput(value);
             if (SetField(ref _crossNetworkCodeInput, normalized))
             {
-                ResetCrossNetworkInput();
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange(ResetCrossNetworkInput);
             }
             else if (!string.Equals(value, normalized, StringComparison.Ordinal))
             {
@@ -593,8 +587,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoveryTxtRecord, value))
             {
-                InvalidatePairingAndPreflight();
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange(InvalidatePairingAndPreflight);
             }
         }
     }
@@ -606,8 +599,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _pairingConnectionCode, value))
             {
-                ResetPairingInput();
-                RefreshCommandStates();
+                ApplyWorkspaceInputChange(ResetPairingInput);
             }
         }
     }
@@ -1273,6 +1265,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
 
         RefreshDynamicWorkspaceActionStates();
+    }
+
+    private void ApplyWorkspaceInputChange(Action? resetInput = null)
+    {
+        resetInput?.Invoke();
+        RefreshCommandStates();
     }
 
     private void RefreshSelectedFeatureState()
