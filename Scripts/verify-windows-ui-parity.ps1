@@ -95,6 +95,7 @@ $sessionViewModelDependenciesPath = Join-Path $RepoRoot "windows/Skybridge.WinCl
 $asyncRelayCommandPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/AsyncRelayCommand.cs"
 $workspaceCommandRegistryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceCommandRegistry.cs"
 $workspaceActionSurfaceTargetsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceActionSurfaceTargets.cs"
+$workspaceStatusPatchApplierPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceStatusPatchApplier.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -122,7 +123,7 @@ $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xa
 $mainWindowCodePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $asyncRelayCommandPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceStatusPatchApplierPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
@@ -134,8 +135,9 @@ $sessionViewModelDependencies = Get-Content -Raw -LiteralPath $sessionViewModelD
 $asyncRelayCommand = Get-Content -Raw -LiteralPath $asyncRelayCommandPath
 $workspaceCommandRegistry = Get-Content -Raw -LiteralPath $workspaceCommandRegistryPath
 $workspaceActionSurfaceTargets = Get-Content -Raw -LiteralPath $workspaceActionSurfaceTargetsPath
+$workspaceStatusPatchApplier = Get-Content -Raw -LiteralPath $workspaceStatusPatchApplierPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
-$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandRegistry + $workspaceActionSurfaceTargets
+$sessionViewModel = $sessionViewModelSource + $sessionViewModelDependencies + $workspaceItemViews + $workspaceCommandRegistry + $workspaceActionSurfaceTargets + $workspaceStatusPatchApplier
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
@@ -861,6 +863,8 @@ foreach ($connectionStateSignal in @(
     "BuildPreflightPreparedPatch",
     "ConnectionWorkspaceResetReason",
     "ConnectionWorkspaceStatusPatch",
+    "WorkspaceStatusPatchApplier",
+    "_workspaceStatusPatchApplier.Apply(",
     "ConnectionWorkspaceValidatedState",
     "ConnectionWorkspacePreflightReadiness",
     "DiscoveryInputChanged",
@@ -925,7 +929,8 @@ foreach ($workspaceErrorSignal in @(
     "RunWithBusyState(WorkspaceErrorScope",
     "RunDeviceDiscoveryActionAsync",
     "_workspaceErrorStatusClient.BuildErrorPatch(errorScope, ex.Message)",
-    "ApplyWorkspaceErrorStatusPatch"
+    "WorkspaceStatusPatchApplier",
+    "_workspaceStatusPatchApplier.Apply("
 )) {
     Assert-Contains -Text ($workspaceErrorStatus + $sessionViewModel + $mainWindow) -Needle $workspaceErrorSignal -Message "Workspace error routing signal missing: $workspaceErrorSignal"
 }
@@ -937,6 +942,9 @@ Assert-True -Condition ($deviceDiscoveryBusyScopeMatches.Count -eq 1) -Message "
 Assert-True -Condition (-not $sessionViewModel.Contains("_connectionWorkspaceStateClient.BuildErrorPatch(ex.Message)")) -Message "RunWithBusyState must route errors through WorkspaceErrorStatusClient, not the currently selected feature."
 Assert-True -Condition (-not $connectionWorkspaceState.Contains("BuildErrorPatch")) -Message "ConnectionWorkspaceStateClient must not own busy-state error routing; use WorkspaceErrorStatusClient."
 Assert-True -Condition (-not [regex]::IsMatch($sessionViewModel, "catch \(Exception ex\)[\s\S]*?if \(IsDeviceDiscoverySelected\)[\s\S]*?BuildErrorPatch\(ex\.Message\)")) -Message "RunWithBusyState catch must not route errors by currently selected feature."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("ApplyConnectionWorkspaceStatusPatch")) -Message "SessionViewModel must apply connection status patches through WorkspaceStatusPatchApplier."
+Assert-True -Condition (-not $sessionViewModelSource.Contains("ApplyWorkspaceErrorStatusPatch")) -Message "SessionViewModel must apply workspace error status patches through WorkspaceStatusPatchApplier."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "if \(patch\.(DiscoveryStatus|UsbManagementStatus|CoreDiagnosticsStatus) is not null\)")) -Message "SessionViewModel must not own per-field workspace status patch application."
 
 foreach ($unavailableSignal in @(
     "internal sealed class UnavailableDiscoveryClient",
@@ -1795,6 +1803,7 @@ foreach ($docSignal in @(
     "ItemsPanelTemplate",
     "WorkspaceActionRenderContext",
     "WorkspaceActionSurfaceTargets",
+    "WorkspaceStatusPatchApplier",
     "DiscoveredPeerItemTemplate",
     "UsbDeviceItemTemplate",
     "FileTransferQueueItemTemplate",

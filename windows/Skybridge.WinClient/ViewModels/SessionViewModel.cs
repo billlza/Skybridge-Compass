@@ -38,6 +38,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IWorkspaceCommandStateClient _workspaceCommandStateClient;
     private readonly WorkspaceCommandRegistry _workspaceCommandRegistry;
     private readonly WorkspaceActionSurfaceTargets _workspaceActionSurfaceTargets;
+    private readonly WorkspaceStatusPatchApplier _workspaceStatusPatchApplier;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -176,6 +177,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _systemMonitorStatus = _systemMonitorClient.BuildInitialStatus();
         _usbManagementStatus = _usbManagementClient.BuildInitialStatus();
         _settingsStatus = _settingsClient.BuildInitialStatus();
+        _workspaceStatusPatchApplier = new WorkspaceStatusPatchApplier(
+            value => StatusMessage = value,
+            value => DiscoveryStatus = value,
+            value => DiscoveryBrowserStatus = value,
+            value => ManualConnectionStatus = value,
+            value => CrossNetworkStatus = value,
+            value => PairingStatus = value,
+            value => ConnectionPreflightStatus = value,
+            value => IsDiscoveryScanning = value,
+            value => UsbManagementStatus = value,
+            value => CoreDiagnosticsStatus = value,
+            value => FileTransferStatus = value,
+            value => RemoteDesktopStatus = value,
+            value => SystemMonitorStatus = value,
+            value => SettingsStatus = value);
         _connectionValidatedState = _connectionWorkspaceStateClient.BuildInputInvalidatedState();
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
         _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
@@ -862,7 +878,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             }
 
             OnPropertyChanged(nameof(DiscoveryBrowserFactCount));
-            ApplyConnectionWorkspaceStatusPatch(
+            _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildDiscoveryBrowserResultPatch(
                     action,
                     snapshot,
@@ -885,7 +901,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ApplyConnectionInputInvalidation();
             OnPropertyChanged(nameof(ManualConnectionFactCount));
             DiscoveryService = snapshot.Target.Service;
-            ApplyConnectionWorkspaceStatusPatch(
+            _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildManualTargetPreparedPatch(snapshot));
         });
     }
@@ -933,7 +949,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
             ApplyConnectionInputInvalidation();
             OnPropertyChanged(nameof(CrossNetworkConnectionFactCount));
-            ApplyConnectionWorkspaceStatusPatch(
+            _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildCrossNetworkPreparedPatch(snapshot));
         });
     }
@@ -950,7 +966,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             DiscoveredPeers.Add(DiscoveredPeerView.FromCandidate(_discoveryBrowserClient.BuildPeerCandidate(peer)));
             ClearPairingAndPreflight();
             OnPropertyChanged(nameof(DiscoveredPeerCount));
-            ApplyConnectionWorkspaceStatusPatch(
+            _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedPatch(peer));
         });
     }
@@ -975,7 +991,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ReplaceCollection(PairingFacts, snapshot.Facts, PairingFactView.FromFact);
 
             OnPropertyChanged(nameof(PairingFactCount));
-            ApplyConnectionWorkspaceStatusPatch(
+            _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildPairingValidatedPatch(material));
         });
     }
@@ -1001,7 +1017,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             ReplaceCollection(ConnectionPreflightFacts, snapshot.Facts, ConnectionPreflightFactView.FromFact);
 
             OnPropertyChanged(nameof(ConnectionPreflightFactCount));
-            ApplyConnectionWorkspaceStatusPatch(
+            _workspaceStatusPatchApplier.Apply(
                 _connectionWorkspaceStateClient.BuildPreflightPreparedPatch(snapshot));
         });
     }
@@ -1198,7 +1214,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            ApplyWorkspaceErrorStatusPatch(
+            _workspaceStatusPatchApplier.Apply(
                 _workspaceErrorStatusClient.BuildErrorPatch(errorScope, ex.Message));
         }
         finally
@@ -1306,92 +1322,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         foreach (var surface in _workspaceActionCatalogClient.BuildDynamicRefreshSurfaces())
         {
             LoadWorkspaceActionSurface(surface, renderContext);
-        }
-    }
-
-    private void ApplyConnectionWorkspaceStatusPatch(ConnectionWorkspaceStatusPatch patch)
-    {
-        if (patch.DiscoveryStatus is not null)
-        {
-            DiscoveryStatus = patch.DiscoveryStatus;
-        }
-
-        if (patch.DiscoveryBrowserStatus is not null)
-        {
-            DiscoveryBrowserStatus = patch.DiscoveryBrowserStatus;
-        }
-
-        if (patch.ManualConnectionStatus is not null)
-        {
-            ManualConnectionStatus = patch.ManualConnectionStatus;
-        }
-
-        if (patch.CrossNetworkStatus is not null)
-        {
-            CrossNetworkStatus = patch.CrossNetworkStatus;
-        }
-
-        if (patch.PairingStatus is not null)
-        {
-            PairingStatus = patch.PairingStatus;
-        }
-
-        if (patch.ConnectionPreflightStatus is not null)
-        {
-            ConnectionPreflightStatus = patch.ConnectionPreflightStatus;
-        }
-
-        if (patch.StatusMessage is not null)
-        {
-            StatusMessage = patch.StatusMessage;
-        }
-
-        if (patch.IsDiscoveryScanning.HasValue)
-        {
-            IsDiscoveryScanning = patch.IsDiscoveryScanning.Value;
-        }
-    }
-
-    private void ApplyWorkspaceErrorStatusPatch(WorkspaceErrorStatusPatch patch)
-    {
-        if (patch.ConnectionWorkspacePatch is not null)
-        {
-            ApplyConnectionWorkspaceStatusPatch(patch.ConnectionWorkspacePatch);
-        }
-
-        if (patch.StatusMessage is not null)
-        {
-            StatusMessage = patch.StatusMessage;
-        }
-
-        if (patch.UsbManagementStatus is not null)
-        {
-            UsbManagementStatus = patch.UsbManagementStatus;
-        }
-
-        if (patch.CoreDiagnosticsStatus is not null)
-        {
-            CoreDiagnosticsStatus = patch.CoreDiagnosticsStatus;
-        }
-
-        if (patch.FileTransferStatus is not null)
-        {
-            FileTransferStatus = patch.FileTransferStatus;
-        }
-
-        if (patch.RemoteDesktopStatus is not null)
-        {
-            RemoteDesktopStatus = patch.RemoteDesktopStatus;
-        }
-
-        if (patch.SystemMonitorStatus is not null)
-        {
-            SystemMonitorStatus = patch.SystemMonitorStatus;
-        }
-
-        if (patch.SettingsStatus is not null)
-        {
-            SettingsStatus = patch.SettingsStatus;
         }
     }
 
@@ -1535,7 +1465,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         DiscoveredPeers.Clear();
         DiscoveryBrowserFacts.Clear();
         ClearPairingAndPreflight();
-        ApplyConnectionWorkspaceStatusPatch(
+        _workspaceStatusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.DiscoveryInputChanged));
         OnPropertyChanged(nameof(DiscoveredPeerCount));
@@ -1545,7 +1475,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void ResetManualConnectionInput()
     {
         ManualConnectionFacts.Clear();
-        ApplyConnectionWorkspaceStatusPatch(
+        _workspaceStatusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.ManualTargetInputChanged));
         OnPropertyChanged(nameof(ManualConnectionFactCount));
@@ -1553,7 +1483,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void ResetCrossNetworkInput()
     {
-        ApplyConnectionWorkspaceStatusPatch(
+        _workspaceStatusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.CrossNetworkInputChanged));
     }
@@ -1563,7 +1493,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ApplyConnectionValidatedState(
             _connectionWorkspaceStateClient.BuildPairingInputResetState(_connectionValidatedState));
         ClearPairingAndPreflight();
-        ApplyConnectionWorkspaceStatusPatch(
+        _workspaceStatusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.PairingInputChanged));
     }
@@ -1571,7 +1501,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void ClearConnectionPreflight()
     {
         ConnectionPreflightFacts.Clear();
-        ApplyConnectionWorkspaceStatusPatch(
+        _workspaceStatusPatchApplier.Apply(
             _connectionWorkspaceStateClient.BuildInputResetPatch(
                 ConnectionWorkspaceResetReason.PreflightCleared));
         OnPropertyChanged(nameof(ConnectionPreflightFactCount));
