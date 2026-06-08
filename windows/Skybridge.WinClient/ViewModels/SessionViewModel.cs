@@ -39,6 +39,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceActionSurfaceLoader _workspaceActionSurfaceLoader;
     private readonly WorkspaceStatusPatchApplier _workspaceStatusPatchApplier;
     private readonly WorkspaceBusyCoordinator _workspaceBusyCoordinator;
+    private readonly ReadOnlyWorkspaceRefreshCoordinator _readOnlyWorkspaceRefreshCoordinator;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
     private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private readonly DashboardMetricsUpdater _dashboardMetricsUpdater;
@@ -213,6 +214,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => IsBusy = value,
             _workspaceStatusPatchApplier,
             dependencies.WorkspaceErrorStatusClient);
+        _readOnlyWorkspaceRefreshCoordinator = new ReadOnlyWorkspaceRefreshCoordinator(
+            _workspaceBusyCoordinator,
+            _coreDiagnosticsClient,
+            _fileTransferClient,
+            _usbManagementClient,
+            _remoteDesktopClient,
+            _systemMonitorClient,
+            _settingsClient);
         _workspaceCountNotifier = new WorkspaceCountNotifier(OnPropertyChanged);
         _workspaceSnapshotApplier = new WorkspaceSnapshotApplier(_workspaceCountNotifier, RefreshDashboardMetrics);
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
@@ -1079,68 +1088,40 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     }
 
     private Task RunCoreDiagnosticsAsync() =>
-        _workspaceBusyCoordinator.RefreshReadOnlyWorkspaceAsync<CoreDiagnosticsSnapshot>(
-            WorkspaceErrorScope.CoreDiagnostics,
-            _coreDiagnosticsClient.BuildPendingStatus,
-            _coreDiagnosticsClient.BuildInteropSnapshotAsync,
+        _readOnlyWorkspaceRefreshCoordinator.RunCoreDiagnosticsAsync(
             ApplyCoreDiagnosticsSnapshot,
-            _coreDiagnosticsClient.BuildCompletedStatus,
-            _coreDiagnosticsClient.BuildCompletedStatusMessage,
             value => CoreDiagnosticsStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshFileTransferAsync() =>
-        _workspaceBusyCoordinator.RefreshReadOnlyWorkspaceAsync<FileTransferWorkspaceSnapshot>(
-            WorkspaceErrorScope.FileTransfer,
-            _fileTransferClient.BuildPendingStatus,
-            _fileTransferClient.BuildReadOnlySnapshotAsync,
+        _readOnlyWorkspaceRefreshCoordinator.RefreshFileTransferAsync(
             ApplyFileTransferSnapshot,
-            _fileTransferClient.BuildCompletedStatus,
-            _fileTransferClient.BuildCompletedStatusMessage,
             value => FileTransferStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshUsbManagementAsync() =>
-        _workspaceBusyCoordinator.RefreshReadOnlyWorkspaceAsync<UsbManagementWorkspaceSnapshot>(
-            WorkspaceErrorScope.UsbManagement,
-            _usbManagementClient.BuildPendingStatus,
-            _usbManagementClient.BuildReadOnlySnapshotAsync,
+        _readOnlyWorkspaceRefreshCoordinator.RefreshUsbManagementAsync(
             ApplyUsbManagementSnapshot,
-            _usbManagementClient.BuildCompletedStatus,
-            _usbManagementClient.BuildCompletedStatusMessage,
             value => UsbManagementStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshRemoteDesktopAsync() =>
-        _workspaceBusyCoordinator.RefreshReadOnlyWorkspaceAsync<RemoteDesktopWorkspaceSnapshot>(
-            WorkspaceErrorScope.RemoteDesktop,
-            _remoteDesktopClient.BuildPendingStatus,
-            () => _remoteDesktopClient.BuildReadOnlySnapshotAsync(SelectedBitrate, SelectedFramerate),
+        _readOnlyWorkspaceRefreshCoordinator.RefreshRemoteDesktopAsync(
+            SelectedBitrate,
+            SelectedFramerate,
             ApplyRemoteDesktopSnapshot,
-            _remoteDesktopClient.BuildCompletedStatus,
-            _remoteDesktopClient.BuildCompletedStatusMessage,
             value => RemoteDesktopStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshSystemMonitorAsync() =>
-        _workspaceBusyCoordinator.RefreshReadOnlyWorkspaceAsync<SystemMonitorWorkspaceSnapshot>(
-            WorkspaceErrorScope.SystemMonitor,
-            _systemMonitorClient.BuildPendingStatus,
-            _systemMonitorClient.BuildReadOnlySnapshotAsync,
+        _readOnlyWorkspaceRefreshCoordinator.RefreshSystemMonitorAsync(
             ApplySystemMonitorSnapshot,
-            _systemMonitorClient.BuildCompletedStatus,
-            _systemMonitorClient.BuildCompletedStatusMessage,
             value => SystemMonitorStatus = value,
             value => StatusMessage = value);
 
     private Task RefreshSettingsAsync() =>
-        _workspaceBusyCoordinator.RefreshReadOnlyWorkspaceAsync<SettingsWorkspaceSnapshot>(
-            WorkspaceErrorScope.Settings,
-            _settingsClient.BuildPendingStatus,
-            _settingsClient.BuildReadOnlySnapshotAsync,
+        _readOnlyWorkspaceRefreshCoordinator.RefreshSettingsAsync(
             ApplySettingsSnapshot,
-            _settingsClient.BuildCompletedStatus,
-            _settingsClient.BuildCompletedStatusMessage,
             value => SettingsStatus = value,
             value => StatusMessage = value);
 
