@@ -90,6 +90,7 @@ function Assert-ItemsControlTemplate {
 $featureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FeatureCatalogClient.cs"
 $legacyFeatureContractPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/FeatureEntryContract.cs"
 $sessionViewModelPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs"
+$asyncRelayCommandPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/AsyncRelayCommand.cs"
 $workspaceItemViewsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs"
 $dashboardMetricsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DashboardMetricsClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
@@ -116,13 +117,14 @@ $unavailableClientStubsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/S
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml"
 $parityDocPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 
-foreach ($path in @($featureContractPath, $sessionViewModelPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelPath, $asyncRelayCommandPath, $workspaceItemViewsPath, $dashboardMetricsPath, $discoveryBrowserPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $mainWindowPath, $parityDocPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $legacyFeatureContractPath)) -Message "Feature catalog must live under Services, not ViewModels: $legacyFeatureContractPath"
 
 $featureContract = Get-Content -Raw -LiteralPath $featureContractPath
 $sessionViewModelSource = Get-Content -Raw -LiteralPath $sessionViewModelPath
+$asyncRelayCommand = Get-Content -Raw -LiteralPath $asyncRelayCommandPath
 $workspaceItemViews = Get-Content -Raw -LiteralPath $workspaceItemViewsPath
 $sessionViewModel = $sessionViewModelSource + $workspaceItemViews
 $dashboardMetrics = Get-Content -Raw -LiteralPath $dashboardMetricsPath
@@ -222,6 +224,15 @@ foreach ($viewModelOwnedItemView in @(
 )) {
     Assert-True -Condition (-not $sessionViewModelSource.Contains($viewModelOwnedItemView)) -Message "SessionViewModel.cs must not own reusable workspace item view records: $viewModelOwnedItemView"
 }
+
+foreach ($asyncRelayCommandSignal in @(
+    "public sealed class AsyncRelayCommand : ICommand",
+    "Func<Task>",
+    "RaiseCanExecuteChanged"
+)) {
+    Assert-Contains -Text $asyncRelayCommand -Needle $asyncRelayCommandSignal -Message "AsyncRelayCommand contract missing from AsyncRelayCommand.cs: $asyncRelayCommandSignal"
+}
+Assert-True -Condition (-not $sessionViewModelSource.Contains("public sealed class AsyncRelayCommand")) -Message "SessionViewModel.cs must not own the reusable AsyncRelayCommand adapter."
 
 foreach ($binding in @(
     "NavigationItems",
