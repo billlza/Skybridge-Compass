@@ -31,6 +31,10 @@ pub struct EngineSnapshot {
     pub state: SessionState,
     pub last_heartbeat_ms: Option<u64>,
     pub has_secrets: bool,
+    pub has_transport_binding: bool,
+    pub transport_kind: Option<transport::SkyBridgeTransportKind>,
+    pub adapter_kind: Option<transport::SkyBridgeTransportKind>,
+    pub transport_binding_digest: Option<[u8; 32]>,
 }
 
 /// CoreEngine ties together session, streaming, and crypto primitives.
@@ -134,10 +138,23 @@ impl EngineState {
             .as_ref()
             .map(|instant| instant.elapsed().as_millis() as u64);
         let has_secrets = self.session_secrets.lock().unwrap().is_some();
+        let transport_binding = self
+            .last_config()
+            .and_then(|config| config.transport_binding);
+        let transport_kind = transport_binding.as_ref().map(|binding| binding.transport);
+        let adapter_kind = transport_binding
+            .as_ref()
+            .map(|binding| binding.adapter_kind);
+        let transport_binding_digest =
+            transport_binding.map(|binding| binding.transport_binding_digest);
         EngineSnapshot {
             state: self.state(),
             last_heartbeat_ms,
             has_secrets,
+            has_transport_binding: transport_kind.is_some(),
+            transport_kind,
+            adapter_kind,
+            transport_binding_digest,
         }
     }
 }
@@ -537,6 +554,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 1_000,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
 
         assert!(engine.initialize(config).await.is_ok());
@@ -563,6 +582,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 1_000,
             peer_public_key: None,
+
+            transport_binding: None,
         };
 
         let err = engine.initialize(config).await.unwrap_err();
@@ -579,6 +600,8 @@ mod tests {
             client_id: " ".into(),
             heartbeat_interval_ms: 0,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
 
         let err = engine.initialize(config).await.unwrap_err();
@@ -595,6 +618,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 500,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
 
         engine
@@ -618,6 +643,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 50,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
 
         engine.initialize(config).await.unwrap();
@@ -654,6 +681,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 1_000,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
         engine.initialize(config).await.unwrap();
         engine.send_heartbeat().await.unwrap();
@@ -679,6 +708,8 @@ mod tests {
                 client_id: "demo".into(),
                 heartbeat_interval_ms: 1_000,
                 peer_public_key: Some(sample_peer_key().await),
+
+                transport_binding: None,
             })
             .await
             .unwrap();
@@ -713,6 +744,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 1_000,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
 
         engine.initialize(config.clone()).await.unwrap();
@@ -729,6 +762,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 50,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
 
         engine.initialize(config).await.unwrap();
@@ -771,6 +806,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 20,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
         engine.initialize(config).await.unwrap();
 
@@ -810,6 +847,8 @@ mod tests {
             client_id: "demo".into(),
             heartbeat_interval_ms: 1_000,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         };
 
         engine.initialize(config).await.unwrap();

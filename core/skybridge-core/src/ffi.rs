@@ -11,7 +11,10 @@ use crate::frame::{
     decode_frame, decode_frame_payload as core_decode_frame_payload, encode_frame,
     encode_sbp2_frame, CoreFrame, FrameFlags, FRAME_HEADER_LEN,
 };
-use crate::session::{AsyncSessionManager, HeartbeatEmitter, SessionConfig, SessionState};
+use crate::session::{
+    AsyncSessionManager, HeartbeatEmitter, SessionAdapterBindingKind, SessionChannelBinding,
+    SessionConfig, SessionState, SessionTransportBinding,
+};
 use crate::stream::{FlowRate, StreamController, StreamMetrics};
 use crate::suite::{
     CryptoProviderCapabilities, CryptoSuite, CryptoSuiteAudit, CryptoSuitePolicy,
@@ -66,6 +69,33 @@ pub struct SkybridgeSessionConfig {
     pub heartbeat_interval_ms: u64,
     pub peer_public_key_ptr: *const u8,
     pub peer_public_key_len: usize,
+    pub transport: SkybridgeTransportKind,
+    pub transport_audit: SkybridgeTransportAuditCode,
+    pub relay_required: u8,
+    pub relay_allowed: u8,
+    pub selected_suite: SkybridgeCryptoSuiteKind,
+    pub selected_suite_wire_id: u16,
+    pub suite_audit: SkybridgeCryptoSuiteAuditCode,
+    pub sbp2_enabled: u8,
+    pub sbp2_fixed_payload_len: usize,
+    pub frame_header_len: usize,
+    pub transport_binding_digest_ptr: *const u8,
+    pub transport_binding_digest_len: usize,
+    pub adapter_kind: SkybridgeTransportKind,
+    pub is_live_adapter_ready: u8,
+    pub adapter_binding_ptr: *const u8,
+    pub adapter_binding_len: usize,
+    pub local_endpoint_ptr: *const u8,
+    pub local_endpoint_len: usize,
+    pub remote_endpoint_ptr: *const u8,
+    pub remote_endpoint_len: usize,
+    pub selected_candidate_pair_ptr: *const u8,
+    pub selected_candidate_pair_len: usize,
+    pub relay_id_ptr: *const u8,
+    pub relay_id_len: usize,
+    pub timestamp_window_ms: u64,
+    pub channel_mappings_ptr: *const SkybridgeChannelMapping,
+    pub channel_mapping_count: usize,
 }
 
 #[repr(C)]
@@ -116,6 +146,10 @@ pub struct SkybridgeEngineSnapshot {
     pub last_heartbeat_ms: u64,
     pub has_last_heartbeat: bool,
     pub has_secrets: bool,
+    pub has_transport_binding: bool,
+    pub transport_kind: SkybridgeTransportKind,
+    pub adapter_kind: SkybridgeTransportKind,
+    pub transport_binding_digest: [u8; 32],
 }
 
 #[repr(C)]
@@ -550,6 +584,26 @@ fn map_transport_audit(reason: TransportAuditReason) -> SkybridgeTransportAuditC
     }
 }
 
+fn map_ffi_transport_audit(audit: SkybridgeTransportAuditCode) -> Option<TransportAuditReason> {
+    match audit {
+        SkybridgeTransportAuditCode::AppleNativeDefault => {
+            Some(TransportAuditReason::AppleNativeDefault)
+        }
+        SkybridgeTransportAuditCode::WindowsNativeMsQuicSameLan => {
+            Some(TransportAuditReason::WindowsNativeMsQuicSameLan)
+        }
+        SkybridgeTransportAuditCode::WindowsSkyBridgeIceMsQuic => {
+            Some(TransportAuditReason::WindowsSkyBridgeIceMsQuic)
+        }
+        SkybridgeTransportAuditCode::WebRtcInterop => Some(TransportAuditReason::WebRtcInterop),
+        SkybridgeTransportAuditCode::TcpFallbackSameLan => {
+            Some(TransportAuditReason::TcpFallbackSameLan)
+        }
+        SkybridgeTransportAuditCode::RelayFallback => Some(TransportAuditReason::RelayFallback),
+        SkybridgeTransportAuditCode::UnsupportedNoCompatibleTransport => None,
+    }
+}
+
 fn map_relay_required(policy: RelayPolicy) -> u8 {
     u8::from(matches!(policy, RelayPolicy::Required))
 }
@@ -607,6 +661,16 @@ fn map_crypto_suite(suite: CryptoSuite) -> SkybridgeCryptoSuiteKind {
     }
 }
 
+fn map_ffi_crypto_suite(suite: SkybridgeCryptoSuiteKind) -> Option<CryptoSuite> {
+    match suite {
+        SkybridgeCryptoSuiteKind::XWingHybrid => Some(CryptoSuite::XWingHybrid),
+        SkybridgeCryptoSuiteKind::MlKem768MlDsa65 => Some(CryptoSuite::MlKem768MlDsa65),
+        SkybridgeCryptoSuiteKind::X25519Ed25519 => Some(CryptoSuite::X25519Ed25519),
+        SkybridgeCryptoSuiteKind::P256Ecdsa => Some(CryptoSuite::P256Ecdsa),
+        SkybridgeCryptoSuiteKind::Unknown => None,
+    }
+}
+
 fn map_crypto_suite_audit(audit: CryptoSuiteAudit) -> SkybridgeCryptoSuiteAuditCode {
     match audit {
         CryptoSuiteAudit::HybridPqcPreferred => SkybridgeCryptoSuiteAuditCode::HybridPqcPreferred,
@@ -618,6 +682,101 @@ fn map_crypto_suite_audit(audit: CryptoSuiteAudit) -> SkybridgeCryptoSuiteAuditC
             SkybridgeCryptoSuiteAuditCode::LegacyPolicyFallback
         }
     }
+}
+
+fn map_ffi_crypto_suite_audit(audit: SkybridgeCryptoSuiteAuditCode) -> Option<CryptoSuiteAudit> {
+    match audit {
+        SkybridgeCryptoSuiteAuditCode::HybridPqcPreferred => {
+            Some(CryptoSuiteAudit::HybridPqcPreferred)
+        }
+        SkybridgeCryptoSuiteAuditCode::PurePqcPreferred => Some(CryptoSuiteAudit::PurePqcPreferred),
+        SkybridgeCryptoSuiteAuditCode::ClassicPolicyFallback => {
+            Some(CryptoSuiteAudit::ClassicPolicyFallback)
+        }
+        SkybridgeCryptoSuiteAuditCode::LegacyPolicyFallback => {
+            Some(CryptoSuiteAudit::LegacyPolicyFallback)
+        }
+        SkybridgeCryptoSuiteAuditCode::None => None,
+    }
+}
+
+fn map_ffi_reliability(
+    reliability: SkybridgeReliabilityKind,
+    max_retransmits: u16,
+) -> Result<SkyBridgeReliability, SkybridgeErrorCode> {
+    match reliability {
+        SkybridgeReliabilityKind::ReliableOrdered => {
+            if max_retransmits != 0 {
+                return Err(SkybridgeErrorCode::InvalidInput);
+            }
+            Ok(SkyBridgeReliability::ReliableOrdered)
+        }
+        SkybridgeReliabilityKind::ReliableUnordered => {
+            if max_retransmits != 0 {
+                return Err(SkybridgeErrorCode::InvalidInput);
+            }
+            Ok(SkyBridgeReliability::ReliableUnordered)
+        }
+        SkybridgeReliabilityKind::PartialReliable => {
+            if max_retransmits == 0 {
+                return Err(SkybridgeErrorCode::InvalidInput);
+            }
+            Ok(SkyBridgeReliability::PartialReliable { max_retransmits })
+        }
+        SkybridgeReliabilityKind::Unreliable => {
+            if max_retransmits != 0 {
+                return Err(SkybridgeErrorCode::InvalidInput);
+            }
+            Ok(SkyBridgeReliability::Unreliable)
+        }
+    }
+}
+
+fn map_ffi_adapter_binding_kind(
+    binding_kind: SkybridgeAdapterBindingKind,
+) -> SessionAdapterBindingKind {
+    match binding_kind {
+        SkybridgeAdapterBindingKind::AppleStream => SessionAdapterBindingKind::AppleStream,
+        SkybridgeAdapterBindingKind::AppleDatagram => SessionAdapterBindingKind::AppleDatagram,
+        SkybridgeAdapterBindingKind::MsQuicStream => SessionAdapterBindingKind::MsQuicStream,
+        SkybridgeAdapterBindingKind::MsQuicDatagram => SessionAdapterBindingKind::MsQuicDatagram,
+        SkybridgeAdapterBindingKind::WebRtcDataChannel => {
+            SessionAdapterBindingKind::WebRtcDataChannel
+        }
+        SkybridgeAdapterBindingKind::RelayStream => SessionAdapterBindingKind::RelayStream,
+        SkybridgeAdapterBindingKind::TcpStream => SessionAdapterBindingKind::TcpStream,
+    }
+}
+
+fn map_ffi_session_channel_mapping(
+    mapping: SkybridgeChannelMapping,
+) -> Result<SessionChannelBinding, SkybridgeErrorCode> {
+    Ok(SessionChannelBinding {
+        channel: map_ffi_channel_kind(mapping.channel),
+        reliability: map_ffi_reliability(mapping.reliability, mapping.max_retransmits)?,
+        max_retransmits: mapping.max_retransmits,
+        binding_kind: map_ffi_adapter_binding_kind(mapping.binding_kind),
+        head_of_line_isolated: ffi_flag(mapping.head_of_line_isolated),
+    })
+}
+
+fn parse_channel_mappings(
+    config: SkybridgeSessionConfig,
+) -> Result<Vec<SessionChannelBinding>, SkybridgeErrorCode> {
+    if config.channel_mapping_count != 5 {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+    if config.channel_mappings_ptr.is_null() {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+
+    let mappings = unsafe {
+        std::slice::from_raw_parts(config.channel_mappings_ptr, config.channel_mapping_count)
+    };
+    mappings
+        .iter()
+        .map(|mapping| map_ffi_session_channel_mapping(*mapping))
+        .collect()
 }
 
 fn map_connection_plan(plan: ConnectionPlan) -> SkybridgeConnectionPlan {
@@ -1440,6 +1599,96 @@ pub unsafe extern "C" fn skybridge_engine_free(handle: *mut SkybridgeEngineHandl
     drop(Box::from_raw(handle));
 }
 
+fn parse_transport_binding(
+    config: SkybridgeSessionConfig,
+) -> Result<SessionTransportBinding, SkybridgeErrorCode> {
+    if !ffi_flag(config.is_live_adapter_ready) {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+
+    let Some(transport) = map_ffi_transport_kind(config.transport) else {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    };
+    let Some(adapter_kind) = map_ffi_transport_kind(config.adapter_kind) else {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    };
+    if adapter_kind != transport {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+
+    let Some(transport_audit) = map_ffi_transport_audit(config.transport_audit) else {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    };
+    let Some(selected_suite) = map_ffi_crypto_suite(config.selected_suite) else {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    };
+    if selected_suite.wire_id() != config.selected_suite_wire_id {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+
+    let Some(suite_audit) = map_ffi_crypto_suite_audit(config.suite_audit) else {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    };
+
+    let digest = unsafe {
+        read_bytes(
+            config.transport_binding_digest_ptr,
+            config.transport_binding_digest_len,
+        )
+    }?;
+    if digest.len() != 32 {
+        return Err(SkybridgeErrorCode::InvalidInput);
+    }
+    let mut transport_binding_digest = [0u8; 32];
+    transport_binding_digest.copy_from_slice(digest);
+
+    let adapter_binding =
+        unsafe { read_utf8(config.adapter_binding_ptr, config.adapter_binding_len) }?.to_string();
+    let local_endpoint =
+        unsafe { read_utf8(config.local_endpoint_ptr, config.local_endpoint_len) }?.to_string();
+    let remote_endpoint =
+        unsafe { read_utf8(config.remote_endpoint_ptr, config.remote_endpoint_len) }?.to_string();
+    let selected_candidate_pair = unsafe {
+        read_utf8(
+            config.selected_candidate_pair_ptr,
+            config.selected_candidate_pair_len,
+        )
+    }?
+    .to_string();
+    let relay_id = if config.relay_id_len == 0 {
+        None
+    } else {
+        Some(unsafe { read_utf8(config.relay_id_ptr, config.relay_id_len) }?.to_string())
+    };
+    let channel_mappings = parse_channel_mappings(config)?;
+
+    let binding = SessionTransportBinding {
+        transport,
+        transport_audit,
+        relay_required: ffi_flag(config.relay_required),
+        relay_allowed: ffi_flag(config.relay_allowed),
+        selected_suite,
+        selected_suite_wire_id: config.selected_suite_wire_id,
+        suite_audit,
+        sbp2_enabled: ffi_flag(config.sbp2_enabled),
+        sbp2_fixed_payload_len: config.sbp2_fixed_payload_len,
+        frame_header_len: config.frame_header_len,
+        transport_binding_digest,
+        adapter_kind,
+        adapter_binding,
+        local_endpoint,
+        remote_endpoint,
+        selected_candidate_pair,
+        relay_id,
+        timestamp_window_ms: config.timestamp_window_ms,
+        channel_mappings,
+    };
+    binding
+        .validate()
+        .map_err(|_| SkybridgeErrorCode::InvalidInput)?;
+    Ok(binding)
+}
+
 fn parse_config(config: SkybridgeSessionConfig) -> Result<SessionConfig, SkybridgeErrorCode> {
     if config.client_id_ptr.is_null() && config.client_id_len > 0 {
         return Err(SkybridgeErrorCode::InvalidInput);
@@ -1467,10 +1716,13 @@ fn parse_config(config: SkybridgeSessionConfig) -> Result<SessionConfig, Skybrid
             .to_vec(),
         )
     };
+    let transport_binding = parse_transport_binding(config)?;
+
     let config = SessionConfig {
         client_id,
         heartbeat_interval_ms: config.heartbeat_interval_ms,
         peer_public_key,
+        transport_binding: Some(transport_binding),
     };
 
     config
@@ -1802,6 +2054,10 @@ pub unsafe extern "C" fn skybridge_engine_snapshot(
             last_heartbeat_ms: snapshot.last_heartbeat_ms.unwrap_or(0),
             has_last_heartbeat: snapshot.last_heartbeat_ms.is_some(),
             has_secrets: snapshot.has_secrets,
+            has_transport_binding: snapshot.has_transport_binding,
+            transport_kind: map_transport_kind(snapshot.transport_kind),
+            adapter_kind: map_transport_kind(snapshot.adapter_kind),
+            transport_binding_digest: snapshot.transport_binding_digest.unwrap_or([0; 32]),
         };
 
         unsafe {

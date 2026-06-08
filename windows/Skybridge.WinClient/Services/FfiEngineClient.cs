@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -48,18 +49,53 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
             }
 
             var clientId = Encoding.UTF8.GetBytes(ClientId);
+            var transportBindingDigest = (byte[])request.Plan.TransportBindingDigest.Clone();
+            var adapterBinding = Encoding.UTF8.GetBytes(request.Plan.AdapterBinding);
+            var localEndpoint = Encoding.UTF8.GetBytes(request.Plan.LocalEndpoint);
+            var remoteEndpoint = Encoding.UTF8.GetBytes(request.Plan.RemoteEndpoint);
+            var selectedCandidatePair = Encoding.UTF8.GetBytes(request.Plan.SelectedCandidatePair);
+            var relayId = string.IsNullOrEmpty(request.Plan.RelayId)
+                ? Array.Empty<byte>()
+                : Encoding.UTF8.GetBytes(request.Plan.RelayId);
+            var nativeChannelMappings = BuildNativeChannelMappings(request.Plan.ChannelMappings);
 
-            var clientIdHandle = GCHandle.Alloc(clientId, GCHandleType.Pinned);
-            var peerKeyHandle = GCHandle.Alloc(peerPublicKey, GCHandleType.Pinned);
+            var pinnedHandles = new List<GCHandle>();
             try
             {
                 var config = new NativeSessionConfig
                 {
-                    ClientIdPtr = clientIdHandle.AddrOfPinnedObject(),
+                    ClientIdPtr = PinArray(clientId, pinnedHandles),
                     ClientIdLen = (nuint)clientId.Length,
                     HeartbeatIntervalMs = HeartbeatIntervalMs,
-                    PeerPublicKeyPtr = peerKeyHandle.AddrOfPinnedObject(),
-                    PeerPublicKeyLen = (nuint)peerPublicKey.Length
+                    PeerPublicKeyPtr = PinArray(peerPublicKey, pinnedHandles),
+                    PeerPublicKeyLen = (nuint)peerPublicKey.Length,
+                    Transport = request.Plan.TransportKind,
+                    TransportAudit = request.Plan.TransportAudit,
+                    RelayRequired = ToFlag(request.Plan.RelayRequired),
+                    RelayAllowed = ToFlag(request.Plan.RelayAllowed),
+                    SelectedSuite = request.Plan.SelectedSuite,
+                    SelectedSuiteWireId = request.Plan.SelectedSuiteWireId,
+                    SuiteAudit = request.Plan.SuiteAudit,
+                    Sbp2Enabled = ToFlag(request.Plan.Sbp2Enabled),
+                    Sbp2FixedPayloadLen = request.Plan.Sbp2FixedPayloadLen,
+                    FrameHeaderLen = request.Plan.FrameHeaderLen,
+                    TransportBindingDigestPtr = PinArray(transportBindingDigest, pinnedHandles),
+                    TransportBindingDigestLen = (nuint)transportBindingDigest.Length,
+                    AdapterKind = request.Plan.AdapterKind,
+                    IsLiveAdapterReady = ToFlag(request.Plan.IsLiveAdapterReady),
+                    AdapterBindingPtr = PinArray(adapterBinding, pinnedHandles),
+                    AdapterBindingLen = (nuint)adapterBinding.Length,
+                    LocalEndpointPtr = PinArray(localEndpoint, pinnedHandles),
+                    LocalEndpointLen = (nuint)localEndpoint.Length,
+                    RemoteEndpointPtr = PinArray(remoteEndpoint, pinnedHandles),
+                    RemoteEndpointLen = (nuint)remoteEndpoint.Length,
+                    SelectedCandidatePairPtr = PinArray(selectedCandidatePair, pinnedHandles),
+                    SelectedCandidatePairLen = (nuint)selectedCandidatePair.Length,
+                    RelayIdPtr = PinArray(relayId, pinnedHandles),
+                    RelayIdLen = (nuint)relayId.Length,
+                    TimestampWindowMs = request.Plan.TimestampWindowMs,
+                    ChannelMappingsPtr = PinArray(nativeChannelMappings, pinnedHandles),
+                    ChannelMappingCount = (nuint)nativeChannelMappings.Length
                 };
                 var result = NativeMethods.EngineConnect(_handle, config);
                 ThrowOnError(result, "connect");
@@ -71,8 +107,13 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
             }
             finally
             {
-                peerKeyHandle.Free();
-                clientIdHandle.Free();
+                foreach (var handle in pinnedHandles)
+                {
+                    if (handle.IsAllocated)
+                    {
+                        handle.Free();
+                    }
+                }
             }
 
             RefreshStateFromCore();
@@ -228,6 +269,41 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
         }
     }
 
+    private static NativeChannelMapping[] BuildNativeChannelMappings(
+        IReadOnlyList<ChannelMapping> mappings)
+    {
+        var nativeMappings = new NativeChannelMapping[mappings.Count];
+        for (var index = 0; index < mappings.Count; index++)
+        {
+            var mapping = mappings[index];
+            nativeMappings[index] = new NativeChannelMapping
+            {
+                Channel = mapping.Channel,
+                Reliability = mapping.Reliability,
+                MaxRetransmits = mapping.MaxRetransmits,
+                BindingKind = mapping.BindingKind,
+                HeadOfLineIsolated = ToFlag(mapping.HeadOfLineIsolated)
+            };
+        }
+
+        return nativeMappings;
+    }
+
+    private static nint PinArray<T>(T[] values, List<GCHandle> handles)
+        where T : struct
+    {
+        if (values.Length == 0)
+        {
+            return nint.Zero;
+        }
+
+        var handle = GCHandle.Alloc(values, GCHandleType.Pinned);
+        handles.Add(handle);
+        return handle.AddrOfPinnedObject();
+    }
+
+    private static byte ToFlag(bool value) => value ? (byte)1 : (byte)0;
+
     private static class NativeMethods
     {
         [DllImport("skybridge_core", EntryPoint = "skybridge_engine_new")]
@@ -268,6 +344,33 @@ internal struct NativeSessionConfig
     public ulong HeartbeatIntervalMs;
     public nint PeerPublicKeyPtr;
     public nuint PeerPublicKeyLen;
+    public CoreTransportKind Transport;
+    public CoreTransportAuditCode TransportAudit;
+    public byte RelayRequired;
+    public byte RelayAllowed;
+    public CoreCryptoSuiteKind SelectedSuite;
+    public ushort SelectedSuiteWireId;
+    public CoreCryptoSuiteAuditCode SuiteAudit;
+    public byte Sbp2Enabled;
+    public nuint Sbp2FixedPayloadLen;
+    public nuint FrameHeaderLen;
+    public nint TransportBindingDigestPtr;
+    public nuint TransportBindingDigestLen;
+    public ConnectionLaunchAdapterKind AdapterKind;
+    public byte IsLiveAdapterReady;
+    public nint AdapterBindingPtr;
+    public nuint AdapterBindingLen;
+    public nint LocalEndpointPtr;
+    public nuint LocalEndpointLen;
+    public nint RemoteEndpointPtr;
+    public nuint RemoteEndpointLen;
+    public nint SelectedCandidatePairPtr;
+    public nuint SelectedCandidatePairLen;
+    public nint RelayIdPtr;
+    public nuint RelayIdLen;
+    public ulong TimestampWindowMs;
+    public nint ChannelMappingsPtr;
+    public nuint ChannelMappingCount;
 }
 
 internal enum NativeSessionState

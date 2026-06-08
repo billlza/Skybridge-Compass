@@ -135,7 +135,20 @@ foreach ($signal in @(
     "GCHandle.Alloc",
     "GetLocalPublicKeyAsync",
     "RefreshStateFromCore",
-    "ThrowOnError"
+    "ThrowOnError",
+    "request.Plan.TransportKind",
+    "request.Plan.TransportAudit",
+    "request.Plan.TransportBindingDigest",
+    "request.Plan.AdapterBinding",
+    "request.Plan.LocalEndpoint",
+    "request.Plan.SelectedCandidatePair",
+    "request.Plan.TimestampWindowMs",
+    "request.Plan.ChannelMappings",
+    "BuildNativeChannelMappings",
+    "TransportBindingDigestPtr",
+    "AdapterBindingPtr",
+    "ChannelMappingsPtr",
+    "ChannelMappingCount"
 )) {
     Assert-Contains -Text $client -Needle $signal -Message "FfiEngineClient missing lifecycle signal: $signal"
 }
@@ -151,6 +164,7 @@ foreach ($signal in @(
     "CoreTransportAuditCode TransportAudit",
     "CoreCryptoSuiteKind SelectedSuite",
     "CoreCryptoSuiteAuditCode SuiteAudit",
+    "IReadOnlyList<ChannelMapping> ChannelMappings",
     "TransportBindingDigest",
     "IsLiveAdapterReady",
     "AdapterBinding",
@@ -163,6 +177,8 @@ foreach ($signal in @(
     "Connection launch requires a selected transport candidate pair.",
     "Connection launch requires a non-zero transport timestamp window.",
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
+    "Connection launch requires all five Core channel mappings from preflight.",
+    "Connection launch Core channel mappings must not contain duplicate channels.",
     "Connection launch request peer does not match pairing material.",
     "Connection launch request fingerprint does not match pairing material."
 )) {
@@ -177,6 +193,8 @@ foreach ($signal in @(
     "Connection launch request peer does not match pairing material.",
     "Connection launch request fingerprint does not match pairing material.",
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
+    "Connection launch requires all five Core channel mappings from preflight.",
+    "Connection launch Core channel mappings must not contain duplicate channels.",
     "Connection launch requires a local transport endpoint.",
     "Connection launch requires a non-zero transport timestamp window.",
     "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
@@ -199,6 +217,9 @@ foreach ($signal in @(
     "Windows external adapter must not select AppleNative",
     "adapter pending",
     "digestLength: 31",
+    "DefaultChannelMappings",
+    "DuplicateChannelMappings",
+    "preflight channel mapping count",
     "smoke live adapter",
     "BuildDynamicQrInput",
     "P256 dynamic canonical signature verified",
@@ -596,7 +617,8 @@ foreach ($signal in @(
     "RemoteEndpoint",
     "SelectedCandidatePair",
     "TimestampWindowMs",
-    "MapChannelAsync",
+    "ChannelMappings",
+    "RequireChannelMapping",
     "TrafficPaddingPlan.Sbp2Fixed",
     "ToPeerPublicKeyProvider",
     "No connection attempt is started"

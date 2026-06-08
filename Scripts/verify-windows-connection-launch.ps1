@@ -138,6 +138,20 @@ ExpectThrows<InvalidOperationException>(
     () => stateClient.BuildConnectionLaunchRequest(
         stateClient.BuildPreflightValidatedState(
             pairedState,
+            BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, channelMappings: Array.Empty<ChannelMapping>())))),
+    "Connection launch requires all five Core channel mappings from preflight.");
+
+ExpectThrows<InvalidOperationException>(
+    () => stateClient.BuildConnectionLaunchRequest(
+        stateClient.BuildPreflightValidatedState(
+            pairedState,
+            BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, channelMappings: DuplicateChannelMappings())))),
+    "Connection launch Core channel mappings must not contain duplicate channels.");
+
+ExpectThrows<InvalidOperationException>(
+    () => stateClient.BuildConnectionLaunchRequest(
+        stateClient.BuildPreflightValidatedState(
+            pairedState,
             BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false, localEndpoint: "")))),
     "Connection launch requires a local transport endpoint.");
 
@@ -154,6 +168,8 @@ var preflightOnlyRequest = stateClient.BuildConnectionLaunchRequest(
         BuildSnapshot(BuildPlan(peerDeviceId: "mac-1", fingerprint: Fingerprint, liveReady: false))));
 AssertEqual(ConnectionLaunchAdapterKind.WebRtcDataChannel, preflightOnlyRequest.Plan.AdapterKind, "adapter kind");
 AssertEqual("adapter pending", preflightOnlyRequest.Plan.AdapterBinding, "preflight adapter binding");
+AssertEqual(5, preflightOnlyRequest.Plan.ChannelMappings.Count, "preflight channel mapping count");
+AssertEqual(CoreChannelKind.Clipboard, preflightOnlyRequest.Plan.ChannelMappings[2].Channel, "preflight clipboard mapping");
 
 await ExpectThrowsAsync<NotSupportedException>(
     () => new DummyEngineClient().ConnectAsync(preflightOnlyRequest),
@@ -330,7 +346,8 @@ static ConnectionPreflightPlan BuildPlan(
     string remoteEndpoint = "mac-1.skybridge-preflight.local:443",
     string selectedCandidatePair = "WebRtcDataChannel/preflight-candidate",
     string? relayId = null,
-    ulong timestampWindowMs = 10_000) =>
+    ulong timestampWindowMs = 10_000,
+    IReadOnlyList<ChannelMapping>? channelMappings = null) =>
     new(
         peerDeviceId,
         fingerprint,
@@ -339,11 +356,12 @@ static ConnectionPreflightPlan BuildPlan(
         RelayRequired: false,
         RelayAllowed: true,
         CoreCryptoSuiteKind.XWingHybrid,
-        0x1001,
+        0x0001,
         CoreCryptoSuiteAuditCode.HybridPqcPreferred,
         Sbp2Enabled: true,
         (nuint)1024,
-        (nuint)16,
+        (nuint)20,
+        channelMappings ?? DefaultChannelMappings(),
         Enumerable.Range(0, digestLength).Select(value => (byte)value).ToArray(),
         ConnectionLaunchAdapterKind.WebRtcDataChannel,
         liveReady,
@@ -353,6 +371,23 @@ static ConnectionPreflightPlan BuildPlan(
         selectedCandidatePair,
         relayId,
         timestampWindowMs);
+
+static IReadOnlyList<ChannelMapping> DefaultChannelMappings() =>
+    new[]
+    {
+        new ChannelMapping(CoreChannelKind.Control, CoreReliabilityKind.ReliableOrdered, 0, CoreAdapterBindingKind.WebRtcDataChannel, true),
+        new ChannelMapping(CoreChannelKind.File, CoreReliabilityKind.ReliableOrdered, 0, CoreAdapterBindingKind.WebRtcDataChannel, true),
+        new ChannelMapping(CoreChannelKind.Clipboard, CoreReliabilityKind.ReliableOrdered, 0, CoreAdapterBindingKind.WebRtcDataChannel, true),
+        new ChannelMapping(CoreChannelKind.Telemetry, CoreReliabilityKind.ReliableUnordered, 0, CoreAdapterBindingKind.WebRtcDataChannel, true),
+        new ChannelMapping(CoreChannelKind.Realtime, CoreReliabilityKind.PartialReliable, 1, CoreAdapterBindingKind.WebRtcDataChannel, true)
+    };
+
+static IReadOnlyList<ChannelMapping> DuplicateChannelMappings()
+{
+    var mappings = DefaultChannelMappings().ToArray();
+    mappings[4] = mappings[0];
+    return mappings;
+}
 
 static string BuildDynamicQrInput(bool includeSignedOsVersion, bool tamperDeviceName)
 {

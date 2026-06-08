@@ -165,6 +165,8 @@ async fn state_machine_transitions_and_metrics() {
         client_id: "integration".into(),
         heartbeat_interval_ms: 25,
         peer_public_key: Some(sample_peer_key().await),
+
+        transport_binding: None,
     };
 
     engine.initialize(config).await.unwrap();
@@ -224,6 +226,8 @@ async fn integration_heartbeat_throttle_is_enforced() {
             client_id: "integration".into(),
             heartbeat_interval_ms: 100,
             peer_public_key: Some(sample_peer_key().await),
+
+            transport_binding: None,
         })
         .await
         .unwrap();
@@ -255,6 +259,8 @@ async fn engine_snapshot_tracks_state_and_heartbeat_age() {
         client_id: "snapshot".into(),
         heartbeat_interval_ms: 20,
         peer_public_key: Some(sample_peer_key().await),
+
+        transport_binding: None,
     };
 
     engine.initialize(config).await.unwrap();

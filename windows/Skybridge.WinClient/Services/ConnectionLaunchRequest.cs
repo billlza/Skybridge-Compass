@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Skybridge.WinClient.Services;
 
@@ -33,6 +34,7 @@ public sealed record ConnectionPreflightPlan(
     bool Sbp2Enabled,
     nuint Sbp2FixedPayloadLen,
     nuint FrameHeaderLen,
+    IReadOnlyList<ChannelMapping> ChannelMappings,
     byte[] TransportBindingDigest,
     ConnectionLaunchAdapterKind AdapterKind,
     bool IsLiveAdapterReady,
@@ -93,6 +95,35 @@ public sealed record ConnectionPreflightPlan(
         if (TransportBindingDigest.Length != 32)
         {
             throw new InvalidOperationException("Connection launch requires a 32-byte transport binding digest from Core preflight.");
+        }
+
+        if (ChannelMappings is null || ChannelMappings.Count != 5)
+        {
+            throw new InvalidOperationException("Connection launch requires all five Core channel mappings from preflight.");
+        }
+
+        var seenChannels = new HashSet<CoreChannelKind>();
+        foreach (var mapping in ChannelMappings)
+        {
+            if (!seenChannels.Add(mapping.Channel))
+            {
+                throw new InvalidOperationException("Connection launch Core channel mappings must not contain duplicate channels.");
+            }
+        }
+
+        foreach (var requiredChannel in new[]
+        {
+            CoreChannelKind.Control,
+            CoreChannelKind.File,
+            CoreChannelKind.Clipboard,
+            CoreChannelKind.Telemetry,
+            CoreChannelKind.Realtime
+        })
+        {
+            if (!seenChannels.Contains(requiredChannel))
+            {
+                throw new InvalidOperationException("Connection launch requires all five Core channel mappings from preflight.");
+            }
         }
 
         if (!string.Equals(PeerDeviceId, pairingMaterial.DeviceId, StringComparison.Ordinal))

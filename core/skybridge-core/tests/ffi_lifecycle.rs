@@ -23,6 +23,98 @@ use std::os::raw::c_char;
 use std::ptr;
 
 const DISCOVERY_FP: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const TRANSPORT_BINDING_DIGEST: [u8; 32] = [0x42; 32];
+const ADAPTER_BINDING: &[u8] = b"external webrtc datachannel";
+const LOCAL_ENDPOINT: &[u8] = b"windows.example:5443";
+const REMOTE_ENDPOINT: &[u8] = b"mac.example:5443";
+const SELECTED_CANDIDATE_PAIR: &[u8] = b"webrtc/dtls/sctp-selected";
+const WEBRTC_CHANNEL_MAPPINGS: [SkybridgeChannelMapping; 5] = [
+    SkybridgeChannelMapping {
+        channel: SkybridgeChannelKind::Control,
+        reliability: SkybridgeReliabilityKind::ReliableOrdered,
+        max_retransmits: 0,
+        binding_kind: SkybridgeAdapterBindingKind::WebRtcDataChannel,
+        head_of_line_isolated: 1,
+    },
+    SkybridgeChannelMapping {
+        channel: SkybridgeChannelKind::File,
+        reliability: SkybridgeReliabilityKind::ReliableOrdered,
+        max_retransmits: 0,
+        binding_kind: SkybridgeAdapterBindingKind::WebRtcDataChannel,
+        head_of_line_isolated: 1,
+    },
+    SkybridgeChannelMapping {
+        channel: SkybridgeChannelKind::Clipboard,
+        reliability: SkybridgeReliabilityKind::ReliableOrdered,
+        max_retransmits: 0,
+        binding_kind: SkybridgeAdapterBindingKind::WebRtcDataChannel,
+        head_of_line_isolated: 1,
+    },
+    SkybridgeChannelMapping {
+        channel: SkybridgeChannelKind::Telemetry,
+        reliability: SkybridgeReliabilityKind::ReliableUnordered,
+        max_retransmits: 0,
+        binding_kind: SkybridgeAdapterBindingKind::WebRtcDataChannel,
+        head_of_line_isolated: 1,
+    },
+    SkybridgeChannelMapping {
+        channel: SkybridgeChannelKind::Realtime,
+        reliability: SkybridgeReliabilityKind::PartialReliable,
+        max_retransmits: 1,
+        binding_kind: SkybridgeAdapterBindingKind::WebRtcDataChannel,
+        head_of_line_isolated: 1,
+    },
+];
+
+fn valid_session_config(client_id: &[u8], peer_public_key: &[u8]) -> SkybridgeSessionConfig {
+    SkybridgeSessionConfig {
+        client_id_ptr: client_id.as_ptr() as *const c_char,
+        client_id_len: client_id.len(),
+        heartbeat_interval_ms: 10,
+        peer_public_key_ptr: peer_public_key.as_ptr(),
+        peer_public_key_len: peer_public_key.len(),
+        transport: SkybridgeTransportKind::WebRtcDataChannel,
+        transport_audit: SkybridgeTransportAuditCode::WebRtcInterop,
+        relay_required: 0,
+        relay_allowed: 1,
+        selected_suite: SkybridgeCryptoSuiteKind::XWingHybrid,
+        selected_suite_wire_id: 0x0001,
+        suite_audit: SkybridgeCryptoSuiteAuditCode::HybridPqcPreferred,
+        sbp2_enabled: 1,
+        sbp2_fixed_payload_len: 512,
+        frame_header_len: 20,
+        transport_binding_digest_ptr: TRANSPORT_BINDING_DIGEST.as_ptr(),
+        transport_binding_digest_len: TRANSPORT_BINDING_DIGEST.len(),
+        adapter_kind: SkybridgeTransportKind::WebRtcDataChannel,
+        is_live_adapter_ready: 1,
+        adapter_binding_ptr: ADAPTER_BINDING.as_ptr(),
+        adapter_binding_len: ADAPTER_BINDING.len(),
+        local_endpoint_ptr: LOCAL_ENDPOINT.as_ptr(),
+        local_endpoint_len: LOCAL_ENDPOINT.len(),
+        remote_endpoint_ptr: REMOTE_ENDPOINT.as_ptr(),
+        remote_endpoint_len: REMOTE_ENDPOINT.len(),
+        selected_candidate_pair_ptr: SELECTED_CANDIDATE_PAIR.as_ptr(),
+        selected_candidate_pair_len: SELECTED_CANDIDATE_PAIR.len(),
+        relay_id_ptr: ptr::null(),
+        relay_id_len: 0,
+        timestamp_window_ms: 10_000,
+        channel_mappings_ptr: WEBRTC_CHANNEL_MAPPINGS.as_ptr(),
+        channel_mapping_count: WEBRTC_CHANNEL_MAPPINGS.len(),
+    }
+}
+
+fn empty_engine_snapshot() -> SkybridgeEngineSnapshot {
+    SkybridgeEngineSnapshot {
+        state: SkybridgeSessionState::Disconnected,
+        last_heartbeat_ms: 0,
+        has_last_heartbeat: false,
+        has_secrets: false,
+        has_transport_binding: false,
+        transport_kind: SkybridgeTransportKind::Unsupported,
+        adapter_kind: SkybridgeTransportKind::Unsupported,
+        transport_binding_digest: [0; 32],
+    }
+}
 
 fn empty_discovery_advertisement() -> SkybridgeDiscoveryAdvertisement {
     SkybridgeDiscoveryAdvertisement {
@@ -85,30 +177,29 @@ fn ffi_engine_lifecycle_runs() {
         unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
 
     let client_id = b"ffi-client";
-    let config = SkybridgeSessionConfig {
-        client_id_ptr: client_id.as_ptr() as *const c_char,
-        client_id_len: client_id.len(),
-        heartbeat_interval_ms: 10,
-        peer_public_key_ptr: local_key.as_ptr(),
-        peer_public_key_len: local_key.len(),
-    };
+    let config = valid_session_config(client_id, local_key);
 
     let connect_result = skybridge_engine_connect(handle, config);
     assert_eq!(connect_result, SkybridgeErrorCode::Ok);
     let state = skybridge_engine_state(handle);
     assert_eq!(state, SkybridgeSessionState::Connected);
 
-    let mut snapshot = SkybridgeEngineSnapshot {
-        state: SkybridgeSessionState::Disconnected,
-        last_heartbeat_ms: 0,
-        has_last_heartbeat: false,
-        has_secrets: false,
-    };
+    let mut snapshot = empty_engine_snapshot();
     let snapshot_res = unsafe { skybridge_engine_snapshot(handle, &mut snapshot) };
     assert_eq!(snapshot_res, SkybridgeErrorCode::Ok);
     assert_eq!(snapshot.state, SkybridgeSessionState::Connected);
     assert!(snapshot.has_secrets);
     assert!(!snapshot.has_last_heartbeat);
+    assert!(snapshot.has_transport_binding);
+    assert_eq!(
+        snapshot.transport_kind,
+        SkybridgeTransportKind::WebRtcDataChannel
+    );
+    assert_eq!(
+        snapshot.adapter_kind,
+        SkybridgeTransportKind::WebRtcDataChannel
+    );
+    assert_eq!(snapshot.transport_binding_digest, TRANSPORT_BINDING_DIGEST);
 
     let mut event = SkybridgeEvent {
         kind: SkybridgeEventKind::None,
@@ -236,16 +327,133 @@ fn ffi_connect_rejects_invalid_config() {
         unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
 
     let client_id = b" ";
-    let config = SkybridgeSessionConfig {
-        client_id_ptr: client_id.as_ptr() as *const c_char,
-        client_id_len: client_id.len(),
-        heartbeat_interval_ms: 0,
-        peer_public_key_ptr: local_key.as_ptr(),
-        peer_public_key_len: local_key.len(),
-    };
+    let mut config = valid_session_config(client_id, local_key);
+    config.heartbeat_interval_ms = 0;
 
     let connect_result = skybridge_engine_connect(handle, config);
     assert_eq!(connect_result, SkybridgeErrorCode::InvalidInput);
+    assert_eq!(
+        skybridge_engine_state(handle),
+        SkybridgeSessionState::Disconnected
+    );
+
+    unsafe { skybridge_engine_free(handle) };
+}
+
+#[test]
+fn ffi_connect_rejects_missing_transport_binding_digest() {
+    let handle = skybridge_engine_new();
+    assert!(!handle.is_null());
+
+    let mut local_public = SkybridgeBuffer {
+        data_ptr: ptr::null(),
+        data_len: 0,
+    };
+    unsafe { skybridge_engine_local_public_key(handle, &mut local_public) };
+    let local_key =
+        unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
+    let client_id = b"missing-digest";
+    let mut config = valid_session_config(client_id, local_key);
+    config.transport_binding_digest_len = 0;
+
+    assert_eq!(
+        skybridge_engine_connect(handle, config),
+        SkybridgeErrorCode::InvalidInput
+    );
+    assert_eq!(
+        skybridge_engine_state(handle),
+        SkybridgeSessionState::Disconnected
+    );
+
+    unsafe { skybridge_engine_free(handle) };
+}
+
+#[test]
+fn ffi_connect_rejects_preflight_only_adapter() {
+    let handle = skybridge_engine_new();
+    assert!(!handle.is_null());
+
+    let mut local_public = SkybridgeBuffer {
+        data_ptr: ptr::null(),
+        data_len: 0,
+    };
+    unsafe { skybridge_engine_local_public_key(handle, &mut local_public) };
+    let local_key =
+        unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
+    let client_id = b"preflight-only";
+    let mut config = valid_session_config(client_id, local_key);
+    config.is_live_adapter_ready = 0;
+
+    assert_eq!(
+        skybridge_engine_connect(handle, config),
+        SkybridgeErrorCode::InvalidInput
+    );
+    assert_eq!(
+        skybridge_engine_state(handle),
+        SkybridgeSessionState::Disconnected
+    );
+
+    unsafe { skybridge_engine_free(handle) };
+}
+
+#[test]
+fn ffi_connect_rejects_suite_wire_mismatch() {
+    let handle = skybridge_engine_new();
+    assert!(!handle.is_null());
+
+    let mut local_public = SkybridgeBuffer {
+        data_ptr: ptr::null(),
+        data_len: 0,
+    };
+    unsafe { skybridge_engine_local_public_key(handle, &mut local_public) };
+    let local_key =
+        unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
+    let client_id = b"suite-mismatch";
+    let mut config = valid_session_config(client_id, local_key);
+    config.selected_suite_wire_id = 0x1001;
+
+    assert_eq!(
+        skybridge_engine_connect(handle, config),
+        SkybridgeErrorCode::InvalidInput
+    );
+    assert_eq!(
+        skybridge_engine_state(handle),
+        SkybridgeSessionState::Disconnected
+    );
+
+    unsafe { skybridge_engine_free(handle) };
+}
+
+#[test]
+fn ffi_connect_rejects_missing_or_duplicate_channel_mappings() {
+    let handle = skybridge_engine_new();
+    assert!(!handle.is_null());
+
+    let mut local_public = SkybridgeBuffer {
+        data_ptr: ptr::null(),
+        data_len: 0,
+    };
+    unsafe { skybridge_engine_local_public_key(handle, &mut local_public) };
+    let local_key =
+        unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
+
+    let client_id = b"missing-channels";
+    let mut config = valid_session_config(client_id, local_key);
+    config.channel_mapping_count = 0;
+    assert_eq!(
+        skybridge_engine_connect(handle, config),
+        SkybridgeErrorCode::InvalidInput
+    );
+
+    let client_id = b"duplicate-channels";
+    let mut duplicate_mappings = WEBRTC_CHANNEL_MAPPINGS;
+    duplicate_mappings[4].channel = SkybridgeChannelKind::Control;
+    let mut config = valid_session_config(client_id, local_key);
+    config.channel_mappings_ptr = duplicate_mappings.as_ptr();
+    assert_eq!(
+        skybridge_engine_connect(handle, config),
+        SkybridgeErrorCode::InvalidInput
+    );
     assert_eq!(
         skybridge_engine_state(handle),
         SkybridgeSessionState::Disconnected
@@ -268,13 +476,8 @@ fn ffi_event_queue_is_bounded_and_clearable() {
     let local_key =
         unsafe { std::slice::from_raw_parts(local_public.data_ptr, local_public.data_len) };
     let client_id = b"bounded";
-    let config = SkybridgeSessionConfig {
-        client_id_ptr: client_id.as_ptr() as *const c_char,
-        client_id_len: client_id.len(),
-        heartbeat_interval_ms: 5,
-        peer_public_key_ptr: local_key.as_ptr(),
-        peer_public_key_len: local_key.len(),
-    };
+    let mut config = valid_session_config(client_id, local_key);
+    config.heartbeat_interval_ms = 5;
     assert_eq!(
         skybridge_engine_connect(handle, config),
         SkybridgeErrorCode::Ok

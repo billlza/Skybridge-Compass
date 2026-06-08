@@ -1868,6 +1868,7 @@ foreach ($connectionLaunchSignal in @(
     "CoreTransportAuditCode TransportAudit",
     "CoreCryptoSuiteKind SelectedSuite",
     "CoreCryptoSuiteAuditCode SuiteAudit",
+    "IReadOnlyList<ChannelMapping> ChannelMappings",
     "TransportBindingDigest",
     "IsLiveAdapterReady",
     "AdapterBinding",
@@ -1880,6 +1881,8 @@ foreach ($connectionLaunchSignal in @(
     "Connection launch requires a selected transport candidate pair.",
     "Connection launch requires a non-zero transport timestamp window.",
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
+    "Connection launch requires all five Core channel mappings from preflight.",
+    "Connection launch Core channel mappings must not contain duplicate channels.",
     "Connection launch request peer does not match pairing material.",
     "Connection launch request fingerprint does not match pairing material."
 )) {
@@ -1894,6 +1897,8 @@ foreach ($connectionLaunchSmokeSignal in @(
     "Connection launch request peer does not match pairing material.",
     "Connection launch request fingerprint does not match pairing material.",
     "Connection launch requires a 32-byte transport binding digest from Core preflight.",
+    "Connection launch requires all five Core channel mappings from preflight.",
+    "Connection launch Core channel mappings must not contain duplicate channels.",
     "Connection launch requires a local transport endpoint.",
     "Connection launch requires a non-zero transport timestamp window.",
     "Connection launch requires a live Windows transport adapter; the current request is preflight-only.",
@@ -1915,6 +1920,9 @@ foreach ($connectionLaunchSmokeSignal in @(
     "DummyEngineClient().ConnectAsync",
     "adapter pending",
     "digestLength: 31",
+    "DefaultChannelMappings",
+    "DuplicateChannelMappings",
+    "preflight channel mapping count",
     "smoke live adapter"
 )) {
     Assert-Contains -Text $connectionLaunchSmoke -Needle $connectionLaunchSmokeSignal -Message "Windows connection launch smoke missing signal: $connectionLaunchSmokeSignal"
@@ -3007,6 +3015,7 @@ foreach ($discoverySignal in @(
     "RemoteEndpoint",
     "SelectedCandidatePair",
     "TimestampWindowMs",
+    "ChannelMappings",
     "Prepare Core connection preflight before connection launch.",
     "No connection attempt is started"
 )) {
