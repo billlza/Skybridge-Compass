@@ -11,6 +11,6 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         ViewModel = new SessionViewModel(SessionViewModelDependencyFactory.CreateDefault());
-        DataContext = ViewModel;
+        RootShell.DataContext = ViewModel;
     }
 }

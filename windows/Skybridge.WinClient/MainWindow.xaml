@@ -5,9 +5,12 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:vm="using:Skybridge.WinClient.ViewModels"
-    mc:Ignorable="d"
-    d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
-    <Window.Resources>
+    mc:Ignorable="d">
+    <Grid
+        x:Name="RootShell"
+        Background="{ThemeResource SolidBackgroundFillColorBase}"
+        d:DataContext="{d:DesignInstance Type=vm:SessionViewModel, IsDesignTimeCreatable=False}">
+        <Grid.Resources>
         <ItemsPanelTemplate x:Key="VerticalWorkspaceActionItemsPanel">
             <StackPanel Spacing="10" />
         </ItemsPanelTemplate>
@@ -259,9 +262,7 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </StackPanel>
         </DataTemplate>
-    </Window.Resources>
-
-    <Grid Background="{ThemeResource SolidBackgroundFillColorBase}">
+        </Grid.Resources>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="252" />
             <ColumnDefinition Width="*" />

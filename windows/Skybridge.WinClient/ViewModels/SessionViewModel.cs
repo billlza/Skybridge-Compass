@@ -2,7 +2,6 @@ using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Threading.Tasks;
 using System.Windows.Input;
 using Skybridge.WinClient.Services;
 
@@ -260,8 +259,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _remoteDesktopClient,
             _systemMonitorClient,
             _settingsClient);
+        var dashboardRefreshAction = new WorkspaceDeferredRefreshAction();
         _workspaceCountNotifier = new WorkspaceCountNotifier(OnPropertyChanged);
-        _workspaceSnapshotApplier = new WorkspaceSnapshotApplier(_workspaceCountNotifier, RefreshDashboardMetrics);
+        _workspaceSnapshotApplier = new WorkspaceSnapshotApplier(
+            _workspaceCountNotifier,
+            dashboardRefreshAction.Invoke);
         _discoveryService = startupState.DiscoveryService;
         _manualConnectionPort = startupState.ManualConnectionPort;
         _discoveryTxtRecord = startupState.DiscoveryTxtRecord;
@@ -527,9 +529,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             OnPropertyChanged,
             WorkspaceShellNotificationCatalog.SelectedFeaturePropertyNames,
             WorkspaceShellNotificationCatalog.ConnectionStatusPropertyName);
-        LoadWorkspaceActions();
-        RefreshDashboardMetrics();
-        RefreshTopBarStatus();
+        dashboardRefreshAction.Attach(_workspaceShellRefreshCoordinator.RefreshDashboardMetrics);
+        _workspaceShellRefreshCoordinator.LoadWorkspaceActions();
+        _workspaceShellRefreshCoordinator.RefreshDashboardMetrics();
+        _workspaceShellRefreshCoordinator.RefreshTopBarStatus();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -675,7 +678,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _selectedFeature, value))
             {
-                RefreshSelectedFeatureState();
+                _workspaceShellRefreshCoordinator.RefreshSelectedFeatureState();
             }
         }
     }
@@ -708,7 +711,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _connectionState, value))
             {
-                RefreshConnectionState();
+                _workspaceShellRefreshCoordinator.RefreshConnectionState();
             }
         }
     }
@@ -722,7 +725,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _isBusy, value))
             {
-                RefreshShellRuntimeState();
+                _workspaceShellRefreshCoordinator.RefreshShellRuntimeState();
             }
         }
     }
@@ -740,7 +743,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoveryService, value))
             {
-                ApplyWorkspaceInputChange(_connectionInputCoordinator.InvalidatePairingAndPreflight);
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(
+                    _connectionInputCoordinator.InvalidatePairingAndPreflight);
             }
         }
     }
@@ -752,7 +756,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoverySearchText, value))
             {
-                ApplyWorkspaceInputChange();
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange();
             }
         }
     }
@@ -764,7 +768,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionHost, value))
             {
-                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetManualConnectionInput);
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(
+                    _connectionInputCoordinator.ResetManualConnectionInput);
             }
         }
     }
@@ -776,7 +781,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionPort, value))
             {
-                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetManualConnectionInput);
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(
+                    _connectionInputCoordinator.ResetManualConnectionInput);
             }
         }
     }
@@ -788,7 +794,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _manualConnectionCode, value))
             {
-                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetManualConnectionInput);
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(
+                    _connectionInputCoordinator.ResetManualConnectionInput);
             }
         }
     }
@@ -800,7 +807,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _crossNetworkQrInput, value))
             {
-                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetCrossNetworkInput);
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(
+                    _connectionInputCoordinator.ResetCrossNetworkInput);
             }
         }
     }
@@ -815,7 +823,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 value);
             if (update.ShouldUpdateValue && SetField(ref _crossNetworkCodeInput, update.NormalizedValue))
             {
-                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetCrossNetworkInput);
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(
+                    _connectionInputCoordinator.ResetCrossNetworkInput);
             }
             else if (update.ShouldNotifyNormalizedValue)
             {
@@ -837,7 +846,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _discoveryTxtRecord, value))
             {
-                ApplyWorkspaceInputChange(_connectionInputCoordinator.InvalidatePairingAndPreflight);
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(
+                    _connectionInputCoordinator.InvalidatePairingAndPreflight);
             }
         }
     }
@@ -849,7 +859,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             if (SetField(ref _pairingConnectionCode, value))
             {
-                ApplyWorkspaceInputChange(_connectionInputCoordinator.ResetPairingInput);
+                _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(
+                    _connectionInputCoordinator.ResetPairingInput);
             }
         }
     }
@@ -1042,30 +1053,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private bool IsFeatureSelected(FeatureEntryId featureId) =>
         _workspaceCommandGateCoordinator.IsFeatureSelected(SelectedFeature, featureId);
-
-    private void RefreshCommandStates() =>
-        _workspaceShellRefreshCoordinator.RefreshCommandStates();
-
-    private void ApplyWorkspaceInputChange(Action? resetInput = null) =>
-        _workspaceShellRefreshCoordinator.ApplyWorkspaceInputChange(resetInput);
-
-    private void RefreshSelectedFeatureState() =>
-        _workspaceShellRefreshCoordinator.RefreshSelectedFeatureState();
-
-    private void RefreshConnectionState() =>
-        _workspaceShellRefreshCoordinator.RefreshConnectionState();
-
-    private void RefreshShellRuntimeState() =>
-        _workspaceShellRefreshCoordinator.RefreshShellRuntimeState();
-
-    private void RefreshDashboardMetrics() =>
-        _workspaceShellRefreshCoordinator.RefreshDashboardMetrics();
-
-    private void LoadWorkspaceActions() =>
-        _workspaceShellRefreshCoordinator.LoadWorkspaceActions();
-
-    private void RefreshTopBarStatus() =>
-        _workspaceShellRefreshCoordinator.RefreshTopBarStatus();
 
     private void OnEngineStateChanged(object? sender, EngineConnectionState newState)
     {
