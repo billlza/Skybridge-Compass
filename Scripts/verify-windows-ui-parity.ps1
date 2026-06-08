@@ -172,15 +172,18 @@ foreach ($featureCatalogSignal in @(
     "public interface IFeatureCatalogClient",
     "public sealed class FeatureCatalogClient : IFeatureCatalogClient",
     "BuildReadOnlySnapshot",
+    "ResolveDefaultSelection",
     "FeatureEntryId",
     "public sealed record FeatureEntry",
     "Entries",
     "_featureCatalogClient.BuildReadOnlySnapshot()",
+    "_featureCatalogClient.ResolveDefaultSelection(featureEntries)",
     "new FeatureCatalogClient()"
 )) {
     Assert-Contains -Text ($featureContract + $sessionViewModel) -Needle $featureCatalogSignal -Message "Feature catalog service signal missing: $featureCatalogSignal"
 }
 Assert-True -Condition (-not $sessionViewModel.Contains("FeatureEntryContract")) -Message "SessionViewModel must source navigation entries from FeatureCatalogClient instead of FeatureEntryContract."
+Assert-True -Condition (-not $sessionViewModel.Contains("NavigationItems[0]")) -Message "SessionViewModel must source default navigation selection from FeatureCatalogClient."
 
 foreach ($binding in @(
     "NavigationItems",

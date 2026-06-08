@@ -146,8 +146,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _pairingConnectionCode = deviceDiscoveryInputDefaults.PairingConnectionCode;
         _extendedSearchCountdown = _discoveryBrowserInputPolicy.ExtendedSearchSeconds;
         _connectionState = _engineClient.State;
-        NavigationItems = new ObservableCollection<FeatureEntry>(_featureCatalogClient.BuildReadOnlySnapshot());
-        _selectedFeature = NavigationItems[0];
+        var featureEntries = _featureCatalogClient.BuildReadOnlySnapshot();
+        NavigationItems = new ObservableCollection<FeatureEntry>(featureEntries);
+        _selectedFeature = _featureCatalogClient.ResolveDefaultSelection(featureEntries);
         DashboardMetrics = new ObservableCollection<DashboardMetricView>();
         SidebarSessionActions = new ObservableCollection<WorkspaceActionItemView>();
         TopBarActions = new ObservableCollection<WorkspaceActionItemView>();

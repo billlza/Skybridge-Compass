@@ -5,6 +5,8 @@ namespace Skybridge.WinClient.Services;
 public interface IFeatureCatalogClient
 {
     IReadOnlyList<FeatureEntry> BuildReadOnlySnapshot();
+
+    FeatureEntry ResolveDefaultSelection(IReadOnlyList<FeatureEntry> entries);
 }
 
 public sealed class FeatureCatalogClient : IFeatureCatalogClient
@@ -23,6 +25,9 @@ public sealed class FeatureCatalogClient : IFeatureCatalogClient
         }.AsReadOnly();
 
     public IReadOnlyList<FeatureEntry> BuildReadOnlySnapshot() => Entries;
+
+    public FeatureEntry ResolveDefaultSelection(IReadOnlyList<FeatureEntry> entries) =>
+        entries.Count == 0 ? Entries[0] : entries[0];
 }
 
 public enum FeatureEntryId

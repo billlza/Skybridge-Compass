@@ -827,6 +827,7 @@ foreach ($signal in @(
     "public interface IFeatureCatalogClient",
     "public sealed class FeatureCatalogClient : IFeatureCatalogClient",
     "BuildReadOnlySnapshot",
+    "ResolveDefaultSelection",
     "FeatureEntryId",
     "public sealed record FeatureEntry",
     "Entries",
