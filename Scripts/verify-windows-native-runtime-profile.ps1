@@ -88,6 +88,19 @@ try
     AssertType<DummyEngineClient>(defaultDependencies.EngineClient, "default engine");
     AssertNestedType<PendingWindowsDnsSdBrowseClient>(defaultDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
     AssertNestedType<PendingWindowsTransportAdapterClient>(defaultDependencies.ConnectionPreflightClient, "_transportAdapterClient", "default transport adapter");
+    AssertType<SystemMonitorWorkspaceClient>(defaultDependencies.SystemMonitorClient, "default system monitor client");
+    AssertEqual(true, defaultDependencies.SystemMonitorClient.CanStartMonitoring(), "default system monitor start gate");
+    AssertEqual(false, defaultDependencies.SystemMonitorClient.CanStopMonitoring(), "default system monitor stop gate");
+    var startMonitoring = await defaultDependencies.SystemMonitorClient.BuildStartMonitoringActionAsync();
+    AssertEqual(SystemMonitorWorkspaceClient.DefaultStartMonitoringStartedStatus, startMonitoring.Status, "start monitoring status");
+    AssertEqual(false, defaultDependencies.SystemMonitorClient.CanStartMonitoring(), "active system monitor start gate");
+    AssertEqual(true, defaultDependencies.SystemMonitorClient.CanStopMonitoring(), "active system monitor stop gate");
+    var activeMonitoringSnapshot = await defaultDependencies.SystemMonitorClient.BuildReadOnlySnapshotAsync();
+    AssertIndicator(activeMonitoringSnapshot, "Monitoring", "Active", "active monitoring indicator");
+    var stopMonitoring = await defaultDependencies.SystemMonitorClient.BuildStopMonitoringActionAsync();
+    AssertEqual(SystemMonitorWorkspaceClient.DefaultStopMonitoringStoppedStatus, stopMonitoring.Status, "stop monitoring status");
+    AssertEqual(true, defaultDependencies.SystemMonitorClient.CanStartMonitoring(), "stopped system monitor start gate");
+    AssertEqual(false, defaultDependencies.SystemMonitorClient.CanStopMonitoring(), "stopped system monitor stop gate");
     AssertType<SettingsWorkspaceClient>(defaultDependencies.SettingsClient, "default settings client");
     AssertNestedType<DisabledSystemPreferencesLauncher>(defaultDependencies.SettingsClient, "_systemPreferencesLauncher", "default system preferences launcher");
     AssertEqual(false, defaultDependencies.SettingsClient.CanOpenSystemPreferences(), "default system preferences gate");
@@ -325,6 +338,17 @@ static void AssertEqual<T>(T expected, T actual, string label)
     {
         throw new InvalidOperationException($"{label}: expected '{expected}', got '{actual}'.");
     }
+}
+
+static void AssertIndicator(SystemMonitorWorkspaceSnapshot snapshot, string label, string state, string assertionLabel)
+{
+    var indicator = snapshot.Indicators.FirstOrDefault(item => item.Label == label);
+    if (indicator is null)
+    {
+        throw new InvalidOperationException($"{assertionLabel}: missing indicator '{label}'.");
+    }
+
+    AssertEqual(state, indicator.State, assertionLabel);
 }
 '@
 

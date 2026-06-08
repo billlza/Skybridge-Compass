@@ -620,7 +620,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Monitoring",
                 "\uF16B",
                 true,
-                "Visible mac-parity monitoring action; fail-closed command does not start ETW/EventSource sampling.",
+                "Visible mac-parity monitoring action; starts in-process read-only sampling without ETW/EventSource helpers.",
                 CommandId: WorkspaceActionCommandId.StartSystemMonitoring,
                 GateId: WorkspaceActionGateId.CanStartSystemMonitoring),
             new(
@@ -628,7 +628,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Stop Monitoring",
                 "\uE71A",
                 true,
-                "Visible mac-parity monitoring action; fail-closed command does not stop a background sampler.",
+                "Visible mac-parity monitoring action; stops the in-process read-only sampler.",
                 CommandId: WorkspaceActionCommandId.StopSystemMonitoring,
                 GateId: WorkspaceActionGateId.CanStopSystemMonitoring),
             new(

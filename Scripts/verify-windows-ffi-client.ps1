@@ -1239,6 +1239,13 @@ foreach ($signal in @(
     "DriveInfo.GetDrives",
     "NetworkInterface.GetAllNetworkInterfaces",
     "RuntimeInformation",
+    "MonitoringSessionSnapshot",
+    "DefaultStartMonitoringStartedStatus",
+    "DefaultStopMonitoringStoppedStatus",
+    "BuildStartMonitoringStartedActionResult",
+    "BuildStopMonitoringStoppedActionResult",
+    "CaptureMonitoringSample",
+    "BuildMonitoringDetail",
     "SystemMonitorMetric",
     "SystemMonitorIndicator"
 )) {

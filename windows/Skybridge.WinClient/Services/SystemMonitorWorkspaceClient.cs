@@ -42,6 +42,10 @@ public interface ISystemMonitorWorkspaceClient
 
 public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 {
+    private readonly object _monitoringLock = new();
+    private DateTimeOffset? _monitoringStartedAt;
+    private int _monitoringSampleCount;
+
     public string BuildInitialStatus() => DefaultInitialStatus;
 
     public string BuildPendingStatus() => DefaultPendingStatus;
@@ -51,9 +55,9 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
 
-    public bool CanStartMonitoring() => false;
+    public bool CanStartMonitoring() => !GetMonitoringSession().IsActive;
 
-    public bool CanStopMonitoring() => false;
+    public bool CanStopMonitoring() => GetMonitoringSession().IsActive;
 
     public bool CanEnableAdvancedMonitoring() => false;
 
@@ -75,20 +79,27 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 
     public static string DefaultAdvancedMonitoringPendingStatus { get; } = "Preparing advanced monitoring...";
 
-    public static string DefaultStartMonitoringBlockedStatus { get; } = "Monitoring unavailable";
+    public static string DefaultStartMonitoringBlockedStatus { get; } = "Monitoring already active";
 
     public static string DefaultStopMonitoringBlockedStatus { get; } = "Monitoring inactive";
 
     public static string DefaultAdvancedMonitoringBlockedStatus { get; } = "Advanced monitoring unavailable";
 
     public static string DefaultStartMonitoringBlockedMessage { get; } =
-        "System monitor live sampling requires an explicit ETW/EventSource provider.";
+        "System monitor is already running in the in-process read-only sampler.";
 
     public static string DefaultStopMonitoringBlockedMessage { get; } =
         "System monitor background sampling is not running.";
 
     public static string DefaultAdvancedMonitoringBlockedMessage { get; } =
         "Advanced system monitoring requires a helper installation and elevation boundary.";
+
+    public static string DefaultStartMonitoringStartedStatus { get; } = "Monitoring started";
+
+    public static string DefaultStartMonitoringStartedMessage { get; } =
+        "In-process read-only monitoring is active; refresh samples process, runtime, disk, and network snapshots without installing helpers.";
+
+    public static string DefaultStopMonitoringStoppedStatus { get; } = "Monitoring stopped";
 
     public static string BuildDefaultCompletedStatus(SystemMonitorWorkspaceSnapshot snapshot) =>
         $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
@@ -102,10 +113,19 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
     public static SystemMonitorWorkspaceActionResult BuildDefaultAdvancedMonitoringActionResult() =>
         new(DefaultAdvancedMonitoringBlockedStatus, DefaultAdvancedMonitoringBlockedMessage);
 
+    public static SystemMonitorWorkspaceActionResult BuildStartMonitoringStartedActionResult() =>
+        new(DefaultStartMonitoringStartedStatus, DefaultStartMonitoringStartedMessage);
+
+    public static SystemMonitorWorkspaceActionResult BuildStopMonitoringStoppedActionResult(int sampleCount, TimeSpan elapsed) =>
+        new(
+            DefaultStopMonitoringStoppedStatus,
+            $"Stopped in-process read-only monitoring after {sampleCount} refresh sample(s) over {FormatElapsed(elapsed)}.");
+
     public Task<SystemMonitorWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
     {
         return Task.Run(() =>
         {
+            var monitoring = CaptureMonitoringSample();
             using var process = Process.GetCurrentProcess();
             var memory = GC.GetGCMemoryInfo();
             var processMemoryBytes = process.WorkingSet64;
@@ -147,6 +167,7 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
             var indicators = new List<SystemMonitorIndicator>
             {
                 new("Health", overallHealth, "derived from memory, disk, and network adapter availability"),
+                new("Monitoring", monitoring.IsActive ? "Active" : "Idle", BuildMonitoringDetail(monitoring)),
                 new("Thermal", "Unknown", "read-only shell avoids unsupported temperature claims"),
                 new("Load", "Nominal", "process/runtime snapshot only until ETW sampling is wired")
             };
@@ -159,11 +180,42 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
         });
     }
 
-    public Task<SystemMonitorWorkspaceActionResult> BuildStartMonitoringActionAsync() =>
-        Task.FromResult(BuildDefaultStartMonitoringActionResult());
+    public Task<SystemMonitorWorkspaceActionResult> BuildStartMonitoringActionAsync()
+    {
+        lock (_monitoringLock)
+        {
+            if (_monitoringStartedAt.HasValue)
+            {
+                return Task.FromResult(BuildDefaultStartMonitoringActionResult());
+            }
 
-    public Task<SystemMonitorWorkspaceActionResult> BuildStopMonitoringActionAsync() =>
-        Task.FromResult(BuildDefaultStopMonitoringActionResult());
+            _monitoringStartedAt = DateTimeOffset.UtcNow;
+            _monitoringSampleCount = 0;
+        }
+
+        return Task.FromResult(BuildStartMonitoringStartedActionResult());
+    }
+
+    public Task<SystemMonitorWorkspaceActionResult> BuildStopMonitoringActionAsync()
+    {
+        DateTimeOffset startedAt;
+        int sampleCount;
+
+        lock (_monitoringLock)
+        {
+            if (!_monitoringStartedAt.HasValue)
+            {
+                return Task.FromResult(BuildDefaultStopMonitoringActionResult());
+            }
+
+            startedAt = _monitoringStartedAt.Value;
+            sampleCount = _monitoringSampleCount;
+            _monitoringStartedAt = null;
+            _monitoringSampleCount = 0;
+        }
+
+        return Task.FromResult(BuildStopMonitoringStoppedActionResult(sampleCount, DateTimeOffset.UtcNow - startedAt));
+    }
 
     public Task<SystemMonitorWorkspaceActionResult> BuildAdvancedMonitoringActionAsync() =>
         Task.FromResult(BuildDefaultAdvancedMonitoringActionResult());
@@ -185,6 +237,41 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 
     private static double ClampPercent(double value) => Math.Clamp(value, 0, 100);
 
+    private MonitoringSessionSnapshot GetMonitoringSession()
+    {
+        lock (_monitoringLock)
+        {
+            return new MonitoringSessionSnapshot(
+                _monitoringStartedAt.HasValue,
+                _monitoringStartedAt,
+                _monitoringSampleCount);
+        }
+    }
+
+    private MonitoringSessionSnapshot CaptureMonitoringSample()
+    {
+        lock (_monitoringLock)
+        {
+            if (!_monitoringStartedAt.HasValue)
+            {
+                return new MonitoringSessionSnapshot(false, null, _monitoringSampleCount);
+            }
+
+            _monitoringSampleCount++;
+            return new MonitoringSessionSnapshot(true, _monitoringStartedAt, _monitoringSampleCount);
+        }
+    }
+
+    private static string BuildMonitoringDetail(MonitoringSessionSnapshot monitoring)
+    {
+        if (!monitoring.IsActive || !monitoring.StartedAt.HasValue)
+        {
+            return "Use Monitoring to start in-process read-only sampling; no helper or elevation is required.";
+        }
+
+        return $"started={monitoring.StartedAt.Value:HH:mm:ss} UTC; samples={monitoring.SampleCount}";
+    }
+
     private static string FormatBytes(long bytes)
     {
         if (bytes < 1024)
@@ -203,6 +290,26 @@ public sealed class SystemMonitorWorkspaceClient : ISystemMonitorWorkspaceClient
 
         return $"{value:0.0} {units[unitIndex]}";
     }
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        if (elapsed.TotalSeconds < 1)
+        {
+            return "less than 1 second";
+        }
+
+        if (elapsed.TotalMinutes < 1)
+        {
+            return $"{elapsed.TotalSeconds:0} second(s)";
+        }
+
+        return $"{elapsed.TotalMinutes:0.0} minute(s)";
+    }
+
+    private sealed record MonitoringSessionSnapshot(
+        bool IsActive,
+        DateTimeOffset? StartedAt,
+        int SampleCount);
 }
 
 public sealed record SystemMonitorWorkspaceSnapshot(
