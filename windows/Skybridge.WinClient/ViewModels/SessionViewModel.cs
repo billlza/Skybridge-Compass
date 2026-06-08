@@ -45,6 +45,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly TopBarStatusUpdater _topBarStatusUpdater;
     private readonly WorkspaceActionRenderContextBuilder _workspaceActionRenderContextBuilder;
     private readonly WorkspaceShellRefreshCoordinator _workspaceShellRefreshCoordinator;
+    private readonly WorkspaceViewStateBuilder _workspaceViewStateBuilder;
     private readonly ConnectionWorkspaceInputCoordinator _connectionInputCoordinator;
     private readonly ConnectionWorkspaceResultProjector _connectionResultProjector;
     private string _statusMessage = "";
@@ -176,6 +177,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _discoveryClient,
             _pairingMaterialClient,
             _connectionWorkspaceStateClient);
+        _workspaceViewStateBuilder = new WorkspaceViewStateBuilder();
         _statusMessage = _sessionStatusClient.BuildInitialStatusMessage();
         var initialConnectionStatusPatch = _connectionWorkspaceStateClient.BuildInitialStatusPatch();
         _discoveryStatus = initialConnectionStatusPatch.DiscoveryStatus ?? "";
@@ -959,7 +961,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             DiscoveryBrowserStatus = _discoveryBrowserClient.BuildPendingStatus(action);
             var snapshot = await _discoveryBrowserClient.BuildReadOnlySnapshotAsync(
-                new DiscoveryBrowserRequest(
+                _workspaceViewStateBuilder.BuildDiscoveryBrowserRequest(
                     action,
                     DiscoveryService,
                     DiscoveryTxtRecord,
@@ -980,7 +982,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         {
             ManualConnectionStatus = _manualConnectionClient.BuildPendingStatus();
             var snapshot = await _manualConnectionClient.BuildReadOnlySnapshotAsync(
-                new ManualConnectionRequest(
+                _workspaceViewStateBuilder.BuildManualConnectionRequest(
                     ManualConnectionHost,
                     ManualConnectionPort,
                     ManualConnectionCode));
@@ -1015,7 +1017,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             CrossNetworkStatus = _crossNetworkConnectionClient.BuildPendingStatus(action);
 
             var snapshot = await _crossNetworkConnectionClient.BuildReadOnlySnapshotAsync(
-                new CrossNetworkConnectionRequest(
+                _workspaceViewStateBuilder.BuildCrossNetworkConnectionRequest(
                     action,
                     CrossNetworkQrInput,
                     CrossNetworkCodeInput,
@@ -1274,13 +1276,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         _workspaceShellRefreshCoordinator.RefreshTopBarStatus();
 
     private DashboardMetricsRequest BuildDashboardMetricsRequest() =>
-        new(
+        _workspaceViewStateBuilder.BuildDashboardMetricsRequest(
             ConnectionState,
             FileTransferQueue.Count,
             IsBusy);
 
     private WorkspaceCommandGateState BuildWorkspaceCommandGateState() =>
-        new(
+        _workspaceViewStateBuilder.BuildCommandGateState(
             IsBusy,
             ConnectionState,
             SelectedFeature,
@@ -1295,7 +1297,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             _connectionInputCoordinator.ValidatedState);
 
     private WorkspaceActionRenderState BuildWorkspaceActionRenderState() =>
-        new(
+        _workspaceViewStateBuilder.BuildActionRenderState(
             IsBusy,
             IsUsbManagementSelected,
             IsFileTransferSelected,
