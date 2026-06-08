@@ -318,26 +318,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         SystemMonitorOverview = collections.SystemMonitorOverview;
         SystemMonitorDetails = collections.SystemMonitorDetails;
         SystemMonitorIndicators = collections.SystemMonitorIndicators;
-        _workspaceActionSurfaceTargets = new WorkspaceActionSurfaceTargets(
-            SidebarSessionActions,
-            TopBarActions,
-            SessionControlActions,
-            DeviceDiscoveryPrimaryActions,
-            DeviceDiscoveryScanActions,
-            CrossNetworkQrActions,
-            CrossNetworkCodePrimaryActions,
-            CrossNetworkCodeConnectActions,
-            UsbManagementHeaderActions,
-            FileTransferHeaderActions,
-            FileTransferActions,
-            RemoteDesktopHeaderActions,
-            RemoteDesktopActions,
-            QuantumDiagnosticsHeaderActions,
-            SystemMonitorHeaderActions,
-            SystemMonitorActions,
-            SettingsHeaderActions,
-            SettingsToolbarActions,
-            SettingsMaintenanceActions);
+        _workspaceActionSurfaceTargets = new WorkspaceActionSurfaceTargets(collections);
         UsbDeviceStats = collections.UsbDeviceStats;
         UsbDevices = collections.UsbDevices;
         SettingsTabs = collections.SettingsTabs;

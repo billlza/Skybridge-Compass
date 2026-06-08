@@ -9,6 +9,30 @@ internal sealed class WorkspaceActionSurfaceTargets
 {
     private readonly IReadOnlyDictionary<WorkspaceActionSurface, ObservableCollection<WorkspaceActionItemView>> _targets;
 
+    public WorkspaceActionSurfaceTargets(WorkspaceObservableCollections collections)
+        : this(
+            collections.SidebarSessionActions,
+            collections.TopBarActions,
+            collections.SessionControlActions,
+            collections.DeviceDiscoveryPrimaryActions,
+            collections.DeviceDiscoveryScanActions,
+            collections.CrossNetworkQrActions,
+            collections.CrossNetworkCodePrimaryActions,
+            collections.CrossNetworkCodeConnectActions,
+            collections.UsbManagementHeaderActions,
+            collections.FileTransferHeaderActions,
+            collections.FileTransferActions,
+            collections.RemoteDesktopHeaderActions,
+            collections.RemoteDesktopActions,
+            collections.QuantumDiagnosticsHeaderActions,
+            collections.SystemMonitorHeaderActions,
+            collections.SystemMonitorActions,
+            collections.SettingsHeaderActions,
+            collections.SettingsToolbarActions,
+            collections.SettingsMaintenanceActions)
+    {
+    }
+
     public WorkspaceActionSurfaceTargets(
         ObservableCollection<WorkspaceActionItemView> sidebarSessionActions,
         ObservableCollection<WorkspaceActionItemView> topBarActions,

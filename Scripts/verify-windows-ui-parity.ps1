@@ -1224,6 +1224,23 @@ foreach ($workspaceActionRoleSignal in @(
     Assert-Contains -Text ($workspaceActionCatalog + $sessionViewModel) -Needle $workspaceActionRoleSignal -Message "Workspace action role signal missing: $workspaceActionRoleSignal"
 }
 
+foreach ($surfaceTargetsSignal in @(
+    "public WorkspaceActionSurfaceTargets(WorkspaceObservableCollections collections)",
+    "collections.SidebarSessionActions",
+    "collections.TopBarActions",
+    "collections.SessionControlActions",
+    "collections.DeviceDiscoveryPrimaryActions",
+    "collections.CrossNetworkCodeConnectActions",
+    "collections.SettingsMaintenanceActions",
+    "WorkspaceActionSurface.SidebarSession",
+    "WorkspaceActionSurface.TopBarActions",
+    "WorkspaceActionSurface.SettingsMaintenance"
+)) {
+    Assert-Contains -Text $workspaceActionSurfaceTargets -Needle $surfaceTargetsSignal -Message "WorkspaceActionSurfaceTargets collection-entry contract missing: $surfaceTargetsSignal"
+}
+Assert-Contains -Text $sessionViewModelSource -Needle "new WorkspaceActionSurfaceTargets(collections)" -Message "SessionViewModel must create action surface targets from WorkspaceObservableCollections."
+Assert-True -Condition (-not [regex]::IsMatch($sessionViewModelSource, "new\s+WorkspaceActionSurfaceTargets\s*\(\s*SidebarSessionActions\s*,")) -Message "SessionViewModel must not hand-wire action surface target collection lists."
+
 foreach ($surfaceLoaderSignal in @(
     "internal sealed class WorkspaceActionSurfaceLoader",
     "LoadInitialSurfaces(WorkspaceActionRenderContext renderContext)",
