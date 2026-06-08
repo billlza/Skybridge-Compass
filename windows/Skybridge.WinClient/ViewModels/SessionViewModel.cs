@@ -40,6 +40,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly WorkspaceActionSurfaceTargets _workspaceActionSurfaceTargets;
     private readonly WorkspaceStatusPatchApplier _workspaceStatusPatchApplier;
     private readonly WorkspaceCountNotifier _workspaceCountNotifier;
+    private readonly WorkspaceSnapshotApplier _workspaceSnapshotApplier;
     private string _statusMessage = "";
     private string _discoveryService = "";
     private string _discoverySearchText = "";
@@ -194,6 +195,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => SystemMonitorStatus = value,
             value => SettingsStatus = value);
         _workspaceCountNotifier = new WorkspaceCountNotifier(OnPropertyChanged);
+        _workspaceSnapshotApplier = new WorkspaceSnapshotApplier(_workspaceCountNotifier, RefreshDashboardMetrics);
         _connectionValidatedState = _connectionWorkspaceStateClient.BuildInputInvalidatedState();
         var deviceDiscoveryInputDefaults = _deviceDiscoveryInputDefaultsClient.BuildReadOnlySnapshot();
         _discoveryService = deviceDiscoveryInputDefaults.DiscoveryService;
@@ -1104,49 +1106,37 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             value => SettingsStatus = value);
 
     private void ApplyCoreDiagnosticsSnapshot(CoreDiagnosticsSnapshot snapshot)
-    {
-        ReplaceCollection(CoreDiagnosticFacts, snapshot.Facts, CoreDiagnosticFactView.FromFact);
-        _workspaceCountNotifier.CoreDiagnosticFactsChanged();
-    }
+        => _workspaceSnapshotApplier.ApplyCoreDiagnostics(snapshot, CoreDiagnosticFacts);
 
     private void ApplyFileTransferSnapshot(FileTransferWorkspaceSnapshot snapshot)
-    {
-        ReplaceCollection(FileTransferQueue, snapshot.Queue, FileTransferQueueItemView.FromItem);
-        ReplaceCollection(FileTransferHistory, snapshot.History, FileTransferHistoryItemView.FromItem);
-        ReplaceCollection(FileTransferSecurityFacts, snapshot.Security, FileTransferSecurityFactView.FromFact);
-        RefreshDashboardMetrics();
-        _workspaceCountNotifier.FileTransferHistoryChanged();
-    }
+        => _workspaceSnapshotApplier.ApplyFileTransfer(
+            snapshot,
+            FileTransferQueue,
+            FileTransferHistory,
+            FileTransferSecurityFacts);
 
     private void ApplyUsbManagementSnapshot(UsbManagementWorkspaceSnapshot snapshot)
-    {
-        ReplaceCollection(UsbDeviceStats, snapshot.Stats, UsbDeviceStatView.FromStat);
-        ReplaceCollection(UsbDevices, snapshot.Devices, UsbDeviceItemView.FromItem);
-        _workspaceCountNotifier.UsbDevicesChanged();
-    }
+        => _workspaceSnapshotApplier.ApplyUsbManagement(snapshot, UsbDeviceStats, UsbDevices);
 
     private void ApplyRemoteDesktopSnapshot(RemoteDesktopWorkspaceSnapshot snapshot)
-    {
-        ReplaceCollection(RemoteDesktopSessions, snapshot.Sessions, RemoteDesktopSessionItemView.FromItem);
-        ReplaceCollection(RemoteDesktopControlFacts, snapshot.ControlFacts, RemoteDesktopControlFactView.FromFact);
-        _workspaceCountNotifier.RemoteDesktopSessionsChanged();
-    }
+        => _workspaceSnapshotApplier.ApplyRemoteDesktop(
+            snapshot,
+            RemoteDesktopSessions,
+            RemoteDesktopControlFacts);
 
     private void ApplySystemMonitorSnapshot(SystemMonitorWorkspaceSnapshot snapshot)
-    {
-        ReplaceCollection(SystemMonitorOverview, snapshot.Overview, SystemMonitorMetricView.FromMetric);
-        ReplaceCollection(SystemMonitorDetails, snapshot.Details, SystemMonitorMetricView.FromMetric);
-        ReplaceCollection(SystemMonitorIndicators, snapshot.Indicators, SystemMonitorIndicatorView.FromIndicator);
-        _workspaceCountNotifier.SystemMonitorMetricsChanged();
-    }
+        => _workspaceSnapshotApplier.ApplySystemMonitor(
+            snapshot,
+            SystemMonitorOverview,
+            SystemMonitorDetails,
+            SystemMonitorIndicators);
 
     private void ApplySettingsSnapshot(SettingsWorkspaceSnapshot snapshot)
-    {
-        ReplaceCollection(SettingsTabs, snapshot.Tabs, SettingsTabItemView.FromItem);
-        ReplaceCollection(SettingsActions, snapshot.Actions, SettingsActionItemView.FromItem);
-        ReplaceCollection(SettingsDetails, snapshot.Details, SettingsDetailItemView.FromItem);
-        _workspaceCountNotifier.SettingsActionsChanged();
-    }
+        => _workspaceSnapshotApplier.ApplySettings(
+            snapshot,
+            SettingsTabs,
+            SettingsActions,
+            SettingsDetails);
 
     private bool CanConnect() => _sessionCommandStateClient.CanConnect(ConnectionState, IsBusy);
 
