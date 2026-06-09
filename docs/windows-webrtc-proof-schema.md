@@ -90,11 +90,10 @@ Scripts\verify-windows-webrtc-proof.ps1 `
 Validate the same schema through the reusable Rust CLI:
 
 ```powershell
-cargo run --manifest-path core\skybridge-core\Cargo.toml --bin skybridge -- `
-    webrtc-proof validate `
-    --proof <proof.json> `
-    --expected-device-id <device-id> `
-    --expected-fingerprint <64-lowercase-hex>
+Scripts\verify-rust-webrtc-proof-cli.ps1 `
+    -ProofPath <proof.json> `
+    -ExpectedDeviceId <device-id> `
+    -ExpectedFingerprint <64-lowercase-hex>
 ```
 
 Run the default synthetic schema smoke:

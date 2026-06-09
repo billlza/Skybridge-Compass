@@ -178,11 +178,12 @@ $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-nat
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 $macSshProbePath = Join-Path $RepoRoot "Scripts/probe-mac-ssh.ps1"
 $webrtcProofSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-webrtc-proof.ps1"
+$rustWebRtcProofCliPath = Join-Path $RepoRoot "Scripts/verify-rust-webrtc-proof-cli.ps1"
 $webrtcProofSchemaSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-webrtc-proof-smoke.ps1"
 $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.md"
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 
-foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath, $webrtcProofSmokePath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath)) {
+foreach ($path in @($featureContractPath, $sessionViewModelDependencyFactoryPath, $windowsNativeRuntimeDependencyFactoryPath, $sessionViewModelPath, $sessionViewModelDependenciesPath, $sessionEngineActionsPath, $sessionEngineStateProjectorPath, $dashboardNavigationActionsPath, $discoveryBrowserActionsPath, $crossNetworkConnectionActionsPath, $connectionWorkspaceActionsPath, $asyncRelayCommandPath, $workspaceCommandGateCoordinatorPath, $workspaceCommandAvailabilityPath, $workspaceCommandBindingsPath, $workspaceCommandRegistryPath, $workspaceActionSurfaceTargetsPath, $workspaceActionSurfaceLoaderPath, $workspaceActionRenderContextBuilderPath, $workspaceShellRefreshCoordinatorPath, $workspaceInputChangeRouterPath, $workspaceShellNotificationCatalogPath, $workspaceShellStateAccessorPath, $workspaceShellStateSourcePath, $workspaceViewStateBuilderPath, $workspaceStartupStateBuilderPath, $workspaceStatusPatchApplierPath, $workspaceBusyCoordinatorPath, $workspaceDeferredRefreshActionPath, $readOnlyWorkspaceRefreshCoordinatorPath, $readOnlyWorkspaceRefreshActionsPath, $fileTransferWorkspaceActionsPath, $remoteDesktopWorkspaceActionsPath, $systemMonitorWorkspaceActionsPath, $settingsWorkspaceActionsPath, $topBarWorkspaceActionsPath, $readOnlyWorkspaceSnapshotHandlersPath, $workspaceCountNotifierPath, $workspaceObservableCollectionsPath, $workspaceCollectionProjectorPath, $workspaceSnapshotApplierPath, $dashboardMetricsUpdaterPath, $topBarStatusUpdaterPath, $crossNetworkCodeInputCoordinatorPath, $connectionWorkspaceInputCoordinatorPath, $connectionWorkspaceResultProjectorPath, $workspaceItemViewsPath, $booleanToVisibilityConverterPath, $dashboardMetricsPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $remoteDesktopProfileSelectionCoordinatorPath, $systemMonitorPath, $settingsPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $winClientProjectPath, $mainWindowPath, $mainWindowCodePath, $parityDocPath, $parityMatrixDocPath, $connectionLaunchSmokePath, $commandGateSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiParityMatrixSmokePath, $portabilitySmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $macSshProbePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing parity file: $path"
 }
 Assert-True -Condition (Test-Path -LiteralPath $uiActionOrderSmokePath) -Message "Missing parity file: $uiActionOrderSmokePath"
@@ -279,6 +280,7 @@ $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfile
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
 $macSshProbe = Get-Content -Raw -LiteralPath $macSshProbePath
 $webrtcProofSmoke = Get-Content -Raw -LiteralPath $webrtcProofSmokePath
+$rustWebRtcProofCli = Get-Content -Raw -LiteralPath $rustWebRtcProofCliPath
 $webrtcProofSchemaSmoke = Get-Content -Raw -LiteralPath $webrtcProofSchemaSmokePath
 $webrtcProofSchema = Get-Content -Raw -LiteralPath $webrtcProofSchemaPath
 $macWebRtcInterop = Get-Content -Raw -LiteralPath $macWebRtcInteropPath
@@ -4457,6 +4459,7 @@ foreach ($portabilityMacSshSignal in @(
 foreach ($webrtcInteropSignal in @(
     'verify-windows-webrtc-proof.ps1',
     'verify-windows-webrtc-proof-smoke.ps1',
+    'verify-rust-webrtc-proof-cli.ps1',
     'docs/windows-webrtc-proof-schema.md',
     'verify-windows-mac-webrtc-interop.ps1',
     'RequireMacWebRtcInterop',
@@ -4464,8 +4467,10 @@ foreach ($webrtcInteropSignal in @(
     'MacWebRtcProofMaxAgeMs',
     'windows-mac-webrtc-interop: ok',
     'windows-webrtc-proof-smoke: ok',
+    'rust-webrtc-proof-cli: ok',
     'mac-ssh-direct-lan-rust-cli',
     'windows-native-dns-sd-peer',
+    'webrtc-proof validate',
     'windows-webrtc-proof',
     'SBF1',
     'ExpectedFingerprint',
@@ -4475,7 +4480,7 @@ foreach ($webrtcInteropSignal in @(
     'capturedAtUnixMs',
     'must not replace the AppleNative path'
 )) {
-    Assert-Contains -Text ($portabilitySmoke + $webrtcProofSmoke + $webrtcProofSchemaSmoke + $webrtcProofSchema + $macWebRtcInterop) -Needle $webrtcInteropSignal -Message "Windows/mac WebRTC interop gate missing signal: $webrtcInteropSignal"
+    Assert-Contains -Text ($portabilitySmoke + $webrtcProofSmoke + $rustWebRtcProofCli + $webrtcProofSchemaSmoke + $webrtcProofSchema + $macWebRtcInterop) -Needle $webrtcInteropSignal -Message "Windows/mac WebRTC interop gate missing signal: $webrtcInteropSignal"
 }
 
 Write-Output "windows-ui-parity: ok"

@@ -57,6 +57,7 @@ function Invoke-InteropGate {
 foreach ($requiredScript in @(
     "Scripts/probe-mac-ssh.ps1",
     "Scripts/verify-windows-native-dns-sd-acceptance.ps1",
+    "Scripts/verify-rust-webrtc-proof-cli.ps1",
     "Scripts/verify-windows-webrtc-proof.ps1",
     "Scripts/verify-windows-connection-launch.ps1"
 )) {
@@ -110,6 +111,17 @@ Invoke-InteropGate `
     -Name "windows-native-dns-sd-peer" `
     -RelativeScriptPath "Scripts/verify-windows-native-dns-sd-acceptance.ps1" `
     -Parameters $dnsSdParameters
+
+Invoke-InteropGate `
+    -Name "rust-webrtc-proof-cli" `
+    -RelativeScriptPath "Scripts/verify-rust-webrtc-proof-cli.ps1" `
+    -Parameters @{
+        RepoRoot = $RepoRoot
+        ProofPath = $WebRtcProofPath
+        ExpectedDeviceId = $ExpectedDeviceId
+        ExpectedFingerprint = $ExpectedFingerprint
+        MaxProofAgeMs = $WebRtcProofMaxAgeMs
+    }
 
 Invoke-InteropGate `
     -Name "windows-webrtc-proof" `

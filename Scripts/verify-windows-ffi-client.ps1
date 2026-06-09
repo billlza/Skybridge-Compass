@@ -71,11 +71,12 @@ $uiAutomationSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ui-automati
 $nativeRuntimeProfileSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-native-runtime-profile.ps1"
 $nativeDnsSdAcceptancePath = Join-Path $RepoRoot "Scripts/verify-windows-native-dns-sd-acceptance.ps1"
 $webrtcProofSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-webrtc-proof.ps1"
+$rustWebRtcProofCliPath = Join-Path $RepoRoot "Scripts/verify-rust-webrtc-proof-cli.ps1"
 $webrtcProofSchemaSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-webrtc-proof-smoke.ps1"
 $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.md"
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -125,6 +126,7 @@ $uiAutomationSmoke = Get-Content -Raw -LiteralPath $uiAutomationSmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
 $webrtcProofSmoke = Get-Content -Raw -LiteralPath $webrtcProofSmokePath
+$rustWebRtcProofCli = Get-Content -Raw -LiteralPath $rustWebRtcProofCliPath
 $webrtcProofSchemaSmoke = Get-Content -Raw -LiteralPath $webrtcProofSchemaSmokePath
 $webrtcProofSchema = Get-Content -Raw -LiteralPath $webrtcProofSchemaPath
 $macWebRtcInterop = Get-Content -Raw -LiteralPath $macWebRtcInteropPath
@@ -534,6 +536,7 @@ Assert-Contains -Text $architecture -Needle "verify-windows-portability-smoke.ps
 Assert-Contains -Text $architecture -Needle "verify-windows-stack-freshness.ps1" -Message "Architecture doc missing stack freshness smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-ui-parity-matrix.ps1" -Message "Architecture doc missing UI parity matrix smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "docs/windows-webrtc-proof-schema.md" -Message "Architecture doc missing WebRTC proof schema entrypoint."
+Assert-Contains -Text $architecture -Needle "verify-rust-webrtc-proof-cli.ps1" -Message "Architecture doc missing Rust WebRTC proof CLI gate entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-webrtc-proof-smoke.ps1" -Message "Architecture doc missing WebRTC proof schema smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "shared action templates" -Message "Architecture doc missing shared action-template style contract."
 Assert-Contains -Text $architecture -Needle "WorkspaceActionButtonWithDetailTemplate" -Message "Architecture doc missing action-template detail contract."
@@ -722,7 +725,20 @@ foreach ($signal in @(
     Assert-Contains -Text $webrtcProofSmoke -Needle $signal -Message "Windows WebRTC proof gate missing signal: $signal"
 }
 foreach ($signal in @(
+    "rust-webrtc-proof-cli: ok",
+    "core/skybridge-core/Cargo.toml",
+    "webrtc-proof validate",
+    "--proof",
+    "--expected-device-id",
+    "--expected-fingerprint",
+    "--max-age-ms"
+)) {
+    Assert-Contains -Text $rustWebRtcProofCli -Needle $signal -Message "Rust WebRTC proof CLI gate missing signal: $signal"
+}
+foreach ($signal in @(
     "windows-webrtc-proof-smoke: ok",
+    "verify-rust-webrtc-proof-cli.ps1",
+    "rust-webrtc-proof-cli",
     "docs/windows-webrtc-proof-schema.md",
     "verify-windows-webrtc-proof.ps1",
     "peerDeviceId",
@@ -756,6 +772,7 @@ foreach ($signal in @(
     "capturedAtUnixMs",
     "must not replace the AppleNative path",
     "Scripts\verify-windows-webrtc-proof-smoke.ps1",
+    "Scripts\verify-rust-webrtc-proof-cli.ps1",
     "Scripts\verify-windows-portability-smoke.ps1"
 )) {
     Assert-Contains -Text $webrtcProofSchema -Needle $signal -Message "Windows WebRTC proof schema missing signal: $signal"
@@ -764,6 +781,8 @@ foreach ($signal in @(
     "windows-mac-webrtc-interop: ok",
     "mac-ssh-direct-lan-rust-cli",
     "windows-native-dns-sd-peer",
+    "rust-webrtc-proof-cli",
+    "verify-rust-webrtc-proof-cli.ps1",
     "windows-webrtc-proof",
     "windows-connection-launch",
     "RequireDirectLan",

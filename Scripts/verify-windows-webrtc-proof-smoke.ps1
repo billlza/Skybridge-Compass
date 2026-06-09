@@ -16,8 +16,10 @@ function Assert-True {
 }
 
 $proofGatePath = Join-Path $RepoRoot "Scripts/verify-windows-webrtc-proof.ps1"
+$rustProofCliPath = Join-Path $RepoRoot "Scripts/verify-rust-webrtc-proof-cli.ps1"
 $proofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.md"
 Assert-True -Condition (Test-Path -LiteralPath $proofGatePath) -Message "Missing Windows WebRTC proof gate: $proofGatePath"
+Assert-True -Condition (Test-Path -LiteralPath $rustProofCliPath) -Message "Missing Rust WebRTC proof CLI gate: $rustProofCliPath"
 Assert-True -Condition (Test-Path -LiteralPath $proofSchemaPath) -Message "Missing Windows WebRTC proof schema: $proofSchemaPath"
 
 $expectedDeviceId = "mac-1"
@@ -57,6 +59,15 @@ try {
         -MaxProofAgeMs 60000
 
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows WebRTC proof schema smoke failed."
+
+    & $rustProofCliPath `
+        -RepoRoot $RepoRoot `
+        -ProofPath $proofPath `
+        -ExpectedDeviceId $expectedDeviceId `
+        -ExpectedFingerprint $expectedFingerprint `
+        -MaxProofAgeMs 60000
+
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Rust WebRTC proof CLI schema smoke failed."
     Write-Output "windows-webrtc-proof-smoke: ok proof=$proofPath schema=$proofSchemaPath"
 }
 finally {
