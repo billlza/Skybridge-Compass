@@ -15,6 +15,7 @@ This map fixes the active Windows parity objective to auditable evidence. It is 
 | `REQ-APPLE-PRESERVATION` Windows interop must not break mac/iOS AppleNative behavior | `Scripts/verify-apple-native-preservation.ps1` proves Apple-to-Apple same-LAN/cross-NAT paths keep `AppleNative`, Windows-to-Apple uses WebRTC without Apple stream/datagram bindings, and Windows-to-Windows keeps MsQuic. |
 | `REQ-MAC-INTEROP` Windows-to-mac co-debugging is gated by direct LAN, pinned SSH host key, Mac Rust CLI smoke, DNS-SD, WebRTC proof, and launch smoke | `Scripts/prepare-mac-rust-cli-codbg.ps1`, `Scripts/verify-mac-rust-cli-codbg-wrapper.ps1`, and `Scripts/verify-windows-mac-webrtc-interop.ps1` define the local sequence. Real interop remains incomplete until direct LAN route, host-key pinning, helper proof, and expected identity evidence are available. |
 | `REQ-GITHUB-SSH` branch upload must avoid unstable GitHub HTTPS transport | `Scripts/ensure-github-ssh-remote.ps1`, `Scripts/verify-git-ssh-remote.ps1`, `Scripts/push-github-ssh.ps1`, `.githooks/pre-push`, and `docs/github-ssh-transport.md` pin SSH remotes, known_hosts, and fallback bundle creation. |
+| `REQ-GITHUB-UPLOAD` the dedicated GitHub branch must actually contain the accepted commit | `Scripts/audit-windows-portability-completion.ps1 -CheckRemoteBranch` compares `origin/Bill/windows-portability` with the accepted local HEAD using SSH-only `git ls-remote`; `-RequireComplete` fails until the remote branch, Mac SSH readiness, and Windows-to-mac interop gates are complete. |
 
 Run the acceptance-map static gate:
 
@@ -41,4 +42,13 @@ Scripts\verify-windows-portability-acceptance-evidence.ps1 `
     -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json `
     -RequireRustCliCoverage `
     -RequireOnlineStackFreshness
+```
+
+Run the completion audit before claiming the full objective is done:
+
+```powershell
+Scripts\audit-windows-portability-completion.ps1 `
+    -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json `
+    -CheckRemoteBranch `
+    -RequireComplete
 ```

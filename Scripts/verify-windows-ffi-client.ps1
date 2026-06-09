@@ -64,6 +64,7 @@ $portabilityAcceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-ac
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $portabilityAcceptanceMapSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-map.ps1"
 $portabilityAcceptanceEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
+$portabilityCompletionAuditPath = Join-Path $RepoRoot "Scripts/audit-windows-portability-completion.ps1"
 $researchEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-research-evidence.ps1"
 $ciWorkflowSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ci-workflow.ps1"
 $githubWorkflowPath = Join-Path $RepoRoot ".github/workflows/windows-portability.yml"
@@ -85,7 +86,7 @@ $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.m
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -128,6 +129,7 @@ $portabilityAcceptanceMap = Get-Content -Raw -LiteralPath $portabilityAcceptance
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
 $portabilityAcceptanceMapSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapSmokePath
 $portabilityAcceptanceEvidenceSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceEvidenceSmokePath
+$portabilityCompletionAudit = Get-Content -Raw -LiteralPath $portabilityCompletionAuditPath
 $researchEvidenceSmoke = Get-Content -Raw -LiteralPath $researchEvidenceSmokePath
 $ciWorkflowSmoke = Get-Content -Raw -LiteralPath $ciWorkflowSmokePath
 $githubWorkflow = Get-Content -Raw -LiteralPath $githubWorkflowPath
@@ -530,6 +532,17 @@ foreach ($portabilityAcceptanceEvidenceSignal in @(
     "hostKeyPinned"
 )) {
     Assert-Contains -Text $portabilityAcceptanceEvidenceSmoke -Needle $portabilityAcceptanceEvidenceSignal -Message "Portability acceptance evidence verifier missing signal: $portabilityAcceptanceEvidenceSignal"
+}
+foreach ($portabilityCompletionAuditSignal in @(
+    "windows-portability-completion-audit",
+    "RequireComplete",
+    "CheckRemoteBranch",
+    "REQ-GITHUB-UPLOAD",
+    "REQ-MAC-INTEROP",
+    "RequireNativeDnsSdAcceptance",
+    "ls-remote --heads origin"
+)) {
+    Assert-Contains -Text $portabilityCompletionAudit -Needle $portabilityCompletionAuditSignal -Message "Portability completion audit missing signal: $portabilityCompletionAuditSignal"
 }
 foreach ($macSshProbeSignal in @(
     "RequireKnownHost",

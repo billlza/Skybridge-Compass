@@ -43,6 +43,7 @@ $acceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-ma
 
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $acceptanceEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
+$completionAuditPath = Join-Path $RepoRoot "Scripts/audit-windows-portability-completion.ps1"
 $researchEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-research-evidence.ps1"
 $stackFreshnessPath = Join-Path $RepoRoot "Scripts/verify-windows-stack-freshness.ps1"
 $rustCoveragePath = Join-Path $RepoRoot "Scripts/verify-rust-cli-coverage.ps1"
@@ -69,6 +70,7 @@ $githubTransport = Read-RequiredText -Path $githubTransportPath
 $acceptanceMap = Read-RequiredText -Path $acceptanceMapPath
 $portabilitySmoke = Read-RequiredText -Path $portabilitySmokePath
 $acceptanceEvidence = Read-RequiredText -Path $acceptanceEvidencePath
+$completionAudit = Read-RequiredText -Path $completionAuditPath
 $researchEvidence = Read-RequiredText -Path $researchEvidencePath
 $stackFreshness = Read-RequiredText -Path $stackFreshnessPath
 $rustCoverage = Read-RequiredText -Path $rustCoveragePath
@@ -97,7 +99,8 @@ foreach ($requirement in @(
     "REQ-BASIC-SMOKE",
     "REQ-APPLE-PRESERVATION",
     "REQ-MAC-INTEROP",
-    "REQ-GITHUB-SSH"
+    "REQ-GITHUB-SSH",
+    "REQ-GITHUB-UPLOAD"
 )) {
     Assert-Contains -Text $acceptanceMap -Needle $requirement -Message "Acceptance map missing requirement id: $requirement"
 }
@@ -250,6 +253,7 @@ foreach ($optionalGate in @(
 }
 foreach ($signal in @(
     "verify-windows-portability-acceptance-evidence.ps1",
+    "audit-windows-portability-completion.ps1",
     "AcceptanceEvidencePath",
     "gateResults",
     "generatedAtUtc",
@@ -258,9 +262,13 @@ foreach ($signal in @(
     "RequireWinUiVisualEvidence",
     "RequireNativeDnsSdAcceptance",
     "RequireMacInterop",
+    "RequireComplete",
+    "CheckRemoteBranch",
+    "REQ-GITHUB-UPLOAD",
+    "REQ-MAC-INTEROP",
     "windows-portability-acceptance-evidence: ok"
 )) {
-    Assert-Contains -Text ($acceptanceMap + $acceptanceEvidence) -Needle $signal -Message "Portability acceptance evidence gate missing signal: $signal"
+    Assert-Contains -Text ($acceptanceMap + $acceptanceEvidence + $completionAudit) -Needle $signal -Message "Portability acceptance evidence gate missing signal: $signal"
 }
 
 foreach ($signal in @(
