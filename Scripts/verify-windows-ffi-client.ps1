@@ -62,6 +62,7 @@ $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
 $portabilityAcceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-map.md"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $portabilityAcceptanceMapSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-map.ps1"
+$portabilityAcceptanceEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
 $ciWorkflowSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ci-workflow.ps1"
 $githubWorkflowPath = Join-Path $RepoRoot ".github/workflows/windows-portability.yml"
 $stackFreshnessSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-stack-freshness.ps1"
@@ -82,7 +83,7 @@ $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.m
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -123,6 +124,7 @@ $architecture = Get-Content -Raw -LiteralPath $architecturePath
 $portabilityAcceptanceMap = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapPath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
 $portabilityAcceptanceMapSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapSmokePath
+$portabilityAcceptanceEvidenceSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceEvidenceSmokePath
 $ciWorkflowSmoke = Get-Content -Raw -LiteralPath $ciWorkflowSmokePath
 $githubWorkflow = Get-Content -Raw -LiteralPath $githubWorkflowPath
 $stackFreshnessSmoke = Get-Content -Raw -LiteralPath $stackFreshnessSmokePath
@@ -467,6 +469,7 @@ foreach ($portabilityAcceptanceMapSignal in @(
     "Product Design QA gate",
     "at or above 90%",
     "verify-windows-ui-visual-evidence.ps1",
+    "verify-windows-portability-acceptance-evidence.ps1",
     "verify-rust-cli-coverage.ps1",
     "verify-apple-native-preservation.ps1",
     "prepare-mac-rust-cli-codbg.ps1",
@@ -474,6 +477,25 @@ foreach ($portabilityAcceptanceMapSignal in @(
     "git-remote-https.exe"
 )) {
     Assert-Contains -Text ($portabilityAcceptanceMap + $portabilityAcceptanceMapSmoke) -Needle $portabilityAcceptanceMapSignal -Message "Portability acceptance map missing signal: $portabilityAcceptanceMapSignal"
+}
+foreach ($portabilityAcceptanceEvidenceSignal in @(
+    "windows-portability-acceptance-evidence: ok",
+    "AcceptanceEvidencePath",
+    "gateResults",
+    "generatedAtUtc",
+    "ExpectedBranch",
+    "ExpectedHead",
+    "RequireRustCliCoverage",
+    "RequireOnlineStackFreshness",
+    "RequireWinUiVisualEvidence",
+    "RequireMacInterop",
+    "totalLineCoverage",
+    "cliLineCoverage",
+    "sourceUris",
+    "directLanLikely",
+    "hostKeyPinned"
+)) {
+    Assert-Contains -Text $portabilityAcceptanceEvidenceSmoke -Needle $portabilityAcceptanceEvidenceSignal -Message "Portability acceptance evidence verifier missing signal: $portabilityAcceptanceEvidenceSignal"
 }
 foreach ($macSshProbeSignal in @(
     "RequireKnownHost",
@@ -582,6 +604,9 @@ foreach ($ciWorkflowSmokeSignal in @(
     "-StackFreshnessEvidencePath artifacts\windows-stack-freshness.json",
     "-RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json",
     "-AcceptanceEvidencePath artifacts\windows-portability-acceptance.json",
+    "verify-windows-portability-acceptance-evidence.ps1",
+    "-RequireRustCliCoverage",
+    "-RequireOnlineStackFreshness",
     "RequireConfiguredSshCommand",
     "RequireKnownHosts",
     "RequireCredentialHelperReset",
@@ -606,6 +631,9 @@ foreach ($githubWorkflowSignal in @(
     "-StackFreshnessEvidencePath artifacts\windows-stack-freshness.json",
     "-RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json",
     "-AcceptanceEvidencePath artifacts\windows-portability-acceptance.json",
+    "verify-windows-portability-acceptance-evidence.ps1",
+    "-RequireRustCliCoverage",
+    "-RequireOnlineStackFreshness",
     "contents: read"
 )) {
     Assert-Contains -Text $githubWorkflow -Needle $githubWorkflowSignal -Message "GitHub workflow missing signal: $githubWorkflowSignal"
@@ -757,6 +785,7 @@ foreach ($startupStateSmokeSignal in @(
 }
 Assert-Contains -Text $architecture -Needle "verify-windows-portability-smoke.ps1" -Message "Architecture doc missing portability smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-portability-acceptance-map.ps1" -Message "Architecture doc missing portability acceptance map gate."
+Assert-Contains -Text $architecture -Needle "verify-windows-portability-acceptance-evidence.ps1" -Message "Architecture doc missing portability acceptance evidence verifier."
 Assert-Contains -Text $architecture -Needle "-AcceptanceEvidencePath <json>" -Message "Architecture doc missing portability acceptance evidence path."
 Assert-Contains -Text $architecture -Needle "gate manifest" -Message "Architecture doc missing portability gate manifest contract."
 Assert-Contains -Text $architecture -Needle "pass/skip/fail status" -Message "Architecture doc missing portability gate result status contract."

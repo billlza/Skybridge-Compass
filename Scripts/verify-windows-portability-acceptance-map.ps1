@@ -41,6 +41,7 @@ $githubTransportPath = Join-Path $RepoRoot "docs/github-ssh-transport.md"
 $acceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-map.md"
 
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
+$acceptanceEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
 $stackFreshnessPath = Join-Path $RepoRoot "Scripts/verify-windows-stack-freshness.ps1"
 $rustCoveragePath = Join-Path $RepoRoot "Scripts/verify-rust-cli-coverage.ps1"
 $ffiClientPath = Join-Path $RepoRoot "Scripts/verify-windows-ffi-client.ps1"
@@ -64,6 +65,7 @@ $webrtcSchema = Read-RequiredText -Path $webrtcSchemaPath
 $githubTransport = Read-RequiredText -Path $githubTransportPath
 $acceptanceMap = Read-RequiredText -Path $acceptanceMapPath
 $portabilitySmoke = Read-RequiredText -Path $portabilitySmokePath
+$acceptanceEvidence = Read-RequiredText -Path $acceptanceEvidencePath
 $stackFreshness = Read-RequiredText -Path $stackFreshnessPath
 $rustCoverage = Read-RequiredText -Path $rustCoveragePath
 $ffiClient = Read-RequiredText -Path $ffiClientPath
@@ -221,6 +223,19 @@ foreach ($optionalGate in @(
     "AcceptanceEvidencePath"
 )) {
     Assert-Contains -Text $portabilitySmoke -Needle $optionalGate -Message "Portability evidence option missing signal: $optionalGate"
+}
+foreach ($signal in @(
+    "verify-windows-portability-acceptance-evidence.ps1",
+    "AcceptanceEvidencePath",
+    "gateResults",
+    "generatedAtUtc",
+    "RequireRustCliCoverage",
+    "RequireOnlineStackFreshness",
+    "RequireWinUiVisualEvidence",
+    "RequireMacInterop",
+    "windows-portability-acceptance-evidence: ok"
+)) {
+    Assert-Contains -Text ($acceptanceMap + $acceptanceEvidence) -Needle $signal -Message "Portability acceptance evidence gate missing signal: $signal"
 }
 
 foreach ($signal in @(

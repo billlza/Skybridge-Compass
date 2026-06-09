@@ -28,15 +28,17 @@ function Assert-Contains {
 
 $workflowPath = Join-Path $RepoRoot ".github/workflows/windows-portability.yml"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
+$acceptanceEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
 $rustCoveragePath = Join-Path $RepoRoot "Scripts/verify-rust-cli-coverage.ps1"
 $gitSshRemotePath = Join-Path $RepoRoot "Scripts/verify-git-ssh-remote.ps1"
 
-foreach ($path in @($workflowPath, $portabilitySmokePath, $rustCoveragePath, $gitSshRemotePath)) {
+foreach ($path in @($workflowPath, $portabilitySmokePath, $acceptanceEvidencePath, $rustCoveragePath, $gitSshRemotePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing Windows CI gate input: $path"
 }
 
 $workflow = Get-Content -Raw -LiteralPath $workflowPath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
+$acceptanceEvidence = Get-Content -Raw -LiteralPath $acceptanceEvidencePath
 $rustCoverage = Get-Content -Raw -LiteralPath $rustCoveragePath
 $gitSshRemote = Get-Content -Raw -LiteralPath $gitSshRemotePath
 
@@ -58,6 +60,9 @@ foreach ($signal in @(
     "-StackFreshnessEvidencePath artifacts\windows-stack-freshness.json",
     "-RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json",
     "-AcceptanceEvidencePath artifacts\windows-portability-acceptance.json",
+    "Scripts\verify-windows-portability-acceptance-evidence.ps1",
+    "-RequireRustCliCoverage",
+    "-RequireOnlineStackFreshness",
     "permissions:",
     "contents: read"
 )) {
@@ -86,6 +91,20 @@ foreach ($signal in @(
     "RustCliCoverageEvidencePath"
 )) {
     Assert-Contains -Text $portabilitySmoke -Needle $signal -Message "Portability smoke missing CI signal: $signal"
+}
+
+foreach ($signal in @(
+    "AcceptanceEvidencePath",
+    "RequireRustCliCoverage",
+    "RequireOnlineStackFreshness",
+    "gateResults",
+    "totalLineCoverage",
+    "cliLineCoverage",
+    "sourceUris",
+    "online",
+    "windows-portability-acceptance-evidence: ok"
+)) {
+    Assert-Contains -Text $acceptanceEvidence -Needle $signal -Message "Acceptance evidence verifier missing CI signal: $signal"
 }
 
 foreach ($signal in @(

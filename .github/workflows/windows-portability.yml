@@ -52,3 +52,4 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           .\Scripts\verify-windows-portability-smoke.ps1 -CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage -StackFreshnessEvidencePath artifacts\windows-stack-freshness.json -RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json
+          .\Scripts\verify-windows-portability-acceptance-evidence.ps1 -AcceptanceEvidencePath artifacts\windows-portability-acceptance.json -StackFreshnessEvidencePath artifacts\windows-stack-freshness.json -RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json -RequireRustCliCoverage -RequireOnlineStackFreshness
