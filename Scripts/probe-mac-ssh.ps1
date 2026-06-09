@@ -5,6 +5,8 @@ param(
     [string[]]$UserNames = @("bill", "Lza"),
     [string]$KeyPath = (Join-Path $env:USERPROFILE ".ssh\skybridge_mac_debug_ed25519"),
     [string]$KnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
+    [switch]$RequireKnownHost,
+    [string]$ExpectedHostKeyFingerprint = "",
     [string]$ExpectedHostAddress = "",
     [string]$DirectSourceAddress = "",
     [string]$EvidencePath = "",
@@ -23,6 +25,9 @@ $script:MacSshProbeMessages = [System.Collections.Generic.List[string]]::new()
 $script:MacSshProbeReady = $false
 $script:MacSshProbeReadyHostName = ""
 $script:MacSshProbeReadyUserName = ""
+$script:MacSshProbeHostKeyPinned = $false
+$script:MacSshProbeHostKeySource = ""
+$script:MacSshProbeHostKeyFingerprints = [System.Collections.Generic.List[string]]::new()
 
 function Write-Probe {
     param([string]$Message)
@@ -74,10 +79,15 @@ function Write-ProbeEvidence {
         requireReady = [bool]$RequireReady
         requireDirectLan = [bool]$RequireDirectLan
         requireRustCliSmoke = [bool]$RequireRustCliSmoke
+        requireKnownHost = [bool]$RequireKnownHost
         remoteRepoRoot = $RemoteRepoRoot
         keyPath = $KeyPath
         keyPresent = Test-Path -LiteralPath $KeyPath
         knownHostsPath = $KnownHostsPath
+        expectedHostKeyFingerprint = $ExpectedHostKeyFingerprint
+        hostKeyPinned = [bool]$script:MacSshProbeHostKeyPinned
+        hostKeySource = $script:MacSshProbeHostKeySource
+        hostKeyFingerprints = @($script:MacSshProbeHostKeyFingerprints)
         windowsLanCandidates = $lanCandidates
         proxyTunnelRouteDetected = $proxyTunnelRouteDetected
         localNameProxyResolutionDetected = $localNameProxyResolutionDetected
@@ -124,6 +134,21 @@ function ConvertTo-PosixSingleQuoted {
     }
 
     return "'$Value'"
+}
+
+function ConvertTo-NormalizedHostKeyFingerprint {
+    param([string]$Fingerprint)
+
+    $trimmed = $Fingerprint.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return ""
+    }
+
+    if ($trimmed.StartsWith("SHA256:", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return "SHA256:" + $trimmed.Substring(7)
+    }
+
+    return "SHA256:$trimmed"
 }
 
 function Test-IsProxySourceAddress {
@@ -198,6 +223,159 @@ function Get-TcpRemoteAddress {
     }
 
     return ""
+}
+
+function Get-KnownHostLookupNames {
+    $names = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($script:CurrentHostName)) {
+        $names.Add($script:CurrentHostName)
+        if ($Port -ne 22) {
+            $names.Add("[$script:CurrentHostName]:$Port")
+        }
+    }
+
+    return @($names | Select-Object -Unique)
+}
+
+function Test-KnownHostEntryPresent {
+    if (-not (Test-Path -LiteralPath $KnownHostsPath)) {
+        return $false
+    }
+
+    foreach ($lookupName in Get-KnownHostLookupNames) {
+        try {
+            $output = & ssh-keygen -F $lookupName -f $KnownHostsPath 2>$null
+            $exitCode = $LASTEXITCODE
+        }
+        catch {
+            $output = @()
+            $exitCode = 255
+        }
+
+        if ($exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace(($output | Out-String))) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-ScannedHostKeyLines {
+    $scanArgs = @(
+        "-T", "$ConnectTimeoutSeconds",
+        "-p", "$Port",
+        "-t", "ed25519,ecdsa,rsa",
+        $script:CurrentHostName
+    )
+
+    try {
+        $scanOutput = & ssh-keyscan @scanArgs 2>&1
+    }
+    catch {
+        $scanOutput = @($_.Exception.Message)
+    }
+
+    return @($scanOutput |
+        ForEach-Object { [string]$_ } |
+        Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_) -and
+            -not $_.StartsWith("#") -and
+            ($_ -match "\s(ssh-ed25519|ecdsa-sha2-|ssh-rsa)\s")
+        })
+}
+
+function Get-HostKeyFingerprints {
+    param([string[]]$HostKeyLines)
+
+    if ($HostKeyLines.Count -eq 0) {
+        return @()
+    }
+
+    $tempKeyFile = Join-Path $env:TEMP ("skybridge-host-keyscan-" + [Guid]::NewGuid().ToString("N"))
+    try {
+        $HostKeyLines | Set-Content -LiteralPath $tempKeyFile -Encoding ASCII
+        try {
+            $fingerprintOutput = & ssh-keygen -l -E sha256 -f $tempKeyFile 2>$null
+        }
+        catch {
+            $fingerprintOutput = @()
+        }
+
+        return @($fingerprintOutput |
+            ForEach-Object {
+                $match = [regex]::Match([string]$_, "SHA256:[^\s]+")
+                if ($match.Success) {
+                    $match.Value
+                }
+            } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Select-Object -Unique)
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempKeyFile) {
+            Remove-Item -LiteralPath $tempKeyFile -Force
+        }
+    }
+}
+
+function Add-HostKeyLinesToKnownHosts {
+    param([string[]]$HostKeyLines)
+
+    $knownHostsDirectory = Split-Path -Parent $KnownHostsPath
+    if (-not [string]::IsNullOrWhiteSpace($knownHostsDirectory)) {
+        New-Item -ItemType Directory -Force -Path $knownHostsDirectory | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $KnownHostsPath)) {
+        $HostKeyLines | Set-Content -LiteralPath $KnownHostsPath -Encoding ASCII
+        return
+    }
+
+    $HostKeyLines | Add-Content -LiteralPath $KnownHostsPath -Encoding ASCII
+}
+
+function Confirm-HostKeyPin {
+    $script:HostProbeHostKeyPinConfirmed = $false
+    $expectedFingerprint = ConvertTo-NormalizedHostKeyFingerprint -Fingerprint $ExpectedHostKeyFingerprint
+
+    if ([string]::IsNullOrWhiteSpace($expectedFingerprint)) {
+        if (Test-KnownHostEntryPresent) {
+            $script:MacSshProbeHostKeyPinned = $true
+            $script:MacSshProbeHostKeySource = "known-hosts-file"
+            $script:HostProbeHostKeyPinConfirmed = $true
+            Write-Probe "host-key pinned: known_hosts entry exists for $script:CurrentHostName"
+            return
+        }
+
+        Write-Probe "host-key required: no known_hosts entry exists for $script:CurrentHostName; pass -ExpectedHostKeyFingerprint or pre-populate -KnownHostsPath"
+        return
+    }
+
+    $hostKeyLines = @(Get-ScannedHostKeyLines)
+    if ($hostKeyLines.Count -eq 0) {
+        Write-Probe "host-key required: ssh-keyscan returned no usable host key for $script:CurrentHostName"
+        return
+    }
+
+    $fingerprints = @(Get-HostKeyFingerprints -HostKeyLines $hostKeyLines)
+    foreach ($fingerprint in $fingerprints) {
+        if (-not $script:MacSshProbeHostKeyFingerprints.Contains($fingerprint)) {
+            $script:MacSshProbeHostKeyFingerprints.Add($fingerprint)
+        }
+
+        Write-Probe "host-key scan: $script:CurrentHostName fingerprint=$fingerprint"
+    }
+
+    if (-not ($fingerprints -contains $expectedFingerprint)) {
+        Write-Probe "host-key required: expected $expectedFingerprint was not found for $script:CurrentHostName"
+        return
+    }
+
+    Add-HostKeyLinesToKnownHosts -HostKeyLines $hostKeyLines
+    $script:MacSshProbeHostKeyPinned = $true
+    $script:MacSshProbeHostKeySource = "ssh-keyscan-expected-fingerprint"
+    $script:HostProbeHostKeyPinConfirmed = $true
+    Write-Probe "host-key pinned: matched expected fingerprint $expectedFingerprint for $script:CurrentHostName"
 }
 
 function Write-NameResolutionDiagnostics {
@@ -332,6 +510,7 @@ function Invoke-SshCommand {
     )
 
     $target = "$UserName@$script:CurrentHostName"
+    $strictHostKeyChecking = if ($RequireKnownHost -or $script:MacSshProbeHostKeyPinned -or -not [string]::IsNullOrWhiteSpace($ExpectedHostKeyFingerprint)) { "yes" } else { "no" }
     $sshArgs = @(
         "-o", "BatchMode=yes",
         "-o", "PreferredAuthentications=publickey",
@@ -339,7 +518,7 @@ function Invoke-SshCommand {
         "-o", "NumberOfPasswordPrompts=0",
         "-o", "ConnectTimeout=$ConnectTimeoutSeconds",
         "-o", "ConnectionAttempts=1",
-        "-o", "StrictHostKeyChecking=no",
+        "-o", "StrictHostKeyChecking=$strictHostKeyChecking",
         "-o", "UserKnownHostsFile=$KnownHostsPath",
         "-p", "$Port",
         "-i", "$KeyPath")
@@ -432,6 +611,7 @@ function Invoke-HostReadinessProbe {
     $script:HostProbeHasSameSubnetLanCandidate = $false
     $script:HostProbeUsesProxySourceRoute = $false
     $script:HostProbeDirectSourceIsValid = [string]::IsNullOrWhiteSpace($DirectSourceAddress)
+    $script:HostProbeHostKeyPinConfirmed = $false
 
     Write-Probe "candidate: host=$script:CurrentHostName port=$Port"
     Write-NameResolutionDiagnostics
@@ -490,6 +670,13 @@ function Invoke-HostReadinessProbe {
         Write-Probe "direct bind: ssh will use source=$DirectSourceAddress"
     }
 
+    if ($RequireKnownHost -or -not [string]::IsNullOrWhiteSpace($ExpectedHostKeyFingerprint)) {
+        Confirm-HostKeyPin
+        if (-not $script:HostProbeHostKeyPinConfirmed) {
+            return
+        }
+    }
+
     $readyUserName = ""
     foreach ($userName in $UserNames) {
         $probe = Invoke-SshCommand -UserName $userName
@@ -513,6 +700,9 @@ function Invoke-HostReadinessProbe {
         elseif ($probe.Text -match "Connection closed by") {
             Write-Probe "$($probe.UserName) connection closed: $($probe.Text)"
             Write-RouteFirstActionIfNeeded -UserName $probe.UserName
+        }
+        elseif ($probe.Text -match "Host key verification failed") {
+            Write-Probe "$($probe.UserName) host-key failed: known_hosts does not match $script:CurrentHostName"
         }
         elseif ($probe.ExitCode -eq 0) {
             Write-Probe "$($probe.UserName) failed readiness transcript: $($probe.Text)"
@@ -572,6 +762,6 @@ foreach ($candidateHostName in $hostCandidates) {
 
 Write-Probe "not ready"
 Write-ProbeEvidence
-if ($RequireReady -or $RequireRustCliSmoke -or $RequireDirectLan) {
+if ($RequireReady -or $RequireRustCliSmoke -or $RequireDirectLan -or $RequireKnownHost -or -not [string]::IsNullOrWhiteSpace($ExpectedHostKeyFingerprint)) {
     throw "Mac SSH probe is not ready"
 }

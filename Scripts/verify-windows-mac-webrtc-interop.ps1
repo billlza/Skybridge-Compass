@@ -6,6 +6,7 @@ param(
     [string[]]$MacUserNames = @("bill"),
     [string]$MacSshKeyPath = (Join-Path $env:USERPROFILE ".ssh\skybridge_mac_debug_ed25519"),
     [string]$MacKnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
+    [string]$MacExpectedHostKeyFingerprint = "",
     [string]$MacExpectedHostAddress = "192.168.0.102",
     [string]$MacDirectSourceAddress = "",
     [string]$MacSshEvidencePath = "",
@@ -79,6 +80,8 @@ $macSshParameters = @{
     UserNames = $MacUserNames
     KeyPath = $MacSshKeyPath
     KnownHostsPath = $MacKnownHostsPath
+    RequireKnownHost = $true
+    ExpectedHostKeyFingerprint = $MacExpectedHostKeyFingerprint
     ExpectedHostAddress = $MacExpectedHostAddress
     RequireReady = $true
     RequireDirectLan = $true

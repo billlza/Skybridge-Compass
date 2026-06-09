@@ -403,6 +403,9 @@ foreach ($portabilitySmokeSignal in @(
     "MacExpectedHostAddress",
     "MacDirectSourceAddress",
     "MacSshEvidencePath",
+    "MacExpectedHostKeyFingerprint",
+    "ExpectedHostKeyFingerprint",
+    "RequireKnownHost",
     "MacRemoteRepoRoot",
     "MacWebRtcProofPath",
     "MacWebRtcProofMaxAgeMs",
@@ -434,6 +437,21 @@ foreach ($appleNativePreservationSignal in @(
     "Windows-to-Apple plan must not consume AppleStream bindings"
 )) {
     Assert-Contains -Text $appleNativePreservationSmoke -Needle $appleNativePreservationSignal -Message "Apple-native preservation smoke missing signal: $appleNativePreservationSignal"
+}
+foreach ($macSshProbeSignal in @(
+    "RequireKnownHost",
+    "ExpectedHostKeyFingerprint",
+    "StrictHostKeyChecking=`$strictHostKeyChecking",
+    "ssh-keyscan",
+    "ssh-keygen -l -E sha256",
+    "hostKeyPinned",
+    "hostKeySource",
+    "hostKeyFingerprints",
+    "host-key pinned",
+    "host-key required",
+    "Host key verification failed"
+)) {
+    Assert-Contains -Text $macSshProbe -Needle $macSshProbeSignal -Message "Mac SSH probe missing host-key pinning signal: $macSshProbeSignal"
 }
 foreach ($fileTransferQrSmokeSignal in @(
     "windows-file-transfer-qr: ok",
@@ -656,6 +674,10 @@ Assert-Contains -Text $architecture -Needle "probe-mac-ssh.ps1" -Message "Archit
 Assert-Contains -Text $architecture -Needle "-RequireMacSshReady" -Message "Architecture doc missing Mac SSH readiness gate."
 Assert-Contains -Text $architecture -Needle "-EvidencePath <json>" -Message "Architecture doc missing Mac SSH evidence path."
 Assert-Contains -Text $architecture -Needle "-MacSshEvidencePath <json>" -Message "Architecture doc missing portability Mac SSH evidence path."
+Assert-Contains -Text $architecture -Needle "-MacExpectedHostKeyFingerprint <SHA256:...>" -Message "Architecture doc missing portability Mac SSH host-key fingerprint path."
+Assert-Contains -Text $architecture -Needle "StrictHostKeyChecking=yes" -Message "Architecture doc missing required Mac SSH strict host-key contract."
+Assert-Contains -Text $architecture -Needle "hostKeyPinned" -Message "Architecture doc missing Mac SSH host-key evidence flag."
+Assert-Contains -Text $architecture -Needle "RequireKnownHost" -Message "Architecture doc missing Mac SSH known-host requirement."
 Assert-Contains -Text $architecture -Needle "-RequireMacRustCliSmoke -MacRemoteRepoRoot <path>" -Message "Architecture doc missing Mac Rust CLI smoke gate."
 Assert-Contains -Text $architecture -Needle "cli_apple_to_apple_selects_apple_native" -Message "Architecture doc missing Mac Rust CLI AppleNative smoke."
 Assert-Contains -Text $architecture -Needle "-ExpectedHostAddress" -Message "Architecture doc missing Mac SSH expected-address diagnostic."
@@ -905,6 +927,8 @@ foreach ($signal in @(
     "windows-connection-launch",
     "RequireDirectLan",
     "RequireRustCliSmoke",
+    "RequireKnownHost",
+    "MacExpectedHostKeyFingerprint",
     "MacRemoteRepoRoot",
     "WebRtcProofPath",
     "ExpectedFingerprint"

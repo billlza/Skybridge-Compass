@@ -25,6 +25,7 @@ param(
     [string[]]$MacUserNames = @("bill", "Lza"),
     [string]$MacSshKeyPath = (Join-Path $env:USERPROFILE ".ssh\skybridge_mac_debug_ed25519"),
     [string]$MacKnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
+    [string]$MacExpectedHostKeyFingerprint = "",
     [string]$MacExpectedHostAddress = "192.168.0.102",
     [string]$MacDirectSourceAddress = "",
     [string]$MacSshEvidencePath = "",
@@ -120,6 +121,7 @@ function Write-AcceptanceEvidence {
             winUiEvidenceDir = $WinUiEvidenceDir
             macSshEvidencePath = $MacSshEvidencePath
             macWebRtcProofPath = $MacWebRtcProofPath
+            macExpectedHostKeyFingerprint = $MacExpectedHostKeyFingerprint
         }
         gateResults = @($script:PortabilitySmokeGateResults)
     } |
@@ -277,6 +279,7 @@ if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMa
         UserNames = $MacUserNames
         KeyPath = $MacSshKeyPath
         KnownHostsPath = $MacKnownHostsPath
+        ExpectedHostKeyFingerprint = $MacExpectedHostKeyFingerprint
         ExpectedHostAddress = $MacExpectedHostAddress
     }
 
@@ -290,14 +293,17 @@ if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMa
 
     if ($RequireMacSshReady) {
         $macSshParameters.RequireReady = $true
+        $macSshParameters.RequireKnownHost = $true
     }
 
     if ($RequireMacDirectLan) {
         $macSshParameters.RequireDirectLan = $true
+        $macSshParameters.RequireKnownHost = $true
     }
 
     if ($RequireMacRustCliSmoke) {
         $macSshParameters.RequireReady = $true
+        $macSshParameters.RequireKnownHost = $true
         $macSshParameters.RequireRustCliSmoke = $true
         $macSshParameters.RemoteRepoRoot = $MacRemoteRepoRoot
     }
@@ -325,6 +331,7 @@ if ($RequireMacWebRtcInterop) {
             MacUserNames = $MacUserNames
             MacSshKeyPath = $MacSshKeyPath
             MacKnownHostsPath = $MacKnownHostsPath
+            MacExpectedHostKeyFingerprint = $MacExpectedHostKeyFingerprint
             MacExpectedHostAddress = $MacExpectedHostAddress
             MacDirectSourceAddress = $MacDirectSourceAddress
             MacSshEvidencePath = $MacSshEvidencePath
