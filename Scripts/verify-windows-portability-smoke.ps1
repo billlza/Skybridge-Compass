@@ -167,6 +167,11 @@ Invoke-SmokeGate `
     -RelativeScriptPath "Scripts/verify-windows-webrtc-proof-smoke.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
 
+Invoke-SmokeGate `
+    -Name "apple-native-preservation" `
+    -RelativeScriptPath "Scripts/verify-apple-native-preservation.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
+
 if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMacRustCliSmoke) {
     $macSshParameters = @{
         HostName = $MacHostName
