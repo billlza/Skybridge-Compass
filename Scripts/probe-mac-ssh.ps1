@@ -7,6 +7,7 @@ param(
     [string]$KnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
     [string]$ExpectedHostAddress = "",
     [string]$DirectSourceAddress = "",
+    [string]$EvidencePath = "",
     [int]$ConnectTimeoutSeconds = 5,
     [switch]$RequireDirectLan,
     [switch]$RequireRustCliSmoke,
@@ -18,11 +19,66 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $script:CurrentHostName = $HostName
+$script:MacSshProbeMessages = [System.Collections.Generic.List[string]]::new()
+$script:MacSshProbeReady = $false
+$script:MacSshProbeReadyHostName = ""
+$script:MacSshProbeReadyUserName = ""
 
 function Write-Probe {
     param([string]$Message)
 
-    Write-Output "mac-ssh-probe: $Message"
+    $line = "mac-ssh-probe: $Message"
+    $script:MacSshProbeMessages.Add($line)
+    Write-Output $line
+}
+
+function Write-ProbeEvidence {
+    if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
+        return
+    }
+
+    $resolvedEvidencePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EvidencePath)
+    $evidenceDirectory = Split-Path -Parent $resolvedEvidencePath
+    if (-not [string]::IsNullOrWhiteSpace($evidenceDirectory)) {
+        New-Item -ItemType Directory -Force -Path $evidenceDirectory | Out-Null
+    }
+
+    $lanCandidates = @(Get-NonProxyLanIPv4Addresses |
+        ForEach-Object {
+            [ordered]@{
+                ipAddress = [string]$_.IPAddress
+                prefixLength = [int]$_.PrefixLength
+                interfaceAlias = [string]$_.InterfaceAlias
+            }
+        })
+
+    $evidence = [ordered]@{
+        generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+        hostName = $HostName
+        alternateHostNames = @($AlternateHostNames)
+        port = $Port
+        userNames = @($UserNames)
+        expectedHostAddress = $ExpectedHostAddress
+        directSourceAddress = $DirectSourceAddress
+        connectTimeoutSeconds = $ConnectTimeoutSeconds
+        requireReady = [bool]$RequireReady
+        requireDirectLan = [bool]$RequireDirectLan
+        requireRustCliSmoke = [bool]$RequireRustCliSmoke
+        remoteRepoRoot = $RemoteRepoRoot
+        keyPath = $KeyPath
+        keyPresent = Test-Path -LiteralPath $KeyPath
+        knownHostsPath = $KnownHostsPath
+        windowsLanCandidates = $lanCandidates
+        ready = [bool]$script:MacSshProbeReady
+        readyHostName = $script:MacSshProbeReadyHostName
+        readyUserName = $script:MacSshProbeReadyUserName
+        messages = @($script:MacSshProbeMessages)
+    }
+
+    $evidence |
+        ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath $resolvedEvidencePath -Encoding UTF8
+    Write-Output "mac-ssh-probe: evidence=$resolvedEvidencePath"
 }
 
 function ConvertFrom-CommaSeparatedList {
@@ -468,6 +524,7 @@ if ($UserNames.Count -eq 0) {
 
 if (-not (Test-Path -LiteralPath $KeyPath)) {
     Write-Probe "missing SSH key: $KeyPath"
+    Write-ProbeEvidence
     if ($RequireReady) {
         throw "Mac SSH probe missing SSH key: $KeyPath"
     }
@@ -490,11 +547,16 @@ foreach ($candidateHostName in $hostCandidates) {
         Invoke-MacRustCliSmoke -UserName $script:HostProbeUserName
     }
 
+    $script:MacSshProbeReady = $true
+    $script:MacSshProbeReadyHostName = $script:HostProbeHostName
+    $script:MacSshProbeReadyUserName = $script:HostProbeUserName
     Write-Probe "ready"
+    Write-ProbeEvidence
     return
 }
 
 Write-Probe "not ready"
+Write-ProbeEvidence
 if ($RequireReady -or $RequireRustCliSmoke -or $RequireDirectLan) {
     throw "Mac SSH probe is not ready"
 }

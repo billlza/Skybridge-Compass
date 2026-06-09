@@ -24,6 +24,7 @@ param(
     [string]$MacKnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
     [string]$MacExpectedHostAddress = "192.168.0.102",
     [string]$MacDirectSourceAddress = "",
+    [string]$MacSshEvidencePath = "",
     [string]$MacRemoteRepoRoot = "",
     [string]$MacWebRtcProofPath = "",
     [ValidateRange(1, 600000)]
@@ -187,6 +188,10 @@ if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMa
         $macSshParameters.DirectSourceAddress = $MacDirectSourceAddress
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($MacSshEvidencePath)) {
+        $macSshParameters.EvidencePath = $MacSshEvidencePath
+    }
+
     if ($RequireMacSshReady) {
         $macSshParameters.RequireReady = $true
     }
@@ -224,6 +229,7 @@ if ($RequireMacWebRtcInterop) {
             MacKnownHostsPath = $MacKnownHostsPath
             MacExpectedHostAddress = $MacExpectedHostAddress
             MacDirectSourceAddress = $MacDirectSourceAddress
+            MacSshEvidencePath = $MacSshEvidencePath
             MacRemoteRepoRoot = $MacRemoteRepoRoot
             WebRtcProofPath = $MacWebRtcProofPath
             ExpectedDeviceId = $ExpectedDeviceId

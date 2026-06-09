@@ -4438,13 +4438,21 @@ foreach ($docSignal in @(
     "Visual QA",
     "-EvidenceDir <dir>",
     "-WinUiEvidenceDir <dir>",
-    "windows-ui-visual-evidence.json"
+    "windows-ui-visual-evidence.json",
+    "-MacSshEvidencePath <json>",
+    "Mac SSH readiness probe records host candidates"
 )) {
     Assert-Contains -Text $parityDoc -Needle $docSignal -Message "windows-ui-parity-contract.md missing signal: $docSignal"
 }
 
 foreach ($macSshProbeSignal in @(
     '$AlternateHostNames',
+    '$EvidencePath',
+    'Write-ProbeEvidence',
+    'mac-ssh-probe: evidence=',
+    'windowsLanCandidates',
+    'readyHostName',
+    'readyUserName',
     '$script:CurrentHostName',
     'candidate: host=',
     'LzadeMacBook-Pro.local',
@@ -4478,6 +4486,8 @@ foreach ($macSshProbeSignal in @(
 foreach ($portabilityMacSshSignal in @(
     '$RequireMacDirectLan',
     '$macSshParameters.RequireDirectLan',
+    '$MacSshEvidencePath',
+    '$macSshParameters.EvidencePath',
     '-RequireMacDirectLan to reject proxy/TUN routes'
 )) {
     Assert-Contains -Text $portabilitySmoke -Needle $portabilityMacSshSignal -Message "verify-windows-portability-smoke.ps1 missing Mac direct-LAN gate signal: $portabilityMacSshSignal"
@@ -4489,6 +4499,7 @@ foreach ($webrtcInteropSignal in @(
     'docs/windows-webrtc-proof-schema.md',
     'verify-windows-mac-webrtc-interop.ps1',
     'RequireMacWebRtcInterop',
+    'MacSshEvidencePath',
     'MacWebRtcProofPath',
     'MacWebRtcProofMaxAgeMs',
     'windows-mac-webrtc-interop: ok',

@@ -176,6 +176,20 @@ foreach ($signal in @(
 
 Push-Location $coreRoot
 try {
+    $fmtResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("fmt", "--all", "--", "--check")
+    if (-not [string]::IsNullOrWhiteSpace($fmtResult.Text)) {
+        Write-Output $fmtResult.Text
+    }
+
+    Assert-True -Condition ($fmtResult.ExitCode -eq 0) -Message "cargo fmt --all -- --check failed."
+
+    $clippyResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("clippy", "--all-targets", "--all-features", "--", "-D", "warnings")
+    if (-not [string]::IsNullOrWhiteSpace($clippyResult.Text)) {
+        Write-Output $clippyResult.Text
+    }
+
+    Assert-True -Condition ($clippyResult.ExitCode -eq 0) -Message "cargo clippy --all-targets --all-features -- -D warnings failed."
+
     $buildResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("build", "--lib")
     if (-not [string]::IsNullOrWhiteSpace($buildResult.Text)) {
         Write-Output $buildResult.Text

@@ -8,6 +8,7 @@ param(
     [string]$MacKnownHostsPath = (Join-Path $env:TEMP "skybridge_mac_debug_known_hosts"),
     [string]$MacExpectedHostAddress = "192.168.0.102",
     [string]$MacDirectSourceAddress = "",
+    [string]$MacSshEvidencePath = "",
     [Parameter(Mandatory = $true)]
     [string]$MacRemoteRepoRoot,
     [Parameter(Mandatory = $true)]
@@ -89,6 +90,9 @@ $macSshParameters = @{
 }
 if (-not [string]::IsNullOrWhiteSpace($MacDirectSourceAddress)) {
     $macSshParameters.DirectSourceAddress = $MacDirectSourceAddress
+}
+if (-not [string]::IsNullOrWhiteSpace($MacSshEvidencePath)) {
+    $macSshParameters.EvidencePath = $MacSshEvidencePath
 }
 
 Invoke-InteropGate `

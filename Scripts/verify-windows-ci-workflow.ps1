@@ -84,6 +84,12 @@ foreach ($signal in @(
 
 foreach ($signal in @(
     "MinimumLineCoverage",
+    "cargo fmt",
+    "--check",
+    "cargo clippy",
+    "--all-targets",
+    "--all-features",
+    "-D warnings",
     "cargo llvm-cov",
     "fail-under-lines",
     "cli.rs",

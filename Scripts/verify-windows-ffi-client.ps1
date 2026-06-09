@@ -386,6 +386,7 @@ foreach ($portabilitySmokeSignal in @(
     "MacAlternateHostNames",
     "MacExpectedHostAddress",
     "MacDirectSourceAddress",
+    "MacSshEvidencePath",
     "MacRemoteRepoRoot",
     "MacWebRtcProofPath",
     "MacWebRtcProofMaxAgeMs",
@@ -500,6 +501,12 @@ foreach ($forbiddenWorkflowSignal in @(
 }
 foreach ($macSshProbeSignal in @(
     'mac-ssh-probe: $Message',
+    "EvidencePath",
+    "Write-ProbeEvidence",
+    "mac-ssh-probe: evidence=",
+    "windowsLanCandidates",
+    "readyHostName",
+    "readyUserName",
     "Resolve-DnsName",
     "ExpectedHostAddress",
     "AlternateHostNames",
@@ -582,6 +589,8 @@ Assert-Contains -Text $architecture -Needle "WorkspaceActionButtonWithDetailTemp
 Assert-Contains -Text $architecture -Needle 'must not introduce inline `Button` controls' -Message "Architecture doc missing inline button prohibition."
 Assert-Contains -Text $architecture -Needle "probe-mac-ssh.ps1" -Message "Architecture doc missing Mac SSH probe entrypoint."
 Assert-Contains -Text $architecture -Needle "-RequireMacSshReady" -Message "Architecture doc missing Mac SSH readiness gate."
+Assert-Contains -Text $architecture -Needle "-EvidencePath <json>" -Message "Architecture doc missing Mac SSH evidence path."
+Assert-Contains -Text $architecture -Needle "-MacSshEvidencePath <json>" -Message "Architecture doc missing portability Mac SSH evidence path."
 Assert-Contains -Text $architecture -Needle "-RequireMacRustCliSmoke -MacRemoteRepoRoot <path>" -Message "Architecture doc missing Mac Rust CLI smoke gate."
 Assert-Contains -Text $architecture -Needle "cli_apple_to_apple_selects_apple_native" -Message "Architecture doc missing Mac Rust CLI AppleNative smoke."
 Assert-Contains -Text $architecture -Needle "-ExpectedHostAddress" -Message "Architecture doc missing Mac SSH expected-address diagnostic."

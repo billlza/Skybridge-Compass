@@ -107,6 +107,7 @@ Run the real Windows-to-mac interop gate only after direct LAN, Mac SSH, Mac Rus
 ```powershell
 Scripts\verify-windows-portability-smoke.ps1 `
     -RequireMacWebRtcInterop `
+    -MacSshEvidencePath <mac-ssh-evidence.json> `
     -MacRemoteRepoRoot <path> `
     -MacWebRtcProofPath <proof.json> `
     -ExpectedDeviceId <device-id> `
