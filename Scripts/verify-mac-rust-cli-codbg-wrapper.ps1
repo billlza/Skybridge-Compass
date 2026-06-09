@@ -70,6 +70,14 @@ if ($RemoteRepoRoot -ne "/Users/bill/Skybridge-Compass") { throw "Unexpected rem
     hostKeyPinned = $true
     hostKeySource = "ssh-keyscan-expected-fingerprint"
     hostKeyFingerprints = @($ExpectedHostKeyFingerprint)
+    remediation = [ordered]@{
+        status = "ready"
+        reasonCodes = @()
+        targetAddresses = @($HostName)
+        recommendedDirectSourceAddresses = @()
+        recommendedActions = @()
+        nextProbeCommand = "Scripts\prepare-mac-rust-cli-codbg.ps1"
+    }
 } |
     ConvertTo-Json -Depth 8 |
     Set-Content -LiteralPath $EvidencePath -Encoding UTF8
@@ -100,6 +108,7 @@ Write-Output "fake-probe: ok"
     Assert-True -Condition ([bool]$summary.probe.hostKeyPinned) -Message "Wrapper summary did not record hostKeyPinned=true."
     Assert-True -Condition ([bool]$summary.probe.directLanLikely) -Message "Wrapper summary did not record directLanLikely=true."
     Assert-True -Condition ($summary.probeEvidencePath -eq $evidencePath) -Message "Wrapper summary did not record the explicit probe evidence path."
+    Assert-True -Condition ($summary.probe.remediation.status -eq "ready") -Message "Wrapper summary did not carry remediation status."
     Assert-True -Condition ($summary.macRustCliSmoke -eq "cli_apple_to_apple_selects_apple_native") -Message "Wrapper summary missing Mac Rust CLI smoke name."
     Assert-True -Condition ($summary.nextInteropCommand -match "verify-windows-mac-webrtc-interop\.ps1") -Message "Wrapper summary missing next interop command."
 }

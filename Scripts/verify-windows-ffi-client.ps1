@@ -676,6 +676,10 @@ foreach ($macSshProbeSignal in @(
     "direct-source warning:",
     "direct-source candidate:",
     "direct source address is not a validated same-subnet Windows LAN IPv4",
+    "New-LanRemediationEvidence",
+    "reasonCodes",
+    "nextProbeCommand",
+    "recommendedDirectSourceAddresses",
     "Write-RouteFirstActionIfNeeded",
     "route action: fix the direct LAN route or proxy bypass",
     "Test-IsReadyProbeResult",
@@ -714,6 +718,7 @@ foreach ($macRustCliCodbgSignal in @(
     "directLanLikely",
     "hostKeyPinned",
     "proxyTunnelRouteDetected",
+    "remediation",
     "System.Text.UTF8Encoding",
     "Missing Mac SSH key"
 )) {
@@ -732,6 +737,7 @@ foreach ($macRustCliCodbgWrapperSmokeSignal in @(
     "summary.probe.ready",
     "summary.probe.hostKeyPinned",
     "summary.probe.directLanLikely",
+    "summary.probe.remediation.status",
     "cli_apple_to_apple_selects_apple_native",
     "verify-windows-mac-webrtc-interop",
     "Refusing to remove unexpected test directory"

@@ -37,6 +37,157 @@ function Write-Probe {
     Write-Output $line
 }
 
+function ConvertTo-PowerShellSingleQuotedArgument {
+    param([string]$Value)
+
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Get-ProbeTargetAddressesFromMessages {
+    param([string[]]$Messages)
+
+    @($Messages |
+        ForEach-Object {
+            $match = [regex]::Match([string]$_, "target: address=([^\s]+)")
+            if ($match.Success) {
+                $match.Groups[1].Value
+            }
+        } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique)
+}
+
+function Get-RecommendedDirectSourceAddresses {
+    param(
+        [object[]]$LanCandidates,
+        [string[]]$TargetAddresses
+    )
+
+    $recommendations = [System.Collections.Generic.List[object]]::new()
+    foreach ($targetAddress in $TargetAddresses) {
+        if (-not (Test-IsIPv4Address -Address $targetAddress)) {
+            continue
+        }
+
+        foreach ($candidate in $LanCandidates) {
+            $candidateAddress = [string]$candidate.ipAddress
+            $prefixLength = [int]$candidate.prefixLength
+            if (Test-IsSameIPv4Subnet -LeftAddress $targetAddress -RightAddress $candidateAddress -PrefixLength $prefixLength) {
+                $recommendations.Add([ordered]@{
+                    targetAddress = $targetAddress
+                    directSourceAddress = $candidateAddress
+                    prefixLength = $prefixLength
+                    interfaceAlias = [string]$candidate.interfaceAlias
+                })
+            }
+        }
+    }
+
+    return @($recommendations | Sort-Object targetAddress, directSourceAddress -Unique)
+}
+
+function New-MacRustCliCodbgCommand {
+    param([object[]]$RecommendedDirectSources)
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts.Add("Scripts\prepare-mac-rust-cli-codbg.ps1")
+    $parts.Add("-MacHostName")
+    $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $HostName))
+    $parts.Add("-MacPort $Port")
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedHostAddress)) {
+        $parts.Add("-MacExpectedHostAddress")
+        $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $ExpectedHostAddress))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedHostKeyFingerprint)) {
+        $parts.Add("-MacExpectedHostKeyFingerprint")
+        $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value (ConvertTo-NormalizedHostKeyFingerprint -Fingerprint $ExpectedHostKeyFingerprint)))
+    }
+    else {
+        $parts.Add("-MacExpectedHostKeyFingerprint <SHA256:mac-host-key-fingerprint>")
+    }
+
+    if ($RecommendedDirectSources.Count -eq 1) {
+        $parts.Add("-MacDirectSourceAddress")
+        $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value ([string]$RecommendedDirectSources[0].directSourceAddress)))
+    }
+
+    $parts.Add("-ProbeEvidencePath")
+    $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value "artifacts\mac-ssh-evidence.json"))
+    $parts.Add("-SummaryPath")
+    $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value "artifacts\mac-rust-cli-codbg-summary.json"))
+    $parts.Add("-RequireDirectLan")
+
+    if ($RequireRustCliSmoke -or -not [string]::IsNullOrWhiteSpace($RemoteRepoRoot)) {
+        $parts.Add("-RequireRustCliSmoke")
+        if (-not [string]::IsNullOrWhiteSpace($RemoteRepoRoot)) {
+            $parts.Add("-MacRemoteRepoRoot")
+            $parts.Add((ConvertTo-PowerShellSingleQuotedArgument -Value $RemoteRepoRoot))
+        }
+        else {
+            $parts.Add("-MacRemoteRepoRoot <mac-repo-root>")
+        }
+    }
+
+    return ($parts -join " ")
+}
+
+function New-LanRemediationEvidence {
+    param(
+        [string[]]$Messages,
+        [object[]]$LanCandidates,
+        [bool]$ProxyTunnelRouteDetected,
+        [bool]$LocalNameProxyResolutionDetected,
+        [bool]$SameSubnetLanCandidateDetected,
+        [bool]$RouteFirstFailureDetected
+    )
+
+    $targetAddresses = @(Get-ProbeTargetAddressesFromMessages -Messages $Messages)
+    $recommendedDirectSources = @(Get-RecommendedDirectSourceAddresses -LanCandidates $LanCandidates -TargetAddresses $targetAddresses)
+    $reasonCodes = [System.Collections.Generic.List[string]]::new()
+    $recommendedActions = [System.Collections.Generic.List[string]]::new()
+
+    if ($ProxyTunnelRouteDetected) {
+        $reasonCodes.Add("proxy-tunnel-route")
+        $recommendedActions.Add("Bypass or disable the 198.18.0.0/15 proxy/TUN route for the Mac private address before treating SSH or product interop as ready.")
+    }
+
+    if ($LocalNameProxyResolutionDetected) {
+        $reasonCodes.Add("local-name-proxy-resolution")
+        $recommendedActions.Add("Use the Mac private LAN IPv4 until .local resolves to a private LAN address instead of 198.18.0.0/15.")
+    }
+
+    if (-not $SameSubnetLanCandidateDetected) {
+        $reasonCodes.Add("no-same-subnet-lan-candidate")
+        $recommendedActions.Add("Put Windows and the Mac on the same non-proxy LAN subnet, then rerun the probe with -MacDirectSourceAddress if more than one Windows LAN address exists.")
+    }
+
+    if ($RouteFirstFailureDetected) {
+        $reasonCodes.Add("route-first-failure")
+        $recommendedActions.Add("Fix the direct LAN route or proxy bypass before treating banner timeouts as SSH key, Rust CLI, or product defects.")
+    }
+
+    if ($RequireKnownHost -and -not $script:MacSshProbeHostKeyPinned) {
+        $reasonCodes.Add("host-key-not-pinned")
+        $recommendedActions.Add("Keep -MacExpectedHostKeyFingerprint set; the host key can only be pinned after ssh-keyscan reaches the real Mac endpoint.")
+    }
+
+    if (-not $script:MacSshProbeReady) {
+        $reasonCodes.Add("ssh-not-ready")
+        $recommendedActions.Add("After direct LAN and host-key pinning pass, ensure the Windows Mac debug public key is authorized for the Mac login user.")
+    }
+
+    return [ordered]@{
+        status = if ($script:MacSshProbeReady -and $SameSubnetLanCandidateDetected -and -not $ProxyTunnelRouteDetected -and $script:MacSshProbeHostKeyPinned) { "ready" } else { "blocked" }
+        reasonCodes = @($reasonCodes | Select-Object -Unique)
+        targetAddresses = @($targetAddresses)
+        recommendedDirectSourceAddresses = @($recommendedDirectSources)
+        recommendedActions = @($recommendedActions | Select-Object -Unique)
+        nextProbeCommand = New-MacRustCliCodbgCommand -RecommendedDirectSources $recommendedDirectSources
+    }
+}
+
 function Write-ProbeEvidence {
     if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
         return
@@ -65,6 +216,13 @@ function Write-ProbeEvidence {
     $localNameProxyResolutionDetected = @($messages | Where-Object { $_ -match "resolve warning: .* resolved to .* in 198\.18\.0\.0/15" }).Count -gt 0
     $sameSubnetLanCandidateDetected = @($messages | Where-Object { $_ -match "sameSubnet=True" }).Count -gt 0
     $routeFirstFailureDetected = @($messages | Where-Object { $_ -match "route action: fix the direct LAN route or proxy bypass" }).Count -gt 0
+    $remediation = New-LanRemediationEvidence `
+        -Messages $messages `
+        -LanCandidates $lanCandidates `
+        -ProxyTunnelRouteDetected $proxyTunnelRouteDetected `
+        -LocalNameProxyResolutionDetected $localNameProxyResolutionDetected `
+        -SameSubnetLanCandidateDetected $sameSubnetLanCandidateDetected `
+        -RouteFirstFailureDetected $routeFirstFailureDetected
 
     $evidence = [ordered]@{
         generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
@@ -94,6 +252,7 @@ function Write-ProbeEvidence {
         sameSubnetLanCandidateDetected = $sameSubnetLanCandidateDetected
         routeFirstFailureDetected = $routeFirstFailureDetected
         directLanLikely = [bool]($sameSubnetLanCandidateDetected -and -not $proxyTunnelRouteDetected)
+        remediation = $remediation
         ready = [bool]$script:MacSshProbeReady
         readyHostName = $script:MacSshProbeReadyHostName
         readyUserName = $script:MacSshProbeReadyUserName

@@ -114,6 +114,8 @@ Scripts\prepare-mac-rust-cli-codbg.ps1 `
     -MacRemoteRepoRoot <mac-repo-root>
 ```
 
+The probe evidence records `remediation.reasonCodes`, recommended direct-source candidates, and `nextProbeCommand`; a `proxy-tunnel-route` or `no-same-subnet-lan-candidate` reason must be fixed before treating Mac SSH, DNS-SD, WebRTC proof, or product connection failures as interop bugs.
+
 Run the real Windows-to-mac interop gate only after direct LAN, Mac SSH, Mac Rust CLI, native DNS-SD, and helper proof generation are ready:
 
 ```powershell

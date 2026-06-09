@@ -209,6 +209,7 @@ $summary = [ordered]@{
             hostKeyPinned = [bool]$probeEvidence.hostKeyPinned
             hostKeySource = [string]$probeEvidence.hostKeySource
             hostKeyFingerprints = @($probeEvidence.hostKeyFingerprints)
+            remediation = if ($probeEvidence.PSObject.Properties.Name -contains "remediation") { $probeEvidence.remediation } else { $null }
         }
     }
     else {

@@ -257,6 +257,8 @@ foreach ($signal in @(
     "RequireRustCliSmoke",
     "MacRemoteRepoRoot",
     "probeEvidencePath",
+    "remediation",
+    "reasonCodes",
     "nextInteropCommand",
     "verify-windows-mac-webrtc-interop.ps1",
     "RequirePeer",
