@@ -1,6 +1,6 @@
 param(
     [string]$HostName = "192.168.0.102",
-    [string[]]$AlternateHostNames = @("LzadeMacBook-Pro.local"),
+    [string[]]$AlternateHostNames = @("LzadeMacBook-Pro.local", "bill.local"),
     [int]$Port = 22,
     [string[]]$UserNames = @("bill", "Lza"),
     [string]$KeyPath = (Join-Path $env:USERPROFILE ".ssh\skybridge_mac_debug_ed25519"),
@@ -52,10 +52,20 @@ function Write-ProbeEvidence {
             }
         })
 
+    $messages = @($script:MacSshProbeMessages)
+    $hostCandidates = @($HostName) + @($AlternateHostNames) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    $proxyTunnelRouteDetected = @($messages | Where-Object { $_ -match "route warning: source address is in 198\.18\.0\.0/15" }).Count -gt 0
+    $localNameProxyResolutionDetected = @($messages | Where-Object { $_ -match "resolve warning: .* resolved to .* in 198\.18\.0\.0/15" }).Count -gt 0
+    $sameSubnetLanCandidateDetected = @($messages | Where-Object { $_ -match "sameSubnet=True" }).Count -gt 0
+    $routeFirstFailureDetected = @($messages | Where-Object { $_ -match "route action: fix the direct LAN route or proxy bypass" }).Count -gt 0
+
     $evidence = [ordered]@{
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
         hostName = $HostName
         alternateHostNames = @($AlternateHostNames)
+        hostCandidates = @($hostCandidates)
         port = $Port
         userNames = @($UserNames)
         expectedHostAddress = $ExpectedHostAddress
@@ -69,10 +79,15 @@ function Write-ProbeEvidence {
         keyPresent = Test-Path -LiteralPath $KeyPath
         knownHostsPath = $KnownHostsPath
         windowsLanCandidates = $lanCandidates
+        proxyTunnelRouteDetected = $proxyTunnelRouteDetected
+        localNameProxyResolutionDetected = $localNameProxyResolutionDetected
+        sameSubnetLanCandidateDetected = $sameSubnetLanCandidateDetected
+        routeFirstFailureDetected = $routeFirstFailureDetected
+        directLanLikely = [bool]($sameSubnetLanCandidateDetected -and -not $proxyTunnelRouteDetected)
         ready = [bool]$script:MacSshProbeReady
         readyHostName = $script:MacSshProbeReadyHostName
         readyUserName = $script:MacSshProbeReadyUserName
-        messages = @($script:MacSshProbeMessages)
+        messages = @($messages)
     }
 
     $evidence |

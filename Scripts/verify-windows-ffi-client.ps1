@@ -515,12 +515,19 @@ foreach ($macSshProbeSignal in @(
     "windowsLanCandidates",
     "readyHostName",
     "readyUserName",
+    "hostCandidates",
+    "proxyTunnelRouteDetected",
+    "localNameProxyResolutionDetected",
+    "sameSubnetLanCandidateDetected",
+    "routeFirstFailureDetected",
+    "directLanLikely",
     "Resolve-DnsName",
     "ExpectedHostAddress",
     "AlternateHostNames",
     "CurrentHostName",
     "candidate: host=",
     "LzadeMacBook-Pro.local",
+    "bill.local",
     "198.18.0.0/15",
     "prefer the Mac private LAN IPv4",
     "DirectSourceAddress",
@@ -603,6 +610,9 @@ Assert-Contains -Text $architecture -Needle "-RequireMacRustCliSmoke -MacRemoteR
 Assert-Contains -Text $architecture -Needle "cli_apple_to_apple_selects_apple_native" -Message "Architecture doc missing Mac Rust CLI AppleNative smoke."
 Assert-Contains -Text $architecture -Needle "-ExpectedHostAddress" -Message "Architecture doc missing Mac SSH expected-address diagnostic."
 Assert-Contains -Text $architecture -Needle "LzadeMacBook-Pro.local" -Message "Architecture doc missing Mac .local alternate host diagnostic."
+Assert-Contains -Text $architecture -Needle "bill.local" -Message "Architecture doc missing user-provided Mac hostname alternate diagnostic."
+Assert-Contains -Text $architecture -Needle "proxyTunnelRouteDetected" -Message "Architecture doc missing structured Mac SSH proxy-route evidence flag."
+Assert-Contains -Text $architecture -Needle "directLanLikely" -Message "Architecture doc missing structured Mac SSH direct-LAN evidence flag."
 Assert-Contains -Text $architecture -Needle "198.18.0.0/15" -Message "Architecture doc missing proxy-route diagnostic."
 Assert-Contains -Text $architecture -Needle 'final manual action surface is explicitly `Cancel` followed by `Connect`' -Message "Architecture doc missing manual final Cancel/Connect action order."
 Assert-Contains -Text $architecture -Needle "WorkspaceActionCommandId.CancelManualConnection" -Message "Architecture doc missing manual Cancel command role."

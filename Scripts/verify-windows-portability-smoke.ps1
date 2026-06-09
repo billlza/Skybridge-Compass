@@ -17,7 +17,7 @@ param(
     [string]$ExpectedFingerprint = "",
     [string]$SearchText = "",
     [string]$MacHostName = "192.168.0.102",
-    [string[]]$MacAlternateHostNames = @("LzadeMacBook-Pro.local"),
+    [string[]]$MacAlternateHostNames = @("LzadeMacBook-Pro.local", "bill.local"),
     [int]$MacPort = 22,
     [string[]]$MacUserNames = @("bill", "Lza"),
     [string]$MacSshKeyPath = (Join-Path $env:USERPROFILE ".ssh\skybridge_mac_debug_ed25519"),
