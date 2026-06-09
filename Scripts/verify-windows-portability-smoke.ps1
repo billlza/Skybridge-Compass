@@ -198,6 +198,11 @@ Invoke-SmokeGate `
     -EvidencePath $StackFreshnessEvidencePath
 
 Invoke-SmokeGate `
+    -Name "windows-portability-acceptance-map" `
+    -RelativeScriptPath "Scripts/verify-windows-portability-acceptance-map.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
+
+Invoke-SmokeGate `
     -Name "windows-ffi-client" `
     -RelativeScriptPath "Scripts/verify-windows-ffi-client.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
