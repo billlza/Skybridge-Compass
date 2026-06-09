@@ -125,6 +125,7 @@ foreach ($signal in @(
     "cli_frame_describe_accepts_plain_frame",
     "cli_frame_describe_reports_roundtrip_metadata",
     "cli_connection_plan_reports_core_contract",
+    "cli_windows_to_apple_same_lan_connection_plan_uses_webrtc",
     "cli_discovery_parse_accepts_mac_bonjour_txt",
     "cli_webrtc_proof_validate_accepts_schema_smoke",
     "cli_webrtc_proof_validate_rejects_missing_sbf1_smoke",

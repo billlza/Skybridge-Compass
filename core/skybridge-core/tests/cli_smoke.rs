@@ -391,6 +391,36 @@ fn cli_connection_plan_reports_core_contract() {
 }
 
 #[test]
+fn cli_windows_to_apple_same_lan_connection_plan_uses_webrtc() {
+    let output = skybridge()
+        .args([
+            "connection",
+            "plan",
+            "--local",
+            "windows",
+            "--remote",
+            "macos",
+            "--path",
+            "same-lan",
+            "--local-caps",
+            "xwing,mlkem,x25519",
+            "--remote-suites",
+            "0x1001,0x0101,0x0001",
+            "--allow-classic",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("transport=WebRtcDataChannel"));
+    assert!(stdout.contains("transport_audit=WebRtcInterop"));
+    assert!(stdout.contains("channel.control=WebRtcDataChannel:skybridge.control"));
+    assert!(stdout.contains("channel.realtime=WebRtcDataChannel:skybridge.realtime"));
+    assert!(!stdout.contains("AppleNative"));
+}
+
+#[test]
 fn cli_apple_to_apple_connection_plan_keeps_apple_native_channels() {
     let output = skybridge()
         .args([
