@@ -52,8 +52,12 @@ foreach ($signal in @(
     "cargo install cargo-llvm-cov --locked",
     "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
     "git remote set-url --push origin git@github.com:billlza/Skybridge-Compass.git",
+    "New-Item -ItemType Directory -Force -Path artifacts",
     "Scripts\verify-windows-portability-smoke.ps1",
     "-CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage",
+    "-StackFreshnessEvidencePath artifacts\windows-stack-freshness.json",
+    "-RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json",
+    "-AcceptanceEvidencePath artifacts\windows-portability-acceptance.json",
     "permissions:",
     "contents: read"
 )) {
@@ -78,7 +82,8 @@ foreach ($signal in @(
     "RequireKnownHosts",
     "RequireCredentialHelperReset",
     "IncludeRustCliCoverage",
-    "CheckOnlineStackFreshness"
+    "CheckOnlineStackFreshness",
+    "RustCliCoverageEvidencePath"
 )) {
     Assert-Contains -Text $portabilitySmoke -Needle $signal -Message "Portability smoke missing CI signal: $signal"
 }
@@ -93,6 +98,10 @@ foreach ($signal in @(
     "-D warnings",
     "cargo llvm-cov",
     "fail-under-lines",
+    "EvidencePath",
+    "rust-cli-coverage: evidence=",
+    "totalLineCoverage",
+    "cliLineCoverage",
     "cli.rs",
     "cli.rs line coverage"
 )) {

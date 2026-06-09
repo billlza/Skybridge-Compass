@@ -5,6 +5,7 @@ param(
     [switch]$IncludeNativeDnsSdAcceptance,
     [switch]$CheckOnlineStackFreshness,
     [string]$StackFreshnessEvidencePath = "",
+    [string]$RustCliCoverageEvidencePath = "",
     [string]$AcceptanceEvidencePath = "",
     [switch]$CiMode,
     [switch]$ProbeMacSsh,
@@ -115,6 +116,7 @@ function Write-AcceptanceEvidence {
         }
         evidencePaths = [ordered]@{
             stackFreshnessEvidencePath = $StackFreshnessEvidencePath
+            rustCliCoverageEvidencePath = $RustCliCoverageEvidencePath
             winUiEvidenceDir = $WinUiEvidenceDir
             macSshEvidencePath = $MacSshEvidencePath
             macWebRtcProofPath = $MacWebRtcProofPath
@@ -374,17 +376,23 @@ else {
 }
 
 if ($IncludeRustCliCoverage) {
+    $rustCliCoverageParameters = @{
+        RepoRoot = $RepoRoot
+        MinimumLineCoverage = $MinimumLineCoverage
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RustCliCoverageEvidencePath)) {
+        $rustCliCoverageParameters.EvidencePath = $RustCliCoverageEvidencePath
+    }
+
     Invoke-SmokeGate `
         -Name "rust-cli-coverage" `
         -RelativeScriptPath "Scripts/verify-rust-cli-coverage.ps1" `
-        -Parameters @{
-            RepoRoot = $RepoRoot
-            MinimumLineCoverage = $MinimumLineCoverage
-        }
+        -Parameters $rustCliCoverageParameters `
+        -EvidencePath $RustCliCoverageEvidencePath
 }
 else {
     Write-Output "windows-portability-smoke: skipped rust-cli-coverage; pass -IncludeRustCliCoverage for the 90% Rust CLI coverage gate."
-    Add-SmokeGateResult -Name "rust-cli-coverage" -Status "skipped" -Detail "Pass -IncludeRustCliCoverage for the 90% Rust CLI coverage gate."
+    Add-SmokeGateResult -Name "rust-cli-coverage" -Status "skipped" -Detail "Pass -IncludeRustCliCoverage for the 90% Rust CLI coverage gate." -EvidencePath $RustCliCoverageEvidencePath
 }
 
 Write-AcceptanceEvidence

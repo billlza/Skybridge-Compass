@@ -1,6 +1,7 @@
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
-    [double]$MinimumLineCoverage = 90.0
+    [double]$MinimumLineCoverage = 90.0,
+    [string]$EvidencePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -93,6 +94,65 @@ function Invoke-NativeCommand {
     }
 }
 
+$script:RustCoverageCommandResults = [System.Collections.Generic.List[object]]::new()
+$script:RustCoverageText = ""
+$script:RustTotalLineCoverage = $null
+$script:RustCliLineCoverage = $null
+$script:RustNativeLibraryPath = ""
+
+function Add-CoverageCommandResult {
+    param(
+        [string]$Name,
+        [int]$ExitCode,
+        [string]$Output
+    )
+
+    $outputPreview = $Output
+    if ($null -ne $outputPreview -and $outputPreview.Length -gt 4000) {
+        $outputPreview = $outputPreview.Substring(0, 4000)
+    }
+
+    $script:RustCoverageCommandResults.Add([ordered]@{
+        name = $Name
+        exitCode = $ExitCode
+        outputPreview = $outputPreview
+    })
+}
+
+function Write-CoverageEvidence {
+    param(
+        [string]$Status,
+        [string]$Detail = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
+        return
+    }
+
+    $resolvedEvidencePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EvidencePath)
+    $evidenceDirectory = Split-Path -Parent $resolvedEvidencePath
+    if (-not [string]::IsNullOrWhiteSpace($evidenceDirectory)) {
+        New-Item -ItemType Directory -Force -Path $evidenceDirectory | Out-Null
+    }
+
+    [ordered]@{
+        generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+        status = $Status
+        detail = $Detail
+        repoRoot = $RepoRoot
+        coreRoot = $coreRoot
+        minimumLineCoverage = $MinimumLineCoverage
+        totalLineCoverage = $script:RustTotalLineCoverage
+        cliLineCoverage = $script:RustCliLineCoverage
+        nativeLibraryPath = $script:RustNativeLibraryPath
+        coverageSummary = $script:RustCoverageText
+        commandResults = @($script:RustCoverageCommandResults)
+    } |
+        ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath $resolvedEvidencePath -Encoding UTF8
+    Write-Output "rust-cli-coverage: evidence=$resolvedEvidencePath"
+}
+
 $coreRoot = Join-Path $RepoRoot "core/skybridge-core"
 Assert-True -Condition (Test-Path -LiteralPath (Join-Path $coreRoot "Cargo.toml")) -Message "Missing Rust core Cargo.toml: $coreRoot"
 
@@ -177,6 +237,7 @@ foreach ($signal in @(
 Push-Location $coreRoot
 try {
     $fmtResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("fmt", "--all", "--", "--check")
+    Add-CoverageCommandResult -Name "cargo fmt --all -- --check" -ExitCode $fmtResult.ExitCode -Output $fmtResult.Text
     if (-not [string]::IsNullOrWhiteSpace($fmtResult.Text)) {
         Write-Output $fmtResult.Text
     }
@@ -184,6 +245,7 @@ try {
     Assert-True -Condition ($fmtResult.ExitCode -eq 0) -Message "cargo fmt --all -- --check failed."
 
     $clippyResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("clippy", "--all-targets", "--all-features", "--", "-D", "warnings")
+    Add-CoverageCommandResult -Name "cargo clippy --all-targets --all-features -- -D warnings" -ExitCode $clippyResult.ExitCode -Output $clippyResult.Text
     if (-not [string]::IsNullOrWhiteSpace($clippyResult.Text)) {
         Write-Output $clippyResult.Text
     }
@@ -191,15 +253,18 @@ try {
     Assert-True -Condition ($clippyResult.ExitCode -eq 0) -Message "cargo clippy --all-targets --all-features -- -D warnings failed."
 
     $buildResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("build", "--lib")
+    Add-CoverageCommandResult -Name "cargo build --lib" -ExitCode $buildResult.ExitCode -Output $buildResult.Text
     if (-not [string]::IsNullOrWhiteSpace($buildResult.Text)) {
         Write-Output $buildResult.Text
     }
 
     Assert-True -Condition ($buildResult.ExitCode -eq 0) -Message "cargo build --lib failed."
     $nativeLibraryPath = Join-Path (Join-Path $coreRoot "target/debug") (Get-NativeLibraryFileName)
+    $script:RustNativeLibraryPath = $nativeLibraryPath
     Assert-True -Condition (Test-Path -LiteralPath $nativeLibraryPath) -Message "Missing native skybridge_core library after cargo build --lib: $nativeLibraryPath"
 
     $testResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("test")
+    Add-CoverageCommandResult -Name "cargo test" -ExitCode $testResult.ExitCode -Output $testResult.Text
     if (-not [string]::IsNullOrWhiteSpace($testResult.Text)) {
         Write-Output $testResult.Text
     }
@@ -207,14 +272,23 @@ try {
     Assert-True -Condition ($testResult.ExitCode -eq 0) -Message "cargo test failed."
 
     $coverageResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("llvm-cov", "--fail-under-lines", "$MinimumLineCoverage", "--summary-only")
+    Add-CoverageCommandResult -Name "cargo llvm-cov --fail-under-lines $MinimumLineCoverage --summary-only" -ExitCode $coverageResult.ExitCode -Output $coverageResult.Text
     $coverageText = $coverageResult.Text
+    $script:RustCoverageText = $coverageText
     Write-Output $coverageText
     Assert-True -Condition ($coverageResult.ExitCode -eq 0) -Message "cargo llvm-cov failed or total line coverage is below $MinimumLineCoverage%."
 
     $totalLineCoverage = Get-LineCoverage -CoverageText $coverageText -RowName "TOTAL"
     $cliLineCoverage = Get-LineCoverage -CoverageText $coverageText -RowName "cli.rs"
+    $script:RustTotalLineCoverage = $totalLineCoverage
+    $script:RustCliLineCoverage = $cliLineCoverage
     Assert-True -Condition ($totalLineCoverage -ge $MinimumLineCoverage) -Message "Total line coverage $totalLineCoverage% is below $MinimumLineCoverage%."
     Assert-True -Condition ($cliLineCoverage -ge $MinimumLineCoverage) -Message "cli.rs line coverage $cliLineCoverage% is below $MinimumLineCoverage%."
+    Write-CoverageEvidence -Status "passed"
+}
+catch {
+    Write-CoverageEvidence -Status "failed" -Detail $_.Exception.Message
+    throw
 }
 finally {
     Pop-Location

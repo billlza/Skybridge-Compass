@@ -379,6 +379,8 @@ foreach ($portabilitySmokeSignal in @(
     "CheckOnlineStackFreshness",
     "StackFreshnessEvidencePath",
     "stackFreshnessParameters.EvidencePath",
+    "RustCliCoverageEvidencePath",
+    "rustCliCoverageParameters.EvidencePath",
     "AcceptanceEvidencePath",
     "Write-AcceptanceEvidence",
     "acceptance-evidence=",
@@ -386,6 +388,7 @@ foreach ($portabilitySmokeSignal in @(
     "Add-SmokeGateResult",
     "gateResults",
     "evidencePaths",
+    "rustCliCoverageEvidencePath",
     "generatedAtUtc",
     "branch = Get-GitText",
     "head = Get-GitText",
@@ -421,9 +424,12 @@ foreach ($appleNativePreservationSignal in @(
     "windows_to_apple_same_lan_never_uses_apple_native",
     "transport=AppleNative",
     "transport=WebRtcDataChannel",
+    "cross-nat",
     "channel.control=AppleStream:skybridge.control",
     "channel.control=WebRtcDataChannel:skybridge.control",
     "kind=WindowsNativeMsQuic",
+    "Apple-to-Apple cross-NAT transport must stay AppleNative",
+    "Windows-to-Apple cross-NAT connection plan must use WebRTC DataChannel",
     "Apple-to-Apple transport must not be replaced by WebRTC",
     "Windows-to-Apple plan must not consume AppleStream bindings"
 )) {
@@ -487,8 +493,12 @@ foreach ($ciWorkflowSmokeSignal in @(
     "rustup component add clippy",
     "rustup component add llvm-tools-preview",
     "cargo install cargo-llvm-cov --locked",
+    "New-Item -ItemType Directory -Force -Path artifacts",
     "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
     "-CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage",
+    "-StackFreshnessEvidencePath artifacts\windows-stack-freshness.json",
+    "-RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json",
+    "-AcceptanceEvidencePath artifacts\windows-portability-acceptance.json",
     "RequireConfiguredSshCommand",
     "RequireKnownHosts",
     "RequireCredentialHelperReset",
@@ -506,9 +516,13 @@ foreach ($githubWorkflowSignal in @(
     "rustup component add clippy",
     "rustup component add llvm-tools-preview",
     "cargo install cargo-llvm-cov --locked",
+    "New-Item -ItemType Directory -Force -Path artifacts",
     "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
     "git remote set-url --push origin git@github.com:billlza/Skybridge-Compass.git",
     "-CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage",
+    "-StackFreshnessEvidencePath artifacts\windows-stack-freshness.json",
+    "-RustCliCoverageEvidencePath artifacts\rust-cli-coverage.json",
+    "-AcceptanceEvidencePath artifacts\windows-portability-acceptance.json",
     "contents: read"
 )) {
     Assert-Contains -Text $githubWorkflow -Needle $githubWorkflowSignal -Message "GitHub workflow missing signal: $githubWorkflowSignal"
@@ -624,8 +638,13 @@ Assert-Contains -Text $architecture -Needle "linked evidence paths" -Message "Ar
 Assert-Contains -Text $architecture -Needle "verify-apple-native-preservation.ps1" -Message "Architecture doc missing Apple-native preservation smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-stack-freshness.ps1" -Message "Architecture doc missing stack freshness smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "-StackFreshnessEvidencePath <json>" -Message "Architecture doc missing portability stack freshness evidence path."
+Assert-Contains -Text $architecture -Needle "-RustCliCoverageEvidencePath <json>" -Message "Architecture doc missing portability Rust CLI coverage evidence path."
 Assert-Contains -Text $architecture -Needle "online latest-version results" -Message "Architecture doc missing stack freshness online evidence contract."
 Assert-Contains -Text $architecture -Needle "source URIs" -Message "Architecture doc missing stack freshness source URI evidence contract."
+Assert-Contains -Text $architecture -Needle "coverage summary" -Message "Architecture doc missing Rust CLI coverage evidence contract."
+Assert-Contains -Text $architecture -Needle "parsed total" -Message "Architecture doc missing parsed Rust CLI coverage evidence contract."
+Assert-Contains -Text $architecture -Needle "Apple-to-Apple same-LAN/cross-NAT" -Message "Architecture doc missing AppleNative cross-NAT preservation contract."
+Assert-Contains -Text $architecture -Needle "Windows-to-Apple same-LAN/cross-NAT" -Message "Architecture doc missing Windows-to-Apple cross-NAT preservation contract."
 Assert-Contains -Text $architecture -Needle "verify-windows-ui-parity-matrix.ps1" -Message "Architecture doc missing UI parity matrix smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "docs/windows-webrtc-proof-schema.md" -Message "Architecture doc missing WebRTC proof schema entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-rust-webrtc-proof-cli.ps1" -Message "Architecture doc missing Rust WebRTC proof CLI gate entrypoint."

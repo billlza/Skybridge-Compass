@@ -127,6 +127,43 @@ Assert-Contains -Text $appleConnection -Needle "channel.telemetry=AppleDatagram:
 Assert-Contains -Text $appleConnection -Needle "channel.realtime=AppleDatagram:skybridge.realtime" -Message "Apple realtime channel must keep AppleDatagram binding."
 Assert-NotContains -Text $appleConnection -Needle "transport=WebRtcDataChannel" -Message "Apple-to-Apple connection plan must not switch to WebRTC."
 
+$appleCrossNatTransport = Invoke-SkybridgeCli -Arguments @(
+    "transport",
+    "select",
+    "--local",
+    "macos",
+    "--remote",
+    "ios",
+    "--path",
+    "cross-nat"
+)
+Assert-Contains -Text $appleCrossNatTransport -Needle "kind=AppleNative" -Message "Apple-to-Apple cross-NAT transport must stay AppleNative."
+Assert-Contains -Text $appleCrossNatTransport -Needle "audit=AppleNativeDefault" -Message "Apple-to-Apple cross-NAT transport must keep AppleNativeDefault audit."
+Assert-Contains -Text $appleCrossNatTransport -Needle "relay_allowed=false" -Message "Apple-to-Apple cross-NAT transport must not require WebRTC relay by default."
+Assert-NotContains -Text $appleCrossNatTransport -Needle "WebRtcDataChannel" -Message "Apple-to-Apple cross-NAT transport must not be replaced by WebRTC."
+
+$appleCrossNatConnection = Invoke-SkybridgeCli -Arguments @(
+    "connection",
+    "plan",
+    "--local",
+    "macos",
+    "--remote",
+    "ios",
+    "--path",
+    "cross-nat",
+    "--local-caps",
+    "xwing,mlkem,x25519",
+    "--remote-suites",
+    "0x0001,0x0101,0x1001",
+    "--sbp2-fixed",
+    "512"
+)
+Assert-Contains -Text $appleCrossNatConnection -Needle "transport=AppleNative" -Message "Apple-to-Apple cross-NAT connection plan must stay AppleNative."
+Assert-Contains -Text $appleCrossNatConnection -Needle "transport_audit=AppleNativeDefault" -Message "Apple-to-Apple cross-NAT connection plan must keep AppleNativeDefault audit."
+Assert-Contains -Text $appleCrossNatConnection -Needle "channel.control=AppleStream:skybridge.control" -Message "Apple cross-NAT control channel must keep AppleStream binding."
+Assert-Contains -Text $appleCrossNatConnection -Needle "channel.telemetry=AppleDatagram:skybridge.telemetry" -Message "Apple cross-NAT telemetry channel must keep AppleDatagram binding."
+Assert-NotContains -Text $appleCrossNatConnection -Needle "transport=WebRtcDataChannel" -Message "Apple-to-Apple cross-NAT connection plan must not switch to WebRTC."
+
 $windowsAppleTransport = Invoke-SkybridgeCli -Arguments @(
     "transport",
     "select",
@@ -164,6 +201,43 @@ Assert-Contains -Text $windowsAppleConnection -Needle "channel.control=WebRtcDat
 Assert-Contains -Text $windowsAppleConnection -Needle "channel.telemetry=WebRtcDataChannel:skybridge.telemetry" -Message "Windows-to-Apple telemetry channel must use WebRTC DataChannel."
 Assert-NotContains -Text $windowsAppleConnection -Needle "AppleStream" -Message "Windows-to-Apple plan must not consume AppleStream bindings."
 Assert-NotContains -Text $windowsAppleConnection -Needle "AppleDatagram" -Message "Windows-to-Apple plan must not consume AppleDatagram bindings."
+
+$windowsAppleCrossNatTransport = Invoke-SkybridgeCli -Arguments @(
+    "transport",
+    "select",
+    "--local",
+    "windows",
+    "--remote",
+    "macos",
+    "--path",
+    "cross-nat"
+)
+Assert-Contains -Text $windowsAppleCrossNatTransport -Needle "kind=WebRtcDataChannel" -Message "Windows-to-Apple cross-NAT transport must use WebRTC interop."
+Assert-Contains -Text $windowsAppleCrossNatTransport -Needle "audit=WebRtcInterop" -Message "Windows-to-Apple cross-NAT transport must report WebRtcInterop audit."
+Assert-NotContains -Text $windowsAppleCrossNatTransport -Needle "AppleNative" -Message "Windows-to-Apple cross-NAT transport must not claim AppleNative."
+
+$windowsAppleCrossNatConnection = Invoke-SkybridgeCli -Arguments @(
+    "connection",
+    "plan",
+    "--local",
+    "windows",
+    "--remote",
+    "macos",
+    "--path",
+    "cross-nat",
+    "--local-caps",
+    "xwing,mlkem,x25519",
+    "--remote-suites",
+    "0x0001,0x0101,0x1001",
+    "--sbp2-fixed",
+    "512"
+)
+Assert-Contains -Text $windowsAppleCrossNatConnection -Needle "transport=WebRtcDataChannel" -Message "Windows-to-Apple cross-NAT connection plan must use WebRTC DataChannel."
+Assert-Contains -Text $windowsAppleCrossNatConnection -Needle "transport_audit=WebRtcInterop" -Message "Windows-to-Apple cross-NAT connection plan must report WebRtcInterop audit."
+Assert-Contains -Text $windowsAppleCrossNatConnection -Needle "channel.control=WebRtcDataChannel:skybridge.control" -Message "Windows-to-Apple cross-NAT control channel must use WebRTC DataChannel."
+Assert-Contains -Text $windowsAppleCrossNatConnection -Needle "channel.telemetry=WebRtcDataChannel:skybridge.telemetry" -Message "Windows-to-Apple cross-NAT telemetry channel must use WebRTC DataChannel."
+Assert-NotContains -Text $windowsAppleCrossNatConnection -Needle "AppleStream" -Message "Windows-to-Apple cross-NAT plan must not consume AppleStream bindings."
+Assert-NotContains -Text $windowsAppleCrossNatConnection -Needle "AppleDatagram" -Message "Windows-to-Apple cross-NAT plan must not consume AppleDatagram bindings."
 
 $windowsTransport = Invoke-SkybridgeCli -Arguments @(
     "transport",
