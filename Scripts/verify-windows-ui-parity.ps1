@@ -448,6 +448,13 @@ foreach ($uiAutomationSmokeSignal in @(
     "Activate-TestWindow",
     "SetForegroundWindow",
     "Save-WindowScreenshot",
+    "Get-ActionOrderMatrix",
+    "Get-RuntimeActionSurfaceSnapshot",
+    "Test-ActionBoundsFollow",
+    "minimumUsableActionWidth",
+    "Action Order Matrix",
+    "runtimeActionBounds",
+    "actionOrderMatrix",
     "requestedWidth",
     "requestedHeight",
     "screenshotWidth",
@@ -469,6 +476,7 @@ foreach ($uiAutomationSmokeSignal in @(
     "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics",
     "WorkspaceAction.SystemMonitorControls.Monitoring",
     "WorkspaceAction.SettingsToolbar.ExportSettings",
+    "WorkspaceAction.SettingsMaintenance.ApplySettings",
     "FileTransferShareQrImage",
     "no local files were read"
 )) {
@@ -1023,6 +1031,9 @@ foreach ($resourceSignal in @(
     'x:Key="WorkspaceActionButtonTemplate"',
     'x:Key="WorkspaceActionButtonWithDetailTemplate"',
     'x:Key="BoolToVisibilityConverter"',
+    'Width="44"',
+    'Height="36"',
+    'ToolTipService.ToolTip="{Binding Title}"',
     'x:Key="WorkspaceMetricCardItemsPanel"',
     'x:Key="WorkspaceMetricCardTemplate"',
     'x:Key="DashboardQuickActionItemsPanel"',
@@ -4439,6 +4450,7 @@ foreach ($docSignal in @(
     "-EvidenceDir <dir>",
     "-WinUiEvidenceDir <dir>",
     "windows-ui-visual-evidence.json",
+    "runtimeActionBounds",
     "-MacSshEvidencePath <json>",
     "Mac SSH readiness probe records host candidates"
 )) {

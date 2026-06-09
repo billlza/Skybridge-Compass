@@ -495,7 +495,10 @@ foreach ($templateSignal in @(
     '<DataTemplate x:Key="TopBarStatusActionButtonTemplate">',
     '<DataTemplate x:Key="DashboardQuickActionTemplate">',
     'AutomationProperties.AutomationId="{Binding AutomationId}"',
-    'Command="{Binding Command}"'
+    'Command="{Binding Command}"',
+    'Width="44"',
+    'Height="36"',
+    'ToolTipService.ToolTip="{Binding Title}"'
 )) {
     Assert-Contains -Text $mainWindow -Needle $templateSignal -Message "MainWindow missing shared action-template signal: $templateSignal"
 }
@@ -666,6 +669,9 @@ foreach ($matrixSignal in @(
     "Global Shell Matrix",
     "Action Order Matrix",
     "Dynamic Refresh Surface Matrix",
+    "runtimeActionBounds",
+    "WorkspaceAction.<Surface>.<Key>",
+    "minimum usable bounds",
     "verify-windows-ui-parity-matrix.ps1",
     "verify-windows-ui-action-order.ps1",
     "verify-windows-ui-parity.ps1"

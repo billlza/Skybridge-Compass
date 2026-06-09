@@ -84,13 +84,13 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | Workspace action surfaces | `WorkspaceActionButtonTemplate` | `HorizontalWorkspaceActionItemsPanel` |
 | Final/manual connect action | `WorkspaceActionButtonWithDetailTemplate` | `HorizontalWorkspaceActionItemsPanel` |
 
-All action buttons must be rendered through these shared templates. Feature sections must not introduce inline `Button` controls for local-only styling, because button shape, command binding, automation id binding, and spacing are part of the mac-parity contract.
+All action buttons must be rendered through these shared templates. Feature sections must not introduce inline `Button` controls for local-only styling, because button shape, command binding, automation id/name binding, tooltip title binding, compact workspace tool-button sizing, and spacing are part of the mac-parity contract.
 
 ## Verification
 
 - `Scripts/verify-windows-ui-parity-matrix.ps1` parses these markdown tables and verifies exact row counts, row order, duplicate prevention, pinned mac baseline objects, ordered mac source symbols, `MainWindow.xaml`, `FeatureCatalogClient`, and `WorkspaceActionCatalogClient` agree on feature order, workspace visibility order, top-bar/session anchors, and per-surface action order.
-- The matrix smoke also verifies shared action templates and rejects inline XAML action buttons outside the approved templates.
+- The matrix smoke also verifies shared action templates, compact workspace tool-button sizing, tooltip title binding, and rejects inline XAML action buttons outside the approved templates.
 - The matrix smoke verifies both initial and dynamic workspace action surface orders so selected-feature, readiness, and pending-provider state changes cannot leave visible buttons stale.
 - `Scripts/verify-windows-ui-action-order.ps1` remains the executable catalog smoke for action keys and automation ids.
-- `Scripts/verify-windows-ui-automation-smoke.ps1 -EvidenceDir <dir>` captures the rendered WinUI shell for all eight workspaces at requested logical window sizes 1280x900 and 1366x768 and writes `windows-ui-visual-evidence.json` with requested size, actual screenshot pixel size, and the corresponding automation-anchor bounds. These artifacts are the local visual evidence package for mac/iOS comparison while fonts, OS scale, and platform pixel metrics remain out of scope.
+- `Scripts/verify-windows-ui-automation-smoke.ps1 -EvidenceDir <dir>` captures the rendered WinUI shell for all eight workspaces at requested logical window sizes 1280x900 and 1366x768 and writes `windows-ui-visual-evidence.json` with requested size, actual screenshot pixel size, the corresponding automation-anchor bounds, and `runtimeActionBounds` generated from this matrix's Action Order Matrix. The runtime bounds gate verifies every visible global and selected-workspace `WorkspaceAction.<Surface>.<Key>` AutomationId exists with minimum usable bounds and flows in matrix order before the screenshot evidence is accepted. These artifacts are the local visual evidence package for mac/iOS comparison while fonts, OS scale, and platform pixel metrics remain out of scope.
 - `Scripts/verify-windows-ui-parity.ps1` remains the broader static modularity gate.

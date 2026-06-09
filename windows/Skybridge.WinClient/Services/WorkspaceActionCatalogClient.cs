@@ -381,7 +381,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Cancel",
                 "\uE711",
                 true,
-                "Mac-parity manual connection cancel action; clears prepared manual-target facts without starting transport.",
+                "Clear prepared target",
                 CommandId: WorkspaceActionCommandId.CancelManualConnection,
                 GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser),
             new(
@@ -389,7 +389,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Connect",
                 "\uE768",
                 true,
-                "Global session action; requires live Windows adapter.",
+                "Core gated",
                 CommandId: WorkspaceActionCommandId.Connect,
                 GateId: WorkspaceActionGateId.CanConnect)
         };
