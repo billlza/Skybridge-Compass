@@ -9,14 +9,10 @@ param(
     [string]$MacExpectedHostAddress = "192.168.0.102",
     [string]$MacDirectSourceAddress = "",
     [string]$MacSshEvidencePath = "",
-    [Parameter(Mandatory = $true)]
-    [string]$MacRemoteRepoRoot,
-    [Parameter(Mandatory = $true)]
-    [string]$WebRtcProofPath,
-    [Parameter(Mandatory = $true)]
-    [string]$ExpectedDeviceId,
-    [Parameter(Mandatory = $true)]
-    [string]$ExpectedFingerprint,
+    [string]$MacRemoteRepoRoot = "",
+    [string]$WebRtcProofPath = "",
+    [string]$ExpectedDeviceId = "",
+    [string]$ExpectedFingerprint = "",
     [string]$SearchText = "",
     [ValidateRange(1, 30)]
     [int]$ExtendedSearchSeconds = 5,
@@ -71,6 +67,7 @@ if ($CheckOnly) {
 }
 
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($MacRemoteRepoRoot)) -Message "Windows/mac WebRTC interop requires -MacRemoteRepoRoot."
+Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($WebRtcProofPath)) -Message "Windows/mac WebRTC interop requires -WebRtcProofPath."
 Assert-True -Condition (Test-Path -LiteralPath $WebRtcProofPath) -Message "Windows/mac WebRTC interop requires a helper proof file: $WebRtcProofPath"
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($ExpectedDeviceId)) -Message "Windows/mac WebRTC interop requires -ExpectedDeviceId."
 Assert-True -Condition ($ExpectedFingerprint -match '^[0-9a-f]{64}$') -Message "Windows/mac WebRTC interop requires -ExpectedFingerprint as 64 lowercase hex characters."

@@ -484,6 +484,7 @@ foreach ($ciWorkflowSmokeSignal in @(
     "actions/setup-dotnet@v4",
     "dotnet-version: '10.0.x'",
     "rustup toolchain install stable --profile minimal",
+    "rustup component add clippy",
     "rustup component add llvm-tools-preview",
     "cargo install cargo-llvm-cov --locked",
     "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
@@ -502,6 +503,7 @@ foreach ($githubWorkflowSignal in @(
     "actions/setup-dotnet@v4",
     "dotnet-version: '10.0.x'",
     "rustup toolchain install stable --profile minimal",
+    "rustup component add clippy",
     "rustup component add llvm-tools-preview",
     "cargo install cargo-llvm-cov --locked",
     "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
@@ -874,6 +876,8 @@ foreach ($signal in @(
 }
 foreach ($signal in @(
     "windows-mac-webrtc-interop: ok",
+    "windows-mac-webrtc-interop: check ok",
+    "CheckOnly",
     "mac-ssh-direct-lan-rust-cli",
     "windows-native-dns-sd-peer",
     "rust-webrtc-proof-cli",
@@ -888,6 +892,7 @@ foreach ($signal in @(
 )) {
     Assert-Contains -Text $macWebRtcInterop -Needle $signal -Message "Windows/mac WebRTC interop gate missing signal: $signal"
 }
+Assert-True -Condition (-not $macWebRtcInterop.Contains("[Parameter(Mandatory = `$true)]")) -Message "Windows/mac WebRTC interop CheckOnly gate must not require external Mac/proof parameters."
 
 Assert-Contains -Text $architecture -Needle "WindowsDiscoveryBrowserClient" -Message "Architecture doc missing WindowsDiscoveryBrowserClient status."
 

@@ -43,6 +43,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          rustup component add clippy
           rustup component add llvm-tools-preview
           cargo install cargo-llvm-cov --locked
 
