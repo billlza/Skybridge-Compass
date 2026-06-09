@@ -5,6 +5,7 @@ param(
     [switch]$IncludeNativeDnsSdAcceptance,
     [switch]$CheckOnlineStackFreshness,
     [string]$StackFreshnessEvidencePath = "",
+    [string]$AcceptanceEvidencePath = "",
     [switch]$CiMode,
     [switch]$ProbeMacSsh,
     [switch]$IncludeWinUiAutomationSmoke,
@@ -48,21 +49,107 @@ function Assert-True {
     }
 }
 
+$script:PortabilitySmokeGateResults = [System.Collections.Generic.List[object]]::new()
+
+function Add-SmokeGateResult {
+    param(
+        [string]$Name,
+        [string]$Status,
+        [string]$Detail = "",
+        [string]$EvidencePath = ""
+    )
+
+    $script:PortabilitySmokeGateResults.Add([ordered]@{
+        name = $Name
+        status = $Status
+        detail = $Detail
+        evidencePath = $EvidencePath
+    })
+}
+
+function Get-GitText {
+    param([string[]]$Arguments)
+
+    try {
+        $output = & git -C $RepoRoot @Arguments 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return (($output | Select-Object -First 1) -as [string])
+        }
+    }
+    catch {
+        return ""
+    }
+
+    return ""
+}
+
+function Write-AcceptanceEvidence {
+    if ([string]::IsNullOrWhiteSpace($AcceptanceEvidencePath)) {
+        return
+    }
+
+    $resolvedEvidencePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AcceptanceEvidencePath)
+    $evidenceDirectory = Split-Path -Parent $resolvedEvidencePath
+    if (-not [string]::IsNullOrWhiteSpace($evidenceDirectory)) {
+        New-Item -ItemType Directory -Force -Path $evidenceDirectory | Out-Null
+    }
+
+    [ordered]@{
+        generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+        repoRoot = $RepoRoot
+        branch = Get-GitText -Arguments @("rev-parse", "--abbrev-ref", "HEAD")
+        head = Get-GitText -Arguments @("rev-parse", "HEAD")
+        parameters = [ordered]@{
+            ciMode = [bool]$CiMode
+            checkOnlineStackFreshness = [bool]$CheckOnlineStackFreshness
+            includeWinUiAutomationSmoke = [bool]$IncludeWinUiAutomationSmoke
+            includeRustCliCoverage = [bool]$IncludeRustCliCoverage
+            includeNativeDnsSdAcceptance = [bool]$IncludeNativeDnsSdAcceptance
+            probeMacSsh = [bool]$ProbeMacSsh
+            requireMacSshReady = [bool]$RequireMacSshReady
+            requireMacDirectLan = [bool]$RequireMacDirectLan
+            requireMacRustCliSmoke = [bool]$RequireMacRustCliSmoke
+            requireMacWebRtcInterop = [bool]$RequireMacWebRtcInterop
+            requireNativeDnsSdPeer = [bool]$RequireNativeDnsSdPeer
+            requireGitRemoteAccess = [bool]$RequireGitRemoteAccess
+        }
+        evidencePaths = [ordered]@{
+            stackFreshnessEvidencePath = $StackFreshnessEvidencePath
+            winUiEvidenceDir = $WinUiEvidenceDir
+            macSshEvidencePath = $MacSshEvidencePath
+            macWebRtcProofPath = $MacWebRtcProofPath
+        }
+        gateResults = @($script:PortabilitySmokeGateResults)
+    } |
+        ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath $resolvedEvidencePath -Encoding UTF8
+    Write-Output "windows-portability-smoke: acceptance-evidence=$resolvedEvidencePath"
+}
+
 function Invoke-SmokeGate {
     param(
         [string]$Name,
         [string]$RelativeScriptPath,
-        [hashtable]$Parameters = @{}
+        [hashtable]$Parameters = @{},
+        [string]$EvidencePath = ""
     )
 
     $scriptPath = Join-Path $RepoRoot $RelativeScriptPath
     Assert-True -Condition (Test-Path -LiteralPath $scriptPath) -Message "Missing smoke gate script: $scriptPath"
 
-    Write-Output "windows-portability-smoke: running $Name"
-    $LASTEXITCODE = 0
-    & $scriptPath @Parameters
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Smoke gate failed: $Name exitCode=$LASTEXITCODE"
-    Write-Output "windows-portability-smoke: passed $Name"
+    try {
+        Write-Output "windows-portability-smoke: running $Name"
+        $LASTEXITCODE = 0
+        & $scriptPath @Parameters
+        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Smoke gate failed: $Name exitCode=$LASTEXITCODE"
+        Write-Output "windows-portability-smoke: passed $Name"
+        Add-SmokeGateResult -Name $Name -Status "passed" -EvidencePath $EvidencePath
+    }
+    catch {
+        Add-SmokeGateResult -Name $Name -Status "failed" -Detail $_.Exception.Message -EvidencePath $EvidencePath
+        Write-AcceptanceEvidence
+        throw
+    }
 }
 
 $gitRemoteParameters = @{
@@ -103,7 +190,8 @@ if (-not [string]::IsNullOrWhiteSpace($StackFreshnessEvidencePath)) {
 Invoke-SmokeGate `
     -Name "windows-stack-freshness" `
     -RelativeScriptPath "Scripts/verify-windows-stack-freshness.ps1" `
-    -Parameters $stackFreshnessParameters
+    -Parameters $stackFreshnessParameters `
+    -EvidencePath $StackFreshnessEvidencePath
 
 Invoke-SmokeGate `
     -Name "windows-ffi-client" `
@@ -136,10 +224,12 @@ if ($IncludeWinUiAutomationSmoke) {
     Invoke-SmokeGate `
         -Name "windows-ui-automation-smoke" `
         -RelativeScriptPath "Scripts/verify-windows-ui-automation-smoke.ps1" `
-        -Parameters $winUiAutomationParameters
+        -Parameters $winUiAutomationParameters `
+        -EvidencePath $WinUiEvidenceDir
 }
 else {
     Write-Output "windows-portability-smoke: skipped windows-ui-automation-smoke; pass -IncludeWinUiAutomationSmoke on an interactive Windows desktop to verify live WinUI navigation, anchors, layout, and File Transfer QR preview. Add -WinUiEvidenceDir <dir> to capture visual evidence screenshots and a manifest."
+    Add-SmokeGateResult -Name "windows-ui-automation-smoke" -Status "skipped" -Detail "Pass -IncludeWinUiAutomationSmoke on an interactive Windows desktop."
 }
 
 Invoke-SmokeGate `
@@ -213,10 +303,12 @@ if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMa
     Invoke-SmokeGate `
         -Name "mac-ssh-readiness" `
         -RelativeScriptPath "Scripts/probe-mac-ssh.ps1" `
-        -Parameters $macSshParameters
+        -Parameters $macSshParameters `
+        -EvidencePath $MacSshEvidencePath
 }
 else {
     Write-Output "windows-portability-smoke: skipped mac-ssh-readiness; pass -ProbeMacSsh for diagnostics, -RequireMacSshReady before Rust CLI co-debugging, -RequireMacDirectLan to reject proxy/TUN routes, or -RequireMacRustCliSmoke -MacRemoteRepoRoot <path> for a Mac-side CLI smoke."
+    Add-SmokeGateResult -Name "mac-ssh-readiness" -Status "skipped" -Detail "Pass -ProbeMacSsh for diagnostics or required Mac SSH gates for co-debugging."
 }
 
 if ($RequireMacWebRtcInterop) {
@@ -241,10 +333,12 @@ if ($RequireMacWebRtcInterop) {
             SearchText = $SearchText
             ExtendedSearchSeconds = $ExtendedSearchSeconds
             WebRtcProofMaxAgeMs = $MacWebRtcProofMaxAgeMs
-        }
+        } `
+        -EvidencePath $MacWebRtcProofPath
 }
 else {
     Write-Output "windows-portability-smoke: skipped windows-mac-webrtc-interop; pass -RequireMacWebRtcInterop -MacRemoteRepoRoot <path> -MacWebRtcProofPath <path> -ExpectedDeviceId <id> -ExpectedFingerprint <hex> after direct LAN and helper proof are ready. That local gate composes probe-mac-ssh.ps1, verify-windows-native-dns-sd-acceptance.ps1, verify-windows-webrtc-proof.ps1, and verify-windows-connection-launch.ps1."
+    Add-SmokeGateResult -Name "windows-mac-webrtc-interop" -Status "skipped" -Detail "Requires direct LAN, Mac Rust CLI smoke, native DNS-SD peer, and helper proof."
 }
 
 if ($IncludeNativeDnsSdAcceptance -or $RequireNativeDnsSdPeer) {
@@ -276,6 +370,7 @@ if ($IncludeNativeDnsSdAcceptance -or $RequireNativeDnsSdPeer) {
 }
 else {
     Write-Output "windows-portability-smoke: skipped windows-native-dns-sd-acceptance; pass -IncludeNativeDnsSdAcceptance or -RequireNativeDnsSdPeer for local-network acceptance."
+    Add-SmokeGateResult -Name "windows-native-dns-sd-acceptance" -Status "skipped" -Detail "Pass -IncludeNativeDnsSdAcceptance or -RequireNativeDnsSdPeer for local-network acceptance."
 }
 
 if ($IncludeRustCliCoverage) {
@@ -289,6 +384,8 @@ if ($IncludeRustCliCoverage) {
 }
 else {
     Write-Output "windows-portability-smoke: skipped rust-cli-coverage; pass -IncludeRustCliCoverage for the 90% Rust CLI coverage gate."
+    Add-SmokeGateResult -Name "rust-cli-coverage" -Status "skipped" -Detail "Pass -IncludeRustCliCoverage for the 90% Rust CLI coverage gate."
 }
 
+Write-AcceptanceEvidence
 Write-Output "windows-portability-smoke: ok"

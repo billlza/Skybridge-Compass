@@ -379,6 +379,17 @@ foreach ($portabilitySmokeSignal in @(
     "CheckOnlineStackFreshness",
     "StackFreshnessEvidencePath",
     "stackFreshnessParameters.EvidencePath",
+    "AcceptanceEvidencePath",
+    "Write-AcceptanceEvidence",
+    "acceptance-evidence=",
+    "PortabilitySmokeGateResults",
+    "Add-SmokeGateResult",
+    "gateResults",
+    "evidencePaths",
+    "generatedAtUtc",
+    "branch = Get-GitText",
+    "head = Get-GitText",
+    'Status "failed"',
     "ProbeMacSsh",
     "IncludeWinUiAutomationSmoke",
     "WinUiEvidenceDir",
@@ -604,6 +615,10 @@ foreach ($startupStateSmokeSignal in @(
     Assert-Contains -Text $startupStateSmoke -Needle $startupStateSmokeSignal -Message "Startup-state smoke missing signal: $startupStateSmokeSignal"
 }
 Assert-Contains -Text $architecture -Needle "verify-windows-portability-smoke.ps1" -Message "Architecture doc missing portability smoke entrypoint."
+Assert-Contains -Text $architecture -Needle "-AcceptanceEvidencePath <json>" -Message "Architecture doc missing portability acceptance evidence path."
+Assert-Contains -Text $architecture -Needle "gate manifest" -Message "Architecture doc missing portability gate manifest contract."
+Assert-Contains -Text $architecture -Needle "pass/skip/fail status" -Message "Architecture doc missing portability gate result status contract."
+Assert-Contains -Text $architecture -Needle "linked evidence paths" -Message "Architecture doc missing portability evidence-link contract."
 Assert-Contains -Text $architecture -Needle "verify-apple-native-preservation.ps1" -Message "Architecture doc missing Apple-native preservation smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-stack-freshness.ps1" -Message "Architecture doc missing stack freshness smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "-StackFreshnessEvidencePath <json>" -Message "Architecture doc missing portability stack freshness evidence path."
