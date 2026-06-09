@@ -4,6 +4,7 @@ param(
     [switch]$IncludeRustCliCoverage,
     [switch]$IncludeNativeDnsSdAcceptance,
     [switch]$CheckOnlineStackFreshness,
+    [string]$StackFreshnessEvidencePath = "",
     [switch]$CiMode,
     [switch]$ProbeMacSsh,
     [switch]$IncludeWinUiAutomationSmoke,
@@ -94,6 +95,9 @@ $stackFreshnessParameters = @{
 }
 if ($CheckOnlineStackFreshness) {
     $stackFreshnessParameters.CheckOnline = $true
+}
+if (-not [string]::IsNullOrWhiteSpace($StackFreshnessEvidencePath)) {
+    $stackFreshnessParameters.EvidencePath = $StackFreshnessEvidencePath
 }
 
 Invoke-SmokeGate `

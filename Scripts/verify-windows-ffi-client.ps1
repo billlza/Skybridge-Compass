@@ -377,6 +377,8 @@ foreach ($portabilitySmokeSignal in @(
     "IncludeNativeDnsSdAcceptance",
     "RequireNativeDnsSdPeer",
     "CheckOnlineStackFreshness",
+    "StackFreshnessEvidencePath",
+    "stackFreshnessParameters.EvidencePath",
     "ProbeMacSsh",
     "IncludeWinUiAutomationSmoke",
     "WinUiEvidenceDir",
@@ -512,6 +514,7 @@ foreach ($macSshProbeSignal in @(
     "EvidencePath",
     "Write-ProbeEvidence",
     "mac-ssh-probe: evidence=",
+    "ToUniversalTime",
     "windowsLanCandidates",
     "readyHostName",
     "readyUserName",
@@ -555,6 +558,14 @@ foreach ($macSshProbeSignal in @(
 }
 foreach ($stackFreshnessSignal in @(
     "windows-stack-freshness: ok",
+    "windows-stack-freshness: evidence=",
+    "EvidencePath",
+    "ToUniversalTime",
+    "sourceUris",
+    "generatedAtUtc",
+    "checkOnline",
+    "approvedVersions",
+    "online",
     "net10.0-windows10.0.19041.0",
     "Microsoft.WindowsAppSDK",
     "2.1.3",
@@ -595,6 +606,9 @@ foreach ($startupStateSmokeSignal in @(
 Assert-Contains -Text $architecture -Needle "verify-windows-portability-smoke.ps1" -Message "Architecture doc missing portability smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-apple-native-preservation.ps1" -Message "Architecture doc missing Apple-native preservation smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-windows-stack-freshness.ps1" -Message "Architecture doc missing stack freshness smoke entrypoint."
+Assert-Contains -Text $architecture -Needle "-StackFreshnessEvidencePath <json>" -Message "Architecture doc missing portability stack freshness evidence path."
+Assert-Contains -Text $architecture -Needle "online latest-version results" -Message "Architecture doc missing stack freshness online evidence contract."
+Assert-Contains -Text $architecture -Needle "source URIs" -Message "Architecture doc missing stack freshness source URI evidence contract."
 Assert-Contains -Text $architecture -Needle "verify-windows-ui-parity-matrix.ps1" -Message "Architecture doc missing UI parity matrix smoke entrypoint."
 Assert-Contains -Text $architecture -Needle "docs/windows-webrtc-proof-schema.md" -Message "Architecture doc missing WebRTC proof schema entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-rust-webrtc-proof-cli.ps1" -Message "Architecture doc missing Rust WebRTC proof CLI gate entrypoint."

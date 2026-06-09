@@ -23,7 +23,7 @@ These instructions apply to the entire repository. More specific `AGENTS.md` fil
 ## Windows client (`windows/Skybridge.WinClient/`)
 - Target WinUI 3 + .NET 10 with `net10.0-windows10.0.19041.0`, `WindowsPackageType=None` for unpackaged Windows App SDK auto-initialization, Windows App SDK `2.1.3`, Windows SDK BuildTools `10.0.28000.1839`, and QRCoder `1.8.0` for Windows QR bitmap rendering.
 - Keep bindings ready for Rust FFI integration without moving Core transport, identity, pairing, or AppleNative routing policy into the Windows ViewModel layer.
-- Run `Scripts/verify-windows-stack-freshness.ps1` after changing project stack declarations, package versions, or stack documentation.
+- Run `Scripts/verify-windows-stack-freshness.ps1` after changing project stack declarations, package versions, or stack documentation; add `-CheckOnline -EvidencePath <json>` when the task needs auditable latest-version evidence.
 - Keep `.github/workflows/windows-portability.yml` aligned with `Scripts/verify-windows-ci-workflow.ps1`: GitHub Actions must pin `origin` back to SSH and run `Scripts/verify-windows-portability-smoke.ps1 -CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage`.
 - Use `-CiMode` only for clean CI runners. Local Windows workstations should keep the default smoke path so `core.sshCommand`, pinned GitHub `known_hosts`, and empty local `credential.helper` continue preventing `git-remote-https.exe` fallback.
 - Before Windows-to-Mac Rust CLI co-debugging, run `Scripts/probe-mac-ssh.ps1` or `Scripts/verify-windows-portability-smoke.ps1 -RequireMacSshReady` so proxy routes, `.local` resolution, username/key authorization, and SSH banner timeout are visible before any remote command is started.

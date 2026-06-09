@@ -1,6 +1,7 @@
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
-    [switch]$CheckOnline
+    [switch]$CheckOnline,
+    [string]$EvidencePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +53,17 @@ function Get-LatestStableNuGetVersion {
     return [string]($stableVersions | Select-Object -First 1)
 }
 
+$sourceUris = [ordered]@{
+    dotnetReleaseMetadata = "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json"
+    microsoftWindowsAppSdkNuGet = "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk/index.json"
+    microsoftWindowsSdkBuildToolsNuGet = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/index.json"
+    qrCoderNuGet = "https://api.nuget.org/v3-flatcontainer/qrcoder/index.json"
+    sipsorceryNuGet = "https://api.nuget.org/v3-flatcontainer/sipsorcery/index.json"
+    msQuicLatestRelease = "https://api.github.com/repos/microsoft/msquic/releases/latest"
+    libdatachannelLatestRelease = "https://api.github.com/repos/paullouisageneau/libdatachannel/releases/latest"
+}
+$onlineEvidence = [ordered]@{}
+
 $winClientProjectPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Skybridge.WinClient.csproj"
 $cargoManifestPath = Join-Path $RepoRoot "core/skybridge-core/Cargo.toml"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
@@ -95,6 +107,9 @@ foreach ($architectureSignal in @(
     'SIPSorcery `10.0.9`',
     'Rust 2021 edition',
     'verify-windows-stack-freshness.ps1',
+    '-EvidencePath <json>',
+    'source URIs',
+    'online latest-version results',
     'Sources checked on 2026-06-09'
 )) {
     Assert-Contains -Text $architecture -Needle $architectureSignal -Message "Architecture stack freshness doc missing signal: $architectureSignal"
@@ -106,6 +121,7 @@ foreach ($agentSignal in @(
     'Windows App SDK `2.1.3`',
     'Windows SDK BuildTools `10.0.28000.1839`',
     'QRCoder `1.8.0`',
+    '-EvidencePath <json>',
     'verify-windows-stack-freshness.ps1'
 )) {
     Assert-Contains -Text $agents -Needle $agentSignal -Message "AGENTS.md stack guidance missing signal: $agentSignal"
@@ -113,7 +129,7 @@ foreach ($agentSignal in @(
 Assert-True -Condition (-not $agents.Contains("Target WinUI 3 + .NET 9")) -Message "AGENTS.md must not point Windows agents back to the retired .NET 9 target."
 
 if ($CheckOnline) {
-    $dotnet10 = Invoke-RestMethod -Uri "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json"
+    $dotnet10 = Invoke-RestMethod -Uri $sourceUris.dotnetReleaseMetadata
     Assert-True -Condition ($dotnet10."channel-version" -eq "10.0") -Message ".NET release metadata channel mismatch."
     Assert-True -Condition ($dotnet10."support-phase" -eq "active") -Message ".NET 10 must remain active."
     Assert-True -Condition ($dotnet10."eol-date" -eq "2028-11-14") -Message ".NET 10 EOL date changed: $($dotnet10.'eol-date')"
@@ -131,13 +147,77 @@ if ($CheckOnline) {
     $latestSipsorcery = Get-LatestStableNuGetVersion -PackageId "SIPSorcery"
     Assert-True -Condition ($latestSipsorcery -eq "10.0.9") -Message "SIPSorcery latest stable changed: $latestSipsorcery"
 
-    $msquicLatest = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/msquic/releases/latest"
+    $msquicLatest = Invoke-RestMethod -Uri $sourceUris.msQuicLatestRelease
     Assert-True -Condition ($msquicLatest.tag_name -eq "v2.5.8") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"
     Assert-True -Condition (-not [bool]$msquicLatest.prerelease) -Message "MsQuic latest release must not be a prerelease."
 
-    $libdatachannelLatest = Invoke-RestMethod -Uri "https://api.github.com/repos/paullouisageneau/libdatachannel/releases/latest"
+    $libdatachannelLatest = Invoke-RestMethod -Uri $sourceUris.libdatachannelLatestRelease
     Assert-True -Condition ($libdatachannelLatest.tag_name -eq "v0.24.4") -Message "libdatachannel latest stable changed: $($libdatachannelLatest.tag_name)"
     Assert-True -Condition (-not [bool]$libdatachannelLatest.prerelease) -Message "libdatachannel latest release must not be a prerelease."
+
+    $onlineEvidence = [ordered]@{
+        dotnet10 = [ordered]@{
+            channelVersion = [string]$dotnet10."channel-version"
+            supportPhase = [string]$dotnet10."support-phase"
+            latestRuntime = [string]$dotnet10."latest-runtime"
+            eolDate = [string]$dotnet10."eol-date"
+        }
+        nugetLatestStable = [ordered]@{
+            MicrosoftWindowsAppSdk = $latestWindowsAppSdk
+            MicrosoftWindowsSdkBuildTools = $latestBuildTools
+            QRCoder = $latestQrCoder
+            SIPSorcery = $latestSipsorcery
+        }
+        githubLatestStable = [ordered]@{
+            MsQuic = [ordered]@{
+                tagName = [string]$msquicLatest.tag_name
+                prerelease = [bool]$msquicLatest.prerelease
+            }
+            libdatachannel = [ordered]@{
+                tagName = [string]$libdatachannelLatest.tag_name
+                prerelease = [bool]$libdatachannelLatest.prerelease
+            }
+        }
+    }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
+    $resolvedEvidencePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EvidencePath)
+    $evidenceDirectory = Split-Path -Parent $resolvedEvidencePath
+    if (-not [string]::IsNullOrWhiteSpace($evidenceDirectory)) {
+        New-Item -ItemType Directory -Force -Path $evidenceDirectory | Out-Null
+    }
+
+    $onlineEvidenceValue = if ($CheckOnline) { $onlineEvidence } else { $null }
+    [ordered]@{
+        generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+        checkOnline = [bool]$CheckOnline
+        project = [ordered]@{
+            targetFramework = $targetFramework
+            windowsPackageType = $windowsPackageType
+            packageVersions = [ordered]@{
+                MicrosoftWindowsAppSdk = $windowsAppSdkVersion
+                MicrosoftWindowsSdkBuildTools = $buildToolsVersion
+                QRCoder = $qrCoderVersion
+            }
+        }
+        rustCore = [ordered]@{
+            edition = "2021"
+            crateTypes = @("rlib", "cdylib")
+        }
+        approvedVersions = [ordered]@{
+            dotnetLatestRuntime = "10.0.8"
+            dotnetEolDate = "2028-11-14"
+            sipsorcery = "10.0.9"
+            msquic = "v2.5.8"
+            libdatachannel = "v0.24.4"
+        }
+        sourceUris = $sourceUris
+        online = $onlineEvidenceValue
+    } |
+        ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath $resolvedEvidencePath -Encoding UTF8
+    Write-Output "windows-stack-freshness: evidence=$resolvedEvidencePath"
 }
 
 Write-Output "windows-stack-freshness: ok"

@@ -62,7 +62,7 @@ function Write-ProbeEvidence {
     $routeFirstFailureDetected = @($messages | Where-Object { $_ -match "route action: fix the direct LAN route or proxy bypass" }).Count -gt 0
 
     $evidence = [ordered]@{
-        generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+        generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
         hostName = $HostName
         alternateHostNames = @($AlternateHostNames)
         hostCandidates = @($hostCandidates)
