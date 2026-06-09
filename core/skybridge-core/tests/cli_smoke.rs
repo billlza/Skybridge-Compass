@@ -1,7 +1,42 @@
 use std::process::Command;
 
+const WEBRTC_PROOF_FINGERPRINT: &str =
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
 fn skybridge() -> Command {
     Command::new(env!("CARGO_BIN_EXE_skybridge"))
+}
+
+fn write_webrtc_proof_fixture(file_name: &str, sbf1_echo_verified: bool) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "skybridge-cli-smoke-webrtc-proof-{}-{file_name}.json",
+        std::process::id()
+    ));
+    let captured_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let proof = format!(
+        r#"{{
+  "helperName": "schema-smoke-webrtc-helper",
+  "peerDeviceId": "mac-1",
+  "peerPublicKeyFingerprint": "{WEBRTC_PROOF_FINGERPRINT}",
+  "dataChannelOpen": true,
+  "sbf1EchoVerified": {sbf1_echo_verified},
+  "sbf1FrameMagic": "SBF1",
+  "adapterBinding": "verified webrtc datachannel helper",
+  "localEndpoint": "windows.lan:5443",
+  "remoteEndpoint": "mac.lan:5443",
+  "selectedCandidatePair": "webrtc/dtls/sctp/helper-selected",
+  "transportSecretFingerprintHex": "6666666666666666666666666666666666666666666666666666666666666666",
+  "capabilityDigestHex": "7777777777777777777777777777777777777777777777777777777777777777",
+  "relayId": "relay-helper",
+  "timestampWindowMs": 15000,
+  "capturedAtUnixMs": {captured_at}
+}}"#
+    );
+    std::fs::write(&path, proof).unwrap();
+    path
 }
 
 #[test]
@@ -23,6 +58,7 @@ fn cli_no_args_prints_help_smoke() {
     assert!(stdout.contains("USAGE:"));
     assert!(stdout.contains("connection plan"));
     assert!(stdout.contains("discovery parse"));
+    assert!(stdout.contains("webrtc-proof validate"));
 }
 
 #[test]
@@ -408,6 +444,61 @@ fn cli_discovery_parse_accepts_mac_bonjour_txt() {
     assert!(stdout.contains("platform=Apple"));
     assert!(stdout.contains("supports_apple_native=true"));
     assert!(stdout.contains("supports_webrtc_data_channel=true"));
+}
+
+#[test]
+fn cli_webrtc_proof_validate_accepts_schema_smoke() {
+    let proof_path = write_webrtc_proof_fixture("valid", true);
+    let proof_path_text = proof_path.to_string_lossy().to_string();
+    let output = skybridge()
+        .args([
+            "webrtc-proof",
+            "validate",
+            "--proof",
+            &proof_path_text,
+            "--expected-device-id",
+            "mac-1",
+            "--expected-fingerprint",
+            WEBRTC_PROOF_FINGERPRINT,
+        ])
+        .output()
+        .expect("run cli");
+
+    let _ = std::fs::remove_file(proof_path);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("webrtc_proof=valid"));
+    assert!(stdout.contains("peer_device_id=mac-1"));
+    assert!(stdout.contains("helper_name=schema-smoke-webrtc-helper"));
+    assert!(stdout.contains("selected_candidate_pair=webrtc/dtls/sctp/helper-selected"));
+    assert!(stdout.contains("timestamp_window_ms=15000"));
+}
+
+#[test]
+fn cli_webrtc_proof_validate_rejects_missing_sbf1_smoke() {
+    let proof_path = write_webrtc_proof_fixture("missing-sbf1", false);
+    let proof_path_text = proof_path.to_string_lossy().to_string();
+    let output = skybridge()
+        .args([
+            "webrtc-proof",
+            "validate",
+            "--proof",
+            &proof_path_text,
+            "--expected-device-id",
+            "mac-1",
+            "--expected-fingerprint",
+            WEBRTC_PROOF_FINGERPRINT,
+        ])
+        .output()
+        .expect("run cli");
+
+    let _ = std::fs::remove_file(proof_path);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("webrtc proof validation failed"));
+    assert!(stderr.contains("SBF1 echo frame"));
 }
 
 #[test]

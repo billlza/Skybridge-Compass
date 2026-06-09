@@ -11,7 +11,9 @@ use crate::transport::{
     NetworkPath, PeerCapabilities, PeerPlatform, SkyBridgeChannel, SkyBridgeReliability,
     SkyBridgeTransportKind, TransportBindingMaterial, TransportPlan, TransportSelector,
 };
+use crate::webrtc_proof::validate_webrtc_proof_json;
 use std::fmt::Write as FmtWrite;
+use std::fs;
 use std::io::Write;
 
 const HELP: &str = "\
@@ -28,6 +30,7 @@ USAGE:
   skybridge frame describe --channel <control|file|clipboard|telemetry|realtime> --sequence <n> --payload <text> [--sbp2-fixed <n>]
   skybridge connection plan --local <apple|windows> --remote <apple|windows> --path <same-lan|cross-nat> --local-caps <xwing,mlkem,x25519,p256> --remote-suites <0x0001,0x1001> [--allow-classic] [--allow-legacy-p256] [--timeout-observed] [--sbp2-fixed <n>]
   skybridge discovery parse --service <udp|tcp|_skybridge._udp|_skybridge._tcp> --txt <deviceId=...;pubKeyFP=...;platform=...;capabilities=...;name=...;version=...>
+  skybridge webrtc-proof validate --proof <path> --expected-device-id <id> --expected-fingerprint <64-lowercase-hex> [--max-age-ms <n>]
 ";
 
 pub fn run<I, S>(args: I, out: &mut impl Write, err: &mut impl Write) -> i32
@@ -62,6 +65,7 @@ fn execute(args: Vec<String>, out: &mut impl Write) -> Result<(), String> {
         "frame" => execute_frame(&args[1..], out),
         "connection" => execute_connection(&args[1..], out),
         "discovery" => execute_discovery(&args[1..], out),
+        "webrtc-proof" => execute_webrtc_proof(&args[1..], out),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -295,6 +299,54 @@ fn execute_discovery(args: &[String], out: &mut impl Write) -> Result<(), String
     .map_err(|err| err.to_string())?;
     writeln!(out, "supports_relay={}", capabilities.supports_relay)
         .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn execute_webrtc_proof(args: &[String], out: &mut impl Write) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("validate") {
+        return Err("expected webrtc-proof validate".into());
+    }
+
+    let proof_path = required_option(args, "--proof")?;
+    let expected_device_id = required_option(args, "--expected-device-id")?;
+    let expected_fingerprint = required_option(args, "--expected-fingerprint")?;
+    let max_age_ms = optional_option(args, "--max-age-ms")
+        .map(|value| parse_u64(value, "--max-age-ms"))
+        .transpose()?
+        .unwrap_or(60_000);
+    let json = fs::read_to_string(proof_path)
+        .map_err(|err| format!("failed to read WebRTC proof: {err}"))?;
+    let summary =
+        validate_webrtc_proof_json(&json, expected_device_id, expected_fingerprint, max_age_ms)
+            .map_err(|err| format!("webrtc proof validation failed: {err}"))?;
+
+    writeln!(out, "webrtc_proof=valid").map_err(|err| err.to_string())?;
+    writeln!(out, "peer_device_id={}", summary.peer_device_id).map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "peer_public_key_fingerprint={}",
+        summary.peer_public_key_fingerprint
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "helper_name={}", summary.helper_name).map_err(|err| err.to_string())?;
+    writeln!(out, "adapter_binding={}", summary.adapter_binding).map_err(|err| err.to_string())?;
+    writeln!(out, "local_endpoint={}", summary.local_endpoint).map_err(|err| err.to_string())?;
+    writeln!(out, "remote_endpoint={}", summary.remote_endpoint).map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "selected_candidate_pair={}",
+        summary.selected_candidate_pair
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(
+        out,
+        "relay_id={}",
+        summary.relay_id.as_deref().unwrap_or("none")
+    )
+    .map_err(|err| err.to_string())?;
+    writeln!(out, "timestamp_window_ms={}", summary.timestamp_window_ms)
+        .map_err(|err| err.to_string())?;
+    writeln!(out, "proof_age_ms={}", summary.proof_age_ms).map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -586,6 +638,9 @@ fn normalize(value: &str) -> String {
 mod tests {
     use super::*;
 
+    const WEBRTC_PROOF_FINGERPRINT: &str =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
     fn run_cli(args: &[&str]) -> (i32, String, String) {
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -595,6 +650,38 @@ mod tests {
             String::from_utf8(out).unwrap(),
             String::from_utf8(err).unwrap(),
         )
+    }
+
+    fn write_webrtc_proof_fixture(file_name: &str, sbf1_echo_verified: bool) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "skybridge-cli-webrtc-proof-{}-{file_name}.json",
+            std::process::id()
+        ));
+        let captured_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let proof = format!(
+            r#"{{
+  "helperName": "schema-smoke-webrtc-helper",
+  "peerDeviceId": "mac-1",
+  "peerPublicKeyFingerprint": "{WEBRTC_PROOF_FINGERPRINT}",
+  "dataChannelOpen": true,
+  "sbf1EchoVerified": {sbf1_echo_verified},
+  "sbf1FrameMagic": "SBF1",
+  "adapterBinding": "verified webrtc datachannel helper",
+  "localEndpoint": "windows.lan:5443",
+  "remoteEndpoint": "mac.lan:5443",
+  "selectedCandidatePair": "webrtc/dtls/sctp/helper-selected",
+  "transportSecretFingerprintHex": "6666666666666666666666666666666666666666666666666666666666666666",
+  "capabilityDigestHex": "7777777777777777777777777777777777777777777777777777777777777777",
+  "relayId": "relay-helper",
+  "timestampWindowMs": 15000,
+  "capturedAtUnixMs": {captured_at}
+}}"#
+        );
+        std::fs::write(&path, proof).unwrap();
+        path
     }
 
     #[test]
@@ -856,6 +943,57 @@ mod tests {
     }
 
     #[test]
+    fn webrtc_proof_validate_reports_schema_summary() {
+        let proof_path = write_webrtc_proof_fixture("valid", true);
+        let proof_path_text = proof_path.to_string_lossy().to_string();
+
+        let (code, stdout, stderr) = run_cli(&[
+            "webrtc-proof",
+            "validate",
+            "--proof",
+            &proof_path_text,
+            "--expected-device-id",
+            "mac-1",
+            "--expected-fingerprint",
+            WEBRTC_PROOF_FINGERPRINT,
+        ]);
+
+        let _ = std::fs::remove_file(proof_path);
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        assert!(stdout.contains("webrtc_proof=valid"));
+        assert!(stdout.contains("peer_device_id=mac-1"));
+        assert!(stdout.contains("helper_name=schema-smoke-webrtc-helper"));
+        assert!(stdout.contains("adapter_binding=verified webrtc datachannel helper"));
+        assert!(stdout.contains("selected_candidate_pair=webrtc/dtls/sctp/helper-selected"));
+        assert!(stdout.contains("relay_id=relay-helper"));
+        assert!(stdout.contains("timestamp_window_ms=15000"));
+    }
+
+    #[test]
+    fn webrtc_proof_validate_rejects_missing_sbf1_echo() {
+        let proof_path = write_webrtc_proof_fixture("missing-sbf1", false);
+        let proof_path_text = proof_path.to_string_lossy().to_string();
+
+        let (code, stdout, stderr) = run_cli(&[
+            "webrtc-proof",
+            "validate",
+            "--proof",
+            &proof_path_text,
+            "--expected-device-id",
+            "mac-1",
+            "--expected-fingerprint",
+            WEBRTC_PROOF_FINGERPRINT,
+        ]);
+
+        let _ = std::fs::remove_file(proof_path);
+        assert_eq!(code, 2);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("webrtc proof validation failed"));
+        assert!(stderr.contains("SBF1 echo frame"));
+    }
+
+    #[test]
     fn suite_offer_is_derived_from_caps_and_policy() {
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -971,6 +1109,7 @@ mod tests {
             (&["frame"][..], "expected frame describe"),
             (&["connection"][..], "expected connection plan"),
             (&["discovery"][..], "expected discovery parse"),
+            (&["webrtc-proof"][..], "expected webrtc-proof validate"),
         ] {
             let (code, stdout, stderr) = run_cli(args);
             assert_eq!(code, 2);

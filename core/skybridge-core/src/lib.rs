@@ -15,6 +15,7 @@ pub mod session;
 pub mod stream;
 pub mod suite;
 pub mod transport;
+pub mod webrtc_proof;
 
 use crypto::SessionCryptoProvider;
 use session::{

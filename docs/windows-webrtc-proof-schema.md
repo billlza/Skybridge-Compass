@@ -87,6 +87,16 @@ Scripts\verify-windows-webrtc-proof.ps1 `
     -ExpectedFingerprint <64-lowercase-hex>
 ```
 
+Validate the same schema through the reusable Rust CLI:
+
+```powershell
+cargo run --manifest-path core\skybridge-core\Cargo.toml --bin skybridge -- `
+    webrtc-proof validate `
+    --proof <proof.json> `
+    --expected-device-id <device-id> `
+    --expected-fingerprint <64-lowercase-hex>
+```
+
 Run the default synthetic schema smoke:
 
 ```powershell

@@ -126,6 +126,8 @@ foreach ($signal in @(
     "cli_frame_describe_reports_roundtrip_metadata",
     "cli_connection_plan_reports_core_contract",
     "cli_discovery_parse_accepts_mac_bonjour_txt",
+    "cli_webrtc_proof_validate_accepts_schema_smoke",
+    "cli_webrtc_proof_validate_rejects_missing_sbf1_smoke",
     "cli_no_args_prints_help_smoke",
     "cli_rejects_incomplete_transport_command",
     "cli_rejects_unknown_command",
@@ -136,7 +138,10 @@ foreach ($signal in @(
     "flags=0x0002",
     "InvalidPublicKeyFingerprint",
     "TargetTooSmall",
-    "invalid suite id: 0xzz"
+    "invalid suite id: 0xzz",
+    "webrtc-proof validate",
+    "webrtc_proof=valid",
+    "SBF1 echo frame"
 )) {
     Assert-True -Condition ($cliSmoke.Contains($signal)) -Message "CLI smoke coverage missing signal: $signal"
 }
