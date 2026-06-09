@@ -516,6 +516,7 @@ foreach ($portabilityAcceptanceEvidenceSignal in @(
     "RequireRustCliCoverage",
     "RequireOnlineStackFreshness",
     "RequireWinUiVisualEvidence",
+    "RequireNativeDnsSdAcceptance",
     "RequireMacInterop",
     "totalLineCoverage",
     "cliLineCoverage",

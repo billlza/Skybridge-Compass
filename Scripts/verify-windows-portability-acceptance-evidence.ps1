@@ -6,6 +6,7 @@ param(
     [switch]$RequireRustCliCoverage,
     [switch]$RequireOnlineStackFreshness,
     [switch]$RequireWinUiVisualEvidence,
+    [switch]$RequireNativeDnsSdAcceptance,
     [switch]$RequireMacInterop,
     [string]$RustCliCoverageEvidencePath = "",
     [string]$StackFreshnessEvidencePath = "",
@@ -245,7 +246,11 @@ if ($RequireWinUiVisualEvidence) {
 
 $includeNativeDnsSdAcceptance = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $parameters -Name "includeNativeDnsSdAcceptance" -Context "acceptance.parameters") -Context "acceptance.parameters.includeNativeDnsSdAcceptance"
 $requireNativeDnsSdPeer = ConvertTo-Boolean -Value (Assert-JsonProperty -Object $parameters -Name "requireNativeDnsSdPeer" -Context "acceptance.parameters") -Context "acceptance.parameters.requireNativeDnsSdPeer"
-if ($includeNativeDnsSdAcceptance -or $requireNativeDnsSdPeer) {
+if ($RequireNativeDnsSdAcceptance) {
+    Assert-True -Condition ($includeNativeDnsSdAcceptance -or $requireNativeDnsSdPeer) -Message "Acceptance must include native DNS-SD acceptance when -RequireNativeDnsSdAcceptance is passed."
+    Assert-PassedGate -Name "windows-native-dns-sd-acceptance" | Out-Null
+}
+elseif ($includeNativeDnsSdAcceptance -or $requireNativeDnsSdPeer) {
     Assert-PassedGate -Name "windows-native-dns-sd-acceptance" | Out-Null
 }
 else {

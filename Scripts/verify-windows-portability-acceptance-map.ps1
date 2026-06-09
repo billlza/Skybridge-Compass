@@ -256,6 +256,7 @@ foreach ($signal in @(
     "RequireRustCliCoverage",
     "RequireOnlineStackFreshness",
     "RequireWinUiVisualEvidence",
+    "RequireNativeDnsSdAcceptance",
     "RequireMacInterop",
     "windows-portability-acceptance-evidence: ok"
 )) {
