@@ -287,6 +287,11 @@ Invoke-SmokeGate `
     -RelativeScriptPath "Scripts/verify-apple-native-preservation.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
 
+Invoke-SmokeGate `
+    -Name "mac-rust-cli-codbg-wrapper" `
+    -RelativeScriptPath "Scripts/verify-mac-rust-cli-codbg-wrapper.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
+
 if ($ProbeMacSsh -or $RequireMacSshReady -or $RequireMacDirectLan -or $RequireMacRustCliSmoke) {
     $macSshParameters = @{
         HostName = $MacHostName

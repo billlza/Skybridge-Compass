@@ -102,6 +102,18 @@ Run the default synthetic schema smoke:
 Scripts\verify-windows-webrtc-proof-smoke.ps1
 ```
 
+Prepare the Mac SSH and reusable Rust CLI side before the real interop gate:
+
+```powershell
+Scripts\prepare-mac-rust-cli-codbg.ps1 `
+    -MacExpectedHostKeyFingerprint <SHA256:...> `
+    -EvidencePath <mac-ssh-evidence.json> `
+    -SummaryPath <mac-rust-cli-codbg-summary.json> `
+    -RequireDirectLan `
+    -RequireRustCliSmoke `
+    -MacRemoteRepoRoot <mac-repo-root>
+```
+
 Run the real Windows-to-mac interop gate only after direct LAN, Mac SSH, Mac Rust CLI, native DNS-SD, and helper proof generation are ready:
 
 ```powershell

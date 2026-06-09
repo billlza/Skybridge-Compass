@@ -64,6 +64,8 @@ $ciWorkflowSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ci-workflow.p
 $githubWorkflowPath = Join-Path $RepoRoot ".github/workflows/windows-portability.yml"
 $stackFreshnessSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-stack-freshness.ps1"
 $macSshProbePath = Join-Path $RepoRoot "Scripts/probe-mac-ssh.ps1"
+$macRustCliCodbgPath = Join-Path $RepoRoot "Scripts/prepare-mac-rust-cli-codbg.ps1"
+$macRustCliCodbgWrapperSmokePath = Join-Path $RepoRoot "Scripts/verify-mac-rust-cli-codbg-wrapper.ps1"
 $startupStateSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-startup-state.ps1"
 $connectionLaunchSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-connection-launch.ps1"
 $fileTransferQrSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-file-transfer-qr.ps1"
@@ -78,7 +80,7 @@ $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.m
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilitySmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -121,6 +123,8 @@ $ciWorkflowSmoke = Get-Content -Raw -LiteralPath $ciWorkflowSmokePath
 $githubWorkflow = Get-Content -Raw -LiteralPath $githubWorkflowPath
 $stackFreshnessSmoke = Get-Content -Raw -LiteralPath $stackFreshnessSmokePath
 $macSshProbe = Get-Content -Raw -LiteralPath $macSshProbePath
+$macRustCliCodbg = Get-Content -Raw -LiteralPath $macRustCliCodbgPath
+$macRustCliCodbgWrapperSmoke = Get-Content -Raw -LiteralPath $macRustCliCodbgWrapperSmokePath
 $startupStateSmoke = Get-Content -Raw -LiteralPath $startupStateSmokePath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
 $fileTransferQrSmoke = Get-Content -Raw -LiteralPath $fileTransferQrSmokePath
@@ -369,6 +373,7 @@ foreach ($portabilitySmokeSignal in @(
     "verify-windows-connection-launch.ps1",
     "verify-windows-webrtc-proof-smoke.ps1",
     "verify-apple-native-preservation.ps1",
+    "verify-mac-rust-cli-codbg-wrapper.ps1",
     "probe-mac-ssh.ps1",
     "verify-windows-native-dns-sd-acceptance.ps1",
     "verify-windows-webrtc-proof.ps1",
@@ -634,6 +639,48 @@ foreach ($macSshProbeSignal in @(
 )) {
     Assert-Contains -Text $macSshProbe -Needle $macSshProbeSignal -Message "Mac SSH probe missing signal: $macSshProbeSignal"
 }
+foreach ($macRustCliCodbgSignal in @(
+    "mac-rust-cli-codbg: ok",
+    "prepare-mac-rust-cli-codbg.ps1",
+    "Scripts/probe-mac-ssh.ps1",
+    "RequireKnownHost = `$true",
+    "MacExpectedHostKeyFingerprint",
+    "ConvertTo-NormalizedHostKeyFingerprint",
+    "MacExpectedHostAddress",
+    "MacDirectSourceAddress",
+    "RequireDirectLan",
+    "RequireRustCliSmoke",
+    "MacRemoteRepoRoot",
+    "cli_apple_to_apple_selects_apple_native",
+    "probeEvidencePath",
+    "nextInteropCommand",
+    "verify-windows-mac-webrtc-interop.ps1",
+    "directLanLikely",
+    "hostKeyPinned",
+    "proxyTunnelRouteDetected",
+    "System.Text.UTF8Encoding",
+    "Missing Mac SSH key"
+)) {
+    Assert-Contains -Text $macRustCliCodbg -Needle $macRustCliCodbgSignal -Message "Mac Rust CLI co-debug wrapper missing signal: $macRustCliCodbgSignal"
+}
+foreach ($macRustCliCodbgWrapperSmokeSignal in @(
+    "mac-rust-cli-codbg-wrapper: ok",
+    "prepare-mac-rust-cli-codbg.ps1",
+    "probe-mac-ssh.ps1",
+    "RequireKnownHost was not passed",
+    "RequireDirectLan was not passed",
+    "RequireRustCliSmoke was not passed",
+    "SHA256:testfingerprint",
+    "/Users/bill/Skybridge-Compass",
+    "summary.probe.ready",
+    "summary.probe.hostKeyPinned",
+    "summary.probe.directLanLikely",
+    "cli_apple_to_apple_selects_apple_native",
+    "verify-windows-mac-webrtc-interop",
+    "Refusing to remove unexpected test directory"
+)) {
+    Assert-Contains -Text $macRustCliCodbgWrapperSmoke -Needle $macRustCliCodbgWrapperSmokeSignal -Message "Mac Rust CLI co-debug wrapper smoke missing signal: $macRustCliCodbgWrapperSmokeSignal"
+}
 foreach ($stackFreshnessSignal in @(
     "windows-stack-freshness: ok",
     "windows-stack-freshness: evidence=",
@@ -708,6 +755,9 @@ Assert-Contains -Text $architecture -Needle "shared action templates" -Message "
 Assert-Contains -Text $architecture -Needle "WorkspaceActionButtonWithDetailTemplate" -Message "Architecture doc missing action-template detail contract."
 Assert-Contains -Text $architecture -Needle 'must not introduce inline `Button` controls' -Message "Architecture doc missing inline button prohibition."
 Assert-Contains -Text $architecture -Needle "probe-mac-ssh.ps1" -Message "Architecture doc missing Mac SSH probe entrypoint."
+Assert-Contains -Text $architecture -Needle "prepare-mac-rust-cli-codbg.ps1" -Message "Architecture doc missing Mac Rust CLI co-debug wrapper entrypoint."
+Assert-Contains -Text $architecture -Needle "verify-mac-rust-cli-codbg-wrapper.ps1" -Message "Architecture doc missing Mac Rust CLI co-debug wrapper smoke."
+Assert-Contains -Text $architecture -Needle 'prints the next `verify-windows-mac-webrtc-interop.ps1` command shape' -Message "Architecture doc missing Mac Rust CLI co-debug next-gate command."
 Assert-Contains -Text $architecture -Needle "-RequireMacSshReady" -Message "Architecture doc missing Mac SSH readiness gate."
 Assert-Contains -Text $architecture -Needle "-EvidencePath <json>" -Message "Architecture doc missing Mac SSH evidence path."
 Assert-Contains -Text $architecture -Needle "-MacSshEvidencePath <json>" -Message "Architecture doc missing portability Mac SSH evidence path."
@@ -951,6 +1001,9 @@ foreach ($signal in @(
     "timestampWindowMs",
     "capturedAtUnixMs",
     "must not replace the AppleNative path",
+    "Scripts\prepare-mac-rust-cli-codbg.ps1",
+    "-RequireDirectLan",
+    "-RequireRustCliSmoke",
     "Scripts\verify-windows-webrtc-proof-smoke.ps1",
     "Scripts\verify-rust-webrtc-proof-cli.ps1",
     "Scripts\verify-windows-portability-smoke.ps1"
