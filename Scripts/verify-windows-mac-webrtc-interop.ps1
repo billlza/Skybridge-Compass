@@ -18,7 +18,7 @@ param(
     [ValidateRange(1, 30)]
     [int]$ExtendedSearchSeconds = 5,
     [ValidateRange(1, 600000)]
-    [ulong]$WebRtcProofMaxAgeMs = 60000,
+    [UInt64]$WebRtcProofMaxAgeMs = 60000,
     [switch]$CheckOnly
 )
 

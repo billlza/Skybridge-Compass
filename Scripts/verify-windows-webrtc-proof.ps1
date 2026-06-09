@@ -7,7 +7,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ExpectedFingerprint,
     [ValidateRange(1, 600000)]
-    [ulong]$MaxProofAgeMs = 60000
+    [UInt64]$MaxProofAgeMs = 60000
 )
 
 $ErrorActionPreference = "Stop"

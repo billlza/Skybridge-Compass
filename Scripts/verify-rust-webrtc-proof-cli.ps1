@@ -7,7 +7,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ExpectedFingerprint,
     [ValidateRange(1, 600000)]
-    [ulong]$MaxProofAgeMs = 60000
+    [UInt64]$MaxProofAgeMs = 60000
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,15 +29,62 @@ Assert-True -Condition (Test-Path -LiteralPath $ProofPath) -Message "Missing Web
 Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($ExpectedDeviceId)) -Message "Rust WebRTC proof CLI requires -ExpectedDeviceId."
 Assert-True -Condition ($ExpectedFingerprint -match '^[0-9a-f]{64}$') -Message "Rust WebRTC proof CLI requires -ExpectedFingerprint as 64 lowercase hex characters."
 
-& cargo run `
-    --manifest-path $manifestPath `
-    --bin skybridge `
-    -- `
-    webrtc-proof validate `
-    --proof $ProofPath `
-    --expected-device-id $ExpectedDeviceId `
-    --expected-fingerprint $ExpectedFingerprint `
-    --max-age-ms $MaxProofAgeMs.ToString()
+$cargoArguments = @(
+    "run",
+    "--manifest-path",
+    $manifestPath,
+    "--bin",
+    "skybridge",
+    "--",
+    "webrtc-proof",
+    "validate",
+    "--proof",
+    $ProofPath,
+    "--expected-device-id",
+    $ExpectedDeviceId,
+    "--expected-fingerprint",
+    $ExpectedFingerprint,
+    "--max-age-ms",
+    $MaxProofAgeMs.ToString()
+)
+$cargoCommandLabel = "webrtc-proof validate"
+$captureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("skybridge-rust-webrtc-proof-cli-" + [guid]::NewGuid().ToString("N"))
+$stdoutPath = Join-Path $captureRoot "stdout.txt"
+$stderrPath = Join-Path $captureRoot "stderr.txt"
+try {
+    New-Item -ItemType Directory -Path $captureRoot | Out-Null
+    $process = Start-Process `
+        -FilePath "cargo" `
+        -ArgumentList $cargoArguments `
+        -NoNewWindow `
+        -Wait `
+        -PassThru `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath
+    $cargoExitCode = [int]$process.ExitCode
 
-Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Rust WebRTC proof CLI validation failed."
+    if (Test-Path -LiteralPath $stderrPath) {
+        Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Output $_ }
+    }
+    if (Test-Path -LiteralPath $stdoutPath) {
+        Get-Content -LiteralPath $stdoutPath | ForEach-Object { Write-Output $_ }
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $captureRoot) {
+        $resolvedCaptureRoot = (Resolve-Path -LiteralPath $captureRoot).Path
+        $resolvedTempParent = (Resolve-Path -LiteralPath ([System.IO.Path]::GetTempPath())).Path.TrimEnd('\')
+        $captureLeaf = Split-Path -Leaf $resolvedCaptureRoot
+        $isOwnedCaptureDir = $resolvedCaptureRoot.StartsWith(
+            $resolvedTempParent,
+            [StringComparison]::OrdinalIgnoreCase) -and $captureLeaf.StartsWith(
+            "skybridge-rust-webrtc-proof-cli-",
+            [StringComparison]::Ordinal)
+
+        Assert-True -Condition $isOwnedCaptureDir -Message "Refusing to remove unexpected temp directory: $resolvedCaptureRoot"
+        Remove-Item -LiteralPath $captureRoot -Recurse -Force
+    }
+}
+
+Assert-True -Condition ($cargoExitCode -eq 0) -Message "Rust WebRTC proof CLI validation failed: $cargoCommandLabel."
 Write-Output "rust-webrtc-proof-cli: ok proof=$ProofPath"

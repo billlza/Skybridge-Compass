@@ -590,6 +590,7 @@ try {
             foreach ($feature in $features) {
                 Select-Feature -Window $window -Title $feature.Title -ExpectedHeading $feature.Heading -AnchorAutomationId $feature.Anchor
                 $featureActionBounds = Get-RuntimeActionSurfaceSnapshot -Root $window -ActionOrderBySurface $actionOrderBySurface -Surfaces $feature.Surfaces -Context "$($feature.Title) $($size.Width)x$($size.Height)"
+                [void](Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId $feature.Anchor)
                 $fileName = "{0}x{1}-{2}.png" -f $size.Width, $size.Height, (ConvertTo-SafeFileName -Value $feature.Title)
                 $screenshotPath = Join-Path $resolvedEvidenceDir $fileName
                 $screenshot = Save-WindowScreenshot -Window $window -Path $screenshotPath
@@ -602,7 +603,10 @@ try {
                     "WorkspaceAction.TopBarActions.Theme",
                     "WorkspaceAction.SidebarSession.Connect",
                     $feature.Anchor
-                ) + @($feature.EvidenceAnchors)
+                )
+                if ($feature.ContainsKey("EvidenceAnchors")) {
+                    $anchorIds += @($feature.EvidenceAnchors | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                }
 
                 $captures.Add([pscustomobject]@{
                     feature = $feature.Title
@@ -632,6 +636,9 @@ try {
         } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
         Assert-True -Condition (Test-Path -LiteralPath $manifestPath) -Message "Missing visual evidence manifest: $manifestPath"
+        $visualEvidenceVerifier = Join-Path $RepoRoot "Scripts/verify-windows-ui-visual-evidence.ps1"
+        Assert-True -Condition (Test-Path -LiteralPath $visualEvidenceVerifier) -Message "Missing visual evidence verifier: $visualEvidenceVerifier"
+        & $visualEvidenceVerifier -RepoRoot $RepoRoot -EvidenceDir $resolvedEvidenceDir | Write-Output
         Write-Output "windows-ui-visual-evidence: ok dir=$resolvedEvidenceDir manifest=$manifestPath captures=$($captures.Count)"
     }
 

@@ -32,7 +32,7 @@ param(
     [string]$MacRemoteRepoRoot = "",
     [string]$MacWebRtcProofPath = "",
     [ValidateRange(1, 600000)]
-    [ulong]$MacWebRtcProofMaxAgeMs = 60000,
+    [UInt64]$MacWebRtcProofMaxAgeMs = 60000,
     [ValidateRange(1, 30)]
     [int]$ExtendedSearchSeconds = 2,
     [switch]$RequireGitRemoteAccess
@@ -230,10 +230,26 @@ if ($IncludeWinUiAutomationSmoke) {
         -RelativeScriptPath "Scripts/verify-windows-ui-automation-smoke.ps1" `
         -Parameters $winUiAutomationParameters `
         -EvidencePath $WinUiEvidenceDir
+
+    if (-not [string]::IsNullOrWhiteSpace($WinUiEvidenceDir)) {
+        Invoke-SmokeGate `
+            -Name "windows-ui-visual-evidence" `
+            -RelativeScriptPath "Scripts/verify-windows-ui-visual-evidence.ps1" `
+            -Parameters @{
+                RepoRoot = $RepoRoot
+                EvidenceDir = $WinUiEvidenceDir
+            } `
+            -EvidencePath $WinUiEvidenceDir
+    }
+    else {
+        Write-Output "windows-portability-smoke: skipped windows-ui-visual-evidence; pass -WinUiEvidenceDir <dir> with -IncludeWinUiAutomationSmoke to validate screenshot evidence artifacts."
+        Add-SmokeGateResult -Name "windows-ui-visual-evidence" -Status "skipped" -Detail "Pass -WinUiEvidenceDir <dir> with -IncludeWinUiAutomationSmoke to validate screenshot evidence artifacts."
+    }
 }
 else {
     Write-Output "windows-portability-smoke: skipped windows-ui-automation-smoke; pass -IncludeWinUiAutomationSmoke on an interactive Windows desktop to verify live WinUI navigation, anchors, layout, and File Transfer QR preview. Add -WinUiEvidenceDir <dir> to capture visual evidence screenshots and a manifest."
     Add-SmokeGateResult -Name "windows-ui-automation-smoke" -Status "skipped" -Detail "Pass -IncludeWinUiAutomationSmoke on an interactive Windows desktop."
+    Add-SmokeGateResult -Name "windows-ui-visual-evidence" -Status "skipped" -Detail "Pass -IncludeWinUiAutomationSmoke -WinUiEvidenceDir <dir> to validate screenshot evidence artifacts." -EvidencePath $WinUiEvidenceDir
 }
 
 Invoke-SmokeGate `

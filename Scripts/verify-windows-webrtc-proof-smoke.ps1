@@ -49,7 +49,8 @@ try {
         capturedAtUnixMs = ([DateTimeOffset]::UtcNow).ToUnixTimeMilliseconds()
     }
 
-    $proof | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $proofPath -Encoding UTF8
+    $proofJson = $proof | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($proofPath, $proofJson, [System.Text.UTF8Encoding]::new($false))
 
     & $proofGatePath `
         -RepoRoot $RepoRoot `
