@@ -85,8 +85,8 @@ Write-Output "fake-probe: ok"
         -MacKnownHostsPath $knownHostsPath `
         -MacExpectedHostKeyFingerprint "testfingerprint" `
         -MacRemoteRepoRoot "/Users/bill/Skybridge-Compass" `
-        -EvidencePath $evidencePath `
-        -SummaryPath $summaryPath `
+        -EvidencePath $summaryPath `
+        -ProbeEvidencePath $evidencePath `
         -RequireReady `
         -RequireDirectLan `
         -RequireRustCliSmoke
@@ -99,6 +99,7 @@ Write-Output "fake-probe: ok"
     Assert-True -Condition ([bool]$summary.probe.ready) -Message "Wrapper summary did not record ready=true."
     Assert-True -Condition ([bool]$summary.probe.hostKeyPinned) -Message "Wrapper summary did not record hostKeyPinned=true."
     Assert-True -Condition ([bool]$summary.probe.directLanLikely) -Message "Wrapper summary did not record directLanLikely=true."
+    Assert-True -Condition ($summary.probeEvidencePath -eq $evidencePath) -Message "Wrapper summary did not record the explicit probe evidence path."
     Assert-True -Condition ($summary.macRustCliSmoke -eq "cli_apple_to_apple_selects_apple_native") -Message "Wrapper summary missing Mac Rust CLI smoke name."
     Assert-True -Condition ($summary.nextInteropCommand -match "verify-windows-mac-webrtc-interop\.ps1") -Message "Wrapper summary missing next interop command."
 }

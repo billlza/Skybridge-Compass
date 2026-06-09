@@ -107,7 +107,7 @@ Prepare the Mac SSH and reusable Rust CLI side before the real interop gate:
 ```powershell
 Scripts\prepare-mac-rust-cli-codbg.ps1 `
     -MacExpectedHostKeyFingerprint <SHA256:...> `
-    -EvidencePath <mac-ssh-evidence.json> `
+    -ProbeEvidencePath <mac-ssh-evidence.json> `
     -SummaryPath <mac-rust-cli-codbg-summary.json> `
     -RequireDirectLan `
     -RequireRustCliSmoke `

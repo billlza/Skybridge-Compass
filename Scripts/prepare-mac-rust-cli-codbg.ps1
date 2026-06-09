@@ -11,6 +11,7 @@ param(
     [string]$MacDirectSourceAddress = "",
     [string]$MacRemoteRepoRoot = "",
     [string]$EvidencePath = "",
+    [string]$ProbeEvidencePath = "",
     [string]$SummaryPath = "",
     [int]$ConnectTimeoutSeconds = 5,
     [switch]$RequireReady,
@@ -122,8 +123,15 @@ if ($RequireRustCliSmoke) {
 }
 
 $normalizedHostKeyFingerprint = ConvertTo-NormalizedHostKeyFingerprint -Fingerprint $MacExpectedHostKeyFingerprint
-if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
-    $EvidencePath = New-DefaultEvidencePath
+if ([string]::IsNullOrWhiteSpace($ProbeEvidencePath)) {
+    if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
+        $EvidencePath = New-DefaultEvidencePath
+    }
+
+    $ProbeEvidencePath = $EvidencePath
+}
+elseif (-not [string]::IsNullOrWhiteSpace($EvidencePath) -and [string]::IsNullOrWhiteSpace($SummaryPath)) {
+    $SummaryPath = $EvidencePath
 }
 
 $probeParameters = @{
@@ -135,7 +143,7 @@ $probeParameters = @{
     KnownHostsPath = $MacKnownHostsPath
     RequireKnownHost = $true
     ExpectedHostAddress = $MacExpectedHostAddress
-    EvidencePath = $EvidencePath
+    EvidencePath = $ProbeEvidencePath
     ConnectTimeoutSeconds = $ConnectTimeoutSeconds
 }
 if (-not [string]::IsNullOrWhiteSpace($normalizedHostKeyFingerprint)) {
@@ -166,7 +174,7 @@ catch {
     $detail = $_.Exception.Message
 }
 
-$probeEvidence = Get-ProbeEvidenceObject -Path $EvidencePath
+$probeEvidence = Get-ProbeEvidenceObject -Path $ProbeEvidencePath
 $summary = [ordered]@{
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     script = "prepare-mac-rust-cli-codbg.ps1"
@@ -186,7 +194,7 @@ $summary = [ordered]@{
     requireDirectLan = [bool]$RequireDirectLan
     requireRustCliSmoke = [bool]$RequireRustCliSmoke
     macRustCliSmoke = "cli_apple_to_apple_selects_apple_native"
-    probeEvidencePath = $EvidencePath
+    probeEvidencePath = $ProbeEvidencePath
     nextInteropCommand = New-NextInteropCommand
     probe = if ($probeEvidence) {
         [ordered]@{
@@ -214,10 +222,10 @@ if (-not [string]::IsNullOrWhiteSpace($SummaryPath)) {
 }
 
 if ($probeEvidence) {
-    Write-Output "mac-rust-cli-codbg: ready=$($probeEvidence.ready) directLanLikely=$($probeEvidence.directLanLikely) hostKeyPinned=$($probeEvidence.hostKeyPinned) evidence=$EvidencePath"
+    Write-Output "mac-rust-cli-codbg: ready=$($probeEvidence.ready) directLanLikely=$($probeEvidence.directLanLikely) hostKeyPinned=$($probeEvidence.hostKeyPinned) evidence=$ProbeEvidencePath"
 }
 else {
-    Write-Output "mac-rust-cli-codbg: evidence=$EvidencePath"
+    Write-Output "mac-rust-cli-codbg: evidence=$ProbeEvidencePath"
 }
 
 Write-Output "mac-rust-cli-codbg: next-interoperability-gate=$($summary.nextInteropCommand)"

@@ -252,6 +252,7 @@ foreach ($signal in @(
     "prepare-mac-rust-cli-codbg.ps1",
     "RequireKnownHost",
     "MacExpectedHostKeyFingerprint",
+    "ProbeEvidencePath",
     "RequireDirectLan",
     "RequireRustCliSmoke",
     "MacRemoteRepoRoot",

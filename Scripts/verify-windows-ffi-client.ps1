@@ -706,6 +706,7 @@ foreach ($macRustCliCodbgSignal in @(
     "RequireDirectLan",
     "RequireRustCliSmoke",
     "MacRemoteRepoRoot",
+    "ProbeEvidencePath",
     "cli_apple_to_apple_selects_apple_native",
     "probeEvidencePath",
     "nextInteropCommand",
@@ -726,6 +727,7 @@ foreach ($macRustCliCodbgWrapperSmokeSignal in @(
     "RequireDirectLan was not passed",
     "RequireRustCliSmoke was not passed",
     "SHA256:testfingerprint",
+    "ProbeEvidencePath",
     "/Users/bill/Skybridge-Compass",
     "summary.probe.ready",
     "summary.probe.hostKeyPinned",
@@ -815,6 +817,7 @@ Assert-Contains -Text $architecture -Needle "probe-mac-ssh.ps1" -Message "Archit
 Assert-Contains -Text $architecture -Needle "prepare-mac-rust-cli-codbg.ps1" -Message "Architecture doc missing Mac Rust CLI co-debug wrapper entrypoint."
 Assert-Contains -Text $architecture -Needle "verify-mac-rust-cli-codbg-wrapper.ps1" -Message "Architecture doc missing Mac Rust CLI co-debug wrapper smoke."
 Assert-Contains -Text $architecture -Needle 'prints the next `verify-windows-mac-webrtc-interop.ps1` command shape' -Message "Architecture doc missing Mac Rust CLI co-debug next-gate command."
+Assert-Contains -Text $architecture -Needle "-ProbeEvidencePath <mac-ssh-evidence.json>" -Message "Architecture doc missing explicit Mac probe evidence path."
 Assert-Contains -Text $architecture -Needle "-RequireMacSshReady" -Message "Architecture doc missing Mac SSH readiness gate."
 Assert-Contains -Text $architecture -Needle "-EvidencePath <json>" -Message "Architecture doc missing Mac SSH evidence path."
 Assert-Contains -Text $architecture -Needle "-MacSshEvidencePath <json>" -Message "Architecture doc missing portability Mac SSH evidence path."
