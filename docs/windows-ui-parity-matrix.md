@@ -92,4 +92,5 @@ All action buttons must be rendered through these shared templates. Feature sect
 - The matrix smoke also verifies shared action templates and rejects inline XAML action buttons outside the approved templates.
 - The matrix smoke verifies both initial and dynamic workspace action surface orders so selected-feature, readiness, and pending-provider state changes cannot leave visible buttons stale.
 - `Scripts/verify-windows-ui-action-order.ps1` remains the executable catalog smoke for action keys and automation ids.
+- `Scripts/verify-windows-ui-automation-smoke.ps1 -EvidenceDir <dir>` captures the rendered WinUI shell for all eight workspaces at requested logical window sizes 1280x900 and 1366x768 and writes `windows-ui-visual-evidence.json` with requested size, actual screenshot pixel size, and the corresponding automation-anchor bounds. These artifacts are the local visual evidence package for mac/iOS comparison while fonts, OS scale, and platform pixel metrics remain out of scope.
 - `Scripts/verify-windows-ui-parity.ps1` remains the broader static modularity gate.

@@ -7,6 +7,7 @@ param(
     [switch]$CiMode,
     [switch]$ProbeMacSsh,
     [switch]$IncludeWinUiAutomationSmoke,
+    [string]$WinUiEvidenceDir = "",
     [switch]$RequireMacSshReady,
     [switch]$RequireMacDirectLan,
     [switch]$RequireMacRustCliSmoke,
@@ -120,13 +121,20 @@ Invoke-SmokeGate `
     -Parameters @{ RepoRoot = $RepoRoot }
 
 if ($IncludeWinUiAutomationSmoke) {
+    $winUiAutomationParameters = @{
+        RepoRoot = $RepoRoot
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WinUiEvidenceDir)) {
+        $winUiAutomationParameters.EvidenceDir = $WinUiEvidenceDir
+    }
+
     Invoke-SmokeGate `
         -Name "windows-ui-automation-smoke" `
         -RelativeScriptPath "Scripts/verify-windows-ui-automation-smoke.ps1" `
-        -Parameters @{ RepoRoot = $RepoRoot }
+        -Parameters $winUiAutomationParameters
 }
 else {
-    Write-Output "windows-portability-smoke: skipped windows-ui-automation-smoke; pass -IncludeWinUiAutomationSmoke on an interactive Windows desktop to verify live WinUI navigation, anchors, layout, and File Transfer QR preview."
+    Write-Output "windows-portability-smoke: skipped windows-ui-automation-smoke; pass -IncludeWinUiAutomationSmoke on an interactive Windows desktop to verify live WinUI navigation, anchors, layout, and File Transfer QR preview. Add -WinUiEvidenceDir <dir> to capture visual evidence screenshots and a manifest."
 }
 
 Invoke-SmokeGate `

@@ -434,14 +434,32 @@ foreach ($uiActionOrderSmokeSignal in @(
 
 foreach ($uiAutomationSmokeSignal in @(
     "windows-ui-automation-smoke: ok",
+    "windows-ui-visual-evidence: ok",
+    "EvidenceDir",
     "UIAutomationClient",
+    "System.Drawing",
     "Wait-ForMainWindow",
+    "Assert-PresentByAutomationId",
+    "Assert-SelectedFeatureTitle",
+    "Assert-StatusMessageContains",
+    "Restore-TestWindow",
+    "Activate-TestWindow",
+    "SetForegroundWindow",
+    "Save-WindowScreenshot",
+    "requestedWidth",
+    "requestedHeight",
+    "screenshotWidth",
+    "screenshotHeight",
+    "windows-ui-visual-evidence.json",
+    "captureCount",
     "WindowsPackageType>None",
     "SKYBRIDGE_WINDOWS_RUNTIME",
     "Skybridge.Navigation.List",
     "Skybridge.SelectedFeature.Title",
     "WorkspaceAction.TopBarActions.Notifications",
+    "WorkspaceAction.TopBarActions.Theme",
     "WorkspaceAction.DashboardQuickActions.ScanDevices",
+    "Top-bar theme action must remain inside the window",
     "WorkspaceAction.DeviceDiscoveryPrimary.ParseTxt",
     "WorkspaceAction.UsbManagementHeader.RefreshDevices",
     "WorkspaceAction.FileTransfer.GenerateQr",
@@ -1128,8 +1146,10 @@ Assert-ItemsControlTemplate -Text $mainWindow -Binding "SettingsDetails" -ItemTe
 Assert-ItemsControlTemplate -Text $mainWindow -Binding "SettingsActions" -ItemTemplate "SettingsActionRowTemplate"
 
 foreach ($layoutSignal in @(
-    "<ColumnDefinition Width=`"252`" />",
+    "<ColumnDefinition Width=`"300`" />",
     "<RowDefinition Height=`"72`" />",
+    "Text=`"Skybridge Compass`" TextWrapping=`"Wrap`"",
+    "Text=`"{Binding Title}`" FontWeight=`"SemiBold`" TextWrapping=`"Wrap`" MaxLines=`"2`"",
     "ItemsSource=`"{Binding NavigationItems}`"",
     "SelectedItem=`"{Binding SelectedFeature, Mode=TwoWay}`""
 )) {
@@ -1155,7 +1175,8 @@ Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
     '<TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
-    '<TextBlock Text="FPS / Diagnostics"',
+    'ToolTipService.ToolTip="FPS / Diagnostics"',
+    '<TextBlock Text="FPS"',
     '<TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold"',
     'ItemsSource="{Binding TopBarActions}"'
 )
@@ -4412,7 +4433,10 @@ foreach ($docSignal in @(
     "DisabledSystemPreferencesLauncher",
     "WindowsSystemPreferencesLauncher",
     "ms-settings:",
-    "Visual QA"
+    "Visual QA",
+    "-EvidenceDir <dir>",
+    "-WinUiEvidenceDir <dir>",
+    "windows-ui-visual-evidence.json"
 )) {
     Assert-Contains -Text $parityDoc -Needle $docSignal -Message "windows-ui-parity-contract.md missing signal: $docSignal"
 }

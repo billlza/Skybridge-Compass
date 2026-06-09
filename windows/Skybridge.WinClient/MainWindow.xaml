@@ -56,9 +56,11 @@
                     FontSize="16"
                     VerticalAlignment="Center" />
                 <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" />
                     <TextBlock
                         Text="{Binding Status}"
+                        TextWrapping="Wrap"
+                        MaxLines="2"
                         FontSize="12"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
@@ -96,9 +98,9 @@
                 Command="{Binding Command}"
                 IsEnabled="{Binding IsEnabled}"
                 MinWidth="44"
-                Padding="10,6"
+                Padding="8,6"
                 ToolTipService.ToolTip="{Binding Title}">
-                <StackPanel Orientation="Horizontal" Spacing="6">
+                <StackPanel Orientation="Horizontal" Spacing="5">
                     <FontIcon Glyph="{Binding Glyph}" FontSize="14" />
                     <TextBlock Text="{Binding Detail}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
@@ -329,7 +331,7 @@
         </DataTemplate>
         </Grid.Resources>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="252" />
+            <ColumnDefinition Width="300" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
@@ -346,8 +348,8 @@
                 </Grid.RowDefinitions>
 
                 <StackPanel Spacing="2">
-                    <TextBlock Text="Skybridge Compass" FontSize="20" FontWeight="SemiBold" />
-                    <TextBlock Text="{Binding ConnectionStatus}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Skybridge Compass" TextWrapping="Wrap" FontSize="20" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding ConnectionStatus}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
 
                 <ListView
@@ -376,10 +378,10 @@
 
             <Border
                 Grid.Row="0"
-                Padding="24,14"
+                Padding="20,14"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="0,0,0,1">
-                <Grid ColumnSpacing="16">
+                <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
@@ -397,25 +399,26 @@
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
 
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                         <Border
                             AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"
-                            Padding="12,7"
+                            Padding="10,7"
                             CornerRadius="6"
                             Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon Glyph="&#xE9F5;" FontSize="12" />
                                 <TextBlock Text="{Binding TopBarConnectionStatus}" FontWeight="SemiBold" />
                             </StackPanel>
                         </Border>
                         <Border
                             AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"
-                            Padding="12,7"
+                            Padding="10,7"
                             CornerRadius="6"
+                            ToolTipService.ToolTip="FPS / Diagnostics"
                             Background="{ThemeResource SystemFillColorNeutralBackgroundBrush}">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon Glyph="&#xE9D9;" FontSize="12" />
-                                <TextBlock Text="FPS / Diagnostics" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="FPS" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 <TextBlock Text="{Binding TopBarDiagnosticsStatus}" FontWeight="SemiBold" />
                             </StackPanel>
                         </Border>
