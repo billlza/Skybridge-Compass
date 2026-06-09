@@ -5,6 +5,8 @@ This map fixes the active Windows parity objective to auditable evidence. It is 
 | Requirement | Required evidence |
 | --- | --- |
 | `REQ-RESEARCH` mac/TDSC and ADR research is captured before Windows decisions | `docs/windows-architecture.md` records the current TDSC branch, current-path mac docs, ADR branch fallback, and source links. |
+| `REQ-BEST-PRACTICE-RESEARCH` Windows stack, modularity, UI parity, Rust CLI, and Apple preservation decisions are tied to source-backed best-practice research | `docs/windows-research-agent-synthesis.md` records the best-practice research matrix with `checkedAtUtc`, `sourceUris`, `finding`, `decisionImpact`, and `staleRisk`; `Scripts/verify-windows-research-evidence.ps1` checks the matrix and source signals. |
+| `REQ-SUBAGENT-SUMMARY` sub-agent collection and synthesis is documented before final parity claims | `docs/windows-research-agent-synthesis.md` records the three explorer reports, their agent IDs, scope, findings, and decision impacts; `Scripts/verify-windows-research-evidence.ps1` keeps the synthesis auditable. |
 | `REQ-STACK` Windows stack is current and checked against primary sources | `Scripts/verify-windows-stack-freshness.ps1` checks project versions offline and supports `-CheckOnline -EvidencePath <json>` for .NET/NuGet/GitHub latest-version evidence. |
 | `REQ-MODULARITY` Windows is modular around Core/service boundaries rather than page-local logic | `Scripts/verify-windows-ffi-client.ps1`, `Scripts/verify-windows-ui-parity.ps1`, `Scripts/verify-windows-native-runtime-profile.ps1`, and `Scripts/verify-windows-connection-launch.ps1` cover CoreBridge, dependency injection, runtime selectors, transport adapters, and fail-closed launch boundaries. |
 | `REQ-UI` controllable UI parity matches mac positions and style contracts | `docs/windows-ui-parity-matrix.md`, `Scripts/verify-windows-ui-action-order.ps1`, `Scripts/verify-windows-ui-parity-matrix.ps1`, `Scripts/verify-windows-ui-automation-smoke.ps1`, and `Scripts/verify-windows-ui-visual-evidence.ps1` cover button/function order, anchors, shared templates, runtime action bounds, and 16 screenshot artifacts. Fonts, DPI, and platform pixel metrics remain out of scope. |
@@ -18,6 +20,7 @@ Run the acceptance-map static gate:
 
 ```powershell
 Scripts\verify-windows-portability-acceptance-map.ps1
+Scripts\verify-windows-research-evidence.ps1
 ```
 
 Run the repository smoke with evidence paths when producing a release/PR acceptance package:

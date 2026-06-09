@@ -59,10 +59,12 @@ $dependencyFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Sessio
 $nativeRuntimeFactoryPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/WindowsNativeRuntimeDependencyFactory.cs"
 $mainWindowPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/MainWindow.xaml.cs"
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
+$researchSynthesisPath = Join-Path $RepoRoot "docs/windows-research-agent-synthesis.md"
 $portabilityAcceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-map.md"
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $portabilityAcceptanceMapSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-map.ps1"
 $portabilityAcceptanceEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
+$researchEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-research-evidence.ps1"
 $ciWorkflowSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ci-workflow.ps1"
 $githubWorkflowPath = Join-Path $RepoRoot ".github/workflows/windows-portability.yml"
 $stackFreshnessSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-stack-freshness.ps1"
@@ -83,7 +85,7 @@ $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.m
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
 
-foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $portabilityAcceptanceEvidenceSmokePath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $appleNativePreservationSmokePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
 }
 
@@ -121,10 +123,12 @@ $dependencyFactory = Get-Content -Raw -LiteralPath $dependencyFactoryPath
 $nativeRuntimeFactory = Get-Content -Raw -LiteralPath $nativeRuntimeFactoryPath
 $mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
 $architecture = Get-Content -Raw -LiteralPath $architecturePath
+$researchSynthesis = Get-Content -Raw -LiteralPath $researchSynthesisPath
 $portabilityAcceptanceMap = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapPath
 $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
 $portabilityAcceptanceMapSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceMapSmokePath
 $portabilityAcceptanceEvidenceSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceEvidenceSmokePath
+$researchEvidenceSmoke = Get-Content -Raw -LiteralPath $researchEvidenceSmokePath
 $ciWorkflowSmoke = Get-Content -Raw -LiteralPath $ciWorkflowSmokePath
 $githubWorkflow = Get-Content -Raw -LiteralPath $githubWorkflowPath
 $stackFreshnessSmoke = Get-Content -Raw -LiteralPath $stackFreshnessSmokePath
@@ -366,6 +370,7 @@ foreach ($portabilitySmokeSignal in @(
     "verify-git-ssh-remote.ps1",
     "verify-windows-ci-workflow.ps1",
     "verify-windows-stack-freshness.ps1",
+    "verify-windows-research-evidence.ps1",
     "verify-windows-portability-acceptance-map.ps1",
     "verify-windows-ffi-client.ps1",
     "verify-windows-ui-parity.ps1",
@@ -438,6 +443,8 @@ foreach ($portabilitySmokeSignal in @(
 foreach ($appleNativePreservationSignal in @(
     "apple-native-preservation: ok",
     "cli_apple_to_apple_selects_apple_native",
+    "cli_ios_to_macos_selects_apple_native",
+    "cli_windows_to_ios_selects_webrtc_interop",
     "cli_apple_to_apple_connection_plan_keeps_apple_native_channels",
     "cli_windows_to_apple_same_lan_connection_plan_uses_webrtc",
     "apple_peers_keep_native_transport_ahead_of_webrtc",
@@ -458,6 +465,8 @@ foreach ($appleNativePreservationSignal in @(
 foreach ($portabilityAcceptanceMapSignal in @(
     "windows-portability-acceptance-map: ok",
     "REQ-RESEARCH",
+    "REQ-BEST-PRACTICE-RESEARCH",
+    "REQ-SUBAGENT-SUMMARY",
     "REQ-STACK",
     "REQ-MODULARITY",
     "REQ-UI",
@@ -478,6 +487,25 @@ foreach ($portabilityAcceptanceMapSignal in @(
 )) {
     Assert-Contains -Text ($portabilityAcceptanceMap + $portabilityAcceptanceMapSmoke) -Needle $portabilityAcceptanceMapSignal -Message "Portability acceptance map missing signal: $portabilityAcceptanceMapSignal"
 }
+foreach ($researchEvidenceSignal in @(
+    "windows-research-evidence: ok",
+    "Best-Practice Research Matrix",
+    "Sub-Agent Research Summary",
+    "checkedAtUtc",
+    "sourceUris",
+    "decisionImpact",
+    "staleRisk",
+    "agentRole",
+    "reportId",
+    "019eaabe-015c-7ba1-a82f-ed04ef5295e5",
+    "019eaabe-45ca-7fe2-a24c-83a5bfa02ecb",
+    "019eaabe-7d5b-7c33-9691-ba4765b93287",
+    "Real Windows-to-mac interop remains blocked",
+    "GitHub branch upload remains blocked",
+    "Interactive WinUI visual screenshots"
+)) {
+    Assert-Contains -Text ($researchSynthesis + $researchEvidenceSmoke) -Needle $researchEvidenceSignal -Message "Windows research evidence missing signal: $researchEvidenceSignal"
+}
 foreach ($portabilityAcceptanceEvidenceSignal in @(
     "windows-portability-acceptance-evidence: ok",
     "AcceptanceEvidencePath",
@@ -491,6 +519,11 @@ foreach ($portabilityAcceptanceEvidenceSignal in @(
     "RequireMacInterop",
     "totalLineCoverage",
     "cliLineCoverage",
+    "cargo fmt --all -- --check",
+    "cargo clippy --all-targets --all-features -- -D warnings",
+    "cargo build --lib",
+    "cargo test",
+    "cargo llvm-cov --fail-under-lines",
     "sourceUris",
     "directLanLikely",
     "hostKeyPinned"

@@ -197,6 +197,7 @@ foreach ($gateName in @(
     "git-ssh-remote",
     "windows-ci-workflow",
     "windows-stack-freshness",
+    "windows-research-evidence",
     "windows-portability-acceptance-map",
     "windows-ffi-client",
     "windows-ui-parity",
@@ -282,6 +283,16 @@ if ($RequireRustCliCoverage -or $includeRustCliCoverage) {
     Assert-True -Condition ($cliLineCoverage -ge $MinimumLineCoverage) -Message "Rust cli.rs line coverage $cliLineCoverage% is below $MinimumLineCoverage%."
     $commandResults = @((Assert-JsonProperty -Object $coverageEvidence -Name "commandResults" -Context "rustCoverage"))
     Assert-True -Condition ($commandResults.Count -ge 5) -Message "Rust CLI coverage evidence must include command results."
+    $commandNames = @($commandResults | ForEach-Object { [string](Assert-JsonProperty -Object $_ -Name "name" -Context "rustCoverage.commandResults[]") })
+    foreach ($requiredCommandName in @(
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo build --lib",
+        "cargo test"
+    )) {
+        Assert-True -Condition ($commandNames -contains $requiredCommandName) -Message "Rust CLI coverage evidence missing command result: $requiredCommandName"
+    }
+    Assert-True -Condition (@($commandNames | Where-Object { $_.StartsWith("cargo llvm-cov --fail-under-lines ", [StringComparison]::Ordinal) -and $_.EndsWith(" --summary-only", [StringComparison]::Ordinal) }).Count -eq 1) -Message "Rust CLI coverage evidence must include one cargo llvm-cov --fail-under-lines <threshold> --summary-only command result."
     foreach ($commandResult in $commandResults) {
         $commandName = [string](Assert-JsonProperty -Object $commandResult -Name "name" -Context "rustCoverage.commandResults[]")
         $exitCode = [int](Assert-JsonProperty -Object $commandResult -Name "exitCode" -Context "rustCoverage.commandResults[$commandName]")

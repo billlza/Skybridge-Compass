@@ -172,6 +172,8 @@ $transport = Get-Content -Raw -LiteralPath $transportPath
 foreach ($signal in @(
     "cli_version_smoke",
     "cli_apple_to_apple_selects_apple_native",
+    "cli_ios_to_macos_selects_apple_native",
+    "cli_windows_to_ios_selects_webrtc_interop",
     "cli_apple_to_apple_connection_plan_keeps_apple_native_channels",
     "cli_windows_same_lan_selects_msquic",
     "cli_windows_to_apple_selects_webrtc_interop",

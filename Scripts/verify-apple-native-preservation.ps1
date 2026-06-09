@@ -63,6 +63,8 @@ $connectionSource = Get-Content -Raw -LiteralPath $connectionSourcePath
 
 foreach ($signal in @(
     "cli_apple_to_apple_selects_apple_native",
+    "cli_ios_to_macos_selects_apple_native",
+    "cli_windows_to_ios_selects_webrtc_interop",
     "cli_apple_to_apple_connection_plan_keeps_apple_native_channels",
     "cli_windows_to_apple_same_lan_connection_plan_uses_webrtc",
     "cli_windows_to_apple_selects_webrtc_interop",
@@ -101,6 +103,20 @@ Assert-Contains -Text $appleTransport -Needle "kind=AppleNative" -Message "Apple
 Assert-Contains -Text $appleTransport -Needle "audit=AppleNativeDefault" -Message "Apple-to-Apple transport must keep AppleNativeDefault audit."
 Assert-Contains -Text $appleTransport -Needle "relay_allowed=false" -Message "Apple-to-Apple transport must not require relay/WebRTC fallback by default."
 Assert-NotContains -Text $appleTransport -Needle "WebRtcDataChannel" -Message "Apple-to-Apple transport must not be replaced by WebRTC."
+
+$iosMacTransport = Invoke-SkybridgeCli -Arguments @(
+    "transport",
+    "select",
+    "--local",
+    "ios",
+    "--remote",
+    "macos",
+    "--path",
+    "same-lan"
+)
+Assert-Contains -Text $iosMacTransport -Needle "kind=AppleNative" -Message "iOS-to-macOS transport must stay AppleNative."
+Assert-Contains -Text $iosMacTransport -Needle "audit=AppleNativeDefault" -Message "iOS-to-macOS transport must keep AppleNativeDefault audit."
+Assert-NotContains -Text $iosMacTransport -Needle "WebRtcDataChannel" -Message "iOS-to-macOS transport must not be replaced by WebRTC."
 
 $appleConnection = Invoke-SkybridgeCli -Arguments @(
     "connection",
@@ -177,6 +193,20 @@ $windowsAppleTransport = Invoke-SkybridgeCli -Arguments @(
 Assert-Contains -Text $windowsAppleTransport -Needle "kind=WebRtcDataChannel" -Message "Windows-to-Apple transport must use WebRTC interop."
 Assert-Contains -Text $windowsAppleTransport -Needle "audit=WebRtcInterop" -Message "Windows-to-Apple transport must report WebRtcInterop audit."
 Assert-NotContains -Text $windowsAppleTransport -Needle "AppleNative" -Message "Windows-to-Apple transport must not claim AppleNative."
+
+$windowsIosTransport = Invoke-SkybridgeCli -Arguments @(
+    "transport",
+    "select",
+    "--local",
+    "windows",
+    "--remote",
+    "ios",
+    "--path",
+    "same-lan"
+)
+Assert-Contains -Text $windowsIosTransport -Needle "kind=WebRtcDataChannel" -Message "Windows-to-iOS transport must use WebRTC interop."
+Assert-Contains -Text $windowsIosTransport -Needle "audit=WebRtcInterop" -Message "Windows-to-iOS transport must report WebRtcInterop audit."
+Assert-NotContains -Text $windowsIosTransport -Needle "AppleNative" -Message "Windows-to-iOS transport must not claim AppleNative."
 
 $windowsAppleConnection = Invoke-SkybridgeCli -Arguments @(
     "connection",

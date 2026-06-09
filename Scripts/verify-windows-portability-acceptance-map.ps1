@@ -34,6 +34,7 @@ function Read-RequiredText {
 }
 
 $architecturePath = Join-Path $RepoRoot "docs/windows-architecture.md"
+$researchSynthesisPath = Join-Path $RepoRoot "docs/windows-research-agent-synthesis.md"
 $uiContractPath = Join-Path $RepoRoot "docs/windows-ui-parity-contract.md"
 $uiMatrixPath = Join-Path $RepoRoot "docs/windows-ui-parity-matrix.md"
 $webrtcSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.md"
@@ -42,6 +43,7 @@ $acceptanceMapPath = Join-Path $RepoRoot "docs/windows-portability-acceptance-ma
 
 $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-smoke.ps1"
 $acceptanceEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
+$researchEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-research-evidence.ps1"
 $stackFreshnessPath = Join-Path $RepoRoot "Scripts/verify-windows-stack-freshness.ps1"
 $rustCoveragePath = Join-Path $RepoRoot "Scripts/verify-rust-cli-coverage.ps1"
 $ffiClientPath = Join-Path $RepoRoot "Scripts/verify-windows-ffi-client.ps1"
@@ -59,6 +61,7 @@ $githubPushPath = Join-Path $RepoRoot "Scripts/push-github-ssh.ps1"
 $githubEnsurePath = Join-Path $RepoRoot "Scripts/ensure-github-ssh-remote.ps1"
 
 $architecture = Read-RequiredText -Path $architecturePath
+$researchSynthesis = Read-RequiredText -Path $researchSynthesisPath
 $uiContract = Read-RequiredText -Path $uiContractPath
 $uiMatrix = Read-RequiredText -Path $uiMatrixPath
 $webrtcSchema = Read-RequiredText -Path $webrtcSchemaPath
@@ -66,6 +69,7 @@ $githubTransport = Read-RequiredText -Path $githubTransportPath
 $acceptanceMap = Read-RequiredText -Path $acceptanceMapPath
 $portabilitySmoke = Read-RequiredText -Path $portabilitySmokePath
 $acceptanceEvidence = Read-RequiredText -Path $acceptanceEvidencePath
+$researchEvidence = Read-RequiredText -Path $researchEvidencePath
 $stackFreshness = Read-RequiredText -Path $stackFreshnessPath
 $rustCoverage = Read-RequiredText -Path $rustCoveragePath
 $ffiClient = Read-RequiredText -Path $ffiClientPath
@@ -84,6 +88,8 @@ $githubEnsure = Read-RequiredText -Path $githubEnsurePath
 
 foreach ($requirement in @(
     "REQ-RESEARCH",
+    "REQ-BEST-PRACTICE-RESEARCH",
+    "REQ-SUBAGENT-SUMMARY",
     "REQ-STACK",
     "REQ-MODULARITY",
     "REQ-UI",
@@ -105,6 +111,23 @@ foreach ($signal in @(
     "paper materials as stale"
 )) {
     Assert-Contains -Text $architecture -Needle $signal -Message "Research evidence missing signal: $signal"
+}
+foreach ($signal in @(
+    "Best-Practice Research Matrix",
+    "Sub-Agent Research Summary",
+    "checkedAtUtc",
+    "sourceUris",
+    "decisionImpact",
+    "staleRisk",
+    "agentRole",
+    "reportId",
+    "019eaabe-015c-7ba1-a82f-ed04ef5295e5",
+    "019eaabe-45ca-7fe2-a24c-83a5bfa02ecb",
+    "019eaabe-7d5b-7c33-9691-ba4765b93287",
+    "verify-windows-research-evidence.ps1",
+    "windows-research-evidence: ok"
+)) {
+    Assert-Contains -Text ($researchSynthesis + $researchEvidence + $acceptanceMap) -Needle $signal -Message "Sub-agent research evidence missing signal: $signal"
 }
 
 foreach ($signal in @(
@@ -196,6 +219,7 @@ foreach ($gate in @(
     "git-ssh-remote",
     "windows-ci-workflow",
     "windows-stack-freshness",
+    "windows-research-evidence",
     "windows-ffi-client",
     "windows-ui-parity",
     "windows-ui-action-order",

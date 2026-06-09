@@ -534,6 +534,12 @@
                                 ItemsSource="{Binding ManualConnectionFacts}"
                                 ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
 
+                            <ItemsControl
+                                AutomationProperties.AutomationId="Skybridge.Actions.DeviceDiscoveryManualConnectFinal"
+                                ItemsSource="{Binding DeviceDiscoveryManualConnectFinalActions}"
+                                ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
+                                ItemTemplate="{StaticResource WorkspaceActionButtonWithDetailTemplate}" />
+
                             <Grid ColumnSpacing="18">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
@@ -654,11 +660,6 @@
                                     <ItemsControl
                                         ItemsSource="{Binding ConnectionPreflightFacts}"
                                         ItemTemplate="{StaticResource WorkspaceFactRowTemplate}" />
-                                    <ItemsControl
-                                        AutomationProperties.AutomationId="Skybridge.Actions.DeviceDiscoveryManualConnectFinal"
-                                        ItemsSource="{Binding DeviceDiscoveryManualConnectFinalActions}"
-                                        ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"
-                                        ItemTemplate="{StaticResource WorkspaceActionButtonWithDetailTemplate}" />
                                 </StackPanel>
                             </Grid>
                         </StackPanel>

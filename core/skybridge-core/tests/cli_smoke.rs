@@ -140,6 +140,53 @@ fn cli_apple_to_apple_selects_apple_native() {
 }
 
 #[test]
+fn cli_ios_to_macos_selects_apple_native() {
+    let output = skybridge()
+        .args([
+            "transport",
+            "select",
+            "--local",
+            "ios",
+            "--remote",
+            "macos",
+            "--path",
+            "same-lan",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("kind=AppleNative"));
+    assert!(stdout.contains("audit=AppleNativeDefault"));
+    assert!(stdout.contains("relay_allowed=false"));
+    assert!(!stdout.contains("WebRtcDataChannel"));
+}
+
+#[test]
+fn cli_windows_to_ios_selects_webrtc_interop() {
+    let output = skybridge()
+        .args([
+            "transport",
+            "select",
+            "--local",
+            "windows",
+            "--remote",
+            "ios",
+            "--path",
+            "same-lan",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("kind=WebRtcDataChannel"));
+    assert!(stdout.contains("audit=WebRtcInterop"));
+    assert!(!stdout.contains("AppleNative"));
+}
+
+#[test]
 fn cli_transport_bind_reports_binding_digest() {
     let output = skybridge()
         .args([

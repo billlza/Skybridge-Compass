@@ -198,6 +198,11 @@ Invoke-SmokeGate `
     -EvidencePath $StackFreshnessEvidencePath
 
 Invoke-SmokeGate `
+    -Name "windows-research-evidence" `
+    -RelativeScriptPath "Scripts/verify-windows-research-evidence.ps1" `
+    -Parameters @{ RepoRoot = $RepoRoot }
+
+Invoke-SmokeGate `
     -Name "windows-portability-acceptance-map" `
     -RelativeScriptPath "Scripts/verify-windows-portability-acceptance-map.ps1" `
     -Parameters @{ RepoRoot = $RepoRoot }
