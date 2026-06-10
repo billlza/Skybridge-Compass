@@ -75,7 +75,9 @@ let package = Package(
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
         .package(url: "https://github.com/apple/swift-asn1", from: "1.7.0"),
         // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
-        .package(url: "https://github.com/stasel/WebRTC", from: "147.0.0")
+        // 注意：上游 149.0.0 发布损坏（资产 SHA256 与其 manifest 声明不符，SwiftPM 必然拉取失败），
+        // 故停留在 148.x；上游修复后再升级。
+        .package(url: "https://github.com/stasel/WebRTC", from: "148.0.0")
     ],
     targets: [
         .binaryTarget(
