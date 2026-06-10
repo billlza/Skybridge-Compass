@@ -2835,8 +2835,12 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
             self.logger.info("✅ DataChannel opened by remote label=\(dataChannel.label, privacy: .public)")
             if self.isScreenChannel(dataChannel) {
                 self.screenDataChannel = dataChannel
-            } else {
+            } else if self.isControlChannel(dataChannel) {
                 self.dataChannel = dataChannel
+            } else {
+                // 未知 label 通道不得收编为控制通道（会覆盖真实控制通道引用）。
+                // 仅挂 delegate 观察；一旦实际传输数据即按 unknown_data_channel_label 断开（与 iOS 端一致）。
+                self.logger.warning("⚠️ 远端打开了未知 label 的 DataChannel，不收编。label=\(dataChannel.label, privacy: .public)")
             }
             dataChannel.delegate = self
             if self.isControlChannel(dataChannel) {
@@ -2868,8 +2872,13 @@ extension WebRTCSession: RTCDataChannelDelegate {
             guard let self, !self.isClosed else { return }
             if self.isScreenChannel(dataChannel) {
                 self.deliverInboundScreenData(buffer.data)
-            } else {
+            } else if self.isControlChannel(dataChannel) {
                 self.deliverInboundData(buffer.data)
+            } else {
+                // fail-closed：未知 label 的数据不得注入控制通道解析链（与 iOS 端语义一致）。
+                self.logger.warning("⚠️ 收到未知 label DataChannel 数据，断开连接。label=\(dataChannel.label, privacy: .public) bytes=\(buffer.data.count)")
+                self.notifyDisconnectedIfNeeded(reason: "unknown_data_channel_label")
+                self.close()
             }
         }
     }

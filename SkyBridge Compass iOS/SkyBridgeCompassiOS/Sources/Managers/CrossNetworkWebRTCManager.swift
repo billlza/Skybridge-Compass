@@ -640,8 +640,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var nextRemotePeerPingID: UInt64 = 1
     private var inFlightScannedConnectLink: String?
 
-    // File transfer waiters (transferId|op|chunkIndex -> continuation)
-    var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
+    // File transfer waiters (transferId|op|chunkIndex -> waiter)
+    // token 用于防止残留的超时任务误杀同 key 的后续 waiter（见 waitForFileTransferAck）。
+    var fileTransferWaiters: [String: FileTransferWaiter] = [:]
     var webRTCSecureEnvelopeSendCounterBySessionId: [String: UInt64] = [:]
     var webRTCSecureEnvelopeReplayWindowBySessionId: [String: WebRTCAppSecureReplayWindow] = [:]
     var webRTCSecureEnvelopeKeyFingerprintBySessionId: [String: String] = [:]
@@ -3252,8 +3253,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             nativeAudioReceiveEnabled: nativeAudioReceiveEnabled
         )
         self.session = s
-        s.onTrace = { [weak self] line in
-            self?.appendSmokeTrace("webrtc \(line)")
+        // 仅 smoke 模式安装 trace 回调：生产环境保持 onTrace == nil，
+        // 使 session 内全部 trace 调用点（含每条入站消息）退化为空指针判断，避免高频字符串插值开销。
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
+            s.onTrace = { [weak self] line in
+                self?.appendSmokeTrace("webrtc \(line)")
+            }
         }
 #if canImport(WebRTC)
         s.onRemoteVideoTrack = { [weak self] track in
@@ -3907,7 +3912,7 @@ extension CrossNetworkWebRTCManager {
         do {
             try await session.sendFramedPayloadAsync(
                 tunedHandshake,
-                maxChunkBytes: CrossNetworkWebRTCHandshakeLimits.maxChunkBytes,
+                maxChunkBytes: CrossNetworkWebRTCHandshakeLimits.maxControlFrameChunkBytes,
                 maxBufferedAmountBytes: CrossNetworkWebRTCHandshakeLimits.maxBufferedAmountBytes
             )
             if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {

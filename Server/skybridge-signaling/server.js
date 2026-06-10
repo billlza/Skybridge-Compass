@@ -134,6 +134,40 @@ const ICE_MAX_PER_SESSION = Number(process.env.ICE_MAX_PER_SESSION || 40);
 const ICE_MAX_BYTES_PER_SESSION = Number(process.env.ICE_MAX_BYTES_PER_SESSION || 64 * 1024);
 const ICE_MAX_BYTES_PER_PEER_PER_SESSION = Number(process.env.ICE_MAX_BYTES_PER_PEER_PER_SESSION || 32 * 1024);
 
+// 后端用量跟踪（如 Redis）异常时的进程内 ICE 兜底限额。
+// 降级期间不得 fail-open：否则攻击者可借故障窗口绕过 ICE 洪泛限制。
+// 兜底表有 TTL 与容量上限，防止无界增长；容量耗尽时 fail-closed。
+const DEGRADED_ICE_USAGE_TTL_MS = Number(process.env.DEGRADED_ICE_USAGE_TTL_MS || 10 * 60 * 1000);
+const DEGRADED_ICE_USAGE_MAX_ENTRIES = Number(process.env.DEGRADED_ICE_USAGE_MAX_ENTRIES || 10_000);
+const degradedIceUsageBySessionPeer = new Map();
+
+function trackIceUsageDegraded(sessionId, deviceId, candidateBytes, limits) {
+  const now = Date.now();
+  const key = `${sessionId}|${deviceId}`;
+  if (!degradedIceUsageBySessionPeer.has(key) &&
+      degradedIceUsageBySessionPeer.size >= DEGRADED_ICE_USAGE_MAX_ENTRIES) {
+    for (const [entryKey, entry] of degradedIceUsageBySessionPeer) {
+      if (now - entry.firstAt > DEGRADED_ICE_USAGE_TTL_MS) {
+        degradedIceUsageBySessionPeer.delete(entryKey);
+      }
+    }
+    if (degradedIceUsageBySessionPeer.size >= DEGRADED_ICE_USAGE_MAX_ENTRIES) {
+      return { accepted: false, duplicate: false, killed: true, degraded: true, reason: 'ice_degraded_capacity' };
+    }
+  }
+  let entry = degradedIceUsageBySessionPeer.get(key);
+  if (!entry || now - entry.firstAt > DEGRADED_ICE_USAGE_TTL_MS) {
+    entry = { firstAt: now, count: 0, bytes: 0 };
+  }
+  entry.count += 1;
+  entry.bytes += candidateBytes;
+  degradedIceUsageBySessionPeer.set(key, entry);
+  if (entry.count > limits.maxPerSession || entry.bytes > limits.maxBytesPerPeerPerSession) {
+    return { accepted: false, duplicate: false, killed: true, degraded: true, reason: 'ice_limit_degraded' };
+  }
+  return { accepted: true, duplicate: false, killed: false, degraded: true };
+}
+
 const GLOBAL_MIN_CLIENT_VERSION = String(process.env.GLOBAL_MIN_CLIENT_VERSION || '0.0.0').trim();
 const GLOBAL_MIN_PROTOCOL_VERSION = String(process.env.GLOBAL_MIN_PROTOCOL_VERSION || '0').trim();
 const SIGNALING_BOOTSTRAP_TENANT_MODE = String(process.env.SIGNALING_BOOTSTRAP_TENANT_MODE || '').trim().toLowerCase();
@@ -3502,7 +3536,17 @@ wss.on('connection', (ws, req) => {
             deviceId: meta.deviceId,
             reason: error?.message || String(error)
           });
-          usage = { accepted: true, duplicate: false, killed: false, degraded: true };
+          incrementSecurityCounter('ice_usage_tracking_degraded');
+          // 降级期间用进程内兜底限额，不得无条件接受（fail-open）。
+          usage = trackIceUsageDegraded(
+            meta.sessionId,
+            meta.deviceId,
+            payloadByteSize(message.payload),
+            {
+              maxPerSession: ICE_MAX_PER_SESSION,
+              maxBytesPerPeerPerSession: ICE_MAX_BYTES_PER_PEER_PER_SESSION
+            }
+          );
         }
         if (usage.killed) {
           const reason = usage.reason || 'ice_limit';

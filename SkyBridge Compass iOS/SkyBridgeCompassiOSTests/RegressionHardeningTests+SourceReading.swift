@@ -350,16 +350,7 @@ extension RegressionHardeningTests {
   }
 
   func readRepositorySource(at sourceURL: URL) throws -> String {
-    if FileManager.default.fileExists(atPath: sourceURL.path) {
-      return try String(contentsOf: sourceURL, encoding: .utf8)
-    }
-    #if os(iOS) && !targetEnvironment(simulator)
-      throw XCTSkip(
-        "Repository source files are not mounted inside the physical-device test sandbox; run source-shape regression tests on macOS or iOS Simulator."
-      )
-    #else
-      return try String(contentsOf: sourceURL, encoding: .utf8)
-    #endif
+    try readRepositorySourceForSourceShapeTests(at: sourceURL)
   }
 
   func sourceSlice(from startMarker: String, to endMarker: String, in source: String) throws

@@ -257,8 +257,8 @@ final class RegressionHardeningTests: XCTestCase {
     let managerSourceURL = root.appendingPathComponent(
       "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
     )
-    let audioSource = try String(contentsOf: audioSourceURL, encoding: .utf8)
-    let managerSource = try String(contentsOf: managerSourceURL, encoding: .utf8)
+    let audioSource = try readRepositorySourceForSourceShapeTests(at: audioSourceURL)
+    let managerSource = try readRepositorySourceForSourceShapeTests(at: managerSourceURL)
 
     XCTAssertFalse(
       audioSource.contains("resetPlayerQueue(on: playerNode, reason: \"queued-audio-overflow\")"),
@@ -4149,11 +4149,10 @@ final class RegressionHardeningTests: XCTestCase {
     let repoRoot = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
       .deletingLastPathComponent()
-    let source = try String(
-      contentsOf: repoRoot.appendingPathComponent(
+    let source = try readRepositorySourceForSourceShapeTests(
+      at: repoRoot.appendingPathComponent(
         "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
-      ),
-      encoding: .utf8
+      )
     )
     XCTAssertFalse(source.contains("metadata/KEM 就绪，继续远控握手"))
     XCTAssertTrue(source.contains("LAN 远控前置 bootstrap fail-fast"))
@@ -4200,7 +4199,11 @@ final class RegressionHardeningTests: XCTestCase {
     enabledSettings.audioRedirectionEnabled = true
     manager.viewerSettings = enabledSettings
 
-    XCTAssertEqual(manager.makeViewerStreamConfigurationPayload().audioRedirectionEnabled, true)
+    // 自“媒体就绪门控”改动起，audioRedirectionEnabled 是有效值而非偏好值：
+    // 偏好开启但无可用媒体音频端点/原生音频时，payload 仍然必须广告为关闭。
+    // 端点就绪时广告为开启的路径由 RemoteDesktopViewerStreamConfigurationFactoryTests
+    // .testCrossNetworkAudioEndpointProducesPQCRealtimeAudioPayload 锁定。
+    XCTAssertEqual(manager.makeViewerStreamConfigurationPayload().audioRedirectionEnabled, false)
   }
 
   func testLegacyViewerSettingsDecodeDefaultsAudioRedirectionToEnabled() throws {
@@ -4283,17 +4286,20 @@ final class RegressionHardeningTests: XCTestCase {
 
   @MainActor
   func testViewerStreamConfigurationKeepsAudioOnStableFallbackPath() {
+    // 无媒体音频绑定时（测试环境默认态），音频字段必须显式广告为关闭，
+    // 不得提前广告 pqc-media-v1 或采样率（媒体就绪门控语义；端点就绪路径由
+    // RemoteDesktopViewerStreamConfigurationFactoryTests 锁定）。
     let payload = RemoteDesktopManager.instance.makeViewerStreamConfigurationPayload()
 
     XCTAssertEqual(payload.nativeAudioTrackEnabled, false)
-    XCTAssertEqual(
-      payload.audioRedirectionEnabled,
-      RemoteDesktopManager.instance.viewerSettings.audioRedirectionEnabled)
-    XCTAssertEqual(payload.audioTransport, "pqc-media-v1")
+    XCTAssertEqual(payload.audioRedirectionEnabled, false)
+    XCTAssertEqual(payload.audioTransport, "disabled")
+    XCTAssertNil(payload.audioMode)
+    XCTAssertNil(payload.mediaAudioEndpoint)
     XCTAssertEqual(payload.compatibilityAudioFallbackEnabled, false)
     XCTAssertNil(payload.preferredAudioEncoding)
-    XCTAssertEqual(payload.audioSampleRate, 48_000)
-    XCTAssertEqual(payload.audioChannelCount, 2)
+    XCTAssertNil(payload.audioSampleRate)
+    XCTAssertNil(payload.audioChannelCount)
   }
 
   func testStrictVideoValidationDoesNotForceRealtimeAudioLowLatencyMode() throws {
@@ -4320,7 +4326,8 @@ final class RegressionHardeningTests: XCTestCase {
         "let videoLowLatencyMode = viewerSettings.lowLatencyMode || strictMediaValidationEnabled"))
     XCTAssertTrue(
       managerConfigWrapper.contains("let realtimeMediaAudioMode = preferredRealtimeMediaAudioMode()"))
-    XCTAssertTrue(configBody.contains("audioMode: realtimeMediaAudioMode.rawValue"))
+    XCTAssertTrue(
+      configBody.contains("audioMode: realtimeMediaAudioReady ? realtimeMediaAudioMode.rawValue : nil"))
     XCTAssertFalse(
       configBody.contains("audioMode: lowLatencyMode ? \"low-latency\" : \"high-fidelity\""),
       "Strict 2K60 video validation must not silently switch the host audio sender into duplicate low-latency datagram mode while the receiver is high-fidelity."
@@ -4541,7 +4548,7 @@ final class RegressionHardeningTests: XCTestCase {
     let sourceURL = root.appendingPathComponent(
       "SkyBridgeCompassiOS/Sources/Managers/RealtimeMediaAudio.swift"
     )
-    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    let source = try readRepositorySourceForSourceShapeTests(at: sourceURL)
 
     XCTAssertTrue(source.contains("AVAudioSourceNode"))
     XCTAssertTrue(source.contains("pqc-opus-source-node-ring"))
@@ -4601,7 +4608,7 @@ final class RegressionHardeningTests: XCTestCase {
     let sourceURL = root.appendingPathComponent(
       "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
     )
-    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    let source = try readRepositorySourceForSourceShapeTests(at: sourceURL)
 
     XCTAssertTrue(source.contains("lastFallbackOnlyNativeVideoDiagnosticAt"))
     XCTAssertTrue(
@@ -4621,7 +4628,7 @@ final class RegressionHardeningTests: XCTestCase {
     let profileURL = root.appendingPathComponent(
       "SkyBridge Compass iOS/LocalPackages/SkyBridgeMediaLocal/Sources/SkyBridgeRealtimeMedia/MediaProfile.swift"
     )
-    let source = try String(contentsOf: profileURL, encoding: .utf8)
+    let source = try readRepositorySourceForSourceShapeTests(at: profileURL)
     let highFidelityBody = try sourceSlice(
       from: "case .highFidelity:",
       to: "}\n    }\n\n    public var samplesPerPacket",
@@ -5278,7 +5285,9 @@ final class RegressionHardeningTests: XCTestCase {
       ))
     XCTAssertTrue(pushBody.contains("if preparationPlan.includeAudioEndpointInStreamConfig"))
     XCTAssertTrue(
-      pushBody.contains("activeTransportModeIsCrossNetwork: activeTransportMode == .crossNetwork"))
+      pushBody.contains("activeTransportMode: activeTransportMode,"),
+      "Push policy preparation must receive the active transport mode."
+    )
     XCTAssertTrue(
       pushBody.contains("ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mediaAudioMode)"))
     XCTAssertFalse(
@@ -7916,7 +7925,7 @@ final class RegressionHardeningTests: XCTestCase {
     let sourceURL = root.appendingPathComponent(
       "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
     )
-    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    let source = try readRepositorySourceForSourceShapeTests(at: sourceURL)
     let crossNetworkBranch = try sourceSlice(
       from:
         "case .crossNetwork:\n                updateRealtimeMediaAudioReceiverStartPhase(.lease",

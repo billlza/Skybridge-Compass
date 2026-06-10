@@ -1399,7 +1399,8 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        return try String(contentsOf: repoRoot.appendingPathComponent(relativePath), encoding: .utf8)
+        return try readRepositorySourceForSourceShapeTests(
+            at: repoRoot.appendingPathComponent(relativePath))
     }
 
     func testStrictPQCRecognizesCanonicalMLKEMAsSatisfyingForwardSecureTarget() {

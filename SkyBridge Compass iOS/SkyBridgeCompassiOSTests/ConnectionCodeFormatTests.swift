@@ -203,7 +203,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
         )
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
 
     private static func crossNetworkWebRTCRebindPolicySource() throws -> String {
@@ -213,7 +213,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkWebRTCManager+CurrentPathRebindPolicy.swift"
         )
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
 
     private static func crossNetworkWebRTCPQCHandshakePolicySource() throws -> String {
@@ -223,7 +223,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkWebRTCPQCHandshakePolicy.swift"
         )
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
 
     private static func crossNetworkSignalServerClientSource() throws -> String {
@@ -233,7 +233,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift"
         )
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
 
 }

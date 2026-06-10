@@ -647,18 +647,24 @@ public actor HandshakeContext {
         let responderShare: Data
         let sealedBox: HPKESealedBox
         let sharedSecretForSession: SecureBytes
+        // 密钥关联指纹仅允许出现在 DEBUG 构建的 smoke 诊断中：
+        // Release 二进制不得包含该路径（防止本地攻击者借环境变量获取密钥关联指纹）。
+        #if DEBUG
         let smokePQCLoggingEnabled = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+        #endif
 
         if suite.isPQC {
             guard let sharedSecret = kemSharedSecrets[suite] else {
                 throw HandshakeError.invalidState("Missing KEM shared secret for \(suite.rawValue)")
             }
+            #if DEBUG
             if smokePQCLoggingEnabled {
                 let staticDigest = SHA256.hash(data: sharedSecret.noCopyData()).prefix(8)
                     .map { String(format: "%02x", $0) }
                     .joined()
                 print("🧪 mac tx MessageB staticSecretSha256=\(staticDigest) suite=\(suite.rawValue)")
             }
+            #endif
 
             let payloadSecret: SecureBytes
             if suite.requiresV2EphemeralContribution {
@@ -674,6 +680,7 @@ public actor HandshakeContext {
                     ephemeralSecret: responderContribution.sharedSecret,
                     suite: suite
                 )
+                #if DEBUG
                 if smokePQCLoggingEnabled {
                     let sessionDigest = SHA256.hash(data: payloadSecret.noCopyData()).prefix(8)
                         .map { String(format: "%02x", $0) }
@@ -689,11 +696,13 @@ public actor HandshakeContext {
                     }
                     print("🧪 mac tx MessageB sessionSecretSha256=\(sessionDigest) payloadKeySha256=\(payloadKeyDigest) suite=\(suite.rawValue)")
                 }
+                #endif
                 responderContribution.sharedSecret.zeroize()
                 sharedSecret.zeroize()
             } else {
                 responderShare = Data()
                 payloadSecret = sharedSecret
+                #if DEBUG
                 if smokePQCLoggingEnabled {
                     let payloadKey = HKDF<SHA256>.deriveKey(
                         inputKeyMaterial: SymmetricKey(data: payloadSecret),
@@ -706,9 +715,12 @@ public actor HandshakeContext {
                     }
                     print("🧪 mac tx MessageB payloadKeySha256=\(payloadKeyDigest) suite=\(suite.rawValue)")
                 }
+                #endif
             }
 
-            let payloadData = (try? localCapabilities.deterministicEncode()) ?? Data()
+            // 本端 capabilities 编码失败属内部不变量被破坏，必须显式失败，
+            // 不得静默发送空载荷把内部错误伪装成"无能力"的合法握手。
+            let payloadData = try localCapabilities.deterministicEncode()
             sealedBox = try sealPayloadWithSharedSecret(
                 payloadSecret,
                 plaintext: payloadData,
@@ -719,7 +731,7 @@ public actor HandshakeContext {
             kemSharedSecrets.removeValue(forKey: suite)
             v2PeerInitiatorContribution = nil
         } else {
-            let payloadData = (try? localCapabilities.deterministicEncode()) ?? Data()
+            let payloadData = try localCapabilities.deterministicEncode()
             let sealResult = try await provider.kemDemSealWithSecret(
                 plaintext: payloadData,
                 recipientPublicKey: peerShare,

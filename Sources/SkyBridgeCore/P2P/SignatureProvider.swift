@@ -229,9 +229,11 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
                         let signature = try await signWithOQS(data, key: key)
                         emitSmokeBackendLog("sign backend=oqs bytes=\(signature.count)")
                         return signature
-                    } catch {
-                        // 两者都失败：保留 Apple 的原始错误，更利于定位
-                        throw appleError
+                    } catch let oqsError {
+                        // 两者都失败：合并报告两侧原因，避免吞掉任一侧的真实错误
+                        throw SignatureProviderError.signatureFailed(
+                            "Apple PQC failed (\(appleError.localizedDescription)); liboqs failed (\(oqsError.localizedDescription))"
+                        )
                     }
                 }
             }
@@ -247,16 +249,28 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         case .oqs:
             return try await verifyWithOQS(data, signature: signature, publicKey: publicKey)
         case .auto:
-            // 验证同样允许 Apple↔OQS 互操作：先尝试 Apple（若可用），再回退 OQS。
+            // 互操作回退仅限运行性失败（如 CryptoKit 不接受该公钥/签名编码）。
+            // Apple 返回 false 是确定性的密码学拒绝，必须直接作为最终结果返回；
+            // 不得再用 OQS 重验，否则验签接受面会变成两个实现的并集
+            //（任一实现的验签缺陷都会成为可利用面，且两实现的行为分歧被静默掩盖）。
             #if HAS_APPLE_PQC_SDK
             if #available(macOS 26.0, iOS 26.0, *) {
                 do {
                     let ok = try await verifyWithApplePQC(data, signature: signature, publicKey: publicKey)
                     emitSmokeBackendLog("verify backend=apple ok=\(ok)")
-                    if ok { return true }
-                } catch {
-                    emitSmokeBackendLog("verify apple_failed=\(error.localizedDescription)")
-                    // ignore and fall back to OQS
+                    return ok
+                } catch let appleError {
+                    emitSmokeBackendLog("verify apple_failed=\(appleError.localizedDescription)")
+                    do {
+                        let ok = try await verifyWithOQS(data, signature: signature, publicKey: publicKey)
+                        emitSmokeBackendLog("verify backend=oqs ok=\(ok)")
+                        return ok
+                    } catch let oqsError {
+                        // 两后端均运行失败：合并报告，避免吞掉任一侧的真实原因
+                        throw SignatureProviderError.verificationFailed(
+                            "Apple PQC failed (\(appleError.localizedDescription)); liboqs failed (\(oqsError.localizedDescription))"
+                        )
+                    }
                 }
             }
             #endif

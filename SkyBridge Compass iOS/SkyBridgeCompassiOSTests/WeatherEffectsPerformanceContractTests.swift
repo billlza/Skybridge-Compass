@@ -75,6 +75,6 @@ final class WeatherEffectsPerformanceContractTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent(relativePath)
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
 }

@@ -3,8 +3,9 @@
 
 SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 为中心的 P2P 连接/安全栈，并提供 macOS 应用形态与论文复现实验流水线（IEEE/TDSC）。
 
-> **平台说明（给审稿人）**：本仓库当前的构建入口是 **macOS**（SwiftPM `platforms: [.macOS(.v14)]`）。
-> 同时，核心协议层包含若干 **iOS 专用代码路径**（使用 `#if os(iOS)` / `@available(iOS …)` 保护），用于保证 iOS 客户端与 macOS 互通时的行为一致性与可移植性。
+> **平台说明（给审稿人）**：本仓库的 SwiftPM 构建入口是 **macOS**（`Package.swift` 声明 `platforms: [.iOS(.v17), .macOS(.v14)]`）；
+> **iOS 客户端**是独立的 Xcode 工程，位于本仓库 `SkyBridge Compass iOS/` 子目录（详见下表）。
+> 核心协议层同时包含若干 **iOS 专用代码路径**（使用 `#if os(iOS)` / `@available(iOS …)` 保护），用于保证 iOS 客户端与 macOS 互通时的行为一致性与可移植性。
 
 ## Platform Map（macOS vs iOS 一眼分清）
 
@@ -13,6 +14,7 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 | Protocol + Crypto + Bench core | macOS / iOS（代码路径） | `Sources/SkyBridgeCore/` | 协议实现（握手/会话/策略）、PQC/降级可审计、SBP1/SBP2 padding、统计与 CSV artifacts |
 | Shared SwiftUI views | macOS（构建）/ iOS（可移植代码） | `Sources/SkyBridgeUI/` | 共享 UI 组件；平台差异用 `#if os(...)` 保护 |
 | macOS app | macOS | `Sources/SkyBridgeCompassApp/` | macOS App 入口（SwiftUI + 菜单/窗口等） |
+| iOS app | iOS | `SkyBridge Compass iOS/` | iOS 客户端 Xcode 工程（`SkyBridgeCompass-iOS.xcodeproj`，iOS 17+）；协议面与 macOS 端按文件对齐（见 `Docs/CoreLayering.md` 的防漂移说明） |
 | Tests / Paper benches | macOS（host） | `Tests/` | 论文评测、SBP2 sensitivity、fault-injection 等，输出 `Artifacts/*.csv` |
 | Paper sources + PDFs | n/a | `Docs/` | 主论文与 Supplementary 源码、生成表格与最终 PDF/DOCX |
 

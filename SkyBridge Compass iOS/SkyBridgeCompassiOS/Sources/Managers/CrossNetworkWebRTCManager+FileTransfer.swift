@@ -3,6 +3,11 @@ import CryptoKit
 
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
+    struct FileTransferWaiter {
+        let token: UUID
+        let continuation: CheckedContinuation<CrossNetworkFileTransferMessage, Error>
+    }
+
     struct InboundFileTransferState {
         let transferId: String
         let fileName: String
@@ -74,8 +79,9 @@ public extension CrossNetworkWebRTCManager {
             throw FileTransferWaitError.cancelled
         }
 
+        let token = UUID()
         return try await withCheckedThrowingContinuation { (c: CheckedContinuation<CrossNetworkFileTransferMessage, Error>) in
-            fileTransferWaiters[key] = c
+            fileTransferWaiters[key] = FileTransferWaiter(token: token, continuation: c)
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -84,10 +90,11 @@ public extension CrossNetworkWebRTCManager {
                 } catch {
                     return
                 }
-                // Timeout: if still pending, resume with error.
-                if let pending = self.fileTransferWaiters.removeValue(forKey: key) {
-                    pending.resume(throwing: FileTransferWaitError.timeout)
-                }
+                // Timeout: 仅当 key 下仍是本次注册的 waiter（token 匹配）才超时移除，
+                // 防止残留超时任务误杀同 key 的后续 waiter（导致其几乎立即超时）。
+                guard let pending = self.fileTransferWaiters[key], pending.token == token else { return }
+                self.fileTransferWaiters.removeValue(forKey: key)
+                pending.continuation.resume(throwing: FileTransferWaitError.timeout)
             }
         }
     }
@@ -99,14 +106,14 @@ extension CrossNetworkWebRTCManager {
         // Resume any waiter matching (transferId, op, chunkIndex).
         let key = Self.fileTransferWaiterKey(transferId: msg.transferId, op: msg.op, chunkIndex: msg.chunkIndex)
         if let waiter = fileTransferWaiters.removeValue(forKey: key) {
-            waiter.resume(returning: msg)
+            waiter.continuation.resume(returning: msg)
             return
         }
 
         // Also allow acks without chunkIndex to be awaited.
         let keyNoIdx = Self.fileTransferWaiterKey(transferId: msg.transferId, op: msg.op, chunkIndex: nil)
         if let waiter = fileTransferWaiters.removeValue(forKey: keyNoIdx) {
-            waiter.resume(returning: msg)
+            waiter.continuation.resume(returning: msg)
             return
         }
     }
@@ -114,8 +121,8 @@ extension CrossNetworkWebRTCManager {
     func failAllFileTransferWaiters(_ error: Error) {
         let waiters = fileTransferWaiters
         fileTransferWaiters.removeAll()
-        for (_, c) in waiters {
-            c.resume(throwing: error)
+        for (_, waiter) in waiters {
+            waiter.continuation.resume(throwing: error)
         }
     }
 
@@ -123,7 +130,7 @@ extension CrossNetworkWebRTCManager {
         let keys = fileTransferWaiters.keys.filter { $0.hasPrefix("\(transferId)|") }
         for key in keys {
             if let waiter = fileTransferWaiters.removeValue(forKey: key) {
-                waiter.resume(throwing: FileTransferError.transferFailed(message))
+                waiter.continuation.resume(throwing: FileTransferError.transferFailed(message))
             }
         }
     }

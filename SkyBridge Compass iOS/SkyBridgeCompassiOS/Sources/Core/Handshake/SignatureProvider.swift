@@ -133,13 +133,30 @@ public struct ClassicSignatureProvider: ProtocolSignatureProvider {
 public struct PQCSignatureProvider: ProtocolSignatureProvider {
     public let signatureAlgorithm: ProtocolSigningAlgorithm = .mlDSA65
     private static let hasLiboqsBackend = OQSPQCCryptoProvider.quickRuntimeProbe()
+    private static let applePrivateKeyRepresentationLength = 64
+    private static let liboqsPrivateKeyRepresentationLength = 4032
+    private static let mldsa65PublicKeyLength = 1952
+    private static let mldsa65SignatureLength = 3309
     
     public init() {}
     
     public func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *) {
-            return try await signWithApplePQC(data, key: key)
+            do {
+                return try await signWithApplePQC(data, key: key)
+            } catch let appleError {
+                if Self.shouldRetrySignWithLiboqs(key: key) {
+                    do {
+                        return try await OQSPQCCryptoProvider().sign(data: data, using: key)
+                    } catch let oqsError {
+                        throw SignatureProviderError.signatureFailed(
+                            "Apple PQC failed (\(appleError.localizedDescription)); liboqs failed (\(oqsError.localizedDescription))"
+                        )
+                    }
+                }
+                throw appleError
+            }
         }
         #endif
 
@@ -155,7 +172,24 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
     public func verify(_ data: Data, signature: Data, publicKey: Data) async throws -> Bool {
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *) {
-            return try await verifyWithApplePQC(data, signature: signature, publicKey: publicKey)
+            do {
+                // Apple 返回 false 是确定性的密码学拒绝，必须直接作为最终结果返回；
+                // 不得再用 liboqs 重验，否则验签接受面会变成两个实现的并集
+                //（任一实现的验签缺陷都会成为可利用面，且两实现的行为分歧被静默掩盖）。
+                return try await verifyWithApplePQC(data, signature: signature, publicKey: publicKey)
+            } catch let appleError {
+                // 仅运行性失败（如 CryptoKit 不接受该公钥编码）才回退 liboqs 互操作路径。
+                guard Self.shouldRetryVerifyWithLiboqs(signature: signature, publicKey: publicKey) else {
+                    throw appleError
+                }
+                do {
+                    return try await OQSPQCCryptoProvider().verify(data: data, signature: signature, publicKey: publicKey)
+                } catch let oqsError {
+                    throw SignatureProviderError.verificationFailed(
+                        "Apple PQC failed (\(appleError.localizedDescription)); liboqs failed (\(oqsError.localizedDescription))"
+                    )
+                }
+            }
         }
         #endif
 
@@ -169,12 +203,35 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
     }
     
     #if HAS_APPLE_PQC_SDK
+    // internal 以便测试锁定回退决策语义（防止条件被无意放宽，扩大验签/签名回退面）。
+    static func shouldRetrySignWithLiboqs(key: SigningKeyHandle) -> Bool {
+        guard hasLiboqsBackend else { return false }
+        switch key {
+        case .softwareKey(let privateKeyData):
+            // 仅标准 liboqs 私钥（4032 字节）才回退；其余长度属于密钥格式非法，
+            // 应直接抛出 Apple 的 invalidKeyType，避免错误被包装成"双后端失败"而掩盖真实原因。
+            return privateKeyData.count == liboqsPrivateKeyRepresentationLength
+        case .callback:
+            return false
+        #if canImport(Security)
+        case .secureEnclaveRef:
+            return false
+        #endif
+        }
+    }
+
+    static func shouldRetryVerifyWithLiboqs(signature: Data, publicKey: Data) -> Bool {
+        hasLiboqsBackend
+            && publicKey.count == mldsa65PublicKeyLength
+            && signature.count == mldsa65SignatureLength
+    }
+
     @available(iOS 26.0, macOS 26.0, *)
     private func signWithApplePQC(_ data: Data, key: SigningKeyHandle) async throws -> Data {
         switch key {
         case .softwareKey(let privateKeyData):
             // CryptoKit (iOS 26/macOS 26) 约定：MLDSA65.PrivateKey.integrityCheckedRepresentation 为 64 bytes（紧凑格式）
-            guard privateKeyData.count == 64 else {
+            guard privateKeyData.count == Self.applePrivateKeyRepresentationLength else {
                 throw SignatureProviderError.invalidKeyType(
                     expected: "ML-DSA-65 private key (64 bytes integrityCheckedRepresentation)",
                     actual: "\(privateKeyData.count) bytes"

@@ -337,7 +337,7 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
         )
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try readRepositorySourceForSourceShapeTests(at: sourceURL)
         let decodedOutputBody = try sourceSlice(
             from: "private func applyDecodedOutput(",
             to: "private func startDecodeLoopIfNeeded()",
@@ -387,7 +387,7 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
         )
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try readRepositorySourceForSourceShapeTests(at: sourceURL)
         let decodeLoopBody = try sourceSlice(
             from: "private func startDecodeLoopIfNeeded()",
             to: "@MainActor\n    private func finishDecodeTask(",
@@ -409,7 +409,7 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
         )
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = try readRepositorySourceForSourceShapeTests(at: sourceURL)
         let drainBody = try sourceSlice(
             from: "private func drainDecodeCompletionsIfNeeded()",
             to: "private func applyDecodeCompletion(",
@@ -440,8 +440,8 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
         let rendererSourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/RemoteVideoTrackHeartbeatRenderer.swift"
         )
-        let managerSource = try String(contentsOf: managerSourceURL, encoding: .utf8)
-        let rendererSource = try String(contentsOf: rendererSourceURL, encoding: .utf8)
+        let managerSource = try readRepositorySourceForSourceShapeTests(at: managerSourceURL)
+        let rendererSource = try readRepositorySourceForSourceShapeTests(at: rendererSourceURL)
 
         XCTAssertTrue(rendererSource.contains("func renderFrame(_ frame: RTCVideoFrame?)"))
         XCTAssertTrue(
@@ -535,7 +535,7 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
             "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
         )
         let viewSource = try remoteDesktopViewSource()
-        let managerSource = try String(contentsOf: managerSourceURL, encoding: .utf8)
+        let managerSource = try readRepositorySourceForSourceShapeTests(at: managerSourceURL)
         let nativeVideoPredicate = try sourceSlice(
             from: "private var isUsingNativeCrossNetworkVideo: Bool",
             to: "private var nativeCrossNetworkVideoTrack",
@@ -627,10 +627,7 @@ final class RemoteVideoFrameFeedTests: XCTestCase {
             "SkyBridgeCompassiOS/Sources/Views/RemoteDesktopRTCVideoView.swift"
         ]
         return try sourcePaths.map { path in
-            try String(
-                contentsOf: root.appendingPathComponent(path),
-                encoding: .utf8
-            )
+            try readRepositorySourceForSourceShapeTests(at: root.appendingPathComponent(path))
         }.joined(separator: "\n")
     }
 

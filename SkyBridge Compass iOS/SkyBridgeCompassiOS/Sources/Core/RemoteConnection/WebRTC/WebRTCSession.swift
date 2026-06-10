@@ -1834,7 +1834,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 #if canImport(WebRTC)
         guard channel.readyState == .open else { throw WebRTCError.dataChannelNotOpen }
         let buffer = RTCDataBuffer(data: data, isBinary: true)
-        guard channel.sendData(buffer) else { throw WebRTCError.dataChannelSendFailed }
+        guard channel.sendData(buffer) else {
+            // 仅失败路径打 trace：成功路径每分片读取 onTrace（stateQueue 同步跳变）
+            // 与 bufferedAmount（libwebrtc 代理调用）会在屏幕流高码率下形成可观开销。
+            onTrace?(
+                "data-channel-tx-failed session=\(sessionId) label=\(channel.label) bytes=\(data.count) binary=1 buffered=\(channel.bufferedAmount)"
+            )
+            throw WebRTCError.dataChannelSendFailed
+        }
 #else
         throw WebRTCError.webRTCNotAvailable
 #endif
@@ -2151,8 +2158,13 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
             guard let self, self.peerConnection === peerConnection, !self.isClosed else { return }
             if self.isScreenChannel(dataChannel) {
                 self.screenDataChannel = dataChannel
-            } else {
+            } else if self.isControlChannel(dataChannel) {
                 self.dataChannel = dataChannel
+            } else {
+                // 未知 label 通道不得收编为控制通道（会覆盖真实控制通道引用）。
+                // 与 didReceiveMessage 的 fail-closed 语义保持一致：仅挂 delegate 观察，
+                // 一旦该通道实际传输数据即按 unknown_data_channel_label 断开。
+                self.onTrace?("did-open-data-channel-unknown session=\(self.sessionId) label=\(dataChannel.label)")
             }
             dataChannel.delegate = self
             self.inspectRemoteVideoTrackIfAvailable(peerConnection: peerConnection)
@@ -2215,12 +2227,27 @@ extension WebRTCSession: RTCDataChannelDelegate {
         }
     }
     public func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
+        // 注意：此回调运行在 libwebrtc 委托线程上，禁止在 scheduleState 之外访问
+        // withState 保护的状态（包括 onTrace getter），否则与 stateQueue 上的
+        // 阻塞式 WebRTC 代理调用（close/setRemoteDescription 等）构成跨线程等待环。
         scheduleState { [weak self] in
             guard let self, !self.isClosed else { return }
             if self.isScreenChannel(dataChannel) {
+                self.onTrace?(
+                    "data-channel-rx session=\(self.sessionId) label=\(dataChannel.label) kind=screen bytes=\(buffer.data.count) binary=\(buffer.isBinary ? 1 : 0)"
+                )
                 self.deliverInboundScreenData(buffer.data)
-            } else {
+            } else if self.isControlChannel(dataChannel) {
+                self.onTrace?(
+                    "data-channel-rx session=\(self.sessionId) label=\(dataChannel.label) kind=control bytes=\(buffer.data.count) binary=\(buffer.isBinary ? 1 : 0)"
+                )
                 self.deliverInboundData(buffer.data)
+            } else {
+                self.onTrace?(
+                    "data-channel-rx-failed session=\(self.sessionId) label=\(dataChannel.label) reason=unknown_label bytes=\(buffer.data.count)"
+                )
+                self.notifyDisconnectedIfNeeded(reason: "unknown_data_channel_label")
+                self.close()
             }
         }
     }

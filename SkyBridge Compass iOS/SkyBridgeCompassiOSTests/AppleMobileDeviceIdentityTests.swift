@@ -71,7 +71,8 @@ final class AppleMobileDeviceIdentityTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let entitlementURL = projectURL.appendingPathComponent(fileName)
-        let data = try Data(contentsOf: entitlementURL)
+        // 借助共享 helper：真机沙箱无仓库文件时 XCTSkip，而非误报失败。
+        let data = Data(try readRepositorySourceForSourceShapeTests(at: entitlementURL).utf8)
         let plist = try PropertyListSerialization.propertyList(
             from: data,
             options: [],
