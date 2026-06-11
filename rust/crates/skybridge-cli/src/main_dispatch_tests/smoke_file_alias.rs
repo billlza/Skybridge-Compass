@@ -30,13 +30,16 @@ async fn smoke_and_file_alias_dispatch_paths_remain_wired() -> Result<()> {
         }
     }
 
-    crate::dispatch(Cli {
-        state_dir: None,
-        command: Commands::File(FileCommand {
-            command: FileSubcommand::History(OutputOptions { json: true }),
-        }),
-    })
-    .await?;
+    assert!(
+        crate::dispatch(Cli {
+            state_dir: None,
+            command: Commands::File(FileCommand {
+                command: FileSubcommand::History(OutputOptions { json: true }),
+            }),
+        })
+        .await
+        .is_err()
+    );
     assert!(
         crate::dispatch(Cli {
             state_dir: None,

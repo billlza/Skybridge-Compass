@@ -19,6 +19,10 @@ pub(super) const CHECK_COVERAGE_ENTRY_CATALOG_SOURCES: &[(&str, &str)] = &[
         include_str!("entries/memory.rs"),
     ),
     (
+        "check_coverage/entries/operator_surface.rs",
+        include_str!("entries/operator_surface.rs"),
+    ),
+    (
         "check_coverage/entries/performance.rs",
         include_str!("entries/performance.rs"),
     ),

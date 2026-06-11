@@ -18,6 +18,14 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../main_tests/parse/doctor.rs"),
     ),
     (
+        "main_tests/parse/help.rs",
+        include_str!("../../main_tests/parse/help.rs"),
+    ),
+    (
+        "main_tests/parse/operator.rs",
+        include_str!("../../main_tests/parse/operator.rs"),
+    ),
+    (
         "main_tests/parse/smoke.rs",
         include_str!("../../main_tests/parse/smoke.rs"),
     ),
@@ -109,6 +117,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "device_commands.rs",
         include_str!("../../device_commands.rs"),
+    ),
+    (
+        "device_commands/discover.rs",
+        include_str!("../../device_commands/discover.rs"),
     ),
     (
         "device_commands/status.rs",

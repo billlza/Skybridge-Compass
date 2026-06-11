@@ -5,11 +5,12 @@ mod connectivity;
 mod control_plane;
 mod coverage;
 mod memory;
+mod operator_surface;
 mod performance;
 mod release;
 mod smoke;
 
-const CHECK_COVERAGE_ENTRY_COUNT: usize = 35;
+const CHECK_COVERAGE_ENTRY_COUNT: usize = 40;
 
 pub(super) fn quality_check_coverage_entries(
     source: &SearchableCheckSource,
@@ -17,6 +18,7 @@ pub(super) fn quality_check_coverage_entries(
     let mut entries = Vec::with_capacity(CHECK_COVERAGE_ENTRY_COUNT);
     memory::append_entries(source, &mut entries);
     performance::append_entries(source, &mut entries);
+    operator_surface::append_entries(source, &mut entries);
     connectivity::append_entries(source, &mut entries);
     smoke::append_entries(source, &mut entries);
     release::append_entries(source, &mut entries);

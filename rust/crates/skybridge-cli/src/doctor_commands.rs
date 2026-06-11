@@ -2,8 +2,9 @@ use anyhow::Result;
 
 use crate::{
     MediaLeaseDoctorArgs, OutputOptions, SignalingDoctorArgs, WebRtcMediaDiagnoseArgs,
-    WebRtcMediaDoctorArgs, control_plane_doctor, ensure_webrtc_media_doctor_passed,
-    print_doctor_probe_report, webrtc_media_artifacts::resolve_webrtc_media_session_arg,
+    WebRtcMediaDoctorArgs, control_plane_doctor, ensure_probe_report_passed,
+    ensure_webrtc_media_doctor_passed, print_doctor_probe_report,
+    webrtc_media_artifacts::resolve_webrtc_media_session_arg,
     webrtc_media_doctor::build_webrtc_media_doctor_report,
 };
 
@@ -14,7 +15,8 @@ pub(crate) async fn doctor_signaling(args: SignalingDoctorArgs) -> Result<()> {
         args.expected_backend.as_deref(),
     )
     .await?;
-    print_doctor_probe_report(&report, as_json)
+    print_doctor_probe_report(&report, as_json)?;
+    ensure_probe_report_passed(&report, "signaling doctor failed")
 }
 
 pub(crate) async fn doctor_media_lease(args: MediaLeaseDoctorArgs) -> Result<()> {
@@ -25,7 +27,8 @@ pub(crate) async fn doctor_media_lease(args: MediaLeaseDoctorArgs) -> Result<()>
         args.media_admission_token,
     )
     .await?;
-    print_doctor_probe_report(&report, as_json)
+    print_doctor_probe_report(&report, as_json)?;
+    ensure_probe_report_passed(&report, "media lease doctor failed")
 }
 
 pub(crate) async fn doctor_webrtc_media(args: WebRtcMediaDoctorArgs) -> Result<()> {

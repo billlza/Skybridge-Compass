@@ -169,6 +169,32 @@ mod tests {
             report
                 .checks
                 .iter()
+                .any(|entry| entry.id == "device_discover_mdns_gate" && entry.covered)
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|entry| entry.id == "file_transfer_proof_alias_gate" && entry.covered)
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|entry| { entry.id == "remote_desktop_proof_alias_gate" && entry.covered })
+        );
+        assert!(report.checks.iter().any(|entry| {
+            entry.id == "file_transfer_live_placeholder_fail_closed_gate" && entry.covered
+        }));
+        assert!(
+            report.checks.iter().any(|entry| {
+                entry.id == "control_plane_doctor_fail_closed_gate" && entry.covered
+            })
+        );
+        assert!(
+            report
+                .checks
+                .iter()
                 .any(|entry| entry.id == "coverage_threshold_gate" && entry.covered)
         );
         Ok(())

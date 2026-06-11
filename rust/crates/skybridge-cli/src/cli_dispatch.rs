@@ -7,17 +7,17 @@ mod smoke;
 
 use crate::auth_commands::{login, logout};
 use crate::connectivity_check::check_connectivity;
-use crate::device_commands::{device_approve, device_enroll, device_status};
+use crate::device_commands::{device_approve, device_discover, device_enroll, device_status};
 use crate::doctor_commands::{
     diagnose_webrtc_media, doctor_media_lease, doctor_signaling, doctor_webrtc_media,
 };
 use crate::operator_status::{doctor, metrics, tail_logs};
 use crate::performance_commands::check_performance;
-use crate::session_commands::{disconnect, session_inspect, session_ls};
+use crate::session_commands::{disconnect, prove_remote_desktop, session_inspect, session_ls};
 use crate::{
     AgentSubcommand, CheckSubcommand, Cli, CodeSubcommand, Commands, DeviceSubcommand,
     DiagnoseSubcommand, DoctorSubcommand, FileSubcommand, InternalSubcommand, LogsSubcommand,
-    SessionSubcommand,
+    RemoteDesktopSubcommand, SessionSubcommand,
 };
 
 pub(super) async fn dispatch(cli: Cli) -> Result<()> {
@@ -37,6 +37,7 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
             DeviceSubcommand::Status(output) => device_status(cli.state_dir, output.json).await,
             DeviceSubcommand::Enroll(args) => device_enroll(cli.state_dir, args).await,
             DeviceSubcommand::Approve(args) => device_approve(cli.state_dir, args).await,
+            DeviceSubcommand::Discover(args) => device_discover(args).await,
         },
         Commands::Code(code) => match code.command {
             CodeSubcommand::Create(args) => {
@@ -50,6 +51,9 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Session(session) => match session.command {
             SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,
             SessionSubcommand::Inspect(args) => session_inspect(cli.state_dir, args).await,
+            SessionSubcommand::RemoteDesktop(command) => match command.command {
+                RemoteDesktopSubcommand::Prove(args) => prove_remote_desktop(args).await,
+            },
         },
         Commands::Disconnect(args) => disconnect(cli.state_dir, &args.session_id).await,
         Commands::File(file) => match file.command {
@@ -60,6 +64,7 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
             FileSubcommand::History(output) => {
                 crate::file_commands::history_placeholder(output.json)
             }
+            FileSubcommand::Prove(args) => crate::file_commands::prove_file_transfer(args).await,
         },
         Commands::Check(check) => match check.command {
             CheckSubcommand::Memory(args) => crate::memory_check::check_memory(args).await,

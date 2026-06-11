@@ -95,13 +95,16 @@ async fn doctor_wrappers_cover_control_plane_and_webrtc_entrypoints() -> Result<
             }),
         ),
     ])?;
-    crate::doctor_commands::doctor_media_lease(crate::MediaLeaseDoctorArgs {
-        base_url: Some(lease_url),
-        session_id: Some("SESSION1".to_owned()),
-        media_admission_token: Some("token".to_owned()),
-        output: OutputOptions { json: true },
-    })
-    .await?;
+    assert!(
+        crate::doctor_commands::doctor_media_lease(crate::MediaLeaseDoctorArgs {
+            base_url: Some(lease_url),
+            session_id: Some("SESSION1".to_owned()),
+            media_admission_token: Some("token".to_owned()),
+            output: OutputOptions { json: true },
+        })
+        .await
+        .is_err()
+    );
 
     let artifact_dir = make_test_dir("main-webrtc-wrapper")?;
     std::fs::write(

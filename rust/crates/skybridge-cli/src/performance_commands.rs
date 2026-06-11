@@ -14,7 +14,14 @@ use crate::performance_check_names::required_webrtc_performance_check_names;
 use crate::webrtc_media_artifacts::resolve_webrtc_media_session_arg;
 use crate::webrtc_media_doctor::build_webrtc_media_doctor_report_for_gate;
 
-pub(super) async fn check_performance(args: PerformanceCheckArgs) -> Result<()> {
+pub(crate) async fn check_performance(args: PerformanceCheckArgs) -> Result<()> {
+    run_performance_check(args, "performance check failed").await
+}
+
+pub(crate) async fn run_performance_check(
+    args: PerformanceCheckArgs,
+    failure_context: &'static str,
+) -> Result<()> {
     let as_json = args.output.json;
     let report = match args.kind {
         PerformanceKindArg::P2pRemote => build_p2p_remote_performance_report(&args)?,
@@ -53,7 +60,7 @@ pub(super) async fn check_performance(args: PerformanceCheckArgs) -> Result<()> 
         }
     };
     print_doctor_probe_report(&report, as_json)?;
-    ensure_probe_report_passed(&report, "performance check failed")
+    ensure_probe_report_passed(&report, failure_context)
 }
 
 pub(super) fn build_performance_check_report(

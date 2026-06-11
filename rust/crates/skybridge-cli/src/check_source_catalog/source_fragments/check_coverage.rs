@@ -21,6 +21,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../check_coverage/entries/memory.rs"),
     ),
     (
+        "check_coverage/entries/operator_surface.rs",
+        include_str!("../../check_coverage/entries/operator_surface.rs"),
+    ),
+    (
         "check_coverage/entries/performance.rs",
         include_str!("../../check_coverage/entries/performance.rs"),
     ),

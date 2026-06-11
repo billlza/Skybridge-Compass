@@ -6,6 +6,11 @@ use skybridge_agent::{
     load_session_registry, remove_managed_session_control, remove_session_runtime, resolve_paths,
 };
 
+use crate::{
+    OutputOptions, PerformanceCheckArgs, PerformanceKindArg, RemoteDesktopProveArgs,
+    performance_commands::run_performance_check,
+};
+
 mod presentation;
 
 use presentation::{
@@ -106,7 +111,7 @@ pub(crate) async fn disconnect(state_dir: Option<PathBuf>, session_id: &str) -> 
     if registry.get(session_id).is_none() {
         bail!("session `{}` not found", session_id);
     }
-    let _ = remove_managed_session_control(&paths, session_id).await;
+    remove_managed_session_control(&paths, session_id).await?;
     remove_session_runtime(
         &paths,
         session_id,
@@ -115,6 +120,32 @@ pub(crate) async fn disconnect(state_dir: Option<PathBuf>, session_id: &str) -> 
     .await?;
     println!("Marked session {} as disconnected", session_id);
     Ok(())
+}
+
+pub(crate) async fn prove_remote_desktop(args: RemoteDesktopProveArgs) -> Result<()> {
+    run_performance_check(
+        PerformanceCheckArgs {
+            kind: PerformanceKindArg::P2pRemote,
+            session_id: None,
+            latest: false,
+            artifact_dir: Some(args.artifact_dir),
+            log_file: None,
+            since_seconds: 120,
+            min_fps: args.min_fps,
+            min_width: args.min_width,
+            min_height: args.min_height,
+            exact_video_size: args.exact_video_size,
+            require_audio: args.require_audio,
+            strict_fps_floor: args.strict_fps_floor,
+            min_pass_window_seconds: args.min_pass_window_seconds,
+            manual_artifact: args.manual_artifact,
+            output: OutputOptions {
+                json: args.output.json,
+            },
+        },
+        "remote-desktop proof failed",
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -7,7 +7,6 @@ mod parse;
 async fn dispatch_covers_safe_placeholders_coverage_and_smoke_aliases() -> Result<()> {
     for args in [
         &["skybridge", "version"][..],
-        &["skybridge", "file", "history", "--json"][..],
         &[
             "skybridge",
             "check",
@@ -50,6 +49,30 @@ async fn dispatch_covers_safe_placeholders_coverage_and_smoke_aliases() -> Resul
     ] {
         dispatch(Cli::try_parse_from(args.iter().copied())?).await?;
     }
+    let file_transfer_fixture =
+        crate::cli_test_support::fixture_dir(&["file-transfer", "signed-kem-pass"]);
+    dispatch(Cli::try_parse_from([
+        "skybridge",
+        "file",
+        "prove",
+        "--artifact-dir",
+        &file_transfer_fixture.display().to_string(),
+        "--json",
+    ])?)
+    .await?;
+
+    let p2p_remote_fixture =
+        crate::cli_test_support::fixture_dir(&["p2p-remote", "full-2k60-pass"]);
+    dispatch(Cli::try_parse_from([
+        "skybridge",
+        "session",
+        "remote-desktop",
+        "prove",
+        "--artifact-dir",
+        &p2p_remote_fixture.display().to_string(),
+        "--json",
+    ])?)
+    .await?;
 
     assert!(
         dispatch(Cli::try_parse_from([
@@ -59,6 +82,16 @@ async fn dispatch_covers_safe_placeholders_coverage_and_smoke_aliases() -> Resul
             "/tmp/payload.txt",
             "--to",
             "peer-device",
+        ])?)
+        .await
+        .is_err()
+    );
+    assert!(
+        dispatch(Cli::try_parse_from([
+            "skybridge",
+            "file",
+            "history",
+            "--json"
         ])?)
         .await
         .is_err()
