@@ -1,13 +1,14 @@
 # GitHub SSH transport policy
 
-This repository must push to GitHub over SSH on Windows. Do not use GitHub HTTPS remotes for this workspace: the local guard is intended to keep Git from invoking `git-remote-https.exe`.
+This repository defaults to GitHub SSH transport on Windows. The local guard still blocks accidental GitHub HTTPS pushes so ordinary `git push` does not invoke `git-remote-https.exe`, but `Scripts/push-github-gcm.ps1` is the explicit Git Credential Manager fallback when the SSH key has not been authorized yet.
 
 ## Local policy
 
 - `origin` fetch and push URLs must be `git@github.com:billlza/Skybridge-Compass.git`.
 - `core.sshCommand` must include `BatchMode=yes`, `IdentitiesOnly=yes`, `StrictHostKeyChecking=yes`, `UserKnownHostsFile=...`, and the workspace SSH key.
-- `credential.helper` must be reset to an empty local value so the system Git Credential Manager cannot handle a GitHub HTTPS fallback.
-- GitHub HTTPS URLs are rewritten to SSH locally, and `.githooks/pre-push` refuses GitHub HTTPS remotes.
+- `credential.helper` must be reset to an empty local value so normal pushes cannot silently use Git Credential Manager.
+- Legacy GitHub HTTPS-to-SSH URL rewrites must be absent; they prevent the explicit GCM fallback from using HTTPS when SSH authorization is unavailable.
+- `.githooks/pre-push` refuses GitHub HTTPS remotes unless `SKYBRIDGE_ALLOW_GITHUB_HTTPS_GCM=1` is set by `Scripts/push-github-gcm.ps1`.
 - GitHub's Ed25519 host key must be pinned in `~/.ssh/known_hosts`.
 
 Run the repair/check command:
@@ -24,6 +25,14 @@ Use the guarded upload command for this branch:
 ```
 
 It repairs/verifies the local SSH policy, refuses accidental pushes from the wrong branch, pushes `HEAD` to `Bill/windows-portability`, and creates a verified fallback bundle if GitHub rejects the SSH key.
+
+If GitHub rejects the SSH key but Git Credential Manager already has a writable `billlza` credential, use the guarded fallback command:
+
+```powershell
+.\Scripts\push-github-gcm.ps1
+```
+
+The fallback checks that the credential can push to `billlza/Skybridge-Compass`, verifies that the remote `Bill/windows-portability` branch is an ancestor of local `HEAD`, removes legacy HTTPS-to-SSH URL rewrites, sends the token only through an in-memory Git `extraHeader`, sets `SKYBRIDGE_ALLOW_GITHUB_HTTPS_GCM=1` for the pre-push hook, verifies the remote ref after upload, and updates the local `origin/Bill/windows-portability` tracking ref. It refuses non-fast-forward updates.
 
 Run the remote authorization check:
 

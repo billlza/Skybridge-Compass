@@ -3,13 +3,21 @@
 remote_name="$1"
 remote_url="$2"
 
+if [ "$SKYBRIDGE_ALLOW_GITHUB_HTTPS_GCM" = "1" ]; then
+    case "$remote_url" in
+        https://github.com/*|http://github.com/*)
+            exit 0
+            ;;
+    esac
+fi
+
 block_https_url() {
     value="$1"
 
     case "$value" in
         https://github.com/*|http://github.com/*)
             echo "pre-push: refusing GitHub HTTPS remote URL to avoid git-remote-https.exe on Windows." >&2
-            echo "pre-push: run Scripts/ensure-github-ssh-remote.ps1, then push over SSH." >&2
+            echo "pre-push: run Scripts/ensure-github-ssh-remote.ps1, then push over SSH; use Scripts/push-github-gcm.ps1 only as the explicit GCM fallback." >&2
             exit 1
             ;;
     esac

@@ -158,6 +158,18 @@ function Assert-Contains {
     }
 }
 
+function Clear-LegacyGitHubHttpsRewrite {
+    $legacyRewriteKeys = @(
+        "url.git@github.com:billlza/Skybridge-Compass.git.insteadOf",
+        "url.git@github.com:billlza/Skybridge-Compass.insteadOf",
+        "url.git@github.com:.insteadOf"
+    )
+
+    foreach ($key in $legacyRewriteKeys) {
+        & git -C $RepoRoot config --local --unset-all $key 2>$null
+    }
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot ".git"))) {
     throw "RepoRoot is not a Git worktree: $RepoRoot"
 }
@@ -169,9 +181,7 @@ if (-not $CheckOnly) {
     Invoke-Git config --local credential.helper "" | Out-Null
     Invoke-Git config --local credential.interactive false | Out-Null
     Invoke-Git config --local core.hooksPath .githooks | Out-Null
-    Invoke-Git config --local url.git@github.com:billlza/Skybridge-Compass.git.insteadOf https://github.com/billlza/Skybridge-Compass.git | Out-Null
-    Invoke-Git config --local url.git@github.com:billlza/Skybridge-Compass.insteadOf https://github.com/billlza/Skybridge-Compass | Out-Null
-    Invoke-Git config --local url.git@github.com:.insteadOf https://github.com/ | Out-Null
+    Clear-LegacyGitHubHttpsRewrite
 }
 
 $remoteOutput = Invoke-Git remote -v
@@ -188,15 +198,12 @@ Assert-Equal -Actual (Get-ConfigValue "core.hooksPath") -Expected ".githooks" -M
 
 $localCredentialHelpers = @(& git -C $RepoRoot config --local --get-all credential.helper 2>$null)
 if ($LASTEXITCODE -ne 0 -or $localCredentialHelpers.Count -eq 0 -or $localCredentialHelpers[0] -ne "") {
-    throw "credential.helper must be reset to an empty local value so Git Credential Manager cannot handle GitHub HTTPS fallback."
+    throw "credential.helper must be reset to an empty local value so normal pushes cannot silently use Git Credential Manager; use Scripts/push-github-gcm.ps1 for the explicit fallback."
 }
 
-$repoRewriteGit = Invoke-Git config --local --get-all url.git@github.com:billlza/Skybridge-Compass.git.insteadOf
-$repoRewriteNoGit = Invoke-Git config --local --get-all url.git@github.com:billlza/Skybridge-Compass.insteadOf
-$githubRewrite = Invoke-Git config --local --get-all url.git@github.com:.insteadOf
-
-Assert-Contains -Actual $repoRewriteGit -Expected "https://github.com/billlza/Skybridge-Compass.git" -Message "Exact .git GitHub HTTPS rewrite must be present."
-Assert-Contains -Actual $repoRewriteNoGit -Expected "https://github.com/billlza/Skybridge-Compass" -Message "Exact GitHub HTTPS rewrite must be present."
-Assert-Contains -Actual $githubRewrite -Expected "https://github.com/" -Message "Broad GitHub HTTPS rewrite must be present."
+$legacyRewriteOutput = @(& git -C $RepoRoot config --local --get-regexp "^url\.git@github\.com.*\.insteadOf$" 2>$null)
+if ($legacyRewriteOutput.Count -gt 0) {
+    throw "Legacy GitHub HTTPS rewrite is still configured; remove it so Scripts/push-github-gcm.ps1 can use the explicit GCM fallback when SSH authorization is unavailable."
+}
 
 Write-Output "github-ssh-remote: ok"

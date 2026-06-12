@@ -59,6 +59,7 @@ $macCodbgWrapperPath = Join-Path $RepoRoot "Scripts/verify-mac-rust-cli-codbg-wr
 $macInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $gitSshRemotePath = Join-Path $RepoRoot "Scripts/verify-git-ssh-remote.ps1"
 $githubPushPath = Join-Path $RepoRoot "Scripts/push-github-ssh.ps1"
+$githubGcmPushPath = Join-Path $RepoRoot "Scripts/push-github-gcm.ps1"
 $githubEnsurePath = Join-Path $RepoRoot "Scripts/ensure-github-ssh-remote.ps1"
 
 $architecture = Read-RequiredText -Path $architecturePath
@@ -86,6 +87,7 @@ $macCodbgWrapper = Read-RequiredText -Path $macCodbgWrapperPath
 $macInterop = Read-RequiredText -Path $macInteropPath
 $gitSshRemote = Read-RequiredText -Path $gitSshRemotePath
 $githubPush = Read-RequiredText -Path $githubPushPath
+$githubGcmPush = Read-RequiredText -Path $githubGcmPushPath
 $githubEnsure = Read-RequiredText -Path $githubEnsurePath
 
 foreach ($requirement in @(
@@ -311,9 +313,13 @@ foreach ($signal in @(
     "fallback bundle",
     "Permission denied (publickey)",
     "RequireRemoteAccess",
+    "push-github-gcm.ps1",
+    "Git Credential Manager",
+    "SKYBRIDGE_ALLOW_GITHUB_HTTPS_GCM",
+    "fast-forward",
     "git@github.com:billlza/Skybridge-Compass.git"
 )) {
-    Assert-Contains -Text ($githubTransport + $gitSshRemote + $githubPush + $githubEnsure) -Needle $signal -Message "GitHub SSH evidence missing signal: $signal"
+    Assert-Contains -Text ($githubTransport + $gitSshRemote + $githubPush + $githubGcmPush + $githubEnsure) -Needle $signal -Message "GitHub SSH evidence missing signal: $signal"
 }
 
 Write-Output "windows-portability-acceptance-map: ok"
