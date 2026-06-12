@@ -316,6 +316,7 @@ foreach ($signal in @(
     "push-github-gcm.ps1",
     "Git Credential Manager",
     "SKYBRIDGE_ALLOW_GITHUB_HTTPS_GCM",
+    "AllowGitHubApiRemoteCheck",
     "fast-forward",
     "git@github.com:billlza/Skybridge-Compass.git"
 )) {

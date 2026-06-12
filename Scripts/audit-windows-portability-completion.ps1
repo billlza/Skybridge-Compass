@@ -8,7 +8,9 @@ param(
     [string]$ReportPath = "",
     [string]$ExpectedBranch = "Bill/windows-portability",
     [string]$ExpectedHead = "",
+    [string]$GitHubRepository = "billlza/Skybridge-Compass",
     [switch]$CheckRemoteBranch,
+    [switch]$AllowGitHubApiRemoteCheck,
     [switch]$RequireComplete
 )
 
@@ -87,7 +89,11 @@ function Add-AuditItem {
 }
 
 function Get-RemoteBranchHead {
-    param([string]$Branch)
+    param(
+        [string]$Branch,
+        [string]$Repository,
+        [switch]$AllowGitHubApiFallback
+    )
 
     $previousPrompt = $env:GIT_TERMINAL_PROMPT
     $previousSsh = $env:GIT_SSH_COMMAND
@@ -99,6 +105,10 @@ function Get-RemoteBranchHead {
 
         $output = & git -C $RepoRoot ls-remote --heads origin $Branch 2>&1
         if ($LASTEXITCODE -ne 0) {
+            if ($AllowGitHubApiFallback) {
+                return Get-GitHubApiBranchHead -Branch $Branch -Repository $Repository -SshDetail (($output | Out-String).Trim())
+            }
+
             return [ordered]@{
                 status = "unavailable"
                 head = ""
@@ -124,6 +134,37 @@ function Get-RemoteBranchHead {
     finally {
         $env:GIT_TERMINAL_PROMPT = $previousPrompt
         $env:GIT_SSH_COMMAND = $previousSsh
+    }
+}
+
+function Get-GitHubApiBranchHead {
+    param(
+        [string]$Branch,
+        [string]$Repository,
+        [string]$SshDetail
+    )
+
+    try {
+        $headers = @{
+            "User-Agent" = "SkyBridge-Completion-Audit"
+            "Accept" = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "Cache-Control" = "no-cache"
+        }
+        $uri = "https://api.github.com/repos/$Repository/git/ref/heads/$Branch"
+        $ref = Invoke-RestMethod -Headers $headers -Uri $uri
+        return [ordered]@{
+            status = "available"
+            head = [string]$ref.object.sha
+            detail = "GitHub API fallback verified refs/heads/$Branch after SSH ls-remote failed: $SshDetail"
+        }
+    }
+    catch {
+        return [ordered]@{
+            status = "unavailable"
+            head = ""
+            detail = "SSH ls-remote failed: $SshDetail; GitHub API fallback failed: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -198,17 +239,17 @@ else {
 $remoteCheck = [ordered]@{
     status = "not-checked"
     head = ""
-    detail = "Pass -CheckRemoteBranch to compare origin/$ExpectedBranch with the local HEAD using SSH-only git ls-remote."
+    detail = "Pass -CheckRemoteBranch to compare origin/$ExpectedBranch with the local HEAD; pass -AllowGitHubApiRemoteCheck to verify through the GitHub refs API when SSH authorization is unavailable."
 }
 if ($CheckRemoteBranch) {
-    $remoteCheck = Get-RemoteBranchHead -Branch $ExpectedBranch
+    $remoteCheck = Get-RemoteBranchHead -Branch $ExpectedBranch -Repository $GitHubRepository -AllowGitHubApiFallback:$AllowGitHubApiRemoteCheck
 }
 
 if ([string]$remoteCheck.status -eq "available" -and [string]$remoteCheck.head -eq $head) {
-    Add-AuditItem -Items $items -Id "REQ-GITHUB-UPLOAD" -Status "complete" -Evidence "origin/$ExpectedBranch points to local HEAD $head."
+    Add-AuditItem -Items $items -Id "REQ-GITHUB-UPLOAD" -Status "complete" -Evidence "$GitHubRepository/$ExpectedBranch points to local HEAD $head."
 }
 else {
-    $gap = "Authorize the configured GitHub SSH key or provide another writable credential, then rerun Scripts/push-github-ssh.ps1 and this audit with -CheckRemoteBranch."
+    $gap = "Authorize the configured GitHub SSH key or use Scripts/push-github-gcm.ps1 with a writable Git Credential Manager credential, then rerun this audit with -CheckRemoteBranch -AllowGitHubApiRemoteCheck."
     if ($CheckRemoteBranch) {
         $gap = $gap + " Remote check status=$($remoteCheck.status) head=$($remoteCheck.head) detail=$($remoteCheck.detail)"
     }

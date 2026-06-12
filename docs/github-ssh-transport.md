@@ -32,7 +32,7 @@ If GitHub rejects the SSH key but Git Credential Manager already has a writable 
 .\Scripts\push-github-gcm.ps1
 ```
 
-The fallback checks that the credential can push to `billlza/Skybridge-Compass`, verifies that the remote `Bill/windows-portability` branch is an ancestor of local `HEAD`, removes legacy HTTPS-to-SSH URL rewrites, sends the token only through an in-memory Git `extraHeader`, sets `SKYBRIDGE_ALLOW_GITHUB_HTTPS_GCM=1` for the pre-push hook, verifies the remote ref after upload, and updates the local `origin/Bill/windows-portability` tracking ref. It refuses non-fast-forward updates.
+The fallback checks that the credential can push to `billlza/Skybridge-Compass`, verifies that the remote `Bill/windows-portability` branch is an ancestor of local `HEAD`, removes legacy HTTPS-to-SSH URL rewrites, sends the token only through an in-memory Git `extraHeader`, sets `SKYBRIDGE_ALLOW_GITHUB_HTTPS_GCM=1` for the pre-push hook, verifies the remote ref after upload, and updates the local `origin/Bill/windows-portability` tracking ref. It refuses non-fast-forward updates. After a GCM upload, `Scripts/audit-windows-portability-completion.ps1 -CheckRemoteBranch -AllowGitHubApiRemoteCheck` can prove the GitHub branch head through the GitHub refs API even if the SSH key is still not authorized.
 
 Run the remote authorization check:
 
