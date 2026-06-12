@@ -503,7 +503,7 @@ foreach ($researchEvidenceSignal in @(
     "019eaabe-45ca-7fe2-a24c-83a5bfa02ecb",
     "019eaabe-7d5b-7c33-9691-ba4765b93287",
     "Real Windows-to-mac interop remains blocked",
-    "GitHub branch upload remains blocked",
+    "GitHub branch upload is now covered",
     "Interactive WinUI visual screenshots"
 )) {
     Assert-Contains -Text ($researchSynthesis + $researchEvidenceSmoke) -Needle $researchEvidenceSignal -Message "Windows research evidence missing signal: $researchEvidenceSignal"
@@ -803,12 +803,12 @@ foreach ($stackFreshnessSignal in @(
     "online",
     "net10.0-windows10.0.19041.0",
     "Microsoft.WindowsAppSDK",
-    "2.1.3",
+    "2.2.0",
     "Microsoft.Windows.SDK.BuildTools",
     "10.0.28000.1839",
     "edition = `"2021`"",
     "crate-type = [`"rlib`", `"cdylib`"]",
-    "10.0.8",
+    "10.0.9",
     "2028-11-14",
     "v2.5.8",
     "v0.24.4",

@@ -139,7 +139,7 @@ foreach ($signal in @(
     "Technology stack check",
     "net10.0-windows10.0.19041.0",
     "Microsoft.WindowsAppSDK",
-    "2.1.3",
+    "2.2.0",
     "Microsoft.Windows.SDK.BuildTools",
     "10.0.28000.1839",
     "QRCoder",

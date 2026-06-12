@@ -73,7 +73,7 @@ foreach ($signal in @(
     "rust-apple explorer",
     "Open Evidence Gaps",
     "Real Windows-to-mac interop remains blocked",
-    "GitHub branch upload remains blocked",
+    "GitHub branch upload is now covered",
     "Interactive WinUI visual screenshots"
 )) {
     Assert-Contains -Text $synthesis -Needle $signal -Message "Sub-agent synthesis missing signal: $signal"

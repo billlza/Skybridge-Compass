@@ -85,7 +85,7 @@ $agents = Get-Content -Raw -LiteralPath $agentsPath
 
 Assert-True -Condition ($targetFramework -eq "net10.0-windows10.0.19041.0") -Message "Windows client must target net10.0-windows10.0.19041.0, got $targetFramework"
 Assert-True -Condition ($windowsPackageType -eq "None") -Message "Windows client must set WindowsPackageType=None so unpackaged WinUI auto-initializes the Windows App SDK runtime, got $windowsPackageType"
-Assert-True -Condition ($windowsAppSdkVersion -eq "2.1.3") -Message "Windows App SDK must stay on latest stable 2.1.3, got $windowsAppSdkVersion"
+Assert-True -Condition ($windowsAppSdkVersion -eq "2.2.0") -Message "Windows App SDK must stay on latest stable 2.2.0, got $windowsAppSdkVersion"
 Assert-True -Condition ($buildToolsVersion -eq "10.0.28000.1839") -Message "Windows SDK BuildTools must stay on latest stable 10.0.28000.1839, got $buildToolsVersion"
 Assert-True -Condition ($qrCoderVersion -eq "1.8.0") -Message "QRCoder must stay on latest stable 1.8.0, got $qrCoderVersion"
 Assert-Contains -Text $cargoManifest -Needle 'edition = "2021"' -Message "Rust core must stay on Rust 2021 edition until a dedicated migration is scheduled."
@@ -94,12 +94,12 @@ Assert-Contains -Text $cargoManifest -Needle 'crate-type = ["rlib", "cdylib"]' -
 foreach ($architectureSignal in @(
     'Technology stack check',
     'net10.0-windows10.0.19041.0',
-    'Windows App SDK `2.1.3`',
+    'Windows App SDK `2.2.0`',
     'Windows SDK BuildTools `10.0.28000.1839`',
     '`WindowsPackageType=None`',
     'QRCoder `1.8.0`',
     '.NET 10',
-    '10.0.8',
+    '10.0.9',
     'November 14, 2028',
     'MsQuic v2.5.8',
     'libdatachannel',
@@ -110,7 +110,7 @@ foreach ($architectureSignal in @(
     '-EvidencePath <json>',
     'source URIs',
     'online latest-version results',
-    'Sources checked on 2026-06-09'
+    'Stack sources refreshed on 2026-06-12'
 )) {
     Assert-Contains -Text $architecture -Needle $architectureSignal -Message "Architecture stack freshness doc missing signal: $architectureSignal"
 }
@@ -118,7 +118,7 @@ foreach ($architectureSignal in @(
 foreach ($agentSignal in @(
     'WinUI 3 + .NET 10',
     'net10.0-windows10.0.19041.0',
-    'Windows App SDK `2.1.3`',
+    'Windows App SDK `2.2.0`',
     'Windows SDK BuildTools `10.0.28000.1839`',
     'QRCoder `1.8.0`',
     '-EvidencePath <json>',
@@ -133,7 +133,7 @@ if ($CheckOnline) {
     Assert-True -Condition ($dotnet10."channel-version" -eq "10.0") -Message ".NET release metadata channel mismatch."
     Assert-True -Condition ($dotnet10."support-phase" -eq "active") -Message ".NET 10 must remain active."
     Assert-True -Condition ($dotnet10."eol-date" -eq "2028-11-14") -Message ".NET 10 EOL date changed: $($dotnet10.'eol-date')"
-    Assert-True -Condition ($dotnet10."latest-runtime" -eq "10.0.8") -Message ".NET 10 latest runtime changed: $($dotnet10.'latest-runtime')"
+    Assert-True -Condition ($dotnet10."latest-runtime" -eq "10.0.9") -Message ".NET 10 latest runtime changed: $($dotnet10.'latest-runtime')"
 
     $latestWindowsAppSdk = Get-LatestStableNuGetVersion -PackageId "Microsoft.WindowsAppSDK"
     Assert-True -Condition ($latestWindowsAppSdk -eq $windowsAppSdkVersion) -Message "Microsoft.WindowsAppSDK package is not current stable: project=$windowsAppSdkVersion latest=$latestWindowsAppSdk"
@@ -206,7 +206,7 @@ if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
             crateTypes = @("rlib", "cdylib")
         }
         approvedVersions = [ordered]@{
-            dotnetLatestRuntime = "10.0.8"
+            dotnetLatestRuntime = "10.0.9"
             dotnetEolDate = "2028-11-14"
             sipsorcery = "10.0.9"
             msquic = "v2.5.8"
