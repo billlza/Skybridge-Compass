@@ -5,6 +5,7 @@ import UserNotifications
 import CoreLocation
 import Darwin
 import Security
+import ImageIO
 
 // 确保可以访问天气管理器
 import Combine
@@ -100,6 +101,34 @@ struct GeneralPreferencesView: View {
     @EnvironmentObject private var themeConfiguration: ThemeConfiguration
     @EnvironmentObject private var localizationManager: LocalizationManager
 
+    // 缓存的背景缩略图：只在路径变化时在后台解码一次，避免在 body 每次重绘时同步解码整张全分辨率图片。
+    @State private var backgroundThumbnail: NSImage?
+
+    /// 在后台用 ImageIO 生成下采样缩略图（最长边约 240px，覆盖 100×60 的 retina 预览），完成后回主线程赋值。
+    private func reloadBackgroundThumbnail(path: String?) {
+        guard let path else {
+            backgroundThumbnail = nil
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let url = URL(fileURLWithPath: path)
+            var produced: NSImage?
+            if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 240
+                ]
+                if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                    produced = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                }
+            }
+            DispatchQueue.main.async {
+                self.backgroundThumbnail = produced
+            }
+        }
+    }
+
     var body: some View {
         Form {
             Section(header: Text("settings.general.language.sectionTitle", bundle: .module)) {
@@ -153,8 +182,7 @@ struct GeneralPreferencesView: View {
 
             Section("个性化背景") {
                 HStack {
-                    if let path = themeConfiguration.customBackgroundImagePath,
-                       let image = NSImage(contentsOfFile: path) {
+                    if let image = backgroundThumbnail {
                         Image(nsImage: image)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
@@ -238,6 +266,10 @@ struct GeneralPreferencesView: View {
                     .padding(.leading, 8)
                 }
                 .padding(.vertical, 4)
+                .onAppear { reloadBackgroundThumbnail(path: themeConfiguration.customBackgroundImagePath) }
+                .onChange(of: themeConfiguration.customBackgroundImagePath) { _, newPath in
+                    reloadBackgroundThumbnail(path: newPath)
+                }
 
                 if themeConfiguration.customBackgroundImagePath != nil {
                     Text("提示: 选择图片后将自动切换到“自定义背景”主题。")
