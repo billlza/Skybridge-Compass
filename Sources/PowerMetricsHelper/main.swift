@@ -33,17 +33,48 @@ final class XPCDelegate: NSObject, NSXPCListenerDelegate {
 }
 
 private func verifyConnectionIdentifier(_ connection: NSXPCConnection, allowedIdentifier: String) -> Bool {
+    // NOTE: NSXPCConnection.auditToken is not public API; the PID guest lookup is the supported path.
+    // PID reuse is a narrow race, but it is mitigated by the code-signing requirement enforced below
+    // (the racing process would also have to be signed by our own Developer-ID team).
     let pid = connection.processIdentifier
     var guest: SecCode?
     let attrs: [CFString: Any] = [kSecGuestAttributePid: pid]
     let statusGuest = SecCodeCopyGuestWithAttributes(nil, attrs as CFDictionary, SecCSFlags(), &guest)
     guard statusGuest == errSecSuccess, let guest else { return false }
     var requirement: SecRequirement?
-    let reqString = "identifier \"\(allowedIdentifier)\""
+    let reqString = trustedClientRequirementString(allowedIdentifier: allowedIdentifier)
     let statusReq = SecRequirementCreateWithString(reqString as CFString, SecCSFlags(), &requirement)
     guard statusReq == errSecSuccess, let requirement else { return false }
     let statusValid = SecCodeCheckValidity(guest, SecCSFlags(), requirement)
     return statusValid == errSecSuccess
+}
+
+/// Builds the SecRequirement string used to authorize incoming XPC clients.
+///
+/// We deliberately bind to the *same* signing team as this helper rather than a hardcoded
+/// Team ID. On a Developer-ID / release build the helper carries a Team Identifier, so we
+/// require the caller to be `identifier "<app>" and anchor apple generic and
+/// certificate leaf[subject.OU] = "<ourTeam>"` — a self-signed or unsigned binary that merely
+/// spoofs the bundle identifier can no longer connect to this root daemon. On an ad-hoc /
+/// unsigned development build there is no Team Identifier, so we fall back to the original
+/// identifier-only requirement to keep `Scripts/run_app.sh` local development working.
+private func trustedClientRequirementString(allowedIdentifier: String) -> String {
+    if let team = currentTeamIdentifier(), !team.isEmpty {
+        return "identifier \"\(allowedIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+    }
+    return "identifier \"\(allowedIdentifier)\""
+}
+
+/// Returns this helper's own Team Identifier (nil for ad-hoc/unsigned builds).
+private func currentTeamIdentifier() -> String? {
+    var selfCode: SecCode?
+    guard SecCodeCopySelf(SecCSFlags(), &selfCode) == errSecSuccess, let selfCode else { return nil }
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(selfCode, SecCSFlags(), &staticCode) == errSecSuccess, let staticCode else { return nil }
+    var info: CFDictionary?
+    guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+          let dict = info as? [String: Any] else { return nil }
+    return dict[kSecCodeInfoTeamIdentifier as String] as? String
 }
 
 @objc protocol PowerMetricsXPCProtocol {

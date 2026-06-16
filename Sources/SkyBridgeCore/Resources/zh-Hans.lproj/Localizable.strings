@@ -617,7 +617,7 @@
 "settings.systemMonitor.config.title" = "监控配置";
 "settings.systemMonitor.config.refreshInterval" = "刷新间隔:";
 "settings.systemMonitor.config.enableRealtime" = "启用实时监控";
-"settings.systemMonitor.config.enableHistory" = "启用历史记录";
+"settings.systemMonitor.config.enableHistory" = "显示趋势指示器";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "启用性能警报";
 "settings.systemMonitor.config.retentionDays" = "数据保留天数:";
 "settings.systemMonitor.config.maxHistoryPoints" = "最大历史数据点:";

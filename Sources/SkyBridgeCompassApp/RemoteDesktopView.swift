@@ -1487,7 +1487,7 @@ struct RemoteDesktopSettingsView: View {
                 .help("远程桌面传输强制使用加密，不能在生产环境关闭")
 
                 Toggle("启用 UDP 传输", isOn: $settingsManager.settings.networkSettings.enableUDPTransport)
-                    .help("使用 UDP 协议提高传输性能")
+                    .help("远程桌面推流（WebRTC）依赖 UDP 传输：关闭后将无法建立远程桌面画面推流，并非可选的性能优化项")
 
                 Toggle("启用自适应质量", isOn: $settingsManager.settings.networkSettings.enableAdaptiveQuality)
                     .help("根据网络状况自动调整视频质量")

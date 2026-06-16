@@ -4,6 +4,41 @@
 // Copyright © 2024 SkyBridge. All rights reserved.
 
 import Foundation
+import Security
+
+/// Authorizes an incoming XPC connection by verifying the caller is code-signed by the
+/// same team as this helper. Mirrors PowerMetricsHelper: on a Developer-ID/release build we
+/// require `identifier "<app>" and anchor apple generic and certificate leaf[subject.OU] = "<ourTeam>"`,
+/// and on an ad-hoc/unsigned development build we fall back to identifier-only so local dev works.
+/// This helper uses an anonymous listener (endpoint is not published), so this is defense-in-depth.
+private func isRegexClientTrusted(_ connection: NSXPCConnection, allowedIdentifier: String) -> Bool {
+    let pid = connection.processIdentifier
+    var guest: SecCode?
+    let attrs: [CFString: Any] = [kSecGuestAttributePid: pid]
+    guard SecCodeCopyGuestWithAttributes(nil, attrs as CFDictionary, SecCSFlags(), &guest) == errSecSuccess,
+          let guest else { return false }
+    let reqString: String
+    if let team = regexHelperTeamIdentifier(), !team.isEmpty {
+        reqString = "identifier \"\(allowedIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+    } else {
+        reqString = "identifier \"\(allowedIdentifier)\""
+    }
+    var requirement: SecRequirement?
+    guard SecRequirementCreateWithString(reqString as CFString, SecCSFlags(), &requirement) == errSecSuccess,
+          let requirement else { return false }
+    return SecCodeCheckValidity(guest, SecCSFlags(), requirement) == errSecSuccess
+}
+
+private func regexHelperTeamIdentifier() -> String? {
+    var selfCode: SecCode?
+    guard SecCodeCopySelf(SecCSFlags(), &selfCode) == errSecSuccess, let selfCode else { return nil }
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(selfCode, SecCSFlags(), &staticCode) == errSecSuccess, let staticCode else { return nil }
+    var info: CFDictionary?
+    guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+          let dict = info as? [String: Any] else { return nil }
+    return dict[kSecCodeInfoTeamIdentifier as String] as? String
+}
 
 /// Thread-safe state container for regex matching operation.
 private final class MatchingState: @unchecked Sendable {
@@ -176,6 +211,10 @@ private final class MatchingState: @unchecked Sendable {
         _ listener: NSXPCListener,
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
+ // Reject connections that are not signed by our own team (defense-in-depth).
+        guard isRegexClientTrusted(newConnection, allowedIdentifier: "com.skybridge.compass.pro") else {
+            return false
+        }
  // Configure the connection
         newConnection.exportedInterface = NSXPCInterface(with: RegexMatchingProtocol.self)
         

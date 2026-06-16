@@ -6,6 +6,14 @@
 **Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop, branch hygiene, stale-paper boundary  
 **Related areas:** P2P discovery, transport selection, WebRTC, Windows native networking, Android Kotlin stack, Android Wi-Fi Aware/NSD, Linux Rust core, Linux Avahi/DNS-SD, Apple Network.framework, QUIC, PQC, trust/pairing, traffic padding, session audit, signaling/TURN deployment
 
+> **⚠️ 实现状态（2026-06-16）**：本 ADR 是**已批准的架构目标（approved target architecture）**，其中
+> 大部分跨平台内容尚未落地。当前实现仅 **Apple↔Apple**：macOS 主机端通过 SkyBridge 私有 PQC 握手 +
+> Bonjour `_skybridge-remote._tcp` 提供远程控制，**只接受已登记信任的 Apple 对端**。
+> 下表中 §6.7 / §1 的 **Apple ↔ Windows/Android/Linux 的 “WebRTC DataChannel MVP 互通路径” 目前尚未接线**：
+> WebRTC 子系统没有任何调用进入远程控制主机（`RemoteControlManager` / `RemoteControlServer`）。
+> Windows/Android/Linux 的 MsQuic / Quinn / Wi-Fi Aware / Avahi 原生栈同样为目标设计，尚无构建目标。
+> 因此非 Apple 设备目前**既不能被 Mac 控制、也不能控制 Mac**。落地顺序见 `ROADMAP.md`。
+
 ---
 
 ## 1. Decision Summary
@@ -394,6 +402,11 @@ Fallback:    WebRTCInteropTransport
 Default nearby Android path is still Android-native for Android ↔ Android. Mixed Android ↔ desktop can use native QUIC if capability and network binding checks pass; otherwise use WebRTC.
 
 ### 6.7 Apple ↔ Windows/Android/Linux
+
+> **实现状态：未接线（2026-06-16）。** 下述 MVP 路径是目标设计。代码中 WebRTC（`CrossNetworkConnectionManager`）
+> 没有任何路径进入远程控制主机（`RemoteControlManager` / `RemoteControlServer`），主机握手只解析
+> 已登记的 `TrustRecord`（Apple 对端）。要让非 Apple 客户端真正驱动 Mac，需要先实现“非 Apple 入站契约”
+> （标准协议主机或 WebRTC media-track + 标准输入协议 + 信任登记路径）——属于 ROADMAP 后续阶段，非当前可用能力。
 
 Default MVP path:
 

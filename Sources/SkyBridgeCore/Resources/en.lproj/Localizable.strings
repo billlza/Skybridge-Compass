@@ -590,7 +590,7 @@
 "settings.systemMonitor.config.title" = "Monitoring Configuration";
 "settings.systemMonitor.config.refreshInterval" = "Refresh Interval:";
 "settings.systemMonitor.config.enableRealtime" = "Enable real-time monitoring";
-"settings.systemMonitor.config.enableHistory" = "Enable history";
+"settings.systemMonitor.config.enableHistory" = "Show trend indicators";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "Enable performance alerts";
 "settings.systemMonitor.config.retentionDays" = "Data retention (days):";
 "settings.systemMonitor.config.maxHistoryPoints" = "Maximum history points:";

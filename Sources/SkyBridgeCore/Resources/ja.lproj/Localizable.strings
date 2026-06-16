@@ -561,7 +561,7 @@
 "settings.systemMonitor.config.title" = "モニタ設定";
 "settings.systemMonitor.config.refreshInterval" = "更新間隔:";
 "settings.systemMonitor.config.enableRealtime" = "リアルタイム監視を有効化";
-"settings.systemMonitor.config.enableHistory" = "履歴を有効化";
+"settings.systemMonitor.config.enableHistory" = "トレンドインジケーターを表示";
 "settings.systemMonitor.config.enablePerformanceAlerts" = "性能アラートを有効化";
 "settings.systemMonitor.config.retentionDays" = "データ保持（日数):";
 "settings.systemMonitor.config.maxHistoryPoints" = "最大履歴ポイント:";
