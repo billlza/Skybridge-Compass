@@ -83,6 +83,32 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     public var onSendToDevice: ((_ data: Data, _ deviceID: String) async throws -> Void)?
     public var onBroadcast: ((_ data: Data) async throws -> Void)?
 
+    /// 本地剪贴板发生变化时回调，提供原始内容（mimeType + 原始字节），由集成方封装为
+    /// AppMessage.clipboard 经 P2P 会话加密发送（不再叠加本服务自带的信封加密）。
+    public var onLocalContentChanged: ((_ mimeType: String, _ data: Data) async -> Void)?
+
+    /// ClipboardContentType ↔ MIME 类型映射（与 AppMessage.ClipboardPayload.mimeType 对齐）。
+    private static func mimeType(for type: ClipboardContentType) -> String {
+        switch type {
+        case .text: return "text/plain"
+        case .image: return "image/png"
+        case .fileURL: return "application/x-skybridge-file-url"
+        case .richText: return "text/rtf"
+        case .html: return "text/html"
+        }
+    }
+
+    private static func contentType(forMIME mime: String) -> ClipboardContentType? {
+        switch mime {
+        case "text/plain": return .text
+        case "image/png": return .image
+        case "application/x-skybridge-file-url": return .fileURL
+        case "text/rtf": return .richText
+        case "text/html": return .html
+        default: return nil
+        }
+    }
+
     private static let configurationStore = CodablePersistenceStore<ClipboardSyncConfiguration>(
         location: .protectedApplicationSupport(
             path: "Clipboard/configuration.json",
@@ -114,6 +140,7 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
         isEnabled = true
         syncState = .idle
         changeCount = pasteboard.changeCount
+        if !configuration.isEnabled { configuration.isEnabled = true } // 持久化用户意图（didSet 保存）
 
         startMonitoring()
 
@@ -126,6 +153,7 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
 
         isEnabled = false
         syncState = .disabled
+        if configuration.isEnabled { configuration.isEnabled = false } // 持久化用户意图（didSet 保存）
 
         stopMonitoring()
 
@@ -244,6 +272,49 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
         } catch {
             logger.error("📋 广播剪贴板内容失败: \(error.localizedDescription)")
             syncState = .error(error.localizedDescription)
+        }
+
+        // 经 P2P AppMessage 传输：把原始内容交给集成方发送（连接时生效的“随航”同步）
+        await onLocalContentChanged?(Self.mimeType(for: content.type), content.data)
+    }
+
+    /// 摄入来自远端的原始剪贴板内容（经 P2P AppMessage.clipboard 解出），应用到本地并落历史。
+    /// applyRemoteContent 会把 lastContentHash 设为该内容哈希，从而避免被本地监听再次回播形成环路。
+    /// - Parameters:
+    ///   - mimeType: 内容 MIME 类型
+    ///   - data: 原始内容字节
+    ///   - fromDeviceID: 来源设备 ID
+    public func ingestRemoteContent(mimeType: String, data: Data, fromDeviceID: String) async {
+        guard isEnabled else { return }
+        guard let type = Self.contentType(forMIME: mimeType) else {
+            logger.debug("📋 忽略未知 MIME 类型的远端剪贴板: \(mimeType, privacy: .public)")
+            return
+        }
+        let content = ClipboardContent(type: type, data: data, sourceDeviceID: fromDeviceID)
+        guard content.contentHash != lastContentHash else {
+            logger.debug("📋 忽略重复的远端剪贴板内容")
+            return
+        }
+        applyRemoteContent(content)
+        let entry = ClipboardHistoryEntry(content: content, direction: .incoming, targetDeviceIDs: [])
+        addToHistory(entry)
+        lastSyncTime = Date()
+        logger.info("📋 已应用来自 \(fromDeviceID, privacy: .public) 的远端剪贴板内容")
+    }
+
+    /// 把本服务接入 P2P 传输（本地剪贴板变化时向所有活动 P2P 会话广播 AppMessage.clipboard），
+    /// 并按持久化配置恢复启用状态。应在 App 启动后调用一次。
+    public func attachP2PTransportAndRestore() async {
+        onLocalContentChanged = { mimeType, data in
+            let payload = AppMessage.ClipboardPayload(mimeType: mimeType, dataBase64: data.base64EncodedString())
+            // 在主线程快照当前活动连接（P2PConnection 为 @unchecked Sendable，可跨域传递），再逐个发送。
+            let connections = await MainActor.run { Array(P2PNetworkManager.shared.activeConnections.values) }
+            for connection in connections {
+                try? await connection.sendAppMessage(.clipboard(payload))
+            }
+        }
+        if configuration.isEnabled {
+            try? await enable()
         }
     }
 

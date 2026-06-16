@@ -477,9 +477,28 @@ struct NetworkPreferencesView: View {
 // MARK: - 设备偏好设置视图
 struct DevicePreferencesView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
+    @State private var showingClipboardSettings = false
 
     var body: some View {
         Form {
+            Section("随航剪贴板") {
+                Button("打开随航剪贴板设置…") { showingClipboardSettings = true }
+                    .help("跨设备同步剪贴板（在与配对设备建立 P2P 连接时生效），可配置同步图片/文件路径与历史")
+            }
+            .sheet(isPresented: $showingClipboardSettings) {
+                VStack(spacing: 0) {
+                    ClipboardSyncSettingsView()
+                    Divider()
+                    HStack {
+                        Spacer()
+                        Button("完成") { showingClipboardSettings = false }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                    .padding()
+                }
+                .frame(minWidth: 520, minHeight: 480)
+            }
+
             Section("设备显示") {
                 Toggle("显示设备RSSI", isOn: $settingsManager.showDeviceRSSI)
                     .help("显示设备信号强度指示器")

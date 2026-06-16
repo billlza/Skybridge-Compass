@@ -457,6 +457,8 @@ struct SkyBridgeCompassApp: App {
  // 第3层：文件传输设置应用（延迟 1800ms）
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 await FileTransferSettingsBridge.shared.applyAsync()
+ // 第4层：随航剪贴板接入 P2P 传输 + 按配置恢复启用
+                await ClipboardSyncService.shared.attachP2PTransportAndRestore()
             }
         }
     }

@@ -2179,8 +2179,17 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return
         }
         switch message {
-        case .clipboard:
-            break
+        case .clipboard(let payload):
+            // 随航剪贴板：把远端剪贴板内容交给 ClipboardSyncService 应用到本地（仅 macOS 主机端）。
+            #if os(macOS)
+            await ClipboardSyncService.shared.ingestRemoteContent(
+                mimeType: payload.mimeType,
+                data: payload.decodedData ?? Data(),
+                fromDeviceID: handshakePeer.deviceId
+            )
+            #else
+            _ = payload
+            #endif
         case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
              .protocolIdentityBindingRequest, .signedProtocolIdentityBinding:
             break
