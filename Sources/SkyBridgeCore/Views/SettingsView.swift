@@ -1619,17 +1619,6 @@ public struct SettingsView: View {
     }
     
  // MARK: - 远程桌面设置
-    private var remoteNetworkCompressionEnabled: Binding<Bool> {
-        Binding(
-            get: { remoteDesktopSettingsManager.settings.networkSettings.compressionLevel > 0 },
-            set: { isEnabled in
-                let currentLevel = remoteDesktopSettingsManager.settings.networkSettings.compressionLevel
-                let restoredLevel = currentLevel > 0 ? currentLevel : 6
-                remoteDesktopSettingsManager.settings.networkSettings.compressionLevel = isEnabled ? restoredLevel : 0
-            }
-        )
-    }
-
     private var remoteDesktopSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -1697,8 +1686,22 @@ public struct SettingsView: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(.green)
                         }
-                        Toggle(localizationManager.localizedString("settings.remote.network.enableCompression"), isOn: remoteNetworkCompressionEnabled)
-                        
+                        HStack {
+                            Text(localizationManager.localizedString("settings.remote.network.enableCompression"))
+                            Slider(
+                                value: Binding(
+                                    get: { Double(remoteDesktopSettingsManager.settings.networkSettings.compressionLevel) },
+                                    set: { remoteDesktopSettingsManager.settings.networkSettings.compressionLevel = Int($0) }
+                                ),
+                                in: 0...9,
+                                step: 1
+                            )
+                            Text("\(remoteDesktopSettingsManager.settings.networkSettings.compressionLevel)")
+                                .foregroundColor(.secondary)
+                                .frame(width: 20)
+                        }
+                        .help("网络数据压缩级别（0 = 关闭，9 = 最大压缩）。与远程桌面页的压缩级别为同一设置。")
+
                         HStack {
                             Text(localizationManager.localizedString("settings.remote.network.bandwidthLimit"))
                             TextField(localizationManager.localizedString("unit.bandwidth"), 
