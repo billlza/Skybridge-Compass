@@ -6,6 +6,8 @@ import CryptoKit
 @available(macOS 14.0, iOS 17.0, *)
 public enum AppMessage: Codable, Sendable, Equatable {
     case clipboard(ClipboardPayload)
+    /// 设备间文本消息（离线时经 OfflineMessageQueue 排队，重连后投递）。
+    case textMessage(TextMessagePayload)
     case pairingIdentityExchange(PairingIdentityExchangePayload)
     case kemRefreshRequest(KEMRefreshRequestPayload)
     case signedKEMRefresh(SignedKEMRefreshPayload)
@@ -32,6 +34,19 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
         public var decodedData: Data? {
             Data(base64Encoded: dataBase64)
+        }
+    }
+
+    /// 设备间文本消息载荷。`id` 用于收端去重 + 发端投递状态回填。
+    public struct TextMessagePayload: Codable, Sendable, Equatable {
+        public let id: UUID
+        public let text: String
+        public let sentAt: Date
+
+        public init(id: UUID = UUID(), text: String, sentAt: Date = Date()) {
+            self.id = id
+            self.text = text
+            self.sentAt = sentAt
         }
     }
 
@@ -1104,6 +1119,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case clipboard
+        case textMessage
         case pairingIdentityExchange
         case kemRefreshRequest
         case signedKEMRefresh
@@ -1125,6 +1141,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
         if let payload = try? container.decode(ClipboardPayload.self, forKey: .clipboard) {
             self = .clipboard(payload)
+            return
+        }
+        if let payload = try? container.decode(TextMessagePayload.self, forKey: .textMessage) {
+            self = .textMessage(payload)
             return
         }
         if let payload = try? container.decode(PairingIdentityExchangePayload.self, forKey: .pairingIdentityExchange) {
@@ -1226,6 +1246,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
         switch self {
         case .clipboard(let payload):
             try container.encode(payload, forKey: .clipboard)
+        case .textMessage(let payload):
+            try container.encode(payload, forKey: .textMessage)
         case .pairingIdentityExchange(let payload):
             try container.encode(payload, forKey: .pairingIdentityExchange)
         case .kemRefreshRequest(let payload):

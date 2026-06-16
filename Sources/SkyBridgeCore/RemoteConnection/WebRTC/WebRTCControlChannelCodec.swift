@@ -443,6 +443,8 @@ enum WebRTCControlChannelCodec {
         switch message {
         case .clipboard:
             return "clipboard"
+        case .textMessage:
+            return "textMessage"
         case .pairingIdentityExchange:
             return "pairingIdentityExchange"
         case .kemRefreshRequest:

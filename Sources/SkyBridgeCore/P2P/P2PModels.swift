@@ -2190,6 +2190,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             #else
             _ = payload
             #endif
+        case .textMessage(let payload):
+            // 设备间文本消息：按发送者稳定公钥指纹归档到会话存储。
+            if let record = await TrustSyncService.shared.getTrustRecord(deviceId: handshakePeer.deviceId),
+               !record.pubKeyFP.isEmpty {
+                await DeviceMessagingService.shared.handleIncoming(payload, fingerprint: record.pubKeyFP)
+            }
         case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
              .protocolIdentityBindingRequest, .signedProtocolIdentityBinding:
             break

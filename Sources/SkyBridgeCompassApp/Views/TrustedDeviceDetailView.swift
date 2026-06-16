@@ -134,6 +134,7 @@ struct TrustedDeviceDetailView: View {
     let onRepairP2PTrust: (_ idsToRepair: [String]) -> Void
     let onRemoveTrust: (_ idsToRevoke: [String], _ declaredDeviceId: String?) -> Void
     @ObservedObject private var autoConnectStore = TrustedAutoConnectStore.shared
+    @State private var showingMessaging = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -207,6 +208,16 @@ struct TrustedDeviceDetailView: View {
                 .padding(.horizontal, 4)
             }
 
+            if !record.pubKeyFP.isEmpty {
+                Button {
+                    showingMessaging = true
+                } label: {
+                    Label(ui(chinese: "发送消息", english: "Send Message", japanese: "メッセージを送信"),
+                          systemImage: "bubble.left.and.bubble.right")
+                }
+                .padding(.horizontal, 4)
+            }
+
             Spacer()
             
             HStack {
@@ -236,8 +247,15 @@ struct TrustedDeviceDetailView: View {
                 .keyboardShortcut(.delete)
             }
         }
+        .sheet(isPresented: $showingMessaging) {
+            DeviceMessagingView(
+                fingerprint: record.pubKeyFP,
+                deviceId: record.currentDeviceId,
+                deviceName: record.deviceName ?? "设备"
+            )
+        }
     }
-    
+
     private func infoRow(_ title: String, value: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(title)

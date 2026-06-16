@@ -3470,6 +3470,14 @@ public class P2PDiscoveryService: BaseManager {
                             case .heartbeat(let payload):
                                 await refreshInboundRouteFromHeartbeat(payload, keys: keys)
 
+                            case .textMessage(let payload):
+                                // 设备间文本消息：按发送者稳定公钥指纹归档（此入站会话路径同样可能收到）。
+                                let senderDeviceId = declaredDeviceIdForVerification ?? peer.deviceId
+                                if let record = await TrustSyncService.shared.getTrustRecord(deviceId: senderDeviceId),
+                                   !record.pubKeyFP.isEmpty {
+                                    await DeviceMessagingService.shared.handleIncoming(payload, fingerprint: record.pubKeyFP)
+                                }
+
                             case .pong, .clipboard:
                                 break
                             }

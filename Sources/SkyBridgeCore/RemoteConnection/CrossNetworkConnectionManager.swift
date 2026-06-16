@@ -7045,6 +7045,8 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                     print("🧪 mac app message=heartbeat")
                                 case .clipboard:
                                     print("🧪 mac app message=clipboard")
+                                case .textMessage(let payload):
+                                    print("🧪 mac app message=textMessage id=\(payload.id)")
                                 case .peerDisconnecting(let payload):
                                     print("🧪 mac app message=peerDisconnecting deviceId=\(payload.deviceId ?? "nil")")
                                 case .ping(let payload):

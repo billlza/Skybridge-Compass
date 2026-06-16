@@ -176,6 +176,9 @@ final class DashboardViewModel: ObservableObject {
             await localPeerServices.startIfNeeded()
         }
 
+        // 设备间文本消息服务：接 P2P 传输 + 离线队列投递（幂等，独立于自动扫描）。
+        DeviceMessagingService.shared.start()
+
         if shouldAutoScan {
             guard await pauseBetweenStartupBursts() else { return }
             // 检查设备发现服务是否已启动，避免重复初始化
