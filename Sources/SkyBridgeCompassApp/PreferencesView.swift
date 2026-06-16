@@ -1,5 +1,6 @@
 import SwiftUI
 import SkyBridgeCore
+import SkyBridgeUI
 import UniformTypeIdentifiers
 import UserNotifications
 import CoreLocation
@@ -339,9 +340,28 @@ struct GeneralPreferencesView: View {
 // MARK: - 网络偏好设置视图
 struct NetworkPreferencesView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
+    @State private var showingBandwidthSettings = false
 
     var body: some View {
         Form {
+            Section("带宽限速") {
+                Button("打开带宽限速设置…") { showingBandwidthSettings = true }
+                    .help("配置全局/按设备的传输带宽上限与时段规则，对文件传输实时生效")
+            }
+            .sheet(isPresented: $showingBandwidthSettings) {
+                VStack(spacing: 0) {
+                    BandwidthSettingsView()
+                    Divider()
+                    HStack {
+                        Spacer()
+                        Button("完成") { showingBandwidthSettings = false }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                    .padding()
+                }
+                .frame(minWidth: 520, minHeight: 480)
+            }
+
             Section("WiFi 设置") {
                 Toggle("自动连接已知网络", isOn: $settingsManager.autoConnectKnownNetworks)
                     .help("自动连接之前连接过的WiFi网络")

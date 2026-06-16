@@ -2061,6 +2061,25 @@ public class FileTransferManager: BaseManager {
     }
 
  /// 分块发送文件 - 支持断点续传
+    /// 在发送一个数据块前，向 BandwidthThrottleEngine 申请发送令牌，实现按设备/时段的带宽限速。
+    /// 令牌桶为空时短暂等待补充后重试，从而把发送速率限制在配置上限；引擎未启用或无限速时立即返回，零额外开销。
+    /// FileTransferManager 与 BandwidthThrottleEngine 均为 @MainActor，故此处为同 actor 同步访问、无跨 actor 跳转。
+    private func awaitBandwidthPermit(bytes: Int64, deviceID: String) async {
+        let throttle = BandwidthThrottleEngine.shared
+        guard throttle.isEnabled else { return }
+        var remaining = bytes
+        while remaining > 0 {
+            let granted = await throttle.requestPermission(bytes: remaining, deviceID: deviceID)
+            if granted > 0 {
+                throttle.reportUsage(bytes: granted, deviceID: deviceID)
+                remaining -= granted
+            } else {
+                // 令牌桶暂时为空，等待补充后重试（20ms 与限速精度的折中）
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+    }
+
     private func sendFileInChunks(
         from url: URL,
         transfer: FileTransfer,
@@ -2122,6 +2141,8 @@ public class FileTransferManager: BaseManager {
                 authenticationTag: encrypted.tag
             )
 
+ // 发送前先向带宽限速引擎申请令牌（按设备/时段限速；未启用时零开销直接放行）
+            await awaitBandwidthPermit(bytes: Int64(chunkData.count), deviceID: transfer.deviceId)
  // 发送文件块
             try await sendFileChunk(chunk, to: connection)
             await applySpeedLimitIfNeeded(for: transfer.id, transferredBytes: chunkData.count)
