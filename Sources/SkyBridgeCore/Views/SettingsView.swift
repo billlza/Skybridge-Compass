@@ -1040,7 +1040,17 @@ public struct SettingsView: View {
                         Text("策略强制启用")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.enableHybridTLS"), isOn: $settingsManager.enablePQCHybridTLS)
+                        // 混合 PQC TLS 的密钥交换组（X25519MLKEM768）由系统 TLS 1.3 栈在 macOS 26+ 自动协商，
+                        // 没有公开 API 可供 App 强制开/关（C 层 sec_protocol_options 无此旋钮，SwiftTLSOptions.keyExchangeGroup
+                        // 未导出到公开接口）。因此此处不再提供仅改状态文字的假开关，改为如实说明。
+                        HStack {
+                            Text(localizationManager.localizedString("settings.advanced.pqc.enableHybridTLS"))
+                            Spacer()
+                            Text("由系统自动协商 (macOS 26+)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        .help("传输层 TLS 1.3 的混合后量子密钥交换组（X25519MLKEM768）由系统在双方支持时自动协商，App 无公开接口可强制开关。注意：SkyBridge 自有的 P2P 设备握手始终使用 PQC（X-Wing），与此传输层 TLS 无关。")
                         Toggle(localizationManager.localizedString("settings.advanced.pqc.preferXWing"), isOn: $settingsManager.preferXWingHybrid)
                             .help(localizationManager.localizedString("settings.advanced.pqc.preferXWing.help"))
                         Text(localizationManager.localizedString("settings.advanced.pqc.preferXWing.caption"))
@@ -1056,7 +1066,18 @@ public struct SettingsView: View {
                             .frame(width: 120)
                         }
                         Toggle(localizationManager.localizedString("settings.advanced.pqc.useSecureEnclaveMLDSA"), isOn: $settingsManager.useSecureEnclaveMLDSA)
-                        Toggle(localizationManager.localizedString("settings.advanced.pqc.useSecureEnclaveMLKEM"), isOn: $settingsManager.useSecureEnclaveMLKEM)
+                        // ML-KEM 密钥协商在本协议中走 X-Wing（ML-KEM-768 + X25519）混合方案，是每会话临时密钥、
+                        // 且 Apple 仅提供软件实现（无 SecureEnclave.XWing 类型）。Secure Enclave 的硬件隔离仅对持久
+                        // 身份密钥（ML-DSA，见上）有意义，故此处不再提供"使用 Secure Enclave ML-KEM"假开关，
+                        // 改为如实展示当前密钥协商方式。
+                        HStack {
+                            Text("ML-KEM 密钥协商")
+                            Spacer()
+                            Text("X-Wing 混合 · 软件 · 临时会话密钥")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        .help("密钥协商使用 X-Wing（ML-KEM-768 + X25519）混合方案。该密钥为每会话临时生成、用完即弃，且 Apple 只提供软件实现；因此 Secure Enclave 硬件隔离不适用于此处，仅适用于持久身份签名密钥（见上方 ML-DSA）。")
                         Text(localizationManager.localizedString("settings.advanced.pqc.note"))
                             .font(.caption)
                             .foregroundColor(.secondary)
