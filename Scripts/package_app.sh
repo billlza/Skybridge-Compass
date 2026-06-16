@@ -1051,6 +1051,22 @@ while IFS= read -r linked_framework; do
   found_framework=1
 done <<< "${linked_frameworks}"
 
+# 嵌入 FreeRDP 动态库（>=3.26 最小依赖集），让 RDP 远程桌面自包含、无需用户安装 Homebrew freerdp。
+# 来源：Scripts/build_freerdp_dylibs.sh 预构建、并已重定位到 @loader_path 的 dylib 集合；
+# bridge（Sources/FreeRDPBridge/CBFreeRDPClient.m）运行时优先从 Contents/Frameworks 加载 libfreerdp3.dylib。
+# 随后由 resign_embedded_code 统一以 Developer ID 重签名（它会签名 Frameworks 下所有 *.dylib）。
+FREERDP_DYLIB_DIR="${ROOT_DIR}/Sources/Vendor/FreeRDPDylibs"
+freerdp_dylibs=("${FREERDP_DYLIB_DIR}"/*.dylib(N))
+if (( ${#freerdp_dylibs} )); then
+  log "嵌入 FreeRDP 动态库到 Frameworks/（自包含 RDP，无需 Homebrew）：${#freerdp_dylibs} 个"
+  for dylib in "${freerdp_dylibs[@]}"; do
+    cp -f "${dylib}" "${FW_DIR}/"
+    chmod u+w "${FW_DIR}/$(basename "${dylib}")"
+  done
+else
+  log "ℹ️ 未找到预构建 FreeRDP 动态库（${FREERDP_DYLIB_DIR}）；RDP 将回退 Homebrew libfreerdp3。运行 Scripts/build_freerdp_dylibs.sh 可使其自包含。"
+fi
+
 # 兼容历史 rpath（@executable_path/../lib），同时保留标准 Frameworks 布局。
 if [[ -L "${LEGACY_FW_LINK}" || -e "${LEGACY_FW_LINK}" ]]; then
   rm -rf "${LEGACY_FW_LINK}"
