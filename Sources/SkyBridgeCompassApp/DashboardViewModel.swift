@@ -233,6 +233,11 @@ final class DashboardViewModel: ObservableObject {
             #endif
             guard await pauseBetweenStartupBursts() else { return }
             unifiedDeviceManager.startDiscovery()
+
+            // 🆕 启动随航自动连接：仅连接「用户逐设备开启随航 + 仍受信 + 当前可发现」的设备，
+            // 维持后台 P2P 会话供随航剪贴板等使用（默认全部关闭，需在设备详情里逐个开启）。
+            guard await pauseBetweenStartupBursts() else { return }
+            TrustedAutoConnectManager.shared.start()
         } else {
             #if DEBUG
             SkyBridgeLogger.ui.debugOnly("⏸ [DashboardViewModel] 启动自动扫描已关闭，跳过自动发现链路")

@@ -133,7 +133,8 @@ struct TrustedDeviceDetailView: View {
     let onDisconnect: ((_ idsToDisconnect: [String], _ declaredDeviceId: String?) -> Void)?
     let onRepairP2PTrust: (_ idsToRepair: [String]) -> Void
     let onRemoveTrust: (_ idsToRevoke: [String], _ declaredDeviceId: String?) -> Void
-    
+    @ObservedObject private var autoConnectStore = TrustedAutoConnectStore.shared
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -183,7 +184,29 @@ struct TrustedDeviceDetailView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(Color.white.opacity(0.12), lineWidth: 1)
             )
-            
+
+            // 随航自动连接（opt-in，按公钥指纹存储）。仅对已绑定指纹的受信设备可设。
+            if !record.pubKeyFP.isEmpty {
+                Toggle(isOn: Binding(
+                    get: { autoConnectStore.allowsAutoConnect(fingerprint: record.pubKeyFP) },
+                    set: { autoConnectStore.setAllowAutoConnect($0, fingerprint: record.pubKeyFP) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(ui(chinese: "允许随航自动连接", english: "Allow follow-along auto-connect", japanese: "フォロー自動接続を許可"))
+                            .font(.callout)
+                        Text(ui(
+                            chinese: "该设备在同一网络/可达时自动建立后台连接，使剪贴板等随航功能无需手动会话即可同步（不会自动打开远程桌面）。",
+                            english: "When this device is reachable on the network, auto-connect in the background so clipboard and other follow-along features sync without a manual session (does not open remote desktop).",
+                            japanese: "このデバイスがネットワークで到達可能なとき自動でバックグラウンド接続し、クリップボード等を手動セッションなしで同期します（リモートデスクトップは自動で開きません）。"
+                        ))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .padding(.horizontal, 4)
+            }
+
             Spacer()
             
             HStack {
