@@ -2843,7 +2843,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "skybridge"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "skybridge-agent"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "skybridge-auth-mail"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2897,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "skybridge-core"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
