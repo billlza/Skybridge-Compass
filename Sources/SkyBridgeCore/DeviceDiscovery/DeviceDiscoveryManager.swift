@@ -11,6 +11,7 @@ import UIKit
 /// 继承 BaseManager，统一管理器模式和生命周期管理
 @MainActor
 public class DeviceDiscoveryManager: BaseManager {
+    nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
 
  // MARK: - 发布的属性
 
@@ -405,7 +406,7 @@ public class DeviceDiscoveryManager: BaseManager {
             listener = nil
         }
 
-        Task { @MainActor in
+        Task { @MainActor [self] in
             if await ServiceAdvertiserCenter.shared.isAdvertising("_skybridge._tcp") {
                 logger.debugOnly("📡 广播中心已在运行，忽略重复启动")
                 return
@@ -1025,7 +1026,7 @@ public class DeviceDiscoveryManager: BaseManager {
         ) async {
             guard let authority = authenticatedRemoteAuthority else {
                 logger.warning(
-                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                 )
                 return
             }
@@ -1057,16 +1058,16 @@ public class DeviceDiscoveryManager: BaseManager {
                 )
                 guard persisted else {
                     logger.warning(
-                        "⚠️ inbound current-path trust bridge skipped: peer=\(peerDeviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                        "⚠️ inbound current-path trust bridge skipped: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                     )
                     return
                 }
                 logger.info(
-                    "🔐 inbound current-path trust bridge persisted: peer=\(peerDeviceId, privacy: .public) current=\(payload.deviceId, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(authority.protocolPublicKeyFingerprint, privacy: .public)"
+                    "🔐 inbound current-path trust bridge persisted: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) current=\(Self.protocolIdentityLogRedaction, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                 )
             } catch {
                 logger.warning(
-                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .public)"
+                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .private)"
                 )
             }
         }
@@ -1343,10 +1344,12 @@ public class DeviceDiscoveryManager: BaseManager {
                         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        // This pre-selection gate only evaluates the peer offer shape.
+                        // Local PQC capability is checked after choosing the responder provider.
                         if let rejection = StrictPQCAdmissionGate.inboundRejection(
                             policy: requestedPolicy,
                             peerSupportedSuites: messageA.supportedSuites,
-                            localPQCSuitesAvailable: peerHasPQCGroup
+                            localPQCSuitesAvailable: true
                         ), rejection == .peerOfferedClassicOnly {
                             logger.error(
                                 "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"

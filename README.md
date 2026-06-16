@@ -26,7 +26,7 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 
 - macOS 14+
 - Apple Silicon（arm64）Mac（当前 vendored XCFramework 仅提供 arm64 slice，Intel x86_64 暂不支持）
-- Xcode 26.4+
+- Xcode 26.5+（正式发布/CI 基线）；Xcode 27 beta 仅用于手动 OS 27 兼容验证
 - Swift 6.3+（由 Xcode 版本提供）
 
 ## Apple PQC（iOS 26+/macOS 26+）在分发包中自动启用
@@ -34,9 +34,61 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 本项目的 Apple CryptoKit PQC（ML-KEM / ML-DSA / X-Wing）代码路径需要在**编译期**启用 `HAS_APPLE_PQC_SDK`。
 为避免在旧 SDK 下误开导致编译失败，我们使用环境变量开关：
 
-- `SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1`：启用编译条件（用于 Xcode/SDK 26+ 的 Release/分发）
+- `SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1`：启用编译条件（用于 Apple PQC 符号探测通过的 SDK 26+ 构建）
 
-`Scripts/build_with_widgets.sh` 与 `run_app.sh` 会自动检测 macOS SDK 版本（>=26）并设置该变量。
+`Scripts/build_dmg.sh`、`Scripts/package_app.sh`、`Scripts/build_with_widgets.sh` 与 `run_app.sh` 会通过
+`Scripts/apple_pqc_sdk_probe.sh` 对项目实际使用的 CryptoKit PQC 符号做 typecheck；
+只有符号探测通过时才设置该变量。Xcode 27 beta 验证请使用
+`Scripts/run_os27_beta_compatibility.sh`，该 lane 会分别验证 macOS、iPhoneOS、iPhoneSimulator SDK 的 PQC 符号。
+OS27 beta 报告使用 `cryptokit-pqc-os27-v1` 标记 WWDC26 后的 CryptoKit / macOS Secure Enclave PQC 探测范围；
+stable release manifest 仍固定接受 Xcode 26.5 发布基线的 `cryptokit-pqc-v1`。该 lane 不做 notarization、不发布更新 manifest。
+Release/打包入口在符号探测失败时会 fail closed；发布 DMG/package 不接受
+`SKYBRIDGE_ALLOW_RELEASE_WITHOUT_APPLE_PQC_SDK=1` 旁路。旧 `Scripts/build_with_widgets.sh`
+只允许历史本地诊断，不作为发布或验收入口。
+
+安装 Xcode 27 beta 或连接 iPadOS 27 beta 真机后，可先运行只读诊断：
+
+```bash
+Scripts/run_os27_beta_compatibility.sh --diagnose-environment
+```
+
+该模式只汇总 Xcode/SDK/iPadOS 27 beta iPad 前置条件，输出会标记
+`full_validation=false` 与 `compatibility=not_validated`；它不运行 PQC 符号探测、build、test 或真机 runtime 验证，
+也不输出设备名、UDID、序列号等硬件标识。缺 Xcode 27、SDK 27 或 iPadOS 27 beta iPad 时会返回非零状态，不能作为兼容通过结论。
+若诊断显示 Xcode 27 beta 存在且 `xcodebuild -version` 可用，但 `xcrun`/SDK/device probes 返回 exit 69，
+说明 Xcode license/first-launch 尚未完成；需要在本机 Terminal 中执行
+`sudo DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -license` 并按提示确认后再重跑诊断。
+
+source-contract preflight 用于验证 OS27 相关脚本、配置、release gate 与 Apple PQC 源码契约没有漂移；它不需要 iPadOS 27 真机，但仍会运行三平台 Apple PQC SDK 符号探测，因此本机当前选中的 Xcode/SDK 必须已经具备这些 CryptoKit PQC 符号：
+
+```bash
+Scripts/run_os27_beta_compatibility.sh --verify-source-contracts
+```
+
+该模式会输出 `coverage=source_contracts_only` 与 `compatibility=not_validated`；它不是 iPadOS 27 runtime 兼容证明。
+机器可读报告里的 `full_validation` 只有在完整 lane 通过后才会为 `true`；`full_validation_attempted=true` 但
+`full_validation_passed=false` 表示曾尝试完整 lane，但仍处于失败或 partial 状态。
+OS27 兼容报告当前 schema 为 `schema_version=2`；交接或发布前不得引用旧 `/tmp` 报告文字，必须用
+`Scripts/check_os27_compatibility_report.py --require-full-validation <report.json>` 结构化复核当前 JSON。
+SwiftPM 与 xcodebuild clean-log gate 默认受 `SKYBRIDGE_OS27_BUILD_GATE_TIMEOUT_SECONDS=1800` 保护；
+beta toolchain 卡住会写失败报告并保持 `compatibility=not_validated`，不能被解释为通过或 partial 成功。
+
+连接 iPadOS 27 beta 真机后，安装 Xcode 27 beta 后必须显式启用物理设备验证，完整通过才会输出
+`[os27-beta-compat] passed`：
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
+  SKYBRIDGE_OS27_RUN_IOS_DEVICE_TESTS=1 \
+  Scripts/run_os27_beta_compatibility.sh
+```
+
+若只做无真机的本地诊断，必须显式设置 `SKYBRIDGE_OS27_ALLOW_PARTIAL_WITHOUT_DEVICE=1`；
+该模式只代表 SDK/build 静态路径通过，不代表 iPadOS 27 PQC runtime 通过，并会以非零状态返回 `compatibility=partial_not_validated`。
+
+当前 Xcode 26.5 可运行 iPadOS 27 定向测试，但会输出 `Error locating DeviceSupport directory`；
+clean-log gate 会把这类工具链错误判为失败，不能用它替代 Xcode 27 beta 验证。
+
+发布、打包、更新 manifest 仍固定使用 stable release toolchain：`Scripts/verify_xcode_toolchain.sh` 默认执行 `stable-release` policy，要求 Xcode 26.5 / build 17F42 / macOS SDK 26.5，并拒绝 beta 命名的 Xcode developer directory。Xcode 27 beta 只能用于 OS27 手动兼容验证。
 
 ## 握手信任钉扎契约（跨平台接入前必读）
 
@@ -82,7 +134,7 @@ Nebula 原生客户端现统一使用以下配置键：
 
 - **连接码模式**：发起端先调用 `/api/webrtc/register-code` 获取服务端签发的短期连接码（默认 8 位）和 `initiatorToken`；输入端调用 `/api/webrtc/lookup/:code` 获取 `responderToken`。
 - **二维码模式**：发起端先调用 `/api/webrtc/register-session` 获取服务端签发的 `sessionId` 与短期 `signalingToken`，再把它封装进二维码 payload。
-- **WebSocket 鉴权**：`/ws?shard=<sessionId>` 只转发已注册会话；每个 WebRTC envelope 都携带短期 token，服务端验证后才允许 `join/offer/answer/ice/leave`。
+- **WebSocket 鉴权**：新客户端连接 `/ws?shard=<sessionId>` 时通过 `X-SkyBridge-Session-Id` 与 `X-SkyBridge-Session` 握手 header 绑定短期 session token；`shard` 仅作为路由/粘性提示。服务端仍保留 legacy query token 兼容旧客户端，但 header 与 query token 同时出现会 fail closed。
 
 ### 服务器端口（EC2 安全组建议）
 
@@ -228,7 +280,7 @@ Source archive checksums（immutability 辅助证据）：
 
 说明：
 - 本仓库仍在持续演进；如需形成新的投稿/归档快照，请在最终提交前重新刷新 `artifact` pin 与归档校验和。
-- 当前工作分支已经升级到 `Swift 6.3 / Xcode 26.4`，并会继续吸收实现级优化；这些变更默认视为 **post-artifact engineering evolution**，不会自动改写主论文当前冻结的定量结论。
+- 当前工作分支已经升级到 `Swift 6.3 / Xcode 26.5` 稳定工具链，并会继续吸收实现级优化；这些变更默认视为 **post-artifact engineering evolution**，不会自动改写主论文当前冻结的定量结论。
 - 只有在重新生成 `Artifacts/*.csv`、刷新 `Docs/tables/` / `Docs/supp_tables/`、并重编主论文与 Supplementary PDF 之后，才应更新论文中的数字、artifact pin 和归档校验和。
 
 ### 当前分支与论文快照的 PQC 边界
@@ -361,8 +413,8 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 详细说明见：
 
 - [`Docs/ops/macos-release-packaging-runbook.md`](Docs/ops/macos-release-packaging-runbook.md)
-- [`Docs/ops/notary-credential-bootstrap.md`](</Users/bill/Desktop/SkyBridge Compass Pro release/Docs/ops/notary-credential-bootstrap.md>)
-- [`Scripts/ensure_notarytool_credentials.sh`](</Users/bill/Desktop/SkyBridge Compass Pro release/Scripts/ensure_notarytool_credentials.sh>)
+- [`Docs/ops/notary-credential-bootstrap.md`](Docs/ops/notary-credential-bootstrap.md)
+- [`Scripts/ensure_notarytool_credentials.sh`](Scripts/ensure_notarytool_credentials.sh)
 
 `bundle exec fastlane release` 现在会在正式发布前先自动执行 notary 凭据自检：
 
@@ -395,7 +447,7 @@ SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
 
 - 发布 DMG 只接受明确 Release provenance 的 `SkyBridgeCompassApp` executable 产物（默认 `swiftpm_release`；在 Xcode Package destination 无歧义时也接受 `xcode_release`），最终 `.app` 由 `package_app.sh` 组装；禁止把 `SkyBridgeCompassMac.app` native app bundle 当作发布 runtime。
 - `package_app.sh` 在 `release_dmg` 上下文下会校验构建来源，禁止隐式 fallback。
-- `build_dmg.sh --use-existing-app` 也会校验现有 `.app` 的构建来源，非 Release provenance 会直接失败。
+- `build_dmg.sh --use-existing-app` 也会校验现有 `.app` 的构建来源与稳定 Xcode/SDK metadata，非 Release provenance 或 beta SDK 产物会直接失败。
 - 正式发布必须使用 `Developer ID Application` 证书签名；`ad-hoc` 仅适合本地调试，不适合稳定复用 macOS TCC 授权。
 - `Developer ID + notarized DMG` 发布链下，Apple 登录固定走 `web_session`（`ASWebAuthenticationSession` + Services ID）；原生 `Sign in with Apple` 仅适用于 Apple 官方支持的分发通道。
 - 最终发布要求 `Widget Extension` 与 `App Groups` 全部随签名产物交付。

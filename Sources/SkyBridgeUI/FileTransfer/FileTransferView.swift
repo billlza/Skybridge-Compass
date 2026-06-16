@@ -1210,41 +1210,9 @@ extension TransferStatus {
     }
 }
 
-private struct TahoeLiquidGlassCardModifier: ViewModifier {
-    var cornerRadius: CGFloat = 24
-    func body(content: Content) -> some View {
-        Group {
-            if #available(macOS 26.0, *) {
-                let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                content
-                    .padding(20)
-                    .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
-                    .clipShape(shape)
-                    .overlay(
-                        shape.strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-            } else {
-                content
-                    .padding(20)
-                    .background(
-                        .ultraThinMaterial,
-                        in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
-                    )
-                    .clipShape(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    )
-            }
-        }
-    }
-}
-
 private extension View {
     func tahoeLiquidGlassCard(cornerRadius: CGFloat = 24) -> some View {
-        modifier(TahoeLiquidGlassCardModifier(cornerRadius: cornerRadius))
+        skyBridgeLiquidGlassCard(cornerRadius: cornerRadius)
     }
 }
 

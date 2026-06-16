@@ -12,6 +12,7 @@ public enum ConnectionDisplayState: String, Sendable, Equatable {
     case connecting
     case reconnecting
     case connectedClassic
+    case connectedPQC
     case connectedApplePQC
     case connectedDegradedSignaling
 }
@@ -357,10 +358,11 @@ public enum ConnectionPresentationContract {
             return nil
         }
 
-        let detail = ConnectionCryptoPresentation.detailText(
+        let detail = detailText(
             kind: nil,
             suite: snapshot.negotiatedSuite,
-            guardStatus: input.labels.crossNetworkGuardStatus
+            guardStatus: input.labels.crossNetworkGuardStatus,
+            input: input
         ) ?? normalized(snapshot.deviceName) ?? input.labels.crossNetworkGuardStatus
         let degraded = input.signalingHealth == .degradedFatal
         let effectiveDetail = degraded ? [detail, "信令降级"].joined(separator: " · ") : detail
@@ -420,10 +422,11 @@ public enum ConnectionPresentationContract {
             ),
             statusText: connectedStatusText(kind: kind, suite: suite, isRekeying: isRekeying, input: input),
             detailText: rekeyDetailText(kind: kind, suite: suite, guardStatus: guardStatus, isRekeying: isRekeying)
-                ?? ConnectionCryptoPresentation.detailText(
+                ?? detailText(
                     kind: kind,
                     suite: suite,
-                    guardStatus: guardStatus
+                    guardStatus: guardStatus,
+                    input: input
                 )
                 ?? normalized(displayName)
         )
@@ -439,28 +442,14 @@ public enum ConnectionPresentationContract {
         if isRekeying {
             return base
         }
-        let explicit = ConnectionCryptoPresentation.connectedStatusText(
+        guard let mode = presentationModeLabel(
             kind: kind,
             suite: suite,
-            baseConnectedText: base
-        )
-        if explicit != base {
-            return explicit
-        }
-        guard normalized(kind) != nil || normalized(suite) != nil else {
+            input: input
+        ) else {
             return base
         }
-        let suiteToken = suite?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        if (suiteToken.contains("ml-kem") || suiteToken.contains("mlkem") || suiteToken.contains("mldsa")),
-           let fallbackMode = normalized(input.defaultPQCModeLabel) {
-            return "\(fallbackMode)\(base)"
-        }
-        return ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
-            kind: kind,
-            suite: suite,
-            baseConnectedText: base,
-            compatibilityModeEnabled: input.compatibilityModeEnabled
-        )
+        return "\(mode)\(base)"
     }
 
     private static func rekeyDetailText(
@@ -485,6 +474,30 @@ public enum ConnectionPresentationContract {
         return components.isEmpty ? nil : components.joined(separator: " · ")
     }
 
+    private static func detailText(
+        kind: String?,
+        suite: String?,
+        guardStatus: String?,
+        input: ConnectionPresentationInput
+    ) -> String? {
+        let mode = presentationModeLabel(kind: kind, suite: suite, input: input)
+        let trimmedSuite = normalized(suite)
+        let trimmedGuard = normalized(guardStatus)
+
+        var components: [String] = []
+        if let mode {
+            components.append(mode)
+        }
+        if let trimmedSuite, !shouldSuppressSuite(mode: mode, suite: trimmedSuite) {
+            components.append(trimmedSuite)
+        }
+        if let trimmedGuard {
+            components.append(trimmedGuard)
+        }
+
+        return components.isEmpty ? nil : components.joined(separator: " · ")
+    }
+
     private static func connectedDisplayState(
         kind: String?,
         suite: String?,
@@ -495,18 +508,50 @@ public enum ConnectionPresentationContract {
             return .connectedDegradedSignaling
         }
 
-        let lowerKind = kind?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let lowerSuite = suite?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let fallbackMode = input.defaultPQCModeLabel?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let looksLikeApplePQC =
-            lowerKind.contains("apple pqc") ||
-            lowerSuite.contains("ml-kem") ||
-            lowerSuite.contains("mlkem") ||
-            lowerSuite.contains("ml-dsa") ||
-            lowerSuite.contains("mldsa") ||
-            fallbackMode == "apple pqc"
+        guard let mode = presentationModeLabel(kind: kind, suite: suite, input: input)?.lowercased() else {
+            return .connectedClassic
+        }
+        if mode == "apple pqc" {
+            return .connectedApplePQC
+        }
+        if mode == "pqc" || mode == "x-wing" || mode == "liboqs" {
+            return .connectedPQC
+        }
+        return .connectedClassic
+    }
 
-        return looksLikeApplePQC ? .connectedApplePQC : .connectedClassic
+    private static func presentationModeLabel(
+        kind: String?,
+        suite: String?,
+        input: ConnectionPresentationInput
+    ) -> String? {
+        if normalized(kind) == nil,
+           isPQCSuite(suite) {
+            return "PQC"
+        }
+        return ConnectionCryptoPresentation.modeLabel(kind: kind, suite: suite)
+    }
+
+    private static func isPQCSuite(_ suite: String?) -> Bool {
+        let suiteToken = suite?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return suiteToken.contains("ml-kem")
+            || suiteToken.contains("mlkem")
+            || suiteToken.contains("ml-dsa")
+            || suiteToken.contains("mldsa")
+    }
+
+    private static func shouldSuppressSuite(mode: String?, suite: String) -> Bool {
+        guard let mode else { return false }
+
+        let modeToken = normalizedToken(mode)
+        let suiteToken = normalizedToken(suite)
+        if modeToken == suiteToken {
+            return true
+        }
+        if modeToken == "xwing" && suiteToken.contains("xwing") {
+            return true
+        }
+        return false
     }
 
     private static func normalized(_ value: String?) -> String? {
@@ -515,5 +560,15 @@ public enum ConnectionPresentationContract {
             return nil
         }
         return trimmed
+    }
+
+    private static func normalizedToken(_ value: String?) -> String {
+        guard let raw = normalized(value)?.lowercased() else { return "" }
+        var token = String()
+        token.reserveCapacity(raw.count)
+        for scalar in raw.unicodeScalars where CharacterSet.alphanumerics.contains(scalar) {
+            token.unicodeScalars.append(scalar)
+        }
+        return token
     }
 }

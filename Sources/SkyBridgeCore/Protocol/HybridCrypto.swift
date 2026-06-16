@@ -60,6 +60,17 @@ public struct HybridSignatureResult: Sendable {
 
 // MARK: - Hybrid Crypto Service
 
+/// Controls how the legacy hybrid-crypto compatibility API handles missing PQC material.
+///
+/// The default keeps the old compatibility contract for pre-strict sessions.
+/// New strictPQC call sites must opt into `requirePQCComponent` so a missing or
+/// failed PQC leg cannot silently collapse into a classic-only result.
+@available(macOS 14.0, *)
+public enum HybridCryptoDegradationPolicy: Sendable, Equatable {
+    case allowClassicOnlyCompatibility
+    case requirePQCComponent
+}
+
 /// 混合加密服务 - 提供经典+PQC 混合加密功能
 @available(macOS 14.0, *)
 public actor HybridCryptoService {
@@ -68,6 +79,7 @@ public actor HybridCryptoService {
     
     private let logger = Logger(subsystem: "com.skybridge.crypto", category: "HybridCrypto")
     private let pqcAdapter: PQCProtocolAdapter
+    private let degradationPolicy: HybridCryptoDegradationPolicy
     
  /// 是否启用混合模式
     public private(set) var isHybridEnabled: Bool
@@ -77,8 +89,12 @@ public actor HybridCryptoService {
     
  // MARK: - Initialization
     
-    public init(pqcAdapter: PQCProtocolAdapter? = nil) {
+    public init(
+        pqcAdapter: PQCProtocolAdapter? = nil,
+        degradationPolicy: HybridCryptoDegradationPolicy = .allowClassicOnlyCompatibility
+    ) {
         self.pqcAdapter = pqcAdapter ?? PQCProtocolAdapter()
+        self.degradationPolicy = degradationPolicy
         self.isHybridEnabled = true
     }
     
@@ -108,15 +124,15 @@ public actor HybridCryptoService {
                 pqcSharedSecret = result.sharedSecret
                 pqcEncapsulated = result.encapsulated
             } else {
- // PQC 不可用，降级
-                logger.warning("⚠️ PQC 不可用，降级到纯经典模式")
-                onDegradationWarning?("PQC 不可用，使用纯经典加密")
+                try handleMissingPQCComponent(reason: "PQC 不可用，使用纯经典加密")
                 pqcSharedSecret = Data()
                 pqcEncapsulated = Data()
             }
         } catch {
-            logger.warning("⚠️ PQC 密钥交换失败，降级到纯经典模式: \(error.localizedDescription)")
-            onDegradationWarning?("PQC 密钥交换失败: \(error.localizedDescription)")
+            if case HybridCryptoError.degradationNotAllowed = error {
+                throw error
+            }
+            try handleMissingPQCComponent(reason: "PQC 密钥交换失败: \(error.localizedDescription)")
             pqcSharedSecret = Data()
             pqcEncapsulated = Data()
         }
@@ -170,16 +186,18 @@ public actor HybridCryptoService {
                         variant: .mlkem768
                     )
                 } else {
-                    logger.warning("⚠️ PQC 不可用，降级到纯经典模式")
-                    onDegradationWarning?("PQC 不可用，使用纯经典加密")
+                    try handleMissingPQCComponent(reason: "PQC 不可用，使用纯经典加密")
                     pqcSharedSecret = Data()
                 }
             } catch {
-                logger.warning("⚠️ PQC 解封装失败，降级: \(error.localizedDescription)")
-                onDegradationWarning?("PQC 解封装失败: \(error.localizedDescription)")
+                if case HybridCryptoError.degradationNotAllowed = error {
+                    throw error
+                }
+                try handleMissingPQCComponent(reason: "PQC 解封装失败: \(error.localizedDescription)")
                 pqcSharedSecret = Data()
             }
         } else {
+            try handleMissingPQCComponent(reason: "PQC encapsulated key missing")
             pqcSharedSecret = Data()
         }
         
@@ -211,13 +229,14 @@ public actor HybridCryptoService {
                 try await pqcAdapter.setSuite(.pqc)
                 pqcSignature = try await pqcAdapter.sign(data: data, peerId: peerId, variant: .mldsa65)
             } else {
-                logger.warning("⚠️ PQC 签名不可用，仅使用经典签名")
-                onDegradationWarning?("PQC 签名不可用")
+                try handleMissingPQCComponent(reason: "PQC 签名不可用")
                 pqcSignature = Data()
             }
         } catch {
-            logger.warning("⚠️ PQC 签名失败: \(error.localizedDescription)")
-            onDegradationWarning?("PQC 签名失败: \(error.localizedDescription)")
+            if case HybridCryptoError.degradationNotAllowed = error {
+                throw error
+            }
+            try handleMissingPQCComponent(reason: "PQC 签名失败: \(error.localizedDescription)")
             pqcSignature = Data()
         }
         
@@ -273,7 +292,13 @@ public actor HybridCryptoService {
                     logger.warning("⚠️ PQC 签名验证失败")
                     return false
                 }
+            } else if degradationPolicy == .requirePQCComponent {
+                logger.warning("⚠️ strict hybrid signature verification rejected missing PQC verifier")
+                return false
             }
+        } else if degradationPolicy == .requirePQCComponent {
+            logger.warning("⚠️ strict hybrid signature verification rejected classic-only signature")
+            return false
         }
         
         logger.info("✅ 混合签名验证通过")
@@ -281,6 +306,17 @@ public actor HybridCryptoService {
     }
     
  // MARK: - Private Helpers
+
+    private func handleMissingPQCComponent(reason: String) throws {
+        if degradationPolicy == .requirePQCComponent {
+            logger.error("PQC component required; refusing classic-only degradation: \(reason)")
+            onDegradationWarning?(reason)
+            throw HybridCryptoError.degradationNotAllowed
+        }
+
+        logger.warning("⚠️ \(reason)")
+        onDegradationWarning?(reason)
+    }
     
  /// 执行经典 ECDH 密钥交换
     private func performClassicKeyExchange(remotePublicKey: Data) throws -> (sharedSecret: Data, localPublicKey: Data) {

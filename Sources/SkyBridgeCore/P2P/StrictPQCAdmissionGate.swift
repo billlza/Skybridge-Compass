@@ -19,14 +19,10 @@ enum StrictPQCAdmissionGate {
     static func inboundRejection(
         policy: HandshakePolicy,
         peerSupportedSuites: [CryptoSuite],
-        localPQCSuitesAvailable: Bool,
-        allowClassicAuthorityBootstrap: Bool = false
+        localPQCSuitesAvailable: Bool
     ) -> StrictPQCAdmissionRejection? {
         guard policy.requirePQC else { return nil }
         guard peerSupportedSuites.contains(where: { $0.isPQCGroup }) else {
-            if allowClassicAuthorityBootstrap {
-                return nil
-            }
             return .peerOfferedClassicOnly
         }
         guard localPQCSuitesAvailable else {

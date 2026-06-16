@@ -28,7 +28,9 @@ enum WebRTCInboundFileTransferIntegrityFailure: Equatable {
     case merkleRootMismatch
     case unknownMerkleSignatureAlgorithm
     case merkleSignatureMismatch
+    case fileSHA256Unavailable
     case fileSHA256Mismatch
+    case fileHandleCloseFailed
 
     var message: String {
         switch self {
@@ -38,8 +40,12 @@ enum WebRTCInboundFileTransferIntegrityFailure: Equatable {
             return "unknown merkle sig alg"
         case .merkleSignatureMismatch:
             return "merkle signature mismatch"
+        case .fileSHA256Unavailable:
+            return "file sha256 unavailable"
         case .fileSHA256Mismatch:
             return "file sha256 mismatch"
+        case .fileHandleCloseFailed:
+            return "file handle close failed"
         }
     }
 }
@@ -53,16 +59,15 @@ enum WebRTCInboundFileTransferSupport {
         FileTransferPathPolicy.sanitizedFileName(name)
     }
 
-    static func uniqueDestinationURL(baseDirectory: URL, fileName: String) -> URL {
-        FileTransferPathPolicy.uniqueDestinationURL(
+    static func uniqueDestinationURL(baseDirectory: URL, fileName: String) throws -> URL {
+        try FileTransferPathPolicy.uniqueDestinationURL(
             baseDirectory: baseDirectory,
             fileName: fileName
         )
     }
 
-    static func sha256File(at url: URL) -> Data? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
+    static func sha256File(at url: URL) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
 
         var hasher = SHA256()
         while true {
@@ -70,7 +75,9 @@ enum WebRTCInboundFileTransferSupport {
             if chunk.isEmpty { break }
             hasher.update(data: chunk)
         }
-        return Data(hasher.finalize())
+        let digest = Data(hasher.finalize())
+        try handle.close()
+        return digest
     }
 
     static func expectedChunkCount(fileSize: Int64, chunkSize: Int) -> Int? {
@@ -98,6 +105,11 @@ enum WebRTCInboundFileTransferSupport {
     ) -> String? {
         guard !fileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "Invalid metadata (empty fileName)"
+        }
+        do {
+            _ = try FileTransferPathPolicy.validatedFileName(fileName)
+        } catch {
+            return "Invalid metadata (unsafe fileName)"
         }
         guard fileSize >= 0 else {
             return "Invalid metadata (negative fileSize)"
@@ -164,10 +176,15 @@ enum WebRTCInboundFileTransferSupport {
             }
         }
 
-        if let expectedFileSha256 = state.expectedFileSha256,
-           let actualFileSha256 = sha256File(at: state.tempURL),
-           actualFileSha256 != expectedFileSha256 {
-            return .fileSHA256Mismatch
+        if let expectedFileSha256 = state.expectedFileSha256 {
+            do {
+                let actualFileSha256 = try sha256File(at: state.tempURL)
+                if actualFileSha256 != expectedFileSha256 {
+                    return .fileSHA256Mismatch
+                }
+            } catch {
+                return .fileSHA256Unavailable
+            }
         }
 
         return nil

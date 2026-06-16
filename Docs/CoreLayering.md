@@ -67,7 +67,9 @@
 
 下一步建议：
 
-1. **（优先）建立两端协议文件防漂移机制**：短期为两端同名协议文件增加 CI 同步校验（哈希比对 + 显式豁免清单）；长期让 iOS 工程直接消费 `SkyBridgeProtocolCore`（或将其拆为 LocalPackage 引用），消除手工复制。
+1. **（优先）建立两端协议文件防漂移机制**：
+   - **已落地（2026-06-16）**：`Scripts/check_protocol_parity.py` + `.github/workflows/protocol-parity.yml` 提供 CI 防漂移闸门。它自动发现 iOS `Sources/Core` 与 macOS `Sources/` 的同名协议文件（当前 32 对，带显式豁免清单），对每侧做**归一化哈希**（剥离注释/import/空白）并与提交进仓的基线 `Scripts/protocol_parity_baseline.json` 比对——任一侧在未重新确认基线的情况下变更即失败，强制人工复核线格式兼容性后再 `--update-baseline`；同时对**必须跨端一致的线锚点**（如 DataChannel label `skybridge`/`skybridge-screen`）做等值断言。注意：由于两端文件已实质分叉（35/36 字节级不同），该闸门是**“变更确认 + 锚点等值”**而非“字节相等”。
+   - **长期**：让 iOS 工程直接消费 `SkyBridgeProtocolCore`（或将其拆为 LocalPackage 引用），消除手工复制，用类型系统替代人工纪律。
 2. 评估 `HandshakeIdentityProvider` 是否还需要再分成“协议签名身份”和“可选 SE PoP 身份”两个更细的 provider，以便 Android / Ubuntu 独立实现不同硬件能力。
 3. 评估 `DeviceIdentityKeyManager` 周边是否还能再抽出一个更薄的本地身份接口，而不把 Apple Keychain / Secure Enclave 细节泄漏到协议层。
 4. 把 `SignalServerClient`、`TURNCredentialService` 里的平台相关标识解析继续从控制面剥离。

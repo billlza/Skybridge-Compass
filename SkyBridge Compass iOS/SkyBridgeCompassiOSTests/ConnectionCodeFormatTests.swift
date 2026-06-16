@@ -67,8 +67,16 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "The expiry task should emit a stable reason when it removes a displayed stale connection code."
         )
         XCTAssertFalse(
-            source.contains("reason=connection_code_lease_not_reusable code=\\(existing)\")\n                await disconnect(clearSnapshot: false)"),
-            "Regenerating a stale displayed code should not tear down a session that may already be completing its WebRTC handshake."
+            source.contains("code=\\(existing"),
+            "A connection code is an admission secret and must not be logged in plaintext when regenerating."
+        )
+        XCTAssertFalse(
+            source.contains("code=\\(code"),
+            "A connection code is an admission secret and must not be logged in plaintext when expiring."
+        )
+        XCTAssertTrue(
+            source.contains("code=<redacted>"),
+            "Connection-code lifecycle logs may expose stable reasons, but never the raw user-entered or server-issued code."
         )
         XCTAssertFalse(
             source.contains("activeSessionID == sessionID,\n               self.currentRole == .offerer"),
@@ -141,11 +149,22 @@ final class ConnectionCodeFormatTests: XCTestCase {
         )
     }
 
-    func testIOSDeviceSupportGateBlocksExplicit2018And2019A12FamilyDevices() {
-        XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone11,2"))
-        XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone11,8"))
-        XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad8,1"))
-        XCTAssertFalse(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad11,3"))
+    func testIOSDeviceSupportGateKeepsExplicit2018And2019A12FamilyDevicesAppStartSupported() {
+        let legacyA12Devices = [
+            "iPhone11,2": "iPhone XS",
+            "iPhone11,8": "iPhone XR",
+            "iPad8,1": "iPad Pro 11-inch (2018)",
+            "iPad11,3": "iPad Air (3rd generation)"
+        ]
+
+        for (modelIdentifier, displayName) in legacyA12Devices {
+            XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: modelIdentifier))
+            XCTAssertTrue(IOSDeviceSupportGate.isLegacyLimited(modelIdentifier: modelIdentifier))
+            XCTAssertEqual(
+                IOSDeviceSupportGate.legacyLimitedDevice(forModelIdentifier: modelIdentifier),
+                LegacyLimitedIOSDevice(modelIdentifier: modelIdentifier, displayName: displayName)
+            )
+        }
     }
 
     func testIOSDeviceSupportGateAllows2020AndLaterDevices() {
@@ -153,6 +172,10 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPhone13,2"))
         XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad11,6"))
         XCTAssertTrue(IOSDeviceSupportGate.isSupported(modelIdentifier: "iPad13,1"))
+        XCTAssertFalse(IOSDeviceSupportGate.isLegacyLimited(modelIdentifier: "iPhone12,8"))
+        XCTAssertFalse(IOSDeviceSupportGate.isLegacyLimited(modelIdentifier: "iPhone13,2"))
+        XCTAssertFalse(IOSDeviceSupportGate.isLegacyLimited(modelIdentifier: "iPad11,6"))
+        XCTAssertFalse(IOSDeviceSupportGate.isLegacyLimited(modelIdentifier: "iPad13,1"))
     }
 
     func testSupabaseServiceNormalizesRelativeAvatarURLs() {
@@ -196,12 +219,201 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertEqual(profile.nebulaId, "NEBULA-123")
     }
 
+    func testAuthSessionStrictLoaderDistinguishesMissingCorruptAndValidData() throws {
+        let keychain = KeychainManager.shared
+        keychain.deleteAuthSession()
+        defer { keychain.deleteAuthSession() }
+
+        XCTAssertNil(try keychain.loadAuthSessionStrict())
+
+        try keychain.savePublicKey(Data("not-json".utf8), identifier: "auth.session")
+        XCTAssertThrowsError(try keychain.loadAuthSessionStrict()) { error in
+            guard case KeychainError.decodingError = error else {
+                return XCTFail("Expected corrupt auth.session data to throw KeychainError.decodingError, got \(error).")
+            }
+        }
+
+        let expected = AuthSession(
+            accessToken: "access-token",
+            refreshToken: "refresh-token",
+            userIdentifier: "user-123",
+            displayName: "Primary User",
+            email: "primary@example.com",
+            avatarURL: "https://example.com/avatar.png",
+            nebulaId: "NEBULA-123",
+            issuedAt: Date(timeIntervalSince1970: 1_234_567)
+        )
+        try keychain.storeAuthSession(expected)
+
+        XCTAssertEqual(try keychain.loadAuthSessionStrict(), expected)
+    }
+
+    func testKeychainAuthSessionStorageUsesUpdateFirstAndStrictDecoding() throws {
+        let source = try Self.keychainManagerSource()
+
+        XCTAssertTrue(
+            source.contains("SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)"),
+            "Generic password writes should update existing Keychain items before adding missing items."
+        )
+        XCTAssertFalse(
+            source.contains("SecItemDelete(query as CFDictionary)\n        let status = SecItemAdd(query as CFDictionary, nil)"),
+            "Generic password writes must not delete an existing auth item before adding its replacement."
+        )
+        XCTAssertTrue(
+            source.contains("nonisolated func loadAuthSessionStrict() throws -> AuthSession?"),
+            "Critical auth paths need a throwing loader so corrupt storage is not collapsed into a signed-out state."
+        )
+        XCTAssertTrue(
+            source.contains("throw KeychainError.decodingError"),
+            "Corrupt auth.session JSON must surface as a decoding error instead of nil."
+        )
+    }
+
+    func testKeychainConfigFallbackDoesNotMaskStorageErrors() throws {
+        let source = try Self.keychainManagerSource()
+
+        XCTAssertTrue(
+            source.contains("public nonisolated func exportKeyStrict(service: String, account: String) throws -> Data?"),
+            "Service/account Keychain reads need a strict API so callers can distinguish missing items from OSStatus failures."
+        )
+        XCTAssertTrue(
+            source.contains("throw KeychainError.unexpectedError(status)"),
+            "Unexpected Keychain OSStatus values must propagate instead of collapsing to nil."
+        )
+        XCTAssertTrue(
+            source.contains("} catch KeychainError.itemNotFound {\n            // Fallback: macOS-style keys (service-based)"),
+            "Legacy service-key fallback should only run when the current iOS keys are genuinely absent."
+        )
+        XCTAssertFalse(
+            source.contains("try? storeSupabaseConfig(url: url, anonKey: anon)"),
+            "Supabase legacy migration failures must not be silently ignored."
+        )
+        XCTAssertFalse(
+            source.contains("try? storeNebulaConfig(baseURL: baseURL, clientId: clientId, clientSecret: clientSecret)"),
+            "Nebula legacy migration failures must not be silently ignored."
+        )
+    }
+
+    func testSignalingAuthPathFailsClosedOnAuthSessionStorageErrors() throws {
+        let source = try Self.crossNetworkSignalServerClientSource()
+
+        XCTAssertTrue(
+            source.contains("case authenticationStorageUnavailable(String)"),
+            "Signaling admission should expose Keychain/session storage failures distinctly from missing authentication."
+        )
+        XCTAssertTrue(
+            source.contains("try KeychainManager.shared.loadAuthSessionStrict()"),
+            "Signaling auth should use the throwing auth-session loader instead of the legacy optional wrapper."
+        )
+        XCTAssertFalse(
+            source.contains("try? KeychainManager.shared.storeAuthSession(merged)"),
+            "Refreshed signaling tokens must not continue after Keychain persistence fails."
+        )
+    }
+
+    func testAuthenticationManagerPersistsSessionBeforePublishingAuthenticatedState() throws {
+        let source = try Self.authenticationManagerSource()
+
+        XCTAssertTrue(
+            source.contains("try KeychainManager.shared.loadAuthSessionStrict()"),
+            "Launch-time auth restoration should distinguish absent sessions from corrupt Keychain data."
+        )
+        XCTAssertTrue(
+            source.contains("try persistSession(session)\n        self.session = session"),
+            "Login success should persist the session before publishing authenticated in-memory state."
+        )
+        XCTAssertFalse(
+            source.contains("try? KeychainManager.shared.storeAuthSession"),
+            "AuthenticationManager must not silently discard auth-session persistence failures."
+        )
+    }
+
+    func testIOSPersistentIdentityKeychainFailuresDoNotRegenerateIdentityMaterial() throws {
+        let platformSource = try Self.platformAdapterSource()
+        let kemStoreSource = try Self.p2pKEMIdentityKeyStoreSource()
+        let pqcManagerSource = try Self.pqcCryptoManagerSource()
+        let protocolDeviceIdentitySource = try Self.protocolDeviceIdentitySource()
+
+        XCTAssertFalse(
+            platformSource.contains("try? loadIdentityKeyFromKeychain"),
+            "Platform identity loading must not collapse Keychain failures into missing identity material."
+        )
+        XCTAssertTrue(
+            platformSource.contains("throw SkyBridgeError.keychainError(status: status)") &&
+            platformSource.contains("Stored identity key failed self-test"),
+            "Platform identity storage must propagate Keychain failures and fail closed on corrupt stored signing keys."
+        )
+        XCTAssertFalse(
+            kemStoreSource.contains("try? keychain.loadPrivateKey") ||
+            kemStoreSource.contains("try? keychain.loadPublicKey"),
+            "P2P KEM identity storage must only generate when both public and private keys are genuinely absent."
+        )
+        XCTAssertTrue(
+            kemStoreSource.contains("P2P KEM identity keypair is incomplete"),
+            "P2P KEM identity storage must fail closed on half-present keypairs."
+        )
+        XCTAssertTrue(
+            pqcManagerSource.contains("private func loadKeysFromKeychain() throws") &&
+            pqcManagerSource.contains("PQC primary KEM/signing key set is incomplete"),
+            "PQC primary key loading must expose storage errors and partial keysets before generating."
+        )
+        XCTAssertFalse(
+            pqcManagerSource.contains("try? keychainManager.loadPrivateKey") ||
+            pqcManagerSource.contains("try? keychainManager.loadPublicKey"),
+            "PQC key loading must not use try? to convert Keychain errors into missing keys."
+        )
+        XCTAssertTrue(
+            protocolDeviceIdentitySource.contains("try KeychainManager.shared.getOrGenerateDeviceIdStrict()"),
+            "Protocol device identity must use the strict Keychain device ID path so storage failures do not rotate device IDs."
+        )
+    }
+
     private static func crossNetworkWebRTCManagerSource() throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
+    }
+
+    private static func platformAdapterSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Core/Platform/PlatformAdapter.swift"
+        )
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
+    }
+
+    private static func p2pKEMIdentityKeyStoreSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Core/Trust/P2PKEMIdentityKeyStore.swift"
+        )
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
+    }
+
+    private static func pqcCryptoManagerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/PQCCryptoManager.swift"
+        )
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
+    }
+
+    private static func protocolDeviceIdentitySource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Core/ProtocolDeviceIdentity.swift"
         )
         return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
@@ -232,6 +444,26 @@ final class ConnectionCodeFormatTests: XCTestCase {
             .deletingLastPathComponent()
         let sourceURL = root.appendingPathComponent(
             "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift"
+        )
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
+    }
+
+    private static func keychainManagerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Core/Security/KeychainManager.swift"
+        )
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
+    }
+
+    private static func authenticationManagerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/AuthenticationManager.swift"
         )
         return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }

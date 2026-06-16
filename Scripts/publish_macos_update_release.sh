@@ -30,6 +30,7 @@ USAGE
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+source "${PROJECT_ROOT}/Scripts/package_build_policy.sh"
 
 REPOSITORY="${GITHUB_REPOSITORY:-billlza/Skybridge-Compass}"
 TAG_NAME="stable"
@@ -220,11 +221,43 @@ PY
   )"
   [[ "$manifest_sha" == "$expected_dmg_sha" ]] \
     || fail "manifest sha256 (${manifest_sha:-missing}) does not match uploaded DMG sha256"
+
+  if ! python3 - "$downloaded_manifest" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+attestation = manifest.get("apple_pqc_sdk_build")
+if not isinstance(attestation, dict):
+    raise SystemExit(1)
+expected = {
+    "compiled_with_has_apple_pqc_sdk": True,
+    "compile_marker": "skybridge.apple-pqc-sdk.compile-fact.v1.has-apple-pqc-sdk",
+    "probe_mode": "symbol_probe",
+    "sdk_name": "macosx",
+    "sdk_version": "26.5",
+    "swift_target": "arm64-apple-macosx26.0",
+    "secure_enclave_symbols_included": True,
+    "symbol_set": "cryptokit-pqc-v1",
+}
+for key, value in expected.items():
+    if attestation.get(key) != value:
+        print(f"unexpected apple_pqc_sdk_build.{key}: {attestation.get(key)!r}", file=sys.stderr)
+        raise SystemExit(1)
+if not isinstance(attestation.get("signature"), dict):
+    raise SystemExit(1)
+PY
+  then
+    fail "uploaded manifest is missing release-grade signed Apple PQC SDK build provenance"
+  fi
 }
 
 [[ -d "$APP_PATH" ]] || fail "app bundle does not exist: $APP_PATH"
 APP_INFO_PLIST="$APP_PATH/Contents/Info.plist"
 [[ -f "$APP_INFO_PLIST" ]] || fail "app Info.plist does not exist: $APP_INFO_PLIST"
+skybridge_assert_bundle_has_apple_pqc_compile_marker "$APP_PATH" "update manifest source app bundle" \
+  || fail "app bundle is missing the Apple PQC SDK compile marker"
 if [[ -z "$DMG_PATH" ]]; then
   DMG_PATH="$(resolve_default_dmg_path "$APP_INFO_PLIST")"
 fi
@@ -267,6 +300,7 @@ EXPECTED_DMG_SHA="$(sha256_file "$DMG_PATH")"
 VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-update-publish.XXXXXX")"
 trap 'rm -rf "$VERIFY_DIR"' EXIT
 
+skybridge_assert_release_stable_toolchain "release_dmg" "${PROJECT_ROOT}/Scripts/verify_xcode_toolchain.sh" "macOS update publishing" || exit 1
 validate_notarized_dmg_before_publish "$DMG_PATH"
 
 GENERATOR_ARGS=(

@@ -101,6 +101,7 @@ public class DashboardViewModel: ObservableObject {
         // If we schedule multiple timers we will trigger discovery/refresh storms and can get killed for memory.
         if refreshTimer != nil { return }
         await refresh()
+        guard !SkyBridgeRuntimeEnvironment.shouldSkipInteractiveStartup else { return }
         startAutoRefresh()
     }
     
@@ -111,10 +112,14 @@ public class DashboardViewModel: ObservableObject {
     
     /// 刷新数据
     public func refresh() async {
+        guard !SkyBridgeRuntimeEnvironment.shouldSkipInteractiveStartup else {
+            synchronizeDashboardSnapshot()
+            return
+        }
+
         isRefreshing = true
-        
         defer { isRefreshing = false }
-        
+
         // 刷新设备发现
         let discoveryManager = DeviceDiscoveryManager.instance
         let startedNow = !discoveryManager.isDiscovering
@@ -123,19 +128,13 @@ public class DashboardViewModel: ObservableObject {
             // 仅在“本次确实启动了发现”时做一次短等待，避免空列表闪烁。
             try? await Task.sleep(for: .milliseconds(600))
         }
-        
-        // 更新设备列表
-        discoveredDevices = discoveryManager.discoveredDevices
-        
-        // 更新连接
-        activeConnections = P2PConnectionManager.instance.activeConnections
-        
-        // 更新指标
-        updateMetrics()
+
+        synchronizeDashboardSnapshot()
     }
     
     /// 触发设备发现刷新
     public func triggerDiscoveryRefresh() {
+        guard !SkyBridgeRuntimeEnvironment.shouldSkipInteractiveStartup else { return }
         Task {
             try? await DeviceDiscoveryManager.instance.startDiscovery()
         }
@@ -152,7 +151,13 @@ public class DashboardViewModel: ObservableObject {
     }
     
     // MARK: - Private Methods
-    
+
+    private func synchronizeDashboardSnapshot() {
+        discoveredDevices = DeviceDiscoveryManager.instance.discoveredDevices
+        activeConnections = P2PConnectionManager.instance.activeConnections
+        updateMetrics()
+    }
+
     private func setupBindings() {
         // 监听设备发现变化
         DeviceDiscoveryManager.instance.$discoveredDevices
@@ -320,16 +325,6 @@ public class DashboardViewModel: ObservableObject {
             ? RuntimeLocalization.string("离线")
             : RuntimeLocalization.string("在线")
 
-        let defaultPQCModeLabel: String?
-        switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
-        case .nativePQC?:
-            defaultPQCModeLabel = "Apple PQC"
-        case .liboqsPQC?:
-            defaultPQCModeLabel = "liboqs"
-        default:
-            defaultPQCModeLabel = nil
-        }
-
         topConnectionPresentation = ConnectionPresentationContract.evaluate(
             ConnectionPresentationInput(
                 labels: ConnectionPresentationLabels(
@@ -345,7 +340,7 @@ public class DashboardViewModel: ObservableObject {
                 latestConnectedDevice: localFallback.connected,
                 latestPendingPeer: localFallback.pending,
                 activeSessionSnapshot: crossNetworkManager.activeSessionSnapshot,
-                defaultPQCModeLabel: defaultPQCModeLabel
+                defaultPQCModeLabel: nil
             )
         )
 

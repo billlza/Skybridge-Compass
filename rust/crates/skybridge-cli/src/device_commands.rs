@@ -9,8 +9,10 @@ use skybridge_core::{
     EnrollmentStatus, ProtocolIdentityBinding, ProtocolSigningAlgorithm, SignalServerClient,
 };
 
+mod discover;
 mod status;
 
+pub(crate) use discover::device_discover;
 pub(crate) use status::device_status;
 
 pub(crate) async fn device_enroll(

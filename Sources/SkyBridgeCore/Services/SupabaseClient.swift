@@ -41,6 +41,14 @@ public final class SupabaseClient {
         self.session = URLSession(configuration: cfg)
     }
 
+    private static func redactedPathForLog(_ url: URL) -> String {
+        guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.path,
+              !path.isEmpty else {
+            return "<invalid-path>"
+        }
+        return path
+    }
+
  /// 执行 GET 请求
  /// - Parameters:
  /// - path: 路径（形如 "/rest/v1/user_devices"）
@@ -59,10 +67,10 @@ public final class SupabaseClient {
         if let jwtProvider, let jwt = await jwtProvider() {
             req.addValue("Bearer " + jwt, forHTTPHeaderField: "Authorization")
         }
-        logger.info("➡️ GET \(url.absoluteString)")
+        logger.info("➡️ GET path=\(Self.redactedPathForLog(url), privacy: .public) queryItems=\(query.count, privacy: .public)")
         let (data, resp) = try await perform(req, enableRetry: enableRetry)
         guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        logger.info("⬅️ GET \(url.absoluteString) status=\(http.statusCode) bytes=\(data.count)")
+        logger.info("⬅️ GET path=\(Self.redactedPathForLog(url), privacy: .public) status=\(http.statusCode) bytes=\(data.count)")
         return (data, http)
     }
 
@@ -76,9 +84,11 @@ public final class SupabaseClient {
         public var errorDescription: String? {
             switch self {
             case .badURL: return "请求URL无效"
-            case .httpStatus(let code, let body): return "HTTP状态异常: \(code) \(body ?? "")"
+            case .httpStatus(let code, let body): return "HTTP状态异常: \(code) bodyBytes=\(body?.utf8.count ?? 0)"
             case .decodeFailed(let reason): return "JSON解码失败: \(reason)"
-            case .network(let err): return "网络请求失败: \(err.localizedDescription)"
+            case .network(let err):
+                let ns = err as NSError
+                return "网络请求失败: \(ns.domain)#\(ns.code)"
             }
         }
     }
@@ -120,13 +130,13 @@ public final class SupabaseClient {
             throw SupabaseError.decodeFailed("请求体编码失败: \(error.localizedDescription)")
         }
         do {
-            logger.info("➡️ POST \(url.absoluteString) bytes=\(req.httpBody?.count ?? 0)")
+            logger.info("➡️ POST path=\(Self.redactedPathForLog(url), privacy: .public) bodyBytes=\(req.httpBody?.count ?? 0)")
             let (data, resp) = try await perform(req, enableRetry: enableRetry)
             guard let http = resp as? HTTPURLResponse else { throw SupabaseError.badURL }
             guard (200...299).contains(http.statusCode) else {
                 // SECURITY: do not log response body here (may contain PII / tokens). Keep it in the thrown error only.
                 let bodyStr = String(data: data, encoding: .utf8)
-                logger.error("❌ POST \(url.absoluteString, privacy: .private) status=\(http.statusCode) bodyBytes=\(data.count)")
+                logger.error("❌ POST path=\(Self.redactedPathForLog(url), privacy: .public) status=\(http.statusCode) bodyBytes=\(data.count)")
                 throw SupabaseError.httpStatus(code: http.statusCode, body: bodyStr)
             }
             do {
@@ -154,12 +164,12 @@ public final class SupabaseClient {
         }
         do { req.httpBody = try encoder.encode(body) } catch { throw SupabaseError.decodeFailed("请求体编码失败: \(error.localizedDescription)") }
         do {
-            logger.info("➡️ PUT \(url.absoluteString) bytes=\(req.httpBody?.count ?? 0)")
+            logger.info("➡️ PUT path=\(Self.redactedPathForLog(url), privacy: .public) bodyBytes=\(req.httpBody?.count ?? 0)")
             let (data, resp) = try await perform(req, enableRetry: enableRetry)
             guard let http = resp as? HTTPURLResponse else { throw SupabaseError.badURL }
             guard (200...299).contains(http.statusCode) else {
                 let bodyStr = String(data: data, encoding: .utf8)
-                logger.error("❌ PUT \(url.absoluteString, privacy: .private) status=\(http.statusCode) bodyBytes=\(data.count)")
+                logger.error("❌ PUT path=\(Self.redactedPathForLog(url), privacy: .public) status=\(http.statusCode) bodyBytes=\(data.count)")
                 throw SupabaseError.httpStatus(code: http.statusCode, body: bodyStr)
             }
             do { return try decoder.decode(Response.self, from: data) } catch { throw SupabaseError.decodeFailed(error.localizedDescription) }
@@ -177,12 +187,12 @@ public final class SupabaseClient {
         req.addValue(anonKey, forHTTPHeaderField: "apikey")
         if let jwtProvider, let jwt = await jwtProvider() { req.addValue("Bearer " + jwt, forHTTPHeaderField: "Authorization") }
         do {
-            logger.info("➡️ DELETE \(url.absoluteString)")
+            logger.info("➡️ DELETE path=\(Self.redactedPathForLog(url), privacy: .public) queryItems=\(query.count, privacy: .public)")
             let (data, resp) = try await perform(req, enableRetry: enableRetry)
             guard let http = resp as? HTTPURLResponse else { throw SupabaseError.badURL }
             guard (200...299).contains(http.statusCode) else {
                 let bodyStr = String(data: data, encoding: .utf8)
-                logger.error("❌ DELETE \(url.absoluteString, privacy: .private) status=\(http.statusCode) bodyBytes=\(data.count)")
+                logger.error("❌ DELETE path=\(Self.redactedPathForLog(url), privacy: .public) status=\(http.statusCode) bodyBytes=\(data.count)")
                 throw SupabaseError.httpStatus(code: http.statusCode, body: bodyStr)
             }
             do { return try decoder.decode(Response.self, from: data) } catch { throw SupabaseError.decodeFailed(error.localizedDescription) }
@@ -199,10 +209,10 @@ public final class SupabaseClient {
         req.addValue("application/json", forHTTPHeaderField: "Accept")
         req.addValue(anonKey, forHTTPHeaderField: "apikey")
         if let jwtProvider, let jwt = await jwtProvider() { req.addValue("Bearer " + jwt, forHTTPHeaderField: "Authorization") }
-        logger.info("➡️ DELETE \(url.absoluteString)")
+        logger.info("➡️ DELETE path=\(Self.redactedPathForLog(url), privacy: .public) queryItems=\(query.count, privacy: .public)")
         let (data, resp) = try await perform(req, enableRetry: enableRetry)
         guard let http = resp as? HTTPURLResponse else { throw SupabaseError.badURL }
-        logger.info("⬅️ DELETE \(url.absoluteString) status=\(http.statusCode) bytes=\(data.count)")
+        logger.info("⬅️ DELETE path=\(Self.redactedPathForLog(url), privacy: .public) status=\(http.statusCode) bytes=\(data.count)")
         return (data, http)
     }
 

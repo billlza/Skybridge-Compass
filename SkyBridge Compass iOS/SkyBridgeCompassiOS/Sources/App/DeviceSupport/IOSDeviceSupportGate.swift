@@ -8,10 +8,17 @@ struct UnsupportedIOSDevice: Equatable {
     let displayName: String
 }
 
+struct LegacyLimitedIOSDevice: Equatable {
+    let modelIdentifier: String
+    let displayName: String
+}
+
 enum IOSDeviceSupportGate {
-    // Keep the App Store plist gate broad (A12 floor), then explicitly block the
-    // last pre-2020 A12/A12X devices that still slip through.
-    private static let blockedModelIdentifiers: Set<String> = [
+    // The install/runtime boundary is iOS 17 plus the App Store A12 capability
+    // gate. Pre-2020 A12/A12X hardware stays app-start supported; feature
+    // managers should treat this set as legacy-limited only when a specific
+    // high-cost capability needs narrower evidence.
+    private static let legacyPre2020A12ModelIdentifiers: Set<String> = [
         "iPhone11,2", // iPhone XS
         "iPhone11,4", // iPhone XS Max (China)
         "iPhone11,6", // iPhone XS Max
@@ -30,6 +37,8 @@ enum IOSDeviceSupportGate {
         "iPad11,4" // iPad Air (3rd gen, 2019) Wi-Fi + Cellular
     ]
 
+    private static let unsupportedModelIdentifiers: Set<String> = []
+
     static func currentUnsupportedDevice(processInfo: ProcessInfo = .processInfo) -> UnsupportedIOSDevice? {
         guard let modelIdentifier = currentModelIdentifier(processInfo: processInfo) else {
             return nil
@@ -39,7 +48,7 @@ enum IOSDeviceSupportGate {
 
     static func unsupportedDevice(forModelIdentifier modelIdentifier: String) -> UnsupportedIOSDevice? {
         let normalized = modelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard blockedModelIdentifiers.contains(normalized) else {
+        guard unsupportedModelIdentifiers.contains(normalized) else {
             return nil
         }
         return UnsupportedIOSDevice(
@@ -50,6 +59,28 @@ enum IOSDeviceSupportGate {
 
     static func isSupported(modelIdentifier: String) -> Bool {
         unsupportedDevice(forModelIdentifier: modelIdentifier) == nil
+    }
+
+    static func currentLegacyLimitedDevice(processInfo: ProcessInfo = .processInfo) -> LegacyLimitedIOSDevice? {
+        guard let modelIdentifier = currentModelIdentifier(processInfo: processInfo) else {
+            return nil
+        }
+        return legacyLimitedDevice(forModelIdentifier: modelIdentifier)
+    }
+
+    static func legacyLimitedDevice(forModelIdentifier modelIdentifier: String) -> LegacyLimitedIOSDevice? {
+        let normalized = modelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard legacyPre2020A12ModelIdentifiers.contains(normalized) else {
+            return nil
+        }
+        return LegacyLimitedIOSDevice(
+            modelIdentifier: normalized,
+            displayName: displayName(forModelIdentifier: normalized)
+        )
+    }
+
+    static func isLegacyLimited(modelIdentifier: String) -> Bool {
+        legacyLimitedDevice(forModelIdentifier: modelIdentifier) != nil
     }
 
     private static func currentModelIdentifier(processInfo: ProcessInfo) -> String? {

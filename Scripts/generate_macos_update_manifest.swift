@@ -14,6 +14,30 @@ struct Signature: Encodable {
     }
 }
 
+struct ApplePQCSDKBuildAttestation: Encodable {
+    let compiledWithHASApplePQCSDK: Bool
+    let compileMarker: String
+    let probeMode: String
+    let sdkName: String
+    let sdkVersion: String
+    let swiftTarget: String
+    let secureEnclaveSymbolsIncluded: Bool
+    let symbolSet: String
+    let signature: Signature?
+
+    enum CodingKeys: String, CodingKey {
+        case compiledWithHASApplePQCSDK = "compiled_with_has_apple_pqc_sdk"
+        case compileMarker = "compile_marker"
+        case probeMode = "probe_mode"
+        case sdkName = "sdk_name"
+        case sdkVersion = "sdk_version"
+        case swiftTarget = "swift_target"
+        case secureEnclaveSymbolsIncluded = "secure_enclave_symbols_included"
+        case symbolSet = "symbol_set"
+        case signature
+    }
+}
+
 struct Manifest: Encodable {
     let schemaVersion: Int
     let bundleIdentifier: String
@@ -32,6 +56,7 @@ struct Manifest: Encodable {
     let distribution: String
     let notarized: Bool
     let sizeBytes: Int64
+    let applePQCSDKBuild: ApplePQCSDKBuildAttestation
     let signature: Signature?
 
     enum CodingKeys: String, CodingKey {
@@ -52,6 +77,7 @@ struct Manifest: Encodable {
         case distribution
         case notarized
         case sizeBytes = "size_bytes"
+        case applePQCSDKBuild = "apple_pqc_sdk_build"
         case signature
     }
 }
@@ -80,6 +106,7 @@ enum ManifestToolError: Error, CustomStringConvertible {
     case missingPlistKey(String)
     case invalidPrivateKey
     case invalidPackage(String)
+    case invalidApplePQCSDKBuildProvenance(String)
 
     var description: String {
         switch self {
@@ -97,6 +124,8 @@ enum ManifestToolError: Error, CustomStringConvertible {
             return "manifest private key must be a base64-encoded 32-byte Ed25519 seed"
         case .invalidPackage(let message):
             return message
+        case .invalidApplePQCSDKBuildProvenance(let message):
+            return "invalid Apple PQC SDK build provenance: \(message)"
         }
     }
 }
@@ -238,6 +267,161 @@ func plistString(_ plist: [String: Any], _ key: String) throws -> String {
     return raw.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+func plistBool(_ plist: [String: Any], _ key: String) throws -> Bool {
+    guard let raw = plist[key] as? Bool else {
+        throw ManifestToolError.missingPlistKey(key)
+    }
+    return raw
+}
+
+let applePQCCompileMarker = "skybridge.apple-pqc-sdk.compile-fact.v1.has-apple-pqc-sdk"
+let applePQCMissingCompileMarker = "skybridge.apple-pqc-sdk.compile-fact.v1.missing-has-apple-pqc-sdk"
+let applePQCProbeMode = "symbol_probe"
+let applePQCSDKName = "macosx"
+let applePQCSDKVersion = "26.5"
+let applePQCSwiftTarget = "arm64-apple-macosx26.0"
+let applePQCSymbolSet = "cryptokit-pqc-v1"
+
+func fileContainsString(_ url: URL, _ needle: Data) throws -> Bool {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+
+    var overlap = Data()
+    while true {
+        guard let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty else {
+            return false
+        }
+        var buffer = overlap
+        buffer.append(chunk)
+        if buffer.range(of: needle) != nil {
+            return true
+        }
+        let overlapCount = max(needle.count - 1, 0)
+        overlap = overlapCount == 0 ? Data() : Data(buffer.suffix(overlapCount))
+    }
+}
+
+func executableCandidateURLs(appPath: String) throws -> [URL] {
+    let appURL = URL(fileURLWithPath: appPath)
+    let macOSURL = appURL.appendingPathComponent("Contents").appendingPathComponent("MacOS")
+    let frameworksURL = appURL.appendingPathComponent("Contents").appendingPathComponent("Frameworks")
+    var candidates: [URL] = []
+    let fileManager = FileManager.default
+
+    func appendExecutableFiles(under root: URL) throws {
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values.isRegularFile == true else { continue }
+            if fileManager.isExecutableFile(atPath: url.path)
+                || url.pathExtension == "dylib"
+                || url.pathExtension == "so" {
+                candidates.append(url)
+            }
+        }
+    }
+
+    try appendExecutableFiles(under: macOSURL)
+    if fileManager.fileExists(atPath: frameworksURL.path) {
+        try appendExecutableFiles(under: frameworksURL)
+    }
+    return candidates
+}
+
+func appBundleContainsApplePQCCompileMarker(appPath: String) throws -> Bool {
+    let hasMarkerData = Data(applePQCCompileMarker.utf8)
+    let missingMarkerData = Data(applePQCMissingCompileMarker.utf8)
+    var foundHasMarker = false
+
+    for url in try executableCandidateURLs(appPath: appPath) {
+        if try fileContainsString(url, missingMarkerData) {
+            throw ManifestToolError.invalidApplePQCSDKBuildProvenance(
+                "packaged binary contains the missing HAS_APPLE_PQC_SDK marker: \(url.path)"
+            )
+        }
+        if try fileContainsString(url, hasMarkerData) {
+            foundHasMarker = true
+        }
+    }
+
+    return foundHasMarker
+}
+
+func readApplePQCSDKBuildAttestation(
+    plist: [String: Any],
+    appPath: String,
+    signature: Signature?
+) throws -> ApplePQCSDKBuildAttestation {
+    let compiled = try plistBool(plist, "SkyBridgePackagingApplePQCSDKCompiledWithHASApplePQCSDK")
+    let compileMarker = try plistString(plist, "SkyBridgePackagingApplePQCSDKCompileMarker")
+    let probeMode = try plistString(plist, "SkyBridgePackagingApplePQCSDKProbeMode")
+    let sdkName = try plistString(plist, "SkyBridgePackagingApplePQCSDKName")
+    let sdkVersion = try plistString(plist, "SkyBridgePackagingApplePQCSDKVersion")
+    let swiftTarget = try plistString(plist, "SkyBridgePackagingApplePQCSDKSwiftTarget")
+    let secureEnclave = try plistBool(plist, "SkyBridgePackagingApplePQCSDKSecureEnclaveSymbolsIncluded")
+    let symbolSet = try plistString(plist, "SkyBridgePackagingApplePQCSDKSymbolSet")
+
+    guard compiled else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance(
+            "SkyBridgePackagingApplePQCSDKCompiledWithHASApplePQCSDK must be true for release manifests"
+        )
+    }
+    guard compileMarker == applePQCCompileMarker else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance("unexpected compile marker: \(compileMarker)")
+    }
+    guard probeMode == applePQCProbeMode else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance(
+            "probe_mode must be \(applePQCProbeMode), got \(probeMode)"
+        )
+    }
+    guard sdkName == applePQCSDKName else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance(
+            "sdk_name must be \(applePQCSDKName), got \(sdkName)"
+        )
+    }
+    guard sdkVersion == applePQCSDKVersion else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance(
+            "sdk_version must be \(applePQCSDKVersion), got \(sdkVersion)"
+        )
+    }
+    guard swiftTarget == applePQCSwiftTarget else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance(
+            "swift_target must be \(applePQCSwiftTarget), got \(swiftTarget)"
+        )
+    }
+    guard secureEnclave else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance(
+            "secure_enclave_symbols_included must be true"
+        )
+    }
+    guard symbolSet == applePQCSymbolSet else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance("symbol_set must be \(applePQCSymbolSet), got \(symbolSet)")
+    }
+    guard try appBundleContainsApplePQCCompileMarker(appPath: appPath) else {
+        throw ManifestToolError.invalidApplePQCSDKBuildProvenance(
+            "packaged app binaries do not contain \(applePQCCompileMarker)"
+        )
+    }
+
+    return ApplePQCSDKBuildAttestation(
+        compiledWithHASApplePQCSDK: compiled,
+        compileMarker: compileMarker,
+        probeMode: probeMode,
+        sdkName: sdkName,
+        sdkVersion: sdkVersion,
+        swiftTarget: swiftTarget,
+        secureEnclaveSymbolsIncluded: secureEnclave,
+        symbolSet: symbolSet,
+        signature: signature
+    )
+}
+
 func readPrivateKeyData(file: String?) throws -> Data {
     let raw: String
     if let file {
@@ -317,6 +501,42 @@ func signingPayload(for manifest: Manifest) -> Data {
     return payload
 }
 
+func applePQCSDKBuildSigningPayload(
+    for manifest: Manifest,
+    attestation: ApplePQCSDKBuildAttestation
+) -> Data {
+    var payload = Data()
+    appendSignedField("bundle_id", manifest.bundleIdentifier, to: &payload)
+    appendSignedField("platform", manifest.platform, to: &payload)
+    appendSignedField("channel", manifest.channel, to: &payload)
+    appendSignedField("version", manifest.version, to: &payload)
+    appendSignedField("build", manifest.build, to: &payload)
+    appendSignedField("sequence", String(manifest.sequence), to: &payload)
+    appendSignedField("download_url", manifest.downloadURL, to: &payload)
+    appendSignedField("sha256", manifest.sha256, to: &payload)
+    appendSignedField("package_format", manifest.packageFormat, to: &payload)
+    appendSignedField("distribution", manifest.distribution, to: &payload)
+    appendSignedField("notarized", manifest.notarized ? "true" : "false", to: &payload)
+    appendSignedField("size_bytes", String(manifest.sizeBytes), to: &payload)
+    appendSignedField(
+        "apple_pqc_sdk_build.compiled_with_has_apple_pqc_sdk",
+        attestation.compiledWithHASApplePQCSDK ? "true" : "false",
+        to: &payload
+    )
+    appendSignedField("apple_pqc_sdk_build.compile_marker", attestation.compileMarker, to: &payload)
+    appendSignedField("apple_pqc_sdk_build.probe_mode", attestation.probeMode, to: &payload)
+    appendSignedField("apple_pqc_sdk_build.sdk_name", attestation.sdkName, to: &payload)
+    appendSignedField("apple_pqc_sdk_build.sdk_version", attestation.sdkVersion, to: &payload)
+    appendSignedField("apple_pqc_sdk_build.swift_target", attestation.swiftTarget, to: &payload)
+    appendSignedField(
+        "apple_pqc_sdk_build.secure_enclave_symbols_included",
+        attestation.secureEnclaveSymbolsIncluded ? "true" : "false",
+        to: &payload
+    )
+    appendSignedField("apple_pqc_sdk_build.symbol_set", attestation.symbolSet, to: &payload)
+    return payload
+}
+
 func writeManifest(_ manifest: Manifest, to outputPath: String) throws {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -360,6 +580,11 @@ func main() throws {
         ?? "14.0.0"
     let package = try packageDigestAndSize(path: packagePath)
     let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: readPrivateKeyData(file: options.privateKeyFile))
+    let unsignedApplePQCSDKBuild = try readApplePQCSDKBuildAttestation(
+        plist: plist,
+        appPath: appPath,
+        signature: nil
+    )
 
     let unsignedManifest = Manifest(
         schemaVersion: 1,
@@ -379,7 +604,16 @@ func main() throws {
         distribution: "developer-id",
         notarized: true,
         sizeBytes: package.size,
+        applePQCSDKBuild: unsignedApplePQCSDKBuild,
         signature: nil
+    )
+    let applePQCSDKBuildSignature = try privateKey
+        .signature(for: applePQCSDKBuildSigningPayload(for: unsignedManifest, attestation: unsignedApplePQCSDKBuild))
+        .base64EncodedString()
+    let signedApplePQCSDKBuild = try readApplePQCSDKBuildAttestation(
+        plist: plist,
+        appPath: appPath,
+        signature: Signature(algorithm: "ed25519", keyId: keyId, value: applePQCSDKBuildSignature)
     )
     let signature = try privateKey.signature(for: signingPayload(for: unsignedManifest)).base64EncodedString()
     let signedManifest = Manifest(
@@ -400,6 +634,7 @@ func main() throws {
         distribution: unsignedManifest.distribution,
         notarized: unsignedManifest.notarized,
         sizeBytes: unsignedManifest.sizeBytes,
+        applePQCSDKBuild: signedApplePQCSDKBuild,
         signature: Signature(algorithm: "ed25519", keyId: keyId, value: signature)
     )
     try writeManifest(signedManifest, to: outputPath)

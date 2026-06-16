@@ -39,8 +39,8 @@ public struct DashboardView: View {
     
     @Namespace private var animation
 
-    private var isUITesting: Bool {
-        ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
+    private var shouldSkipInteractiveStartup: Bool {
+        SkyBridgeRuntimeEnvironment.shouldSkipInteractiveStartup
     }
 
     private static var initialSelectedTab: DashboardTab {
@@ -111,11 +111,11 @@ public struct DashboardView: View {
         }
         .task {
             loadedTabs.insert(selectedTab)
-            guard !isUITesting else { return }
+            guard !shouldSkipInteractiveStartup else { return }
             await viewModel.start()
         }
         .onDisappear {
-            guard !isUITesting else { return }
+            guard !shouldSkipInteractiveStartup else { return }
             viewModel.stop()
         }
         .sheet(isPresented: $showingQRScanner) {
@@ -547,24 +547,26 @@ private struct QuantumStarLayer: View {
             
             Spacer()
             
-            // PQC Status Badge (Quantum glow)
+            let securityBadge = Self.securityBadgePresentation(for: viewModel.topConnectionPresentation)
+            let securityBadgeColor = Self.securityBadgeColor(for: securityBadge.tone)
+
             VStack(spacing: 4) {
-                Image(systemName: "lock.shield.fill")
+                Image(systemName: securityBadge.systemImage)
                     .font(.title2)
-                    .foregroundStyle(.green.gradient)
+                    .foregroundStyle(securityBadgeColor.gradient)
                     .symbolRenderingMode(.multicolor)
-                    .shadow(color: .green.opacity(0.4), radius: 5, x: 0, y: 0)
-                Text("PQC")
+                    .shadow(color: securityBadgeColor.opacity(0.4), radius: 5, x: 0, y: 0)
+                Text(securityBadge.label)
                     .font(.caption2)
                     .fontWeight(.bold)
-                    .foregroundColor(.green)
+                    .foregroundColor(securityBadgeColor)
             }
             .padding(10)
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(LinearGradient(colors: [.green.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+                    .stroke(LinearGradient(colors: [securityBadgeColor.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
             )
         }
         .padding()
@@ -594,14 +596,49 @@ private struct QuantumStarLayer: View {
         viewModel.topConnectionPresentation.detailText
     }
 
-    private var defaultPQCModeLabel: String? {
-        switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
-        case .nativePQC?:
-            return "Apple PQC"
-        case .liboqsPQC?:
-            return "liboqs"
-        default:
-            return nil
+    internal enum SecurityBadgeTone: String, Equatable {
+        case verifiedPQC
+        case classic
+        case pending
+        case offline
+    }
+
+    internal struct SecurityBadgePresentation: Equatable {
+        let label: String
+        let systemImage: String
+        let tone: SecurityBadgeTone
+    }
+
+    internal static func securityBadgePresentation(
+        for presentation: ConnectionPresentation
+    ) -> SecurityBadgePresentation {
+        switch presentation.phase {
+        case .disconnected:
+            return SecurityBadgePresentation(label: "离线", systemImage: "lock.slash", tone: .offline)
+        case .connecting, .reconnecting:
+            return SecurityBadgePresentation(label: "待确认", systemImage: "lock", tone: .pending)
+        case .connected:
+            switch presentation.securityEvidence {
+            case .pqc:
+                return SecurityBadgePresentation(label: "PQC", systemImage: "lock.shield.fill", tone: .verifiedPQC)
+            case .classic:
+                return SecurityBadgePresentation(label: "Classic", systemImage: "lock.fill", tone: .classic)
+            case .none:
+                return SecurityBadgePresentation(label: "待确认", systemImage: "lock", tone: .pending)
+            }
+        }
+    }
+
+    private static func securityBadgeColor(for tone: SecurityBadgeTone) -> Color {
+        switch tone {
+        case .verifiedPQC:
+            return .green
+        case .classic:
+            return .blue
+        case .pending:
+            return .orange
+        case .offline:
+            return .gray
         }
     }
 
@@ -620,7 +657,7 @@ private struct QuantumStarLayer: View {
             baseText: status.displayName,
             kind: kind,
             suite: suite,
-            defaultPQCModeLabel: defaultPQCModeLabel
+            defaultPQCModeLabel: nil
         )
     }
 

@@ -143,6 +143,15 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
     public func sign(_ data: Data, key: SigningKeyHandle) async throws -> Data {
         #if HAS_APPLE_PQC_SDK
         if #available(iOS 26.0, macOS 26.0, *) {
+            if Self.shouldUseLiboqsForSigningBeforeApple(key: key) {
+                do {
+                    return try await OQSPQCCryptoProvider().sign(data: data, using: key)
+                } catch let oqsError {
+                    throw SignatureProviderError.signatureFailed(
+                        "liboqs failed for liboqs-format ML-DSA-65 private key (\(oqsError.localizedDescription)); Apple PQC was not attempted because the key is not an Apple integrityCheckedRepresentation"
+                    )
+                }
+            }
             do {
                 return try await signWithApplePQC(data, key: key)
             } catch let appleError {
@@ -204,6 +213,10 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
     
     #if HAS_APPLE_PQC_SDK
     // internal 以便测试锁定回退决策语义（防止条件被无意放宽，扩大验签/签名回退面）。
+    static func shouldUseLiboqsForSigningBeforeApple(key: SigningKeyHandle) -> Bool {
+        shouldRetrySignWithLiboqs(key: key)
+    }
+
     static func shouldRetrySignWithLiboqs(key: SigningKeyHandle) -> Bool {
         guard hasLiboqsBackend else { return false }
         switch key {

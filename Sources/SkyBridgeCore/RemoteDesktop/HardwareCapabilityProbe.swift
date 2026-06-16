@@ -179,7 +179,12 @@ public struct HardwareCapabilityProbe: Sendable {
         #endif
     }
 
-    /// 5. Metal GPU 能力族（要求 Apple 8+ = M1+）
+    /// 5. Metal GPU 能力族
+    ///
+    /// 不再把 "Apple Silicon" 当作 "HDR 能力" 的同义词：真正的 HDR 要求（硬件 HEVC
+    /// Main10 解码、10-bit 像素、EDR、Display P3）已由其它探测点覆盖。这里只需确认 GPU
+    /// 属于受支持的现代能力族——Apple 8+（M1+）或 Mac 2（Intel / AMD GPU 的 Mac，
+    /// macOS 14/15 基线仍然支持且具备 HEVC 硬解 + EDR 的机型不应被排除）。
     private static func probeMetalGPUFamily() -> ProbeResult {
         guard let device = MTLCreateSystemDefaultDevice() else {
             return ProbeResult(
@@ -189,12 +194,20 @@ public struct HardwareCapabilityProbe: Sendable {
             )
         }
         let supportsApple8 = device.supportsFamily(.apple8)
+        let supportsMac2 = device.supportsFamily(.mac2)
+        let supported = supportsApple8 || supportsMac2
+        let detail: String
+        if supportsApple8 {
+            detail = "Apple 8+ (M1+) supported"
+        } else if supportsMac2 {
+            detail = "Mac 2 family (Intel/AMD GPU) supported"
+        } else {
+            detail = "Below Apple 8 / Mac 2 family"
+        }
         return ProbeResult(
             capability: "Metal GPU Family",
-            supported: supportsApple8,
-            detail: supportsApple8
-                ? "Apple 8+ (M1+) supported"
-                : "Below Apple 8 family"
+            supported: supported,
+            detail: detail
         )
     }
 

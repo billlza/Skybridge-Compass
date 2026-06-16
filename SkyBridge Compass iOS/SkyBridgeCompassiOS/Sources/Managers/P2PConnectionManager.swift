@@ -49,7 +49,15 @@ private struct P2PStoredHandshakeTrustProvider: MultiFingerprintHandshakeTrustPr
     }
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
-        await KEMTrustStore.shared.kemPublicKeys(forAny: candidateDeviceIds(for: deviceId))
+        let candidates = candidateDeviceIds(for: deviceId)
+        guard requirePinnedProtocolIdentity else {
+            return await KEMTrustStore.shared.kemPublicKeys(forAny: candidates)
+        }
+        let pinnedFingerprints = await trustedFingerprints(for: deviceId)
+        return await KEMTrustStore.shared.signedRefreshKEMPublicKeys(
+            forAny: candidates,
+            pinnedProtocolFingerprints: pinnedFingerprints
+        )
     }
 
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
@@ -247,6 +255,77 @@ public class P2PConnectionManager: ObservableObject {
             .replacingOccurrences(of: "\r", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    private nonisolated static var protocolIdentityLogRedaction: String { "<redacted>" }
+
+    private nonisolated static func diagnosticErrorSummary(_ error: Error) -> String {
+        let nsError = error as NSError
+        return "error_domain=\(nsError.domain) code=\(nsError.code)"
+    }
+
+    private nonisolated static func diagnosticConnectionState(_ state: NWConnection.State) -> String {
+        switch state {
+        case .setup:
+            return "setup"
+        case .waiting:
+            return "waiting"
+        case .preparing:
+            return "preparing"
+        case .ready:
+            return "ready"
+        case .failed:
+            return "failed"
+        case .cancelled:
+            return "cancelled"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private nonisolated static func diagnosticHandshakeFailureCode(_ reason: HandshakeFailureReason) -> String {
+        switch reason {
+        case .timeout:
+            return "timeout"
+        case .peerRejected:
+            return "peer_rejected"
+        case .cryptoError:
+            return "crypto_error"
+        case .transportError:
+            return "transport_error"
+        case .cancelled:
+            return "cancelled"
+        case .versionMismatch:
+            return "version_mismatch"
+        case .suiteNegotiationFailed:
+            return "suite_negotiation_failed"
+        case .signatureVerificationFailed:
+            return "signature_verification_failed"
+        case .invalidMessageFormat:
+            return "invalid_message_format"
+        case .identityMismatch:
+            return "identity_mismatch"
+        case .replayDetected:
+            return "replay_detected"
+        case .secureEnclavePoPRequired:
+            return "secure_enclave_pop_required"
+        case .secureEnclaveSignatureInvalid:
+            return "secure_enclave_signature_invalid"
+        case .keyConfirmationFailed:
+            return "key_confirmation_failed"
+        case .suiteSignatureMismatch:
+            return "suite_signature_mismatch"
+        case .pqcProviderUnavailable:
+            return "pqc_provider_unavailable"
+        case .missingPeerKEMPublicKey:
+            return "missing_peer_kem_public_key"
+        case .suiteNotSupported:
+            return "suite_not_supported"
+        case .supersededByConcurrentAttempt:
+            return "superseded_by_concurrent_attempt"
+        case .unknownSuite:
+            return "unknown_suite"
+        }
+    }
     
     // MARK: - Pairing / Trust Prompt
     
@@ -345,15 +424,8 @@ public class P2PConnectionManager: ObservableObject {
     private init() {
         pairingPolicyByPeerId = Self.pairingPolicyStore.load() ?? [:]
 
-        if let unsupported = IOSDeviceSupportGate.currentUnsupportedDevice() {
-            SkyBridgeLogger.shared.warning(
-                "⛔️ P2P stack bootstrap skipped on unsupported device: \(unsupported.displayName) (\(unsupported.modelIdentifier))"
-            )
-            return
-        }
-        
         // 设置入站连接回调
-        Task { @MainActor in
+        Task { @MainActor [self] in
             discoveryManager.onNewConnection = { [weak self] connection, peerId in
                 Task { @MainActor in
                     await self?.handleIncomingConnection(connection, peerId: peerId)
@@ -421,7 +493,7 @@ public class P2PConnectionManager: ObservableObject {
 
     private func rejectStrictPQCClassicBootstrap(for peerId: String) -> P2PError {
         let message =
-            "严格 PQC 已启用，但对端只提供 Classic suites；当前已拒绝 classic bootstrap / legacy bootstrap 路径。peer=\(peerId)"
+            "严格 PQC 已启用，但对端只提供 Classic suites；当前已拒绝 classic bootstrap / legacy bootstrap 路径。peer=redacted"
         SkyBridgeLogger.shared.error("⛔️ \(message)")
         currentHandshakeState = message
         lastError = message
@@ -451,7 +523,7 @@ public class P2PConnectionManager: ObservableObject {
         guard !keys.isEmpty else { return nil }
         guard let stablePeerId = stableProtocolIdentityCandidate(from: candidates) else {
             SkyBridgeLogger.shared.warning(
-                "⛔️ trusted peer KEM ignored: missing stable protocol identity for peer=\(device.id); refusing endpoint alias target"
+                "⛔️ trusted peer KEM ignored: missing stable protocol identity for peer=\(Self.protocolIdentityLogRedaction); refusing endpoint alias target"
             )
             return nil
         }
@@ -648,7 +720,7 @@ public class P2PConnectionManager: ObservableObject {
         let messageAStableCandidates = await stableProtocolIdentityCandidates(from: messageA)
         guard messageAStableCandidates.count <= 1 else {
             SkyBridgeLogger.shared.warning(
-                "⛔️ strict PQC \(stage) rejected ambiguous MessageA SOA identity: peer=\(peerId) matches=\(messageAStableCandidates.joined(separator: ",")) reason=ambiguous_message_a_soa_identity"
+                "⛔️ strict PQC \(stage) rejected ambiguous MessageA SOA identity: peer=\(Self.protocolIdentityLogRedaction) matchCount=\(messageAStableCandidates.count) reason=ambiguous_message_a_soa_identity"
             )
             return nil
         }
@@ -656,13 +728,13 @@ public class P2PConnectionManager: ObservableObject {
             + connectionStatePeerIds(for: runtimePeerId)
         guard let stablePeerId = stableProtocolIdentityCandidate(from: candidates) else {
             SkyBridgeLogger.shared.warning(
-                "⛔️ strict PQC \(stage) rejected endpoint-only peer: peer=\(peerId) reason=missing_stable_protocol_identity"
+                "⛔️ strict PQC \(stage) rejected endpoint-only peer: peer=\(Self.protocolIdentityLogRedaction) reason=missing_stable_protocol_identity"
             )
             return nil
         }
         if messageAStableCandidates.contains(stablePeerId) {
             SkyBridgeLogger.shared.info(
-                "🧩 strict PQC \(stage) resolved stable peer from MessageA SOA: endpoint=\(peerId) stablePeer=\(stablePeerId)"
+                "🧩 strict PQC \(stage) resolved stable peer from MessageA SOA: endpoint=\(Self.protocolIdentityLogRedaction) stablePeer=\(Self.protocolIdentityLogRedaction)"
             )
         }
 
@@ -673,7 +745,7 @@ public class P2PConnectionManager: ObservableObject {
         let pinnedFingerprints = await provider.trustedFingerprints(for: stablePeerId)
         guard !pinnedFingerprints.isEmpty else {
             SkyBridgeLogger.shared.warning(
-                "⛔️ strict PQC \(stage) rejected unpinned peer: peer=\(peerId) stablePeer=\(stablePeerId) reason=missing_pinned_protocol_identity"
+                "⛔️ strict PQC \(stage) rejected unpinned peer: peer=\(Self.protocolIdentityLogRedaction) stablePeer=\(Self.protocolIdentityLogRedaction) reason=missing_pinned_protocol_identity"
             )
             return nil
         }
@@ -754,22 +826,22 @@ public class P2PConnectionManager: ObservableObject {
                     preferredTargetSuite: preferredTargetSuite
                 ) {
                     SkyBridgeLogger.shared.info(
-                        "🔐 SKR-1 signed LAN KEM refresh verified and imported: peer=\(device.id) suites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))"
+                        "🔐 SKR-1 signed LAN KEM refresh verified and imported: peer=\(Self.protocolIdentityLogRedaction) suites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))"
                     )
                     return
                 }
                 SkyBridgeLogger.shared.warning(
-                    "⛔️ SKR-1 refresh completed but strict suite still unsatisfied: peer=\(device.id) expected=\(preferredTargetSuite?.rawValue ?? "PQC") importedSuites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))"
+                    "⛔️ SKR-1 refresh completed but strict suite still unsatisfied: peer=\(Self.protocolIdentityLogRedaction) expected=\(preferredTargetSuite?.rawValue ?? "PQC") importedSuites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))"
                 )
             } catch {
-                signedRefreshFailureReason = error.localizedDescription
-                let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(device.id) stage=preflight-kem-refresh reason=\(error.localizedDescription) pinnedProtocolIdentity=1 lifecycle=missing-kem>failed"
+                signedRefreshFailureReason = Self.smokeSanitize(error.localizedDescription)
+                let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(Self.protocolIdentityLogRedaction) stage=preflight-kem-refresh reason=\(Self.protocolIdentityLogRedaction) pinnedProtocolIdentity=1 lifecycle=missing-kem>failed"
                 SkyBridgeLogger.shared.warning(line)
                 SignedKEMRefreshSmokeStatusWriter.append(line)
             }
         } else if initialPreflightAction == .attemptOOBProtocolIdentityBindingThenRefresh && pinnedFingerprints.isEmpty {
             SkyBridgeLogger.shared.warning(
-                "🔐 SKR-1 refresh skipped: no pinned protocol identity for peer=\(device.id) candidates=\(candidates.prefix(5).joined(separator: ","))"
+                "🔐 SKR-1 refresh skipped: no pinned protocol identity for peer=\(Self.protocolIdentityLogRedaction) candidates=\(Self.protocolIdentityLogRedaction)"
             )
         }
 
@@ -803,14 +875,14 @@ public class P2PConnectionManager: ObservableObject {
                     preferredTargetSuite: preferredTargetSuite
                 ) {
                     SkyBridgeLogger.shared.info(
-                        "🔐 PIB-1 -> SKR-1 recovery completed: peer=\(device.id) suites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))"
+                        "🔐 PIB-1 -> SKR-1 recovery completed: peer=\(Self.protocolIdentityLogRedaction) suites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))"
                     )
                     return
                 }
                 signedRefreshFailureReason = "PIB-1 completed but SKR-1 did not import required suite"
             } catch {
-                signedRefreshFailureReason = "PIB-1 protocol identity binding failed: \(error.localizedDescription)"
-                let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(device.id) stage=preflight-identity-binding reason=\(error.localizedDescription) lifecycle=identity-oob>failed"
+                signedRefreshFailureReason = "PIB-1 protocol identity binding failed: \(Self.diagnosticErrorSummary(error))"
+                let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction) stage=preflight-identity-binding reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>failed"
                 SkyBridgeLogger.shared.warning(line)
                 SignedKEMRefreshSmokeStatusWriter.append(line)
             }
@@ -883,11 +955,18 @@ public class P2PConnectionManager: ObservableObject {
         guard !routeCandidates.isEmpty else {
             throw signedLANRefreshFailure("no LAN endpoint candidates")
         }
-        let endpoints = routeCandidates.filter {
+        let directHostCandidate = routeCandidates.contains {
             Self.signedLANRefreshEndpointClass($0) == "direct-host"
         }
-        guard !endpoints.isEmpty else {
+        guard directHostCandidate else {
             throw signedLANRefreshFailure("missing direct LAN endpoint candidate")
+        }
+        let endpoints = routeCandidates.filter { endpoint in
+            let endpointClass = Self.signedLANRefreshEndpointClass(endpoint)
+            return endpointClass == "direct-host" || endpointClass == "bonjour-service"
+        }
+        guard !endpoints.isEmpty else {
+            throw signedLANRefreshFailure("no signed LAN refresh bootstrap endpoint candidates")
         }
 
         let requestedSuites = signedLANRefreshRequestedSuites(preferredTargetSuite: preferredTargetSuite)
@@ -909,19 +988,27 @@ public class P2PConnectionManager: ObservableObject {
         )
 
         let refreshStartedAt = Date()
-        let suppressedServiceCandidateCount = routeCandidates.count - endpoints.count
-        let connectStartLine = "🔐 SKR-1 signed LAN KEM refresh connect-start: peer=\(device.id) endpoints=\(endpoints.map { String(describing: $0) }.joined(separator: ";")) suppressedServiceCandidates=\(suppressedServiceCandidateCount) fallbackSuppressed=1 pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>connect"
+        let serviceFallbackCandidateCount = endpoints.filter {
+            Self.signedLANRefreshEndpointClass($0) == "bonjour-service"
+        }.count
+        let connectStartLine = "🔐 SKR-1 signed LAN KEM refresh connect-start: peer=\(Self.protocolIdentityLogRedaction) endpointCount=\(endpoints.count) serviceFallbackCandidates=\(serviceFallbackCandidateCount) classicFallbackSuppressed=1 pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>connect"
         SkyBridgeLogger.shared.info(connectStartLine)
         SignedKEMRefreshSmokeStatusWriter.append(connectStartLine)
-        let connectionResult = try await establishReadyConnectionWithMetrics(to: endpoints, for: device)
+        let connectionResult: ReadyConnectionResult
+        do {
+            connectionResult = try await establishReadyConnectionWithMetrics(to: endpoints, for: device)
+        } catch {
+            throw signedLANRefreshFailure(
+                "bootstrap control connection failed: \(Self.smokeSanitize(error.localizedDescription))"
+            )
+        }
         let connection = connectionResult.connection
         let selectedEndpoint = connectionResult.endpoint
         let selectedEndpointClass = Self.signedLANRefreshEndpointClass(selectedEndpoint)
         let selectedEndpointDirect = selectedEndpointClass == "direct-host"
-        let directHostCandidate = routeCandidates.contains { Self.signedLANRefreshEndpointClass($0) == "direct-host" }
         defer { connection.cancel() }
 
-        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(device.id) endpoint=\(selectedEndpoint) selectedEndpointClass=\(selectedEndpointClass) selectedEndpointDirect=\(selectedEndpointDirect ? 1 : 0) selectedEndpointPeerToPeer=\(connectionResult.selectedEndpointPeerToPeer ? 1 : 0) directHostCandidate=\(directHostCandidate ? 1 : 0) requesterProtocolIdentity=\(requesterProtocolIdentityFingerprint) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
+        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) selectedEndpointClass=\(selectedEndpointClass) selectedEndpointDirect=\(selectedEndpointDirect ? 1 : 0) selectedEndpointPeerToPeer=\(connectionResult.selectedEndpointPeerToPeer ? 1 : 0) directHostCandidate=\(directHostCandidate ? 1 : 0) requesterProtocolIdentity=\(Self.protocolIdentityLogRedaction) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
         SkyBridgeLogger.shared.info(requestLine)
         SignedKEMRefreshSmokeStatusWriter.append(requestLine)
         let exchangeStartedAt = Date()
@@ -931,7 +1018,7 @@ public class P2PConnectionManager: ObservableObject {
         let response = try JSONDecoder().decode(AppMessage.self, from: responseFrame)
         if case .kemRefreshFailure(let failure) = response {
             throw signedLANRefreshFailure(
-                "remote rejected SKR-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode) reason=\(failure.reason)"
+                "remote rejected SKR-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode)"
             )
         }
         guard case .signedKEMRefresh(let payload) = response else {
@@ -984,7 +1071,7 @@ public class P2PConnectionManager: ObservableObject {
             : 100.0
         let verifiedLine = String(
             format: "🔐 SKR-1 signed LAN KEM refresh verified and imported: peer=%@ suites=%@ wireId=%@ pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=%.1f responseLatencyMs=%.1f connectLatencyMs=%.1f selectedEndpointPeerToPeer=%d jitterMs=%.1f applicationLossPct=%.1f retryCount=%d lifecycle=served>verified metricScope=application-control-channel",
-            device.id,
+            Self.protocolIdentityLogRedaction,
             validated.kemPublicKeys.map { CryptoSuite(wireId: $0.suiteWireId).rawValue }.sorted().joined(separator: ","),
             validated.kemPublicKeys.map { String(format: "0x%04X", $0.suiteWireId) }.sorted().joined(separator: ","),
             totalLatencyMs,
@@ -1050,16 +1137,15 @@ public class P2PConnectionManager: ObservableObject {
             sentAt: unsignedRequest.sentAt
         )
 
-        let connectStartLine = "🔐 PIB-1 protocol identity binding connect-start: peer=\(device.id) endpoints=\(endpoints.map { String(describing: $0) }.joined(separator: ";")) lifecycle=identity-oob>connect"
+        let connectStartLine = "🔐 PIB-1 protocol identity binding connect-start: peer=\(Self.protocolIdentityLogRedaction) endpoints=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>connect"
         SkyBridgeLogger.shared.info(connectStartLine)
         SignedKEMRefreshSmokeStatusWriter.append(connectStartLine)
         let connectionResult = try await establishReadyConnectionWithMetrics(to: endpoints, for: device)
         let connection = connectionResult.connection
-        let selectedEndpoint = connectionResult.endpoint
         defer { connection.cancel() }
 
         let responseTimeoutSeconds = Self.protocolIdentityBindingResponseTimeoutSeconds()
-        let requestLine = "🔐 PIB-1 protocol identity binding request: peer=\(device.id) endpoint=\(selectedEndpoint) algorithms=\(request.requestedProtocolSigningAlgorithms.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) lifecycle=identity-oob>request"
+        let requestLine = "🔐 PIB-1 protocol identity binding request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) algorithms=\(request.requestedProtocolSigningAlgorithms.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) lifecycle=identity-oob>request"
         SkyBridgeLogger.shared.info(requestLine)
         SignedKEMRefreshSmokeStatusWriter.append(requestLine)
         try await sendPlainFramed(JSONEncoder().encode(AppMessage.protocolIdentityBindingRequest(request)), over: connection)
@@ -1070,7 +1156,7 @@ public class P2PConnectionManager: ObservableObject {
         let response = try JSONDecoder().decode(AppMessage.self, from: responseFrame)
         if case .kemRefreshFailure(let failure) = response {
             throw protocolIdentityBindingFailure(
-                "remote rejected PIB-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode) reason=\(failure.reason)"
+                "remote rejected PIB-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode) reason=redacted"
             )
         }
         guard case .signedProtocolIdentityBinding(let payload) = response else {
@@ -1092,7 +1178,7 @@ public class P2PConnectionManager: ObservableObject {
         }
 
         let code = validated.shortAuthenticationCode(request: request)
-        let verifiedLine = "🔐 PIB-1 protocol identity binding signature verified: peer=\(device.id) fingerprint=\(validated.protocolIdentityFingerprint) code=\(code) lifecycle=identity-oob>verified"
+        let verifiedLine = "🔐 PIB-1 protocol identity binding signature verified: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>verified"
         SkyBridgeLogger.shared.info(verifiedLine)
         SignedKEMRefreshSmokeStatusWriter.append(verifiedLine)
 
@@ -1142,17 +1228,17 @@ public class P2PConnectionManager: ObservableObject {
                     candidates: policyCandidates,
                     payload: payload
                 ), clearExisting: false) else {
-                    let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(device.id) fingerprint=\(payload.protocolIdentityFingerprint) code=\(verificationCode) reason=authority_pin_promotion_failed lifecycle=identity-oob>failed"
+                    let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=authority_pin_promotion_failed lifecycle=identity-oob>failed"
                     SkyBridgeLogger.shared.warning(line)
                     SignedKEMRefreshSmokeStatusWriter.append(line)
                     return .reject
                 }
-                let line = "🔐 PIB-1 protocol identity binding operator approved: peer=\(device.id) fingerprint=\(payload.protocolIdentityFingerprint) code=\(verificationCode) operator=\(operatorLabel) lifecycle=identity-oob>pinned"
+                let line = "🔐 PIB-1 protocol identity binding operator approved: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=\(operatorLabel) lifecycle=identity-oob>pinned"
                 SkyBridgeLogger.shared.info(line)
                 SignedKEMRefreshSmokeStatusWriter.append(line)
                 return .alwaysAllow
             case .reject:
-                let line = "🛑 PIB-1 protocol identity binding rejected: peer=\(device.id) fingerprint=\(payload.protocolIdentityFingerprint) code=\(verificationCode) operator=stored-policy lifecycle=identity-oob>rejected"
+                let line = "🛑 PIB-1 protocol identity binding rejected: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=stored-policy lifecycle=identity-oob>rejected"
                 SkyBridgeLogger.shared.warning(line)
                 SignedKEMRefreshSmokeStatusWriter.append(line)
                 return .reject
@@ -1165,12 +1251,12 @@ public class P2PConnectionManager: ObservableObject {
                 candidates: policyCandidates,
                 payload: payload
             )) else {
-                let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(device.id) fingerprint=\(payload.protocolIdentityFingerprint) code=\(verificationCode) reason=authority_pin_promotion_failed lifecycle=identity-oob>failed"
+                let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=authority_pin_promotion_failed lifecycle=identity-oob>failed"
                 SkyBridgeLogger.shared.warning(line)
                 SignedKEMRefreshSmokeStatusWriter.append(line)
                 return .reject
             }
-            let line = "🔐 PIB-1 protocol identity binding operator approved: peer=\(device.id) fingerprint=\(payload.protocolIdentityFingerprint) code=\(verificationCode) operator=smoke-auto-approve lifecycle=identity-oob>pinned"
+            let line = "🔐 PIB-1 protocol identity binding operator approved: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=smoke-auto-approve lifecycle=identity-oob>pinned"
             SkyBridgeLogger.shared.info(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
             return .alwaysAllow
@@ -1198,10 +1284,8 @@ public class P2PConnectionManager: ObservableObject {
             receivedAt: Date()
         )
 
-        let timeoutPeerId = device.id
-        let timeoutFingerprint = payload.protocolIdentityFingerprint
         let approvalTimeoutSeconds = Self.protocolIdentityBindingApprovalTimeoutSeconds()
-        let awaitingLine = "🔐 PIB-1 protocol identity binding awaiting operator approval: peer=\(device.id) fingerprint=\(payload.protocolIdentityFingerprint) code=\(verificationCode) timeoutSeconds=\(approvalTimeoutSeconds) lifecycle=identity-oob>awaiting-approval"
+        let awaitingLine = "🔐 PIB-1 protocol identity binding awaiting operator approval: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) timeoutSeconds=\(approvalTimeoutSeconds) lifecycle=identity-oob>awaiting-approval"
         SkyBridgeLogger.shared.info(awaitingLine)
         SignedKEMRefreshSmokeStatusWriter.append(awaitingLine)
         return await withCheckedContinuation { continuation in
@@ -1216,7 +1300,7 @@ public class P2PConnectionManager: ObservableObject {
                 if self.pendingPairingTrustRequest?.id == requestId {
                     self.pendingPairingTrustRequest = nil
                 }
-                let line = "⏳ PIB-1 protocol identity binding approval timed out: peer=\(timeoutPeerId) fingerprint=\(timeoutFingerprint) code=\(verificationCode) timeoutSeconds=\(approvalTimeoutSeconds) lifecycle=identity-oob>timeout"
+                let line = "⏳ PIB-1 protocol identity binding approval timed out: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) timeoutSeconds=\(approvalTimeoutSeconds) lifecycle=identity-oob>timeout"
                 SkyBridgeLogger.shared.warning(line)
                 SignedKEMRefreshSmokeStatusWriter.append(line)
                 timedOut.resume(returning: .timedOut)
@@ -1230,7 +1314,7 @@ public class P2PConnectionManager: ObservableObject {
     ) async -> Bool {
         let payload = context.payload
         guard ProtocolSigningAlgorithm(rawValue: payload.protocolSigningAlgorithm) != nil else {
-            let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(context.peerId) deviceId=\(payload.deviceId) fingerprint=\(payload.protocolIdentityFingerprint) reason=unsupported_protocol_signing_algorithm lifecycle=identity-oob>failed"
+            let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction) deviceId=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) reason=unsupported_protocol_signing_algorithm lifecycle=identity-oob>failed"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
             return false
@@ -1243,7 +1327,7 @@ public class P2PConnectionManager: ObservableObject {
             protocolSigningAlgorithm: payload.protocolSigningAlgorithm,
             protocolPublicKeyFingerprint: payload.protocolIdentityFingerprint
         ) else {
-            let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(context.peerId) deviceId=\(payload.deviceId) fingerprint=\(payload.protocolIdentityFingerprint) reason=authority_pin_not_persisted lifecycle=identity-oob>failed"
+            let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction) deviceId=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) reason=authority_pin_not_persisted lifecycle=identity-oob>failed"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
             return false
@@ -1264,7 +1348,7 @@ public class P2PConnectionManager: ObservableObject {
                 protocolIdentityPublicKeys: [protocolIdentityKey]
             )
         }
-        let line = "🔐 PIB-1 protocol identity binding pinned: peer=\(context.peerId) deviceId=\(payload.deviceId) fingerprint=\(payload.protocolIdentityFingerprint) candidates=\(installIds.prefix(5).joined(separator: ",")) lifecycle=identity-oob>pinned"
+        let line = "🔐 PIB-1 protocol identity binding pinned: peer=\(Self.protocolIdentityLogRedaction) deviceId=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) candidates=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>pinned"
         SkyBridgeLogger.shared.info(line)
         SignedKEMRefreshSmokeStatusWriter.append(line)
         return true
@@ -1281,7 +1365,7 @@ public class P2PConnectionManager: ObservableObject {
             protocolSigningAlgorithm: context.requesterProtocolSigningAlgorithm.rawValue,
             protocolPublicKeyFingerprint: context.requesterProtocolIdentityFingerprint
         ) else {
-            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(context.requesterDeviceIds.first ?? "-") fingerprint=\(context.requesterProtocolIdentityFingerprint) code=\(context.verificationCode) reason=authority_pin_not_persisted lifecycle=identity-oob>requester-pin-failed"
+            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=authority_pin_not_persisted lifecycle=identity-oob>requester-pin-failed"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
             return false
@@ -1296,7 +1380,7 @@ public class P2PConnectionManager: ObservableObject {
                 protocolIdentityPublicKeys: [key]
             )
         }
-        let line = "🔐 PIB-1 requester protocol identity pinned: requester=\(context.requesterDeviceIds.first ?? "-") fingerprint=\(context.requesterProtocolIdentityFingerprint) code=\(context.verificationCode) lifecycle=identity-oob>requester-pinned"
+        let line = "🔐 PIB-1 requester protocol identity pinned: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>requester-pinned"
         SkyBridgeLogger.shared.info(line)
         SignedKEMRefreshSmokeStatusWriter.append(line)
         return true
@@ -1409,7 +1493,7 @@ public class P2PConnectionManager: ObservableObject {
         let targetSuite = preferredRekeyTargetSuite() ?? CryptoSuite.xwing.rawValue
 
         SkyBridgeLogger.shared.info(
-            "🧩 P2P classic bootstrap start: peer=\(peerId) targetSuite=\(targetSuite)"
+            "🧩 P2P classic bootstrap start: peer=\(Self.protocolIdentityLogRedaction) targetSuite=\(targetSuite)"
         )
         currentHandshakeState = "经典 bootstrap 中..."
 
@@ -1424,7 +1508,7 @@ public class P2PConnectionManager: ObservableObject {
         let observedAt = Date()
         try await sendPairingIdentityExchange(to: peerId)
         SkyBridgeLogger.shared.info(
-            "📤 已发送 pairingIdentityExchange 触发 PQC bootstrap: peer=\(peerId)"
+            "📤 已发送 pairingIdentityExchange 触发 PQC bootstrap: peer=\(Self.protocolIdentityLogRedaction)"
         )
 
         let observedReply = await waitForPairingIdentityExchangeActivity(
@@ -1434,11 +1518,11 @@ public class P2PConnectionManager: ObservableObject {
         )
         if observedReply {
             SkyBridgeLogger.shared.info(
-                "🔁 bootstrap pairingIdentityExchange 已往返: peer=\(peerId)"
+                "🔁 bootstrap pairingIdentityExchange 已往返: peer=\(Self.protocolIdentityLogRedaction)"
             )
         } else {
             SkyBridgeLogger.shared.info(
-                "⏳ bootstrap 等待对端批准/回传 KEM identity: peer=\(peerId)"
+                "⏳ bootstrap 等待对端批准/回传 KEM identity: peer=\(Self.protocolIdentityLogRedaction)"
             )
         }
 
@@ -1458,7 +1542,7 @@ public class P2PConnectionManager: ObservableObject {
             if let suite = resolvedNegotiatedSuite(forAnyPeerId: runtimePeerId),
                suite.isPQCGroup {
                 SkyBridgeLogger.shared.info(
-                    "✅ bootstrap-assisted PQC rekey 完成: peer=\(runtimePeerId) suite=\(suite.rawValue)"
+                    "✅ bootstrap-assisted PQC rekey 完成: peer=\(Self.protocolIdentityLogRedaction) suite=\(suite.rawValue)"
                 )
                 return
             }
@@ -1537,9 +1621,9 @@ public class P2PConnectionManager: ObservableObject {
             case .reject:
                 pairingPolicyByPeerId[peerId] = PairingTrustDecision.reject.rawValue
                 savePairingPolicy()
-                SkyBridgeLogger.shared.warning("🛑 Pairing/trust request rejected: peer=\(peerId) declaredDeviceId=\(payload.deviceId)")
+                SkyBridgeLogger.shared.warning("🛑 Pairing/trust request rejected: peer=\(Self.protocolIdentityLogRedaction) declaredDeviceId=\(Self.protocolIdentityLogRedaction)")
             case .timedOut:
-                SkyBridgeLogger.shared.warning("⏳ Pairing/trust request timed out: peer=\(peerId) declaredDeviceId=\(payload.deviceId)")
+                SkyBridgeLogger.shared.warning("⏳ Pairing/trust request timed out: peer=\(Self.protocolIdentityLogRedaction) declaredDeviceId=\(Self.protocolIdentityLogRedaction)")
             }
         case .protocolIdentityBinding(let context):
             var resolutionDecision = decision
@@ -1547,17 +1631,17 @@ public class P2PConnectionManager: ObservableObject {
             case .alwaysAllow, .allowOnce:
                 if !(await installOOBProtocolIdentityBinding(context)) {
                     resolutionDecision = .reject
-                    let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(context.peerId) fingerprint=\(context.payload.protocolIdentityFingerprint) reason=authority_pin_promotion_failed lifecycle=identity-oob>failed"
+                    let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) reason=authority_pin_promotion_failed lifecycle=identity-oob>failed"
                     SkyBridgeLogger.shared.warning(line)
                     SignedKEMRefreshSmokeStatusWriter.append(line)
                 }
             case .reject:
                 SkyBridgeLogger.shared.warning(
-                    "🛑 PIB-1 protocol identity binding rejected: peer=\(context.peerId) fingerprint=\(context.payload.protocolIdentityFingerprint)"
+                    "🛑 PIB-1 protocol identity binding rejected: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction)"
                 )
             case .timedOut:
                 SkyBridgeLogger.shared.warning(
-                    "⏳ PIB-1 protocol identity binding timed out: peer=\(context.peerId) fingerprint=\(context.payload.protocolIdentityFingerprint)"
+                    "⏳ PIB-1 protocol identity binding timed out: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction)"
                 )
             }
             pendingPairingDecisionContinuationByRequestId.removeValue(forKey: request.id)?.resume(returning: resolutionDecision)
@@ -1567,17 +1651,17 @@ public class P2PConnectionManager: ObservableObject {
             case .alwaysAllow, .allowOnce:
                 if !(await installInboundRequesterProtocolIdentityBinding(context)) {
                     resolutionDecision = .reject
-                    let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(context.requesterDeviceIds.first ?? "-") fingerprint=\(context.requesterProtocolIdentityFingerprint) reason=authority_pin_promotion_failed lifecycle=identity-oob>requester-pin-failed"
+                    let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) reason=authority_pin_promotion_failed lifecycle=identity-oob>requester-pin-failed"
                     SkyBridgeLogger.shared.warning(line)
                     SignedKEMRefreshSmokeStatusWriter.append(line)
                 }
             case .reject:
                 SkyBridgeLogger.shared.warning(
-                    "🛑 PIB-1 requester protocol identity binding rejected: requester=\(context.requesterDeviceIds.first ?? "-") fingerprint=\(context.requesterProtocolIdentityFingerprint)"
+                    "🛑 PIB-1 requester protocol identity binding rejected: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction)"
                 )
             case .timedOut:
                 SkyBridgeLogger.shared.warning(
-                    "⏳ PIB-1 requester protocol identity binding timed out: requester=\(context.requesterDeviceIds.first ?? "-") fingerprint=\(context.requesterProtocolIdentityFingerprint)"
+                    "⏳ PIB-1 requester protocol identity binding timed out: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction)"
                 )
             }
             pendingPairingDecisionContinuationByRequestId.removeValue(forKey: request.id)?.resume(returning: resolutionDecision)
@@ -1829,7 +1913,7 @@ public class P2PConnectionManager: ObservableObject {
                 await transport?.removeConnection(for: key)
             }
             SkyBridgeLogger.shared.warning(
-                "⛔️ 已拒绝仅凭传输连接标记为已连接: peer=\(targetDevice.id) reason=missing_authenticated_session"
+                "⛔️ 已拒绝仅凭传输连接标记为已连接: peer=\(Self.protocolIdentityLogRedaction) reason=missing_authenticated_session"
             )
         }
         connectingCount += 1
@@ -1861,7 +1945,7 @@ public class P2PConnectionManager: ObservableObject {
             selectedEndpointDescriptionByDeviceId[targetDevice.id] = selectedEndpoint.debugDescription
             await handleConnectionStateChange(.ready, for: targetDevice)
 
-            SkyBridgeLogger.shared.info("🔗 已连接候选端点：\(targetDevice.name) endpoint=\(selectedEndpoint)")
+            SkyBridgeLogger.shared.info("🔗 已连接候选端点：device=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction)")
 
             // 发起方也必须开始接收（握手 MessageB 需要被路由到 HandshakeDriver）
             startReceiving(from: connection, peerId: targetDevice.id)
@@ -2018,21 +2102,21 @@ public class P2PConnectionManager: ObservableObject {
                     connectionErrorByDeviceId.removeValue(forKey: peerId)
                 }
 
-                SkyBridgeLogger.shared.info("🔌 已断开与 \(targetDevice.name) 的连接")
+                SkyBridgeLogger.shared.info("🔌 已断开与 \(Self.protocolIdentityLogRedaction) 的连接")
                 didDisconnect = true
             } else if purgeStalePresentationState(for: targetDevice) {
-                SkyBridgeLogger.shared.warning("🧹 已清理陈旧的连接展示态: \(targetDevice.name)")
+                SkyBridgeLogger.shared.warning("🧹 已清理陈旧的连接展示态: \(Self.protocolIdentityLogRedaction)")
                 didDisconnect = true
             }
         }
 
         if !didDisconnect, purgeStalePresentationState(for: provisionalTargetDevice) {
-            SkyBridgeLogger.shared.warning("🧹 已清理陈旧的连接展示态: \(device.name)")
+            SkyBridgeLogger.shared.warning("🧹 已清理陈旧的连接展示态: \(Self.protocolIdentityLogRedaction)")
             didDisconnect = true
         }
 
         guard didDisconnect else {
-            SkyBridgeLogger.shared.warning("ℹ️ 未找到可断开的运行时连接: \(device.name)")
+            SkyBridgeLogger.shared.warning("ℹ️ 未找到可断开的运行时连接: \(Self.protocolIdentityLogRedaction)")
             return false
         }
 
@@ -2046,12 +2130,12 @@ public class P2PConnectionManager: ObservableObject {
     /// 接受连接请求
     public func acceptConnection(from deviceID: String) async {
         // 实现连接接受逻辑
-        SkyBridgeLogger.shared.info("✅ 接受来自 \(deviceID) 的连接")
+        SkyBridgeLogger.shared.info("✅ 接受来自 \(Self.protocolIdentityLogRedaction) 的连接")
     }
     
     /// 拒绝连接请求
     public func rejectConnection(from deviceID: String) async {
-        SkyBridgeLogger.shared.info("❌ 拒绝来自 \(deviceID) 的连接")
+        SkyBridgeLogger.shared.info("❌ 拒绝来自 \(Self.protocolIdentityLogRedaction) 的连接")
     }
     
     // MARK: - Private Methods
@@ -2062,7 +2146,7 @@ public class P2PConnectionManager: ObservableObject {
             SkyBridgeLogger.shared.info("✅ 监听器就绪")
             
         case .failed(let error):
-            SkyBridgeLogger.shared.error("❌ 监听器失败: \(error.localizedDescription)")
+            SkyBridgeLogger.shared.error("❌ 监听器失败: \(Self.diagnosticErrorSummary(error))")
             isListening = false
             lastError = userVisibleConnectionError(error)
             
@@ -2077,13 +2161,13 @@ public class P2PConnectionManager: ObservableObject {
     
     /// 处理入站连接（作为响应方）
     private func handleIncomingConnection(_ connection: NWConnection, peerId: String) async {
-        SkyBridgeLogger.shared.info("📞 处理入站连接: \(peerId)")
-        smokeInboundTrace("p2p-inbound handle-start peer=\(Self.smokeSanitize(peerId))")
+        SkyBridgeLogger.shared.info("📞 处理入站连接: \(Self.protocolIdentityLogRedaction)")
+        smokeInboundTrace("p2p-inbound handle-start peer=\(Self.protocolIdentityLogRedaction)")
 
         let inboundDevice = makeActiveConnectionDevice(peerId: peerId, connection: connection)
         let canonicalPeerId = registerCanonicalPeerIdentity(candidate: inboundDevice, primaryPeerId: peerId)
         smokeInboundTrace(
-            "p2p-inbound canonical peer=\(Self.smokeSanitize(peerId)) canonical=\(Self.smokeSanitize(canonicalPeerId))"
+            "p2p-inbound canonical peer=\(Self.protocolIdentityLogRedaction) canonical=\(Self.protocolIdentityLogRedaction)"
         )
         let canonicalDevice = canonicalizedDevice(inboundDevice, canonicalPeerId: canonicalPeerId)
         lastKnownDevices[canonicalPeerId] = canonicalDevice
@@ -2105,7 +2189,7 @@ public class P2PConnectionManager: ObservableObject {
             let message = "入站连接缺少握手传输层"
             SkyBridgeLogger.shared.error("❌ \(message)")
             smokeInboundTrace(
-                "p2p-inbound transport-missing peer=\(Self.smokeSanitize(canonicalPeerId))"
+                "p2p-inbound transport-missing peer=\(Self.protocolIdentityLogRedaction)"
             )
             lastError = message
             connectionStatusByDeviceId[canonicalPeerId] = .failed
@@ -2121,9 +2205,9 @@ public class P2PConnectionManager: ObservableObject {
         startReceiving(from: connection, peerId: canonicalPeerId)
 
         currentHandshakeState = "等待握手消息..."
-        SkyBridgeLogger.shared.info("🔐 等待来自 \(canonicalPeerId) 的握手消息")
+        SkyBridgeLogger.shared.info("🔐 等待来自 \(Self.protocolIdentityLogRedaction) 的握手消息")
         smokeInboundTrace(
-            "p2p-inbound awaiting-message peer=\(Self.smokeSanitize(canonicalPeerId))"
+            "p2p-inbound awaiting-message peer=\(Self.protocolIdentityLogRedaction)"
         )
     }
     
@@ -2133,15 +2217,15 @@ public class P2PConnectionManager: ObservableObject {
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] lengthData, _, isComplete, error in
             Task { @MainActor in
                 if let error = error {
-                    SkyBridgeLogger.shared.error("❌ 接收长度头错误: \(error.localizedDescription)")
+                    SkyBridgeLogger.shared.error("❌ 接收长度头错误: \(Self.diagnosticErrorSummary(error))")
                     self?.smokeInboundTrace(
-                        "p2p-inbound rx-header-error peer=\(Self.smokeSanitize(peerId)) error=\(Self.smokeSanitize(error.localizedDescription))"
+                        "p2p-inbound rx-header-error peer=\(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))"
                     )
                     return
                 }
                 guard let lengthData, lengthData.count == 4 else {
                     self?.smokeInboundTrace(
-                        "p2p-inbound rx-header-short peer=\(Self.smokeSanitize(peerId)) bytes=\(lengthData?.count ?? 0) complete=\(isComplete ? 1 : 0)"
+                        "p2p-inbound rx-header-short peer=\(Self.protocolIdentityLogRedaction) bytes=\(lengthData?.count ?? 0) complete=\(isComplete ? 1 : 0)"
                     )
                     if !isComplete {
                         self?.startReceiving(from: connection, peerId: peerId)
@@ -2154,20 +2238,19 @@ public class P2PConnectionManager: ObservableObject {
 		                }
 	                let bodyLen = Int(length)
                     self?.smokeInboundTrace(
-                        "p2p-inbound rx-header peer=\(Self.smokeSanitize(peerId)) bodyBytes=\(bodyLen)"
+                        "p2p-inbound rx-header peer=\(Self.protocolIdentityLogRedaction) bodyBytes=\(bodyLen)"
                     )
 	                guard bodyLen <= 2_000_000 else {
                     if self?.looksLikeTLSRecordHeader(lengthData) == true {
                         SkyBridgeLogger.shared.warning("⚠️ 检测到 TLS 记录头，但当前通道期望 length-framed 明文握手，已关闭该入站连接")
                         self?.smokeInboundTrace(
-                            "p2p-inbound rx-header-invalid peer=\(Self.smokeSanitize(peerId)) reason=tls-record bodyBytes=\(bodyLen)"
+                            "p2p-inbound rx-header-invalid peer=\(Self.protocolIdentityLogRedaction) reason=tls-record bodyBytes=\(bodyLen)"
                         )
                         self?.cleanupBrokenInboundConnection(connection, peerId: peerId, reason: "传输协议不匹配（收到 TLS 记录头）")
                     } else {
-                        let headerHex = lengthData.map { String(format: "%02x", $0) }.joined()
-                        SkyBridgeLogger.shared.error("❌ 接收长度头非法: \(bodyLen) peer=\(peerId) header=0x\(headerHex)（可能连接到了错误协议或端口）")
+                        SkyBridgeLogger.shared.error("❌ 接收长度头非法: \(bodyLen) peer=\(Self.protocolIdentityLogRedaction) header=\(Self.protocolIdentityLogRedaction)（可能连接到了错误协议或端口）")
                         self?.smokeInboundTrace(
-                            "p2p-inbound rx-header-invalid peer=\(Self.smokeSanitize(peerId)) reason=length bodyBytes=\(bodyLen) header=0x\(headerHex)"
+                            "p2p-inbound rx-header-invalid peer=\(Self.protocolIdentityLogRedaction) reason=length bodyBytes=\(bodyLen) header=\(Self.protocolIdentityLogRedaction)"
                         )
                         self?.cleanupBrokenInboundConnection(connection, peerId: peerId, reason: "非法消息长度头: \(bodyLen)")
                     }
@@ -2177,20 +2260,20 @@ public class P2PConnectionManager: ObservableObject {
                 connection.receive(minimumIncompleteLength: bodyLen, maximumLength: bodyLen) { [weak self] payload, _, isComplete2, error2 in
                     Task { @MainActor in
                         if let error2 = error2 {
-                            SkyBridgeLogger.shared.error("❌ 接收消息体错误: \(error2.localizedDescription)")
+                            SkyBridgeLogger.shared.error("❌ 接收消息体错误: \(Self.diagnosticErrorSummary(error2))")
                             self?.smokeInboundTrace(
-                                "p2p-inbound rx-body-error peer=\(Self.smokeSanitize(peerId)) error=\(Self.smokeSanitize(error2.localizedDescription))"
+                                "p2p-inbound rx-body-error peer=\(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error2))"
                             )
                             return
                         }
                         if let payload, !payload.isEmpty {
                             self?.smokeInboundTrace(
-                                "p2p-inbound rx-body peer=\(Self.smokeSanitize(peerId)) bytes=\(payload.count)"
+                                "p2p-inbound rx-body peer=\(Self.protocolIdentityLogRedaction) bytes=\(payload.count)"
                             )
                             await self?.handleReceivedMessage(payload, from: peerId)
                         } else {
                             self?.smokeInboundTrace(
-                                "p2p-inbound rx-body-empty peer=\(Self.smokeSanitize(peerId)) complete=\(isComplete2 ? 1 : 0)"
+                                "p2p-inbound rx-body-empty peer=\(Self.protocolIdentityLogRedaction) complete=\(isComplete2 ? 1 : 0)"
                             )
                 }
                 
@@ -2252,15 +2335,15 @@ public class P2PConnectionManager: ObservableObject {
         // This is safe to apply unconditionally because unwrap is a no-op unless magic matches.
         let unwrapped = TrafficPadding.unwrapIfNeeded(data, label: "rx")
 
-        SkyBridgeLogger.shared.debug("📨 收到消息 (\(unwrapped.count) bytes) from \(peerId)")
+        SkyBridgeLogger.shared.debug("📨 收到消息 (\(unwrapped.count) bytes) from \(Self.protocolIdentityLogRedaction)")
         smokeInboundTrace(
-            "p2p-inbound message peer=\(Self.smokeSanitize(peerId)) bytes=\(unwrapped.count) existingDriver=\(handshakeDrivers[peerId] == nil ? 0 : 1) hasSession=\(hasStoredSessionMaterial(for: peerId) ? 1 : 0)"
+            "p2p-inbound message peer=\(Self.protocolIdentityLogRedaction) bytes=\(unwrapped.count) existingDriver=\(handshakeDrivers[peerId] == nil ? 0 : 1) hasSession=\(hasStoredSessionMaterial(for: peerId) ? 1 : 0)"
         )
 
         // 已有握手驱动器：交给握手状态机处理
         if let driver = handshakeDrivers[peerId] {
             smokeInboundTrace(
-                "p2p-inbound dispatch existing-driver peer=\(Self.smokeSanitize(peerId))"
+                "p2p-inbound dispatch existing-driver peer=\(Self.protocolIdentityLogRedaction)"
             )
             await processHandshakeFrame(unwrapped, from: peerId, initialDriver: driver)
             return
@@ -2268,7 +2351,7 @@ public class P2PConnectionManager: ObservableObject {
 
         if await handlePreHandshakeBootstrapControlMessage(unwrapped, from: peerId) {
             smokeInboundTrace(
-                "p2p-inbound bootstrap-control-consumed peer=\(Self.smokeSanitize(peerId))"
+                "p2p-inbound bootstrap-control-consumed peer=\(Self.protocolIdentityLogRedaction)"
             )
             return
         }
@@ -2277,7 +2360,7 @@ public class P2PConnectionManager: ObservableObject {
         // 若此前 driver 已进入 failed 并被移除，需要在这里按新的 MessageA 重新创建 driver。
         if let freshInboundDriver = await ensureInboundHandshakeDriverIfNeeded(for: peerId, frame: unwrapped) {
             smokeInboundTrace(
-                "p2p-inbound dispatch fresh-handshake peer=\(Self.smokeSanitize(peerId))"
+                "p2p-inbound dispatch fresh-handshake peer=\(Self.protocolIdentityLogRedaction)"
             )
             await processHandshakeFrame(unwrapped, from: peerId, initialDriver: freshInboundDriver)
             return
@@ -2287,7 +2370,7 @@ public class P2PConnectionManager: ObservableObject {
         // 若当前无 driver 但已存在 sessionKeys，且收到的是 MessageA，则切换回握手模式而不是误当业务密文。
         if let rekeyDriver = await ensureInboundRekeyDriverIfNeeded(for: peerId, frame: unwrapped) {
             smokeInboundTrace(
-                "p2p-inbound dispatch rekey peer=\(Self.smokeSanitize(peerId))"
+                "p2p-inbound dispatch rekey peer=\(Self.protocolIdentityLogRedaction)"
             )
             await processHandshakeFrame(unwrapped, from: peerId, initialDriver: rekeyDriver)
             return
@@ -2306,14 +2389,14 @@ public class P2PConnectionManager: ObservableObject {
                 await handleAppMessage(msg, from: peerId)
             } catch {
                 // 如果不是业务消息（比如对端还在发旧格式），忽略即可
-                SkyBridgeLogger.shared.debug("ℹ️ 无法解析业务消息（忽略）：\(error.localizedDescription)")
+                SkyBridgeLogger.shared.debug("ℹ️ 无法解析业务消息（忽略）：\(Self.diagnosticErrorSummary(error))")
                 smokeInboundTrace(
-                    "p2p-inbound app-message-ignored peer=\(Self.smokeSanitize(peerId)) error=\(Self.smokeSanitize(error.localizedDescription))"
+                    "p2p-inbound app-message-ignored peer=\(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))"
                 )
             }
         } else {
             smokeInboundTrace(
-                "p2p-inbound message-unhandled peer=\(Self.smokeSanitize(peerId)) hasDriver=0 hasSession=0"
+                "p2p-inbound message-unhandled peer=\(Self.protocolIdentityLogRedaction) hasDriver=0 hasSession=0"
             )
         }
     }
@@ -2338,7 +2421,7 @@ public class P2PConnectionManager: ObservableObject {
         }
 
         guard let connection = connections[peerId] else {
-            let line = "⛔️ inbound bootstrap control rejected: peer=\(peerId) reason=missing_connection"
+            let line = "⛔️ inbound bootstrap control rejected: peer=\(Self.protocolIdentityLogRedaction) reason=missing_connection"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
             return true
@@ -2356,7 +2439,7 @@ public class P2PConnectionManager: ObservableObject {
             }
             SignedKEMRefreshSmokeStatusWriter.append(response.statusLine)
         } catch {
-            let line = "⛔️ inbound bootstrap control response failed: peer=\(peerId) reason=\(error.localizedDescription)"
+            let line = "⛔️ inbound bootstrap control response failed: peer=\(Self.protocolIdentityLogRedaction) reason=\(Self.protocolIdentityLogRedaction)"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
         }
@@ -2375,9 +2458,9 @@ public class P2PConnectionManager: ObservableObject {
                 let responderLatencyMs = Date().timeIntervalSince(responseStartedAt) * 1_000.0
                 let line = String(
                     format: "🔐 SKR-1 signed LAN KEM refresh served: requester=%@ target=%@ keyId=%@ generation=%llu suites=%@ wireId=%@ responderLatencyMs=%.1f lifecycle=request>served",
-                    request.requesterDeviceId,
-                    request.targetDeviceId,
-                    payload.keyId,
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
                     payload.generation,
                     payload.kemPublicKeys.map { CryptoSuite(wireId: $0.suiteWireId).rawValue }.sorted().joined(separator: ","),
                     payload.kemPublicKeys.map { String(format: "0x%04X", $0.suiteWireId) }.sorted().joined(separator: ","),
@@ -2396,10 +2479,10 @@ public class P2PConnectionManager: ObservableObject {
                 )
                 let line = String(
                     format: "⛔️ SKR-1 signed LAN KEM refresh rejected: requester=%@ target=%@ reasonCode=%@ reason=%@ responderLatencyMs=%.1f lifecycle=request>rejected",
-                    request.requesterDeviceId,
-                    request.targetDeviceId,
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
                     failure.reasonCode,
-                    error.localizedDescription,
+                    Self.protocolIdentityLogRedaction,
                     responderLatencyMs
                 )
                 return .init(message: .kemRefreshFailure(failure), statusLine: line, isFailure: true)
@@ -2411,8 +2494,7 @@ public class P2PConnectionManager: ObservableObject {
                     for: request,
                     peerId: peerId
                 )
-                let code = payload.shortAuthenticationCode(request: request)
-                let line = "🔐 PIB-1 protocol identity binding served: requester=\(request.requesterDeviceId) target=\(request.targetDeviceId) fingerprint=\(payload.protocolIdentityFingerprint) code=\(code) lifecycle=identity-oob>served"
+                let line = "🔐 PIB-1 protocol identity binding served: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>served"
                 return .init(message: .signedProtocolIdentityBinding(payload), statusLine: line, isFailure: false)
             } catch {
                 let failure = AppMessage.KEMRefreshFailurePayload(
@@ -2423,7 +2505,7 @@ public class P2PConnectionManager: ObservableObject {
                     reason: error.localizedDescription,
                     requestHashHex: request.canonicalRequestHashHex
                 )
-                let line = "⛔️ PIB-1 protocol identity binding rejected: requester=\(request.requesterDeviceId) target=\(request.targetDeviceId) reasonCode=\(failure.reasonCode) reason=\(error.localizedDescription) lifecycle=identity-oob>rejected"
+                let line = "⛔️ PIB-1 protocol identity binding rejected: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) reasonCode=\(failure.reasonCode) reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>rejected"
                 return .init(message: .kemRefreshFailure(failure), statusLine: line, isFailure: true)
             }
 
@@ -2674,7 +2756,7 @@ public class P2PConnectionManager: ObservableObject {
             receivedAt: Date()
         )
         let timeoutSeconds = Self.protocolIdentityBindingApprovalTimeoutSeconds()
-        let awaitingLine = "🔐 PIB-1 requester protocol identity awaiting operator approval: requester=\(stableRequesterId) fingerprint=\(requesterFingerprint) code=\(verificationCode) peer=\(peerId) timeoutSeconds=\(timeoutSeconds) lifecycle=identity-oob>awaiting-requester-approval"
+        let awaitingLine = "🔐 PIB-1 requester protocol identity awaiting operator approval: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) peer=\(Self.protocolIdentityLogRedaction) timeoutSeconds=\(timeoutSeconds) lifecycle=identity-oob>awaiting-requester-approval"
         SkyBridgeLogger.shared.info(awaitingLine)
         SignedKEMRefreshSmokeStatusWriter.append(awaitingLine)
         return await withCheckedContinuation { continuation in
@@ -2689,7 +2771,7 @@ public class P2PConnectionManager: ObservableObject {
                 if self.pendingPairingTrustRequest?.id == requestId {
                     self.pendingPairingTrustRequest = nil
                 }
-                let line = "⏳ PIB-1 requester protocol identity approval timed out: requester=\(stableRequesterId) fingerprint=\(requesterFingerprint) code=\(verificationCode) timeoutSeconds=\(timeoutSeconds) lifecycle=identity-oob>timeout"
+                let line = "⏳ PIB-1 requester protocol identity approval timed out: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) timeoutSeconds=\(timeoutSeconds) lifecycle=identity-oob>timeout"
                 SkyBridgeLogger.shared.warning(line)
                 SignedKEMRefreshSmokeStatusWriter.append(line)
                 timedOut.resume(returning: .timedOut)
@@ -2779,18 +2861,18 @@ public class P2PConnectionManager: ObservableObject {
         let handshakeFrame = HandshakePadding.unwrapIfNeeded(frame, label: "rx")
         guard let messageA = try? HandshakeMessageA.decode(from: handshakeFrame) else {
             smokeInboundTrace(
-                "p2p-inbound messageA-decode-miss peer=\(Self.smokeSanitize(peerId)) bytes=\(handshakeFrame.count)"
+                "p2p-inbound messageA-decode-miss peer=\(Self.protocolIdentityLogRedaction) bytes=\(handshakeFrame.count)"
             )
             return nil
         }
         guard !messageA.supportedSuites.isEmpty else {
             smokeInboundTrace(
-                "p2p-inbound messageA-empty-suites peer=\(Self.smokeSanitize(peerId))"
+                "p2p-inbound messageA-empty-suites peer=\(Self.protocolIdentityLogRedaction)"
             )
             return nil
         }
         smokeInboundTrace(
-            "p2p-inbound messageA-decoded peer=\(Self.smokeSanitize(peerId)) suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
+            "p2p-inbound messageA-decoded peer=\(Self.protocolIdentityLogRedaction) suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
         )
 
         if hasStoredSessionMaterial(for: peerId) {
@@ -2800,15 +2882,15 @@ public class P2PConnectionManager: ObservableObject {
                     reason: "message_a_without_authenticated_session"
                 )
                 SkyBridgeLogger.shared.warning(
-                    "🧹 清理陈旧入站会话状态，按 fresh handshake 重新处理: peer=\(peerId)"
+                    "🧹 清理陈旧入站会话状态，按 fresh handshake 重新处理: peer=\(Self.protocolIdentityLogRedaction)"
                 )
                 smokeInboundTrace(
-                    "p2p-inbound stale-session-cleared peer=\(Self.smokeSanitize(peerId))"
+                    "p2p-inbound stale-session-cleared peer=\(Self.protocolIdentityLogRedaction)"
                 )
             }
             guard !hasStoredSessionMaterial(for: peerId) else {
                 smokeInboundTrace(
-                    "p2p-inbound fresh-handshake-deferred-to-rekey peer=\(Self.smokeSanitize(peerId))"
+                    "p2p-inbound fresh-handshake-deferred-to-rekey peer=\(Self.protocolIdentityLogRedaction)"
                 )
                 return nil
             }
@@ -2824,14 +2906,14 @@ public class P2PConnectionManager: ObservableObject {
                 messageA: messageA
             ) else {
                 smokeInboundTrace(
-                    "p2p-inbound strict-trust-missing peer=\(Self.smokeSanitize(peerId)) stage=inbound-handshake"
+                    "p2p-inbound strict-trust-missing peer=\(Self.protocolIdentityLogRedaction) stage=inbound-handshake"
                 )
                 return nil
             }
             strictTrustContext = context
             strictInboundStablePeerIdByRuntimePeerId[peerId] = context.stablePeerId
             smokeInboundTrace(
-                "p2p-inbound strict-trust-ready peer=\(Self.smokeSanitize(peerId)) stable=\(Self.smokeSanitize(context.stablePeerId)) stage=inbound-handshake"
+                "p2p-inbound strict-trust-ready peer=\(Self.protocolIdentityLogRedaction) stable=\(Self.protocolIdentityLogRedaction) stage=inbound-handshake"
             )
         } else {
             strictTrustContext = nil
@@ -2862,19 +2944,19 @@ public class P2PConnectionManager: ObservableObject {
                 handshakeDrivers[peerId] = driver
             }
         } catch {
-            SkyBridgeLogger.shared.warning("⚠️ 入站握手 driver 重建失败: \(error.localizedDescription)")
+            SkyBridgeLogger.shared.warning("⚠️ 入站握手 driver 重建失败: \(Self.diagnosticErrorSummary(error))")
             smokeInboundTrace(
-                "p2p-inbound driver-create-failed peer=\(Self.smokeSanitize(peerId)) stage=inbound-handshake error=\(Self.smokeSanitize(error.localizedDescription))"
+                "p2p-inbound driver-create-failed peer=\(Self.protocolIdentityLogRedaction) stage=inbound-handshake error=\(Self.diagnosticErrorSummary(error))"
             )
             return nil
         }
 
         currentHandshakeState = "收到新的入站握手请求，握手中..."
         SkyBridgeLogger.shared.info(
-            "🔁 重新创建入站握手驱动器: peer=\(peerId) suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
+            "🔁 重新创建入站握手驱动器: peer=\(Self.protocolIdentityLogRedaction) suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
         )
         smokeInboundTrace(
-            "p2p-inbound driver-created peer=\(Self.smokeSanitize(peerId)) stage=inbound-handshake suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
+            "p2p-inbound driver-created peer=\(Self.protocolIdentityLogRedaction) stage=inbound-handshake suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
         )
         return handshakeDrivers[peerId]
     }
@@ -2913,12 +2995,12 @@ public class P2PConnectionManager: ObservableObject {
             handshakeDrivers.removeValue(forKey: peerId)
             clearRekeyInProgress(for: peerId)
             currentHandshakeState = "握手成功 (Suite: \(keys.negotiatedSuite.rawValue))"
-            SkyBridgeLogger.shared.info("✅ 握手完成: \(peerId) (Suite: \(keys.negotiatedSuite.rawValue))")
+            SkyBridgeLogger.shared.info("✅ 握手完成: \(Self.protocolIdentityLogRedaction) (Suite: \(keys.negotiatedSuite.rawValue))")
             connectionStatusByDeviceId[peerId] = .connected
             connectionErrorByDeviceId.removeValue(forKey: peerId)
             startHeartbeatIfNeeded(deviceId: peerId)
             smokeInboundTrace(
-                "p2p-inbound handshake-established peer=\(Self.smokeSanitize(peerId)) suite=\(Self.smokeSanitize(keys.negotiatedSuite.rawValue))"
+                "p2p-inbound handshake-established peer=\(Self.protocolIdentityLogRedaction) suite=\(Self.smokeSanitize(keys.negotiatedSuite.rawValue))"
             )
 
             let activeDevice = makeActiveConnectionDevice(
@@ -2946,9 +3028,9 @@ public class P2PConnectionManager: ObservableObject {
             lastError = message
             connectionStatusByDeviceId[peerId] = .failed
             connectionErrorByDeviceId[peerId] = message
-            SkyBridgeLogger.shared.error("❌ 握手失败: \(peerId) - \(reason)")
+            SkyBridgeLogger.shared.error("❌ 握手失败: \(Self.protocolIdentityLogRedaction) reason=\(Self.diagnosticHandshakeFailureCode(reason))")
             smokeInboundTrace(
-                "p2p-inbound handshake-failed peer=\(Self.smokeSanitize(peerId)) error=\(Self.smokeSanitize(String(describing: reason)))"
+                "p2p-inbound handshake-failed peer=\(Self.protocolIdentityLogRedaction) reason=\(Self.diagnosticHandshakeFailureCode(reason))"
             )
 
         default:
@@ -2964,18 +3046,18 @@ public class P2PConnectionManager: ObservableObject {
         let handshakeFrame = HandshakePadding.unwrapIfNeeded(frame, label: "rx")
         guard let messageA = try? HandshakeMessageA.decode(from: handshakeFrame) else {
             smokeInboundTrace(
-                "p2p-inbound rekey-messageA-decode-miss peer=\(Self.smokeSanitize(peerId)) bytes=\(handshakeFrame.count)"
+                "p2p-inbound rekey-messageA-decode-miss peer=\(Self.protocolIdentityLogRedaction) bytes=\(handshakeFrame.count)"
             )
             return nil
         }
         guard !messageA.supportedSuites.isEmpty else {
             smokeInboundTrace(
-                "p2p-inbound rekey-messageA-empty-suites peer=\(Self.smokeSanitize(peerId))"
+                "p2p-inbound rekey-messageA-empty-suites peer=\(Self.protocolIdentityLogRedaction)"
             )
             return nil
         }
         smokeInboundTrace(
-            "p2p-inbound rekey-messageA-decoded peer=\(Self.smokeSanitize(peerId)) suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
+            "p2p-inbound rekey-messageA-decoded peer=\(Self.protocolIdentityLogRedaction) suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
         )
 
         let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
@@ -2988,14 +3070,14 @@ public class P2PConnectionManager: ObservableObject {
                 messageA: messageA
             ) else {
                 smokeInboundTrace(
-                    "p2p-inbound strict-trust-missing peer=\(Self.smokeSanitize(peerId)) stage=inbound-rekey"
+                    "p2p-inbound strict-trust-missing peer=\(Self.protocolIdentityLogRedaction) stage=inbound-rekey"
                 )
                 return nil
             }
             strictTrustContext = context
             strictInboundStablePeerIdByRuntimePeerId[peerId] = context.stablePeerId
             smokeInboundTrace(
-                "p2p-inbound strict-trust-ready peer=\(Self.smokeSanitize(peerId)) stable=\(Self.smokeSanitize(context.stablePeerId)) stage=inbound-rekey"
+                "p2p-inbound strict-trust-ready peer=\(Self.protocolIdentityLogRedaction) stable=\(Self.protocolIdentityLogRedaction) stage=inbound-rekey"
             )
         } else {
             strictTrustContext = nil
@@ -3026,9 +3108,9 @@ public class P2PConnectionManager: ObservableObject {
                 handshakeDrivers[peerId] = driver
             }
         } catch {
-            SkyBridgeLogger.shared.warning("⚠️ 入站 rekey driver 初始化失败: \(error.localizedDescription)")
+            SkyBridgeLogger.shared.warning("⚠️ 入站 rekey driver 初始化失败: \(Self.diagnosticErrorSummary(error))")
             smokeInboundTrace(
-                "p2p-inbound driver-create-failed peer=\(Self.smokeSanitize(peerId)) stage=inbound-rekey error=\(Self.smokeSanitize(error.localizedDescription))"
+                "p2p-inbound driver-create-failed peer=\(Self.protocolIdentityLogRedaction) stage=inbound-rekey error=\(Self.diagnosticErrorSummary(error))"
             )
             return nil
         }
@@ -3046,10 +3128,10 @@ public class P2PConnectionManager: ObservableObject {
         rekeyInProgress.insert(peerId)
         currentHandshakeState = "收到对端 rekey 请求，重新握手中..."
         SkyBridgeLogger.shared.info(
-            "🔁 收到对端 rekey 请求，切换到握手模式: peer=\(peerId) suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
+            "🔁 收到对端 rekey 请求，切换到握手模式: peer=\(Self.protocolIdentityLogRedaction) suites=\(messageA.supportedSuites.map(\.rawValue).joined(separator: ","))"
         )
         smokeInboundTrace(
-            "p2p-inbound driver-created peer=\(Self.smokeSanitize(peerId)) stage=inbound-rekey suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
+            "p2p-inbound driver-created peer=\(Self.protocolIdentityLogRedaction) stage=inbound-rekey suites=\(Self.smokeSanitize(messageA.supportedSuites.map(\.rawValue).joined(separator: ",")))"
         )
         return handshakeDrivers[peerId]
     }
@@ -3078,7 +3160,7 @@ public class P2PConnectionManager: ObservableObject {
             guard let data = payload.decodedData else { return }
             ClipboardManager.shared.setRemoteClipboard(data: data, mimeType: payload.mimeType, fromDeviceId: peerId)
             ClipboardManager.shared.recordDeviceSync(deviceId: peerId, mimeType: payload.mimeType, bytes: data.count)
-            SkyBridgeLogger.shared.info("📋 已接收远端剪贴板：\(peerId)")
+            SkyBridgeLogger.shared.info("📋 已接收远端剪贴板：\(Self.protocolIdentityLogRedaction)")
         case .pairingIdentityExchange(let payload):
             await handlePairingIdentityExchangeRequest(from: peerId, payload: payload)
         case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
@@ -3305,7 +3387,7 @@ public class P2PConnectionManager: ObservableObject {
             let ciphertext = try encryptForDevice(payload, deviceId: peerId)
             try await send(data: ciphertext, over: connection)
         } catch {
-            SkyBridgeLogger.shared.debug("ℹ️ pong reply failed (ignored): \(error.localizedDescription)")
+            SkyBridgeLogger.shared.debug("ℹ️ pong reply failed (ignored): \(Self.diagnosticErrorSummary(error))")
         }
     }
 
@@ -3325,7 +3407,7 @@ public class P2PConnectionManager: ObservableObject {
             let ciphertext = try encryptForDevice(payload, deviceId: peerId)
             try await send(data: ciphertext, over: connection)
         } catch {
-            SkyBridgeLogger.shared.debug("ℹ️ peerDisconnecting 发送失败（忽略）: \(error.localizedDescription)")
+            SkyBridgeLogger.shared.debug("ℹ️ peerDisconnecting 发送失败（忽略）: \(Self.diagnosticErrorSummary(error))")
         }
     }
     
@@ -3347,7 +3429,7 @@ public class P2PConnectionManager: ObservableObject {
                 await acceptPairingIdentityExchange(from: peerId, payload: payload, trustPeer: true, persistTrust: true)
                 return
             case .reject:
-                SkyBridgeLogger.shared.warning("🛑 Pairing/trust request auto-rejected: peer=\(peerId) declaredDeviceId=\(payload.deviceId)")
+                SkyBridgeLogger.shared.warning("🛑 Pairing/trust request auto-rejected: peer=\(Self.protocolIdentityLogRedaction) declaredDeviceId=\(Self.protocolIdentityLogRedaction)")
                 return
             case .allowOnce, .timedOut:
                 // Should not be persisted; fall through to prompt.
@@ -3364,7 +3446,7 @@ public class P2PConnectionManager: ObservableObject {
         
         // If another prompt is already showing, don't overwrite it. Keep the first one.
         guard pendingPairingTrustRequest == nil else {
-            SkyBridgeLogger.shared.warning("ℹ️ Pairing/trust request received but UI prompt already pending; ignoring duplicate. peer=\(peerId)")
+            SkyBridgeLogger.shared.warning("ℹ️ Pairing/trust request received but UI prompt already pending; ignoring duplicate. peer=\(Self.protocolIdentityLogRedaction)")
             return
         }
         
@@ -3390,7 +3472,7 @@ public class P2PConnectionManager: ObservableObject {
             receivedAt: Date()
         )
         
-        SkyBridgeLogger.shared.info("🔔 收到配对/受信任申请：\(device.name) platform=\(device.platform.displayName) os=\(device.osVersion) peerId=\(peerId)")
+        SkyBridgeLogger.shared.info("🔔 收到配对/受信任申请：device=\(Self.protocolIdentityLogRedaction) platform=\(device.platform.displayName) os=\(device.osVersion) peerId=\(Self.protocolIdentityLogRedaction)")
     }
     
     private func scheduleBootstrapRekeyIfNeeded(peerId: String, suiteRaw: String) {
@@ -3442,7 +3524,7 @@ public class P2PConnectionManager: ObservableObject {
                 // On LAN bootstrap paths the remote side can still be transitioning
                 // from `waitingFinished` to steady-state app-message handling.
                 try? await Task.sleep(for: .seconds(2))
-                SkyBridgeLogger.shared.info("🔁 已获得对端 KEM 公钥，开始 rekey 到 PQC… peer=\(peerId)")
+                SkyBridgeLogger.shared.info("🔁 已获得对端 KEM 公钥，开始 rekey 到 PQC… peer=\(Self.protocolIdentityLogRedaction)")
                 try await self.rekeyToPreferPQC(deviceId: peerId, allowSOA: false)
                 for effectivePeerId in self.connectionStatePeerIds(for: peerId) {
                     self.connectionErrorByDeviceId.removeValue(forKey: effectivePeerId)
@@ -3453,7 +3535,7 @@ public class P2PConnectionManager: ObservableObject {
                     self.connectionErrorByDeviceId[effectivePeerId] = "PQC 切换失败：\(self.userVisibleConnectionError(error))"
                 }
                 self.clearRekeyPresentationStatus(for: peerId)
-                SkyBridgeLogger.shared.error("❌ rekeyToPreferPQC failed: \(error.localizedDescription)")
+                SkyBridgeLogger.shared.error("❌ rekeyToPreferPQC failed: \(Self.diagnosticErrorSummary(error))")
             }
         }
     }
@@ -3548,7 +3630,7 @@ public class P2PConnectionManager: ObservableObject {
             } catch {
                 lastError = error
                 SkyBridgeLogger.shared.debug(
-                    "ℹ️ SKR-1 signed LAN KEM refresh skipped local protocol identity key alg=\(algorithm.rawValue): \(error.localizedDescription)"
+                    "ℹ️ SKR-1 signed LAN KEM refresh skipped local protocol identity key alg=\(algorithm.rawValue): \(Self.diagnosticErrorSummary(error))"
                 )
             }
         }
@@ -3598,7 +3680,7 @@ public class P2PConnectionManager: ObservableObject {
             } catch {
                 lastError = error
                 SkyBridgeLogger.shared.debug(
-                    "ℹ️ PIB-1 requester proof skipped local protocol identity key alg=\(algorithm.rawValue): \(error.localizedDescription)"
+                    "ℹ️ PIB-1 requester proof skipped local protocol identity key alg=\(algorithm.rawValue): \(Self.diagnosticErrorSummary(error))"
                 )
             }
         }
@@ -3617,7 +3699,7 @@ public class P2PConnectionManager: ObservableObject {
                 keys.append(.init(protocolSigningAlgorithm: algorithm.rawValue, publicKey: publicKey))
             } catch {
                 SkyBridgeLogger.shared.debug(
-                    "ℹ️ P2P pairingIdentityExchange skipped protocol identity key alg=\(algorithm.rawValue): \(error.localizedDescription)"
+                    "ℹ️ P2P pairingIdentityExchange skipped protocol identity key alg=\(algorithm.rawValue): \(Self.diagnosticErrorSummary(error))"
                 )
             }
         }
@@ -3631,9 +3713,8 @@ public class P2PConnectionManager: ObservableObject {
         persistTrust: Bool
     ) async {
         guard let payload = payload.normalizedBootstrapPayload else {
-            let runtimePeerId = canonicalPeerLookupKey(peerId)
             SkyBridgeLogger.shared.warning(
-                "⚠️ 忽略无效 pairingIdentityExchange: peer=\(runtimePeerId) keys=\(payload.kemPublicKeys.count)"
+                "⚠️ 忽略无效 pairingIdentityExchange: peer=\(Self.protocolIdentityLogRedaction) keys=\(payload.kemPublicKeys.count)"
             )
             return
         }
@@ -3684,7 +3765,7 @@ public class P2PConnectionManager: ObservableObject {
         for candidate in bootstrapKEMLookupCandidates(for: peerId) + [declaredDeviceId] where !protocolFingerprints.isEmpty {
             await ProtocolIdentityTrustStore.shared.upsert(deviceId: candidate, fingerprints: protocolFingerprints)
         }
-        SkyBridgeLogger.shared.info("🔑 已保存对端 KEM 公钥：peer=\(peerId) declaredDeviceId=\(declaredDeviceId) keys=\(payload.kemPublicKeys.count)")
+        SkyBridgeLogger.shared.info("🔑 已保存对端 KEM 公钥：peer=\(Self.protocolIdentityLogRedaction) declaredDeviceId=\(Self.protocolIdentityLogRedaction) keys=\(payload.kemPublicKeys.count)")
         lastPairingIdentityBootstrapReadyAt[peerId] = observedAt
         lastPairingIdentityBootstrapReadyAt[presentationPeerId] = observedAt
         
@@ -3706,7 +3787,7 @@ public class P2PConnectionManager: ObservableObject {
                 )
             }
             if persistTrust {
-                SkyBridgeLogger.shared.info("✅ 已加入受信任设备：\(device.name) peerId=\(peerId)")
+                SkyBridgeLogger.shared.info("✅ 已加入受信任设备：\(Self.protocolIdentityLogRedaction) peerId=\(Self.protocolIdentityLogRedaction)")
             }
         }
 
@@ -3728,9 +3809,9 @@ public class P2PConnectionManager: ObservableObject {
         lastPairingIdentityExchangeSentAt[peerId] = Date()
         do {
             try await sendPairingIdentityExchange(to: peerId)
-            SkyBridgeLogger.shared.info("🔁 pairingIdentityExchange replied to peer=\(peerId)")
+            SkyBridgeLogger.shared.info("🔁 pairingIdentityExchange replied to peer=\(Self.protocolIdentityLogRedaction)")
         } catch {
-            SkyBridgeLogger.shared.debug("ℹ️ pairingIdentityExchange reply failed (ignored): \(error.localizedDescription)")
+            SkyBridgeLogger.shared.debug("ℹ️ pairingIdentityExchange reply failed (ignored): \(Self.diagnosticErrorSummary(error))")
         }
     }
 
@@ -3743,11 +3824,11 @@ public class P2PConnectionManager: ObservableObject {
                negotiatedSuite.isPQCGroup {
                 clearRekeyInProgress(for: deviceId)
                 SkyBridgeLogger.shared.info(
-                    "🔁 cleared stale rekey marker before pairingIdentityExchange: peer=\(deviceId) suite=\(negotiatedSuite.rawValue)"
+                    "🔁 cleared stale rekey marker before pairingIdentityExchange: peer=\(Self.protocolIdentityLogRedaction) suite=\(negotiatedSuite.rawValue)"
                 )
             } else {
                 SkyBridgeLogger.shared.info(
-                    "⏳ pairingIdentityExchange delayed during active rekey: peer=\(deviceId)"
+                    "⏳ pairingIdentityExchange delayed during active rekey: peer=\(Self.protocolIdentityLogRedaction)"
                 )
                 return
             }
@@ -3791,7 +3872,7 @@ public class P2PConnectionManager: ObservableObject {
         let ciphertext = try encryptForDevice(payload, deviceId: deviceId)
         try await send(data: ciphertext, over: connection)
         lastPairingIdentityExchangeSentAt[deviceId] = Date()
-        SkyBridgeLogger.shared.info("📤 pairingIdentityExchange sent: peer=\(deviceId) keys=\(kemKeys.count)")
+        SkyBridgeLogger.shared.info("📤 pairingIdentityExchange sent: peer=\(Self.protocolIdentityLogRedaction) keys=\(kemKeys.count)")
     }
 
     public func waitForPairingIdentityExchangeActivity(
@@ -3950,10 +4031,10 @@ public class P2PConnectionManager: ObservableObject {
 
         if let connection, !isTrackedConnection(connection) {
             SkyBridgeLogger.shared.info(
-                "ℹ️ 忽略旧连接状态回调: \(effectiveDevice.name) state=\(state)"
+                "ℹ️ 忽略旧连接状态回调: \(Self.protocolIdentityLogRedaction) state=\(Self.diagnosticConnectionState(state))"
             )
             smokeInboundTrace(
-                "p2p-connection stale-state-ignored peer=\(Self.smokeSanitize(runtimePeerId)) state=\(Self.smokeSanitize(String(describing: state)))"
+                "p2p-connection stale-state-ignored peer=\(Self.protocolIdentityLogRedaction) state=\(Self.diagnosticConnectionState(state))"
             )
             return
         }
@@ -3974,7 +4055,7 @@ public class P2PConnectionManager: ObservableObject {
                 connectionStatusByDeviceId[peerId] = .connecting
                 connectionErrorByDeviceId[peerId] = userVisibleConnectionError(error)
             }
-            SkyBridgeLogger.shared.warning("⏳ 连接等待网络: \(effectiveDevice.name) error=\(error.localizedDescription)")
+            SkyBridgeLogger.shared.warning("⏳ 连接等待网络: \(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))")
             
         case .failed(let error):
             let isPathRecoverySocketFailure = Self.isRecoverablePathRecoverySocketFailure(
@@ -3984,10 +4065,10 @@ public class P2PConnectionManager: ObservableObject {
             )
             if isPathRecoverySocketFailure {
                 SkyBridgeLogger.shared.info(
-                    "ℹ️ 连接路径恢复中: \(effectiveDevice.name) error=\(error.localizedDescription)"
+                    "ℹ️ 连接路径恢复中: \(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))"
                 )
             } else {
-                SkyBridgeLogger.shared.error("❌ 连接失败: \(effectiveDevice.name) error=\(error.localizedDescription)")
+                SkyBridgeLogger.shared.error("❌ 连接失败: \(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))")
             }
             for peerId in peerIds {
                 if isPathRecoverySocketFailure {
@@ -4043,7 +4124,7 @@ public class P2PConnectionManager: ObservableObject {
                connectionErrorByDeviceId[presentationPeerId] == nil {
                 connectionErrorByDeviceId[presentationPeerId] = "连接已断开（系统未提供错误原因）"
             }
-            SkyBridgeLogger.shared.info("⏹️ 连接已取消/断开: \(effectiveDevice.name) user=\(wasUser)")
+            SkyBridgeLogger.shared.info("⏹️ 连接已取消/断开: \(Self.protocolIdentityLogRedaction) user=\(wasUser)")
             heartbeatTasks[runtimePeerId]?.cancel()
             heartbeatTasks.removeValue(forKey: runtimePeerId)
             pathRecoveryTasks[runtimePeerId]?.cancel()
@@ -4281,7 +4362,7 @@ public class P2PConnectionManager: ObservableObject {
             connectionErrorByDeviceId[peerId] = message
         }
         SkyBridgeLogger.shared.warning(
-            "🔐 stale peer KEM detected and cleared: peer=\(device.id) preserveProtocolIdentity=1 nextStage=kem_refresh err=\(error.localizedDescription)"
+            "🔐 stale peer KEM detected and cleared: peer=\(Self.protocolIdentityLogRedaction) preserveProtocolIdentity=1 nextStage=kem_refresh err=\(Self.protocolIdentityLogRedaction)"
         )
         return true
     }
@@ -4309,14 +4390,14 @@ public class P2PConnectionManager: ObservableObject {
                 "reason=missing_pinned_identity_requires_oob oob=short_authentication_string。当前不会 classic fallback，也不会继续伪成功。"
             currentHandshakeState = message
             lastError = message
-            let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(device.id) stage=stale-kem-refresh reason=missing_pinned_identity_requires_oob pinnedProtocolIdentity=0 lifecycle=stale-kem>failed"
+            let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(Self.protocolIdentityLogRedaction) stage=stale-kem-refresh reason=missing_pinned_identity_requires_oob pinnedProtocolIdentity=0 lifecycle=stale-kem>failed"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
             throw HandshakeError.failed(.missingPeerKEMPublicKey(suite: preferredStrictPQCHandshakeTargetSuite()?.rawValue ?? "PQC"))
         }
 
         let preferredTargetSuite = preferredStrictPQCHandshakeTargetSuite()
-        let startLine = "🔐 SKR-1 signed LAN KEM refresh after stale KEM: peer=\(device.id) stage=stale-kem-refresh pinnedProtocolIdentity=1 failure=messageBPayloadAuthenticationFailed lifecycle=stale-kem>kem-refresh"
+        let startLine = "🔐 SKR-1 signed LAN KEM refresh after stale KEM: peer=\(Self.protocolIdentityLogRedaction) stage=stale-kem-refresh pinnedProtocolIdentity=1 failure=messageBPayloadAuthenticationFailed lifecycle=stale-kem>kem-refresh"
         currentHandshakeState = "PQC KEM 缓存已清除，协议身份 pin 已保留，正在执行 SKR-1 signed LAN refresh"
         SkyBridgeLogger.shared.warning(startLine)
         SignedKEMRefreshSmokeStatusWriter.append(startLine)
@@ -4331,10 +4412,10 @@ public class P2PConnectionManager: ObservableObject {
         } catch {
             let message =
                 "messageBPayloadAuthenticationFailed 后进入 stage=kem_refresh，但 SKR-1 signed LAN refresh 失败：" +
-                "\(error.localizedDescription)。当前不会 classic fallback，也不会继续伪成功。"
+                "reason=redacted。当前不会 classic fallback，也不会继续伪成功。"
             currentHandshakeState = message
             lastError = message
-            let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(device.id) stage=stale-kem-refresh reason=\(error.localizedDescription) pinnedProtocolIdentity=1 lifecycle=stale-kem>failed"
+            let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(Self.protocolIdentityLogRedaction) stage=stale-kem-refresh reason=\(Self.protocolIdentityLogRedaction) pinnedProtocolIdentity=1 lifecycle=stale-kem>failed"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
             throw error
@@ -4351,7 +4432,7 @@ public class P2PConnectionManager: ObservableObject {
                 "expected=\(preferredTargetSuite?.rawValue ?? "PQC") importedSuites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))。"
             currentHandshakeState = message
             lastError = message
-            let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(device.id) stage=stale-kem-refresh reason=strict-suite-unsatisfied pinnedProtocolIdentity=1 lifecycle=stale-kem>failed"
+            let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(Self.protocolIdentityLogRedaction) stage=stale-kem-refresh reason=strict-suite-unsatisfied pinnedProtocolIdentity=1 lifecycle=stale-kem>failed"
             SkyBridgeLogger.shared.warning(line)
             SignedKEMRefreshSmokeStatusWriter.append(line)
             throw HandshakeError.failed(.missingPeerKEMPublicKey(suite: preferredTargetSuite?.rawValue ?? "PQC"))
@@ -4359,7 +4440,7 @@ public class P2PConnectionManager: ObservableObject {
 
         currentHandshakeState = "SKR-1 signed LAN refresh 已完成，正在重新发起 strict PQC/X-Wing 握手"
         SkyBridgeLogger.shared.info(
-            "🔐 SKR-1 stale KEM recovery imported trusted KEM; retrying strict PQC handshake: peer=\(device.id) suites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))"
+            "🔐 SKR-1 stale KEM recovery imported trusted KEM; retrying strict PQC handshake: peer=\(Self.protocolIdentityLogRedaction) suites=\(refreshedSuites.map(\.rawValue).sorted().joined(separator: ","))"
         )
         return true
     }
@@ -5522,19 +5603,18 @@ public class P2PConnectionManager: ObservableObject {
             let peerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)
             let connection = NWConnection(to: endpoint, using: makeConnectionParameters(for: endpoint))
             let readyGate = ConnectionReadyGate()
-            let endpointDescription = String(describing: endpoint)
 
             connection.stateUpdateHandler = { state in
                 readyGate.onState(state)
                 if case .waiting(let error) = state {
                     SkyBridgeLogger.shared.debug(
-                        "⏳ 候选端点等待网络[\(index + 1)/\(endpoints.count)]: \(device.name) endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                        "⏳ 候选端点等待网络[\(index + 1)/\(endpoints.count)]: device=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))"
                     )
                 }
             }
 
             SkyBridgeLogger.shared.info(
-                "🔗 尝试连接候选端点[\(index + 1)/\(endpoints.count)]: \(device.name) endpoint=\(endpointDescription) peerToPeer=\(peerToPeer)"
+                "🔗 尝试连接候选端点[\(index + 1)/\(endpoints.count)]: device=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) peerToPeer=\(peerToPeer)"
             )
             connection.start(queue: queue)
 
@@ -5560,7 +5640,7 @@ public class P2PConnectionManager: ObservableObject {
                 lastError = error
                 connection.cancel()
                 SkyBridgeLogger.shared.warning(
-                    "⚠️ 候选端点连接失败[\(index + 1)/\(endpoints.count)]: \(device.name) endpoint=\(endpointDescription) error=\(error.localizedDescription)"
+                    "⚠️ 候选端点连接失败[\(index + 1)/\(endpoints.count)]: device=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) error=\(Self.diagnosticErrorSummary(error))"
                 )
             }
         }
@@ -5579,7 +5659,7 @@ public class P2PConnectionManager: ObservableObject {
         connection.viabilityUpdateHandler = { [weak self] viable in
             Task { @MainActor in
                 guard let self else { return }
-                SkyBridgeLogger.shared.debug("🌐 连接可用性变化：\(device.name) viable=\(viable)")
+                SkyBridgeLogger.shared.debug("🌐 连接可用性变化：device=\(Self.protocolIdentityLogRedaction) viable=\(viable)")
                 if !viable {
                     self.connectionStatusByDeviceId[device.id] = .connecting
                     self.schedulePathRecoveryIfNeeded(
@@ -5592,7 +5672,7 @@ public class P2PConnectionManager: ObservableObject {
 
         connection.betterPathUpdateHandler = { [weak self] betterPath in
             Task { @MainActor in
-                SkyBridgeLogger.shared.debug("🌐 更优路径可用：\(device.name) betterPath=\(betterPath)")
+                SkyBridgeLogger.shared.debug("🌐 更优路径可用：device=\(Self.protocolIdentityLogRedaction) betterPath=\(betterPath)")
                 guard let self, betterPath else { return }
                 self.schedulePathRecoveryIfNeeded(
                     deviceId: self.canonicalPeerLookupKey(device.id),
@@ -5636,7 +5716,7 @@ public class P2PConnectionManager: ObservableObject {
             legacyIdentifiers: legacyIdentifiers
         )
         SkyBridgeLogger.shared.info(
-            "🔧 已修复受信任设备主键与 KEM 映射: \(requestedDevice.id) -> \(canonicalStableId)"
+            "🔧 已修复受信任设备主键与 KEM 映射: \(Self.protocolIdentityLogRedaction) -> \(Self.protocolIdentityLogRedaction)"
         )
     }
 
@@ -5751,11 +5831,11 @@ public class P2PConnectionManager: ObservableObject {
 
         if persisted {
             SkyBridgeLogger.shared.info(
-                "🔐 已持久化对端协议身份 authority: peer=\(peerId) fingerprint=\(authority.protocolPublicKeyFingerprint)"
+                "🔐 已持久化对端协议身份 authority: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction)"
             )
         } else {
             SkyBridgeLogger.shared.debug(
-                "ℹ️ 对端协议身份 authority 未持久化（缺少稳定 peer 映射）: peer=\(peerId)"
+                "ℹ️ 对端协议身份 authority 未持久化（缺少稳定 peer 映射）: peer=\(Self.protocolIdentityLogRedaction)"
             )
         }
     }

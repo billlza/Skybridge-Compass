@@ -1156,7 +1156,7 @@
 "remoteControl.securityNotice.appName" = "SkyBridge Compass";
 "remoteControl.securityNotice.pendingTitle" = "%@ is requesting approval for remote control";
 "remoteControl.securityNotice.activeTitle" = "%@ is being remotely controlled";
-"remoteControl.securityNotice.subtitle" = "Inbound %@ remote control is protected by quantum-safe/PQC encryption.";
+"remoteControl.securityNotice.subtitle" = "Inbound %@ remote control uses an authenticated encrypted channel; PQC is shown only when the negotiated suite proves it.";
 "remoteControl.securityNotice.transport.p2p" = "P2P";
 "remoteControl.securityNotice.transport.webrtc" = "WebRTC";
 "remoteControl.securityNotice.remoteIP" = "IP";

@@ -17,7 +17,11 @@ make_fixture() {
   mkdir -p "${fixture_root}/SkyBridge Compass iOS"
   cp -R "${ROOT_DIR}/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj" "${fixture_root}/SkyBridge Compass iOS/"
   cp -R "${ROOT_DIR}/SkyBridge Compass iOS/SkyBridgeCompassiOSTests" "${fixture_root}/SkyBridge Compass iOS/"
+  cp -R "${ROOT_DIR}/SkyBridgeWidgets.xcodeproj" "${fixture_root}/SkyBridgeWidgets.xcodeproj"
+  cp "${ROOT_DIR}/project.yml" "${fixture_root}/project.yml"
   cp "${ROOT_DIR}/SkyBridge Compass iOS/project.yml" "${fixture_root}/SkyBridge Compass iOS/project.yml"
+  cp "${ROOT_DIR}/SkyBridge Compass iOS/Package.swift" "${fixture_root}/SkyBridge Compass iOS/Package.swift"
+  cp "${ROOT_DIR}/Package.swift" "${fixture_root}/Package.swift"
   printf '%s\n' "${fixture_root}"
 }
 
@@ -45,6 +49,114 @@ expect_failure_contains() {
 positive_root="$(make_fixture positive)"
 bash "${CHECK_SCRIPT}" --root "${positive_root}" --static-only >/dev/null \
   || fail "positive fixture should pass static validation"
+
+missing_pqc_sdk_root="$(make_fixture missing-pqc-sdk-setting)"
+python3 - "${missing_pqc_sdk_root}/SkyBridge Compass iOS/project.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = '        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: ""\n'
+if needle not in text:
+    raise SystemExit("missing Apple PQC build setting in project.yml fixture")
+path.write_text(text.replace(needle, "", 1), encoding="utf-8")
+PY
+expect_failure_contains \
+  "project.yml missing Apple PQC explicit build setting" \
+  "project.yml 的 app/test target 必须声明空的 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 默认值" \
+  bash "${CHECK_SCRIPT}" --root "${missing_pqc_sdk_root}" --static-only
+
+forbidden_pqc_yml_root="$(make_fixture forbidden-pqc-sdk-selector-yml)"
+python3 - "${forbidden_pqc_yml_root}/SkyBridge Compass iOS/project.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = '        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"\n'
+if needle not in text:
+    raise SystemExit("missing Swift compilation condition line in project.yml fixture")
+replacement = needle + '        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos27*]: "$(inherited) HAS_APPLE_PQC_SDK"\n'
+path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+PY
+expect_failure_contains \
+  "project.yml rejects SDK-selector Apple PQC gate" \
+  "project.yml 不得使用 SDK selector 默认启用 HAS_APPLE_PQC_SDK" \
+  bash "${CHECK_SCRIPT}" --root "${forbidden_pqc_yml_root}" --static-only
+
+forbidden_pqc_pbxproj_root="$(make_fixture forbidden-pqc-sdk-selector-pbxproj)"
+python3 - "${forbidden_pqc_pbxproj_root}/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.pbxproj" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = '\t\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)";\n'
+if needle not in text:
+    raise SystemExit("missing Swift compilation condition line in project.pbxproj fixture")
+replacement = needle + '\t\t\t\t\t"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator27*]" = "$(inherited) HAS_APPLE_PQC_SDK";\n'
+path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+PY
+expect_failure_contains \
+  "project.pbxproj rejects SDK-selector Apple PQC gate" \
+  "project.pbxproj 不得使用 SDK selector 默认启用 HAS_APPLE_PQC_SDK" \
+  bash "${CHECK_SCRIPT}" --root "${forbidden_pqc_pbxproj_root}" --static-only
+
+raised_deployment_root="$(make_fixture raised-deployment-target)"
+python3 - "${raised_deployment_root}" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+project_yml = root / "SkyBridge Compass iOS" / "project.yml"
+pbxproj = root / "SkyBridge Compass iOS" / "SkyBridgeCompass-iOS.xcodeproj" / "project.pbxproj"
+
+project_text = project_yml.read_text(encoding="utf-8")
+project_text = project_text.replace('    iOS: "17.0"', '    iOS: "27.0"', 1)
+project_yml.write_text(project_text, encoding="utf-8")
+
+pbxproj_text = pbxproj.read_text(encoding="utf-8")
+pbxproj_text = pbxproj_text.replace("IPHONEOS_DEPLOYMENT_TARGET = 17.0;", "IPHONEOS_DEPLOYMENT_TARGET = 27.0;", 1)
+pbxproj.write_text(pbxproj_text, encoding="utf-8")
+PY
+expect_failure_contains \
+  "iOS deployment target raised" \
+  "IPHONEOS_DEPLOYMENT_TARGET 必须保持 17.0" \
+  bash "${CHECK_SCRIPT}" --root "${raised_deployment_root}" --static-only
+
+raised_macos_project_root="$(make_fixture raised-macos-project-yaml)"
+python3 - "${raised_macos_project_root}/project.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace('    macOS: "14.0"', '    macOS: "27.0"', 1)
+text = text.replace('    MACOSX_DEPLOYMENT_TARGET: "14.0"', '    MACOSX_DEPLOYMENT_TARGET: "27.0"', 1)
+path.write_text(text, encoding="utf-8")
+PY
+expect_failure_contains \
+  "macOS project.yml deployment target raised" \
+  "根 project.yml 的 deploymentTarget.macOS 必须保持 14.0" \
+  bash "${CHECK_SCRIPT}" --root "${raised_macos_project_root}" --static-only
+
+raised_macos_pbxproj_root="$(make_fixture raised-macos-pbxproj)"
+python3 - "${raised_macos_pbxproj_root}/SkyBridgeWidgets.xcodeproj/project.pbxproj" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = "MACOSX_DEPLOYMENT_TARGET = 14.0;"
+if needle not in text:
+    raise SystemExit("missing macOS deployment target in fixture")
+path.write_text(text.replace(needle, "MACOSX_DEPLOYMENT_TARGET = 27.0;", 1), encoding="utf-8")
+PY
+expect_failure_contains \
+  "macOS xcodeproj deployment target raised" \
+  "SkyBridgeWidgets.xcodeproj 的 macOS target MACOSX_DEPLOYMENT_TARGET 必须保持 14.0" \
+  bash "${CHECK_SCRIPT}" --root "${raised_macos_pbxproj_root}" --static-only
 
 missing_membership_root="$(make_fixture missing-membership)"
 cat > "${missing_membership_root}/SkyBridge Compass iOS/SkyBridgeCompassiOSTests/GuardProbeTests.swift" <<'EOF'

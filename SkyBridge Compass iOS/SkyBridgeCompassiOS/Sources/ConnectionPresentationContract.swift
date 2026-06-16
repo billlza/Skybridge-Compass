@@ -92,7 +92,8 @@ public enum ConnectionPresentationContract {
                 phase: .reconnecting,
                 isConnected: true,
                 statusText: input.labels.reconnectingText,
-                detailText: detail.isEmpty ? input.labels.reconnectingText : detail
+                detailText: detail.isEmpty ? input.labels.reconnectingText : detail,
+                securityEvidence: .none
             )
         }
 
@@ -118,7 +119,8 @@ public enum ConnectionPresentationContract {
                 phase: .connected,
                 isConnected: true,
                 statusText: connectedStatusText(kind: nil, suite: snapshot.negotiatedSuite, isRekeying: false, input: input),
-                detailText: detail
+                detailText: detail,
+                securityEvidence: securityEvidence(kind: nil, suite: snapshot.negotiatedSuite)
             )
         }
 
@@ -142,7 +144,8 @@ public enum ConnectionPresentationContract {
                 phase: .connected,
                 isConnected: true,
                 statusText: connectedStatusText(kind: nil, suite: nil, isRekeying: false, input: input),
-                detailText: nil
+                detailText: nil,
+                securityEvidence: .none
             )
         }
 
@@ -152,7 +155,8 @@ public enum ConnectionPresentationContract {
                 phase: .connecting,
                 isConnected: false,
                 statusText: input.labels.connectingText,
-                detailText: normalized(snapshot.deviceName)
+                detailText: normalized(snapshot.deviceName),
+                securityEvidence: .none
             )
         }
 
@@ -160,7 +164,8 @@ public enum ConnectionPresentationContract {
             phase: .disconnected,
             isConnected: false,
             statusText: input.labels.disconnectedText,
-            detailText: nil
+            detailText: nil,
+            securityEvidence: .none
         )
     }
 
@@ -189,7 +194,8 @@ public enum ConnectionPresentationContract {
                 kind: peer.cryptoKind,
                 suite: peer.suite,
                 guardStatus: peer.guardStatus
-            ) ?? normalized(peer.displayName)
+            ) ?? normalized(peer.displayName),
+            securityEvidence: .none
         )
     }
 
@@ -207,7 +213,8 @@ public enum ConnectionPresentationContract {
             statusText: connectedStatusText(kind: kind, suite: suite, isRekeying: isRekeying, input: input),
             detailText: rekeyDetailText(kind: kind, suite: suite, guardStatus: guardStatus, isRekeying: isRekeying)
                 ?? detailText(kind: kind, suite: suite, guardStatus: guardStatus)
-                ?? normalized(displayName)
+                ?? normalized(displayName),
+            securityEvidence: securityEvidence(kind: kind, suite: suite)
         )
     }
 
@@ -300,7 +307,8 @@ public enum ConnectionPresentationContract {
         if kindToken.contains("liboqs") || kindToken.contains("oqs") {
             return "liboqs"
         }
-        if kindToken.contains("apple") {
+        if kindToken.contains("apple"),
+           suiteToken.contains("mlkem") || suiteToken.contains("mldsa") || suiteToken.contains("xwing") {
             return "Apple PQC"
         }
         if kindToken.contains("classic") {
@@ -308,10 +316,32 @@ public enum ConnectionPresentationContract {
         }
 
         if suiteToken.contains("mlkem") || suiteToken.contains("mldsa") {
-            return normalized(defaultPQCModeLabel)
+            return "PQC"
         }
 
         return nil
+    }
+
+    private static func securityEvidence(
+        kind: String?,
+        suite: String?
+    ) -> ConnectionSecurityEvidence {
+        let suiteToken = normalizedToken(suite)
+        if suiteToken.contains("xwing")
+            || suiteToken.contains("mlkem")
+            || suiteToken.contains("mldsa") {
+            return .pqc
+        }
+        if suiteToken.contains("x25519") || suiteToken.contains("p256") {
+            return .classic
+        }
+
+        let kindToken = normalizedToken(currentModeComponent(from: kind))
+        if kindToken.contains("x25519") || kindToken.contains("p256") || kindToken.contains("classic") {
+            return .classic
+        }
+
+        return .none
     }
 
     private static func currentModeComponent(from kind: String?) -> String? {

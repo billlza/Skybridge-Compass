@@ -70,6 +70,13 @@ public final class SystemPerformanceMonitor: ObservableObject {
 
     private var previousNetworkSample: (inBytes: UInt64, outBytes: UInt64, timestamp: Date)?
 
+    // 磁盘/网络是同步内核/文件系统 I/O（5–100ms）。放到后台执行器采集并节流到 ~5s 一次，
+    // 结果缓存在这里供 applySnapshot 读取——避免每个采样周期在主线程阻塞（沙滩球根因），同时降低耗电/发热。
+    private var cachedDiskUsagePercent: Double = 0
+    private var cachedNetworkMbps: Double = 0
+    private var lastDiskNetworkSampleAt: Date = .distantPast
+    private let diskNetworkSampleInterval: TimeInterval = 5.0
+
     private var lastDiagnosticLogAt: Date = .distantPast
     private var lastDiagnosticSignature = ""
 
@@ -342,15 +349,40 @@ public final class SystemPerformanceMonitor: ObservableObject {
 
     private func collectPerformanceData(force: Bool) async {
         let snapshot = await UnifiedMetricsBackend.shared.collectSnapshot(force: force)
+        await refreshDiskAndNetworkIfNeeded(force: force)
         applySnapshot(snapshot)
         await checkAndSendNotifications()
+    }
+
+    /// 在后台执行器采集磁盘/网络（同步内核/文件系统 I/O），节流到 ~5s 一次，结果写入缓存。
+    /// `await Task.detached` 期间主线程被挂起而非阻塞，因此不会出现沙滩球。
+    private func refreshDiskAndNetworkIfNeeded(force: Bool) async {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastDiskNetworkSampleAt) >= diskNetworkSampleInterval else { return }
+        lastDiskNetworkSampleAt = now
+        let raw = await Task.detached(priority: .utility) {
+            (disk: SystemPerformanceMonitor.rawDiskUsagePercent(),
+             net: SystemPerformanceMonitor.rawNetworkBytes())
+        }.value
+        if let disk = raw.disk { cachedDiskUsagePercent = disk }
+        if let net = raw.net {
+            if let prev = previousNetworkSample {
+                let elapsed = now.timeIntervalSince(prev.timestamp)
+                if elapsed > 0 {
+                    let inDiff = net.inBytes >= prev.inBytes ? net.inBytes - prev.inBytes : 0
+                    let outDiff = net.outBytes >= prev.outBytes ? net.outBytes - prev.outBytes : 0
+                    cachedNetworkMbps = max(0, Double(inDiff + outDiff) * 8 / (1024 * 1024) / elapsed)
+                }
+            }
+            previousNetworkSample = (inBytes: net.inBytes, outBytes: net.outBytes, timestamp: now)
+        }
     }
 
     private func applySnapshot(_ snapshot: UnifiedMetricsSnapshot) {
         cpuUsage = snapshot.cpuUsage
         memoryUsage = snapshot.memoryUsage
-        diskUsage = sampleDiskUsagePercent()
-        networkThroughputMbps = sampleNetworkThroughputMbps()
+        diskUsage = cachedDiskUsagePercent
+        networkThroughputMbps = cachedNetworkMbps
         loadAverage1Min = snapshot.loadAvg1
         loadAverage5Min = snapshot.loadAvg5
         loadAverage15Min = snapshot.loadAvg15
@@ -480,29 +512,24 @@ public final class SystemPerformanceMonitor: ObservableObject {
         }
     }
 
-    private func sampleDiskUsagePercent() -> Double {
-        do {
-            let attrs = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
-            let total = (attrs[.systemSize] as? NSNumber)?.doubleValue ?? 0
-            let free = (attrs[.systemFreeSize] as? NSNumber)?.doubleValue ?? 0
-            guard total > 0 else { return diskUsage }
-            return max(0, min(100, (1.0 - (free / total)) * 100))
-        } catch {
-            return diskUsage
-        }
+    // nonisolated：纯系统调用，无 actor 状态，可安全地在后台执行器（Task.detached）上运行，
+    // 不阻塞主线程。状态相关的增量计算放在 refreshDiskAndNetworkIfNeeded（MainActor）里完成。
+    private nonisolated static func rawDiskUsagePercent() -> Double? {
+        guard let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+              let total = (attrs[.systemSize] as? NSNumber)?.doubleValue, total > 0,
+              let free = (attrs[.systemFreeSize] as? NSNumber)?.doubleValue else { return nil }
+        return max(0, min(100, (1.0 - (free / total)) * 100))
     }
 
-    private func sampleNetworkThroughputMbps() -> Double {
+    private nonisolated static func rawNetworkBytes() -> (inBytes: UInt64, outBytes: UInt64)? {
         var bytesIn: UInt64 = 0
         var bytesOut: UInt64 = 0
         var mib = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
         var len: size_t = 0
-        let now = Date()
-
-        guard sysctl(&mib, 6, nil, &len, nil, 0) >= 0 else { return networkThroughputMbps }
+        guard sysctl(&mib, 6, nil, &len, nil, 0) >= 0 else { return nil }
         let buffer = UnsafeMutablePointer<Int8>.allocate(capacity: len)
         defer { buffer.deallocate() }
-        guard sysctl(&mib, 6, buffer, &len, nil, 0) >= 0 else { return networkThroughputMbps }
+        guard sysctl(&mib, 6, buffer, &len, nil, 0) >= 0 else { return nil }
 
         var offset = 0
         while offset < len {
@@ -514,19 +541,7 @@ public final class SystemPerformanceMonitor: ObservableObject {
             }
             offset += Int(header.ifm_msglen)
         }
-
-        let current = (inBytes: bytesIn, outBytes: bytesOut, timestamp: now)
-        defer { previousNetworkSample = current }
-
-        guard let previous = previousNetworkSample else { return 0 }
-        let elapsed = now.timeIntervalSince(previous.timestamp)
-        guard elapsed > 0 else { return networkThroughputMbps }
-
-        let inDiff = bytesIn >= previous.inBytes ? bytesIn - previous.inBytes : 0
-        let outDiff = bytesOut >= previous.outBytes ? bytesOut - previous.outBytes : 0
-        let bytesPerSecond = Double(inDiff + outDiff) / elapsed
-        let mbps = bytesPerSecond * 8 / (1024 * 1024)
-        return max(0, mbps)
+        return (inBytes: bytesIn, outBytes: bytesOut)
     }
 
     private func checkAndSendNotifications() async {

@@ -36,7 +36,7 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
             }
             return false
         }
-        return error.localizedDescription.localizedCaseInsensitiveContains("cryptokit")
+        return false
     }
 
     nonisolated static func describeHandshakeError(_ error: Error) -> String {
@@ -206,8 +206,8 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
         strictPQCRequested: Bool,
         expectedRemoteAuthorityAlgorithm: ProtocolSigningAlgorithm?
     ) -> Bool {
-        strictPQCRequested
-            && expectedRemoteAuthorityAlgorithm == .ed25519
+        guard !strictPQCRequested else { return false }
+        return expectedRemoteAuthorityAlgorithm == .ed25519
             && !supportedSuites.contains(where: { $0.isPQCGroup })
             && supportedSuites.contains(where: { !$0.isPQCGroup })
     }
@@ -224,9 +224,7 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
         strictPQCRequested: Bool,
         allowsClassicAuthorityBootstrap: Bool
     ) -> Bool {
-        !strictPQCRequested
-            || suite.isPQCGroup
-            || (allowsClassicAuthorityBootstrap && !suite.isPQCGroup)
+        !strictPQCRequested || suite.isPQCGroup
     }
 
     nonisolated static func shouldInitiateInitialWebRTCHandshake(role: WebRTCSession.Role) -> Bool {
@@ -252,6 +250,13 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
         peerDeviceId: String
     ) -> InitialHandshakeBootstrapDecision {
         if useClassicAuthorityBootstrap {
+            if strictPQCRequested {
+                return .reject(.init(
+                    code: 43,
+                    message: "严格 PQC 已启用，但 WebRTC 初始握手请求 classic authority bootstrap；当前已拒绝 classic bootstrap。peer=\(peerDeviceId)",
+                    includeProviderAvailabilityInLog: false
+                ))
+            }
             return .proceed(.init(
                 selection: .classicOnly,
                 bootstrapMode: "classic_authority_bootstrap",
@@ -274,11 +279,18 @@ enum CrossNetworkWebRTCPQCHandshakePolicy {
             ))
         }
 
-        if strictPQCRequested, !(capability.hasApplePQC || capability.hasLiboqs) {
-            return .reject(.init(
-                code: 42,
-                message: "严格 PQC 已启用，但当前设备没有可用的 PQC Provider；跨网路径不会再降级到 Classic/PreferPQC。",
-                includeProviderAvailabilityInLog: true
+        guard capability.hasApplePQC || capability.hasLiboqs else {
+            if strictPQCRequested {
+                return .reject(.init(
+                    code: 42,
+                    message: "严格 PQC 已启用，但当前设备没有可用的 PQC Provider；跨网路径不会再降级到 Classic/PreferPQC。",
+                    includeProviderAvailabilityInLog: true
+                ))
+            }
+            return .proceed(.init(
+                selection: .classicOnly,
+                bootstrapMode: "classic_bootstrap_no_local_pqc_provider",
+                usesClassicAuthorityBootstrap: false
             ))
         }
 

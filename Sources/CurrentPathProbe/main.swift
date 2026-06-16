@@ -180,8 +180,19 @@ struct CurrentPathProbe {
         ) else {
             throw ProbeError.invalidArguments("invalid signaling websocket url")
         }
+        guard let headers = signalingWebSocketHeaders(
+            sessionID: lookup.sessionID,
+            token: lookup.sessionToken
+        ) else {
+            throw ProbeError.invalidArguments("invalid signaling websocket headers")
+        }
 
-        let client = WebSocketSignalingClient(url: wsURL, sessionId: lookup.sessionID, generation: 1)
+        let client = WebSocketSignalingClient(
+            url: wsURL,
+            sessionId: lookup.sessionID,
+            generation: 1,
+            additionalHeaders: headers
+        )
         final class LifecycleBox: @unchecked Sendable {
             var phases: [WebSocketSignalingClient.SignalingLifecycleEvent] = []
         }
@@ -861,6 +872,15 @@ struct CurrentPathProbe {
         CrossNetworkConnectionManager.currentPathSignalingWebSocketURL(
             signalingServerOrigin: origin,
             wsPath: wsPath,
+            sessionID: sessionID,
+            sessionToken: token,
+            clientVersion: resolvedClientVersion(),
+            protocolVersion: resolvedProtocolVersion()
+        )
+    }
+
+    private static func signalingWebSocketHeaders(sessionID: String, token: String) -> [String: String]? {
+        CrossNetworkConnectionManager.currentPathSignalingWebSocketHeaders(
             sessionID: sessionID,
             sessionToken: token,
             clientVersion: resolvedClientVersion(),

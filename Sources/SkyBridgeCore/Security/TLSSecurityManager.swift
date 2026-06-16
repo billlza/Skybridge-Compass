@@ -36,7 +36,7 @@ public struct TLSHandshakeDetails: Sendable {
         }
     }
 }
-/// TLS安全管理器 - 负责TLS 1.3加密通信和证书管理，支持量子安全加密
+/// TLS安全管理器 - 负责TLS 1.3加密通信和证书管理；应用层 PQC 只在 HPKE/key material 具备证据时启用
 @MainActor
 public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
@@ -53,14 +53,17 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
     private let certificateManager: CertificateManager
  /// 当前TLS连接
     @Published public private(set) var activeConnections: [String: NWConnection] = [:]
+    private var cryptoProfileByDeviceId: [String: CryptoProfile] = [:]
  /// TLS统计信息
     @Published public private(set) var tlsStatistics: TLSStatistics = TLSStatistics()
  /// 量子安全加密管理器
     private let quantumCryptoManager: QuantumCryptoManager
+    private let classicQuantumCryptoManager: QuantumCryptoManager
+    private let strictPQCQuantumCryptoManager: QuantumCryptoManager
  /// TLS量子加密管理器实例
     private let tlsQuantumCrypto = TLSQuantumCryptoManager()
-    private var pqcProvider: PQCProvider?
-    private var hpkeProvider: PQCHPKEProvider?
+    private var pqcProviderByDeviceId: [String: PQCProvider] = [:]
+    private var hpkeProviderByDeviceId: [String: PQCHPKEProvider] = [:]
     private var localDeviceId: String?
     public enum CryptoProfile: String, Sendable {
         case classicP256
@@ -71,13 +74,33 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
         for p in offered { if supported.contains(p) { return p } }
         return .classicP256
     }
-    private var selectedProfile: CryptoProfile = .classicP256
+
+    private func negotiateApplicationCryptoProfile(peerOfferedProfiles: [CryptoProfile]?) -> CryptoProfile {
+        guard let peerOfferedProfiles, !peerOfferedProfiles.isEmpty else {
+            return .classicP256
+        }
+        return negotiateProfile(offered: peerOfferedProfiles, supported: supportedApplicationCryptoProfiles())
+    }
+
+    private func supportedApplicationCryptoProfiles() -> [CryptoProfile] {
+        var supported: [CryptoProfile] = []
+        if PQCProviderFactory.supportsSuite(.hybridXWing) {
+            supported.append(.hybridXWing)
+        }
+        if PQCProviderFactory.supportsSuite(.pqcMlKemMlDsa) {
+            supported.append(.pqcMlKemMlDsa)
+        }
+        supported.append(.classicP256)
+        return supported
+    }
  // MARK: - 初始化
 
     public init(configuration: TLSConfiguration = .default) {
         self.tlsConfiguration = configuration
         self.certificateManager = CertificateManager()
         self.quantumCryptoManager = QuantumCryptoManager()
+        self.classicQuantumCryptoManager = QuantumCryptoManager(mode: .classicOnly)
+        self.strictPQCQuantumCryptoManager = QuantumCryptoManager(mode: .pqcOnly)
     }
 
  // MARK: - 生命周期管理方法
@@ -113,9 +136,9 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
  // MARK: - TLS连接管理
 
- /// 创建TLS客户端连接 - 支持量子安全
+ /// 创建 TLS 1.3 客户端连接；应用层 PQC profile 需要单独的 HPKE/key material 证明
     public func createClientConnection(to endpoint: NWEndpoint, deviceId: String) -> NWConnection {
- // 创建量子安全TLS选项
+ // 创建 TLS 1.3 选项；传输层 PQC 协商不在此处伪造为已证明状态
         let tlsOptions = createQuantumSecureTLSOptions(for: .client, deviceId: deviceId)
 
  // 创建TCP选项
@@ -135,32 +158,21 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
  // 设置连接状态监听
         setupConnectionStateHandler(connection, deviceId: deviceId)
-        SkyBridgeLogger.security.debugOnly("Crypto profile selected: \(selectedProfile.rawValue)")
+        let profile = CryptoProfile.classicP256
+        recordCryptoProfile(profile, for: deviceId)
+        SkyBridgeLogger.security.debugOnly("Crypto profile selected: \(profile.rawValue)")
 
-        if selectedProfile != .classicP256 {
-            if let provider = PQCProviderFactory.makeProvider() {
-                self.pqcProvider = provider
-                if let hp = provider as? PQCHPKEProvider { self.hpkeProvider = hp }
-                SkyBridgeLogger.security.debugOnly("🔐 PQC Provider: \(String(describing: type(of: provider)))")
-            } else {
-                self.pqcProvider = nil
-                self.hpkeProvider = nil
-                SkyBridgeLogger.security.debugOnly("🔐 PQC Provider unavailable; fallback classic")
-            }
-        } else {
-            self.pqcProvider = nil
-            self.hpkeProvider = nil
-        }
+        configurePQCProvider(for: profile, deviceId: deviceId, logPrefix: "Client")
 
         activeConnections[deviceId] = connection
 
-        SkyBridgeLogger.security.debugOnly("🔐 创建量子安全TLS客户端连接: \(deviceId) -> \(String(describing: endpoint))")
+        SkyBridgeLogger.security.debugOnly("🔐 创建 TLS 1.3 客户端连接: \(deviceId) -> \(String(describing: endpoint)); app-layer PQC profile=\(profile.rawValue)")
         return connection
     }
 
- /// 创建TLS服务器监听器 - 支持量子安全
+ /// 创建 TLS 1.3 服务器监听器；应用层 PQC profile 需要单独的 HPKE/key material 证明
     public func createServerListener(on port: UInt16, deviceId: String) -> NWListener? {
- // 创建量子安全TLS选项
+ // 创建 TLS 1.3 选项；传输层 PQC 协商不在此处伪造为已证明状态
         let tlsOptions = createQuantumSecureTLSOptions(for: .server, deviceId: deviceId)
 
  // 创建TCP选项
@@ -176,29 +188,15 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port.validated(port))
             self.localDeviceId = deviceId
 
- // 设置新连接处理器
+	 // 设置新连接处理器
             listener.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor in
-                    let offered: [CryptoProfile] = [.hybridXWing, .pqcMlKemMlDsa, .classicP256]
-                    let supported: [CryptoProfile] = [.hybridXWing, .classicP256]
-                    self?.selectedProfile = self?.negotiateProfile(offered: offered, supported: supported) ?? .classicP256
+                    let negotiatedProfile = self?.negotiateApplicationCryptoProfile(peerOfferedProfiles: nil) ?? .classicP256
+                    self?.recordCryptoProfile(negotiatedProfile, for: deviceId)
                     self?.handleNewConnection(connection, deviceId: deviceId)
-                    SkyBridgeLogger.security.debugOnly("Crypto profile selected: \(self?.selectedProfile.rawValue ?? "classicP256")")
-                    if self?.selectedProfile != .classicP256 {
-                        if let provider = PQCProviderFactory.makeProvider() {
-                            self?.pqcProvider = provider
-                            if let hp = provider as? PQCHPKEProvider { self?.hpkeProvider = hp }
-                            SkyBridgeLogger.security.debugOnly("🔐 Server PQC Provider: \(String(describing: type(of: provider)))")
-                        } else {
-                            self?.pqcProvider = nil
-                            self?.hpkeProvider = nil
-                            SkyBridgeLogger.security.debugOnly("🔐 Server PQC Provider unavailable; fallback classic")
-                        }
-                    } else {
-                        self?.pqcProvider = nil
-                        self?.hpkeProvider = nil
-                    }
-                }
+                    SkyBridgeLogger.security.debugOnly("Crypto profile selected: \(negotiatedProfile.rawValue)")
+                    self?.configurePQCProvider(for: negotiatedProfile, deviceId: deviceId, logPrefix: "Server")
+			                }
             }
 
  // 设置状态变化处理器
@@ -208,7 +206,7 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
                 }
             }
 
-            SkyBridgeLogger.security.debugOnly("🔐 创建量子安全TLS服务器监听器: \(deviceId) 端口: \(port)")
+            SkyBridgeLogger.security.debugOnly("🔐 创建 TLS 1.3 服务器监听器: \(deviceId) 端口: \(port); app-layer PQC profile is negotiated per connection")
             return listener
 
         } catch {
@@ -217,44 +215,36 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
         }
     }
 
- /// 发送量子安全加密数据（多版本兼容，自动记录 PQC 指标）
+ /// 发送 TLS 应用层加密数据；只有 hybrid/PQC profile 成功封装后才记录 PQC 指标
     public func sendSecureData(_ data: Data, to deviceId: String, completion: @escaping @Sendable (Error?) -> Void) {
         guard let connection = activeConnections[deviceId] else {
             completion(TLSSecurityError.connectionNotFound)
             return
         }
-        let profile = selectedProfile
+        let profile: CryptoProfile
+        do {
+            profile = try cryptoProfile(for: deviceId)
+        } catch {
+            completion(error)
+            return
+        }
 
         Task {
             do {
-                if let hp = hpkeProvider, profile == .hybridXWing {
-                    let variant = (profile == .hybridXWing) ? "xwing-mlkem768-x25519" : "mlkem768"
-                    let service = PQCKeyTags.v2Kem(variant)
-                    if let recipientPub = KeychainManager.shared.exportKey(service: service, account: deviceId) {
-                        let ctx = try hp.senderContext(recipientPublicKey: recipientPub, suite: .hybridXWing)
-                        let aad = Data(deviceId.utf8)
-                        let sealed = try ctx.seal(data, authenticating: aad)
-                        var header = withUnsafeBytes(of: UInt32(sealed.encapsulatedKey.count).bigEndian) { Data($0) }
-                        header.append(sealed.encapsulatedKey)
-                        let payload = header + sealed.ciphertext
-                        connection.send(content: payload, completion: .contentProcessed { error in
-                            Task { @MainActor in
-                                if let error = error {
-                                    completion(error)
-                                } else {
-                                    self.tlsStatistics.bytesSent += UInt64(payload.count)
-                                    self.tlsStatistics.messagesSent += 1
-                                    self.tlsStatistics.pqcBytesSent += UInt64(payload.count)
-                                    completion(nil)
-                                }
-                            }
-                        })
-                        return
-                    }
+                let encryptedData: Data
+                switch profile {
+                case .hybridXWing:
+                    encryptedData = try makeHybridXWingPayload(data, recipientDeviceId: deviceId)
+                case .pqcMlKemMlDsa, .classicP256:
+                    // 旧路径用「每次随机生成、从不与对端共享」的对称密钥加密，产生的密文对端
+                    // 永远无法解开（非互通且具误导性）。应用层安全数据仅支持经真实 HPKE 协商的
+                    // hybridXWing profile；其余 profile 一律 fail-closed，绝不发送伪“加密”数据。
+                    throw TLSSecurityError.pqcMaterialUnavailable(
+                        profile: "non-hybrid",
+                        operation: "sendSecureData",
+                        reason: "应用层安全数据仅支持 hybridXWing(真实 HPKE)；旧 pqc/classic 直接对称加密路径使用一次性密钥、对端无法解密，已 fail-closed"
+                    )
                 }
-                let encryptedData = try quantumCryptoManager.quantumSafeEncrypt(data, using: SymmetricKey(size: .bits256))
-                let algoType = quantumCryptoManager.currentAlgorithm
-                let isPQC = (algoType != QuantumCryptoManager.AlgorithmType.classic)
                 connection.send(content: encryptedData, completion: .contentProcessed { error in
                     Task { @MainActor in
                         if let error = error {
@@ -262,11 +252,8 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
                         } else {
                             self.tlsStatistics.bytesSent += UInt64(encryptedData.count)
                             self.tlsStatistics.messagesSent += 1
-                            if isPQC {
-                                self.tlsStatistics.pqcBytesSent += UInt64(encryptedData.count)
-                            } else {
-                                self.tlsStatistics.classicBytesSent += UInt64(encryptedData.count)
-                            }
+                            // 只有 hybridXWing 能到达这里，必为 PQC 路径
+                            self.tlsStatistics.pqcBytesSent += UInt64(encryptedData.count)
                             completion(nil)
                         }
                     }
@@ -277,13 +264,19 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
         }
     }
 
- /// 接收量子安全加密数据（多版本兼容，自动记录 PQC 指标）
+ /// 接收 TLS 应用层加密数据；只有 hybrid/PQC profile 成功打开后才记录 PQC 指标
     public func receiveSecureData(from deviceId: String, completion: @escaping @Sendable (Data?, Error?) -> Void) {
         guard let connection = activeConnections[deviceId] else {
             completion(nil, TLSSecurityError.connectionNotFound)
             return
         }
-        let profile = selectedProfile
+        let profile: CryptoProfile
+        do {
+            profile = try cryptoProfile(for: deviceId)
+        } catch {
+            completion(nil, error)
+            return
+        }
         let localIdSnapshot = localDeviceId
 
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1048576) { [weak self] data, _, isComplete, error in
@@ -293,39 +286,27 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
                 } else if let encryptedData = data {
                     do {
                         guard let strongSelf = self else { completion(nil, TLSSecurityError.connectionNotFound); return }
-                        if let hp = strongSelf.hpkeProvider, profile == .hybridXWing, let localId = localIdSnapshot {
-                            if encryptedData.count >= 4 {
-                                let lenData = encryptedData.prefix(4)
-                                let encLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-                                let totalNeeded = 4 + Int(encLen)
-                                if encryptedData.count >= totalNeeded {
-                                    let encKey = encryptedData.dropFirst(4).prefix(Int(encLen))
-                                    let ct = encryptedData.dropFirst(totalNeeded)
-                                    let variant = (profile == .hybridXWing) ? "xwing-mlkem768-x25519" : "mlkem768"
-                                    let service = PQCKeyTags.v2Kem(variant)
-                                    if let priv = KeychainManager.shared.exportKey(service: service, account: localId) {
-                                        let ctx = try hp.recipientContext(recipientPrivateKey: priv, suite: .hybridXWing, encapsulatedKey: Data(encKey))
-                                        let aad = Data(deviceId.utf8)
-                                        let opened = try ctx.open(Data(ct), authenticating: aad)
-                                        strongSelf.tlsStatistics.bytesReceived += UInt64(encryptedData.count)
-                                        strongSelf.tlsStatistics.messagesReceived += 1
-                                        strongSelf.tlsStatistics.pqcBytesReceived += UInt64(encryptedData.count)
-                                        completion(opened, nil)
-                                        return
-                                    }
-                                }
-                            }
+                        let decryptedData: Data
+                        switch profile {
+                        case .hybridXWing:
+                            decryptedData = try strongSelf.openHybridXWingPayload(
+                                encryptedData,
+                                remoteDeviceId: deviceId,
+                                localDeviceId: localIdSnapshot
+                            )
+                        case .pqcMlKemMlDsa, .classicP256:
+                            // 与 sendSecureData 对称：非 hybrid profile 的旧一次性密钥路径无法
+                            // 互通，fail-closed 而非用错误密钥“解密”得到垃圾数据。
+                            throw TLSSecurityError.pqcMaterialUnavailable(
+                                profile: "non-hybrid",
+                                operation: "receiveSecureData",
+                                reason: "应用层安全数据仅支持 hybridXWing(真实 HPKE)；旧 pqc/classic 直接对称解密路径使用一次性密钥，已 fail-closed"
+                            )
                         }
-                        let decryptedData = try strongSelf.quantumCryptoManager.quantumSafeDecrypt(encryptedData, using: SymmetricKey(size: .bits256))
-                        let algoType = strongSelf.quantumCryptoManager.currentAlgorithm
-                        let isPQC = (algoType != QuantumCryptoManager.AlgorithmType.classic)
                         strongSelf.tlsStatistics.bytesReceived += UInt64(encryptedData.count)
                         strongSelf.tlsStatistics.messagesReceived += 1
-                        if isPQC {
-                            strongSelf.tlsStatistics.pqcBytesReceived += UInt64(encryptedData.count)
-                        } else {
-                            strongSelf.tlsStatistics.classicBytesReceived += UInt64(encryptedData.count)
-                        }
+                        // 只有 hybridXWing 能到达这里，必为 PQC 路径
+                        strongSelf.tlsStatistics.pqcBytesReceived += UInt64(encryptedData.count)
                         completion(decryptedData, nil)
                     } catch {
                         completion(nil, error)
@@ -346,19 +327,19 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
         return certificateManager.getIdentity(for: deviceId)
     }
 
- // MARK: - 量子安全证书管理
+ // MARK: - TLS/设备证书管理
 
- /// 获取设备的量子安全证书
+ /// 获取设备 TLS 证书
     public func getDeviceCertificate(for deviceId: String) -> SecCertificate? {
         return certificateManager.getCertificate(for: deviceId)
     }
 
- /// 验证对等设备的量子安全证书
+ /// 验证对等设备 TLS 证书
     public func validatePeerCertificate(_ certificate: SecCertificate, for deviceId: String) -> Bool {
         return certificateManager.validateCertificate(certificate, for: deviceId)
     }
 
- /// 生成量子安全自签名证书
+ /// 生成本地 P2P 自签名 TLS 证书；证书签名仍是经典 P-256/ECDSA，不作为 PQC 证明。
     public func generateSelfSignedCertificate(for deviceId: String) -> SecCertificate? {
         return certificateManager.generateSelfSignedCertificate(for: deviceId)
     }
@@ -395,6 +376,8 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
         if let connection = activeConnections[deviceId] {
             connection.cancel()
             activeConnections.removeValue(forKey: deviceId)
+            cryptoProfileByDeviceId.removeValue(forKey: deviceId)
+            clearPQCProvider(for: deviceId)
         }
     }
 
@@ -404,6 +387,9 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
             connection.cancel()
         }
         activeConnections.removeAll()
+        cryptoProfileByDeviceId.removeAll()
+        pqcProviderByDeviceId.removeAll()
+        hpkeProviderByDeviceId.removeAll()
     }
 
  /// 获取连接状态
@@ -464,7 +450,147 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
  // MARK: - 私有方法
 
- /// 创建量子安全TLS选项（多版本兼容：macOS 14.x/15.x）
+    private func recordCryptoProfile(_ profile: CryptoProfile, for deviceId: String) {
+        cryptoProfileByDeviceId[deviceId] = profile
+    }
+
+    private func cryptoProfile(for deviceId: String) throws -> CryptoProfile {
+        guard let profile = cryptoProfileByDeviceId[deviceId] else {
+            throw TLSSecurityError.cryptoProfileMissing(deviceId: deviceId)
+        }
+        return profile
+    }
+
+    private func configurePQCProvider(for profile: CryptoProfile, deviceId: String, logPrefix: String) {
+        clearPQCProvider(for: deviceId)
+
+        switch profile {
+        case .classicP256:
+            return
+        case .hybridXWing:
+            guard let provider = PQCProviderFactory.makeHPKEProvider(for: .hybridXWing) else {
+                SkyBridgeLogger.security.error(
+                    "🔐 \(logPrefix) X-Wing HPKE Provider unavailable for selected profile \(profile.rawValue); PQC payloads will fail closed until suite evidence exists"
+                )
+                return
+            }
+            pqcProviderByDeviceId[deviceId] = provider
+            hpkeProviderByDeviceId[deviceId] = provider
+            SkyBridgeLogger.security.debugOnly("🔐 \(logPrefix) X-Wing HPKE Provider: \(String(describing: type(of: provider)))")
+        case .pqcMlKemMlDsa:
+            guard let provider = PQCProviderFactory.makeProvider(for: .pqcMlKemMlDsa) else {
+                SkyBridgeLogger.security.error(
+                    "🔐 \(logPrefix) PQC Provider unavailable for selected profile \(profile.rawValue); PQC payloads will fail closed until provider evidence exists"
+                )
+                return
+            }
+            pqcProviderByDeviceId[deviceId] = provider
+            SkyBridgeLogger.security.debugOnly("🔐 \(logPrefix) PQC Provider: \(String(describing: type(of: provider)))")
+        }
+    }
+
+    private func clearPQCProvider(for deviceId: String) {
+        pqcProviderByDeviceId.removeValue(forKey: deviceId)
+        hpkeProviderByDeviceId.removeValue(forKey: deviceId)
+    }
+
+    private func makeHybridXWingPayload(_ data: Data, recipientDeviceId: String) throws -> Data {
+        let hp = try requireHPKEProvider(for: recipientDeviceId, operation: "send")
+        let service = PQCKeyTags.v2Kem("xwing-mlkem768-x25519")
+        let recipientPublicKey = try requiredPQCKey(
+            service: service,
+            account: recipientDeviceId,
+            operation: "send",
+            reason: "missing_recipient_public_key"
+        )
+        let ctx = try hp.senderContext(recipientPublicKey: recipientPublicKey, suite: .hybridXWing)
+        let aad = hybridXWingAAD(senderDeviceId: localDeviceId, recipientDeviceId: recipientDeviceId)
+        let sealed = try ctx.seal(data, authenticating: aad)
+        var header = withUnsafeBytes(of: UInt32(sealed.encapsulatedKey.count).bigEndian) { Data($0) }
+        header.append(sealed.encapsulatedKey)
+        return header + sealed.ciphertext
+    }
+
+    private func openHybridXWingPayload(
+        _ encryptedData: Data,
+        remoteDeviceId: String,
+        localDeviceId: String?
+    ) throws -> Data {
+        let hp = try requireHPKEProvider(for: remoteDeviceId, operation: "receive")
+        guard let localDeviceId, !localDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw TLSSecurityError.pqcMaterialUnavailable(
+                profile: CryptoProfile.hybridXWing.rawValue,
+                operation: "receive",
+                reason: "missing_local_device_id"
+            )
+        }
+        guard encryptedData.count >= 4 else {
+            throw TLSSecurityError.invalidDataFormat
+        }
+
+        let encLen = encryptedData.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        let totalNeeded = 4 + Int(encLen)
+        guard encryptedData.count >= totalNeeded else {
+            throw TLSSecurityError.invalidDataFormat
+        }
+
+        let service = PQCKeyTags.v2Kem("xwing-mlkem768-x25519")
+        let recipientPrivateKey = try requiredPQCKey(
+            service: service,
+            account: localDeviceId,
+            operation: "receive",
+            reason: "missing_recipient_private_key"
+        )
+        let encapsulatedKey = encryptedData.dropFirst(4).prefix(Int(encLen))
+        let ciphertext = encryptedData.dropFirst(totalNeeded)
+        let ctx = try hp.recipientContext(
+            recipientPrivateKey: recipientPrivateKey,
+            suite: .hybridXWing,
+            encapsulatedKey: Data(encapsulatedKey)
+        )
+        let aad = hybridXWingAAD(senderDeviceId: remoteDeviceId, recipientDeviceId: localDeviceId)
+        return try ctx.open(Data(ciphertext), authenticating: aad)
+    }
+
+    private func hybridXWingAAD(senderDeviceId: String?, recipientDeviceId: String) -> Data {
+        let sender = normalizedDeviceId(senderDeviceId)
+        let recipient = normalizedDeviceId(recipientDeviceId)
+        return Data("SkyBridgeTLSAppPayload|v1|\(CryptoProfile.hybridXWing.rawValue)|sender=\(sender)|recipient=\(recipient)".utf8)
+    }
+
+    private func normalizedDeviceId(_ deviceId: String?) -> String {
+        guard let deviceId else { return "" }
+        return deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func requireHPKEProvider(for deviceId: String, operation: String) throws -> PQCHPKEProvider {
+        guard let hpkeProvider = hpkeProviderByDeviceId[deviceId] else {
+            throw TLSSecurityError.pqcMaterialUnavailable(
+                profile: CryptoProfile.hybridXWing.rawValue,
+                operation: operation,
+                reason: "missing_hpke_provider"
+            )
+        }
+        return hpkeProvider
+    }
+
+    private func requiredPQCKey(
+        service: String,
+        account: String,
+        operation: String,
+        reason: String
+    ) throws -> Data {
+        guard let key = KeychainManager.shared.exportKey(service: service, account: account) else {
+            throw TLSSecurityError.pqcMaterialUnavailable(
+                profile: CryptoProfile.hybridXWing.rawValue,
+                operation: operation,
+                reason: reason
+            )
+        }
+        return key
+    }
+
+ /// 创建 TLS 1.3 选项（多版本兼容：macOS 14.x/15.x）
     private func createQuantumSecureTLSOptions(for mode: TLSMode, deviceId: String) -> NWProtocolTLS.Options {
         let tlsOptions = NWProtocolTLS.Options()
 
@@ -473,18 +599,18 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
         sec_protocol_options_set_min_tls_protocol_version(secOptions, .TLSv13)
         sec_protocol_options_set_max_tls_protocol_version(secOptions, .TLSv13)
 
- // macOS 15+：尝试配置 PQC 协商组（X25519+ML-KEM-768）
+ // macOS 15+：保持 TLS 1.3 配置；传输层 PQC 协商必须由真实 negotiated group 证明。
         if #available(macOS 15.0, *) {
- // 在 macOS 26 中，系统 TLS 实现会自动协商混合后量子组 "X25519+MLKEM768"
- // 如果服务器不支持，会自动回退到经典算法
- // 注意：当前 Network.framework 可能尚未暴露直接的 PQC 配置 API，
- // 但系统会在 TLS 1.3 握手中自动尝试 PQC 协商组
+ // Apple 平台 TLS 可能具备 hybrid KEX 能力，但当前模块没有读取或强制设置
+ // X25519+ML-KEM-768 negotiated group 的公开 API 证明。OS27 lane 只把
+ // Network TLS hybrid KEX 作为 transport-only SDK 诊断，不作为 SkyBridge
+ // 应用层 HPKE/X-Wing、PQC suite selection 或 release eligibility 证明。
 
- // 记录 PQC 尝试
-            SkyBridgeLogger.security.debugOnly("🔐 TLS 配置：尝试使用 PQC 协商组（macOS 15+）")
+ // 记录 TLS 1.3 配置，不把未证明的 TLS KEX 标成 PQC。
+            SkyBridgeLogger.security.debugOnly("🔐 TLS 配置：TLS 1.3；传输层 PQC 协商未由本模块证明")
 
- // 未来实现：当 Apple 提供直接配置 API 时，可以这样设置：
- // sec_protocol_options_set_tls_ciphersuites(secOptions, [.TLS_AES_256_GCM_SHA384, .TLS_PQC_HYBRID])
+ // 未来实现：当 Apple 公开可 typecheck 的 TLS hybrid KEX 配置和 negotiated-group
+ // metadata API 后，在 AppleTransport/TLS adapter 中接入并保留真实协商证据。
         } else {
  // macOS 14：使用经典 TLS 1.3 密码套件
             SkyBridgeLogger.security.debugOnly("🔐 TLS 配置：使用经典 TLS 1.3（macOS 14）")
@@ -579,15 +705,18 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
  // 检测实际使用的算法（macOS 15+）
             if #available(macOS 15.0, *) {
- // 尝试检查 TLS 协商组（如果系统提供 API）
- // 当前实现：基于量子加密管理器的能力判断
-                let algoType = quantumCryptoManager.currentAlgorithm
-                if algoType != QuantumCryptoManager.AlgorithmType.classic {
-                    tlsStatistics.pqcConnections += 1
-                    SkyBridgeLogger.security.debugOnly("   🔐 使用算法: \(algoType.rawValue)")
+                tlsStatistics.classicConnections += 1
+                let profile = cryptoProfileByDeviceId[deviceId]
+                if profile == .classicP256 {
+                    SkyBridgeLogger.security.debugOnly("   🔐 TLS transport profile: classicP256")
+                } else if let profile {
+                    SkyBridgeLogger.security.debugOnly(
+                        "   🔐 TLS transport profile: \(profile.rawValue); app-layer PQC payloads require explicit HPKE material and are not counted as negotiated TLS PQC"
+                    )
                 } else {
-                    tlsStatistics.classicConnections += 1
-                    SkyBridgeLogger.security.debugOnly("   🔐 使用算法: AES-GCM（经典）")
+                    SkyBridgeLogger.security.debugOnly(
+                        "   🔐 TLS transport profile missing for device; application payload crypto will fail closed"
+                    )
                 }
  // 记录握手协商信息（版本/套件/ALPN），便于诊断与统计
                 if !tlsStatistics.lastProtocolVersion.isEmpty || !tlsStatistics.lastCipherSuite.isEmpty || !tlsStatistics.lastALPN.isEmpty {
@@ -601,11 +730,13 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
         case .failed(let error):
             SkyBridgeLogger.security.error("❌ TLS连接失败: \(deviceId, privacy: .private), 错误: \(error.localizedDescription, privacy: .private)")
             activeConnections.removeValue(forKey: deviceId)
+            cryptoProfileByDeviceId.removeValue(forKey: deviceId)
             tlsStatistics.errorCount += 1
 
         case .cancelled:
             SkyBridgeLogger.security.debugOnly("⏹️ TLS连接已取消: \(deviceId)")
             activeConnections.removeValue(forKey: deviceId)
+            cryptoProfileByDeviceId.removeValue(forKey: deviceId)
 
         default:
             break
@@ -638,57 +769,34 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
         }
     }
 
- /// 验证证书链 - 增强证书固定和量子安全验证
+ /// 验证证书链 - 证书固定、经典密钥强度与信任/有效期检查
     private func verifyCertificateChain(_ trust: sec_trust_t, for deviceId: String) -> Bool {
  // 将sec_trust_t转换为SecTrust
         let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
 
- // 1. 基础证书链验证
-        var result: SecTrustResultType = .invalid
-        var error: CFError?
-        let success = SecTrustEvaluateWithError(secTrust, &error)
-
-        guard success else {
-            SkyBridgeLogger.security.error("❌ 证书链验证失败: \(String(describing: error?.localizedDescription), privacy: .private)")
-            return false
-        }
-
- // 获取评估结果
-        let evaluationResult = SecTrustGetTrustResult(secTrust, &result)
-        guard evaluationResult == errSecSuccess else {
-            SkyBridgeLogger.security.error("❌ 获取证书评估结果失败")
-            return false
-        }
-
- // 2. 证书固定验证 - 检查证书指纹
+ // 1. 证书固定验证 - 检查证书指纹
         guard performCertificatePinning(secTrust, for: deviceId) else {
             SkyBridgeLogger.security.error("❌ 证书固定验证失败: \(deviceId, privacy: .private)")
             return false
         }
 
- // 3. 量子安全证书验证 - 检查证书是否支持量子安全算法
-        guard validateQuantumSafeCertificate(secTrust, for: deviceId) else {
-            SkyBridgeLogger.security.error("❌ 量子安全证书验证失败: \(deviceId, privacy: .private)")
+ // 2. 经典证书密钥强度下限检查；不把 P-256/ECDSA 证书标成 PQC 证明。
+        guard validateClassicalCertificateKeyStrength(secTrust, for: deviceId) else {
+            SkyBridgeLogger.security.error("❌ TLS证书经典密钥强度验证失败: \(deviceId, privacy: .private)")
             return false
         }
 
- // 4. 证书有效期和撤销状态检查
+ // 3. 证书有效期和撤销状态检查
         guard validateCertificateValidity(secTrust, for: deviceId) else {
             SkyBridgeLogger.security.error("❌ 证书有效性验证失败: \(deviceId, privacy: .private)")
             return false
         }
 
-        switch result {
-        case .unspecified, .proceed:
-            SkyBridgeLogger.security.debugOnly("✅ 证书链验证成功: \(deviceId)")
-            return true
-        default:
-            SkyBridgeLogger.security.error("❌ 证书链验证失败: \(String(describing: result))")
-            return false
-        }
+        SkyBridgeLogger.security.debugOnly("✅ 证书链验证成功: \(deviceId)")
+        return true
     }
 
- /// 执行证书固定验证 - 检查证书指纹是否匹配预期值
+    /// 执行证书固定验证 - 只接受已授权 pin 或本地证书，不在握手回调中建立 TOFU 信任
     private func performCertificatePinning(_ trust: SecTrust, for deviceId: String) -> Bool {
  // 获取证书链中的叶子证书（使用新API）
         guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leafCertificate = chain.first else {
@@ -696,32 +804,11 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
             return false
         }
 
- // 计算证书的SHA-256指纹
-        let certificateData = SecCertificateCopyData(leafCertificate)
-        let data = CFDataGetBytePtr(certificateData)!
-        let length = CFDataGetLength(certificateData)
-        let certificateBytes = Data(bytes: data, count: length)
-
-        let sha256Hash = SHA256.hash(data: certificateBytes)
-        let fingerprint = sha256Hash.compactMap { String(format: "%02x", $0) }.joined()
-
- // 检查是否有预存的证书指纹
-        if let expectedFingerprint = certificateManager.getStoredFingerprint(for: deviceId) {
-            let isMatch = fingerprint == expectedFingerprint
-            if !isMatch {
-                SkyBridgeLogger.security.error("❌ 证书指纹不匹配 - 期望: \(expectedFingerprint, privacy: .private) 实际: \(fingerprint, privacy: .private)")
-            }
-            return isMatch
-        } else {
- // 首次连接，存储证书指纹用于后续验证
-            certificateManager.storeFingerprint(fingerprint, for: deviceId)
-            SkyBridgeLogger.security.debugOnly("📌 存储新设备证书指纹: \(deviceId) -> \(fingerprint)")
-            return true
-        }
+        return certificateManager.validateCertificate(leafCertificate, for: deviceId)
     }
 
- /// 验证量子安全证书 - 检查证书是否使用量子安全算法
-    private func validateQuantumSafeCertificate(_ trust: SecTrust, for deviceId: String) -> Bool {
+    /// 验证经典 TLS 证书公钥强度下限；该检查不证明 PQC/quantum-safe 证书。
+    private func validateClassicalCertificateKeyStrength(_ trust: SecTrust, for deviceId: String) -> Bool {
         guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leafCertificate = chain.first else {
             return false
         }
@@ -738,27 +825,28 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
             return false
         }
 
-        let keyType = keyAttributes[kSecAttrKeyType as String] as? String
-        let keySize = keyAttributes[kSecAttrKeySizeInBits as String] as? Int
+        guard let keyType = keyAttributes[kSecAttrKeyType as String] as? String,
+              let keySize = keyAttributes[kSecAttrKeySizeInBits as String] as? Int else {
+            SkyBridgeLogger.security.error("❌ TLS证书缺少公钥类型或位数")
+            return false
+        }
 
- // 验证密钥强度（为量子安全做准备）
-        if let type = keyType {
-            switch type {
-            case String(kSecAttrKeyTypeRSA):
- // RSA密钥至少需要3072位才能抵御量子攻击
-                guard let size = keySize, size >= 3072 else {
-                    SkyBridgeLogger.security.error("❌ RSA密钥长度不足，需要至少3072位")
-                    return false
-                }
-            case String(kSecAttrKeyTypeECSECPrimeRandom):
- // ECC密钥至少需要256位（P-256）
-                guard let size = keySize, size >= 256 else {
-                    SkyBridgeLogger.security.error("❌ ECC密钥长度不足，需要至少256位")
-                    return false
-                }
-            default:
-                break
+        switch keyType {
+        case String(kSecAttrKeyTypeRSA):
+ // RSA密钥至少需要3072位作为经典 TLS 兼容下限；不代表 PQC。
+            guard keySize >= 3072 else {
+                SkyBridgeLogger.security.error("❌ RSA密钥长度不足，需要至少3072位")
+                return false
             }
+        case String(kSecAttrKeyTypeECSECPrimeRandom):
+ // ECC密钥至少需要256位（P-256）；不代表 PQC。
+            guard keySize >= 256 else {
+                SkyBridgeLogger.security.error("❌ ECC密钥长度不足，需要至少256位")
+                return false
+            }
+        default:
+            SkyBridgeLogger.security.error("❌ 不支持的TLS证书公钥类型")
+            return false
         }
 
         return true
@@ -783,10 +871,9 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
  // 使用现代API进行评估；当启用网络抓取且存在撤销端点时，系统将自动进行OCSP检查。
         var evalError: CFError?
-        let ok = SecTrustEvaluateWithError(trust, &evalError)
-        guard ok else {
+        let evaluationSucceeded = SecTrustEvaluateWithError(trust, &evalError)
+        if !evaluationSucceeded {
             SkyBridgeLogger.security.error("❌ 证书评估失败: \(String(describing: evalError?.localizedDescription), privacy: .private)")
-            return false
         }
 
  // 继续进行结果类型检查，确保在有效期内且信任可接受。
@@ -799,11 +886,17 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
         switch result {
         case .unspecified, .proceed:
-            break
+            guard evaluationSucceeded else {
+                SkyBridgeLogger.security.error("❌ 证书评估未通过但返回了可接受结果: \(String(describing: result))")
+                return false
+            }
         case .recoverableTrustFailure:
- // 自签名或链不完整等情况可能导致可恢复的信任失败；在P2P场景中允许继续。
-            SkyBridgeLogger.security.debugOnly("⚠️ 证书信任问题，但可恢复（可能为自签名或链不完整）")
-            break
+ // 只有已 pin 的单证书本地 P2P 自签证书可以通过重新锚定验证；链不完整或未知自签名仍失败。
+            guard validatePinnedSelfSignedLocalCertificateContract(trust, for: deviceId) else {
+                SkyBridgeLogger.security.error("❌ 可恢复证书信任失败未满足本地P2P自签pin约束: \(deviceId, privacy: .private)")
+                return false
+            }
+            SkyBridgeLogger.security.debugOnly("✅ 已pin本地P2P自签证书通过重新锚定验证: \(deviceId)")
         default:
             SkyBridgeLogger.security.error("❌ 证书有效性验证失败: \(String(describing: result))")
             return false
@@ -823,6 +916,74 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
 
         SkyBridgeLogger.security.debugOnly("✅ 证书有效性与（如适用）撤销检查通过: \(deviceId)")
         return true
+    }
+
+    private func validatePinnedSelfSignedLocalCertificateContract(_ trust: SecTrust, for deviceId: String) -> Bool {
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              chain.count == 1,
+              let leafCertificate = chain.first else {
+            return false
+        }
+
+        guard isSelfSignedCertificate(leafCertificate) else {
+            return false
+        }
+
+        guard certificateManager.validateCertificate(leafCertificate, for: deviceId) else {
+            return false
+        }
+
+        let policy = SecPolicyCreateSSL(true, nil)
+        var pinnedTrust: SecTrust?
+        guard SecTrustCreateWithCertificates(leafCertificate, policy, &pinnedTrust) == errSecSuccess,
+              let pinnedTrust else {
+            return false
+        }
+
+        guard SecTrustSetAnchorCertificates(pinnedTrust, [leafCertificate] as CFArray) == errSecSuccess else {
+            return false
+        }
+        guard SecTrustSetAnchorCertificatesOnly(pinnedTrust, true) == errSecSuccess else {
+            return false
+        }
+        SecTrustSetNetworkFetchAllowed(pinnedTrust, false)
+
+        var evalError: CFError?
+        guard SecTrustEvaluateWithError(pinnedTrust, &evalError) else {
+            SkyBridgeLogger.security.error("❌ 已pin本地P2P自签证书重新锚定验证失败: \(String(describing: evalError?.localizedDescription), privacy: .private)")
+            return false
+        }
+
+        var anchoredResult: SecTrustResultType = .invalid
+        guard SecTrustGetTrustResult(pinnedTrust, &anchoredResult) == errSecSuccess else {
+            return false
+        }
+        return anchoredResult == .unspecified || anchoredResult == .proceed
+    }
+
+    private func isSelfSignedCertificate(_ certificate: SecCertificate) -> Bool {
+        guard let subject = certificateNameEntries(certificate, oid: kSecOIDX509V1SubjectName),
+              let issuer = certificateNameEntries(certificate, oid: kSecOIDX509V1IssuerName),
+              !subject.isEmpty else {
+            return false
+        }
+        return subject == issuer
+    }
+
+    private func certificateNameEntries(_ certificate: SecCertificate, oid: CFString) -> [String]? {
+        guard let values = SecCertificateCopyValues(certificate, [oid] as CFArray, nil) as? [CFString: Any],
+              let valueDict = values[oid] as? [CFString: Any],
+              let entries = valueDict[kSecPropertyKeyValue] as? [[CFString: Any]] else {
+            return nil
+        }
+
+        return entries.compactMap { entry in
+            guard let label = entry[kSecPropertyKeyLabel] as? String,
+                  let value = entry[kSecPropertyKeyValue] else {
+                return nil
+            }
+            return "\(label)=\(String(describing: value))"
+        }
     }
 
  /// C 字符串安全解码为 Swift 字符串（避免使用不推荐API）
@@ -950,6 +1111,8 @@ public enum TLSSecurityError: Error, LocalizedError {
     case invalidDataFormat
     case connectionTimeout
     case tlsHandshakeFailed
+    case pqcMaterialUnavailable(profile: String, operation: String, reason: String)
+    case cryptoProfileMissing(deviceId: String)
 
     public var errorDescription: String? {
         switch self {
@@ -965,6 +1128,10 @@ public enum TLSSecurityError: Error, LocalizedError {
             return "连接超时"
         case .tlsHandshakeFailed:
             return "TLS握手失败"
+        case .pqcMaterialUnavailable(let profile, let operation, let reason):
+            return "PQC TLS材料不可用: profile=\(profile) operation=\(operation) reason=\(reason)"
+        case .cryptoProfileMissing:
+            return "TLS连接缺少已协商的加密 profile"
         }
     }
 }

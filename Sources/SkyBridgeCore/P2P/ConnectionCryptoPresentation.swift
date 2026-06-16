@@ -1,12 +1,10 @@
 import Foundation
 
 public enum ConnectionCryptoPresentation {
-    private static let detectedCapability = CryptoProviderFactory.detectCapability()
-
     public static func modeLabel(
         kind: String?,
         suite: String?,
-        capability: CryptoProviderFactory.Capability? = nil
+        capability _: CryptoProviderFactory.Capability? = nil
     ) -> String? {
         let suiteToken = normalizedToken(suite)
         if suiteToken.contains("xwing") {
@@ -23,7 +21,8 @@ public enum ConnectionCryptoPresentation {
         if kindToken.contains("liboqs") || kindToken.contains("oqs") {
             return "liboqs"
         }
-        if kindToken.contains("apple") {
+        if kindToken.contains("apple"),
+           suiteToken.contains("mlkem") || suiteToken.contains("mldsa") || suiteToken.contains("xwing") {
             return "Apple PQC"
         }
         if kindToken.contains("classic") {
@@ -31,13 +30,7 @@ public enum ConnectionCryptoPresentation {
         }
 
         if suiteToken.contains("mlkem") || suiteToken.contains("mldsa") {
-            let resolvedCapability = capability ?? detectedCapability
-            if resolvedCapability.hasApplePQC {
-                return "Apple PQC"
-            }
-            if resolvedCapability.hasLiboqs {
-                return "liboqs"
-            }
+            return "PQC"
         }
 
         return nil
@@ -55,19 +48,16 @@ public enum ConnectionCryptoPresentation {
     }
 
     public static func inferredModeLabelForCurrentPolicy(
-        compatibilityModeEnabled: Bool = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        compatibilityModeEnabled _: Bool = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
     ) -> String? {
-        let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
-        let selection: CryptoProviderFactory.SelectionPolicy = policy.requirePQC ? .requirePQC : .preferPQC
-        let provider = CryptoProviderFactory.make(policy: selection)
-        return modeLabel(kind: provider.providerName, suite: provider.activeSuite.rawValue)
+        nil
     }
 
     public static func connectedStatusTextWithPolicyFallback(
         kind: String?,
         suite: String?,
         baseConnectedText: String,
-        compatibilityModeEnabled: Bool = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
+        compatibilityModeEnabled _: Bool = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
     ) -> String {
         let explicit = connectedStatusText(
             kind: kind,
@@ -78,12 +68,7 @@ public enum ConnectionCryptoPresentation {
             return explicit
         }
 
-        guard let inferredMode = inferredModeLabelForCurrentPolicy(
-            compatibilityModeEnabled: compatibilityModeEnabled
-        ) else {
-            return baseConnectedText
-        }
-        return "\(inferredMode)\(baseConnectedText)"
+        return baseConnectedText
     }
 
     public static func detailText(

@@ -127,6 +127,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         case invalidChunkSize(Int)
         case framedPayloadTooLarge(Int)
         case alreadyClosed
+        case invalidICEConfiguration(String)
         
         public var errorDescription: String? {
             switch self {
@@ -138,12 +139,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             case .invalidChunkSize(let value): return "分块大小无效：\(value)。必须大于 0"
             case .framedPayloadTooLarge(let size): return "分帧负载过大：\(size) 字节，超过 4 GiB 上限"
             case .alreadyClosed: return "WebRTCSession 已关闭"
+            case .invalidICEConfiguration(let message): return "ICE 配置无效：\(message)"
             }
         }
     }
 
     private let logger = Logger(subsystem: "com.skybridge.compass.ios", category: "WebRTCSession")
-    private static let publicFallbackSTUNURL = "stun:stun.l.google.com:19302"
     private static let controlChannelLabel = "skybridge"
     private static let screenChannelLabel = "skybridge-screen"
     private static let maxPendingInboundControlBuffers = 64
@@ -457,7 +458,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_FORCE_RELAY_ICE"] == "1"
     }
 
-    private func buildIceServers() -> [RTCIceServer] {
+    private func buildIceServers() throws -> [RTCIceServer] {
         var servers: [RTCIceServer] = []
 
         if let stunURL = Self.normalizedICEURL(ice.stunURL), stunURL.hasPrefix("stun:") {
@@ -482,15 +483,17 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             if !turnUsername.isEmpty, !turnPassword.isEmpty {
                 servers.append(RTCIceServer(urlStrings: validTurnURLs, username: turnUsername, credential: turnPassword))
             } else {
-                logger.warning("⚠️ TURN credentials missing, degraded to STUN-only. sessionId=\(self.sessionId, privacy: .public)")
+                logger.error("❌ TURN credentials missing; refusing STUN-only downgrade. sessionId=\(self.sessionId, privacy: .public)")
+                throw WebRTCError.invalidICEConfiguration("TURN credentials missing")
             }
         } else if !ice.turnURLs.isEmpty {
-            logger.warning("⚠️ Invalid TURN URLs. sessionId=\(self.sessionId, privacy: .public)")
+            logger.error("❌ Invalid TURN URLs. sessionId=\(self.sessionId, privacy: .public)")
+            throw WebRTCError.invalidICEConfiguration("invalid TURN URLs")
         }
 
         if servers.isEmpty {
-            servers.append(RTCIceServer(urlStrings: [Self.publicFallbackSTUNURL]))
-            logger.warning("⚠️ No valid ICE servers, fallback to public STUN. sessionId=\(self.sessionId, privacy: .public)")
+            logger.error("❌ No valid ICE servers; refusing public STUN fallback. sessionId=\(self.sessionId, privacy: .public)")
+            throw WebRTCError.invalidICEConfiguration("no valid ICE servers")
         }
 
         return servers
@@ -518,7 +521,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             if Self.shouldForceRelayOnlyForSmoke {
                 config.iceTransportPolicy = .relay
             }
-            config.iceServers = buildIceServers()
+            config.iceServers = try buildIceServers()
             
             let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
             guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
@@ -778,8 +781,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             let expectedLifecycleToken = self.lifecycleToken
             pc.setRemoteDescription(desc) { [weak self, weak pc] error in
                 guard let self else { return }
-                self.scheduleState {
-                    guard let pc,
+                self.scheduleState { [weak self, weak pc] in
+                    guard let self,
+                          let pc,
                           self.peerConnection === pc,
                           !self.isClosed,
                           self.lifecycleToken == expectedLifecycleToken else { return }
@@ -826,8 +830,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             let expectedLifecycleToken = self.lifecycleToken
             pc.setRemoteDescription(desc) { [weak self, weak pc] error in
                 guard let self else { return }
-                self.scheduleState {
-                    guard let pc,
+                self.scheduleState { [weak self, weak pc] in
+                    guard let self,
+                          let pc,
                           self.peerConnection === pc,
                           !self.isClosed,
                           self.lifecycleToken == expectedLifecycleToken else { return }
@@ -1913,7 +1918,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let expectedLifecycleToken = lifecycleToken
         pc.offer(for: constraints) { [weak self, weak pc] sdp, error in
             guard let self else { return }
-            self.scheduleState {
+            self.scheduleState { [weak self, weak pc] in
+                guard let self else { return }
                 guard let pc,
                       Self.lifecycleGuardAllowsCallback(
                         peerConnectionMatches: self.peerConnection === pc,
@@ -1937,7 +1943,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     : RTCSessionDescription(type: .offer, sdp: sdpString)
                 pc.setLocalDescription(localDescription) { [weak self, weak pc] err in
                     guard let self else { return }
-                    self.scheduleState {
+                    self.scheduleState { [weak self, weak pc] in
+                        guard let self else { return }
                         guard let pc,
                               Self.lifecycleGuardAllowsCallback(
                                 peerConnectionMatches: self.peerConnection === pc,
@@ -1976,7 +1983,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let expectedLifecycleToken = lifecycleToken
         pc.answer(for: constraints) { [weak self, weak pc] sdp, error in
             guard let self else { return }
-            self.scheduleState {
+            self.scheduleState { [weak self, weak pc] in
+                guard let self else { return }
                 guard let pc,
                       Self.lifecycleGuardAllowsCallback(
                         peerConnectionMatches: self.peerConnection === pc,
@@ -2000,7 +2008,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     : RTCSessionDescription(type: .answer, sdp: sdpString)
                 pc.setLocalDescription(localDescription) { [weak self, weak pc] err in
                     guard let self else { return }
-                    self.scheduleState {
+                    self.scheduleState { [weak self, weak pc] in
+                        guard let self else { return }
                         guard let pc,
                               Self.lifecycleGuardAllowsCallback(
                                 peerConnectionMatches: self.peerConnection === pc,

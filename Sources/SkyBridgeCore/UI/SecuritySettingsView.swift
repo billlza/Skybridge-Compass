@@ -914,15 +914,15 @@ struct PostQuantumCryptoSettingsView: View {
  // PQC运行状态
             HStack(spacing: 8) {
                 Image(systemName: "lock.shield.fill")
-                    .foregroundColor(.green)
+                    .foregroundColor(.orange)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("后量子加密")
                         .font(.subheadline)
 
-                    Text("Strict-PQC 已强制启用")
+                    Text("Strict-PQC 策略已请求，等待会话协商证明")
                         .font(.caption)
-                        .foregroundColor(.green)
+                        .foregroundColor(.orange)
                 }
 
                 Spacer()
@@ -930,9 +930,9 @@ struct PostQuantumCryptoSettingsView: View {
             .padding(.vertical, 4)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("• macOS 26+: CryptoKit（含 Secure Enclave PQC）")
-                Text("• macOS 14–15: liboqs（ML‑KEM‑768/ML‑DSA‑65）")
-                Text("• OQS 不可用: Classic（X25519/Ed25519）")
+                Text("• macOS 26+: CryptoKit 候选能力（需 runtime 与协商证明）")
+                Text("• macOS 14–15: liboqs 候选能力（ML‑KEM‑768/ML‑DSA‑65）")
+                Text("• OQS 不可用: Classic（非量子安全兼容）")
             }
             .font(.caption2)
             .foregroundColor(.secondary)
@@ -1011,10 +1011,10 @@ struct PostQuantumCryptoSettingsView: View {
     
     private var pqcStatusText: String {
         if cryptoCapability.hasApplePQC {
-            return "ApplePQC 可用（\(cryptoCapability.osVersion)）"
+            return "ApplePQC 候选就绪（\(cryptoCapability.osVersion)，等待协商证明）"
         }
         if cryptoCapability.hasLiboqs {
-            return "liboqs PQC 可用（\(cryptoCapability.osVersion)）"
+            return "liboqs PQC 候选就绪（\(cryptoCapability.osVersion)，等待协商证明）"
         }
         return "未检测到 PQC Provider"
     }

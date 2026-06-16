@@ -8,6 +8,23 @@ internal enum WebRTCPQCHandshakePolicy {
         let suites: [CryptoSuite]
     }
 
+    internal struct InitialHandshakeBootstrapPlan: Equatable, Sendable {
+        let selection: CryptoProviderFactory.SelectionPolicy
+        let bootstrapMode: String
+        let usesClassicAuthorityBootstrap: Bool
+    }
+
+    internal struct InitialHandshakeBootstrapFailure: Equatable, Sendable {
+        let code: Int
+        let message: String
+        let includeProviderAvailabilityInLog: Bool
+    }
+
+    internal enum InitialHandshakeBootstrapDecision: Equatable, Sendable {
+        case proceed(InitialHandshakeBootstrapPlan)
+        case reject(InitialHandshakeBootstrapFailure)
+    }
+
     static func canonicalPQCRekeyElectionDeviceId(_ raw: String?) -> String? {
         guard let raw else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -145,5 +162,64 @@ internal enum WebRTCPQCHandshakePolicy {
             return true
         }
         return !hasTrustedPeerKEM
+    }
+
+    static func initialWebRTCHandshakeBootstrapDecision(
+        strictPQCRequested: Bool,
+        hasTrustedPeerKEM: Bool,
+        capability: CryptoProviderFactory.Capability,
+        useClassicAuthorityBootstrap: Bool,
+        peerDeviceId: String
+    ) -> InitialHandshakeBootstrapDecision {
+        if useClassicAuthorityBootstrap {
+            if strictPQCRequested {
+                return .reject(.init(
+                    code: 703,
+                    message: "严格 PQC 已启用，但 WebRTC 初始握手请求 classic authority bootstrap；当前已拒绝 classic bootstrap。peer=\(peerDeviceId)",
+                    includeProviderAvailabilityInLog: false
+                ))
+            }
+            return .proceed(.init(
+                selection: .classicOnly,
+                bootstrapMode: "classic_authority_bootstrap",
+                usesClassicAuthorityBootstrap: true
+            ))
+        }
+
+        guard hasTrustedPeerKEM else {
+            if strictPQCRequested {
+                return .reject(.init(
+                    code: 701,
+                    message: "严格 PQC 已启用，但 WebRTC 对端 authoritative deviceId / 受信任 KEM 尚未就绪；当前已拒绝 classic bootstrap。peer=\(peerDeviceId)",
+                    includeProviderAvailabilityInLog: false
+                ))
+            }
+            return .proceed(.init(
+                selection: .classicOnly,
+                bootstrapMode: "classic_bootstrap",
+                usesClassicAuthorityBootstrap: false
+            ))
+        }
+
+        guard capability.hasApplePQC || capability.hasLiboqs else {
+            if strictPQCRequested {
+                return .reject(.init(
+                    code: 702,
+                    message: "严格 PQC 已启用，但当前设备没有可用的 PQC Provider；WebRTC 初始握手不会再降级到 Classic。",
+                    includeProviderAvailabilityInLog: true
+                ))
+            }
+            return .proceed(.init(
+                selection: .classicOnly,
+                bootstrapMode: "classic_bootstrap_no_local_pqc_provider",
+                usesClassicAuthorityBootstrap: false
+            ))
+        }
+
+        return .proceed(.init(
+            selection: .requirePQC,
+            bootstrapMode: "trusted_kem",
+            usesClassicAuthorityBootstrap: false
+        ))
     }
 }

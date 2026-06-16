@@ -128,12 +128,6 @@ public class AuthenticationManager: ObservableObject {
     }
     
     private init() {
-        if let unsupported = IOSDeviceSupportGate.currentUnsupportedDevice() {
-            SkyBridgeLogger.shared.warning(
-                "⛔️ Authentication bootstrap skipped on unsupported device: \(unsupported.displayName) (\(unsupported.modelIdentifier))"
-            )
-            return
-        }
         if Self.shouldResetStateForUITests {
             clearSession()
         }
@@ -394,7 +388,7 @@ public class AuthenticationManager: ObservableObject {
             try? KeychainManager.shared.storeAppleUserID(credential.user)
             let enrichedSession = await persistAppleProfileIfNeeded(from: credential, session: session)
             let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
-            applySession(
+            try applySession(
                 hydratedSession,
                 emailFallback: credential.email ?? hydratedSession.email ?? "\(credential.user)@appleid.local"
             )
@@ -497,7 +491,7 @@ public class AuthenticationManager: ObservableObject {
         )
 
         let hydratedSession = await hydrateSessionProfileIfPossible(enrichedSession)
-        applySession(hydratedSession, emailFallback: email)
+        try applySession(hydratedSession, emailFallback: email)
         await recordRegistrationAttempt(
             identifier: email,
             identifierType: .email,
@@ -539,7 +533,7 @@ public class AuthenticationManager: ObservableObject {
             ])
         }
         let hydratedSession = await hydrateSessionProfileIfPossible(session)
-        applySession(hydratedSession, emailFallback: email)
+        try applySession(hydratedSession, emailFallback: email)
         await recordRegistrationAttempt(
             identifier: email,
             identifierType: .email,
@@ -643,7 +637,7 @@ public class AuthenticationManager: ObservableObject {
             ])
         }
         let hydratedSession = await hydrateSessionProfileIfPossible(session)
-        applySession(hydratedSession, emailFallback: phoneNumber)
+        try applySession(hydratedSession, emailFallback: phoneNumber)
         await recordRegistrationAttempt(
             identifier: phoneNumber,
             identifierType: .phone,
@@ -671,7 +665,7 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: nebulaId,
             issuedAt: Date()
         )
-        applySession(session, emailFallback: email)
+        try applySession(session, emailFallback: email)
         SkyBridgeLogger.shared.info("✅ Nebula 浏览器登录成功: \(displayName)")
     }
 
@@ -691,7 +685,7 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: nebulaId,
             issuedAt: Date()
         )
-        applySession(session, emailFallback: email)
+        try applySession(session, emailFallback: email)
         SkyBridgeLogger.shared.info("✅ Nebula 浏览器注册成功: \(displayName)")
     }
 
@@ -747,31 +741,22 @@ public class AuthenticationManager: ObservableObject {
     // MARK: - Private Methods
     
     private func loadSession() {
-        if let session = KeychainManager.shared.loadAuthSession() {
-            self.session = session
-            let email = session.email ?? (session.displayName.contains("@") ? session.displayName : "user@skybridge.local")
-            let avatarURL = session.avatarURL.flatMap(URL.init(string:))
-            currentUser = User(
-                id: session.userIdentifier,
-                email: email,
-                displayName: session.displayName,
-                avatarURL: avatarURL,
-                nebulaId: session.nebulaId
-            )
-            isAuthenticated = true
-            isGuestMode = false
-
-            // 启动后后台刷新一次（不阻塞 UI）
-            Task { [weak self] in
-                guard let self else { return }
-                await self.refreshProfileIfPossible()
+        do {
+            guard let session = try KeychainManager.shared.loadAuthSessionStrict() else {
+                return
             }
+            applyPersistedSession(session)
+        } catch {
+            session = nil
+            currentUser = nil
+            isAuthenticated = false
+            isGuestMode = false
+            SkyBridgeLogger.shared.error("❌ 持久化登录态读取失败: \(error.localizedDescription)")
         }
     }
     
-    private func saveSession() {
-        guard let session else { return }
-        try? KeychainManager.shared.storeAuthSession(session)
+    private func persistSession(_ session: AuthSession) throws {
+        try KeychainManager.shared.storeAuthSession(session)
     }
     
     private func clearSession() {
@@ -850,7 +835,30 @@ public class AuthenticationManager: ObservableObject {
         SkyBridgeLogger.shared.info("🧪 Smoke remote desktop session installed for real Dashboard path")
     }
 
-    private func applySession(_ session: AuthSession, emailFallback: String) {
+    private func applyPersistedSession(_ session: AuthSession) {
+        self.session = session
+        let email = session.email ?? (session.displayName.contains("@") ? session.displayName : "user@skybridge.local")
+        let displayName = session.displayName.isEmpty ? (email.components(separatedBy: "@").first ?? "用户") : session.displayName
+        let avatarURL = session.avatarURL.flatMap(URL.init(string:))
+        currentUser = User(
+            id: session.userIdentifier,
+            email: email,
+            displayName: displayName,
+            avatarURL: avatarURL,
+            nebulaId: session.nebulaId
+        )
+        isAuthenticated = true
+        isGuestMode = false
+
+        // 登录成功后自动刷新一次，确保 iOS 与 macOS 的 nebula_id/avatar 等一致并持久化
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshProfileIfPossible()
+        }
+    }
+
+    private func applySession(_ session: AuthSession, emailFallback: String) throws {
+        try persistSession(session)
         self.session = session
         let displayName = session.displayName.isEmpty ? (emailFallback.components(separatedBy: "@").first ?? "用户") : session.displayName
         let avatarURL = session.avatarURL.flatMap(URL.init(string:))
@@ -863,7 +871,6 @@ public class AuthenticationManager: ObservableObject {
         )
         isAuthenticated = true
         isGuestMode = false
-        saveSession()
 
         // 登录成功后自动刷新一次，确保 iOS 与 macOS 的 nebula_id/avatar 等一致并持久化
         Task { [weak self] in
@@ -961,8 +968,8 @@ public class AuthenticationManager: ObservableObject {
                 nebulaId: session.nebulaId,
                 issuedAt: Date()
             )
+            try persistSession(merged)
             self.session = merged
-            saveSession()
             SkyBridgeLogger.shared.info("🔄 Supabase access token 已刷新")
             return true
         } catch {
@@ -1001,8 +1008,13 @@ public class AuthenticationManager: ObservableObject {
             nebulaId: profile.nebulaId ?? session.nebulaId,
             issuedAt: session.issuedAt
         )
+        do {
+            try persistSession(updatedSession)
+        } catch {
+            SkyBridgeLogger.shared.error("❌ 远端账号资料持久化失败: \(error.localizedDescription)")
+            return
+        }
         self.session = updatedSession
-        saveSession()
 
         // 更新 currentUser（驱动 UI）
         let email = updatedSession.email ?? (updatedSession.displayName.contains("@") ? updatedSession.displayName : (currentUser?.email ?? "user@skybridge.local"))

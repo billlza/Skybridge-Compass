@@ -2,6 +2,8 @@ import XCTest
 @testable import SkyBridgeCore
 
 #if HAS_APPLE_PQC_SDK
+import CryptoKit
+
 /// Apple原生PQC与OQS兼容性测试
 /// 验证两种实现可以互操作
 @available(macOS 26.0, *)
@@ -132,12 +134,61 @@ final class ApplePQCCompatibilityTests: XCTestCase {
     }
     
  // MARK: - X-Wing HPKE测试
+
+    func testXWingHPKERequiresAuthenticatedRecipientKey() async throws {
+        let appleProvider = ApplePQCProvider()
+        let testPeerId = "xwing-missing-\(UUID().uuidString)"
+
+        do {
+            _ = try await appleProvider.hpkeSeal(
+                recipientPeerId: testPeerId,
+                plaintext: "X-Wing缺少认证公钥测试".utf8Data,
+                associatedData: Data("关联数据".utf8)
+            )
+            XCTFail("X-Wing HPKE seal must require a pre-authenticated recipient public key.")
+        } catch let error as NSError {
+            XCTAssertEqual(error.domain, "PQC")
+            XCTAssertEqual(error.code, -918)
+            XCTAssertFalse(error.localizedDescription.contains(testPeerId))
+        }
+    }
+
+    func testXWingHPKEOpenMissingPrivateKeyRedactsPeerIdentifier() async throws {
+        let appleProvider = ApplePQCProvider()
+        let testPeerId = "xwing-missing-private-\(UUID().uuidString)"
+        let recipientPrivateKey = try XWingMLKEM768X25519.PrivateKey.generate()
+
+        try await appleProvider.setAuthenticatedXWingRecipientPublicKey(recipientPrivateKey.publicKey, for: testPeerId)
+        let sealed = try await appleProvider.hpkeSeal(
+            recipientPeerId: testPeerId,
+            plaintext: "X-Wing缺少私钥测试".utf8Data,
+            associatedData: Data("关联数据".utf8)
+        )
+
+        do {
+            _ = try await appleProvider.hpkeOpen(
+                recipientPeerId: "missing-private-\(testPeerId)",
+                ciphertext: sealed.ciphertext,
+                encapsulatedKey: sealed.encapsulatedKey,
+                associatedData: Data("关联数据".utf8)
+            )
+            XCTFail("X-Wing HPKE open must require local private key material.")
+        } catch let error as NSError {
+            XCTAssertEqual(error.domain, "PQC")
+            XCTAssertEqual(error.code, -919)
+            XCTAssertFalse(error.localizedDescription.contains(testPeerId))
+        }
+    }
     
     func testXWingHPKE() async throws {
         let appleProvider = ApplePQCProvider()
         let testMessage = "X-Wing HPKE测试消息".utf8Data
-        let testPeerId = "xwing-test"
+        let testPeerId = "xwing-test-\(UUID().uuidString)"
         let testAAD = "关联数据".data(using: .utf8)
+        let recipientPrivateKey = try XWingMLKEM768X25519.PrivateKey.generate()
+
+        try await appleProvider.setAuthenticatedXWingRecipientPublicKey(recipientPrivateKey.publicKey, for: testPeerId)
+        try await appleProvider.setLocalXWingRecipientPrivateKey(recipientPrivateKey, for: testPeerId)
         
  // 封装和加密
         let (ciphertext, encapsulatedKey) = try await appleProvider.hpkeSeal(
@@ -305,4 +356,3 @@ final class ApplePQCCompatibilityTests: XCTestCase {
     }
 }
 #endif // HAS_APPLE_PQC_SDK
-

@@ -107,6 +107,9 @@ extension CrossNetworkConnectionManager {
         let classicSuites = classicProvider.supportedSuites.filter { !$0.isPQCGroup }
 
         guard peerHasPQCGroup else {
+            guard !policy.requirePQC else {
+                return nil
+            }
             return WebRTCInboundResponderSelection(
                 selectionPolicy: .classicOnly,
                 cryptoProvider: classicProvider,

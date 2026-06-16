@@ -1,0 +1,42 @@
+name: protocol-parity
+
+# Guards the iOS <-> macOS hand-copied protocol layer against silent drift.
+# See Docs/CoreLayering.md and Scripts/check_protocol_parity.py for rationale.
+# This does NOT require the files to be identical (they intentionally diverge);
+# it fails when a tracked wire/protocol file changes without the baseline being
+# re-acknowledged, or when a cross-platform wire anchor (e.g. DataChannel labels)
+# stops matching.
+
+on:
+  pull_request:
+    paths:
+      - "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/**"
+      - "Sources/**"
+      - "Scripts/check_protocol_parity.py"
+      - "Scripts/protocol_parity_baseline.json"
+      - ".github/workflows/protocol-parity.yml"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/**"
+      - "Sources/**"
+      - "Scripts/check_protocol_parity.py"
+      - "Scripts/protocol_parity_baseline.json"
+      - ".github/workflows/protocol-parity.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-parity-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check iOS <-> macOS protocol parity (drift baseline + wire anchors)
+        run: python3 Scripts/check_protocol_parity.py

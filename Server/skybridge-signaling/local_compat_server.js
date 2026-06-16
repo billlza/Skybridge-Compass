@@ -4,17 +4,54 @@ const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
 const { WebSocketServer, WebSocket } = require('ws');
+const {
+  allowsLegacyQueryTokenFromEnv,
+  extractWebSocketSessionCredentials
+} = require('./lib/websocket_credentials');
 
 const PORT = Number(process.env.PORT || 18443);
 const HOST = process.env.HOST || '0.0.0.0';
 const PUBLIC_HOST = String(process.env.PUBLIC_HOST || '').trim();
 const CODE_LEN = Number(process.env.CODE_LEN || 8);
 const CODE_TTL_MS = Number(process.env.CODE_TTL_MS || 10 * 60_000);
+const WS_MAX_MSG_BYTES = readPositiveIntegerEnv(
+  'SKYBRIDGE_LOCAL_COMPAT_MAX_WS_MESSAGE_BYTES',
+  'WS_MAX_MSG_BYTES',
+  16 * 1024
+);
+const WS_MAX_PAYLOAD_BYTES = readPositiveIntegerEnv(
+  'SKYBRIDGE_LOCAL_COMPAT_MAX_WS_PAYLOAD_BYTES',
+  'WS_MAX_PAYLOAD_BYTES',
+  WS_MAX_MSG_BYTES
+);
+const WS_MAX_BUFFERED_BYTES = readPositiveIntegerEnv(
+  'SKYBRIDGE_LOCAL_COMPAT_MAX_WS_BUFFERED_BYTES',
+  'WS_MAX_BUFFERED_BYTES',
+  512 * 1024
+);
+const WS_ALLOW_LEGACY_QUERY_TOKEN = allowsLegacyQueryTokenFromEnv(process.env);
+if (WS_MAX_PAYLOAD_BYTES < WS_MAX_MSG_BYTES) {
+  throw new Error('invalid_local_compat_resource_limit:SKYBRIDGE_LOCAL_COMPAT_MAX_WS_PAYLOAD_BYTES');
+}
 const TURN_URIS = String(process.env.TURN_URIS || '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const LOG_REDACTED = '<redacted>';
+
+function readPositiveIntegerEnv(primaryName, fallbackName, defaultValue) {
+  const raw = process.env[primaryName] !== undefined ? process.env[primaryName] : process.env[fallbackName];
+  const sourceName = process.env[primaryName] !== undefined ? primaryName : fallbackName;
+  if (raw === undefined) return defaultValue;
+  const valueText = String(raw).trim();
+  const value = Number(valueText);
+  if (!valueText || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`invalid_local_compat_resource_limit:${sourceName}`);
+  }
+  return value;
+}
+
 function normalizeSignalingWebSocketPath(rawPath) {
   const value = String(rawPath || '').trim();
   if (
@@ -64,6 +101,18 @@ function normalizeSessionID(value) {
 
 function sha256Hex(value) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function safeErrorCode(error) {
+  return String(error?.code || error?.name || 'Error');
+}
+
+function sessionLogId(record) {
+  return String(record?.logId || LOG_REDACTED);
+}
+
+function tokenPresence(value) {
+  return String(value || '').trim() ? 'present' : 'missing';
 }
 
 function parseJWTClaims(token) {
@@ -192,9 +241,70 @@ function compareBinding(left, right) {
     && left.protocolPublicKeyFingerprint === right.protocolPublicKeyFingerprint;
 }
 
+function socketForRole(record, role) {
+  return role === 'initiator' ? record.initiator.socket : record.responder?.socket || null;
+}
+
+function setSocketForRole(record, role, ws) {
+  const binding = role === 'initiator' ? record.initiator : record.responder;
+  if (!binding) {
+    throw new Error('missing_role_binding');
+  }
+  const previous = binding.socket;
+  binding.socket = ws;
+  return previous;
+}
+
+function isCurrentRoleSocket(record, role, ws) {
+  return socketForRole(record, role) === ws;
+}
+
+function closeWebSocketWithReason(ws, code, reason, context) {
+  if (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)) {
+    return false;
+  }
+  try {
+    ws.close(code, reason);
+    return true;
+  } catch (error) {
+    console.warn(`[ws] close failed context=${context} error=${safeErrorCode(error)}`);
+    return false;
+  }
+}
+
+function webSocketMessageByteLength(raw) {
+  if (Buffer.isBuffer(raw)) return raw.length;
+  if (raw instanceof ArrayBuffer) return raw.byteLength;
+  if (ArrayBuffer.isView(raw)) return raw.byteLength;
+  return Buffer.byteLength(String(raw), 'utf8');
+}
+
+function webSocketMessageToText(raw) {
+  if (Buffer.isBuffer(raw)) return raw.toString('utf8');
+  if (raw instanceof ArrayBuffer) return Buffer.from(raw).toString('utf8');
+  if (ArrayBuffer.isView(raw)) return Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString('utf8');
+  return String(raw);
+}
+
+function sendTextFrame(ws, text, context) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  const payload = String(text);
+  const bytes = Buffer.byteLength(payload, 'utf8');
+  const bufferedAmount = Number(ws.bufferedAmount || 0);
+  if (bufferedAmount >= WS_MAX_BUFFERED_BYTES || bufferedAmount + bytes > WS_MAX_BUFFERED_BYTES) {
+    closeWebSocketWithReason(ws, 1013, 'backpressure', context);
+    return false;
+  }
+  ws.send(payload, (error) => {
+    if (!error) return;
+    console.warn(`[ws] send failed context=${context} error=${safeErrorCode(error)}`);
+    closeWebSocketWithReason(ws, 1011, 'send_failed', context);
+  });
+  return true;
+}
+
 function sendServerFrame(ws, frame) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify(frame));
+  return sendTextFrame(ws, JSON.stringify(frame), 'server_frame');
 }
 
 app.get('/', (req, res) => {
@@ -289,6 +399,7 @@ app.post('/api/webrtc/register-code', (req, res) => {
   const record = {
     code,
     sessionId: code,
+    logId: randomToken(9),
     signalingServerOrigin,
     createdAt: nowMs(),
     expiresAt: nowMs() + CODE_TTL_MS,
@@ -303,7 +414,7 @@ app.post('/api/webrtc/register-code', (req, res) => {
     responder: null
   };
   sessions.set(code, record);
-  console.log(`[http] register-code code=${code} initiator=${binding.deviceId}`);
+  console.log(`[http] register-code sessionLogId=${sessionLogId(record)} code=${LOG_REDACTED} initiator=${LOG_REDACTED}`);
   res.json(sessionResponse(record, 'initiator'));
 });
 
@@ -320,7 +431,7 @@ app.get('/api/webrtc/lookup/:code', (req, res) => {
     binding = legacyBindingFromRequest(req);
   }
   if (!binding) {
-    console.log(`[http] lookup denied code=${sessionId} reason=missing_identity_binding`);
+    console.log(`[http] lookup denied sessionLogId=${sessionLogId(record)} code=${LOG_REDACTED} reason=missing_identity_binding`);
     return res.status(401).json({ error: 'missing_identity_binding' });
   }
   if (!record.responder) {
@@ -331,11 +442,11 @@ app.get('/api/webrtc/lookup/:code', (req, res) => {
       socket: null
     };
   } else if (!compareBinding(record.responder, binding)) {
-    console.log(`[http] lookup denied code=${sessionId} reason=session_peer_mismatch responder=${binding.deviceId}`);
+    console.log(`[http] lookup denied sessionLogId=${sessionLogId(record)} code=${LOG_REDACTED} reason=session_peer_mismatch responder=${LOG_REDACTED}`);
     return res.status(409).json({ error: 'session_peer_mismatch' });
   }
   sessions.set(sessionId, record);
-  console.log(`[http] lookup code=${sessionId} responder=${binding.deviceId}`);
+  console.log(`[http] lookup sessionLogId=${sessionLogId(record)} code=${LOG_REDACTED} responder=${LOG_REDACTED}`);
   res.json(sessionResponse(record, 'responder'));
 });
 
@@ -355,15 +466,35 @@ app.use((err, req, res, next) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: SIGNALING_WEBSOCKET_PATH });
+const wss = new WebSocketServer({
+  server,
+  path: SIGNALING_WEBSOCKET_PATH,
+  maxPayload: WS_MAX_PAYLOAD_BYTES,
+  perMessageDeflate: false
+});
 
 wss.on('connection', (ws, req) => {
+  let connectionRecord = null;
+  let connectionRole = 'unbound';
+  ws.on('error', (error) => {
+    console.warn(`[ws] socket error sessionLogId=${sessionLogId(connectionRecord)} role=${connectionRole} error=${safeErrorCode(error)}`);
+  });
+
   const url = new URL(req.url, 'http://127.0.0.1');
-  const sessionId = normalizeSessionID(url.searchParams.get('shard'));
-  const sessionToken = String(url.searchParams.get('st') || '').trim();
+  const credentials = extractWebSocketSessionCredentials(req, url, {
+    allowLegacyQueryToken: WS_ALLOW_LEGACY_QUERY_TOKEN
+  });
+  if (credentials.error) {
+    console.log(`[ws] reject session=${LOG_REDACTED} reason=${credentials.error} token=missing`);
+    ws.close(1008, credentials.error);
+    return;
+  }
+  const sessionId = normalizeSessionID(credentials.sessionId);
+  const sessionToken = credentials.sessionToken;
   const record = sessions.get(sessionId);
+  connectionRecord = record;
   if (!record) {
-    console.log(`[ws] reject session=${sessionId} reason=unknown_session`);
+    console.log(`[ws] reject session=${LOG_REDACTED} reason=unknown_session token=${tokenPresence(sessionToken)}`);
     ws.close(1008, 'unknown_session');
     return;
   }
@@ -371,25 +502,45 @@ wss.on('connection', (ws, req) => {
   let role = null;
   if (record.initiator.sessionToken === sessionToken) {
     role = 'initiator';
-    record.initiator.socket = ws;
   } else if (record.responder && record.responder.sessionToken === sessionToken) {
     role = 'responder';
-    record.responder.socket = ws;
   } else {
-    console.log(`[ws] reject session=${sessionId} reason=invalid_session_token token=${sessionToken.slice(0, 8)}`);
+    console.log(`[ws] reject sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} reason=invalid_session_token token=${tokenPresence(sessionToken)}`);
     ws.close(1008, 'invalid_session_token');
     return;
   }
+  connectionRole = role;
 
-  console.log(`[ws] bound session=${sessionId} role=${role}`);
+  const previousSocket = setSocketForRole(record, role, ws);
+  if (previousSocket && previousSocket !== ws) {
+    console.log(`[ws] reclaim sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} role=${role}`);
+    closeWebSocketWithReason(previousSocket, 1008, 'reclaimed', `reclaim:${role}`);
+  }
+
+  console.log(`[ws] bound sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} role=${role}`);
   sendServerFrame(ws, { type: 'bound', sessionId, role });
 
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
+    if (!isCurrentRoleSocket(record, role, ws)) {
+      closeWebSocketWithReason(ws, 1008, 'reclaimed', `stale:${role}`);
+      return;
+    }
+    if (isBinary) {
+      console.log(`[ws] reject sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} role=${role} reason=unsupported_data`);
+      closeWebSocketWithReason(ws, 1003, 'unsupported_data', `binary:${role}`);
+      return;
+    }
+    const bytes = webSocketMessageByteLength(raw);
+    if (bytes > WS_MAX_MSG_BYTES) {
+      console.log(`[ws] reject sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} role=${role} reason=message_too_large bytes=${bytes}`);
+      closeWebSocketWithReason(ws, 1009, 'message_too_large', `message_size:${role}`);
+      return;
+    }
     const peer = role === 'initiator' ? record.responder?.socket : record.initiator.socket;
     if (peer && peer.readyState === WebSocket.OPEN) {
-      const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw);
-      console.log(`[ws] relay session=${sessionId} from=${role} bytes=${text.length}`);
-      peer.send(text);
+      const text = webSocketMessageToText(raw);
+      console.log(`[ws] relay sessionLogId=${sessionLogId(record)} session=${LOG_REDACTED} from=${role} bytes=${bytes}`);
+      sendTextFrame(peer, text, `relay:${role}`);
     }
   });
 
@@ -409,10 +560,14 @@ setInterval(() => {
     if (value.expiresAt <= cutoff) {
       try {
         value.initiator.socket?.close(1001, 'session_expired');
-      } catch (_) {}
+      } catch (error) {
+        console.warn(`[ws] close expired socket failed sessionLogId=${sessionLogId(value)} role=initiator error=${safeErrorCode(error)}`);
+      }
       try {
         value.responder?.socket?.close(1001, 'session_expired');
-      } catch (_) {}
+      } catch (error) {
+        console.warn(`[ws] close expired socket failed sessionLogId=${sessionLogId(value)} role=responder error=${safeErrorCode(error)}`);
+      }
       sessions.delete(key);
     }
   }

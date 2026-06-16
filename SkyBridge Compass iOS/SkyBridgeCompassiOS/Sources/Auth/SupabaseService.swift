@@ -65,6 +65,10 @@ public final class SupabaseService: ObservableObject {
             return true
         }
 
+        private static func logResolvedConfiguration(source: String) {
+            SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=\(source) urlValidated=1 anonKeyPresent=1")
+        }
+
         /// iOS 端优先 Keychain，其次 Info.plist
         public static func fromEnvironment(logIfMissing: Bool = true) -> Configuration? {
             // 1) Keychain
@@ -75,12 +79,11 @@ public final class SupabaseService: ObservableObject {
                     KeychainManager.shared.deleteSupabaseConfig()
                 } else if let url = URL(string: keychainConfig.url) {
                     if isValidSupabaseURL(url), !keychainConfig.anonKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=Keychain host=\(url.host ?? "unknown")")
+                        logResolvedConfiguration(source: "Keychain")
                         return Configuration(url: url, anonKey: keychainConfig.anonKey)
                     } else {
-                        let host = url.host ?? "unknown"
                         let anonEmpty = keychainConfig.anonKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "1" : "0"
-                        SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置无效（host=\(host), anonKeyEmpty=\(anonEmpty)），将回退到 Info.plist/Bundle。")
+                        SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置无效（urlParsed=1, anonKeyEmpty=\(anonEmpty)），将回退到 Info.plist/Bundle。")
                     }
                 } else {
                     SkyBridgeLogger.shared.warning("⚠️ Supabase Keychain 配置无效（URL 无法解析），将回退到 Info.plist/Bundle。")
@@ -95,7 +98,7 @@ public final class SupabaseService: ObservableObject {
                isValidSupabaseURL(url),
                !anonKey.isEmpty,
                !isPlaceholderConfig(urlString: urlString, anonKey: anonKey) {
-                SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=Info.plist host=\(url.host ?? "unknown")")
+                logResolvedConfiguration(source: "Info.plist")
                 return Configuration(url: url, anonKey: anonKey)
             }
 
@@ -108,7 +111,7 @@ public final class SupabaseService: ObservableObject {
                isValidSupabaseURL(baseURL),
                !anonKey.isEmpty,
                !isPlaceholderConfig(urlString: urlString, anonKey: anonKey) {
-                SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=SupabaseConfig.plist(host=\(baseURL.host ?? "unknown"))")
+                logResolvedConfiguration(source: "SupabaseConfig.plist")
                 return Configuration(url: baseURL, anonKey: anonKey)
             }
 
@@ -122,7 +125,7 @@ public final class SupabaseService: ObservableObject {
                isValidSupabaseURL(baseURL),
                !anonKey.isEmpty,
                !isPlaceholderConfig(urlString: urlString, anonKey: anonKey) {
-                SkyBridgeLogger.shared.info("🔐 Supabase 配置来源=Bundle.module(host=\(baseURL.host ?? "unknown"))")
+                logResolvedConfiguration(source: "Bundle.module")
                 return Configuration(url: baseURL, anonKey: anonKey)
             }
 #endif

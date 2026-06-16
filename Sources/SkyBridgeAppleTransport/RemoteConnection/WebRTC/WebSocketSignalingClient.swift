@@ -108,8 +108,8 @@ public actor WebSocketSignalingClient {
                 return "信令 WebSocket 端点无效: \(reason)"
             case .sendRequiresBound:
                 return "信令通道尚未 bound，不能发送业务消息"
-            case .serverRejected(let reason):
-                return "信令服务器拒绝请求: \(reason)"
+            case .serverRejected(_):
+                return "信令服务器拒绝请求: \(WebSocketSignalingClient.redactedServerErrorReasonDescription)"
             case .backendFailed(let backend, let reason):
                 return "信令后端 \(backend.rawValue) 失败: \(reason)"
             }
@@ -153,8 +153,12 @@ public actor WebSocketSignalingClient {
     }
 
     private let logger = Logger(subsystem: "com.skybridge.signal", category: "WebRTCSignalingWS")
+    nonisolated private static let redactedServerErrorReasonDescription = "<redacted-server-error>"
+    nonisolated private static let redactedTransportErrorDescription = "<redacted-transport-error>"
+    nonisolated private static let sensitiveLogRedaction = "<redacted>"
     private let url: URL
     private let sessionId: String
+    private let additionalHeaders: [String: String]
     private var nextSequenceGeneration: Int
     private let connectionTimeout: Duration = .seconds(15)
     private static let websocketRequestTimeoutSeconds: TimeInterval = 120
@@ -183,11 +187,12 @@ public actor WebSocketSignalingClient {
     public var onServerFrame: (@Sendable (SignalingServerFrame) -> Void)?
     public var onLifecycleEvent: (@Sendable (SignalingLifecycleEvent) -> Void)?
 
-    public init(url: URL, sessionId: String, generation: Int) {
+    public init(url: URL, sessionId: String, generation: Int, additionalHeaders: [String: String] = [:]) {
         self.init(
             url: url,
             sessionId: sessionId,
             generation: generation,
+            additionalHeaders: additionalHeaders,
             selectionPolicy: BackendSelectionPolicy.current(),
             nativeFallbackEnabled: ProcessInfo.processInfo.environment["SKYBRIDGE_SIGNALING_DISABLE_NATIVE_FALLBACK"] != "1"
         )
@@ -197,11 +202,13 @@ public actor WebSocketSignalingClient {
         url: URL,
         sessionId: String,
         generation: Int,
+        additionalHeaders: [String: String] = [:],
         selectionPolicy: BackendSelectionPolicy,
         nativeFallbackEnabled: Bool
     ) {
         self.url = url
         self.sessionId = sessionId
+        self.additionalHeaders = additionalHeaders
         self.nextSequenceGeneration = generation
         self.selectionPolicy = selectionPolicy
         self.nativeFallbackEnabled = nativeFallbackEnabled
@@ -223,7 +230,7 @@ public actor WebSocketSignalingClient {
         do {
             try await connectOrThrow()
         } catch {
-            logger.error("❌ signaling websocket connect failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("❌ signaling websocket connect failed: err=\(Self.transportErrorLogSummary(error), privacy: .public)")
         }
     }
 
@@ -333,7 +340,12 @@ public actor WebSocketSignalingClient {
             return url.host ?? "<redacted>"
         }
         components.queryItems = components.queryItems?.map { item in
-            guard item.name == "st" else { return item }
+            let name = item.name.lowercased()
+            guard name == "st"
+                || name == "shard"
+                || name == "sessionid"
+                || name.contains("token")
+                || name.contains("secret") else { return item }
             return URLQueryItem(name: item.name, value: "<redacted>")
         }
         return components.string ?? components.host ?? "<redacted>"
@@ -361,7 +373,7 @@ public actor WebSocketSignalingClient {
             )
 
             logger.info(
-                "🔌 signaling connect attempt: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
+                "🔌 signaling connect attempt: session=\(Self.sensitiveLogRedaction, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
             )
 
             do {
@@ -373,7 +385,7 @@ public actor WebSocketSignalingClient {
                 }
 
                 logger.info(
-                    "✅ signaling backend pinned after bound: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)"
+                    "✅ signaling backend pinned after bound: session=\(Self.sensitiveLogRedaction, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)"
                 )
                 lastBoundHandle = handleId
                 return
@@ -381,11 +393,11 @@ public actor WebSocketSignalingClient {
                 lastError = error
                 if error is CancellationError {
                     logger.debug(
-                        "ℹ️ signaling connect attempt cancelled: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
+                        "ℹ️ signaling connect attempt cancelled: session=\(Self.sensitiveLogRedaction, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
                     )
                 } else {
                     logger.error(
-                        "❌ signaling connect attempt failed: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                        "❌ signaling connect attempt failed: session=\(Self.sensitiveLogRedaction, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(Self.transportErrorLogSummary(error), privacy: .public)"
                     )
                 }
                 await cleanupTransport(for: attempt.backend)
@@ -463,7 +475,11 @@ public actor WebSocketSignalingClient {
             }
         )
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
-        let task = session.webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        for (name, value) in additionalHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        let task = session.webSocketTask(with: request)
         urlSessionDelegate = delegate
         urlSession = session
         urlTask = task
@@ -476,7 +492,7 @@ public actor WebSocketSignalingClient {
             if proxyBypass || !shouldRetryBypassingProxy(error) {
                 throw error
             }
-            throw SignalingError.backendFailed(.urlSession, error.localizedDescription)
+            throw SignalingError.backendFailed(.urlSession, Self.transportErrorLogSummary(error))
         }
     }
 
@@ -507,6 +523,7 @@ public actor WebSocketSignalingClient {
             tls: (url.scheme == "wss"),
             pingInterval: 30,
             preferNoProxies: proxyBypass,
+            additionalHeaders: additionalHeaders,
             callbacks: callbacks
         )
         nativeClient = client
@@ -591,7 +608,7 @@ public actor WebSocketSignalingClient {
             failureClass: nil,
             serverFrameType: nil
         )
-        logger.info("✅ signaling websocket open: session=\(handleId.sessionId, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
+        logger.info("✅ signaling websocket open: session=\(Self.sensitiveLogRedaction, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
     }
 
     private func handleText(handleId: SignalingHandleID, text: String) {
@@ -614,14 +631,15 @@ public actor WebSocketSignalingClient {
                     failureClass: nil,
                     serverFrameType: frame.type
                 )
-                logger.info("✅ signaling server bound: session=\(handleId.sessionId, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
+                logger.info("✅ signaling server bound: session=\(Self.sensitiveLogRedaction, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
                 return
             }
 
             if frame.isError {
                 let reason = frame.error ?? "unknown"
                 let failureClass = Self.classifyServerError(reason)
-                let error = SignalingError.serverRejected(reason)
+                let redactedReason = Self.redactedServerErrorReasonDescription
+                let error = SignalingError.serverRejected(redactedReason)
                 terminalErrorsByHandle[handleId] = error
                 if currentHandle == handleId {
                     isBound = false
@@ -630,11 +648,11 @@ public actor WebSocketSignalingClient {
                 emitLifecycle(
                     phase: .failed,
                     handleId: handleId,
-                    errorDescription: reason,
+                    errorDescription: redactedReason,
                     failureClass: failureClass,
                     serverFrameType: frame.type
                 )
-                logger.error("❌ signaling server error: \(reason, privacy: .public)")
+                logger.error("❌ signaling server error: \(redactedReason, privacy: .public)")
             } else {
                 emitLifecycle(
                     phase: lifecyclePhase,
@@ -646,7 +664,7 @@ public actor WebSocketSignalingClient {
                 logger.debug("ℹ️ signaling server frame: type=\(frame.type, privacy: .public)")
             }
         case .unknown:
-            logger.debug("ignoring non-envelope message: \(text.prefix(200), privacy: .public)")
+            logger.debug("ignoring non-envelope message bytes=\(text.utf8.count, privacy: .public)")
         }
     }
 
@@ -664,7 +682,7 @@ public actor WebSocketSignalingClient {
             failureClass: .transientNetwork,
             serverFrameType: nil
         )
-        logger.info("⏹️ signaling websocket closed: session=\(handleId.sessionId, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
+        logger.info("⏹️ signaling websocket closed: session=\(Self.sensitiveLogRedaction, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
     }
 
     private func handleErrored(handleId: SignalingHandleID, error: Error) async {
@@ -678,12 +696,12 @@ public actor WebSocketSignalingClient {
         emitLifecycle(
             phase: .failed,
             handleId: handleId,
-            errorDescription: error.localizedDescription,
+            errorDescription: Self.redactedTransportErrorDescription,
             failureClass: failureClass,
             serverFrameType: nil
         )
         logger.error(
-            "❌ signaling websocket error: session=\(handleId.sessionId, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+            "❌ signaling websocket error: session=\(Self.sensitiveLogRedaction, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public) err=\(Self.transportErrorLogSummary(error), privacy: .public)"
         )
     }
 
@@ -760,6 +778,11 @@ public actor WebSocketSignalingClient {
             return .transientNetwork
         }
         return .transientServer
+    }
+
+    private static func transportErrorLogSummary(_ error: Error) -> String {
+        let ns = error as NSError
+        return "\(ns.domain)#\(ns.code)"
     }
 
     private func shouldRetryBypassingProxy(_ error: Error) -> Bool {

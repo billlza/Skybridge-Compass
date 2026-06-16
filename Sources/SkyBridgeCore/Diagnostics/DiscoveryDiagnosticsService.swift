@@ -178,30 +178,32 @@ public final class DiscoveryDiagnosticsService: ObservableObject {
         
         logger.info("✅ 发现诊断完成")
     }
-    
+
     /// 记录发现失败
     public func recordFailure(
         serviceType: String,
         error: Error,
         category: DiscoveryFailure.FailureCategory? = nil
     ) {
+        let redactedServiceType = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(serviceType)
+        let redactedErrorMessage = SkyBridgeDiagnosticRedaction.errorSummary(error)
         let failure = DiscoveryFailure(
             timestamp: Date(),
-            serviceType: serviceType,
+            serviceType: redactedServiceType,
             errorCode: (error as NSError).code,
-            errorMessage: error.localizedDescription,
+            errorMessage: redactedErrorMessage,
             suggestedFix: suggestFix(for: error, serviceType: serviceType),
             category: category ?? categorizeError(error)
         )
-        
+
         recentFailures.insert(failure, at: 0)
         if recentFailures.count > maxFailureHistory {
             recentFailures.removeLast()
         }
-        
-        logger.warning("📝 记录发现失败: \(serviceType) - \(error.localizedDescription)")
+
+        logger.warning("📝 记录发现失败: \(redactedServiceType, privacy: .public) - \(redactedErrorMessage, privacy: .public)")
     }
-    
+
     /// 记录握手失败（映射到用户可读消息）
     public func recordHandshakeFailure(
         deviceId: String,
@@ -209,24 +211,25 @@ public final class DiscoveryDiagnosticsService: ObservableObject {
     ) {
         let userMessage = HandshakeErrorLocalizer.localizedMessage(for: reason)
         let suggestedFix = HandshakeErrorLocalizer.suggestedFix(for: reason)
-        
+        let redactedDeviceId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId)
+
         let failure = DiscoveryFailure(
             timestamp: Date(),
-            serviceType: "握手: \(deviceId)",
+            serviceType: "握手: \(redactedDeviceId)",
             errorCode: nil,
             errorMessage: userMessage,
             suggestedFix: suggestedFix,
             category: categorizeHandshakeFailure(reason)
         )
-        
+
         recentFailures.insert(failure, at: 0)
         if recentFailures.count > maxFailureHistory {
             recentFailures.removeLast()
         }
-        
-        logger.warning("🤝 握手失败: \(deviceId) - \(userMessage)")
+
+        logger.warning("🤝 握手失败: \(redactedDeviceId, privacy: .public) - \(userMessage, privacy: .public)")
     }
-    
+
     /// 清除失败历史
     public func clearFailureHistory() {
         recentFailures.removeAll()
@@ -540,7 +543,7 @@ public enum HandshakeErrorLocalizer {
             if isAEADFailureDetail(detail) {
                 // CryptoKitError(3) is most commonly an AEAD authentication failure (wrong key / wrong transcript binding).
                 // In our PQC handshake, this can happen if one side uses Apple CryptoKit PQC and the other side uses liboqs.
-                return "安全验证失败：解密认证失败（可能是两端后量子加密实现不兼容或应用构建未启用 Apple PQC）"
+                return "安全验证失败：解密认证失败（可能是两端 PQC 实现或协商套件不一致，或构建未启用 Apple PQC）"
             }
             return "安全验证失败：\(simplifyTechnicalMessage(detail))"
             
@@ -562,8 +565,8 @@ public enum HandshakeErrorLocalizer {
         case .invalidMessageFormat:
             return "收到无效的握手消息 - 可能是版本不兼容"
             
-        case .identityMismatch(let expected, _):
-            return "设备身份不匹配 - 期望连接到「\(expected)」但对方身份不符"
+	        case .identityMismatch:
+	            return "设备身份不匹配 - 对方身份与已信任记录不符"
             
         case .replayDetected:
             return "检测到重放攻击，连接已中止"
@@ -581,7 +584,7 @@ public enum HandshakeErrorLocalizer {
             return "安全配置不匹配（\(simplifyTechnicalMessage(suite))）"
             
         case .pqcProviderUnavailable:
-            return "后量子加密不可用 - 需要 macOS 26/iOS 26 或更高版本"
+            return "后量子加密不可用 - 当前构建、运行时或协商证据不足，不能建立 PQC 保护连接"
             
         case .suiteNotSupported:
             return "不支持的加密套件 - 请更新应用"
@@ -595,7 +598,7 @@ public enum HandshakeErrorLocalizer {
         switch reason {
         case .cryptoError(let detail):
             if isAEADFailureDetail(detail) {
-                return "请更新两台设备的应用到同一版本，并确保 macOS 端是用 Xcode 26+ 构建且已启用 Apple PQC（HAS_APPLE_PQC_SDK）。"
+                return "请确认两台设备应用版本一致，并检查 Apple PQC 编译标记、runtime self-test 与协商套件证据；不要仅凭系统或 Xcode 版本判断已启用。"
             }
             return "请更新两台设备的应用，并重试连接；如仍失败可在诊断面板查看详细原因"
             
@@ -609,13 +612,13 @@ public enum HandshakeErrorLocalizer {
             return "请更新两台设备上的 SkyBridge 应用到最新版本"
             
         case .suiteNegotiationFailed:
-            return "请更新两台设备的应用，或在设置中调整加密策略"
+            return "请更新两台设备的应用并检查双方支持的协商套件；Strict-PQC 下不要切换到经典兼容，除非明确接受该连接不是量子安全连接。"
             
         case .signatureVerificationFailed, .identityMismatch:
             return "如果这是一台新设备，请在信任设置中添加它"
             
         case .pqcProviderUnavailable:
-            return "更新系统到 macOS 26/iOS 26 以启用后量子加密，或在设置中启用经典加密兼容模式"
+            return "请检查当前构建是否启用 Apple PQC SDK、runtime self-test 是否通过以及对端是否提供 PQC 套件；Strict-PQC 下应保持失败关闭。仅在明确接受非量子安全连接时才切换经典兼容。"
             
         case .transportError:
             return "检查网络连接，确保没有使用可能干扰的 VPN 或代理"

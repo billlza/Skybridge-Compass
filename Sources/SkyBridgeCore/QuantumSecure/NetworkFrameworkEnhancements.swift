@@ -10,7 +10,10 @@ import OSLog
 public class NetworkFrameworkEnhancements {
     
     private static let logger = Logger(subsystem: "com.skybridge.quantum", category: "NetworkEnhancements")
-    
+
+ /// TLS 验证回调专用串行队列——避免在主线程上执行握手期间的证书评估（会卡 UI）
+    private static let verifyQueue = DispatchQueue(label: "com.skybridge.quantum.tls-verify")
+
  /// 可观测事件
     public static let certificateValidationNotification = Notification.Name("QuantumCertValidationEvent")
     
@@ -134,14 +137,21 @@ public class NetworkFrameworkEnhancements {
             }
             
  // 5) 失败分级：降级或拒绝
+ //    安全加固：证书降级是一个 MITM 隐患，绝不能在发布版静默放行。仅在 DEBUG 构建中
+ //    允许 downgradeOnFailure，且每次都以 fault 级别告警；发布版一律拒绝并忽略该标志。
             if policy.downgradeOnFailure {
-                logger.warning("⬇️ 证书校验失败但策略允许降级，放行连接")
-                finish(true, reason: "downgraded_\(policy.enableOCSP || policy.enableCRL ? "ocspcrl_on" : "ocspcrl_off")")
+                #if DEBUG
+                logger.fault("🚨 安全告警：证书校验失败但 downgradeOnFailure=true（仅 DEBUG 允许放行）——切勿在发布版依赖此行为。")
+                finish(true, reason: "downgraded_DEBUG_\(policy.enableOCSP || policy.enableCRL ? "ocspcrl_on" : "ocspcrl_off")")
+                #else
+                logger.fault("🚨 安全告警：忽略 downgradeOnFailure——发布版禁止证书降级，拒绝连接。")
+                finish(false, reason: "downgrade_blocked_release")
+                #endif
             } else {
                 logger.error("⛔️ 证书校验失败，拒绝连接")
                 finish(false, reason: "verify_failed_\(policy.enableOCSP || policy.enableCRL ? "ocspcrl_on" : "ocspcrl_off")")
             }
-        }, DispatchQueue.main)
+        }, verifyQueue)
         logger.info("✅ 已设置TLS自定义验证回调（含主机名与诊断）")
     }
     

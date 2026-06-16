@@ -181,6 +181,41 @@ public actor PeerKEMBootstrapStore {
         )
     }
 
+    public func signedRefreshKEMPublicKeys(
+        forCandidates candidates: [String],
+        pinnedProtocolFingerprints: Set<String>
+    ) -> [UInt16: Data] {
+        let normalizedPins = Set(pinnedProtocolFingerprints.compactMap(Self.normalizedProtocolFingerprint))
+        guard !normalizedPins.isEmpty else { return [:] }
+        let normalizedCandidates = trustMaterialIds(candidates)
+        guard !normalizedCandidates.isEmpty else { return [:] }
+
+        var selected: [UInt16: SelectedKey] = [:]
+        for (index, candidate) in normalizedCandidates.enumerated() {
+            guard let entry = entries[candidate],
+                  entry.source == "signed_lan_kem_refresh",
+                  Self.entry(entry, isBoundToAny: normalizedPins) else {
+                continue
+            }
+            if let expiresAt = entry.expiresAt, expiresAt <= Date() { continue }
+            let signedSuiteWireIds = Set(entry.signedSuiteWireIds ?? entry.kemPublicKeys.keys.sorted())
+            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(entry.kemPublicKeys)
+            where signedSuiteWireIds.contains(suiteWireId) {
+                let candidateKey = SelectedKey(
+                    publicKey: publicKey,
+                    updatedAt: entry.updatedAt,
+                    isSignedRefresh: true,
+                    lookupIndex: index
+                )
+                if Self.shouldPrefer(candidateKey, over: selected[suiteWireId]) {
+                    selected[suiteWireId] = candidateKey
+                }
+            }
+        }
+
+        return Dictionary(uniqueKeysWithValues: selected.map { ($0.key, $0.value.publicKey) })
+    }
+
     private func selectKEMPublicKeys(forCandidates candidates: [String]) -> [UInt16: SelectedKey] {
         let normalizedCandidates = trustMaterialIds(candidates)
         guard !normalizedCandidates.isEmpty else { return [:] }
@@ -267,6 +302,27 @@ public actor PeerKEMBootstrapStore {
         }
     }
 
+    public func clearPairingIdentityExchangeEntries(deviceIds: [String]) {
+        let normalizedIds = trustMaterialIds(deviceIds)
+        guard !normalizedIds.isEmpty else { return }
+
+        var changed = false
+        for deviceId in normalizedIds {
+            guard entries[deviceId]?.source == "pairing_identity_exchange" else {
+                continue
+            }
+            entries.removeValue(forKey: deviceId)
+            changed = true
+        }
+
+        guard changed else { return }
+        if entries.isEmpty {
+            defaults.removeObject(forKey: Self.defaultsKey)
+        } else {
+            persist()
+        }
+    }
+
     func clearForTesting() {
         entries.removeAll()
         defaults.removeObject(forKey: Self.defaultsKey)
@@ -314,6 +370,22 @@ public actor PeerKEMBootstrapStore {
             return candidate.lookupIndex < existing.lookupIndex
         }
         return candidate.updatedAt > existing.updatedAt
+    }
+
+    private static func entry(_ entry: Entry, isBoundToAny normalizedPins: Set<String>) -> Bool {
+        [
+            normalizedProtocolFingerprint(entry.signingFingerprint),
+            normalizedProtocolFingerprint(entry.protocolIdentityFingerprint)
+        ]
+        .compactMap { $0 }
+        .contains { normalizedPins.contains($0) }
+    }
+
+    private static func normalizedProtocolFingerprint(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard value.count == 64, value.allSatisfy(\.isHexDigit) else { return nil }
+        return value
     }
 
     private static func sha256Hex(_ data: Data) -> String {

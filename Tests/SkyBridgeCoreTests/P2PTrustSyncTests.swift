@@ -357,6 +357,38 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertNil(created?.deviceName)
     }
 
+    func testProtectedTrustMirrorPersistenceFailuresAreNotSilentlyIgnored() throws {
+        let source = try readSource("Sources/SkyBridgeCore/P2P/TrustSyncService.swift")
+
+        XCTAssertTrue(source.contains("private func storeFallbackRecords(_ records: [TrustRecord]) throws"))
+        XCTAssertTrue(source.contains("private func upsertFallbackRecord(_ record: TrustRecord) throws"))
+        XCTAssertTrue(source.contains("private func removeFallbackRecord(deviceId: String) throws"))
+        XCTAssertTrue(source.contains("private func deleteFromKeychain(deviceId: String) throws"))
+        XCTAssertTrue(source.contains("let status = SecItemDelete(query as CFDictionary)"))
+        XCTAssertTrue(source.contains("throw TrustSyncError.keychainError(status)"))
+        XCTAssertFalse(source.contains("SecItemDelete(query as CFDictionary)\n        try removeFallbackRecord"))
+        XCTAssertFalse(source.contains("try? storeFallbackRecords"))
+        XCTAssertFalse(source.contains("try? Self.protectedFallbackRecordStore.remove()"))
+        XCTAssertTrue(source.contains("preconditionFailure(\"failed to remove trust record for testing"))
+    }
+
+    func testLocalTrustRecordLoadVerifiesSignaturesBeforeMerging() throws {
+        let source = try readSource("Sources/SkyBridgeCore/P2P/TrustSyncService.swift")
+
+        XCTAssertTrue(source.contains("private func verifiedTrustRecordsForLocalLoad("))
+        XCTAssertTrue(source.contains("guard try await verifyRecordSignature(record) else"))
+        XCTAssertTrue(source.contains("reason=invalid_signature device=redacted"))
+        XCTAssertTrue(source.contains("reason=verification_error"))
+        XCTAssertTrue(source.contains("let verifiedRecords = await verifiedTrustRecordsForLocalLoad(allRecords, source: \"Keychain sync\")"))
+        XCTAssertTrue(source.contains("Rejected malformed \\(source, privacy: .public) trust record during local load"))
+        XCTAssertTrue(source.contains("throw TrustSyncError.decodingError(\"trust record index \\(index): \\(error.localizedDescription)"))
+        XCTAssertTrue(source.contains("try Self.protectedFallbackRecordStore.loadOrThrow() ?? []"))
+        XCTAssertFalse(source.contains("for record in allRecords {"))
+        XCTAssertFalse(source.contains("for record in records { merge(record) }"))
+        XCTAssertFalse(source.contains("for record in fallbackRecords { merge(record) }"))
+        XCTAssertFalse(source.contains("if let record = try? decoder.decode(TrustRecord.self, from: data)"))
+    }
+
     @MainActor
     func testEvaluateCurrentPathBindingMatchesKnownAliasesBeforeDeclaringConflict() async throws {
         let service = TrustSyncService.shared
@@ -714,5 +746,10 @@ final class P2PTrustSyncTests: XCTestCase {
             revokedAt: revokedAt,
             deviceName: deviceName
         )
+    }
+
+    private func readSource(_ relativePath: String) throws -> String {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        return try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
     }
 }

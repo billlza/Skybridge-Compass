@@ -67,6 +67,30 @@ final class ConnectionCodeFormatTests: XCTestCase {
             source.contains("connection_code_lease_expired"),
             "The expiry task should emit a stable reason when it removes a displayed stale connection code."
         )
+        XCTAssertTrue(
+            source.contains("code=<redacted>"),
+            "Connection-code lifecycle logs may expose stable reasons, but never the raw user-entered or server-issued code."
+        )
+        XCTAssertFalse(
+            source.contains("code=\\(existing"),
+            "A connection code is an admission secret and must not be logged in plaintext when regenerating."
+        )
+        XCTAssertFalse(
+            source.contains("code=\\(code"),
+            "A connection code is an admission secret and must not be logged in plaintext when expiring."
+        )
+        XCTAssertFalse(
+            source.contains("连接码生成成功: \\(code"),
+            "Successful code generation logs must not print the raw server-issued code."
+        )
+        XCTAssertFalse(
+            source.contains("使用连接码连接: \\(normalized"),
+            "Join logs must not print the raw user-entered connection code."
+        )
+        XCTAssertFalse(
+            source.contains("复用已有连接码会话: \\(normalized"),
+            "Reuse logs must not print the raw user-entered connection code."
+        )
         XCTAssertFalse(
             source.contains("cleanupWebRTCSession(sessionID, reason: \"connection_code_lease_expired\")"),
             "Connection-code lease expiry must only remove stale UI/code state; it must not close an active or in-flight WebRTC session."
@@ -122,7 +146,7 @@ final class ConnectionCodeFormatTests: XCTestCase {
             "The connection-code joiner must honor the Ed25519 authority fingerprint returned by lookup instead of switching to a PQC identity key."
         )
         XCTAssertTrue(
-            source.contains("authorityBootstrap=\\(useClassicAuthorityBootstrap"),
+            source.contains("authorityBootstrap=\\(bootstrapPlan.usesClassicAuthorityBootstrap"),
             "Release logs must expose whether identityMismatch prevention used authority-bound bootstrap."
         )
         XCTAssertTrue(

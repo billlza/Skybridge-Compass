@@ -1182,7 +1182,7 @@
 "remoteControl.securityNotice.appName" = "云桥司南";
 "remoteControl.securityNotice.pendingTitle" = "%@ 正在请求远程控制批准";
 "remoteControl.securityNotice.activeTitle" = "%@ 正在被远程控制";
-"remoteControl.securityNotice.subtitle" = "入站 %@ 远控受量子安全/PQC 加密保护。";
+"remoteControl.securityNotice.subtitle" = "入站 %@ 远控使用已认证加密通道；仅在协商套件证明后显示 PQC。";
 "remoteControl.securityNotice.transport.p2p" = "P2P";
 "remoteControl.securityNotice.transport.webrtc" = "WebRTC";
 "remoteControl.securityNotice.remoteIP" = "IP";

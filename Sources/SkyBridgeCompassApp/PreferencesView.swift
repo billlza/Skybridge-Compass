@@ -1758,7 +1758,7 @@ struct AboutPreferencesView: View {
                     TechRow(icon: "lock.shield", name: "CryptoKit", description: "现代加密 API")
                     TechRow(icon: "key", name: "Keychain", description: "安全凭证存储")
                     TechRow(icon: "checkmark.seal", name: "Code Signing", description: "代码签名验证")
-                    TechRow(icon: "shield.lefthalf.filled", name: "Quantum-Safe", description: "量子安全算法")
+                    TechRow(icon: "shield.lefthalf.filled", name: "Negotiated PQC", description: "协商后证明的 PQC 套件")
                 }
                 .padding()
             }

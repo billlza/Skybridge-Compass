@@ -2,8 +2,18 @@ import CryptoKit
 import Foundation
 
 @available(iOS 17.0, *)
+enum CrossNetworkWebRTCInboundFileTransferPathError: Error {
+    case emptyFileName
+    case traversalComponent
+    case pathSeparator
+    case destinationEscapesBaseDirectory
+}
+
+@available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
-    static func fileTransferWaiterKey(
+    private nonisolated static let inboundFileNameFallback = "SkyBridgeFile"
+
+    nonisolated static func fileTransferWaiterKey(
         transferId: String,
         op: CrossNetworkFileTransferOp,
         chunkIndex: Int?
@@ -19,18 +29,19 @@ extension CrossNetworkWebRTCManager {
         return dir
     }
 
-    static func sanitizeFileName(_ name: String) -> String {
-        let last = (name as NSString).lastPathComponent
-        let trimmed = last.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "SkyBridgeFile" : trimmed
+    nonisolated static func sanitizeFileName(_ name: String) -> String {
+        (try? validatedInboundFileName(name)) ?? inboundFileNameFallback
     }
 
-    static func makeUniqueDestinationURL(baseDir: URL, fileName: String) -> URL {
-        let safe = sanitizeFileName(fileName)
+    nonisolated static func makeUniqueDestinationURL(baseDir: URL, fileName: String) throws -> URL {
+        let safe = try validatedInboundFileName(fileName)
         let ext = (safe as NSString).pathExtension
         let stem = (safe as NSString).deletingPathExtension
+        let canonicalBaseDir = baseDir
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
 
-        var candidate = baseDir.appendingPathComponent(safe)
+        var candidate = canonicalBaseDir.appendingPathComponent(safe, isDirectory: false)
         var idx = 1
         while FileManager.default.fileExists(atPath: candidate.path) {
             let altName: String
@@ -39,13 +50,16 @@ extension CrossNetworkWebRTCManager {
             } else {
                 altName = "\(stem) (\(idx)).\(ext)"
             }
-            candidate = baseDir.appendingPathComponent(altName)
+            candidate = canonicalBaseDir.appendingPathComponent(altName, isDirectory: false)
             idx += 1
+        }
+        guard isInboundDestination(candidate, containedIn: canonicalBaseDir) else {
+            throw CrossNetworkWebRTCInboundFileTransferPathError.destinationEscapesBaseDirectory
         }
         return candidate
     }
 
-    static func expectedInboundChunkCount(fileSize: Int64, chunkSize: Int) -> Int? {
+    nonisolated static func expectedInboundChunkCount(fileSize: Int64, chunkSize: Int) -> Int? {
         guard chunkSize > 0 else { return nil }
         if fileSize == 0 { return 0 }
         let total = (fileSize + Int64(chunkSize) - 1) / Int64(chunkSize)
@@ -53,7 +67,7 @@ extension CrossNetworkWebRTCManager {
         return Int(total)
     }
 
-    static func validateInboundMetadata(
+    nonisolated static func validateInboundMetadata(
         fileName: String,
         fileSize: Int64,
         chunkSize: Int,
@@ -61,6 +75,11 @@ extension CrossNetworkWebRTCManager {
     ) -> String? {
         guard !fileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "Invalid metadata (empty fileName)"
+        }
+        do {
+            _ = try validatedInboundFileName(fileName)
+        } catch {
+            return "Invalid metadata (unsafe fileName)"
         }
         guard fileSize >= 0 else {
             return "Invalid metadata (negative fileSize)"
@@ -79,7 +98,7 @@ extension CrossNetworkWebRTCManager {
         return nil
     }
 
-    static func expectedInboundChunkSize(
+    nonisolated static func expectedInboundChunkSize(
         fileSize: Int64,
         chunkSize: Int,
         totalChunks: Int,
@@ -93,15 +112,54 @@ extension CrossNetworkWebRTCManager {
         return Int(min(Int64(chunkSize), remaining))
     }
 
-    static func sha256File(_ url: URL) -> Data? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
+    nonisolated static func sha256File(_ url: URL) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
         var hasher = SHA256()
         while true {
             let chunk = handle.readData(ofLength: 256 * 1024)
             if chunk.isEmpty { break }
             hasher.update(data: chunk)
         }
-        return Data(hasher.finalize())
+        let digest = Data(hasher.finalize())
+        try handle.close()
+        return digest
+    }
+
+    private nonisolated static func validatedInboundFileName(_ raw: String) throws -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw CrossNetworkWebRTCInboundFileTransferPathError.emptyFileName
+        }
+        guard trimmed != "." && trimmed != ".." else {
+            throw CrossNetworkWebRTCInboundFileTransferPathError.traversalComponent
+        }
+        guard !containsInboundPathSeparator(trimmed) else {
+            throw CrossNetworkWebRTCInboundFileTransferPathError.pathSeparator
+        }
+        return trimmed
+    }
+
+    private nonisolated static func containsInboundPathSeparator(_ value: String) -> Bool {
+        value.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x00, 0x2F, 0x5C, 0x2044, 0x2215:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private nonisolated static func isInboundDestination(_ candidate: URL, containedIn baseDirectory: URL) -> Bool {
+        let candidatePath = candidate
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+        let basePath = baseDirectory
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+        let normalizedBasePath = basePath.hasSuffix("/") ? basePath : basePath + "/"
+        return candidatePath.hasPrefix(normalizedBasePath)
     }
 }

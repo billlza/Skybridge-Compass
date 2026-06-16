@@ -70,7 +70,7 @@ public struct DeviceRowView: View {
                         
                         // PQC 徽章
                         if device.capabilities.contains("pqc") {
-                            PQCBadge()
+                            PQCCapabilityBadge()
                         }
                     }
                     
@@ -205,14 +205,14 @@ struct SignalStrengthView: View {
 
 // MARK: - PQC Badge
 
-/// PQC 徽章
+/// PQC 候选能力徽章
 @available(iOS 17.0, *)
-struct PQCBadge: View {
+struct PQCCapabilityBadge: View {
     var body: some View {
         HStack(spacing: 2) {
             Image(systemName: "lock.shield.fill")
                 .font(.system(size: 8))
-            Text("PQC")
+            Text("PQC候选")
                 .font(.system(size: 8, weight: .bold))
         }
         .foregroundColor(.green)
@@ -220,6 +220,7 @@ struct PQCBadge: View {
         .padding(.vertical, 2)
         .background(Color.green.opacity(0.2))
         .clipShape(Capsule())
+        .accessibilityLabel("PQC 候选能力；不是当前连接证明")
     }
 }
 
@@ -542,20 +543,11 @@ struct DeviceDetailSheet: View {
             ? (connectionManager.getNegotiatedSuite(for: device.id)?.rawValue ?? crossNetworkSuite)
             : nil
         let kind = rekey.map { "\($0.fromSuite) → \($0.toSuite)" }
-        let defaultPQCModeLabel: String?
-        switch SkyBridgeiOSCore.shared.cryptoProvider?.tier {
-        case .nativePQC?:
-            defaultPQCModeLabel = "Apple PQC"
-        case .liboqsPQC?:
-            defaultPQCModeLabel = "liboqs"
-        default:
-            defaultPQCModeLabel = nil
-        }
         return ConnectionPresentationContract.modeAwareStatusText(
             baseText: status.displayName,
             kind: kind,
             suite: suite,
-            defaultPQCModeLabel: defaultPQCModeLabel
+            defaultPQCModeLabel: nil
         )
     }
 

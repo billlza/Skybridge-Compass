@@ -115,6 +115,10 @@ private final class RemoteControlHandshakeTransport: DiscoveryTransport, @unchec
 @MainActor
 public final class RemoteControlManager: BaseManager {
 
+    private static func streamRefreshTokenLogState(_ token: UInt64?) -> String {
+        token == nil ? "missing" : "present"
+    }
+
     enum HandshakeSyncResult: Equatable {
         case pending
         case established
@@ -3131,7 +3135,7 @@ public final class RemoteControlManager: BaseManager {
                effectiveConfig.mediaAudioEndpoint != nil,
                config.streamRefreshToken != nil {
                 RemoteControlSmokeStatusWriter.append(
-                    "audioEndpointPreservedForVideoRefresh peer=\(peer.id) refreshToken=\(config.streamRefreshToken.map(String.init) ?? "-")"
+                    "audioEndpointPreservedForVideoRefresh peer=\(peer.id) refreshTokenState=\(Self.streamRefreshTokenLogState(config.streamRefreshToken))"
                 )
             }
             peer.requestedStreamConfiguration = effectiveConfig
@@ -3166,7 +3170,7 @@ public final class RemoteControlManager: BaseManager {
                 perf=\(effectiveConfig.performanceValidationMode ?? "normal") \
                 fallback=\(effectiveConfig.mediaFallbackPolicy ?? "default") \
                 audioEndpoint=\(effectiveConfig.mediaAudioEndpoint == nil ? "missing" : "present") \
-                refreshToken=\(effectiveConfig.streamRefreshToken.map(String.init) ?? "-")
+                refreshTokenState=\(Self.streamRefreshTokenLogState(effectiveConfig.streamRefreshToken))
                 """
             )
             guard peer.role != .beingControlled || peer.securityAdmissionApproved else {

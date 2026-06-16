@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -17,12 +18,16 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::discovery::{build_active_scan_snapshot, scan_nearby_peers};
 use crate::state::{
     apply_signaling_event, apply_transport_event, disconnect_session_if_active,
     ensure_device_identity, load_managed_session_controls, load_session_registry,
-    remove_managed_session_control, signing_binding, update_session_remote_peer,
+    observe_file_transfer_requests_for_established_session,
+    observe_remote_desktop_requests_for_established_session, remove_managed_session_control,
+    signing_binding, update_session_remote_peer, upsert_nearby_discovery_snapshot,
 };
 
+mod file_transfer;
 mod fs_io;
 mod options;
 mod paths;
@@ -34,6 +39,7 @@ mod tracing_setup;
 pub use options::AgentRuntimeOptions;
 pub use paths::{AgentPaths, resolve_paths};
 
+use file_transfer::{FileTransferCoordinator, spawn_file_send_transfer};
 use fs_io::{append_event_line, ensure_layout, load_json, write_json};
 use pqc_config::{build_pqc_initiator_config_from_env, build_pqc_responder_config};
 use tracing_setup::init_tracing;
@@ -95,6 +101,14 @@ pub async fn run_agent(options: AgentRuntimeOptions) -> Result<()> {
         cancel.clone(),
     );
     let supervisor_task = spawn_supervisor(paths.clone(), cancel.clone());
+    let scanner_task = options.discovery_scan_enabled.then(|| {
+        spawn_nearby_scanner(
+            paths.clone(),
+            options.discovery_scan_interval,
+            options.discovery_scan_window,
+            cancel.clone(),
+        )
+    });
 
     wait_for_shutdown_signal().await;
     cancel.cancel();
@@ -104,6 +118,11 @@ pub async fn run_agent(options: AgentRuntimeOptions) -> Result<()> {
     }
     if let Err(join_error) = supervisor_task.await {
         warn!(kind = "agent.supervisor.join_failed", error = %join_error, "supervisor worker stopped unexpectedly");
+    }
+    if let Some(scanner_task) = scanner_task
+        && let Err(join_error) = scanner_task.await
+    {
+        warn!(kind = "agent.discovery.join_failed", error = %join_error, "nearby scanner worker stopped unexpectedly");
     }
 
     health.touch(AgentRuntimeStatus::Stopping);
@@ -196,6 +215,70 @@ fn spawn_supervisor(paths: AgentPaths, cancel: CancellationToken) -> JoinHandle<
             }
         }
     })
+}
+
+fn spawn_nearby_scanner(
+    paths: AgentPaths,
+    scan_interval: Duration,
+    scan_window: Duration,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // The first tick fires immediately so a fresh snapshot exists shortly
+        // after startup; subsequent ticks pace the active scans.
+        let mut ticker = interval(scan_interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = ticker.tick() => {
+                    run_nearby_scan_pass(&paths, scan_window).await;
+                }
+            }
+        }
+    })
+}
+
+async fn run_nearby_scan_pass(paths: &AgentPaths, scan_window: Duration) {
+    let peers = match scan_nearby_peers(scan_window).await {
+        Ok(peers) => peers,
+        Err(error) => {
+            warn!(
+                kind = "agent.discovery.scan_failed",
+                error = %error,
+                "active nearby scan failed"
+            );
+            return;
+        }
+    };
+
+    // Conservative trust projection: the agent does not yet maintain a
+    // peer-identity -> trust index keyed by the advertised protocol key, so
+    // every freshly observed peer is a Candidate and is never marked
+    // connectable. Discovery never authorizes a connection on its own; an
+    // actual connection still requires the explicit request + handshake gates.
+    let trusted_identities = BTreeMap::new();
+    let snapshot = build_active_scan_snapshot(
+        peers,
+        &trusted_identities,
+        crate::discovery::DEFAULT_ACTIVE_SCAN_TTL_SECONDS,
+    );
+    let device_count = snapshot.devices.len();
+
+    if let Err(error) = upsert_nearby_discovery_snapshot(paths, snapshot).await {
+        warn!(
+            kind = "agent.discovery.snapshot_write_failed",
+            error = %error,
+            "failed to persist active nearby scan snapshot"
+        );
+        return;
+    }
+
+    info!(
+        kind = "agent.discovery.scan_completed",
+        devices = device_count,
+        "active nearby scan completed"
+    );
 }
 
 fn spawn_managed_session_worker(
@@ -399,9 +482,16 @@ async fn run_managed_session(
     })
     .await?;
     native_session.start().await?;
+    let file_sender = native_session.sender_handle();
+    let coordinator = Arc::new(FileTransferCoordinator::new(
+        control.session_id.clone(),
+        paths.received_dir.clone(),
+    ));
     let mut join_sent = false;
     let mut signaling_stream_closed = false;
     let mut signaling_drop_injected = false;
+    let mut control_request_observation_ticker = interval(Duration::from_secs(1));
+    control_request_observation_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -438,6 +528,8 @@ async fn run_managed_session(
                             &connection,
                             &control.session_id,
                             &mut native_session,
+                            &coordinator,
+                            &file_sender,
                         )
                         .await?;
                         if matches!(lifecycle.phase, SignalingLifecyclePhase::Closed | SignalingLifecyclePhase::Failed) {
@@ -462,6 +554,8 @@ async fn run_managed_session(
                             &connection,
                             &control.session_id,
                             &mut native_session,
+                            &coordinator,
+                            &file_sender,
                         )
                         .await?;
                     }
@@ -478,7 +572,15 @@ async fn run_managed_session(
                     && std::env::var("SKYBRIDGE_TEST_SIGNALING_DROP_AFTER_HANDSHAKE")
                         .map(|value| value == "1")
                         .unwrap_or(false);
-                apply_native_runtime_event(&paths, &connection, &control.session_id, event).await?;
+                apply_native_runtime_event(
+                    &paths,
+                    &connection,
+                    &control.session_id,
+                    event,
+                    &coordinator,
+                    &file_sender,
+                )
+                .await?;
                 if should_inject_signaling_drop {
                     inject_signaling_drop_after_handshake(&paths, &control.session_id).await?;
                     signaling_stream_closed = true;
@@ -495,6 +597,70 @@ async fn run_managed_session(
                     break;
                 }
             }
+            _ = control_request_observation_ticker.tick() => {
+                match observe_remote_desktop_requests_for_established_session(
+                    &paths,
+                    &control.session_id,
+                )
+                .await
+                {
+                    Ok(observed) if !observed.is_empty() => {
+                        for request in observed {
+                            info!(
+                                kind = "agent.remote_desktop.request_observed",
+                                session_id = %request.session_id,
+                                request_id = %request.request_id,
+                                action = ?request.action,
+                                applied = false,
+                                "remote desktop request observed by agent but not live-applied"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(
+                            kind = "agent.remote_desktop.request_observation_failed",
+                            session_id = %control.session_id,
+                            error = %error,
+                            "failed to observe remote desktop request"
+                        );
+                    }
+                }
+                match observe_file_transfer_requests_for_established_session(
+                    &paths,
+                    &control.session_id,
+                )
+                .await
+                {
+                    Ok(observed) if !observed.is_empty() => {
+                        for request in observed {
+                            info!(
+                                kind = "agent.file_transfer.request_observed",
+                                session_id = %request.session_id,
+                                request_id = %request.request_id,
+                                action = ?request.action,
+                                "file transfer request observed by agent; starting live transfer"
+                            );
+                            spawn_file_send_transfer(
+                                paths.clone(),
+                                Arc::clone(&coordinator),
+                                request,
+                                file_sender.clone(),
+                                cancel.child_token(),
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(
+                            kind = "agent.file_transfer.request_observation_failed",
+                            session_id = %control.session_id,
+                            error = %error,
+                            "failed to observe file transfer request"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -506,11 +672,21 @@ async fn drain_native_runtime_events(
     connection: &SignalingConnection,
     session_id: &str,
     native_session: &mut NativeWebRtcSession,
+    coordinator: &Arc<FileTransferCoordinator>,
+    file_sender: &skybridge_core::NativeWebRtcSender,
 ) -> Result<()> {
     let mut drained = 0usize;
     while let Some(event) = native_session.try_next_event() {
         drained = drained.saturating_add(1);
-        apply_native_runtime_event(paths, connection, session_id, event).await?;
+        apply_native_runtime_event(
+            paths,
+            connection,
+            session_id,
+            event,
+            coordinator,
+            file_sender,
+        )
+        .await?;
     }
     if drained > 0 {
         info!(
@@ -555,10 +731,22 @@ async fn apply_native_runtime_event(
     connection: &SignalingConnection,
     session_id: &str,
     event: NativeWebRtcEvent,
+    coordinator: &Arc<FileTransferCoordinator>,
+    file_sender: &skybridge_core::NativeWebRtcSender,
 ) -> Result<()> {
     match event {
         NativeWebRtcEvent::SignalingEnvelope(envelope) => {
             connection.send(envelope).await?;
+        }
+        NativeWebRtcEvent::InboundFileFrame(frame) => {
+            if let Err(error) = coordinator.route_inbound(frame, file_sender).await {
+                warn!(
+                    kind = "agent.file_transfer.inbound_frame_failed",
+                    session_id = %session_id,
+                    error = %error,
+                    "failed to route inbound file frame"
+                );
+            }
         }
         NativeWebRtcEvent::TransportReady => {
             info!(

@@ -8,6 +8,8 @@ import Security
 
 // MARK: - P2P连接
 public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sendable {
+    private static let protocolIdentityLogRedaction = "<redacted>"
+
     public let id = UUID()
     public let device: P2PDevice
     public let connection: NWConnection
@@ -32,6 +34,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     @available(macOS 14.0, iOS 17.0, *)
     private let remoteDesktopFrameHandlerLock = OSAllocatedUnfairLock<(@Sendable (Data, UInt64) -> Void)?>(initialState: nil)
     private var handshakePeer: PeerIdentifier
+    private var handshakePeerDiagnosticLabel: String {
+        SkyBridgeDiagnosticRedaction.stableIdentifierLabel(handshakePeer.deviceId)
+    }
+    private var deviceDiagnosticLabel: String {
+        SkyBridgeDiagnosticRedaction.stableIdentifierLabel(device.deviceId)
+    }
 
     @available(macOS 14.0, iOS 17.0, *)
     private struct MetricsState: Sendable {
@@ -382,7 +390,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         handshakePeer = await resolveHandshakePeerIdentifier()
         if handshakePeer.deviceId != device.deviceId {
             SkyBridgeLogger.p2p.info(
-                "🧭 Handshake peer id normalized: raw=\(self.device.deviceId, privacy: .public) resolved=\(self.handshakePeer.deviceId, privacy: .public)"
+                "🧭 Handshake peer id normalized: raw=\(self.deviceDiagnosticLabel, privacy: .public) resolved=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
             )
         }
         startReceivingIfNeeded()
@@ -510,9 +518,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             } else {
                 rekeyPairKey = await currentSOAPairKey()
             }
-            if let rekeyPairKey {
+                if let rekeyPairKey {
                 SkyBridgeLogger.p2p.info(
-                    "🧩 outbound rekey: releasing SOA established guard. peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                    "🧩 outbound rekey: releasing SOA established guard. peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
                 )
                 await PeerSessionArbiter.shared.clearEstablished(pairKey: rekeyPairKey)
                 await PeerSessionArbiter.shared.clearOutgoing(pairKey: rekeyPairKey, attemptId: nil)
@@ -579,7 +587,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         } catch {
             if hadEstablishedSession, let rekeyPairKey {
                 SkyBridgeLogger.p2p.info(
-                    "🧩 outbound rekey: restoring SOA established guard after failed rekey. peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                    "🧩 outbound rekey: restoring SOA established guard after failed rekey. peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
                 )
                 await PeerSessionArbiter.shared.markEstablished(pairKey: rekeyPairKey)
             }
@@ -612,7 +620,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let targetSuites = requiredPQCSuites.map(\.rawValue).joined(separator: ",")
         let recoveryMode = requestedPolicy.requirePQC ? "strictPQC" : "preferredPQC"
         SkyBridgeLogger.p2p.info(
-            "🧩 \(recoveryMode, privacy: .public) bootstrap start: peer=\(self.handshakePeer.deviceId, privacy: .public) target=\(targetSuites, privacy: .public)"
+            "🧩 \(recoveryMode, privacy: .public) bootstrap start: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public) target=\(targetSuites, privacy: .public)"
         )
 
         do {
@@ -632,7 +640,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             )
             guard readyForPQC else {
                 SkyBridgeLogger.p2p.warning(
-                    "⏳ \(recoveryMode, privacy: .public) bootstrap 未在时限内收到对端 KEM 公钥: peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                    "⏳ \(recoveryMode, privacy: .public) bootstrap 未在时限内收到对端 KEM 公钥: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
                 )
                 sessionKeysLock.withLock { $0 = nil }
                 bootstrapAssistedHandshakeLock.withLock { $0 = false }
@@ -674,11 +682,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return nil
         }
 
-        let baselinePeerKEM = await currentTrustedPeerKEMPublicKeysByCanonicalWireId()
+        let baselinePeerKEM = await currentKnownPeerKEMPublicKeysByCanonicalWireId()
         let targetSuites = requiredPQCSuites.map(\.rawValue).joined(separator: ",")
         let recoveryMode = requestedPolicy.requirePQC ? "strictPQC" : "preferredPQC"
         SkyBridgeLogger.p2p.info(
-            "🧩 \(recoveryMode, privacy: .public) key-refresh bootstrap start: peer=\(self.handshakePeer.deviceId, privacy: .public) target=\(targetSuites, privacy: .public)"
+            "🧩 \(recoveryMode, privacy: .public) key-refresh bootstrap start: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public) target=\(targetSuites, privacy: .public)"
         )
 
         do {
@@ -699,7 +707,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             )
             guard refreshedPeerKEM else {
                 SkyBridgeLogger.p2p.warning(
-                    "⏳ \(recoveryMode, privacy: .public) key-refresh bootstrap 未在时限内刷新对端 KEM 公钥: peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                    "⏳ \(recoveryMode, privacy: .public) key-refresh bootstrap 未在时限内刷新对端 KEM 公钥: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
                 )
                 sessionKeysLock.withLock { $0 = nil }
                 bootstrapAssistedHandshakeLock.withLock { $0 = false }
@@ -1201,7 +1209,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let resolvedId = diagnostic.resolvedId ?? candidates.first
         diagnostic = SuiteNegotiationTrustDiagnostic(
             resolvedId: resolvedId,
-            hasTrust: diagnostic.hasTrust || !cachedSuites.isEmpty,
+            hasTrust: diagnostic.hasTrust,
             kemSuiteWireIds: mergedSuites,
             matchedBy: matchedBy
         )
@@ -1225,15 +1233,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             .map(\.wireId)
 
         let missingPQC = requiredPQC.filter { !diag.kemSuiteWireIds.contains($0) }
-        let requiredPQCSummary = requiredPQC.map(String.init).joined(separator: ",")
-        let knownKEMSummary = diag.kemSuiteWireIds.map(String.init).joined(separator: ",")
-        let missingKEMSummary = missingPQC.map(String.init).joined(separator: ",")
-        let resolvedTrustId = diag.resolvedId ?? "nil"
-        let policyRequirePQC = policy.requirePQC ? "1" : "0"
-        let policyAllowClassicFallback = policy.allowClassicFallback ? "1" : "0"
-        let diagnostic = "🧩 握手协商失败诊断: peer=\(handshakePeer.deviceId) " +
-            "policy(requirePQC=\(policyRequirePQC),allowClassicFallback=\(policyAllowClassicFallback)) " +
-            "trustResolved=\(resolvedTrustId) by=\(diag.matchedBy) " +
+	        let requiredPQCSummary = requiredPQC.map(String.init).joined(separator: ",")
+	        let knownKEMSummary = diag.kemSuiteWireIds.map(String.init).joined(separator: ",")
+	        let missingKEMSummary = missingPQC.map(String.init).joined(separator: ",")
+	        let resolvedTrustId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(diag.resolvedId)
+	        let policyRequirePQC = policy.requirePQC ? "1" : "0"
+	        let policyAllowClassicFallback = policy.allowClassicFallback ? "1" : "0"
+	        let diagnostic = "🧩 握手协商失败诊断: peer=\(handshakePeerDiagnosticLabel) " +
+	            "policy(requirePQC=\(policyRequirePQC),allowClassicFallback=\(policyAllowClassicFallback)) " +
+	            "trustResolved=\(resolvedTrustId) by=\(diag.matchedBy) " +
             "requiredPQC=\(requiredPQCSummary) knownKEM=\(knownKEMSummary) missingKEM=\(missingKEMSummary)"
         SkyBridgeLogger.p2p.warning("\(diagnostic, privacy: .public)")
 
@@ -1252,7 +1260,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 try await self.sendPostAuthPairingIdentityExchangeWithTimeout()
             } catch {
                 SkyBridgeLogger.p2p.info(
-                    "ℹ️ optional post-auth pairingIdentityExchange deferred: \(error.localizedDescription, privacy: .public)"
+                    "ℹ️ optional post-auth pairingIdentityExchange deferred: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                 )
             }
         }
@@ -1333,7 +1341,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 keys.append(.init(protocolSigningAlgorithm: algorithm.rawValue, publicKey: publicKey))
             } catch {
                 SkyBridgeLogger.p2p.debug(
-                    "ℹ️ P2P pairingIdentityExchange skipped protocol identity key alg=\(algorithm.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    "ℹ️ P2P pairingIdentityExchange skipped protocol identity key alg=\(algorithm.rawValue, privacy: .public): \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                 )
             }
         }
@@ -1369,7 +1377,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         requiredWireIds: Set<UInt16>,
         requiringFreshKeyMaterialComparedTo baselineKeys: [UInt16: Data] = [:]
     ) async -> Bool {
-        let currentKeys = await currentTrustedPeerKEMPublicKeysByCanonicalWireId()
+        let currentKeys = await currentKnownPeerKEMPublicKeysByCanonicalWireId()
         let currentWireIds = Set(currentKeys.keys)
         guard requiredWireIds.isSubset(of: currentWireIds) else {
             return false
@@ -1388,7 +1396,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    private func currentTrustedPeerKEMPublicKeysByCanonicalWireId() async -> [UInt16: Data] {
+    private func currentKnownPeerKEMPublicKeysByCanonicalWireId() async -> [UInt16: Data] {
         let candidates = trustLookupCandidates(primary: handshakePeer.deviceId, persistent: device.persistentDeviceId)
         let trustKeys: [UInt16: Data] = await MainActor.run {
             let trust = TrustSyncService.shared
@@ -1765,7 +1773,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             } catch {
                 if !Task.isCancelled {
                     SkyBridgeLogger.p2p.warning(
-                        "⚠️ P2P receive loop ended; tearing down authenticated session: peer=\(self.handshakePeer.deviceId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                        "⚠️ P2P receive loop ended; tearing down authenticated session: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public) error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                     )
                     self.disconnect()
                 }
@@ -1860,7 +1868,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         } catch {
             // Best-effort: ignore frames that aren't business messages for this channel.
             if rekeyInProgressLock.withLock({ $0 }) {
-                SkyBridgeLogger.p2p.debug("ℹ️ rekey期间业务帧解密失败（忽略）: \(error.localizedDescription, privacy: .public)")
+                SkyBridgeLogger.p2p.debug("ℹ️ rekey期间业务帧解密失败（忽略）: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
             }
         }
     }
@@ -1910,7 +1918,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
         if let existingDriver = handshakeDriverLock.withLock({ $0 }) {
             let existingState = await existingDriver.getCurrentState()
-            SkyBridgeLogger.p2p.info("🧩 inbound rekey replacing existing handshake driver state=\(String(describing: existingState), privacy: .public) peer=\(self.handshakePeer.deviceId, privacy: .public)")
+            SkyBridgeLogger.p2p.info("🧩 inbound rekey replacing existing handshake driver state=\(existingState.diagnosticSummary, privacy: .public) peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)")
             handshakeDriverLock.withLock { $0 = nil }
         }
 
@@ -1926,7 +1934,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             localPQCSuitesAvailable: localPQCAvailable
         ), rejection == .peerOfferedClassicOnly {
             SkyBridgeLogger.p2p.error(
-                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
             )
             return nil
         }
@@ -1950,14 +1958,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 localPQCSuitesAvailable: !localPQCSuites.isEmpty
             ) {
                 SkyBridgeLogger.p2p.error(
-                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
                 )
                 return nil
             }
             if localPQCSuites.isEmpty {
                 if !peerHasClassicGroup {
                     SkyBridgeLogger.p2p.error(
-                        "❌ inbound rekey rejected: peer offered PQC suites but local PQC responder unavailable. peer=\(self.handshakePeer.deviceId, privacy: .public)"
+                        "❌ inbound rekey rejected: peer offered PQC suites but local PQC responder unavailable. peer=\(self.handshakePeerDiagnosticLabel, privacy: .public)"
                     )
                     return nil
                 }
@@ -2015,12 +2023,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
             let targetSuites = messageA.supportedSuites.map(\.rawValue).joined(separator: ",")
             SkyBridgeLogger.p2p.info(
-                "🔁 inbound rekey start: peer=\(self.handshakePeer.deviceId, privacy: .public) current=\(previousKeys.negotiatedSuite.rawValue, privacy: .public) target=\(targetSuites, privacy: .public)"
+                "🔁 inbound rekey start: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public) current=\(previousKeys.negotiatedSuite.rawValue, privacy: .public) target=\(targetSuites, privacy: .public)"
             )
             return driver
         } catch {
             SkyBridgeLogger.p2p.error(
-                "❌ inbound rekey driver init failed: \(error.localizedDescription, privacy: .public)"
+                "❌ inbound rekey driver init failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
             )
             return nil
         }
@@ -2062,7 +2070,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     await PeerSessionArbiter.shared.markEstablished(pairKey: pairKey)
                 }
                 SkyBridgeLogger.p2p.warning(
-                    "⚠️ inbound rekey failed; restored previous session. peer=\(self.handshakePeer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
+                    "⚠️ inbound rekey failed; restored previous session. peer=\(self.handshakePeerDiagnosticLabel, privacy: .public) reason=\(reason.diagnosticReasonCode, privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
                 )
                 await MainActor.run {
                     if self.status != .authenticated {
@@ -2215,7 +2223,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             try await persistPeerKEMTrustRecords(from: payload)
         } catch {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ pairingIdentityExchange trust persistence degraded: \(error.localizedDescription, privacy: .public)"
+                "⚠️ pairingIdentityExchange trust persistence failed closed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
             )
         }
 
@@ -2223,7 +2231,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             try await persistAuthenticatedRemoteAuthority(from: payload)
         } catch {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ pairingIdentityExchange current-path trust bridge degraded: \(error.localizedDescription, privacy: .public)"
+                "⚠️ pairingIdentityExchange current-path trust bridge degraded: \(error.localizedDescription, privacy: .private)"
             )
         }
 
@@ -2235,7 +2243,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             try await sendPairingIdentityExchange(force: shouldForceIdentityReply)
         } catch {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ pairingIdentityExchange reply failed: \(error.localizedDescription, privacy: .public)"
+                "⚠️ pairingIdentityExchange reply failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
             )
         }
     }
@@ -2300,7 +2308,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     ) async throws {
         guard let authority = authenticatedRemoteAuthorityLock.withLock({ $0 }) else {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(self.handshakePeer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                "⚠️ pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
             )
             return
         }
@@ -2335,7 +2343,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
         guard persisted else {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ current-path trust bridge skipped: peer=\(self.handshakePeer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                "⚠️ current-path trust bridge skipped: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
             )
             return
         }
@@ -2359,12 +2367,12 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             )
         } else if !advertisedFingerprints.isEmpty {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ pairingIdentityExchange protocol identity pins ignored because they are not bound to the authenticated session: peer=\(self.handshakePeer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public) count=\(advertisedFingerprints.count, privacy: .public)"
+                "⚠️ pairingIdentityExchange protocol identity pins ignored because they are not bound to the authenticated session: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public) count=\(advertisedFingerprints.count, privacy: .public)"
             )
         }
 
         SkyBridgeLogger.p2p.info(
-            "🔐 current-path trust bridge persisted: peer=\(self.handshakePeer.deviceId, privacy: .public) current=\(declaredDeviceId ?? self.handshakePeer.deviceId, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(authority.protocolPublicKeyFingerprint, privacy: .public)"
+            "🔐 current-path trust bridge persisted: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) current=\(Self.protocolIdentityLogRedaction, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
         )
     }
 
@@ -2488,50 +2496,51 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         var savedIds: [String] = []
         var lastError: Error?
 
-        func upsert(_ deviceId: String, caps: [String]) async {
-            do {
-                try await upsertTrustRecordForBootstrap(
-                    deviceId: deviceId,
+	        func upsert(_ deviceId: String, caps: [String]) async {
+	            do {
+	                try await upsertTrustRecordForBootstrap(
+	                    deviceId: deviceId,
                     displayName: displayName,
                     incomingKEMKeys: payload.kemPublicKeys,
                     capabilities: caps,
                     currentDeviceId: declaredDeviceId,
                     knownDeviceIds: bootstrapIds
                 )
-                savedIds.append(deviceId)
-            } catch {
-                lastError = error
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ KEM trust alias upsert failed: id=\(deviceId, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
-                )
-            }
-        }
+	                savedIds.append(deviceId)
+	            } catch {
+	                lastError = error
+	                let redactedDeviceId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId)
+	                SkyBridgeLogger.p2p.warning(
+	                    "⚠️ KEM trust alias upsert failed: id=\(redactedDeviceId, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
+	                )
+	            }
+	        }
 
         await upsert(declaredDeviceId, caps: baseCapabilities)
 
         if savedIds.isEmpty, let lastError {
             if bootstrapCacheEnabled {
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ TrustSync KEM persistence failed; using bootstrap cache only: declared=\(declaredDeviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) err=\(lastError.localizedDescription, privacy: .public)"
-                )
-            } else {
-                throw lastError
-            }
+	                await PeerKEMBootstrapStore.shared.clearPairingIdentityExchangeEntries(deviceIds: bootstrapIds)
+	                SkyBridgeLogger.p2p.warning(
+	                    "⚠️ TrustSync KEM persistence failed; cleared unsigned bootstrap KEM cache and failing closed: err=\(lastError.localizedDescription, privacy: .private)"
+	                )
+	            }
+            throw lastError
         }
 
-        let savedSummary = savedIds.joined(separator: ",")
-        let cachedSuites = await PeerKEMBootstrapStore.shared.availableSuiteWireIds(forCandidates: bootstrapIds)
-        let cachedSummary = cachedSuites.map(String.init).joined(separator: ",")
-        if !savedIds.isEmpty {
-            SkyBridgeLogger.p2p.info(
-                "🔑 已保存对端 KEM 公钥：declared=\(declaredDeviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) trust=\(savedSummary, privacy: .public) cacheSuites=\(cachedSummary, privacy: .public) keys=\(payload.kemPublicKeys.count)"
-            )
-        } else if bootstrapCacheEnabled {
-            SkyBridgeLogger.p2p.info(
-                "🔑 已缓存对端 KEM 公钥（TrustSync degraded）：declared=\(declaredDeviceId, privacy: .public) peer=\(peerDeviceId, privacy: .public) cacheSuites=\(cachedSummary, privacy: .public) keys=\(payload.kemPublicKeys.count)"
-            )
-        }
-    }
+	        let savedSummary = savedIds
+	            .map { SkyBridgeDiagnosticRedaction.stableIdentifierLabel($0) }
+	            .joined(separator: ",")
+	        let cachedSuites = await PeerKEMBootstrapStore.shared.availableSuiteWireIds(forCandidates: bootstrapIds)
+	        let cachedSummary = cachedSuites.map(String.init).joined(separator: ",")
+	        if !savedIds.isEmpty {
+	            let redactedDeclaredDeviceId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(declaredDeviceId)
+	            let redactedPeerDeviceId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerDeviceId)
+	            SkyBridgeLogger.p2p.info(
+	                "🔑 已保存对端 KEM 公钥：declared=\(redactedDeclaredDeviceId, privacy: .public) peer=\(redactedPeerDeviceId, privacy: .public) trust=\(savedSummary, privacy: .public) cacheSuites=\(cachedSummary, privacy: .public) keys=\(payload.kemPublicKeys.count)"
+	            )
+	        }
+	    }
 
     @available(macOS 14.0, iOS 17.0, *)
     @MainActor

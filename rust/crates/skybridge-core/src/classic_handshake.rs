@@ -60,6 +60,9 @@ pub struct ClassicHandleResult {
     pub pong_id: Option<u64>,
     pub observed_pong_id: Option<u64>,
     pub observed_heartbeat: bool,
+    /// A decoded inbound binary file frame, when the encrypted app message was a
+    /// file transfer frame rather than a JSON keepalive frame.
+    pub inbound_file_frame: Option<crate::file_transfer_frame::FileAppFrame>,
 }
 
 enum InitiatorState {
@@ -312,6 +315,7 @@ impl ClassicInitiatorHandshake {
                     pong_id: None,
                     observed_pong_id: None,
                     observed_heartbeat: false,
+                    inbound_file_frame: None,
                 })
             }
             InitiatorState::Established(_) => Ok(ClassicHandleResult::default()),

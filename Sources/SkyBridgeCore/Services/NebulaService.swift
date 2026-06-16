@@ -71,7 +71,7 @@ public final class NebulaService: BaseManager {
  /// 生产环境兼容兜底（仅提供非敏感默认值）
         public static var production: Configuration {
             return Configuration(
-                baseURL: "https://nebula.skybridge.com",
+                baseURL: "https://auth.nebula-technologies.net",
                 clientId: "skybridge_compass_pro",
                 clientSecret: ""
             )
@@ -80,8 +80,8 @@ public final class NebulaService: BaseManager {
  /// 开发环境兼容兜底（仅提供非敏感默认值）
         public static var development: Configuration {
             return Configuration(
-                baseURL: "https://nebula-dev.skybridge.com",
-                clientId: "skybridge_compass_dev",
+                baseURL: "https://auth.nebula-technologies.net",
+                clientId: "skybridge_compass_pro",
                 clientSecret: ""
             )
         }

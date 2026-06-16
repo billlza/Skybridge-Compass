@@ -200,7 +200,7 @@ public actor RegexMatchingExecutor {
 
  // Perform matching via XPC
         return try await withCheckedThrowingContinuation { continuation in
-            proxy.matchPattern(pattern, in: inputData, timeoutMs: timeoutMs) { results, error in
+            proxy.matchPattern(pattern, in: inputData, timeoutMs: timeoutMs) { [weak self] results, error in
                 if let error = error {
                     // Helper responded but indicates failure; if it looks like an XPC-layer issue, back off.
                     if error.code == 4 {

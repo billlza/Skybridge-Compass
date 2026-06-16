@@ -27,8 +27,14 @@ enum ProtocolDeviceIdentity {
             return legacyIdentity
         }
 
-        let keychainIdentity = KeychainManager.shared.getOrGenerateDeviceId()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let keychainIdentity: String
+        do {
+            keychainIdentity = try KeychainManager.shared.getOrGenerateDeviceIdStrict()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            SkyBridgeLogger.shared.error("❌ 协议设备 ID Keychain 加载失败，拒绝静默重建: \(error.localizedDescription)")
+            return ""
+        }
         if !keychainIdentity.isEmpty {
             UserDefaults.standard.set(keychainIdentity, forKey: protocolIdentityMirrorDefaultsKey)
             mirrorDeviceIdToLegacyDefaultsIfNeeded(keychainIdentity)

@@ -85,4 +85,5 @@ fn check_subcommands_parse_with_json_flags() {
         ])
         .is_ok()
     );
+    assert!(Cli::try_parse_from(["skybridge", "capabilities", "--json"]).is_ok());
 }

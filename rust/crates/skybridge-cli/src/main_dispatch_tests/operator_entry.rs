@@ -28,6 +28,20 @@ async fn dispatch_covers_operator_entry_error_and_wrapper_paths() -> Result<()> 
         "--json",
     ])
     .await?;
+    dispatch_args(["skybridge", "--state-dir", &state, "capabilities", "--json"]).await?;
+    assert!(
+        dispatch_args([
+            "skybridge",
+            "--state-dir",
+            &state,
+            "device",
+            "discover",
+            "--nearby",
+            "--json",
+        ])
+        .await
+        .is_err()
+    );
     assert!(
         dispatch_args([
             "skybridge",

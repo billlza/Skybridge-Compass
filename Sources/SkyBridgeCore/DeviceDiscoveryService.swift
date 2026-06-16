@@ -318,7 +318,7 @@ public final class DeviceDiscoveryService: ObservableObject {
     }
 
     public init() {
-        Task { @MainActor in
+        Task { @MainActor [self] in
  // 初始化设备名称解析器
             self.deviceNameResolver = DeviceNameResolver()
 
@@ -829,7 +829,7 @@ public final class DeviceDiscoveryService: ObservableObject {
         lastScanEndTime = Date()
 
  // 🔄 2025年优化：停止优化管理器
-        Task { @MainActor in
+        Task { @MainActor [self] in
             optimizedManager?.stopScanning()
         }
 
@@ -864,7 +864,7 @@ public final class DeviceDiscoveryService: ObservableObject {
     private func startOptimizedDiscovery() async {
         logger.info("🚀 使用Apple Silicon优化的设备发现")
 
-        Task { @MainActor in
+        Task { @MainActor [self] in
             await withTaskGroup(of: Void.self) { group in
                 let passive = settingsManager.discoveryPassiveMode
                 var scanTasks: [(String, TaskType)] = []
@@ -908,7 +908,7 @@ public final class DeviceDiscoveryService: ObservableObject {
     private func startStandardDiscovery() async {
         logger.info("使用标准设备发现")
 
-        Task { @MainActor in
+        Task { @MainActor [self] in
             performBonjourScan()
             if !settingsManager.discoveryPassiveMode {
                 await performNetworkScan()
@@ -1698,9 +1698,19 @@ public final class DeviceDiscoveryService: ObservableObject {
 
             let connection = NWConnection(host: host, port: nwPort, using: .tcp)
 
-            connection.stateUpdateHandler = { [weak self] state in
-                defer { portGroup.leave() }
+ // NWConnection 的 stateUpdateHandler 会多次回调（.preparing → .ready/.failed → .cancelled）。
+ // 每个端口只 enter() 一次，必须保证恰好 leave() 一次，否则 DispatchGroup 会 over-release 崩溃。
+            let didLeavePortGroup = OSAllocatedUnfairLock(initialState: false)
+            let leavePortGroupOnce: @Sendable () -> Void = {
+                let shouldLeave = didLeavePortGroup.withLock { alreadyLeft -> Bool in
+                    guard !alreadyLeft else { return false }
+                    alreadyLeft = true
+                    return true
+                }
+                if shouldLeave { portGroup.leave() }
+            }
 
+            connection.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
  // 找到开放端口，主机存在
@@ -1713,14 +1723,16 @@ public final class DeviceDiscoveryService: ObservableObject {
                         }
                     }
                     connection.cancel()
+                    leavePortGroupOnce()
 
                 case .failed(let error):
  // 记录端口扫描失败的详细信息
                     self?.logger.debug("🔍 \(ip):\(port) 连接失败: \(error.localizedDescription)")
                     connection.cancel()
+                    leavePortGroupOnce()
 
                 case .cancelled:
-                    break
+                    leavePortGroupOnce()
 
                 default:
                     break

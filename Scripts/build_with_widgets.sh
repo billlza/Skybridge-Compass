@@ -72,14 +72,22 @@ log_info "清理旧构建..."
 swift package clean 2>/dev/null || true
 
 log_info "检测 Apple PQC SDK 可用性（用于编译期开关 HAS_APPLE_PQC_SDK）..."
-SDK_VER="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "")"
-SDK_MAJOR="$(echo "$SDK_VER" | awk -F. '{print $1}')"
-if [ -n "$SDK_MAJOR" ] && [ "$SDK_MAJOR" -ge 26 ]; then
+source "$SCRIPT_DIR/apple_pqc_sdk_probe.sh"
+skybridge_detect_apple_pqc_sdk
+if [ "${SKYBRIDGE_PQC_SDK_AVAILABLE:-0}" = "1" ]; then
     export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
-    log_info "✅ 检测到 macOS SDK ${SDK_VER}（>=26），启用 Apple PQC 编译条件"
+    log_info "Apple PQC SDK 探测通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}, SDK=${SKYBRIDGE_PQC_SDK_VER:-unknown}），启用 Apple PQC 编译条件"
 else
-    unset SKYBRIDGE_ENABLE_APPLE_PQC_SDK
-    log_info "ℹ️ 未检测到 macOS SDK 26+（当前: ${SDK_VER:-unknown}），禁用 Apple PQC 编译条件（运行仍可使用 classic/liboqs）"
+    export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=0
+    log_info "Apple PQC SDK 探测未通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}, SDK=${SKYBRIDGE_PQC_SDK_VER:-unknown}），拒绝构建 Release 产物"
+    if [ -n "${SKYBRIDGE_PQC_PROBE_ERROR:-}" ]; then
+        log_info "PQC 探测详情: ${SKYBRIDGE_PQC_PROBE_ERROR}"
+    fi
+    if [ "${SKYBRIDGE_ALLOW_RELEASE_WITHOUT_APPLE_PQC_SDK:-0}" != "1" ]; then
+        log_error "Release 构建必须通过 Apple PQC SDK symbol probe。仅本地诊断可显式设置 SKYBRIDGE_ALLOW_RELEASE_WITHOUT_APPLE_PQC_SDK=1。"
+        exit 1
+    fi
+    log_info "已显式允许本地诊断构建不启用 Apple PQC SDK；禁止用于发布。"
 fi
 
 log_info "构建 Release 版本..."

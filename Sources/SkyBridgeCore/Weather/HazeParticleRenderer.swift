@@ -137,52 +137,22 @@ final class HazeParticleRenderer: NSObject, MTKViewDelegate {
         }
         SkyBridgeLogger.metal.debugOnly("🔧 开始设置Metal...")
         
-        var library: MTLLibrary?
-        
- // 尝试多种方式加载Metal库
-        SkyBridgeLogger.metal.debugOnly("🔍 尝试加载Metal库...")
-        
- // 方法1: 尝试默认库
-        library = device.makeDefaultLibrary()
-        if library != nil {
-            SkyBridgeLogger.metal.debugOnly("✅ 成功加载默认Metal库")
-        } else {
-            SkyBridgeLogger.metal.error("❌ 默认Metal库加载失败")
-            
- // 方法2: 尝试从Bundle.module加载
-            do {
-                library = try device.makeDefaultLibrary(bundle: Bundle.module)
-                SkyBridgeLogger.metal.debugOnly("✅ 成功从Bundle.module加载Metal库")
-            } catch {
-                SkyBridgeLogger.metal.error("❌ Bundle.module加载失败: \(error.localizedDescription, privacy: .private)")
-                
- // 方法3: 尝试从主Bundle加载
-                do {
-                    library = try device.makeDefaultLibrary(bundle: Bundle.main)
-                    SkyBridgeLogger.metal.debugOnly("✅ 成功从Bundle.main加载Metal库")
-                } catch {
-                    SkyBridgeLogger.metal.error("❌ Bundle.main加载失败: \(error.localizedDescription, privacy: .private)")
-                    
- // 方法4: 尝试通过文件路径加载着色器源码
-                    if let shaderPath = Bundle.module.path(forResource: "HazeParticleShaders", ofType: "metal") {
-                        SkyBridgeLogger.metal.debugOnly("🔍 找到着色器文件路径: \(shaderPath)")
-                        do {
-                            let shaderSource = try String(contentsOfFile: shaderPath, encoding: .utf8)
-                            library = try device.makeLibrary(source: shaderSource, options: nil)
-                            SkyBridgeLogger.metal.debugOnly("✅ 成功从源码编译Metal库")
-                        } catch {
-                            SkyBridgeLogger.metal.error("❌ 源码编译失败: \(error.localizedDescription, privacy: .private)")
-                        }
-                    } else {
-                        SkyBridgeLogger.metal.error("❌ 无法找到HazeParticleShaders.metal文件")
-                    }
-                }
-            }
-        }
-        
-        guard let metalLibrary = library else {
+        let metalLibrary: MTLLibrary
+        do {
+            metalLibrary = try SkyBridgeMetalShaderLibrary.load(
+                device: device,
+                bundle: Bundle.module,
+                sourceResourceNames: ["HazeParticleShaders"],
+                requiredFunctionNames: [
+                    "hazeParticleVertex",
+                    "hazeParticleFragment",
+                    "updateHazeParticles"
+                ]
+            )
+            SkyBridgeLogger.metal.debugOnly("✅ 成功加载Metal库")
+        } catch {
  // 优雅降级：记录错误并停止渲染流程，避免崩溃
-            logger.error("❌ 无法从任何来源加载Metal库，渲染停止")
+            logger.error("❌ 无法加载Metal库，渲染停止: \(error.localizedDescription, privacy: .private)")
             return
         }
         

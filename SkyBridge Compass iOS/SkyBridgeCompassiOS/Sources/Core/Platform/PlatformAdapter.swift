@@ -138,7 +138,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     /// 加载或创建身份密钥
     private func loadOrCreateIdentityKey(algorithm: ProtocolSigningAlgorithm) async throws {
         // 尝试从 Keychain 加载
-        if let existingKey = try? loadIdentityKeyFromKeychain(algorithm: algorithm) {
+        if let existingKey = try loadIdentityKeyFromKeychain(algorithm: algorithm) {
             if await isSigningKeyUsable(
                 keyHandle: existingKey.keyHandle,
                 publicKey: existingKey.publicKey,
@@ -149,18 +149,49 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
                 return
             }
 
+            // 存量身份密钥自检失败：常见于跨 App / OS 版本升级后，旧后端（或收紧验签前）
+            // 生成的 ML-DSA 密钥在当前验签路径下不再被接受。旧密钥已不可用，继续抛错会让本机
+            // 永久无法建立连接、也无法生成连接码（UI 表现为长时间卡住后报错）。这里改为轮换出
+            // 一把新身份密钥并持久化（对端需重新建立信任），实现自愈而非永久失败。
             SkyBridgeLogger.shared.warning(
-                "⚠️ 发现旧/不兼容身份密钥（algorithm=\(algorithm.rawValue)），将自动重建"
+                "⚠️ 存量 \(algorithm.rawValue) 身份密钥自检失败，轮换为新密钥（对端需重新信任本机）"
             )
+            let rotated = try await regenerateAndStoreIdentityKey(algorithm: algorithm)
+            identityKeyHandle = rotated.keyHandle
+            identityPublicKey = rotated.publicKey
+            return
         }
-        
+
         // 创建新密钥
         let newKey = try await generateIdentityKey(algorithm: algorithm)
         identityKeyHandle = newKey.keyHandle
         identityPublicKey = newKey.publicKey
-        
+
         // 保存到 Keychain
         try saveIdentityKeyToKeychain(keyHandle: newKey.keyHandle, publicKey: newKey.publicKey, algorithm: algorithm)
+    }
+
+    /// 轮换并持久化一把新的身份密钥；对新密钥再做一次自检以避免无限轮换：
+    /// 若新密钥仍不可用，说明 PQC 后端本身不可用，此时才抛错。
+    private func regenerateAndStoreIdentityKey(
+        algorithm: ProtocolSigningAlgorithm
+    ) async throws -> (keyHandle: SigningKeyHandle, publicKey: Data) {
+        let fresh = try await generateIdentityKey(algorithm: algorithm)
+        guard await isSigningKeyUsable(
+            keyHandle: fresh.keyHandle,
+            publicKey: fresh.publicKey,
+            algorithm: algorithm
+        ) else {
+            throw SkyBridgeError.invalidKeyData(
+                reason: "Freshly generated \(algorithm.rawValue) identity key failed self-test; PQC backend unavailable"
+            )
+        }
+        try saveIdentityKeyToKeychain(
+            keyHandle: fresh.keyHandle,
+            publicKey: fresh.publicKey,
+            algorithm: algorithm
+        )
+        return fresh
     }
     
     /// 生成身份密钥
@@ -200,13 +231,23 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
             return (keyHandle, publicKey)
         }
 
-        if let existingKey = try? loadIdentityKeyFromKeychain(algorithm: algorithm),
-           await isSigningKeyUsable(
+        if let existingKey = try loadIdentityKeyFromKeychain(algorithm: algorithm) {
+            if await isSigningKeyUsable(
                 keyHandle: existingKey.keyHandle,
                 publicKey: existingKey.publicKey,
                 algorithm: algorithm
-           ) {
-            return existingKey
+            ) {
+                return existingKey
+            }
+
+            // 存量身份密钥自检失败：轮换为新密钥并持久化，避免本机被永久卡死（详见 loadOrCreateIdentityKey）。
+            SkyBridgeLogger.shared.warning(
+                "⚠️ 存量 \(algorithm.rawValue) 身份密钥自检失败，轮换为新密钥（对端需重新信任本机）"
+            )
+            let rotated = try await regenerateAndStoreIdentityKey(algorithm: algorithm)
+            identityKeyHandle = rotated.keyHandle
+            identityPublicKey = rotated.publicKey
+            return rotated
         }
 
         let newKey = try await generateIdentityKey(algorithm: algorithm)
@@ -232,21 +273,31 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         
-        guard status == errSecSuccess, let keyData = result as? Data else {
+        if status == errSecItemNotFound {
             return nil
+        }
+        guard status == errSecSuccess else {
+            throw SkyBridgeError.keychainError(status: status)
+        }
+        guard let keyData = result as? Data else {
+            throw SkyBridgeError.keychainError(status: errSecDecode)
         }
         
         // 解析存储的数据（格式: privateKey || publicKey）
         switch algorithm {
         case .ed25519:
-            guard keyData.count == 64 else { return nil }
+            guard keyData.count == 64 else {
+                throw SkyBridgeError.invalidKeyData(reason: "Invalid Ed25519 identity key length")
+            }
             let privateKeyData = keyData.prefix(32)
             let publicKeyData = keyData.suffix(32)
             return (.softwareKey(Data(privateKeyData)), Data(publicKeyData))
             
         case .mlDSA65:
             let publicKeyLength = mldsaPublicKeyLength()
-            guard publicKeyLength > 0, keyData.count > publicKeyLength else { return nil }
+            guard publicKeyLength > 0, keyData.count > publicKeyLength else {
+                throw SkyBridgeError.invalidKeyData(reason: "Invalid ML-DSA-65 identity key length")
+            }
             let privateKeyData = keyData.prefix(keyData.count - publicKeyLength)
             let publicKeyData = keyData.suffix(publicKeyLength)
             return (.softwareKey(Data(privateKeyData)), Data(publicKeyData))
@@ -300,25 +351,39 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         var keyData = privateKeyData
         keyData.append(publicKey)
         
-        // 删除已存在的
-        let deleteQuery: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag.data(using: .utf8)!
         ]
-        SecItemDelete(deleteQuery as CFDictionary)
-        
-        // 添加新的
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
+
+        let updateAttributes: [String: Any] = [
             kSecValueData as String: keyData,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
-        
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        guard status == errSecSuccess || status == errSecDuplicateItem else {
-            throw SkyBridgeError.keychainError(status: status)
+
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return
         }
+        guard updateStatus == errSecItemNotFound else {
+            throw SkyBridgeError.keychainError(status: updateStatus)
+        }
+
+        var addQuery = query
+        addQuery[kSecValueData as String] = keyData
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        if status == errSecSuccess {
+            return
+        }
+        if status == errSecDuplicateItem {
+            let retryStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+            guard retryStatus == errSecSuccess else {
+                throw SkyBridgeError.keychainError(status: retryStatus)
+            }
+            return
+        }
+        throw SkyBridgeError.keychainError(status: status)
     }
 
     private func supportsHandshakeSuite(
@@ -536,6 +601,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
 public enum SkyBridgeError: Error, LocalizedError {
     case notInitialized
     case keychainError(status: OSStatus)
+    case invalidKeyData(reason: String)
     case handshakeFailed(reason: String)
     case encryptionFailed(reason: String)
     case decryptionFailed(reason: String)
@@ -546,6 +612,8 @@ public enum SkyBridgeError: Error, LocalizedError {
             return "SkyBridge core not initialized"
         case .keychainError(let status):
             return "Keychain error: \(status)"
+        case .invalidKeyData(let reason):
+            return "Invalid key data: \(reason)"
         case .handshakeFailed(let reason):
             return "Handshake failed: \(reason)"
         case .encryptionFailed(let reason):

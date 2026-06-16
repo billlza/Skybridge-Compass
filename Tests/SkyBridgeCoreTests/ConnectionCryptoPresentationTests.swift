@@ -32,6 +32,16 @@ final class ConnectionCryptoPresentationTests: XCTestCase {
         XCTAssertEqual(text, "Apple PQC已连接")
     }
 
+    func testAppleKindWithoutNegotiatedSuiteDoesNotClaimPQC() {
+        let text = ConnectionCryptoPresentation.connectedStatusText(
+            kind: "ApplePQC",
+            suite: nil,
+            baseConnectedText: "已连接"
+        )
+
+        XCTAssertEqual(text, "已连接")
+    }
+
     func testLiboqsKindConnectedStatus() {
         let text = ConnectionCryptoPresentation.connectedStatusText(
             kind: "liboqs",
@@ -42,7 +52,7 @@ final class ConnectionCryptoPresentationTests: XCTestCase {
         XCTAssertEqual(text, "liboqs已连接")
     }
 
-    func testModeLabelFallsBackToCapabilityForPQCOnlySuite() {
+    func testModeLabelDoesNotInferProviderFromCapabilityForPQCOnlySuite() {
         let appleCapability = CryptoProviderFactory.Capability(
             hasApplePQC: true,
             hasLiboqs: true,
@@ -56,11 +66,11 @@ final class ConnectionCryptoPresentationTests: XCTestCase {
 
         XCTAssertEqual(
             ConnectionCryptoPresentation.modeLabel(kind: nil, suite: "ML-KEM-768", capability: appleCapability),
-            "Apple PQC"
+            "PQC"
         )
         XCTAssertEqual(
             ConnectionCryptoPresentation.modeLabel(kind: nil, suite: "ML-KEM-768", capability: liboqsCapability),
-            "liboqs"
+            "PQC"
         )
     }
 
@@ -85,15 +95,18 @@ final class ConnectionCryptoPresentationTests: XCTestCase {
         XCTAssertEqual(text, "liboqs已连接")
     }
 
-    func testInferredModeLabelForCurrentPolicyReturnsKnownCategory() {
-        let mode = ConnectionCryptoPresentation.inferredModeLabelForCurrentPolicy(
-            compatibilityModeEnabled: true
+    func testConnectedStatusTextWithPolicyFallbackDoesNotClaimPQCWithoutSessionEvidence() {
+        let text = ConnectionCryptoPresentation.connectedStatusTextWithPolicyFallback(
+            kind: nil,
+            suite: nil,
+            baseConnectedText: "已连接",
+            compatibilityModeEnabled: false
         )
 
-        XCTAssertNotNil(mode)
-        XCTAssertTrue(
-            ["X-Wing", "Apple PQC", "liboqs", "Classic"].contains(mode ?? ""),
-            "Unexpected inferred mode: \(mode ?? "nil")"
-        )
+        XCTAssertEqual(text, "已连接")
+    }
+
+    func testModeLabelDoesNotInferApplePQCFromProviderNameAlone() {
+        XCTAssertNil(ConnectionCryptoPresentation.modeLabel(kind: "ApplePQC", suite: nil))
     }
 }

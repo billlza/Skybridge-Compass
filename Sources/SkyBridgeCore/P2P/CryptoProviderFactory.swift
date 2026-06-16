@@ -270,7 +270,10 @@ public enum CryptoProviderFactory {
         }
 
  // 确定 severity
-        let severity: SecurityEventSeverity = fallbackFromPreferred ? .warning : .info
+        let strictPQCUnavailable = policy == .requirePQC && provider.providerName == "Unavailable"
+        let severity: SecurityEventSeverity = strictPQCUnavailable ? .high : (fallbackFromPreferred ? .warning : .info)
+        let providerStatus = strictPQCUnavailable ? "pqc_unavailable" : "selected"
+        let fallbackAllowed = fallbackFromPreferred && policy == .preferPQC
 
  // 创建事件
         let event = SecurityEvent(
@@ -280,8 +283,11 @@ public enum CryptoProviderFactory {
             context: [
                 "selectedTier": selectedTier.rawValue,
                 "fallbackFromPreferred": String(fallbackFromPreferred),
+                "fallbackAllowed": String(fallbackAllowed),
                 "providerName": provider.providerName,
+                "providerStatus": providerStatus,
                 "suite": provider.activeSuite.rawValue,
+                "strictPQCUnavailable": String(strictPQCUnavailable),
                 "osVersion": capability.osVersion,
                 "compiledWithApplePQCSDK": String(compiledWithApplePQCSDK),
                 "hasApplePQC": String(capability.hasApplePQC),
@@ -300,7 +306,12 @@ public enum CryptoProviderFactory {
 internal struct UnavailablePQCProvider: CryptoProvider, Sendable {
     let providerName = "Unavailable"
     let tier: CryptoTier = .classic
-    let activeSuite: CryptoSuite = .x25519Ed25519
+    let activeSuite: CryptoSuite = .unknown(0xFFFF)
+    let supportedSuites: [CryptoSuite] = []
+
+    func supportsSuite(_ suite: CryptoSuite) -> Bool {
+        false
+    }
 
     func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
         throw CryptoProviderError.providerNotAvailable(.cryptoKitPQC)

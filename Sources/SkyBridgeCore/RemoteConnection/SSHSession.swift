@@ -41,7 +41,7 @@ public final class SSHSession: ObservableObject {
         self.group = group
 
         let bootstrap = ClientBootstrap(group: group)
-            .channelInitializer { channel in
+            .channelInitializer { [self] channel in
                 channel.eventLoop.makeCompletedFuture {
                     let sync = channel.pipeline.syncOperations
                     let userAuth = SimplePasswordDelegate(username: self.username, password: password)
@@ -292,7 +292,7 @@ public final class SSHSession: ObservableObject {
         guard let ch = channel else { throw SSHClientError.invalidChannelType }
         let p = ch.eventLoop.makePromise(of: Channel.self)
         let ssh = try ch.pipeline.syncOperations.handler(type: NIOSSHHandler.self)
-        ssh.createChannel(p, channelType: .session) { child, type in
+        ssh.createChannel(p, channelType: .session) { [weak self] child, type in
             guard case .session = type else { return ch.eventLoop.makeFailedFuture(SSHClientError.invalidChannelType) }
             return child.eventLoop.makeCompletedFuture {
                 let childSync = child.pipeline.syncOperations

@@ -213,6 +213,134 @@ pub struct DiscoveredPeer {
     pub transfer_port: Option<u16>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearbyDiscoveryEndpointClass {
+    LocalNetwork,
+    PeerToPeer,
+    Relay,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearbyDiscoveryTrustStatus {
+    Unknown,
+    Candidate,
+    ProtocolIdentityVerified,
+    Trusted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearbyDiscoveredDevice {
+    pub device_ref: String,
+    pub display_name: String,
+    pub endpoint_class: NearbyDiscoveryEndpointClass,
+    pub trust_status: NearbyDiscoveryTrustStatus,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub connectable: bool,
+}
+
+impl NearbyDiscoveredDevice {
+    pub fn new(
+        device_ref: impl Into<String>,
+        display_name: impl Into<String>,
+        endpoint_class: NearbyDiscoveryEndpointClass,
+        trust_status: NearbyDiscoveryTrustStatus,
+        capabilities: Vec<String>,
+        connectable: bool,
+    ) -> Self {
+        Self {
+            device_ref: device_ref.into(),
+            display_name: display_name.into(),
+            endpoint_class,
+            trust_status,
+            capabilities,
+            connectable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearbyDiscoverySnapshot {
+    pub schema_version: u32,
+    pub scan_id: String,
+    pub source: String,
+    #[serde(default)]
+    pub devices: Vec<NearbyDiscoveredDevice>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub observed_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+impl NearbyDiscoverySnapshot {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    pub fn new(
+        scan_id: impl Into<String>,
+        source: impl Into<String>,
+        devices: Vec<NearbyDiscoveredDevice>,
+        ttl_seconds: i64,
+    ) -> Self {
+        let now = OffsetDateTime::now_utc();
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            scan_id: scan_id.into(),
+            source: source.into(),
+            devices,
+            observed_at: now,
+            expires_at: now + time::Duration::seconds(ttl_seconds),
+            updated_at: now,
+        }
+    }
+
+    pub fn is_fresh_at(&self, now: OffsetDateTime) -> bool {
+        self.expires_at > now
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearbyDiscoverySnapshotRegistry {
+    pub schema_version: u32,
+    pub snapshots: BTreeMap<String, NearbyDiscoverySnapshot>,
+}
+
+impl Default for NearbyDiscoverySnapshotRegistry {
+    fn default() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            snapshots: BTreeMap::new(),
+        }
+    }
+}
+
+impl NearbyDiscoverySnapshotRegistry {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const MAX_SNAPSHOTS: usize = 32;
+    pub const MAX_DEVICES_PER_SNAPSHOT: usize = 256;
+
+    pub fn insert(&mut self, snapshot: NearbyDiscoverySnapshot) {
+        self.snapshots.insert(snapshot.scan_id.clone(), snapshot);
+    }
+
+    pub fn latest_fresh(&self, now: OffsetDateTime) -> Option<&NearbyDiscoverySnapshot> {
+        self.snapshots
+            .values()
+            .filter(|snapshot| snapshot.is_fresh_at(now))
+            .max_by_key(|snapshot| snapshot.updated_at)
+    }
+
+    pub fn latest(&self) -> Option<&NearbyDiscoverySnapshot> {
+        self.snapshots
+            .values()
+            .max_by_key(|snapshot| snapshot.updated_at)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnifiedPeer {
     pub peer_id: String,
@@ -425,5 +553,79 @@ mod tests {
         assert_eq!(selected.port, 9443);
         assert_eq!(selected.route_source, "presence:inbound");
         assert!(resolution.fallback_invoked);
+    }
+
+    #[test]
+    fn nearby_discovery_snapshot_registry_selects_only_fresh_snapshots() {
+        let mut registry = NearbyDiscoverySnapshotRegistry::default();
+        let stale = NearbyDiscoverySnapshot::new(
+            "scan-stale",
+            "agent_owned_nearby_discovery_snapshot",
+            vec![NearbyDiscoveredDevice::new(
+                "nearby-stale",
+                "Old Mac",
+                NearbyDiscoveryEndpointClass::LocalNetwork,
+                NearbyDiscoveryTrustStatus::ProtocolIdentityVerified,
+                vec!["file_transfer".to_owned()],
+                true,
+            )],
+            60,
+        );
+        let now = stale.expires_at + time::Duration::seconds(1);
+        registry.insert(stale);
+        assert!(registry.latest_fresh(now).is_none());
+        assert_eq!(
+            registry
+                .latest()
+                .expect("stale snapshot still exists for diagnostics")
+                .scan_id,
+            "scan-stale"
+        );
+
+        let fresh = NearbyDiscoverySnapshot::new(
+            "scan-fresh",
+            "agent_owned_nearby_discovery_snapshot",
+            vec![NearbyDiscoveredDevice::new(
+                "nearby-fresh",
+                "Studio Mac",
+                NearbyDiscoveryEndpointClass::LocalNetwork,
+                NearbyDiscoveryTrustStatus::Trusted,
+                vec!["remote_desktop".to_owned()],
+                true,
+            )],
+            300,
+        );
+        registry.insert(fresh);
+
+        assert_eq!(
+            registry
+                .latest_fresh(OffsetDateTime::now_utc())
+                .expect("fresh snapshot should be selected")
+                .scan_id,
+            "scan-fresh"
+        );
+    }
+
+    #[test]
+    fn nearby_discovery_snapshot_serializes_public_projection_only() {
+        let snapshot = NearbyDiscoverySnapshot::new(
+            "scan-1",
+            "agent_owned_nearby_discovery_snapshot",
+            vec![NearbyDiscoveredDevice::new(
+                "nearby-device-1",
+                "Studio Mac",
+                NearbyDiscoveryEndpointClass::LocalNetwork,
+                NearbyDiscoveryTrustStatus::ProtocolIdentityVerified,
+                vec!["remote_desktop".to_owned(), "file_transfer".to_owned()],
+                true,
+            )],
+            300,
+        );
+        let serialized = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+        assert!(serialized.contains("nearby-device-1"));
+        assert!(serialized.contains("protocol_identity_verified"));
+        assert!(!serialized.contains("192.168."));
+        assert!(!serialized.contains("private_key"));
+        assert!(!serialized.contains("fingerprint"));
     }
 }

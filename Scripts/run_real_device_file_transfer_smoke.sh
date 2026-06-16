@@ -4,7 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/Scripts/signing_entitlements_helpers.sh"
 source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
+source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
+source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
+source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_file_smoke_$(date +%Y%m%d_%H%M%S)}"
+PUBLIC_ARTIFACT_DIR="$ARTIFACT_DIR/public-redacted"
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
 IOS_DEBUG_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements"
@@ -20,7 +24,7 @@ RUN_ID="${SKYBRIDGE_SMOKE_FILE_TRANSFER_RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 USER_REALISTIC="${SKYBRIDGE_SMOKE_USER_REALISTIC:-0}"
 MAC_HOST_MODE="${SKYBRIDGE_SMOKE_MAC_HOST_MODE:-}"
 USE_OOB_QR_BOOTSTRAP="${SKYBRIDGE_SMOKE_USE_OOB_QR_BOOTSTRAP:-0}"
-REQUIRE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-$USER_REALISTIC}"
+REQUIRE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-1}"
 FORCE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH:-$REQUIRE_SIGNED_KEM_REFRESH}"
 ALLOW_UNNOTARIZED_DMG_FOR_LAB="${SKYBRIDGE_SMOKE_ALLOW_UNNOTARIZED_DMG_FOR_LAB:-0}"
 PIB_APPROVAL_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_PIB_APPROVAL_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
@@ -122,74 +126,127 @@ mkdir -p "$SWIFTPM_CACHE_DIR" "$SWIFT_MODULE_CACHE_DIR"
 
 pick_real_device_id() {
   python3 - <<'PY'
-import re
+import json
 import subprocess
+import sys
+import tempfile
 
-def pick_from_xctrace():
-    output = subprocess.check_output(["xcrun", "xctrace", "list", "devices"], text=True)
-    in_devices = False
-    for line in output.splitlines():
-        stripped = line.strip()
-        if stripped == "== Devices ==":
-            in_devices = True
-            continue
-        if stripped.startswith("== ") and stripped != "== Devices ==":
-            in_devices = False
-        if not in_devices:
-            continue
-        if not stripped or "Mac" in stripped:
-            continue
-        match = re.search(r"\(([0-9A-Fa-f-]{20,})\)$", stripped)
-        if match:
-            print(match.group(1))
-            return True
-    return False
-
-def pick_from_devicectl():
-    try:
-        output = subprocess.check_output(
-            ["xcrun", "devicectl", "list", "devices"],
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False
-
-    candidates = []
-    for line in output.splitlines():
-        if "available" not in line or "paired" not in line:
-            continue
-        match = re.search(r"([0-9A-Fa-f-]{8}(?:-[0-9A-Fa-f-]{4}){3}-[0-9A-Fa-f-]{12})", line)
-        if not match:
-            continue
-        priority = 0 if "iPad" in line else 1
-        candidates.append((priority, match.group(1)))
-
-    for _, identifier in sorted(candidates):
+def load_devicectl_device_list():
+    with tempfile.NamedTemporaryFile(prefix="skybridge-file-transfer-devices-", suffix=".json") as handle:
         try:
-            details = subprocess.check_output(
-                ["xcrun", "devicectl", "device", "info", "details", "--device", identifier],
-                stderr=subprocess.STDOUT,
+            result = subprocess.run(
+                ["xcrun", "devicectl", "list", "devices", "--json-output", handle.name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 timeout=30,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            if result.returncode != 0:
+                print("devicectl JSON device list failed while selecting the real file-transfer target.", file=sys.stderr)
+                raise SystemExit(1)
+            handle.seek(0)
+            return json.load(handle)
+        except subprocess.TimeoutExpired as exc:
+            print("devicectl JSON device list timed out while selecting the real file-transfer target.", file=sys.stderr)
+            raise SystemExit(1)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"devicectl JSON device list could not be read while selecting the real file-transfer target: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+
+def installable_physical_ios_identifiers(payload):
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    devices = result.get("devices", []) if isinstance(result, dict) else []
+    candidates = []
+    for device in devices:
+        if not isinstance(device, dict):
             continue
-        udid = re.search(r"udid:\s*([0-9A-Fa-f-]{20,})", details)
-        print(udid.group(1) if udid else identifier)
-        return True
+        if not is_connected_devicectl_device(device):
+            continue
+        if not is_physical_devicectl_device(device):
+            continue
+        if not is_ios_family_device(device):
+            continue
+        if not has_install_application_capability(device):
+            continue
+        identifier = (
+            string_value(device.get("identifier"))
+            or string_value(nested_value(device, "hardwareProperties", "udid"))
+            or string_value(nested_value(device, "deviceProperties", "udid"))
+        )
+        if identifier:
+            candidates.append((0 if is_ipad_devicectl_device(device) else 1, identifier))
+    return [identifier for _, identifier in sorted(candidates)]
 
-    return False
+def is_connected_devicectl_device(device):
+    connection = device.get("connectionProperties", {})
+    if not isinstance(connection, dict):
+        return False
+    tunnel_state = string_value(connection.get("tunnelState")).lower()
+    pairing_state = string_value(connection.get("pairingState")).lower()
+    return tunnel_state == "connected" or pairing_state == "paired"
 
-if pick_from_xctrace() or pick_from_devicectl():
+def is_physical_devicectl_device(device):
+    hardware_reality = string_value(nested_value(device, "hardwareProperties", "reality")).lower()
+    properties_reality = string_value(nested_value(device, "properties", "hardware", "reality")).lower()
+    visibility_class = string_value(device.get("visibilityClass")).lower()
+    provider = string_value(nested_value(device, "deviceProperties", "provider"))
+    return (
+        "physical" in {hardware_reality, properties_reality}
+        and visibility_class != "simulators"
+        and provider != "com.apple.CoreSimulator.SimulatorCoreDevicePlugin"
+    )
+
+def is_ios_family_device(device):
+    hardware = device.get("hardwareProperties", {})
+    platform = string_value(hardware.get("platform") if isinstance(hardware, dict) else "")
+    return platform == "iOS" or is_ipad_devicectl_device(device) or is_iphone_devicectl_device(device)
+
+def is_ipad_devicectl_device(device):
+    return device_type(device).startswith("ipad")
+
+def is_iphone_devicectl_device(device):
+    return device_type(device).startswith("iphone")
+
+def device_type(device):
+    hardware = device.get("hardwareProperties", {})
+    evidence = [
+        hardware.get("deviceType") if isinstance(hardware, dict) else None,
+        hardware.get("productType") if isinstance(hardware, dict) else None,
+        hardware.get("marketingName") if isinstance(hardware, dict) else None,
+    ]
+    return " ".join(string_value(value).lower() for value in evidence)
+
+def has_install_application_capability(device):
+    capabilities = device.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        return False
+    return any(
+        isinstance(capability, dict)
+        and capability.get("featureIdentifier") == "com.apple.coredevice.feature.installapp"
+        for capability in capabilities
+    )
+
+def nested_value(value, *keys):
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+def string_value(value):
+    return value.strip() if isinstance(value, str) else ""
+
+candidates = installable_physical_ios_identifiers(load_devicectl_device_list())
+if candidates:
+    print(candidates[0])
     raise SystemExit(0)
 
-raise SystemExit("No connected real iOS device found.")
+raise SystemExit("No connected installable physical iOS device found.")
 PY
 }
 
 IOS_DEVICE_ID="${SKYBRIDGE_REAL_DEVICE_ID:-$(pick_real_device_id)}"
+IOS_DEVICE_LABEL="$(skybridge_smoke_hash_label "$IOS_DEVICE_ID")"
 MAC_TARGET_NAME="${SKYBRIDGE_SMOKE_MAC_TARGET_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname)}"
 HOST_STATUS="$ARTIFACT_DIR/mac.status.log"
 HOST_PQC_REPORT="$ARTIFACT_DIR/mac.pqc.json"
@@ -216,11 +273,11 @@ capture_host_context() {
   safe_label="$(printf '%s' "$label" | tr -cs 'A-Za-z0-9_.-' '_')"
 
   echo "---- macOS host status tail ($HOST_STATUS) ----" >&2
-  tail -n 120 "$HOST_STATUS" >&2 2>/dev/null || true
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 120 "$HOST_STATUS" "$IOS_DEVICE_ID" >&2 || true
   echo "---- macOS host stdout tail ($HOST_STDOUT) ----" >&2
-  tail -n 120 "$HOST_STDOUT" >&2 2>/dev/null || true
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 120 "$HOST_STDOUT" "$IOS_DEVICE_ID" >&2 || true
   echo "---- macOS host stderr tail ($HOST_STDERR) ----" >&2
-  tail -n 120 "$HOST_STDERR" >&2 2>/dev/null || true
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 120 "$HOST_STDERR" "$IOS_DEVICE_ID" >&2 || true
 
   if command -v log >/dev/null 2>&1; then
     local log_path="$ARTIFACT_DIR/mac-host-${safe_label}.system.log"
@@ -230,7 +287,7 @@ capture_host_context() {
     fi
     log show --style compact --last 2m --predicate "process == \"${process_name}\" || subsystem == \"com.skybridge.transfer\" || subsystem == \"com.skybridge.compass\"" >"$log_path" 2>/dev/null || true
     echo "---- macOS host system log tail ($log_path) ----" >&2
-    tail -n 80 "$log_path" >&2 2>/dev/null || true
+    skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$log_path" "$IOS_DEVICE_ID" >&2 || true
   fi
 
   if [[ -n "${HOST_PID:-}" ]] && kill -0 "$HOST_PID" >/dev/null 2>&1; then
@@ -318,6 +375,10 @@ has_file_transfer_failure_without_phase() {
   awk '/failed stage=file-transfer/ && $0 !~ /phase=/ { found=1 } END { exit found ? 0 : 1 }' "$path"
 }
 
+print_ios_status_tail() {
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 120 "$IOS_STATUS_LOCAL" "$IOS_DEVICE_ID" >&2 || true
+}
+
 wait_for_file_pattern() {
   local path="$1"
   local pattern="$2"
@@ -329,40 +390,40 @@ wait_for_file_pattern() {
     copy_ios_status
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=file-transfer phase=unknown' "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer instrumentation gap while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
     if has_file_transfer_failure_without_phase "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer missing phase while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=' "$IOS_STATUS_LOCAL"; then
       echo "Detected iOS failure while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
     if [[ -f "$path" ]] && grep -qE 'failed stage=file-transfer phase=unknown' "$path"; then
       echo "Detected file-transfer instrumentation gap while waiting for ${label}: ${path}" >&2
       echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
     if has_file_transfer_failure_without_phase "$path"; then
       echo "Detected file-transfer missing phase while waiting for ${label}: ${path}" >&2
       echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
     if [[ -f "$path" ]] && grep -qE 'failed stage=' "$path"; then
       echo "Detected failure while waiting for ${label}: ${path}" >&2
       echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
@@ -373,7 +434,7 @@ wait_for_file_pattern() {
       echo "macOS host exited before ${label}: ${path}" >&2
       copy_ios_status
       echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
@@ -381,7 +442,7 @@ wait_for_file_pattern() {
       echo "Timed out waiting for ${label}: ${path}" >&2
       copy_ios_status
       echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
@@ -409,19 +470,19 @@ wait_for_ios_status_pattern() {
     copy_ios_status
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=file-transfer phase=unknown' "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer instrumentation gap while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
     if has_file_transfer_failure_without_phase "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer missing phase while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=' "$IOS_STATUS_LOCAL"; then
       echo "Detected iOS failure while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
@@ -432,7 +493,7 @@ wait_for_ios_status_pattern() {
       if host_completed_file_transfer_smoke; then
         if (( "$(date +%s)" - started_at >= timeout_seconds )); then
           echo "Timed out waiting for ${label} after macOS host completed file-transfer smoke: ${IOS_STATUS_LOCAL}" >&2
-          tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+          print_ios_status_tail
           capture_host_context "$label"
           return 1
         fi
@@ -440,13 +501,13 @@ wait_for_ios_status_pattern() {
         continue
       fi
       echo "macOS host exited before ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
     if (( "$(date +%s)" - started_at >= timeout_seconds )); then
       echo "Timed out waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "$label"
       return 1
     fi
@@ -486,19 +547,19 @@ wait_for_optional_protocol_identity_binding() {
     copy_ios_status
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=file-transfer phase=unknown' "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer instrumentation gap while waiting for SKR-1 or PIB-1: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "SKR-1 or PIB-1"
       return 1
     fi
     if has_file_transfer_failure_without_phase "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer missing phase while waiting for SKR-1 or PIB-1: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "SKR-1 or PIB-1"
       return 1
     fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=' "$IOS_STATUS_LOCAL"; then
       echo "Detected iOS failure while waiting for SKR-1 or PIB-1: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "SKR-1 or PIB-1"
       return 1
     fi
@@ -523,13 +584,13 @@ wait_for_optional_protocol_identity_binding() {
     fi
     if ! host_process_running; then
       echo "macOS host exited before SKR-1 or PIB-1 evidence: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "SKR-1 or PIB-1"
       return 1
     fi
     if (( "$(date +%s)" - started_at >= timeout_seconds )); then
       echo "Timed out waiting for SKR-1 or PIB-1 evidence: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 120 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_ios_status_tail
       capture_host_context "SKR-1 or PIB-1"
       return 1
     fi
@@ -566,7 +627,7 @@ launch_ios_smoke_app() {
     if launch_result_indicates_ios_profile_trust_failure; then
       echo "iOS smoke app launch failed at launch stage: code signature/profile/trust rejected by device." >&2
       echo "This is a real-device precondition failure, not a file-transfer/network pass." >&2
-      cat "$LAUNCH_RESULT_JSON" >&2 2>/dev/null || true
+      skybridge_smoke_cat_redacted "$IOS_DEVICE_LABEL" "$LAUNCH_RESULT_JSON" "$IOS_DEVICE_ID" >&2 || true
       capture_host_context "iOS app launch signing"
       return 1
     fi
@@ -575,7 +636,7 @@ launch_ios_smoke_app() {
       if (( "$(date +%s)" - started_at >= IOS_LAUNCH_TIMEOUT_SECONDS )); then
         echo "Timed out launching iOS smoke app because the real device stayed locked for ${IOS_LAUNCH_TIMEOUT_SECONDS}s." >&2
         echo "Unlock the iPad/iPhone and rerun the same CLI command; this is a real-device precondition, not a transfer pass." >&2
-        cat "$LAUNCH_RESULT_JSON" >&2 2>/dev/null || true
+        skybridge_smoke_cat_redacted "$IOS_DEVICE_LABEL" "$LAUNCH_RESULT_JSON" "$IOS_DEVICE_ID" >&2 || true
         capture_host_context "iOS app launch locked"
         return 1
       fi
@@ -587,7 +648,7 @@ launch_ios_smoke_app() {
     fi
 
     echo "iOS smoke app launch failed before transfer validation." >&2
-    cat "$LAUNCH_RESULT_JSON" >&2 2>/dev/null || true
+    skybridge_smoke_cat_redacted "$IOS_DEVICE_LABEL" "$LAUNCH_RESULT_JSON" "$IOS_DEVICE_ID" >&2 || true
     capture_host_context "iOS app launch"
     return 1
   done
@@ -597,7 +658,7 @@ capture_device_info() {
   local attempts="${SKYBRIDGE_SMOKE_DEVICE_INFO_ATTEMPTS:-3}"
   local attempt
   for attempt in $(seq 1 "$attempts"); do
-    if xcrun devicectl list devices --json-output "$DEVICE_INFO_JSON" >/dev/null; then
+    if skybridge_smoke_write_redacted_devicectl_devices "$IOS_DEVICE_LABEL" "$DEVICE_INFO_JSON" "$IOS_DEVICE_ID"; then
       return 0
     fi
     echo "    devicectl JSON device list failed (${attempt}/${attempts})" >&2
@@ -605,7 +666,9 @@ capture_device_info() {
   done
 
   echo "    warning: continuing after devicectl JSON device list failed" >&2
-  xcrun devicectl list devices >"$ARTIFACT_DIR/device-info.txt" 2>&1 || true
+  xcrun devicectl list devices 2>&1 \
+    | skybridge_smoke_redact_stream "$IOS_DEVICE_LABEL" "$IOS_DEVICE_ID" \
+      >"$ARTIFACT_DIR/device-info.txt" || true
   python3 - "$DEVICE_INFO_JSON" <<'PY'
 import json
 import sys
@@ -616,7 +679,7 @@ PY
 }
 
 echo "==> Artifacts: $ARTIFACT_DIR"
-echo "==> Real device: $IOS_DEVICE_ID"
+echo "==> Real device: $IOS_DEVICE_LABEL"
 echo "==> Run ID: $RUN_ID"
 echo "==> Host preferred suite: $HOST_PREFERRED_SUITE"
 echo "==> iOS preferred suite: $IOS_PREFERRED_SUITE"
@@ -644,6 +707,15 @@ echo "==> Inspecting connected device"
 capture_device_info
 
 if [[ "$MAC_HOST_MODE" == "swiftpm-host" ]]; then
+  echo "==> Checking Apple PQC SDK gate for macOS file-transfer host"
+  skybridge_configure_optional_apple_pqc_sdk_compile_gate macosx
+  if [[ "${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}" != "1" ]]; then
+    echo "Apple PQC SDK symbol probe failed for the macOS file-transfer host; refusing to build an X-Wing smoke host without HAS_APPLE_PQC_SDK." >&2
+    echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=${SKYBRIDGE_PQC_PROBE_ERROR:-}" >&2
+    exit 1
+  fi
+  echo "==> Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
+
   echo "==> Building macOS LAN host"
   (
     cd "$ROOT_DIR"
@@ -807,12 +879,20 @@ case "$(printf '%s' "$HOST_PREFERRED_SUITE" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 echo "==> Building iOS app for real device"
+skybridge_detect_apple_pqc_sdk iphoneos
+if ! skybridge_apple_pqc_sdk_probe_succeeded; then
+  echo "Apple PQC SDK symbol probe failed for the file-transfer iOS app; refusing to build an X-Wing smoke target without HAS_APPLE_PQC_SDK." >&2
+  echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=${SKYBRIDGE_PQC_PROBE_ERROR:-}" >&2
+  exit 1
+fi
+echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
 SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
   -project "$IOS_PROJECT" \
   -scheme "$IOS_SCHEME" \
   -configuration Debug \
   -destination "id=$IOS_DEVICE_ID" \
   -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios" \
+  SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
   build >"$IOS_BUILD_LOG"
 
 IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/Debug-iphoneos/SkyBridgeCompass-iOS.app"
@@ -826,7 +906,7 @@ if ! skybridge_profile_supports_requested_profile_backed_entitlements \
   "$IOS_EMBEDDED_PROFILE" \
   "$IOS_DEBUG_ENTITLEMENTS"; then
   echo "iOS app provisioning profile does not cover requested Debug entitlements; refusing a smoke run that would hide a signing mismatch." >&2
-  echo "profile=$IOS_EMBEDDED_PROFILE entitlements=$IOS_DEBUG_ENTITLEMENTS" >&2
+  echo "profile=<redacted-profile-path> entitlements=<redacted-entitlements-path>" >&2
   exit 1
 fi
 
@@ -844,6 +924,10 @@ IOS_PQC_PEER_DEVICE_ID="$MAC_PQC_DEVICE_ID"
 IOS_PQC_PEER_XWING_PUBLIC_KEY_BASE64="$MAC_PQC_XWING_PUBLIC_KEY_BASE64"
 IOS_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64="$MAC_PQC_MLKEM768_PUBLIC_KEY_BASE64"
 IOS_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64="$MAC_PQC_MLKEM768FS_PUBLIC_KEY_BASE64"
+IOS_AUTO_APPROVE_PAIRING="${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-}"
+if [[ "$USER_REALISTIC" != "1" && -z "$IOS_AUTO_APPROVE_PAIRING" ]]; then
+  IOS_AUTO_APPROVE_PAIRING="1"
+fi
 if [[ "$USER_REALISTIC" == "1" ]]; then
   IOS_PQC_PEER_DEVICE_ID=""
   IOS_PQC_PEER_XWING_PUBLIC_KEY_BASE64=""
@@ -862,10 +946,11 @@ IOS_ENV_JSON="$(
 	  SKYBRIDGE_SMOKE_USER_REALISTIC="$USER_REALISTIC" \
 	  SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH="$REQUIRE_SIGNED_KEM_REFRESH" \
 	  SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH="$FORCE_SIGNED_KEM_REFRESH" \
-	  SKYBRIDGE_SMOKE_USE_OOB_QR_BOOTSTRAP="$USE_OOB_QR_BOOTSTRAP" \
-	  SKYBRIDGE_PIB_APPROVAL_TIMEOUT_SECONDS="$PIB_APPROVAL_TIMEOUT_SECONDS" \
-	  SKYBRIDGE_SMOKE_CONNECT_LINK="$MAC_QR_CONNECT_LINK" \
-	  SB_PQC_PREFERRED_SUITE="$IOS_PREFERRED_SUITE" \
+		  SKYBRIDGE_SMOKE_USE_OOB_QR_BOOTSTRAP="$USE_OOB_QR_BOOTSTRAP" \
+		  SKYBRIDGE_PIB_APPROVAL_TIMEOUT_SECONDS="$PIB_APPROVAL_TIMEOUT_SECONDS" \
+		  SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING="$IOS_AUTO_APPROVE_PAIRING" \
+		  SKYBRIDGE_SMOKE_CONNECT_LINK="$MAC_QR_CONNECT_LINK" \
+		  SB_PQC_PREFERRED_SUITE="$IOS_PREFERRED_SUITE" \
   SKYBRIDGE_PQC_PEER_DEVICE_ID="$IOS_PQC_PEER_DEVICE_ID" \
   SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64="$IOS_PQC_PEER_XWING_PUBLIC_KEY_BASE64" \
   SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64="$IOS_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64" \
@@ -886,9 +971,10 @@ keys = [
 	    "SKYBRIDGE_SMOKE_USER_REALISTIC",
 	    "SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH",
 	    "SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH",
-	    "SKYBRIDGE_SMOKE_USE_OOB_QR_BOOTSTRAP",
-	    "SKYBRIDGE_PIB_APPROVAL_TIMEOUT_SECONDS",
-	    "SKYBRIDGE_SMOKE_CONNECT_LINK",
+		    "SKYBRIDGE_SMOKE_USE_OOB_QR_BOOTSTRAP",
+		    "SKYBRIDGE_PIB_APPROVAL_TIMEOUT_SECONDS",
+		    "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING",
+		    "SKYBRIDGE_SMOKE_CONNECT_LINK",
 	    "SB_PQC_PREFERRED_SUITE",
     "SKYBRIDGE_PQC_PEER_DEVICE_ID",
     "SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64",
@@ -948,7 +1034,7 @@ fi
 
 if [[ "$REQUIRE_SIGNED_KEM_REFRESH" == "1" ]]; then
   echo "==> Waiting for SKR-1 signed KEM refresh smoke proof"
-  wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh smoke-evidence: .*source=signed_lan_kem_refresh .*signature=verified .*requestHash=bound .*strictXWingEstablished=1' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 smoke evidence"
+  wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence: .*source=signed_lan_kem_refresh .*signature=verified .*requestHash=bound .*strictXWingEstablished=1|verified and imported: .*suites=.*X-Wing.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound)' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 smoke proof"
 fi
 
 echo "==> Waiting for smoke success markers"
@@ -963,6 +1049,13 @@ else
   wait_for_file_pattern "$HOST_STATUS" "success .*suite=${EXPECTED_TARGET_SUITE} .*fileTransfer=1" "$SMOKE_TIMEOUT_SECONDS" "macOS file-transfer success"
   wait_for_ios_status_pattern "success .*suite=${EXPECTED_TARGET_SUITE} .*fileTransfer=1" "$SMOKE_TIMEOUT_SECONDS" "iOS file-transfer success"
 fi
+
+echo "==> Running Rust CLI file-transfer performance artifact gate"
+skybridge_smoke_check_performance_gate "$ROOT_DIR" file-transfer "$ARTIFACT_DIR"
+echo "==> Materializing redacted public file-transfer smoke artifacts"
+skybridge_smoke_materialize_public_artifacts "$IOS_DEVICE_LABEL" "$ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
+skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
+echo "==> Redacted public artifacts: $PUBLIC_ARTIFACT_DIR"
 
 echo "==> Real-device bidirectional file transfer smoke succeeded"
 echo "    mac status: $HOST_STATUS"

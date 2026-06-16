@@ -286,7 +286,12 @@ public enum CryptoProviderFactory {
 internal struct UnavailablePQCProvider: CryptoProvider, Sendable {
     let providerName = "Unavailable"
     let tier: CryptoTier = .classic
-    let activeSuite: CryptoSuite = .x25519Ed25519
+    let activeSuite: CryptoSuite = .unknown(0xFFFF)
+    let supportedSuites: [CryptoSuite] = []
+
+    func supportsSuite(_ suite: CryptoSuite) -> Bool {
+        false
+    }
     
     func hpkeSeal(plaintext: Data, recipientPublicKey: Data, info: Data) async throws -> HPKESealedBox {
         throw CryptoProviderError.pqcNotAvailable

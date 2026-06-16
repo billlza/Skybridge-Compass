@@ -75,7 +75,12 @@ public struct HazeDebugTestView: View {
         
         SkyBridgeLogger.metal.debugOnly("✅ Metal device available: \(device.name)")
         
-        guard let library = device.makeDefaultLibrary() else {
+        guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: ["HazeShaders"],
+            requiredFunctionNames: ["hazeVertex", "hazeFragment"]
+        ) else {
             testMessage = "❌ Metal library not available"
             SkyBridgeLogger.metal.error("❌ Metal library not available")
             return

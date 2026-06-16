@@ -107,6 +107,7 @@ public enum DeviceIdentityKeyError: Error, LocalizedError, Sendable {
     case keyAccessDenied
     case secureEnclaveNotAvailable
     case invalidKeyData
+    case incompleteKeyMaterial(String)
     case keychainError(OSStatus)
     case signatureFailed(String)
     case verificationFailed
@@ -124,6 +125,8 @@ public enum DeviceIdentityKeyError: Error, LocalizedError, Sendable {
             return "Secure Enclave not available on this device"
         case .invalidKeyData:
             return "Invalid key data"
+        case .incompleteKeyMaterial(let reason):
+            return "Incomplete identity key material: \(reason)"
         case .keychainError(let status):
             return "Keychain error: \(status)"
         case .signatureFailed(let reason):
@@ -331,14 +334,29 @@ public actor DeviceIdentityKeyManager {
     
  /// 获取设备 ID
     public func getDeviceId() async -> String {
+        do {
+            return try await getOrCreateDeviceIdStrict()
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "❌ 设备 ID 严格加载失败，拒绝静默重建: \(error.localizedDescription, privacy: .public)"
+            )
+            if let mirrored = loadMirroredDeviceId() {
+                _deviceId = mirrored
+                return mirrored
+            }
+            return ""
+        }
+    }
+
+    public func getOrCreateDeviceIdStrict() async throws -> String {
         if let deviceId = _deviceId {
             return deviceId
         }
-        
+
  // 优先尝试 Data Protection Keychain。legacy Keychain fallback can be very slow on
  // upgraded macOS installations, so only use it after the non-secret UserDefaults
  // mirror has had a chance to satisfy startup.
-        if let stored = loadStoredDeviceId(allowLegacyFallback: false) {
+        if let stored = try loadStoredDeviceIdStrict(allowLegacyFallback: false) {
             _deviceId = stored
             return stored
         }
@@ -348,14 +366,13 @@ public actor DeviceIdentityKeyManager {
             return mirrored
         }
 
-        if let migrated = loadStoredDeviceId(allowLegacyFallback: true) {
+        if let migrated = try loadStoredDeviceIdStrict(allowLegacyFallback: true) {
             _deviceId = migrated
             return migrated
         }
-        
-// 生成新的设备 ID
+
         let newId = UUID().uuidString
-        saveDeviceId(newId)
+        try saveDeviceIdStrict(newId)
         _deviceId = newId
         return newId
     }
@@ -598,7 +615,7 @@ public actor DeviceIdentityKeyManager {
         }
 
  // 首先尝试从新 tag 加载
-        if let secKey = try? getSEPoPKeyReference() {
+        if let secKey = try getSEPoPKeyReference() {
             return .secureEnclaveRef(secKey)
         }
         
@@ -606,7 +623,7 @@ public actor DeviceIdentityKeyManager {
         try await migrateExistingIdentityKey()
         
  // 再次尝试加载
-        if let secKey = try? getSEPoPKeyReference() {
+        if let secKey = try getSEPoPKeyReference() {
             return .secureEnclaveRef(secKey)
         }
         
@@ -655,7 +672,7 @@ public actor DeviceIdentityKeyManager {
         if Self.useInMemoryKeychain { return }
 
  // 1. 检查是否已迁移（sePoPKeyTag 已存在）
-        if (try? getSEPoPKeyReference()) != nil {
+        if try getSEPoPKeyReference() != nil {
             SkyBridgeLogger.p2p.debug("SE PoP key already exists, skipping migration")
             return
         }
@@ -705,13 +722,15 @@ public actor DeviceIdentityKeyManager {
     ) async throws -> (publicKey: Data, privateKey: SecureBytes) {
         let storageSuite = suite.canonicalKEMSuite
         let cacheKey = KEMCacheKey(suiteWireId: storageSuite.wireId, tier: provider.tier)
-        if let cached = cachedKEMPublicKeys[cacheKey],
-           let record = try? loadKEMKeyRecord(suiteWireId: storageSuite.wireId, tier: provider.tier),
-           record.publicKey == cached {
-            return (publicKey: record.publicKey, privateKey: SecureBytes(data: record.privateKey))
+        if cachedKEMPublicKeys[cacheKey] != nil {
+            if let record = try loadKEMKeyRecord(suiteWireId: storageSuite.wireId, tier: provider.tier) {
+                cachedKEMPublicKeys[cacheKey] = record.publicKey
+                return (publicKey: record.publicKey, privateKey: SecureBytes(data: record.privateKey))
+            }
+            cachedKEMPublicKeys.removeValue(forKey: cacheKey)
         }
         
-        if let record = try? loadKEMKeyRecord(suiteWireId: storageSuite.wireId, tier: provider.tier) {
+        if let record = try loadKEMKeyRecord(suiteWireId: storageSuite.wireId, tier: provider.tier) {
             cachedKEMPublicKeys[cacheKey] = record.publicKey
             return (publicKey: record.publicKey, privateKey: SecureBytes(data: record.privateKey))
         }
@@ -896,7 +915,7 @@ public actor DeviceIdentityKeyManager {
         
  // 生成新的设备 ID
         let newDeviceId = UUID().uuidString
-        saveDeviceId(newDeviceId)
+        try saveDeviceIdStrict(newDeviceId)
         _deviceId = newDeviceId
         
  // 创建新密钥
@@ -919,7 +938,7 @@ public actor DeviceIdentityKeyManager {
     
     /// 创建新的身份密钥
     private func createNewIdentityKey() async throws -> DeviceIdentityKeyInfo {
-        let deviceId = await getDeviceId()
+        let deviceId = try await getOrCreateDeviceIdStrict()
         if Self.useInMemoryKeychain {
             let privateKey = P256.Signing.PrivateKey()
             let publicKeyData = privateKey.publicKey.x963Representation
@@ -1055,8 +1074,7 @@ public actor DeviceIdentityKeyManager {
             let key = KeychainConstants.service + "|" + "keyInfo"
             let data = Self.inMemoryGet(key)
             guard let data else { return nil }
-            // Decode best-effort; the in-memory mode may not persist SecKey references across runs.
-            return try? JSONDecoder().decode(DeviceIdentityKeyInfo.self, from: data)
+            return try JSONDecoder().decode(DeviceIdentityKeyInfo.self, from: data)
         }
 
         guard let data = try readGenericPasswordData(
@@ -1072,7 +1090,7 @@ public actor DeviceIdentityKeyManager {
         
  // 验证私钥仍然存在
         guard try getPrivateKeyReference() != nil else {
-            return nil
+            throw DeviceIdentityKeyError.incompleteKeyMaterial("identity keyInfo exists without its private key reference")
         }
         
         return keyInfo
@@ -1277,42 +1295,60 @@ public actor DeviceIdentityKeyManager {
     
  /// 加载存储的设备 ID
     private func loadStoredDeviceId(allowLegacyFallback: Bool = true) -> String? {
+        do {
+            return try loadStoredDeviceIdStrict(allowLegacyFallback: allowLegacyFallback)
+        } catch {
+            SkyBridgeLogger.p2p.warning(
+                "⚠️ 读取设备 ID 失败: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    private func loadStoredDeviceIdStrict(allowLegacyFallback: Bool = true) throws -> String? {
         if Self.useInMemoryKeychain {
             let key = KeychainConstants.service + "|" + KeychainConstants.deviceIdKey
             Self.inMemoryLock.lock()
             let data = Self.inMemoryStore[key]
             Self.inMemoryLock.unlock()
             guard let data else { return nil }
-            let value = String(data: data, encoding: .utf8)
-            if let value, !value.isEmpty {
-                saveMirroredDeviceId(value)
+            guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+                throw DeviceIdentityKeyError.invalidKeyData
             }
+            saveMirroredDeviceId(value)
             return value
         }
 
-        do {
-            if let data = try readGenericPasswordData(
-                service: KeychainConstants.service,
-                account: KeychainConstants.deviceIdKey,
-                migrateAccessible: kSecAttrAccessibleAfterFirstUnlock,
-                includeLegacyMigration: allowLegacyFallback
-            ),
-               let value = String(data: data, encoding: .utf8),
-               !value.isEmpty {
-                saveMirroredDeviceId(value)
-                return value
-            }
-        } catch {
-            SkyBridgeLogger.p2p.warning(
-                "⚠️ 读取设备 ID 失败: \(error.localizedDescription, privacy: .public)"
-            )
+        guard let data = try readGenericPasswordData(
+            service: KeychainConstants.service,
+            account: KeychainConstants.deviceIdKey,
+            migrateAccessible: kSecAttrAccessibleAfterFirstUnlock,
+            includeLegacyMigration: allowLegacyFallback
+        ) else {
+            return nil
         }
-        return nil
+        guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
+            throw DeviceIdentityKeyError.invalidKeyData
+        }
+        saveMirroredDeviceId(value)
+        return value
     }
     
  /// 保存设备 ID
     private func saveDeviceId(_ deviceId: String) {
-        guard let data = deviceId.data(using: .utf8) else { return }
+        do {
+            try saveDeviceIdStrict(deviceId)
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "❌ 保存设备 ID 失败: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func saveDeviceIdStrict(_ deviceId: String) throws {
+        guard let data = deviceId.data(using: .utf8) else {
+            throw DeviceIdentityKeyError.invalidKeyData
+        }
 
         if Self.useInMemoryKeychain {
             let key = KeychainConstants.service + "|" + KeychainConstants.deviceIdKey
@@ -1323,18 +1359,12 @@ public actor DeviceIdentityKeyManager {
             return
         }
 
-        do {
-            try upsertGenericPassword(
-                service: KeychainConstants.service,
-                account: KeychainConstants.deviceIdKey,
-                data: data,
-                accessible: kSecAttrAccessibleAfterFirstUnlock
-            )
-        } catch {
-            SkyBridgeLogger.p2p.error(
-                "❌ 保存设备 ID 失败: \(error.localizedDescription, privacy: .public)"
-            )
-        }
+        try upsertGenericPassword(
+            service: KeychainConstants.service,
+            account: KeychainConstants.deviceIdKey,
+            data: data,
+            accessible: kSecAttrAccessibleAfterFirstUnlock
+        )
         saveMirroredDeviceId(deviceId)
     }
 
@@ -1389,7 +1419,10 @@ public actor DeviceIdentityKeyManager {
                     makeQuery(useDataProtection: true, accessGroup: accessGroup) as CFDictionary,
                     &dpResult
                 )
-                if dpStatus == errSecSuccess, let data = dpResult as? Data {
+                if dpStatus == errSecSuccess {
+                    guard let data = dpResult as? Data else {
+                        throw DeviceIdentityKeyError.keychainError(errSecDecode)
+                    }
                     if accessGroup == nil, Self.preferredKeychainAccessGroup() != nil {
                         try upsertGenericPassword(
                             service: service,
@@ -1401,9 +1434,7 @@ public actor DeviceIdentityKeyManager {
                     return data
                 }
                 if dpStatus != errSecItemNotFound {
-                    SkyBridgeLogger.p2p.warning(
-                        "⚠️ Data Protection Keychain 读取失败: service=\(service, privacy: .public) account=\(account, privacy: .public) status=\(dpStatus, privacy: .public)"
-                    )
+                    throw DeviceIdentityKeyError.keychainError(dpStatus)
                 }
             }
         }
@@ -1570,26 +1601,35 @@ public actor DeviceIdentityKeyManager {
             let publicKeyData = Self.inMemoryStore[pubKey]
             let privateKeyData = Self.inMemoryStore[privKey]
             Self.inMemoryLock.unlock()
-            guard let publicKeyData, let privateKeyData else { return nil }
-            return (publicKey: publicKeyData, privateKey: privateKeyData)
+            switch (publicKeyData, privateKeyData) {
+            case (nil, nil):
+                return nil
+            case let (publicKeyData?, privateKeyData?):
+                return (publicKey: publicKeyData, privateKey: privateKeyData)
+            default:
+                throw DeviceIdentityKeyError.incompleteKeyMaterial("ML-DSA-65 public/private keypair is incomplete")
+            }
         }
 
-        guard let publicKeyData = try readGenericPasswordData(
+        let publicKeyData = try readGenericPasswordData(
             service: KeychainConstants.mldsaService,
             account: KeychainConstants.mldsaPublicKeyAccount,
             migrateAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ) else {
-            return nil
-        }
-        guard let privateKeyData = try readGenericPasswordData(
+        )
+        let privateKeyData = try readGenericPasswordData(
             service: KeychainConstants.mldsaService,
             account: KeychainConstants.mldsaSecretKeyAccount,
             migrateAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ) else {
+        )
+        switch (publicKeyData, privateKeyData) {
+        case (nil, nil):
             return nil
+        case let (publicKeyData?, privateKeyData?):
+            saveMirroredData(publicKeyData, forKey: KeychainConstants.mirroredMLDSAPublicKeyDefaultsKey)
+            return (publicKey: publicKeyData, privateKey: privateKeyData)
+        default:
+            throw DeviceIdentityKeyError.incompleteKeyMaterial("ML-DSA-65 public/private keypair is incomplete")
         }
-        saveMirroredData(publicKeyData, forKey: KeychainConstants.mirroredMLDSAPublicKeyDefaultsKey)
-        return (publicKey: publicKeyData, privateKey: privateKeyData)
     }
     
  /// 保存 ML-DSA-65 协议签名密钥到 Keychain

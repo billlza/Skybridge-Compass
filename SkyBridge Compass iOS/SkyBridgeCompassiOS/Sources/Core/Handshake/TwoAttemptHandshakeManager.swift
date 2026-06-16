@@ -444,8 +444,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
             severity: .info,
             message: "Retrying PQC handshake with pure-PQC compatibility suite",
             context: [
-                "deviceId": deviceId,
-                "reason": String(describing: reason),
+                "deviceId": HandshakeDiagnosticRedaction.stableIdentifierLabel(deviceId),
+                "reason": reason.diagnosticReasonCode,
                 "strategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
                 "bridgeMode": "pure_pqc_compat_retry",
                 "policyRequirePQC": policy.requirePQC ? "1" : "0"
@@ -480,8 +480,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 message: "Fallback blocked: peer not trusted (identity gate)",
                 context: [
                     "reason": "untrusted_peer_fallback_blocked",
-                    "deviceId": deviceId,
-                    "originalFailure": String(describing: reason),
+                    "deviceId": HandshakeDiagnosticRedaction.stableIdentifierLabel(deviceId),
+                    "originalFailure": reason.diagnosticReasonCode,
                     "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
                     "policyInTranscript": "1",
                     "transcriptBinding": "1",
@@ -514,8 +514,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
                 "policyInTranscript": "1",
                 "transcriptBinding": "1",
-                "reason": String(describing: reason),
-                "deviceId": deviceId,
+                "reason": reason.diagnosticReasonCode,
+                "deviceId": HandshakeDiagnosticRedaction.stableIdentifierLabel(deviceId),
                 "cooldownSeconds": String(cooldownSeconds),
                 "cooldownRemainingSeconds": String(cooldownSeconds),
                 "policyRequirePQC": policy.requirePQC ? "1" : "0",

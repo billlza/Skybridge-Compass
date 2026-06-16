@@ -1884,7 +1884,11 @@ public struct EnhancedDeviceDiscoveryView: View {
     private func appendSmokeStatusLine(_ line: String, to statusURL: URL) {
         let rendered = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
         let data = Data(rendered.utf8)
-        try? SmokeStatusFileAppender.append(data, to: statusURL)
+        MacSmokeStatusFailClosedWriter.append(
+            data,
+            to: statusURL,
+            context: "mac-online-ipad device-management smoke"
+        )
     }
 
     private func appendMacOnlineIPadConnectAppActionIfNeeded(

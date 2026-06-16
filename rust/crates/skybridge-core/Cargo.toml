@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Phase-0 cross-platform groundwork: links the macOS/iOS host C-ABI bridge for the
+# `platform` module. Off by default so the portable core builds without host symbols.
+# See src/platform.rs and ROADMAP.md.
+apple-platform-ffi = []
+
 [dependencies]
 anyhow.workspace = true
 aes-gcm.workspace = true

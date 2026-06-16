@@ -33,35 +33,17 @@ public struct TopNavigationBarView: View {
     }
 
     public var body: some View {
-        HStack {
-            Spacer()
+        HStack(spacing: 12) {
+            Spacer(minLength: 0)
 
-            if settingsManager.showTopBarIPLocation {
-                ipLocationIndicator
-            }
+            topBarStatusPills
+                .layoutPriority(0)
 
-            if settingsManager.showTopBarNetworkSpeed {
-                networkSpeedIndicator
-            }
-
-            if settingsManager.showTopBarNetworkLatency {
-                networkLatencyIndicator
-            }
-
- // 连接状态指示器
-            connectionStatusIndicator
-
- // 在"未连接"和"通知中心"之间显示实时FPS（仅受设置开关控制）
-            if SettingsManager.shared.showRealtimeFPS {
-                fpsIndicator
-            }
-
- // 通知铃铛（在"刷子"左侧）
-            NotificationBellView()
-
- // 主题切换按钮（刷子）
-            themeToggleButton
+            topBarActions
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
         }
+        .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
         .background(themeConfiguration.cardBackgroundMaterial, in: Rectangle())
@@ -113,6 +95,40 @@ public struct TopNavigationBarView: View {
             }
             .padding(20)
             .frame(width: 380)
+        }
+    }
+
+    private var topBarStatusPills: some View {
+        HStack(spacing: 8) {
+            if settingsManager.showTopBarIPLocation {
+                ipLocationIndicator
+            }
+
+            if settingsManager.showTopBarNetworkSpeed {
+                networkSpeedIndicator
+            }
+
+            if settingsManager.showTopBarNetworkLatency {
+                networkLatencyIndicator
+            }
+
+ // 连接状态指示器
+            connectionStatusIndicator
+
+ // 在"未连接"和"通知中心"之间显示实时FPS（仅受设置开关控制）
+            if SettingsManager.shared.showRealtimeFPS {
+                fpsIndicator
+            }
+        }
+    }
+
+    private var topBarActions: some View {
+        HStack(spacing: 10) {
+ // 通知铃铛（在"刷子"左侧）
+            NotificationBellView()
+
+ // 主题切换按钮（刷子）
+            themeToggleButton
         }
     }
 
@@ -419,6 +435,7 @@ public struct TopNavigationBarView: View {
                 )
         }
         .menuStyle(.borderlessButton)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private func selectCustomBackground() {

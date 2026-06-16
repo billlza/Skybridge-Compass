@@ -4,11 +4,11 @@ options:
   bundleIdPrefix: com.skybridge
   deploymentTarget:
     iOS: "17.0"
-  xcodeVersion: "26.4"
+  xcodeVersion: "26.5"
 
 settings:
   base:
-    # Note: SWIFT_VERSION is the Swift language major (6.0). Minor (6.3+) is provided by the Xcode 26.4 toolchain.
+    # Note: SWIFT_VERSION is the Swift language major (6.0). Minor (6.3+) is provided by the selected stable Xcode 26.5+ toolchain.
     SWIFT_VERSION: "6.0"
 
 packages:
@@ -30,7 +30,7 @@ targets:
           - CFBundleURLName: com.skybridge.compass.ios
             CFBundleURLSchemes:
               - skybridge
-        NEBULA_BASE_URL: "https://nebula.skybridge.com"
+        NEBULA_BASE_URL: "https://auth.nebula-technologies.net"
         NEBULA_CLIENT_ID: "skybridge_compass_ios"
         NEBULA_CLIENT_SECRET: ""
         SKYBRIDGE_ENABLE_APPLE_SIGN_IN: true
@@ -93,11 +93,10 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         OTHER_CFLAGS: "$(inherited)"
         OTHER_CPLUSPLUSFLAGS: "$(inherited)"
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]: "$(inherited) HAS_APPLE_PQC_SDK"
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]: "$(inherited) HAS_APPLE_PQC_SDK"
-        # Auto-enable Apple PQC compile gate only when building against iOS 26 SDK.
-        # This keeps older SDK builds portable while allowing 26.x builds to use native PQC.
+        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: ""
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
+        # Apple PQC SDK branches are enabled only by probe-verified build lanes that
+        # pass SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK explicitly.
       configs:
         Debug:
           CODE_SIGN_ENTITLEMENTS: SkyBridgeCompass-iOSDebug.entitlements
@@ -155,9 +154,8 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         OTHER_CFLAGS: "$(inherited)"
         OTHER_CPLUSPLUSFLAGS: "$(inherited)"
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]: "$(inherited) HAS_APPLE_PQC_SDK"
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]: "$(inherited) HAS_APPLE_PQC_SDK"
+        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: ""
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
       configs:
         Debug:
           "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"

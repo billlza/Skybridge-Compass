@@ -309,6 +309,7 @@ impl PqcInitiatorHandshake {
                     pong_id: None,
                     observed_pong_id: None,
                     observed_heartbeat: false,
+                    inbound_file_frame: None,
                 })
             }
             PqcInitiatorState::Established(_) => Ok(ClassicHandleResult::default()),

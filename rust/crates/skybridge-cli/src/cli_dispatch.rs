@@ -17,7 +17,7 @@ use crate::session_commands::{disconnect, session_inspect, session_ls};
 use crate::{
     AgentSubcommand, CheckSubcommand, Cli, CodeSubcommand, Commands, DeviceSubcommand,
     DiagnoseSubcommand, DoctorSubcommand, FileSubcommand, InternalSubcommand, LogsSubcommand,
-    SessionSubcommand,
+    RemoteDesktopSubcommand, SessionSubcommand,
 };
 
 pub(super) async fn dispatch(cli: Cli) -> Result<()> {
@@ -27,6 +27,7 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
                 run_agent(skybridge_agent::AgentRuntimeOptions {
                     state_dir: cli.state_dir,
                     heartbeat_interval: Duration::from_secs(2),
+                    ..skybridge_agent::AgentRuntimeOptions::default()
                 })
                 .await
             }
@@ -35,6 +36,9 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Logout => logout(cli.state_dir).await,
         Commands::Device(device) => match device.command {
             DeviceSubcommand::Status(output) => device_status(cli.state_dir, output.json).await,
+            DeviceSubcommand::Discover(args) => {
+                crate::device_commands::device_discover(cli.state_dir, args).await
+            }
             DeviceSubcommand::Enroll(args) => device_enroll(cli.state_dir, args).await,
             DeviceSubcommand::Approve(args) => device_approve(cli.state_dir, args).await,
         },
@@ -52,13 +56,36 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
             SessionSubcommand::Inspect(args) => session_inspect(cli.state_dir, args).await,
         },
         Commands::Disconnect(args) => disconnect(cli.state_dir, &args.session_id).await,
-        Commands::File(file) => match file.command {
-            FileSubcommand::Send(args) => {
-                crate::file_commands::send_placeholder(&args.path, &args.to)
+        Commands::RemoteDesktop(remote_desktop) => match remote_desktop.command {
+            RemoteDesktopSubcommand::Contract(output) => {
+                crate::remote_desktop_commands::contract(output.json)
             }
-            FileSubcommand::Receive => crate::file_commands::receive_placeholder(),
+            RemoteDesktopSubcommand::Status(args) => {
+                crate::remote_desktop_commands::status(cli.state_dir, args).await
+            }
+            RemoteDesktopSubcommand::Resolutions(output) => {
+                crate::remote_desktop_commands::resolutions(cli.state_dir, output).await
+            }
+            RemoteDesktopSubcommand::Start(args) => {
+                crate::remote_desktop_commands::start(cli.state_dir, args).await
+            }
+            RemoteDesktopSubcommand::Stop(args) => {
+                crate::remote_desktop_commands::stop(cli.state_dir, args).await
+            }
+            RemoteDesktopSubcommand::SetResolution(args) => {
+                crate::remote_desktop_commands::set_resolution(cli.state_dir, args).await
+            }
+            RemoteDesktopSubcommand::SetFps(args) => {
+                crate::remote_desktop_commands::set_fps(cli.state_dir, args).await
+            }
+        },
+        Commands::File(file) => match file.command {
+            FileSubcommand::Send(args) => crate::file_commands::send(cli.state_dir, args).await,
+            FileSubcommand::Receive(args) => {
+                crate::file_commands::receive_placeholder(args.output.json)
+            }
             FileSubcommand::History(output) => {
-                crate::file_commands::history_placeholder(output.json)
+                crate::file_commands::history(cli.state_dir, output.json).await
             }
         },
         Commands::Check(check) => match check.command {
@@ -87,6 +114,9 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
             None => doctor(cli.state_dir, args.output.json).await,
         },
         Commands::Smoke(smoke) => smoke::dispatch_smoke_command(smoke).await,
+        Commands::Capabilities(output) => {
+            crate::operator_capabilities::print_operator_capabilities(output.json)
+        }
         Commands::Logs(logs) => match logs.command {
             LogsSubcommand::Tail(args) => tail_logs(cli.state_dir, args.lines).await,
         },

@@ -522,10 +522,13 @@ public class P2PDiscoveryService: BaseManager {
         routePreference: ConnectionRoutePreference
     ) async throws {
         let device = resolveLatestConnectableDevice(from: device)
-        logger.info("尝试连接到设备: \(device.name)")
+        let deviceDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(
+            device.deviceId ?? device.uniqueIdentifier ?? device.name
+        )
+        logger.info("尝试连接到设备: \(deviceDiagnosticLabel, privacy: .public)")
         NetworkActivityLogStore.shared.record(
             category: "p2p",
-            message: "connect start device=\(device.name) route=\(String(describing: routePreference))"
+            message: "connect start device=\(deviceDiagnosticLabel) route=\(String(describing: routePreference))"
         )
         let deviceKey = stableConnectionKey(for: device)
         connections[deviceKey]?.cancel()
@@ -548,7 +551,7 @@ public class P2PDiscoveryService: BaseManager {
         let serviceNameCandidates = P2PDiscoveryBonjourPolicy.resolvedBonjourServiceNameCandidates(for: device)
         let serviceName = serviceNameCandidates.first ?? ""
         logger.info(
-            "🧭 连接目标解析: displayName=\(device.name, privacy: .public) bonjourInstance=\(serviceName, privacy: .public) identifier=\((device.uniqueIdentifier ?? "nil"), privacy: .public)"
+            "🧭 连接目标解析: displayName=\(deviceDiagnosticLabel, privacy: .public) bonjourInstance=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(serviceName), privacy: .public) identifier=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(device.uniqueIdentifier), privacy: .public)"
         )
         let hasBonjourIdentifier = P2PDiscoveryBonjourPolicy.isBonjourIdentifier(device.uniqueIdentifier)
         let shouldFallbackToDefaultSkyBridgePort =
@@ -651,7 +654,7 @@ public class P2PDiscoveryService: BaseManager {
         guard !endpointAttempts.isEmpty else {
             NetworkActivityLogStore.shared.record(
                 category: "p2p",
-                message: "connect failed device=\(device.name) reason=no_connectable_endpoint",
+                message: "connect failed device=\(deviceDiagnosticLabel) reason=no_connectable_endpoint",
                 level: "WARN"
             )
             throw P2PDiscoveryError.noConnectableEndpoint
@@ -674,10 +677,11 @@ public class P2PDiscoveryService: BaseManager {
             for interfacePreference in interfacePreferences {
                 for plan in securityPlans {
                     do {
+                        let endpointDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpoint.debugDescription)
                         if case .service(let name, let type, _, _) = endpoint {
-                            logger.info("📡 尝试 Bonjour 连接: \(name, privacy: .public) [\(type, privacy: .public)] security=\(plan.rawValue, privacy: .public) route=\(interfacePreference.rawValue, privacy: .public)")
+                            logger.info("📡 尝试 Bonjour 连接: \(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(name), privacy: .public) [\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(type), privacy: .public)] security=\(plan.rawValue, privacy: .public) route=\(interfacePreference.rawValue, privacy: .public)")
                         } else {
-                            logger.info("📡 尝试地址连接: \(endpoint.debugDescription, privacy: .public) security=\(plan.rawValue, privacy: .public) route=\(interfacePreference.rawValue, privacy: .public)")
+                            logger.info("📡 尝试地址连接: \(endpointDiagnosticLabel, privacy: .public) security=\(plan.rawValue, privacy: .public) route=\(interfacePreference.rawValue, privacy: .public)")
                         }
 
                         let connection = makeConnection(
@@ -711,16 +715,16 @@ public class P2PDiscoveryService: BaseManager {
                             }
                         }
 
-                        logger.info("✅ 成功连接到设备: \(device.name)")
+                        logger.info("✅ 成功连接到设备: \(deviceDiagnosticLabel, privacy: .public)")
                         NetworkActivityLogStore.shared.record(
                             category: "p2p",
-                            message: "connect success device=\(device.name) endpoint=\(endpoint.debugDescription)"
+                            message: "connect success device=\(deviceDiagnosticLabel) endpoint=\(endpointDiagnosticLabel)"
                         )
                         connectionStatus = .connected
                         return
                     } catch {
                         lastError = error
-                        logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(error.localizedDescription, privacy: .public)")
+                        logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
                         if let authenticated = authenticatedConnections.removeValue(forKey: deviceKey) {
                             authenticated.disconnect()
                         }
@@ -734,7 +738,7 @@ public class P2PDiscoveryService: BaseManager {
         connectionStatus = .failed
         NetworkActivityLogStore.shared.record(
             category: "p2p",
-            message: "connect failed device=\(device.name) reason=\(lastError?.localizedDescription ?? "cancelled")",
+            message: "connect failed device=\(deviceDiagnosticLabel) reason=\(lastError.map(SkyBridgeDiagnosticRedaction.errorSummary) ?? "cancelled")",
             level: "WARN"
         )
         throw lastError ?? P2PDiscoveryError.connectionCancelled
@@ -1045,13 +1049,13 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         let stableTargetCandidates = Self.stableProtocolIdentityCandidates(for: device)
-        guard let targetDeviceId = Self.uniqueStableProtocolIdentityCandidate(from: stableTargetCandidates) else {
-            let reason = "missing stable protocol identity target; refusing endpoint alias target"
-            logger.warning(
-                "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.handshakeDeviceIdentifier(for: device), privacy: .public) stage=preflight-identity-binding reason=\(reason, privacy: .public) lifecycle=identity-oob>failed"
-            )
-            throw P2PDiscoveryError.strictPQCTrustPreflightFailed(reason)
-        }
+	        guard let targetDeviceId = Self.uniqueStableProtocolIdentityCandidate(from: stableTargetCandidates) else {
+	            let reason = "missing stable protocol identity target; refusing endpoint alias target"
+	            logger.warning(
+	                "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) stage=preflight-identity-binding reason=\(reason, privacy: .public) lifecycle=identity-oob>failed"
+	            )
+	            throw P2PDiscoveryError.strictPQCTrustPreflightFailed(reason)
+	        }
 
         let candidates = Self.outboundStrictPQCTrustCandidates(for: device, stableTarget: targetDeviceId)
         let preferredTargetSuite = await Self.preferredStrictPQCOutboundTargetSuite()
@@ -1096,7 +1100,7 @@ public class P2PDiscoveryService: BaseManager {
                 guard Self.shouldAttemptOOBProtocolIdentityBinding(afterSKRFailure: error) else {
                     throw error
                 }
-                let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(targetDeviceId) stage=preflight-kem-refresh reason=\(error.localizedDescription) pinnedProtocolIdentity=1 lifecycle=missing-kem>failed"
+                let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(Self.protocolIdentityLogRedaction) stage=preflight-kem-refresh reason=\(Self.protocolIdentityLogRedaction) pinnedProtocolIdentity=1 lifecycle=missing-kem>failed"
                 logger.warning("\(line, privacy: .public)")
                 RemoteControlSmokeStatusWriter.append(line)
             }
@@ -1172,7 +1176,7 @@ public class P2PDiscoveryService: BaseManager {
             sentAt: unsignedRequest.sentAt
         )
 
-        let connectStartLine = "🔐 PIB-1 protocol identity binding connect-start: peer=\(targetDeviceId) endpoints=\(endpoints.map { $0.debugDescription }.joined(separator: ";")) lifecycle=identity-oob>connect"
+        let connectStartLine = "🔐 PIB-1 protocol identity binding connect-start: peer=\(Self.protocolIdentityLogRedaction) endpoints=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>connect"
         logger.info("\(connectStartLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(connectStartLine)
 
@@ -1182,7 +1186,7 @@ public class P2PDiscoveryService: BaseManager {
             endpoints: endpoints,
             timeoutSeconds: responseTimeoutSeconds
         )
-        let requestLine = "🔐 PIB-1 protocol identity binding request: peer=\(targetDeviceId) endpoint=\(exchange.endpoint.debugDescription) algorithms=\(request.requestedProtocolSigningAlgorithms.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) lifecycle=identity-oob>request"
+        let requestLine = "🔐 PIB-1 protocol identity binding request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) algorithms=\(request.requestedProtocolSigningAlgorithms.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) lifecycle=identity-oob>request"
         logger.info("\(requestLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(requestLine)
 
@@ -1207,8 +1211,7 @@ public class P2PDiscoveryService: BaseManager {
             throw Self.protocolIdentityBindingFailure("signature verification failed")
         }
 
-        let code = validated.shortAuthenticationCode(request: request)
-        let verifiedLine = "🔐 PIB-1 protocol identity binding signature verified: peer=\(targetDeviceId) fingerprint=\(validated.protocolIdentityFingerprint) code=\(code) lifecycle=identity-oob>verified"
+        let verifiedLine = "🔐 PIB-1 protocol identity binding signature verified: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>verified"
         logger.info("\(verifiedLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(verifiedLine)
 
@@ -1250,7 +1253,7 @@ public class P2PDiscoveryService: BaseManager {
             fingerprints: [validated.protocolIdentityFingerprint]
         )
 
-        let pinnedLine = "🔐 PIB-1 protocol identity binding pinned: peer=\(targetDeviceId) deviceId=\(validated.deviceId) fingerprint=\(validated.protocolIdentityFingerprint) code=\(code) operator=\(approval.rawValue) lifecycle=identity-oob>pinned"
+        let pinnedLine = "🔐 PIB-1 protocol identity binding pinned: peer=\(Self.protocolIdentityLogRedaction) deviceId=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=\(approval.rawValue) lifecycle=identity-oob>pinned"
         logger.info("\(pinnedLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(pinnedLine)
         return validated.protocolIdentityFingerprint.lowercased()
@@ -1281,7 +1284,7 @@ public class P2PDiscoveryService: BaseManager {
             nonce: Self.secureRandomNonce()
         )
 
-        let connectStartLine = "🔐 SKR-1 signed LAN KEM refresh connect-start: peer=\(targetDeviceId) endpoints=\(endpoints.map { $0.debugDescription }.joined(separator: ";")) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>connect"
+        let connectStartLine = "🔐 SKR-1 signed LAN KEM refresh connect-start: peer=\(Self.protocolIdentityLogRedaction) endpointCount=\(endpoints.count) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>connect"
         logger.info("\(connectStartLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(connectStartLine)
         let startedAt = Date()
@@ -1290,12 +1293,12 @@ public class P2PDiscoveryService: BaseManager {
             endpoints: endpoints,
             timeoutSeconds: 8.0
         )
-        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(targetDeviceId) endpoint=\(exchange.endpoint.debugDescription) requesterProtocolIdentity=\(requesterFingerprint) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
+        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) requesterProtocolIdentity=\(Self.protocolIdentityLogRedaction) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
         logger.info("\(requestLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(requestLine)
 
         if case .kemRefreshFailure(let failure) = exchange.response {
-            throw Self.signedLANRefreshFailure("remote rejected SKR-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode) reason=\(failure.reason)")
+            throw Self.signedLANRefreshFailure("remote rejected SKR-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode)")
         }
         guard case .signedKEMRefresh(let payload) = exchange.response else {
             throw Self.signedLANRefreshFailure("unexpected SKR-1 response type")
@@ -1323,11 +1326,11 @@ public class P2PDiscoveryService: BaseManager {
             .sorted()
             .joined(separator: ",")
         let totalLatencyMs = Date().timeIntervalSince(startedAt) * 1_000.0
-        let verifiedLine = String(
-            format: "🔐 SKR-1 signed LAN KEM refresh verified and imported: peer=%@ suites=%@ wireId=%@ pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=%.1f connectLatencyMs=%.1f retryCount=%d lifecycle=served>verified metricScope=application-control-channel",
-            targetDeviceId,
-            importedSuites,
-            validated.kemPublicKeys.map { String(format: "0x%04X", $0.suiteWireId) }.sorted().joined(separator: ","),
+	        let verifiedLine = String(
+	            format: "🔐 SKR-1 signed LAN KEM refresh verified and imported: peer=%@ suites=%@ wireId=%@ pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=%.1f connectLatencyMs=%.1f retryCount=%d lifecycle=served>verified metricScope=application-control-channel",
+	            Self.protocolIdentityLogRedaction,
+	            importedSuites,
+	            validated.kemPublicKeys.map { String(format: "0x%04X", $0.suiteWireId) }.sorted().joined(separator: ","),
             totalLatencyMs,
             exchange.connectLatencyMs,
             max(0, exchange.attemptCount - 1)
@@ -1371,14 +1374,14 @@ public class P2PDiscoveryService: BaseManager {
                     attemptCount: index + 1,
                     failedAttemptCount: failedAttemptCount
                 )
-            } catch {
-                failedAttemptCount += 1
-                lastError = error
-                connection.cancel()
-                logger.warning(
-                    "⚠️ bootstrap control exchange failed endpoint=\(endpoint.debugDescription, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-                )
-            }
+	            } catch {
+	                failedAttemptCount += 1
+	                lastError = error
+	                connection.cancel()
+	                logger.warning(
+	                    "⚠️ bootstrap control exchange failed endpoint=\(Self.protocolIdentityLogRedaction, privacy: .public) error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+	                )
+	            }
         }
         throw lastError ?? P2PDiscoveryError.connectionCancelled
     }
@@ -1807,12 +1810,12 @@ public class P2PDiscoveryService: BaseManager {
             await PeerKEMBootstrapStore.shared.upsert(
                 deviceIds: aliases,
                 kemPublicKeys: kemKeys
-            )
-            logger.info(
-                "🔧 已修复 P2P KEM bootstrap 缓存别名: selected=\(handshakeId, privacy: .public) alias=\(alias, privacy: .public) keys=\(kemKeys.count)"
-            )
-            return
-        }
+	            )
+	            logger.info(
+	                "🔧 已修复 P2P KEM bootstrap 缓存别名: selected=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(handshakeId), privacy: .public) alias=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(alias), privacy: .public) keys=\(kemKeys.count)"
+	            )
+	            return
+	        }
 
         guard let record = Self.uniqueKEMTrustRecordForAliasRepair(
             device: device,
@@ -1826,11 +1829,11 @@ public class P2PDiscoveryService: BaseManager {
         await PeerKEMBootstrapStore.shared.upsert(
             deviceIds: aliases + PeerTrustLookup.recordLookupCandidates(record),
             kemPublicKeys: kemKeys
-        )
-        logger.info(
-            "🔧 已修复 P2P KEM 信任记录别名: selected=\(handshakeId, privacy: .public) trust=\(record.deviceId, privacy: .public) keys=\(kemKeys.count)"
-        )
-    }
+	        )
+	        logger.info(
+	            "🔧 已修复 P2P KEM 信任记录别名: selected=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(handshakeId), privacy: .public) trust=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(record.deviceId), privacy: .public) keys=\(kemKeys.count)"
+	        )
+	    }
 
     static func kemBootstrapAliasRepairCandidates(for device: DiscoveredDevice) -> [String] {
         P2PDiscoveryKEMAliasRepairPolicy.aliasRepairCandidates(for: device)
@@ -1949,7 +1952,7 @@ public class P2PDiscoveryService: BaseManager {
     @MainActor public func startAdvertising(forceRebind: Bool = false) {
         logger.info("📡 开始广播服务")
 
-        Task { @MainActor in
+        Task { @MainActor [self] in
             let centerSnapshot = await ServiceAdvertiserCenter.shared.advertisementSnapshot(for: Self.controlServiceType)
             let centerHealthyForP2P = centerSnapshot.isOwned(by: Self.controlAdvertisementOwner)
                 && (centerSnapshot.isConnectable || centerSnapshot.isStarting)
@@ -2763,9 +2766,11 @@ public class P2PDiscoveryService: BaseManager {
         let peer = PeerIdentifier(deviceId: resolvedPeerId)
         var driver: HandshakeDriver?
         peerIdForPresence = peer.deviceId
-        let endpointDescriptionForPresence = Self.stableEndpointLabel(for: connection.endpoint)
-        let endpointHostOrIPForClassicTransfer = Self.endpointHostOrIP(for: connection.endpoint)
-        var latestPeerCapabilities: [String] = []
+	        let endpointDescriptionForPresence = Self.stableEndpointLabel(for: connection.endpoint)
+	        let endpointHostOrIPForClassicTransfer = Self.endpointHostOrIP(for: connection.endpoint)
+	        let peerDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peer.deviceId)
+	        let endpointDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(endpointDescriptionForPresence)
+	        var latestPeerCapabilities: [String] = []
 
         func refreshInboundControlSessionAliases() async {
             await MainActor.run {
@@ -2795,12 +2800,12 @@ public class P2PDiscoveryService: BaseManager {
         func validatedPairingIdentityPayload(
             _ payload: AppMessage.PairingIdentityExchangePayload
         ) -> AppMessage.PairingIdentityExchangePayload? {
-            guard let normalized = payload.normalizedBootstrapPayload else {
-                logger.warning(
-                    "⚠️ ignoring pairingIdentityExchange with empty declaredDeviceId: peer=\(peer.deviceId, privacy: .public) endpoint=\(endpointDescriptionForPresence, privacy: .public)"
-                )
-                return nil
-            }
+	            guard let normalized = payload.normalizedBootstrapPayload else {
+	                logger.warning(
+	                    "⚠️ ignoring pairingIdentityExchange with empty declaredDeviceId: peer=\(peerDiagnosticLabel, privacy: .public) endpoint=\(endpointDiagnosticLabel, privacy: .public)"
+	                )
+	                return nil
+	            }
             return normalized
         }
 
@@ -2863,7 +2868,7 @@ public class P2PDiscoveryService: BaseManager {
         ) async {
             guard let authority = authenticatedRemoteAuthority else {
                 logger.warning(
-                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                 )
                 return
             }
@@ -2895,16 +2900,16 @@ public class P2PDiscoveryService: BaseManager {
                 )
                 guard persisted else {
                     logger.warning(
-                        "⚠️ inbound current-path trust bridge skipped: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                        "⚠️ inbound current-path trust bridge skipped: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                     )
                     return
                 }
                 logger.info(
-                    "🔐 inbound current-path trust bridge persisted: peer=\(peer.deviceId, privacy: .public) current=\(payload.deviceId, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(authority.protocolPublicKeyFingerprint, privacy: .public)"
+                    "🔐 inbound current-path trust bridge persisted: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) current=\(Self.protocolIdentityLogRedaction, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                 )
             } catch {
                 logger.warning(
-                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .public)"
+                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .private)"
                 )
             }
         }
@@ -2956,7 +2961,7 @@ public class P2PDiscoveryService: BaseManager {
                     !displayAddress.isEmpty,
                     (1...65535).contains(advertisedTransferPort ?? resolved.transferPort) else {
                     logger.error(
-                        "❌ inbound establish route missing: peer=\(peerId, privacy: .public) endpoint=\(endpointDescriptionForPresence, privacy: .public)"
+                        "❌ inbound establish route missing: peer=\(SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerId), privacy: .public) endpoint=\(endpointDiagnosticLabel, privacy: .public)"
                     )
                     return false
                 }
@@ -3102,7 +3107,7 @@ public class P2PDiscoveryService: BaseManager {
                 )
             } catch {
                 logger.warning(
-                    "⚠️ 本机 KEM 公钥准备失败（\(reason, privacy: .public)）：\(error.localizedDescription, privacy: .public)"
+                    "⚠️ 本机 KEM 公钥准备失败（\(reason, privacy: .public)）：\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                 )
                 return nil
             }
@@ -3161,11 +3166,12 @@ public class P2PDiscoveryService: BaseManager {
             let outCipher = try encryptAppPayload(outPlain, with: keys)
             let outPadded = TrafficPadding.wrapIfEnabled(outCipher, label: "tx")
             try await sendFramed(outPadded)
-            didSendPostAuthPairingIdentityExchange = true
-            logger.info(
-                "🔑 inbound post-auth pairingIdentityExchange sent: peer=\(peer.deviceId, privacy: .public) local=\(localIdentity.localId, privacy: .public) keys=\(localIdentity.kemKeyCount, privacy: .public) fileTransferPort=\(localIdentity.fileTransferPort.map(String.init) ?? "-", privacy: .public) remoteControlPort=\(localIdentity.remoteControlPort.map(String.init) ?? "-", privacy: .public)"
-            )
-        }
+	            didSendPostAuthPairingIdentityExchange = true
+	            let localDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(localIdentity.localId)
+	            logger.info(
+	                "🔑 inbound post-auth pairingIdentityExchange sent: peer=\(peerDiagnosticLabel, privacy: .public) local=\(localDiagnosticLabel, privacy: .public) keys=\(localIdentity.kemKeyCount, privacy: .public) fileTransferPort=\(localIdentity.fileTransferPort.map(String.init) ?? "-", privacy: .public) remoteControlPort=\(localIdentity.remoteControlPort.map(String.init) ?? "-", privacy: .public)"
+	            )
+	        }
 
         func refreshInboundRouteFromHeartbeat(
             _ payload: AppMessage.HeartbeatPayload,
@@ -3186,12 +3192,13 @@ public class P2PDiscoveryService: BaseManager {
             recordRemoteControlSecurityIdentity(from: payload)
 
             await publishInboundClassicTransferSession(keys: keys)
-            if await publishInboundPresence(keys: keys) {
-                logger.debug(
-                    "📡 refreshed inbound file-transfer route from heartbeat: peer=\(declaredDeviceIdForVerification ?? peer.deviceId, privacy: .public) fileTransferPort=\(latestPeerFileTransferPort.map(String.init) ?? "-", privacy: .public)"
-                )
-            }
-        }
+	            if await publishInboundPresence(keys: keys) {
+	                let routeDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(declaredDeviceIdForVerification ?? peer.deviceId)
+	                logger.debug(
+	                    "📡 refreshed inbound file-transfer route from heartbeat: peer=\(routeDiagnosticLabel, privacy: .public) fileTransferPort=\(latestPeerFileTransferPort.map(String.init) ?? "-", privacy: .public)"
+	                )
+	            }
+	        }
 
         func publishInboundClassicTransferSession(keys: SessionKeys) async {
             let declaredPeerId = trimmedIdentifier(declaredDeviceIdForVerification)
@@ -3350,40 +3357,41 @@ public class P2PDiscoveryService: BaseManager {
                                     kemKeyCount: payload.kemPublicKeys.count
                                 )
 
-                                let decision: PairingTrustApprovalService.Decision
-                                if isPairingIdentityBoundToAuthenticatedAuthority(payload) {
-                                    if let persistedDecision = await PairingTrustApprovalService.shared.persistedPolicyDecision(for: request) {
-                                        decision = persistedDecision
-                                        logger.info(
-                                            "🔐 pairingIdentityExchange resolved by persisted policy on authenticated protocol-identity channel: declared=\(payload.deviceId, privacy: .public) decision=\(persistedDecision.rawValue, privacy: .public)"
-                                        )
-                                    } else {
-                                        decision = .allowOnce
-                                        logger.info(
-                                            "🔐 pairingIdentityExchange accepted on authenticated protocol-identity channel: declared=\(payload.deviceId, privacy: .public)"
-                                        )
-                                    }
-                                } else {
-                                    decision = await PairingTrustApprovalService.shared.decide(for: request)
-                                }
-                                guard decision != PairingTrustApprovalService.Decision.reject else {
-                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(payload.deviceId, privacy: .public)")
-                                    break
-                                }
+	                                let decision: PairingTrustApprovalService.Decision
+	                                let payloadDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(payload.deviceId)
+	                                if isPairingIdentityBoundToAuthenticatedAuthority(payload) {
+	                                    if let persistedDecision = await PairingTrustApprovalService.shared.persistedPolicyDecision(for: request) {
+	                                        decision = persistedDecision
+	                                        logger.info(
+	                                            "🔐 pairingIdentityExchange resolved by persisted policy on authenticated protocol-identity channel: declared=\(payloadDiagnosticLabel, privacy: .public) decision=\(persistedDecision.rawValue, privacy: .public)"
+	                                        )
+	                                    } else {
+	                                        decision = .allowOnce
+	                                        logger.info(
+	                                            "🔐 pairingIdentityExchange accepted on authenticated protocol-identity channel: declared=\(payloadDiagnosticLabel, privacy: .public)"
+	                                        )
+	                                    }
+	                                } else {
+	                                    decision = await PairingTrustApprovalService.shared.decide(for: request)
+	                                }
+	                                guard decision != PairingTrustApprovalService.Decision.reject else {
+	                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(payloadDiagnosticLabel, privacy: .public)")
+	                                    break
+	                                }
 
                                 await PeerKEMBootstrapStore.shared.upsert(
                                     deviceIds: [payload.deviceId, peer.deviceId],
                                     kemPublicKeys: payload.kemPublicKeys
-                                )
-                                logger.info(
-                                    "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payload.deviceId, privacy: .public) peer=\(peer.deviceId, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
-                                )
-                                await publishInboundClassicTransferSession(keys: keys)
-                                if await publishInboundPresence(keys: keys) {
-                                    logger.info(
-                                        "📡 refreshed inbound file-transfer route from pairing identity: peer=\(payload.deviceId, privacy: .public) fileTransferPort=\(payload.fileTransferPort.map(String.init) ?? "-", privacy: .public)"
-                                    )
-                                }
+	                                )
+	                                logger.info(
+	                                    "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payloadDiagnosticLabel, privacy: .public) peer=\(peerDiagnosticLabel, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+	                                )
+	                                await publishInboundClassicTransferSession(keys: keys)
+	                                if await publishInboundPresence(keys: keys) {
+	                                    logger.info(
+	                                        "📡 refreshed inbound file-transfer route from pairing identity: peer=\(payloadDiagnosticLabel, privacy: .public) fileTransferPort=\(payload.fileTransferPort.map(String.init) ?? "-", privacy: .public)"
+	                                    )
+	                                }
 
                                 guard let localIdentity = await makeLocalPairingIdentityExchangeMessage(reason: "bootstrap reply") else {
                                     break
@@ -3467,7 +3475,7 @@ public class P2PDiscoveryService: BaseManager {
                             }
                         }
                     } catch {
-                        logger.debug("ℹ️ 业务消息解密/解析失败（忽略）：\(error.localizedDescription, privacy: .public)")
+                        logger.debug("ℹ️ 业务消息解密/解析失败（忽略）：\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
                     }
                     continue
                 }
@@ -3480,7 +3488,7 @@ public class P2PDiscoveryService: BaseManager {
                             continue
                         }
                     } catch {
-                        logger.error("❌ 入站控制包验签异常: \(error.localizedDescription, privacy: .public)")
+                        logger.error("❌ 入站控制包验签异常: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
                         continue
                     }
 
@@ -3506,7 +3514,7 @@ public class P2PDiscoveryService: BaseManager {
                         expectedRemoteSOAPeerId = soaBinding.expectedRemotePeerId
                         inboundPairKey = soaBinding.pairKey
                         if soaBinding.usedAuthenticatedInitiator {
-                            logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peer.deviceId, privacy: .public))")
+                            logger.info("🧩 inboundSOA: binding to MessageA initiatorPeerId (endpointId=\(peerDiagnosticLabel, privacy: .public))")
                         }
                         let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
                         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
@@ -3520,7 +3528,7 @@ public class P2PDiscoveryService: BaseManager {
                             localPQCSuitesAvailable: localPQCAvailable
                         ), rejection == .peerOfferedClassicOnly {
                             logger.error(
-                                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peerDiagnosticLabel, privacy: .public)"
                             )
                             return
                         }
@@ -3545,34 +3553,34 @@ public class P2PDiscoveryService: BaseManager {
                                 localPQCSuitesAvailable: !localPQCSuites.isEmpty
                             ) {
                                 logger.error(
-                                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"
+                                    "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peerDiagnosticLabel, privacy: .public)"
                                 )
                                 return
                             }
 
                             if localPQCSuites.isEmpty {
                                 // Best-effort classic fallback only if peer also advertises classic suites.
-	                                if peerHasClassicGroup {
-	                                    selection = .classicOnly
-	                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
-	                                    sigAAlgorithm = .ed25519
-	                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
-                                        effectivePolicy = HandshakePolicy(
-                                            requirePQC: false,
-                                            allowClassicFallback: false,
-                                            minimumTier: .classic,
-                                            requireSecureEnclavePoP: policy.requireSecureEnclavePoP
-                                        )
-	                                    // Make responder-side capability fallback auditable (no silent downgrade in telemetry).
-	                                    SecurityEventEmitter.emitDetached(SecurityEvent(
-	                                        type: .cryptoDowngrade,
-	                                        severity: .warning,
-	                                        message: "Inbound handshake: peer advertises PQC but local PQC unavailable; falling back to Classic",
-	                                        context: [
-	                                            "reason": "pqcProviderUnavailable",
-	                                            "direction": "responder_inbound",
-	                                            "deviceId": peer.deviceId,
-	                                            "policyInTranscript": "1",
+                                if peerHasClassicGroup {
+                                    selection = .classicOnly
+                                    cryptoProvider = CryptoProviderFactory.make(policy: selection)
+                                    sigAAlgorithm = .ed25519
+                                    offeredSuites = cryptoProvider.supportedSuites.filter { !$0.isPQCGroup }
+                                    effectivePolicy = HandshakePolicy(
+                                        requirePQC: false,
+                                        allowClassicFallback: false,
+                                        minimumTier: .classic,
+                                        requireSecureEnclavePoP: policy.requireSecureEnclavePoP
+                                    )
+                                    // Make responder-side capability fallback auditable (no silent downgrade in telemetry).
+		                                    SecurityEventEmitter.emitDetached(SecurityEvent(
+		                                        type: .cryptoDowngrade,
+		                                        severity: .warning,
+		                                        message: "Inbound handshake: peer advertises PQC but local PQC unavailable; falling back to Classic",
+		                                        context: [
+		                                            "reason": "pqcProviderUnavailable",
+		                                            "direction": "responder_inbound",
+		                                            "deviceId": "present_redacted",
+		                                            "policyInTranscript": "1",
 	                                            "transcriptBinding": "1",
 	                                            "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
 	                                            "policyRequirePQC": policy.requirePQC ? "1" : "0",
@@ -3584,11 +3592,11 @@ public class P2PDiscoveryService: BaseManager {
 	                                            "strategy": HandshakeAttemptStrategy.classicOnly.rawValue
 	                                        ]
 	                                    ))
-	                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peer.deviceId, privacy: .public)")
-	                            } else {
-	                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peer.deviceId, privacy: .public)")
-	                                    return
-	                                }
+		                                    logger.info("🧩 inboundFallback(classic): peer advertises PQC but local PQC unavailable; falling back to classic handshake. peer=\(peerDiagnosticLabel, privacy: .public)")
+		                            } else {
+		                                    logger.error("❌ Peer offered PQC-only suites but local PQC unavailable; cannot continue. peer=\(peerDiagnosticLabel, privacy: .public)")
+		                                    return
+		                                }
                             } else {
                                 sigAAlgorithm = .mlDSA65
                                 offeredSuites = localPQCSuites
@@ -3625,7 +3633,7 @@ public class P2PDiscoveryService: BaseManager {
                             )
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
                         } catch {
-                            logger.error("❌ 入站 HandshakeDriver 初始化失败: \(error.localizedDescription, privacy: .public)")
+                            logger.error("❌ 入站 HandshakeDriver 初始化失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
                             return
                         }
                     } else {
@@ -3637,7 +3645,7 @@ public class P2PDiscoveryService: BaseManager {
                 guard let activeDriver = driver else { continue }
                 await activeDriver.handleMessage(frame, from: peer)
                 let st = await activeDriver.getCurrentState()
-                logger.debug("🤝 HandshakeDriver state: \(String(describing: st), privacy: .public)")
+                logger.debug("🤝 HandshakeDriver state: \(st.diagnosticSummary, privacy: .public)")
 
                 if case .failed(let reason) = st {
                     if let previousKeys = previousSessionKeysBeforeRekey {
@@ -3649,14 +3657,14 @@ public class P2PDiscoveryService: BaseManager {
                             self.connectionStatus = .connected
                         }
                         logger.warning(
-                            "⚠️ 入站 rekey 失败，已恢复旧会话: peer=\(peer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
+                            "⚠️ 入站 rekey 失败，已恢复旧会话: peer=\(peerDiagnosticLabel, privacy: .public) reason=\(reason.diagnosticReasonCode, privacy: .public) suite=\(previousKeys.negotiatedSuite.rawValue, privacy: .public)"
                         )
                         driver = nil
                         continue
                     }
 
                     logger.warning(
-                        "⚠️ 入站握手失败，等待同连接重试: peer=\(peer.deviceId, privacy: .public) reason=\(String(describing: reason), privacy: .public)"
+                        "⚠️ 入站握手失败，等待同连接重试: peer=\(peerDiagnosticLabel, privacy: .public) reason=\(reason.diagnosticReasonCode, privacy: .public)"
                     )
                     authenticatedRemoteAuthority = nil
                     driver = nil
@@ -3681,7 +3689,7 @@ public class P2PDiscoveryService: BaseManager {
                         try await sendInboundPostAuthPairingIdentityExchange(keys: keys)
                     } catch {
                         logger.error(
-                            "❌ inbound post-auth pairingIdentityExchange fail-fast: peer=\(peer.deviceId, privacy: .public) stage=pairing_identity_exchange reason=\(error.localizedDescription, privacy: .public)"
+                            "❌ inbound post-auth pairingIdentityExchange fail-fast: peer=\(peerDiagnosticLabel, privacy: .public) stage=pairing_identity_exchange reason=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                         )
                         connection.cancel()
                         return
@@ -3698,7 +3706,7 @@ public class P2PDiscoveryService: BaseManager {
                     let published = await publishInboundPresence(keys: keys)
                     if !published {
                         logger.warning(
-                            "⚠️ inbound established before route metadata was complete; keeping control session alive while waiting for pairing identity or heartbeat metadata peer=\(peer.deviceId, privacy: .public)"
+                            "⚠️ inbound established before route metadata was complete; keeping control session alive while waiting for pairing identity or heartbeat metadata peer=\(peerDiagnosticLabel, privacy: .public)"
                         )
                     }
 
@@ -3722,7 +3730,7 @@ public class P2PDiscoveryService: BaseManager {
             if let framedError = error as? FramedReaderError, framedError == .peerClosed {
                 logger.debug("ℹ️ 入站控制通道结束（peer closed）")
             } else {
-                logger.debug("ℹ️ 入站控制通道结束: \(error.localizedDescription, privacy: .public)")
+                logger.debug("ℹ️ 入站控制通道结束: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
             }
         }
     }
@@ -3756,7 +3764,7 @@ public class P2PDiscoveryService: BaseManager {
                 keys.append(.init(protocolSigningAlgorithm: algorithm.rawValue, publicKey: publicKey))
             } catch {
                 SkyBridgeLogger.p2p.debug(
-                    "ℹ️ P2P pairingIdentityExchange reply skipped protocol identity key alg=\(algorithm.rawValue): \(error.localizedDescription, privacy: .public)"
+                    "ℹ️ P2P pairingIdentityExchange reply skipped protocol identity key alg=\(algorithm.rawValue): \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                 )
             }
         }

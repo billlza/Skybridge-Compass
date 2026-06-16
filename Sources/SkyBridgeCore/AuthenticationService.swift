@@ -425,13 +425,21 @@ import Combine
         guard persistedSessionLoadTask == nil else { return }
 
         persistedSessionLoadTask = Task(priority: .utility) { [weak self] in
-            let session = await Task.detached(priority: .utility) {
-                KeychainManager.shared.loadAuthSession()
+            let loadResult = await Task.detached(priority: .utility) {
+                Result { try KeychainManager.shared.loadAuthSessionStrict() }
             }.value
 
             guard let self else { return }
             defer { self.persistedSessionLoadTask = nil }
             guard !Task.isCancelled else { return }
+            let session: AuthSession?
+            switch loadResult {
+            case .success(let loadedSession):
+                session = loadedSession
+            case .failure(let error):
+                self.logger.error("AuthenticationService 持久化会话读取失败: \(error.localizedDescription, privacy: .private)")
+                return
+            }
             guard self.sessionSubject.value == nil, let session else { return }
             self.sessionSubject.send(session)
             await TenantAccessController.shared.bindAuthentication(session: session)
@@ -501,7 +509,7 @@ import Combine
     }
 
     private func loadSessionFromKeychain() throws -> AuthSession? {
-        KeychainManager.shared.loadAuthSession()
+        try KeychainManager.shared.loadAuthSessionStrict()
     }
 
     nonisolated static func mergedRefreshToken(_ candidate: String?, fallback: String?) -> String? {

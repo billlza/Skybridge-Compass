@@ -46,8 +46,19 @@ pub(crate) struct AgentCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum DeviceSubcommand {
     Status(OutputOptions),
+    Discover(DeviceDiscoverArgs),
     Enroll(DeviceEnrollArgs),
     Approve(DeviceApproveArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DeviceDiscoverArgs {
+    #[arg(long)]
+    pub(crate) nearby: bool,
+    #[arg(long)]
+    pub(crate) scan: bool,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
 }
 
 #[derive(Debug, Args)]
@@ -130,9 +141,82 @@ pub(crate) struct SessionCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub(crate) enum RemoteDesktopSubcommand {
+    Contract(OutputOptions),
+    Status(RemoteDesktopStatusArgs),
+    Resolutions(RemoteDesktopResolutionsArgs),
+    Start(RemoteDesktopStartArgs),
+    Stop(RemoteDesktopSessionActionArgs),
+    SetResolution(RemoteDesktopSetResolutionArgs),
+    SetFps(RemoteDesktopSetFpsArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RemoteDesktopCommand {
+    #[command(subcommand)]
+    pub(crate) command: RemoteDesktopSubcommand,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RemoteDesktopStatusArgs {
+    #[arg(long)]
+    pub(crate) session_id: Option<String>,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RemoteDesktopResolutionsArgs {
+    #[arg(long)]
+    pub(crate) session_id: Option<String>,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RemoteDesktopStartArgs {
+    #[arg(long)]
+    pub(crate) session_id: String,
+    #[arg(long, default_value = "auto")]
+    pub(crate) resolution: String,
+    #[arg(long, default_value_t = 60)]
+    pub(crate) fps: u16,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RemoteDesktopSessionActionArgs {
+    #[arg(long)]
+    pub(crate) session_id: String,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RemoteDesktopSetResolutionArgs {
+    #[arg(long)]
+    pub(crate) session_id: String,
+    #[arg(long)]
+    pub(crate) resolution: String,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RemoteDesktopSetFpsArgs {
+    #[arg(long)]
+    pub(crate) session_id: String,
+    #[arg(long)]
+    pub(crate) fps: u16,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Subcommand)]
 pub(crate) enum FileSubcommand {
     Send(FileSendArgs),
-    Receive,
+    Receive(FileReceiveArgs),
     History(OutputOptions),
 }
 
@@ -141,6 +225,16 @@ pub(crate) struct FileSendArgs {
     pub(crate) path: PathBuf,
     #[arg(long)]
     pub(crate) to: String,
+    #[arg(long)]
+    pub(crate) session_id: Option<String>,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FileReceiveArgs {
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
 }
 
 #[derive(Debug, Args)]

@@ -499,7 +499,7 @@ public class FileTransferEngine: ObservableObject {
         
  // 确定目标目录
         let targetDirectory = destinationDirectory ?? getDefaultDownloadDirectory()
-        let destinationURL = FileTransferPathPolicy.uniqueDestinationURL(
+        let destinationURL = try FileTransferPathPolicy.uniqueDestinationURL(
             baseDirectory: targetDirectory,
             fileName: metadata.fileName
         )

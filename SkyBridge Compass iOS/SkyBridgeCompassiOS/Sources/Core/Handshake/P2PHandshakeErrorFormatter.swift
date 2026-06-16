@@ -56,8 +56,8 @@ enum P2PHandshakeErrorFormatter {
             return "身份验证失败 - 对方设备的身份无法验证"
         case .invalidMessageFormat:
             return "收到无效的握手消息 - 可能是版本不兼容"
-        case .identityMismatch(let expected, _):
-            return "设备身份不匹配 - 期望连接到「\(expected)」但对方身份不符"
+        case .identityMismatch:
+            return "设备身份不匹配，连接已中止。请重新验证受信任设备后重试。"
         case .replayDetected:
             return "检测到重放攻击，连接已中止"
         case .secureEnclavePoPRequired:
@@ -69,7 +69,7 @@ enum P2PHandshakeErrorFormatter {
         case .suiteSignatureMismatch(let suite, _):
             return "安全配置不匹配（\(simplifyTechnicalMessage(suite))）"
         case .pqcProviderUnavailable:
-            return "后量子加密不可用 - 需要 macOS 26/iOS 26 或更高版本"
+            return "后量子加密不可用 - 当前构建、运行时或协商证据不足，不能建立 PQC 保护连接"
         case .missingPeerKEMPublicKey(let suite):
             return "缺少对端后量子密钥材料（\(simplifyTechnicalMessage(suite))），无法建立 PQC 握手。当前已中止连接，不会降级或假装成功；请重新完成受信任设备验证后重试。"
         case .suiteNotSupported:

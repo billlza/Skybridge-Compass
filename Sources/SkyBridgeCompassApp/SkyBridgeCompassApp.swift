@@ -3,19 +3,69 @@ import WidgetKit
 import UserNotifications
 import os.log
 import AppKit
+import Darwin
 import SkyBridgeCore
 import SkyBridgeSmokeSupport
 import SkyBridgeUI
+
+enum MacSmokeStatusFailClosedWriter {
+    static func append(_ data: Data, to statusURL: URL, context: String) {
+        do {
+            try SmokeStatusFileAppender.append(data, to: statusURL)
+        } catch {
+            failStatusWrite(context: context, statusURL: statusURL, error: error)
+        }
+    }
+
+    static func reset(at statusURL: URL, context: String) {
+        do {
+            try SmokeStatusFileAppender.reset(at: statusURL)
+        } catch {
+            failStatusWrite(context: context, statusURL: statusURL, error: error)
+        }
+    }
+
+    static func failMissingRequiredStatusFile(context: String) -> Never {
+        failStatusWrite(
+            context: context,
+            statusURL: nil,
+            errorDescription: "missing SKYBRIDGE_SMOKE_STATUS_FILE"
+        )
+    }
+
+    private static func failStatusWrite(context: String, statusURL: URL?, error: Error) -> Never {
+        failStatusWrite(context: context, statusURL: statusURL, errorDescription: error.localizedDescription)
+    }
+
+    private static func failStatusWrite(context: String, statusURL: URL?, errorDescription: String) -> Never {
+        let message = [
+            "SkyBridge smoke status write failed",
+            "context=\(sanitize(context))",
+            "path=\(sanitize(statusURL?.path ?? "-"))",
+            "error=\(sanitize(errorDescription))"
+        ].joined(separator: " ") + "\n"
+        FileHandle.standardError.write(Data(message.utf8))
+        Darwin.exit(74)
+    }
+
+    private static func sanitize(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+    }
+}
 
 private enum MacOnlineIPadSmokeBootMarker {
     static func appendIfNeeded(uiRole: String) {
         let environment = ProcessInfo.processInfo.environment
         guard environment["SKYBRIDGE_SMOKE_ROLE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) == "mac-online-ipad-client",
-              let rawStatusPath = environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "mac-online-ipad-client" else {
+            return
+        }
+        guard let rawStatusPath = environment["SKYBRIDGE_SMOKE_STATUS_FILE"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               !rawStatusPath.isEmpty else {
-            return
+            MacSmokeStatusFailClosedWriter.failMissingRequiredStatusFile(context: "mac-online-ipad boot marker")
         }
 
         let formatter = ISO8601DateFormatter()
@@ -26,13 +76,15 @@ private enum MacOnlineIPadSmokeBootMarker {
             "process=SkyBridgeCompassApp",
             "uiRole=\(uiRole)",
             "source=app",
-            "pid=\(ProcessInfo.processInfo.processIdentifier)"
+            "pid=\(ProcessInfo.processInfo.processIdentifier)",
+            "applePQCSDKCompileMarker=\(SkyBridgeApplePQCSDKBuildProvenance.compileMarker)"
         ].joined(separator: " ")
-        let data = "[\(formatter.string(from: Date()))] \(line)\n".data(using: .utf8)
-
-        if let data {
-            try? SmokeStatusFileAppender.append(data, to: URL(fileURLWithPath: rawStatusPath))
-        }
+        let data = Data("[\(formatter.string(from: Date()))] \(line)\n".utf8)
+        MacSmokeStatusFailClosedWriter.append(
+            data,
+            to: URL(fileURLWithPath: rawStatusPath),
+            context: "mac-online-ipad boot marker"
+        )
     }
 }
 
@@ -976,7 +1028,7 @@ private final class MacOnlineIPadSmokeHarness {
     }
 
     private var reporter: SmokeStatusReporter {
-        SmokeStatusReporter(statusURL: statusURL)
+        SmokeStatusReporter(statusURL: requiredStatusURL())
     }
 
     private var statusURL: URL? {
@@ -986,6 +1038,15 @@ private final class MacOnlineIPadSmokeHarness {
             return nil
         }
         return URL(fileURLWithPath: raw)
+    }
+
+    private func requiredStatusURL() -> URL {
+        guard let statusURL else {
+            MacSmokeStatusFailClosedWriter.failMissingRequiredStatusFile(
+                context: "mac-online-ipad smoke harness"
+            )
+        }
+        return statusURL
     }
 }
 
@@ -1205,8 +1266,10 @@ private struct SmokeStatusReporter {
 
     func reset() {
         guard let statusURL else { return }
-        try? FileManager.default.createDirectory(at: statusURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? "".write(to: statusURL, atomically: true, encoding: .utf8)
+        MacSmokeStatusFailClosedWriter.reset(
+            at: statusURL,
+            context: "smoke status reporter reset"
+        )
     }
 
     func append(_ line: String) {
@@ -1214,8 +1277,10 @@ private struct SmokeStatusReporter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let sanitizedLine = "[\(formatter.string(from: Date()))] \(line)\n"
-        if let data = sanitizedLine.data(using: .utf8) {
-            try? SmokeStatusFileAppender.append(data, to: statusURL)
-        }
+        MacSmokeStatusFailClosedWriter.append(
+            Data(sanitizedLine.utf8),
+            to: statusURL,
+            context: "smoke status reporter append"
+        )
     }
 }

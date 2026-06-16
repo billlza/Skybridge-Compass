@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import MetalKit
 import simd
@@ -39,8 +40,14 @@ public class CustomFrameInterpolator {
     private func setupInterpolationPipeline() async {
         do {
  // 创建默认库
-            guard let library = device.makeDefaultLibrary() else {
+            guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+                device: device,
+                bundle: Bundle.module,
+                sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
+                requiredFunctionNames: [interpolationKernel]
+            ) else {
                 logger.error("❌ 无法创建Metal库")
+                await setupFallbackInterpolation()
                 return
             }
             

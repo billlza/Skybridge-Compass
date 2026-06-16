@@ -229,7 +229,7 @@ static BOOL CBFreeRDPVersionMeetsMinimum(NSString *versionString) {
         
         if (isAppleSilicon) {
             if (osVersion.majorVersion >= 26) {
-                os_log_info(CBFreeRDPLogger, "🚀 检测到 macOS 26+ (Tahoe) + Apple Silicon: 启用后量子加密和高级硬件加速");
+                os_log_info(CBFreeRDPLogger, "🚀 检测到 macOS 26+ (Tahoe) + Apple Silicon: 启用高级硬件加速；PQC 状态由 SkyBridgeCore 会话证明单独记录");
             } else if (osVersion.majorVersion >= 15) {
                 os_log_info(CBFreeRDPLogger, "⚡️ 检测到 macOS 15+ + Apple Silicon: 启用标准硬件加速");
             } else {

@@ -211,6 +211,54 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
         }
     }
 
+    func testPersistentIdentityKeychainFailuresDoNotRegenerateIdentityMaterial() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+        let keychainSource = try repositorySource("Sources/SkyBridgeCore/Security/KeychainManager.swift")
+
+        XCTAssertFalse(
+            source.contains("try? loadKEMKeyRecord"),
+            "KEM identity loading must propagate Keychain/decode failures instead of treating them as missing and generating a new identity key."
+        )
+        XCTAssertTrue(
+            keychainSource.contains("public nonisolated func exportKeyStrict(service: String, account: String) throws -> Data?"),
+            "Generic Keychain service/account reads need a strict API for security-sensitive callers."
+        )
+        XCTAssertTrue(
+            keychainSource.contains("public nonisolated func getOrGenerateDeviceIdStrict() throws -> String"),
+            "Generic Keychain device ID creation must also expose storage failures instead of silently rotating IDs."
+        )
+        XCTAssertTrue(
+            source.contains("public func getOrCreateDeviceIdStrict() async throws -> String"),
+            "Device ID creation needs a throwing path so storage errors do not silently rotate persistent identity."
+        )
+        XCTAssertTrue(
+            source.contains("try saveDeviceIdStrict(newId)") &&
+            source.contains("try await getOrCreateDeviceIdStrict()"),
+            "Identity creation and rotation must persist the device ID through the strict path before publishing new key material."
+        )
+        XCTAssertTrue(
+            source.contains("throw DeviceIdentityKeyError.keychainError(dpStatus)"),
+            "Data Protection Keychain failures must fail closed; legacy fallback is only valid after itemNotFound."
+        )
+    }
+
+    func testPartialPersistentIdentityMaterialFailsClosed() throws {
+        let source = try repositorySource("Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift")
+
+        XCTAssertTrue(
+            source.contains("case incompleteKeyMaterial(String)"),
+            "Persistent identity stores need an explicit partial-material error for public/private split keypairs."
+        )
+        XCTAssertTrue(
+            source.contains("identity keyInfo exists without its private key reference"),
+            "A stored identity record without its private key must not be treated as absent and regenerated."
+        )
+        XCTAssertTrue(
+            source.contains("ML-DSA-65 public/private keypair is incomplete"),
+            "ML-DSA identity loading must distinguish full absence from a corrupt half-present keypair."
+        )
+    }
+
     private func repositorySource(_ relativePath: String) throws -> String {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

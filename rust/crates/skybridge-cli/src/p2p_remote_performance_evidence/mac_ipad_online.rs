@@ -115,6 +115,7 @@ fn is_mac_ipad_dashboard_role_boot(line: &str, lower: &str) -> bool {
     lower.contains("boot")
         && text_value_equals(line, "role", "mac-online-ipad-client")
         && text_value_equals(line, "process", "SkyBridgeCompassApp")
+        && text_value_equals(line, "source", "app")
         && matches!(
             extract_text_value(line, "uiRole")
                 .unwrap_or_default()

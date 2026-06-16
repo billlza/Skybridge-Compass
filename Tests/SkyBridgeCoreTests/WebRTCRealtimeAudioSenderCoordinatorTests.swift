@@ -74,6 +74,124 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
     }
 
     @available(macOS 14.0, *)
+    func testSessionAuthorityLostRelayFailureDoesNotRefreshAdmissionLease() async throws {
+        var refreshCalls = 0
+        var requestedTokens: [String] = []
+        let authorityLostBody = """
+        {
+          "error": "media_admission_token_superseded",
+          "mediaTokenRequestGeneration": "aaaa",
+          "mediaTokenExpectedPresent": false,
+          "mediaTokenSessionPresent": false,
+          "mediaTokenState": "revoked",
+          "rejectReason": "remote_kill"
+        }
+        """
+        let coordinator = makeCoordinator(
+            reusableAdmissionLease: { _ in .init(token: "stale-token", expiresIn: 60) },
+            requestMediaRelayLease: { token in
+                requestedTokens.append(token)
+                throw SignalServerClient.ClientError.serverRejected(401, authorityLostBody)
+            },
+            refreshMediaAdmissionLease: { _, _, _ in
+                refreshCalls += 1
+                return .init(token: "unexpected-refresh", expiresIn: 60)
+            }
+        )
+
+        do {
+            _ = try await coordinator.requestSenderEndpoint(sessionID: "session-1")
+            XCTFail("Expected authority-lost relay rejection to fail without refresh")
+        } catch SignalServerClient.ClientError.serverRejected(let status, _) {
+            XCTAssertEqual(status, 401)
+        } catch {
+            XCTFail("Expected serverRejected, got \(error)")
+        }
+        XCTAssertEqual(requestedTokens, ["stale-token"])
+        XCTAssertEqual(refreshCalls, 0)
+        XCTAssertFalse(CrossNetworkConnectionManager.isMediaAdmissionLeaseRefreshable(
+            SignalServerClient.ClientError.serverRejected(401, authorityLostBody)
+        ))
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.mediaAdmissionFailureReason(
+                for: SignalServerClient.ClientError.serverRejected(401, authorityLostBody)
+            ),
+            "sessionAuthorityLost"
+        )
+    }
+
+    @available(macOS 14.0, *)
+    func testSupersededRelayFailureWithLiveSessionStillRefreshesAdmissionLease() {
+        let liveSupersededBody = """
+        {
+          "error": "media_admission_token_superseded",
+          "mediaTokenRequestGeneration": "aaaa",
+          "mediaTokenExpectedGeneration": "bbbb",
+          "mediaTokenExpectedPresent": true,
+          "mediaTokenSessionPresent": true,
+          "mediaTokenState": "revoked",
+          "rejectReason": "media_admission_refreshed"
+        }
+        """
+        let error = SignalServerClient.ClientError.serverRejected(401, liveSupersededBody)
+
+        XCTAssertTrue(CrossNetworkConnectionManager.isMediaAdmissionLeaseRefreshable(error))
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.mediaAdmissionFailureReason(for: error),
+            "superseded"
+        )
+    }
+
+    @available(macOS 14.0, *)
+    func testRelayFailureAfterRefreshMapsSupersededToServerStateMismatch() async throws {
+        var refreshedTokens: [String] = []
+        var requestedTokens: [String] = []
+        var diagnostics: [String] = []
+        let expiredBody = #"{"error":"media_admission_token_expired"}"#
+        let liveSupersededBody = """
+        {
+          "error": "media_admission_token_superseded",
+          "mediaTokenRequestGeneration": "aaaa",
+          "mediaTokenExpectedGeneration": "bbbb",
+          "mediaTokenExpectedPresent": true,
+          "mediaTokenSessionPresent": true,
+          "mediaTokenState": "revoked",
+          "rejectReason": "media_admission_refreshed"
+        }
+        """
+        let coordinator = makeCoordinator(
+            reusableAdmissionLease: { _ in nil },
+            requestMediaRelayLease: { token in
+                requestedTokens.append(token)
+                if token == "fresh-1" {
+                    throw SignalServerClient.ClientError.serverRejected(401, expiredBody)
+                }
+                throw SignalServerClient.ClientError.serverRejected(401, liveSupersededBody)
+            },
+            refreshMediaAdmissionLease: { _, _, _ in
+                let token = refreshedTokens.isEmpty ? "fresh-1" : "fresh-2"
+                refreshedTokens.append(token)
+                return .init(token: token, expiresIn: 60)
+            },
+            appendSessionDiagnostic: { line, _ in diagnostics.append(line) }
+        )
+
+        do {
+            _ = try await coordinator.requestSenderEndpoint(sessionID: "session-1")
+            XCTFail("Expected refreshed relay superseded rejection to fail")
+        } catch let failure as WebRTCMediaAdmissionClassifiedFailure {
+            XCTAssertEqual(failure.reason, "serverStateMismatch")
+        } catch {
+            XCTFail("Expected classified media admission failure, got \(error)")
+        }
+        XCTAssertEqual(refreshedTokens, ["fresh-1", "fresh-2"])
+        XCTAssertEqual(requestedTokens, ["fresh-1", "fresh-2"])
+        XCTAssertTrue(diagnostics.contains { $0.contains("reason=serverStateMismatch") })
+        XCTAssertTrue(diagnostics.contains { $0.contains("requestGeneration=aaaa") })
+        XCTAssertTrue(diagnostics.contains { $0.contains("expectedGeneration=bbbb") })
+    }
+
+    @available(macOS 14.0, *)
     func testMissingTokenOrRoleDoesNotRefreshOrRequestRelay() async throws {
         var refreshCalls = 0
         var relayRequests = 0

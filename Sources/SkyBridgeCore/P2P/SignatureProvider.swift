@@ -201,6 +201,10 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
 
  /// 底层实现后端
     private let backend: PQCSignatureBackend
+    private static let applePrivateKeyRepresentationLength = 64
+    private static let liboqsPrivateKeyRepresentationLength = 4032
+    private static let mldsa65PublicKeyLength = 1952
+    private static let mldsa65SignatureLength = 3309
 
     public init(backend: PQCSignatureBackend = .auto) {
         self.backend = backend
@@ -213,18 +217,33 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         case .oqs:
             return try await signWithOQS(data, key: key)
         case .auto:
-            // 优先 Apple PQC，但必须允许回退到 OQS：
-            // - ML-DSA-65 的私钥可能来自 OQS（4032 bytes）或 Apple（64 bytes seed / 其它格式）
-            // - 在 macOS 26+/iOS 26+ 上如果直接强制 Apple，会导致 OQS 私钥出现 incorrectParameterSize
+            // ML-DSA-65 的私钥格式决定可用后端：
+            // - Apple CryptoKit 使用 64-byte integrityCheckedRepresentation。
+            // - liboqs 使用 4032-byte expanded secret key。
+            // 已知 liboqs 私钥不得先打到 Apple 再按失败回退，否则 smoke/release 证据会出现
+            // misleading apple_failed 诊断；直接选择 OQS，失败即暴露真实 OQS 错误。
             #if HAS_APPLE_PQC_SDK
             if #available(macOS 26.0, iOS 26.0, *) {
+                if Self.shouldUseLiboqsForSigningBeforeApple(key: key) {
+                    do {
+                        let signature = try await signWithOQS(data, key: key)
+                        emitSmokeBackendLog("sign backend=oqs keyFormat=liboqs bytes=\(signature.count)")
+                        return signature
+                    } catch let oqsError {
+                        throw SignatureProviderError.signatureFailed(
+                            "liboqs failed for liboqs-format ML-DSA-65 private key (\(oqsError.localizedDescription)); Apple PQC was not attempted because the key is not an Apple integrityCheckedRepresentation"
+                        )
+                    }
+                }
                 do {
                     let signature = try await signWithApplePQC(data, key: key)
                     emitSmokeBackendLog("sign backend=apple bytes=\(signature.count)")
                     return signature
                 } catch let appleError {
                     emitSmokeBackendLog("sign apple_failed=\(appleError.localizedDescription)")
-                    // Apple PQC 失败（常见：参数长度/格式不匹配），尝试 OQS 以保证互操作性
+                    guard Self.shouldRetrySignWithLiboqs(key: key) else {
+                        throw appleError
+                    }
                     do {
                         let signature = try await signWithOQS(data, key: key)
                         emitSmokeBackendLog("sign backend=oqs bytes=\(signature.count)")
@@ -261,6 +280,9 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
                     return ok
                 } catch let appleError {
                     emitSmokeBackendLog("verify apple_failed=\(appleError.localizedDescription)")
+                    guard Self.shouldRetryVerifyWithLiboqs(signature: signature, publicKey: publicKey) else {
+                        throw appleError
+                    }
                     do {
                         let ok = try await verifyWithOQS(data, signature: signature, publicKey: publicKey)
                         emitSmokeBackendLog("verify backend=oqs ok=\(ok)")
@@ -298,6 +320,39 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         }
     }
 
+    #if HAS_APPLE_PQC_SDK
+    // internal 以便测试锁定回退决策语义，防止条件被无意放宽。
+    static func shouldUseLiboqsForSigningBeforeApple(key: SigningKeyHandle) -> Bool {
+        shouldRetrySignWithLiboqs(key: key)
+    }
+
+    static func shouldRetrySignWithLiboqs(key: SigningKeyHandle) -> Bool {
+        #if canImport(OQSRAII)
+        switch key {
+        case .softwareKey(let privateKeyData):
+            return privateKeyData.count == liboqsPrivateKeyRepresentationLength
+        case .callback:
+            return false
+        #if canImport(Security)
+        case .secureEnclaveRef:
+            return false
+        #endif
+        }
+        #else
+        return false
+        #endif
+    }
+
+    static func shouldRetryVerifyWithLiboqs(signature: Data, publicKey: Data) -> Bool {
+        #if canImport(OQSRAII)
+        return publicKey.count == mldsa65PublicKeyLength
+            && signature.count == mldsa65SignatureLength
+        #else
+        return false
+        #endif
+    }
+    #endif
+
  // MARK: - Apple PQC Implementation
 
     private func signWithApplePQC(_ data: Data, key: SigningKeyHandle) async throws -> Data {
@@ -306,6 +361,12 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
             switch key {
             case .softwareKey(let privateKeyData):
  // ML-DSA-65 私钥：64 bytes (seed format)
+                guard privateKeyData.count == Self.applePrivateKeyRepresentationLength else {
+                    throw SignatureProviderError.invalidKeyType(
+                        expected: "ML-DSA-65 private key (64 bytes integrityCheckedRepresentation)",
+                        actual: "\(privateKeyData.count) bytes"
+                    )
+                }
                 let privateKey = try MLDSA65.PrivateKey(integrityCheckedRepresentation: privateKeyData)
                 let signature = try privateKey.signature(for: data)
                 return signature
@@ -333,7 +394,7 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         #if HAS_APPLE_PQC_SDK
         if #available(macOS 26.0, iOS 26.0, *) {
  // ML-DSA-65 公钥：1952 bytes
-            guard publicKey.count == 1952 else {
+            guard publicKey.count == Self.mldsa65PublicKeyLength else {
                 throw SignatureProviderError.invalidPublicKeyFormat(
                     "ML-DSA-65 public key must be 1952 bytes, got \(publicKey.count)"
                 )
@@ -373,7 +434,7 @@ public struct PQCSignatureProvider: ProtocolSignatureProvider {
         publicKey: Data
     ) async throws -> Bool {
  // ML-DSA-65 公钥：1952 bytes
-        guard publicKey.count == 1952 else {
+        guard publicKey.count == Self.mldsa65PublicKeyLength else {
             throw SignatureProviderError.invalidPublicKeyFormat(
                 "ML-DSA-65 public key must be 1952 bytes, got \(publicKey.count)"
             )

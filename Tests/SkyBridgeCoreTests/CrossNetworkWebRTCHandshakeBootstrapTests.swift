@@ -177,6 +177,149 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
     }
 
+    func testInitialWebRTCHandshakeBootstrapDecisionPreservesClassicBootstrapOnlyBeforeTrust() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: true,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+
+        XCTAssertEqual(
+            WebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: false,
+                hasTrustedPeerKEM: true,
+                capability: capability,
+                useClassicAuthorityBootstrap: true,
+                peerDeviceId: "peer-a"
+            ),
+            .proceed(.init(
+                selection: .classicOnly,
+                bootstrapMode: "classic_authority_bootstrap",
+                usesClassicAuthorityBootstrap: true
+            ))
+        )
+        XCTAssertEqual(
+            WebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: false,
+                hasTrustedPeerKEM: false,
+                capability: capability,
+                useClassicAuthorityBootstrap: false,
+                peerDeviceId: "peer-a"
+            ),
+            .proceed(.init(
+                selection: .classicOnly,
+                bootstrapMode: "classic_bootstrap",
+                usesClassicAuthorityBootstrap: false
+            ))
+        )
+    }
+
+    func testInitialWebRTCHandshakeBootstrapDecisionRequiresPQCWhenTrustAndProviderExist() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: false,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+
+        XCTAssertEqual(
+            WebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: false,
+                hasTrustedPeerKEM: true,
+                capability: capability,
+                useClassicAuthorityBootstrap: false,
+                peerDeviceId: "peer-a"
+            ),
+            .proceed(.init(
+                selection: .requirePQC,
+                bootstrapMode: "trusted_kem",
+                usesClassicAuthorityBootstrap: false
+            ))
+        )
+    }
+
+    func testInitialWebRTCHandshakeBootstrapDecisionKeepsNonStrictNoProviderCompatibilityExplicit() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: false,
+            hasLiboqs: false,
+            osVersion: "test"
+        )
+
+        XCTAssertEqual(
+            WebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: false,
+                hasTrustedPeerKEM: true,
+                capability: capability,
+                useClassicAuthorityBootstrap: false,
+                peerDeviceId: "peer-a"
+            ),
+            .proceed(.init(
+                selection: .classicOnly,
+                bootstrapMode: "classic_bootstrap_no_local_pqc_provider",
+                usesClassicAuthorityBootstrap: false
+            ))
+        )
+    }
+
+    func testInitialWebRTCHandshakeBootstrapDecisionRejectsStrictPQCWithoutTrustOrProvider() {
+        let noProviderCapability = CryptoProviderFactory.Capability(
+            hasApplePQC: false,
+            hasLiboqs: false,
+            osVersion: "test"
+        )
+
+        XCTAssertEqual(
+            WebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: true,
+                hasTrustedPeerKEM: false,
+                capability: noProviderCapability,
+                useClassicAuthorityBootstrap: false,
+                peerDeviceId: "peer-b"
+            ),
+            .reject(.init(
+                code: 701,
+                message: "严格 PQC 已启用，但 WebRTC 对端 authoritative deviceId / 受信任 KEM 尚未就绪；当前已拒绝 classic bootstrap。peer=peer-b",
+                includeProviderAvailabilityInLog: false
+            ))
+        )
+        XCTAssertEqual(
+            WebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: true,
+                hasTrustedPeerKEM: true,
+                capability: noProviderCapability,
+                useClassicAuthorityBootstrap: false,
+                peerDeviceId: "peer-b"
+            ),
+            .reject(.init(
+                code: 702,
+                message: "严格 PQC 已启用，但当前设备没有可用的 PQC Provider；WebRTC 初始握手不会再降级到 Classic。",
+                includeProviderAvailabilityInLog: true
+            ))
+        )
+    }
+
+    func testInitialWebRTCHandshakeBootstrapDecisionRejectsStrictPQCClassicAuthorityBootstrap() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: true,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+
+        XCTAssertEqual(
+            WebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: true,
+                hasTrustedPeerKEM: true,
+                capability: capability,
+                useClassicAuthorityBootstrap: true,
+                peerDeviceId: "peer-c"
+            ),
+            .reject(.init(
+                code: 703,
+                message: "严格 PQC 已启用，但 WebRTC 初始握手请求 classic authority bootstrap；当前已拒绝 classic bootstrap。peer=peer-c",
+                includeProviderAvailabilityInLog: false
+            ))
+        )
+    }
+
     func testWebRTCPQCRekeyPlansPreferXWingOnlyWhenPeerHasXWing() {
         let capability = CryptoProviderFactory.Capability(
             hasApplePQC: true,
@@ -257,6 +400,16 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertEqual(fallbackSelection?.sigAAlgorithm, .ed25519)
         XCTAssertTrue(fallbackSelection?.fellBackToClassic == true)
         XCTAssertTrue(fallbackSelection?.offeredSuites.allSatisfy { !$0.isPQCGroup } == true)
+    }
+
+    func testWebRTCInboundResponderRejectsClassicOnlyPeerWhenStrictPQCRequiresPQC() {
+        let selection = CrossNetworkConnectionManager.selectWebRTCInboundResponder(
+            peerSupportedSuites: [.x25519Ed25519],
+            policy: .strictPQC,
+            environment: MockCryptoEnvironment(hasApplePQC: true, hasLiboqs: true)
+        )
+
+        XCTAssertNil(selection)
     }
 
     func testWebRTCInboundResponderRejectsClassicFallbackWhenStrictPQCRequiresLocalPQC() {
@@ -462,6 +615,15 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(
             scriptSource.contains("SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH"),
             "The real-device smoke script must require signed KEM refresh evidence instead of relying on QR bootstrap."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("REQUIRE_SIGNED_KEM_REFRESH=\"${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-1}\""),
+            "File-transfer smoke must default to requiring signed KEM refresh evidence in lab and realistic modes."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("IOS_AUTO_APPROVE_PAIRING=\"${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-}\"")
+                && scriptSource.contains("SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=\"$IOS_AUTO_APPROVE_PAIRING\""),
+            "Lab file-transfer smoke must pass pairing auto-approval to the iOS process; realistic mode remains opt-in."
         )
         XCTAssertTrue(
             scriptSource.contains("SKR-1 signed LAN KEM refresh served"),
@@ -682,6 +844,324 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(remoteSmokeSource.contains("changedRatio"))
         XCTAssertTrue(remoteSmokeSource.contains("smoke-capture-source captureVerified=1"))
         XCTAssertTrue(remoteSmokeSource.contains("verify_mac_smoke_capture_source_visible\nwait_for_file_pattern \"$HOST_PQC_REPORT\""))
+    }
+
+    func testPIB1StatusLinesRedactProtocolIdentitySecrets() throws {
+        let p2pSource = try [
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift",
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryService+BootstrapControl.swift"
+        ].map { path in
+            try readSource(path)
+        }.joined(separator: "\n")
+        let approvalSource = try readSource("Sources/SkyBridgeCore/Security/PairingTrustApprovalService.swift")
+        let combinedSource = [p2pSource, approvalSource].joined(separator: "\n")
+        let macWebRTCSource = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        let iOSWebRTCSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift")
+        let webRTCSources = [macWebRTCSource, iOSWebRTCSource].joined(separator: "\n")
+
+        XCTAssertTrue(combinedSource.contains("protocolIdentityLogRedaction"))
+        XCTAssertTrue(combinedSource.contains("code=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(combinedSource.contains("fingerprint=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertEqual(
+            webRTCSources.components(separatedBy: "protocol-identity-pins session=\\(Self.protocolIdentityLogRedaction)").count - 1,
+            2,
+            "macOS and iOS WebRTC protocol-identity pin status lines must redact stable session and device identifiers."
+        )
+        XCTAssertEqual(
+            webRTCSources.components(separatedBy: "fingerprint=\\(Self.protocolIdentityLogRedaction").count - 1,
+            2,
+            "macOS and iOS WebRTC current-path authority rebind logs must redact protocol identity fingerprints."
+        )
+        XCTAssertTrue(
+            p2pSource.contains("protocolIdentityBindingCode: code"),
+            "Responder payloads still need the PIB-1 SAS for approval; only logs/status lines are redacted."
+        )
+        XCTAssertTrue(
+            approvalSource.contains("pendingVerificationCode = verificationCode"),
+            "The operator-facing pending approval state must keep the SAS even though logs redact it."
+        )
+
+        [
+            "code=\\(code)",
+            "code=\\(verificationCode)",
+            "fingerprint=\\(validated.protocolIdentityFingerprint)",
+            "fingerprint=\\(binding.protocolIdentityFingerprint)",
+            "fingerprint=\\(fingerprint)",
+            "fingerprint=\\(normalizedFingerprint)",
+            "fp=\\(protocolIdentityFingerprint",
+            "fp=\\(normalizedFingerprint",
+            "PIB-1 protocol identity binding served: requester=\\(request.requesterDeviceId)",
+            "PIB-1 protocol identity binding rejected: requester=\\(request.requesterDeviceId)",
+            "PIB-1 protocol identity binding connect-start: peer=\\(targetDeviceId)",
+            "PIB-1 protocol identity binding request: peer=\\(targetDeviceId)",
+            "PIB-1 protocol identity binding pinned: peer=\\(targetDeviceId)",
+            "deviceId=\\(validated.deviceId)",
+            "deviceId=\\(declaredDeviceId"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                combinedSource.contains(forbidden),
+                "PIB-1 logs/status lines must not persist raw protocol identity secrets: \(forbidden)"
+            )
+        }
+
+        [
+            "protocol-identity-pins session=\\(sessionID) peer=\\(peerDeviceId) declared=\\(payload.deviceId)",
+            "protocol-identity-pins session=\\(sessionId) peer=\\(peerDeviceId) declared=\\(payload.deviceId)",
+            "current-path protocol identity pins updated: session=\\(sessionID",
+            "current-path protocol identity pins updated: session=\\(sessionId",
+            "fingerprint=\\(protocolPublicKeyFingerprint",
+            "deviceId=\\(deviceId"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                webRTCSources.contains(forbidden),
+                "WebRTC protocol identity logs/status lines must not persist raw session IDs, device IDs, or protocol fingerprints: \(forbidden)"
+            )
+        }
+    }
+
+    func testCurrentPathTrustBridgeLogsRedactStableIdentifiers() throws {
+        let source = try [
+            "Sources/SkyBridgeCore/P2P/P2PModels.swift",
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift",
+            "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManager.swift",
+            "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift"
+        ].map { path in
+            try readSource(path)
+        }.joined(separator: "\n")
+        let currentPathTrustLogLines = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter {
+                $0.contains("current-path trust bridge")
+                    || $0.contains("pairingIdentityExchange protocol identity pins")
+            }
+            .joined(separator: "\n")
+
+        XCTAssertTrue(currentPathTrustLogLines.contains("Self.protocolIdentityLogRedaction"))
+        XCTAssertTrue(currentPathTrustLogLines.contains("fp=\\(Self.protocolIdentityLogRedaction"))
+        XCTAssertTrue(currentPathTrustLogLines.contains("privacy: .private"))
+
+        [
+            "peer=\\(self.handshakePeer.deviceId",
+            "peer=\\(peer.deviceId",
+            "peer=\\(peerDeviceId",
+            "declared=\\(payload.deviceId",
+            "current=\\(declaredDeviceId",
+            "current=\\(payload.deviceId",
+            "fp=\\(authority.protocolPublicKeyFingerprint",
+            "error.localizedDescription, privacy: .public"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                currentPathTrustLogLines.contains(forbidden),
+                "Current-path trust bridge logs must not persist raw stable identifiers or public failure text: \(forbidden)"
+            )
+        }
+
+        XCTAssertTrue(
+            source.contains("recordAuthenticatedRemoteAuthority("),
+            "The trust bridge must continue persisting the authenticated authority; only logs are redacted."
+        )
+        XCTAssertTrue(
+            source.contains("protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint"),
+            "Fingerprint data still needs to reach TrustSyncService for fail-closed current-path trust."
+        )
+    }
+
+    func testSKR1StatusLinesRedactProtocolIdentitySecrets() throws {
+        let macSource = try [
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift",
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryService+BootstrapControl.swift"
+        ].map { path in
+            try readSource(path)
+        }.joined(separator: "\n")
+        let iOSSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift")
+        let combinedSource = [macSource, iOSSource].joined(separator: "\n")
+        let skrSource = combinedSource
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { $0.contains("SKR-1") }
+            .joined(separator: "\n")
+
+        XCTAssertTrue(skrSource.contains("SKR-1 signed LAN KEM refresh"))
+        XCTAssertTrue(skrSource.contains("requester=%@ target=%@ keyId=%@"))
+        XCTAssertTrue(skrSource.contains("requester=%@ target=%@ reasonCode=%@ reason=%@"))
+        XCTAssertGreaterThanOrEqual(
+            skrSource.components(separatedBy: "Self.protocolIdentityLogRedaction").count - 1,
+            10
+        )
+        XCTAssertTrue(skrSource.contains("requesterProtocolIdentity=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(skrSource.contains("reason=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(skrSource.contains("endpointCount=\\(endpoints.count)"))
+
+        [
+            "requester=\\(request.requesterDeviceId)",
+            "target=\\(request.targetDeviceId)",
+            "keyId=\\(refresh.keyId)",
+            "reason=\\(error.localizedDescription)",
+            "reason=\\(failure.reason)",
+            "peer=\\(targetDeviceId)",
+            "endpoint=\\(exchange.endpoint.debugDescription)",
+            "requesterProtocolIdentity=\\(requesterFingerprint)",
+            "peer=\\(device.id)",
+            "endpoints=\\(endpoints.map",
+            "endpoint=\\(selectedEndpoint)",
+            "requesterProtocolIdentity=\\(requesterProtocolIdentityFingerprint)",
+            "reason=\\(error.localizedDescription)",
+            "reason=\\(failure.reason)"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                skrSource.contains(forbidden),
+                "SKR-1 logs/status lines must not persist raw stable identifiers or remote failure text: \(forbidden)"
+            )
+        }
+    }
+
+    func testSignalingLogsAndErrorDescriptionsDoNotExposeServerBodiesOrStableIdentifiers() throws {
+        let iOSWebRTCSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift")
+        let iOSSignalClientSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift")
+        let protocolSignalClientSource = try readSource("Sources/SkyBridgeProtocolCore/RemoteConnection/SignalServerClient.swift")
+        let macWebSocketSource = try readSource("Sources/SkyBridgeAppleTransport/RemoteConnection/WebRTC/WebSocketSignalingClient.swift")
+        let iOSWebSocketSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebSocketSignalingClient.swift")
+        let signalingServerSource = try readSource("Server/skybridge-signaling/server.js")
+        let localCompatServerSource = try readSource("Server/skybridge-signaling/local_compat_server.js")
+        let supabaseClientSource = try readSource("Sources/SkyBridgeCore/Services/SupabaseClient.swift")
+
+        let initialHandshakeLogSlice = try sourceSlice(
+            from: "guard shouldInitiate else",
+            to: "let keys: SessionKeys",
+            in: iOSWebRTCSource
+        )
+        XCTAssertTrue(initialHandshakeLogSlice.contains("session=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(initialHandshakeLogSlice.contains("peer=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(initialHandshakeLogSlice.contains("trustPeer=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertFalse(initialHandshakeLogSlice.contains("session=\\(sessionId)"))
+        XCTAssertFalse(initialHandshakeLogSlice.contains("peer=\\(peerDeviceId)"))
+        XCTAssertFalse(initialHandshakeLogSlice.contains("trustPeer=\\(trustLookupPeerId)"))
+
+        XCTAssertTrue(iOSSignalClientSource.contains("redactedServerRejectedBodyDescription"))
+        XCTAssertTrue(iOSSignalClientSource.contains("redactedServerRejectedBodyLogSummary(byteCount: data.count)"))
+        XCTAssertTrue(iOSSignalClientSource.contains("sanitizedServerRejectedBodyDescription(from: data)"))
+        XCTAssertTrue(iOSSignalClientSource.contains("deviceId=\\(Self.sensitiveLogRedaction"))
+        XCTAssertTrue(iOSSignalClientSource.contains("deviceName=\\(Self.sensitiveLogRedaction"))
+        XCTAssertTrue(iOSSignalClientSource.contains("sessionId=\\(Self.sensitiveLogRedaction"))
+        XCTAssertTrue(iOSSignalClientSource.contains("sessionTokenGeneration=\\(Self.logPresence(response.sessionTokenGeneration)"))
+        XCTAssertTrue(iOSSignalClientSource.contains("mediaTokenGeneration=\\(Self.logPresence(response.mediaTokenGeneration)"))
+        XCTAssertTrue(iOSSignalClientSource.contains("challengeId=\\(Self.sensitiveLogRedaction"))
+        XCTAssertTrue(iOSSignalClientSource.contains("body=\\(bodySummary, privacy: .public)"))
+        XCTAssertTrue(iOSSignalClientSource.contains("err=\\(error.localizedDescription, privacy: .private)"))
+        XCTAssertFalse(iOSSignalClientSource.contains("body=\\(bodyString, privacy: .public)"))
+        XCTAssertFalse(iOSSignalClientSource.contains("throw ClientError.serverRejected(http.statusCode, bodyString)"))
+        XCTAssertFalse(iOSSignalClientSource.contains("current-path request start path=/api/webrtc/admission/challenge deviceId=\\(binding.deviceId"))
+        XCTAssertFalse(iOSSignalClientSource.contains("current-path request start path=/api/webrtc/admission deviceId=\\(binding.deviceId"))
+        XCTAssertFalse(iOSSignalClientSource.contains("challengeId=\\(response.challengeId"))
+        XCTAssertFalse(iOSSignalClientSource.contains("sessionId=\\(sessionId, privacy: .public)"))
+        XCTAssertFalse(iOSSignalClientSource.contains("sessionId=\\(response.sessionId, privacy: .public)"))
+        XCTAssertFalse(iOSSignalClientSource.contains("sessionTokenGeneration=\\(response.sessionTokenGeneration"))
+        XCTAssertFalse(iOSSignalClientSource.contains("mediaTokenGeneration=\\(response.mediaTokenGeneration"))
+        XCTAssertFalse(iOSSignalClientSource.contains("deviceName=\\(deviceName, privacy: .public)"))
+
+        XCTAssertTrue(protocolSignalClientSource.contains("redactedServerRejectedBodyDescription"))
+        XCTAssertTrue(protocolSignalClientSource.contains("sanitizedServerRejectedBodyDescription(from: data)"))
+        XCTAssertFalse(protocolSignalClientSource.contains("throw ClientError.serverRejected(httpResponse.statusCode, bodyText)"))
+        XCTAssertFalse(protocolSignalClientSource.contains("return \"信令服务器拒绝请求 (\\(status)): \\(body)\""))
+        XCTAssertFalse(iOSSignalClientSource.contains("return \"信令服务器拒绝请求 (\\(status)): \\(body)\""))
+
+        for source in [macWebSocketSource, iOSWebSocketSource] {
+            XCTAssertTrue(source.contains("redactedServerErrorReasonDescription"))
+            XCTAssertTrue(source.contains("sensitiveLogRedaction"))
+            XCTAssertTrue(source.contains("name == \"shard\""))
+            XCTAssertTrue(source.contains("name.contains(\"token\")"))
+            XCTAssertTrue(source.contains("session=\\(Self.sensitiveLogRedaction"))
+            XCTAssertTrue(source.contains("transportErrorLogSummary"))
+            XCTAssertTrue(source.contains("let redactedReason = Self.redactedServerErrorReasonDescription"))
+            XCTAssertTrue(source.contains("errorDescription: redactedReason"))
+            XCTAssertTrue(source.contains("logger.error(\"❌ signaling server error: \\(redactedReason"))
+            XCTAssertTrue(source.contains("ignoring non-envelope message bytes=\\(text.utf8.count"))
+            XCTAssertFalse(source.contains("logger.error(\"❌ signaling server error: \\(reason, privacy: .public)"))
+            XCTAssertFalse(source.contains("ignoring non-envelope message: \\(text.prefix(200), privacy: .public)"))
+            XCTAssertFalse(source.contains("session=\\(self.sessionId, privacy: .public)"))
+            XCTAssertFalse(source.contains("session=\\(handleId.sessionId, privacy: .public)"))
+            XCTAssertFalse(source.contains("err=\\(error.localizedDescription, privacy: .public)"))
+        }
+
+        XCTAssertFalse(iOSWebSocketSource.contains("session=\\(envelope.sessionId)"))
+        XCTAssertFalse(iOSWebSocketSource.contains("from=\\(envelope.from)"))
+        XCTAssertFalse(iOSWebSocketSource.contains("to=\\(envelope.to"))
+        XCTAssertFalse(iOSWebSocketSource.contains("session=\\(env.sessionId)"))
+        XCTAssertFalse(iOSWebSocketSource.contains("from=\\(env.from)"))
+        XCTAssertFalse(iOSWebSocketSource.contains("to=\\(env.to"))
+        XCTAssertFalse(iOSWebSocketSource.contains("error=\\(frame.error"))
+
+        XCTAssertTrue(localCompatServerSource.contains("sessionLogId=${sessionLogId(record)}"))
+        XCTAssertTrue(localCompatServerSource.contains("token=${tokenPresence(sessionToken)}"))
+        XCTAssertFalse(localCompatServerSource.contains("console.log(`[http] register-code code=${code} initiator=${binding.deviceId}`)"))
+        XCTAssertFalse(localCompatServerSource.contains("console.log(`[http] lookup denied code=${sessionId}"))
+        XCTAssertFalse(localCompatServerSource.contains("console.log(`[http] lookup code=${sessionId} responder=${binding.deviceId}`)"))
+        XCTAssertFalse(localCompatServerSource.contains("console.log(`[ws] reject session=${sessionId}"))
+        XCTAssertFalse(localCompatServerSource.contains("console.log(`[ws] bound session=${sessionId}"))
+        XCTAssertFalse(localCompatServerSource.contains("console.log(`[ws] relay session=${sessionId}"))
+        XCTAssertFalse(localCompatServerSource.contains("token=${sessionToken.slice"))
+        XCTAssertFalse(localCompatServerSource.contains("catch (_) {}"))
+
+        XCTAssertTrue(signalingServerSource.contains("redactedWSMetaForLog(meta)"))
+        XCTAssertTrue(signalingServerSource.contains("safeLogErrorCode(error)"))
+        XCTAssertFalse(signalingServerSource.contains("sessionId: meta?.sessionId || null"))
+        XCTAssertFalse(signalingServerSource.contains("deviceId: meta?.deviceId || null"))
+        XCTAssertFalse(signalingServerSource.contains("message: error?.message || String(error)"))
+        XCTAssertFalse(signalingServerSource.contains("stack: error?.stack || null"))
+
+        XCTAssertTrue(supabaseClientSource.contains("redactedPathForLog"))
+        XCTAssertTrue(supabaseClientSource.contains("queryItems=\\(query.count"))
+        XCTAssertTrue(supabaseClientSource.contains("bodyBytes=\\(body?.utf8.count ?? 0)"))
+        XCTAssertFalse(supabaseClientSource.contains("url.absoluteString"))
+        XCTAssertFalse(supabaseClientSource.contains("HTTP状态异常: \\(code) \\(body ?? \"\")"))
+    }
+
+    func testServerRejectedBodySummaryPreservesSafeClassifiersOnly() throws {
+        let iOSSignalClientSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift")
+        let body = Data(
+            #"""
+            {
+              "error": "session_inactive",
+              "rejectReason": "remote_kill",
+              "mediaTokenRequestGeneration": "aaaa1111bbbb2222",
+              "mediaTokenExpectedGeneration": "bbbb2222cccc3333",
+              "mediaTokenGeneration": "secret-token",
+              "mediaTokenExpectedPresent": false,
+              "mediaTokenSessionPresent": false,
+              "message": "token secret should not leave the HTTP boundary",
+              "email": "operator@example.com",
+              "sessionToken": "session-token-secret"
+            }
+            """#.utf8
+        )
+
+        let summary = SignalServerClient.sanitizedServerRejectedBodyDescription(from: body)
+
+        XCTAssertTrue(summary.contains("\"error\":\"session_inactive\""))
+        XCTAssertTrue(summary.contains("\"rejectReason\":\"remote_kill\""))
+        XCTAssertTrue(summary.contains("\"mediaTokenRequestGeneration\":\"aaaa1111bbbb2222\""))
+        XCTAssertTrue(summary.contains("\"mediaTokenExpectedGeneration\":\"bbbb2222cccc3333\""))
+        XCTAssertTrue(summary.contains("\"mediaTokenExpectedPresent\":false"))
+        XCTAssertTrue(summary.contains("\"mediaTokenSessionPresent\":false"))
+        XCTAssertTrue(summary.contains("\"bodyBytes\":"))
+        XCTAssertFalse(summary.contains("token secret"))
+        XCTAssertFalse(summary.contains("secret-token"))
+        XCTAssertFalse(summary.contains("operator@example.com"))
+        XCTAssertFalse(summary.contains("session-token-secret"))
+        XCTAssertFalse(summary.contains("\"mediaTokenGeneration\""))
+        XCTAssertFalse(summary.contains("\"message\""))
+        XCTAssertFalse(summary.contains("\"email\""))
+        XCTAssertFalse(summary.contains("\"sessionToken\""))
+
+        XCTAssertTrue(iOSSignalClientSource.contains("\"mediaTokenRequestGeneration\""))
+        XCTAssertTrue(iOSSignalClientSource.contains("\"mediaTokenExpectedGeneration\""))
+        XCTAssertTrue(iOSSignalClientSource.contains("\"mediaTokenGeneration\""))
+
+        let plainTextSummary = SignalServerClient.sanitizedServerRejectedBodyDescription(
+            from: Data("plain server error with secret-token".utf8)
+        )
+        XCTAssertTrue(plainTextSummary.hasPrefix(SignalServerClient.redactedServerRejectedBodyDescription))
+        XCTAssertTrue(plainTextSummary.contains("bytes="))
+        XCTAssertFalse(plainTextSummary.contains("secret-token"))
     }
 
     func testBonjourDiscoveryDoesNotImportKEMPublicKeysFromTXT() throws {
@@ -921,6 +1401,70 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(guardBody.contains("throw NSError("))
     }
 
+    func testMacCurrentPathWebRTCKEMTrustUsesSignedRefreshBoundToProtocolPins() throws {
+        let managerSource = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
+        let trustProviderSource = try readSource("Sources/SkyBridgeCore/RemoteConnection/CurrentPathHandshakeTrustProvider.swift")
+
+        XCTAssertTrue(managerSource.contains("private func trustedSignedRefreshKEMPublicKeys("))
+        XCTAssertTrue(managerSource.contains("currentPathTrustedProtocolFingerprints(for: sessionID)"))
+        XCTAssertTrue(trustProviderSource.contains("signedRefreshKEMPublicKeys("))
+        XCTAssertFalse(trustProviderSource.contains("mergedKEMPublicKeys("))
+
+        let initialBootstrapKEMLookup = try sourceSlice(
+            from: "var trustedPeerKEMKeys: [UInt16: Data] = [:]",
+            to: "if !WebRTCPQCHandshakePolicy.shouldWaitForStrictPQCInitialWebRTCHandshake(",
+            in: managerSource
+        )
+        XCTAssertTrue(initialBootstrapKEMLookup.contains("trustedSignedRefreshKEMPublicKeys("))
+        XCTAssertFalse(initialBootstrapKEMLookup.contains("mergedKEMPublicKeys("))
+
+        let rekeyKEMLookup = try sourceSlice(
+            from: "var peerKEMByCandidateId: [String: [UInt16: Data]] = [:]",
+            to: "let peerHasXWing = peerKEMByCandidateId.values.contains",
+            in: managerSource
+        )
+        XCTAssertTrue(rekeyKEMLookup.contains("trustedSignedRefreshKEMPublicKeys("))
+        XCTAssertFalse(rekeyKEMLookup.contains("mergedKEMPublicKeys("))
+    }
+
+    func testIOSCurrentPathWebRTCKEMTrustUsesSignedRefreshBoundToProtocolPins() throws {
+        let managerSource = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift")
+        let trustProviderSource = try readSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CurrentPathHandshakeTrustCompat.swift"
+        )
+
+        XCTAssertTrue(managerSource.contains("private func trustedCurrentPathKEMPublicKeys("))
+        XCTAssertTrue(managerSource.contains("currentPathTrustedProtocolFingerprints(for: sessionId)"))
+        XCTAssertTrue(trustProviderSource.contains("signedRefreshKEMPublicKeys("))
+        XCTAssertFalse(trustProviderSource.contains("kemPublicKeys(for: deviceId)"))
+
+        let initialBootstrapKEMLookup = try sourceSlice(
+            from: "var trustedPeerKEMKeys: [CryptoSuite: Data] = [:]",
+            to: "let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty",
+            in: managerSource
+        )
+        XCTAssertTrue(initialBootstrapKEMLookup.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionId] != nil"))
+        XCTAssertTrue(initialBootstrapKEMLookup.contains("trustedCurrentPathKEMPublicKeys("))
+    }
+
+    func testLegacyBootstrapKEMCacheIsKnownMaterialNotTrustAuthority() throws {
+        let source = try readSource("Sources/SkyBridgeCore/P2P/P2PModels.swift")
+        let bootstrapStoreSource = try readSource("Sources/SkyBridgeCore/P2P/PeerKEMBootstrapStore.swift")
+
+        XCTAssertTrue(source.contains("currentKnownPeerKEMPublicKeysByCanonicalWireId"))
+        XCTAssertTrue(source.contains("return \"bootstrapCache\""))
+        XCTAssertTrue(source.contains("hasTrust: diagnostic.hasTrust"))
+        XCTAssertTrue(source.contains("clearPairingIdentityExchangeEntries(deviceIds: bootstrapIds)"))
+        XCTAssertTrue(source.contains("cleared unsigned bootstrap KEM cache and failing closed"))
+        XCTAssertFalse(source.contains("using bootstrap cache only"))
+        XCTAssertFalse(source.contains("TrustSync degraded"))
+        XCTAssertFalse(source.contains("currentTrustedPeerKEMPublicKeysByCanonicalWireId"))
+        XCTAssertFalse(source.contains("hasTrust: diagnostic.hasTrust || !cachedSuites.isEmpty"))
+        XCTAssertTrue(bootstrapStoreSource.contains("entry.source == \"signed_lan_kem_refresh\""))
+        XCTAssertTrue(bootstrapStoreSource.contains("public func clearPairingIdentityExchangeEntries(deviceIds: [String])"))
+        XCTAssertTrue(bootstrapStoreSource.contains("entries[deviceId]?.source == \"pairing_identity_exchange\""))
+    }
+
     func testSignedAppSmokeHasAppLevelPairingApprovalSurface() throws {
         let appSource = try readSource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let scriptSource = try readSource("Scripts/run_real_device_file_transfer_smoke.sh")
@@ -987,7 +1531,32 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
         XCTAssertTrue(appSource.contains("SKYBRIDGE_SMOKE_ROLE"))
         XCTAssertTrue(appSource.contains("SKYBRIDGE_SMOKE_STATUS_FILE"))
-        XCTAssertTrue(appSource.contains("SmokeStatusFileAppender.append(data, to: URL(fileURLWithPath: rawStatusPath))"))
+        let bootMarkerBody = try sourceSlice(
+            from: "private enum MacOnlineIPadSmokeBootMarker",
+            to: "private enum VolatileSwiftUIAutosaveDefaultsPruner",
+            in: appSource
+        )
+        XCTAssertTrue(bootMarkerBody.contains("MacSmokeStatusFailClosedWriter.append("))
+        XCTAssertTrue(bootMarkerBody.contains("failMissingRequiredStatusFile"))
+        XCTAssertFalse(bootMarkerBody.contains("try? SmokeStatusFileAppender.append"))
+
+        guard let reporterStart = appSource.range(of: "private struct SmokeStatusReporter")?.lowerBound else {
+            XCTFail("Expected SmokeStatusReporter in SkyBridgeCompassApp.")
+            return
+        }
+        let smokeStatusReporterBody = String(appSource[reporterStart...])
+        XCTAssertTrue(smokeStatusReporterBody.contains("MacSmokeStatusFailClosedWriter.reset("))
+        XCTAssertTrue(smokeStatusReporterBody.contains("MacSmokeStatusFailClosedWriter.append("))
+        XCTAssertFalse(smokeStatusReporterBody.contains("try?"))
+
+        let deviceDiscoverySource = try readSource("Sources/SkyBridgeCompassApp/Views/EnhancedDeviceDiscoveryView.swift")
+        let smokeLineAppender = try sourceSlice(
+            from: "private func appendSmokeStatusLine",
+            to: "private func appendMacOnlineIPadConnectAppActionIfNeeded",
+            in: deviceDiscoverySource
+        )
+        XCTAssertTrue(smokeLineAppender.contains("MacSmokeStatusFailClosedWriter.append("))
+        XCTAssertFalse(smokeLineAppender.contains("try? SmokeStatusFileAppender.append"))
     }
 
     func testMacOnlineStartupAvoidsBundleMainResourceResolutionBeforeRootViewCanRender() throws {

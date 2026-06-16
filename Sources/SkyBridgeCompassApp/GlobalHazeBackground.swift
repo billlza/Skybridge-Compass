@@ -88,7 +88,15 @@ class GlobalHazeRenderer: ObservableObject {
     private func setupRenderPipeline() {
         guard let device = device else { return }
         
-        guard let library = device.makeDefaultLibrary() else {
+        guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: ["GlobalHazeShaders"],
+            requiredFunctionNames: [
+                "globalHazeVertexShader",
+                "globalHazeFragmentShader"
+            ]
+        ) else {
  // Release模式不打印调试信息
             return
         }

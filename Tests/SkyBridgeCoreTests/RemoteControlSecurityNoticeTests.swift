@@ -650,6 +650,8 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertTrue(script.contains("launch method=open-app-bundle pid=%s role=mac-online-ipad-client"))
         XCTAssertTrue(script.contains("launch requested role=mac-online-ipad-client"))
         XCTAssertTrue(script.contains("wait_for_mac_online_pattern 'boot .*role=mac-online-ipad-client .*source=app'"))
+        XCTAssertTrue(script.contains("phase=wait-pattern reason=process-exited"))
+        XCTAssertTrue(script.contains("phase=wait-pattern reason=timeout"))
         XCTAssertFalse(script.contains("boot role=mac-online-ipad-client process=SkyBridgeCompassApp uiRole=external-accessibility"))
         XCTAssertFalse(
             script.contains("\"$MAC_ONLINE_APP_BIN\" >\"$MAC_ONLINE_STDOUT\" 2>&1 &"),

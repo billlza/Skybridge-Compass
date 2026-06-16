@@ -2,10 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_webrtc_smoke_$(date +%Y%m%d_%H%M%S)}"
 if [[ "$ARTIFACT_DIR" != /* ]]; then
   ARTIFACT_DIR="$PWD/$ARTIFACT_DIR"
 fi
+PUBLIC_ARTIFACT_DIR="$ARTIFACT_DIR/public-redacted"
 
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
@@ -844,6 +846,7 @@ AUTH_SESSION_FILE="$(prepare_auth_session)"
 if [[ -z "$IOS_DEVICE_ID" ]]; then
   IOS_DEVICE_ID="$(pick_real_device_id)"
 fi
+IOS_DEVICE_LABEL="$(skybridge_smoke_hash_label "$IOS_DEVICE_ID")"
 if [[ "$PRESERVE_INSTALL" != "1" && -z "${SKYBRIDGE_REAL_DEVICE_ID:-}" ]]; then
   echo "SKYBRIDGE_SMOKE_PRESERVE_INSTALL=0 requires explicit SKYBRIDGE_REAL_DEVICE_ID to avoid uninstalling from the wrong device." >&2
   exit 1
@@ -1093,6 +1096,10 @@ fi
 
 echo "==> Running WebRTC media doctor"
 run_webrtc_media_doctor "$SESSION_ID"
+echo "==> Materializing redacted public WebRTC smoke artifacts"
+skybridge_smoke_materialize_public_artifacts "$IOS_DEVICE_LABEL" "$ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID" "$MAC_DEVICE_ID" "$IOS_LOGICAL_DEVICE_ID" "$MAC_PQC_DEVICE_ID"
+skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID" "$MAC_DEVICE_ID" "$IOS_LOGICAL_DEVICE_ID" "$MAC_PQC_DEVICE_ID"
+echo "==> Redacted public artifacts: $PUBLIC_ARTIFACT_DIR"
 
 if [[ "$LAB_RUN" == "1" ]]; then
   echo "Lab run completed, but this is not an acceptance pass because SKYBRIDGE_REAL_DEVICE_WEBRTC_LAB_RUN=1." >&2

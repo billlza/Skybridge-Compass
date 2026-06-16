@@ -86,7 +86,7 @@ fn remember_evidence_token(slot: &mut Option<String>, value: Option<String>) {
 
 pub(crate) fn signed_kem_refresh_check_detail(evidence: &SignedKEMRefreshEvidence) -> String {
     format!(
-        "requestSeen={} servedSeen={} verifiedImported={} iosRequestSeen={} macServedSeen={} iosVerifiedImported={} pinnedIdentity={} signatureVerified={} requestHashBound={} xwingSuite={} xwingWireId={} missingKEMPreflight={} strictXWingAfterRefresh={} unsignedOrTOFU={} classicSuite={} unknownSuite={} rejectedSeen={} firstRejection={} lifecycleSamples={} requestSeq={:?} latestRequestSeq={:?} servedSeq={:?} verifiedSeq={:?} strictXWingSeq={:?} skrRequestPeer={} skrServedTarget={} skrVerifiedPeer={} skrProtocolIdentityFingerprint={} selectedEndpoint={} selectedEndpointClass={} directHostCandidate={} selectedEndpointDirect={} pibSkrIdentityBound={} latencyMsMax={:?} jitterMsMax={:?} successRatePctMin={:?} applicationLossPctMax={:?} retryCountMax={:?} {} limits=latency<={:.1},jitter<={:.1},successRate>={:.1},appLossPct<={:.1},retry<={}",
+        "requestSeen={} servedSeen={} verifiedImported={} iosRequestSeen={} macServedSeen={} iosVerifiedImported={} pinnedIdentity={} signatureVerified={} requestHashBound={} xwingSuite={} xwingWireId={} missingKEMPreflight={} strictXWingAfterRefresh={} unsignedOrTOFU={} classicSuite={} unknownSuite={} rejectedSeen={} firstRejection={} lifecycleSamples={} requestSeq={:?} latestRequestSeq={:?} servedSeq={:?} verifiedSeq={:?} strictXWingSeq={:?} skrRequestPeerSeen={} skrServedTargetSeen={} skrVerifiedPeerSeen={} skrProtocolIdentityFingerprintSeen={} selectedEndpointSeen={} selectedEndpointClass={} directHostCandidate={} selectedEndpointDirect={} pibSkrIdentityBound={} latencyMsMax={:?} jitterMsMax={:?} successRatePctMin={:?} applicationLossPctMax={:?} retryCountMax={:?} {} limits=latency<={:.1},jitter<={:.1},successRate>={:.1},appLossPct<={:.1},retry<={}",
         evidence.request_seen,
         evidence.served_seen,
         evidence.verified_imported_seen,
@@ -111,14 +111,11 @@ pub(crate) fn signed_kem_refresh_check_detail(evidence: &SignedKEMRefreshEvidenc
         evidence.served_sequence,
         evidence.verified_imported_sequence,
         evidence.strict_xwing_established_sequence,
-        evidence.request_peer.as_deref().unwrap_or("-"),
-        evidence.served_target.as_deref().unwrap_or("-"),
-        evidence.verified_peer.as_deref().unwrap_or("-"),
-        evidence
-            .protocol_identity_fingerprint
-            .as_deref()
-            .unwrap_or("-"),
-        evidence.selected_endpoint.as_deref().unwrap_or("-"),
+        evidence.request_peer.is_some(),
+        evidence.served_target.is_some(),
+        evidence.verified_peer.is_some(),
+        evidence.protocol_identity_fingerprint.is_some(),
+        evidence.selected_endpoint.is_some(),
         evidence.selected_endpoint_class.as_deref().unwrap_or("-"),
         evidence.direct_host_candidate_seen,
         evidence.selected_endpoint_direct_seen,

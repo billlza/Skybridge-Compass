@@ -43,6 +43,7 @@ public actor NativeWebSocketClient {
         tls: Bool = true,
         pingInterval: TimeInterval? = 30,
         preferNoProxies: Bool = false,
+        additionalHeaders: [String: String] = [:],
         callbacks: NativeWebSocketCallbacks = .init()
     ) {
         self.endpoint = NWEndpoint.url(url)
@@ -50,7 +51,8 @@ public actor NativeWebSocketClient {
         self.parameters = Self.buildParameters(
             tls: tls,
             pingInterval: pingInterval,
-            preferNoProxies: preferNoProxies
+            preferNoProxies: preferNoProxies,
+            additionalHeaders: additionalHeaders
         )
         self.callbacks = callbacks
     }
@@ -111,7 +113,8 @@ public actor NativeWebSocketClient {
     private static func buildParameters(
         tls: Bool,
         pingInterval: TimeInterval?,
-        preferNoProxies: Bool
+        preferNoProxies: Bool,
+        additionalHeaders: [String: String] = [:]
     ) -> NWParameters {
         let params: NWParameters = tls ? .tls : NWParameters(tls: nil)
         params.allowLocalEndpointReuse = true
@@ -120,6 +123,13 @@ public actor NativeWebSocketClient {
 
         let options = NWProtocolWebSocket.Options()
         options.autoReplyPing = true
+        if !additionalHeaders.isEmpty {
+            options.setAdditionalHeaders(
+                additionalHeaders
+                    .sorted { $0.key < $1.key }
+                    .map { (name: $0.key, value: $0.value) }
+            )
+        }
         _ = pingInterval
         params.defaultProtocolStack.applicationProtocols.insert(options, at: 0)
         return params
@@ -246,12 +256,14 @@ extension NativeWebSocketClient {
     internal static func testOnlyBuildParameters(
         tls: Bool,
         pingInterval: TimeInterval?,
-        preferNoProxies: Bool
+        preferNoProxies: Bool,
+        additionalHeaders: [String: String] = [:]
     ) -> NWParameters {
         buildParameters(
             tls: tls,
             pingInterval: pingInterval,
-            preferNoProxies: preferNoProxies
+            preferNoProxies: preferNoProxies,
+            additionalHeaders: additionalHeaders
         )
     }
 }

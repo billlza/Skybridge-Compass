@@ -77,6 +77,7 @@ public final class PairingTrustApprovalService: ObservableObject {
         )
     )
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "PairingTrustApproval")
+    private nonisolated static var protocolIdentityLogRedaction: String { "<redacted>" }
     
     /// deviceId -> decisionRawValue (persists "alwaysAllow" and "reject"; allowOnce is not persisted)
     private var policyByDeviceId: [String: String] = [:]
@@ -86,7 +87,6 @@ public final class PairingTrustApprovalService: ObservableObject {
         let deviceIds: [String]
         let algorithm: ProtocolSigningAlgorithm
         let fingerprint: String
-        let verificationCode: String
     }
 
     private var protocolIdentityPinContextByRequestId: [UUID: ProtocolIdentityPinContext] = [:]
@@ -255,7 +255,7 @@ public final class PairingTrustApprovalService: ObservableObject {
         pendingVerificationSuite = "PIB-1"
         pendingVerificationUpdatedAt = Date()
         logger.info(
-            "🔐 PIB-1 verification code displayed: deviceId=\(declaredDeviceId, privacy: .public) fp=\(protocolIdentityFingerprint, privacy: .public)"
+            "🔐 PIB-1 verification code displayed: deviceId=\(Self.protocolIdentityLogRedaction, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
         )
     }
 
@@ -290,7 +290,6 @@ public final class PairingTrustApprovalService: ObservableObject {
                     deviceIds: normalizedIds,
                     algorithm: requesterProtocolSigningAlgorithm,
                     fingerprint: normalizedFingerprint,
-                    verificationCode: verificationCode,
                     operatorLabel: "stored-policy"
                 ) else { return .reject }
                 return policy
@@ -308,7 +307,6 @@ public final class PairingTrustApprovalService: ObservableObject {
                     deviceIds: normalizedIds,
                     algorithm: requesterProtocolSigningAlgorithm,
                     fingerprint: normalizedFingerprint,
-                    verificationCode: verificationCode,
                     operatorLabel: "stored-policy"
                 ) else { return .reject }
                 return policy
@@ -324,7 +322,6 @@ public final class PairingTrustApprovalService: ObservableObject {
                 deviceIds: normalizedIds,
                 algorithm: requesterProtocolSigningAlgorithm,
                 fingerprint: normalizedFingerprint,
-                verificationCode: verificationCode,
                 operatorLabel: "smoke-auto-approve"
             ) else { return .reject }
             return .alwaysAllow
@@ -345,19 +342,18 @@ public final class PairingTrustApprovalService: ObservableObject {
                 if let pendingDecision {
                     return pendingDecision
                 }
-                logger.info("PIB-1 requester approval coalesced with pending prompt for deviceId=\(declaredDeviceId, privacy: .public)")
+                logger.info("PIB-1 requester approval coalesced with pending prompt for deviceId=\(Self.protocolIdentityLogRedaction, privacy: .public)")
                 return await withCheckedContinuation { cont in
                     continuationByRequestId[pendingRequest.id, default: []].append(cont)
                 }
             }
-            logger.warning("PIB-1 requester approval rejected because another prompt is pending. deviceId=\(declaredDeviceId, privacy: .public)")
+            logger.warning("PIB-1 requester approval rejected because another prompt is pending. deviceId=\(Self.protocolIdentityLogRedaction, privacy: .public)")
             return .reject
         }
         protocolIdentityPinContextByRequestId[request.id] = ProtocolIdentityPinContext(
             deviceIds: normalizedIds,
             algorithm: requesterProtocolSigningAlgorithm,
-            fingerprint: normalizedFingerprint,
-            verificationCode: verificationCode
+            fingerprint: normalizedFingerprint
         )
         pendingDecision = nil
         pendingVerificationCode = verificationCode
@@ -365,10 +361,10 @@ public final class PairingTrustApprovalService: ObservableObject {
         pendingVerificationUpdatedAt = Date()
         pendingRequest = request
         logger.info(
-            "🔐 PIB-1 requester protocol identity approval required: requester=\(declaredDeviceId, privacy: .public) fp=\(normalizedFingerprint, privacy: .public) code=\(verificationCode, privacy: .public)"
+            "🔐 PIB-1 requester protocol identity approval required: requester=\(Self.protocolIdentityLogRedaction, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public) code=\(Self.protocolIdentityLogRedaction, privacy: .public)"
         )
         RemoteControlSmokeStatusWriter.append(
-            "🔐 PIB-1 requester protocol identity approval required: requester=\(declaredDeviceId) fingerprint=\(normalizedFingerprint) code=\(verificationCode) lifecycle=identity-oob>awaiting-requester-approval"
+            "🔐 PIB-1 requester protocol identity approval required: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>awaiting-requester-approval"
         )
         return await withCheckedContinuation { cont in
             continuationByRequestId[request.id, default: []].append(cont)
@@ -379,11 +375,10 @@ public final class PairingTrustApprovalService: ObservableObject {
         deviceIds: [String],
         algorithm: ProtocolSigningAlgorithm,
         fingerprint: String,
-        verificationCode: String,
         operatorLabel: String
     ) async -> Bool {
         guard let stableDeviceId = stableProtocolIdentityDeviceId(from: deviceIds) else {
-            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(deviceIds.first ?? "-") fingerprint=\(fingerprint) code=\(verificationCode) reason=missing_stable_device_id lifecycle=identity-oob>requester-pin-failed"
+            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=missing_stable_device_id lifecycle=identity-oob>requester-pin-failed"
             logger.warning("\(line, privacy: .public)")
             RemoteControlSmokeStatusWriter.append(line)
             return false
@@ -398,13 +393,13 @@ public final class PairingTrustApprovalService: ObservableObject {
                 pinSource: .pib1OperatorApproval
             )
             guard promoted else {
-                let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(stableDeviceId) fingerprint=\(fingerprint) code=\(verificationCode) reason=authority_record_not_promoted lifecycle=identity-oob>requester-pin-failed"
+                let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=authority_record_not_promoted lifecycle=identity-oob>requester-pin-failed"
                 logger.warning("\(line, privacy: .public)")
                 RemoteControlSmokeStatusWriter.append(line)
                 return false
             }
         } catch {
-            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(stableDeviceId) fingerprint=\(fingerprint) code=\(verificationCode) reason=\(error.localizedDescription) lifecycle=identity-oob>requester-pin-failed"
+            let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=\(error.localizedDescription) lifecycle=identity-oob>requester-pin-failed"
             logger.error("\(line, privacy: .public)")
             RemoteControlSmokeStatusWriter.append(line)
             return false
@@ -413,7 +408,7 @@ public final class PairingTrustApprovalService: ObservableObject {
             deviceIds: deviceIds,
             fingerprints: [fingerprint]
         )
-        let line = "🔐 PIB-1 requester protocol identity pinned: requester=\(deviceIds.first ?? "-") fingerprint=\(fingerprint) code=\(verificationCode) operator=\(operatorLabel) lifecycle=identity-oob>requester-pinned"
+        let line = "🔐 PIB-1 requester protocol identity pinned: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=\(operatorLabel) lifecycle=identity-oob>requester-pinned"
         logger.info("\(line, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(line)
         return true
@@ -507,7 +502,6 @@ public final class PairingTrustApprovalService: ObservableObject {
                     deviceIds: protocolIdentityContext.deviceIds,
                     algorithm: protocolIdentityContext.algorithm,
                     fingerprint: protocolIdentityContext.fingerprint,
-                    verificationCode: protocolIdentityContext.verificationCode,
                     operatorLabel: "local-user"
                 )
                 self.finishResolution(

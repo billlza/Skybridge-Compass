@@ -193,6 +193,105 @@ final class NebulaIdentityAndConnectionPresentationTests: XCTestCase {
         XCTAssertEqual(transferFallbackPresentation.statusText, "已连接")
     }
 
+    func testPresentationDoesNotPromoteCapabilityOnlyConnectionToApplePQCDisplayState() {
+        let labels = ConnectionPresentationLabels(
+            connectedText: "已连接",
+            disconnectedText: "未连接",
+            connectingText: "连接中",
+            reconnectingText: "重连中",
+            defaultGuardStatus: "守护中",
+            crossNetworkGuardStatus: "跨网已连接"
+        )
+
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "Peer",
+                    cryptoKind: nil,
+                    suite: nil,
+                    guardStatus: "守护中"
+                ),
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: nil,
+                defaultPQCModeLabel: "Apple PQC",
+                compatibilityModeEnabled: false
+            )
+        )
+
+        XCTAssertEqual(presentation.phase, .connected)
+        XCTAssertEqual(presentation.statusText, "已连接")
+        XCTAssertEqual(presentation.displayState, .connectedClassic)
+        XCTAssertEqual(presentation.detailText, "守护中")
+    }
+
+    func testPresentationUsesGenericPQCDisplayStateWhenOnlyPQCSuiteIsNegotiated() {
+        let labels = ConnectionPresentationLabels(
+            connectedText: "已连接",
+            disconnectedText: "未连接",
+            connectingText: "连接中",
+            reconnectingText: "重连中",
+            defaultGuardStatus: "守护中",
+            crossNetworkGuardStatus: "跨网已连接"
+        )
+
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: nil,
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: ActiveSessionSnapshot(
+                    sessionId: "session-pqc",
+                    source: .qr,
+                    phase: .handshakeComplete,
+                    deviceId: "peer-pqc",
+                    deviceName: "Mac Studio",
+                    negotiatedSuite: "ML-KEM-768"
+                ),
+                defaultPQCModeLabel: "Apple PQC",
+                compatibilityModeEnabled: false
+            )
+        )
+
+        XCTAssertEqual(presentation.phase, .connected)
+        XCTAssertEqual(presentation.statusText, "PQC已连接")
+        XCTAssertEqual(presentation.displayState, .connectedPQC)
+    }
+
+    func testPresentationUsesApplePQCDisplayStateOnlyWhenAppleKindIsExplicit() {
+        let labels = ConnectionPresentationLabels(
+            connectedText: "已连接",
+            disconnectedText: "未连接",
+            connectingText: "连接中",
+            reconnectingText: "重连中",
+            defaultGuardStatus: "守护中",
+            crossNetworkGuardStatus: "跨网已连接"
+        )
+
+        let presentation = ConnectionPresentationContract.evaluate(
+            ConnectionPresentationInput(
+                labels: labels,
+                fileTransferActive: false,
+                latestPeerConnection: ConnectionPresentationPeer(
+                    displayName: "Peer",
+                    cryptoKind: "ApplePQC",
+                    suite: "ML-KEM-768",
+                    guardStatus: "守护中"
+                ),
+                latestConnectedDevice: nil,
+                activeSessionSnapshot: nil,
+                defaultPQCModeLabel: "Apple PQC",
+                compatibilityModeEnabled: false
+            )
+        )
+
+        XCTAssertEqual(presentation.phase, .connected)
+        XCTAssertEqual(presentation.statusText, "Apple PQC已连接")
+        XCTAssertEqual(presentation.displayState, .connectedApplePQC)
+    }
+
     func testReconnectWindowAndLateCleanupDoNotDeleteNewSnapshot() {
         let originalToken = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         let replacementToken = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
@@ -323,7 +422,7 @@ final class NebulaIdentityAndConnectionPresentationTests: XCTestCase {
 
         XCTAssertEqual(degradedPresentation.phase, .connected)
         XCTAssertEqual(degradedPresentation.displayState, .connectedDegradedSignaling)
-        XCTAssertEqual(degradedPresentation.statusText, "Apple PQC已连接")
+        XCTAssertEqual(degradedPresentation.statusText, "PQC已连接")
         XCTAssertTrue(degradedPresentation.detailText?.contains("信令降级") == true)
     }
 
@@ -358,6 +457,7 @@ final class NebulaIdentityAndConnectionPresentationTests: XCTestCase {
         )
 
         XCTAssertEqual(presentation.phase, .connected)
+        XCTAssertEqual(presentation.displayState, .connectedPQC)
         XCTAssertNotEqual(presentation.displayState, .connectedDegradedSignaling)
         XCTAssertFalse(presentation.detailText?.contains("信令降级") == true)
     }

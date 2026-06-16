@@ -34,13 +34,24 @@ public final class SkyBridgeConnection: @unchecked Sendable {
         connection.stateUpdateHandler = { [weak self] newState in
             guard let self else { return }
             self.handleStateUpdate(newState)
-            self.externalStateHandler?(newState)
+            // Read the handler under the same lock that guards lifecycleState;
+            // onStateUpdate(_:) may replace it concurrently from another thread.
+            self.currentExternalStateHandler()?(newState)
         }
     }
 
  /// 设置外部状态回调（可在初始化后调用）
     public func onStateUpdate(_ handler: @Sendable @escaping (NWConnection.State) -> Void) {
-        self.externalStateHandler = handler
+        stateLock.lock()
+        externalStateHandler = handler
+        stateLock.unlock()
+    }
+
+ /// 在锁保护下读取外部状态回调，避免与 onStateUpdate(_:) 的并发写入产生数据竞争
+    private func currentExternalStateHandler() -> (@Sendable (NWConnection.State) -> Void)? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return externalStateHandler
     }
 
  /// 当前安全状态（线程安全）

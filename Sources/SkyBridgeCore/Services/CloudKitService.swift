@@ -134,7 +134,7 @@ public final class CloudKitService: CloudDeviceService {
         self.recordZone = zone
 
         do {
-            try await privateDB.save(zone)
+            _ = try await privateDB.save(zone)
             logger.info("Record Zone 确认就绪")
         } catch {
  // 如果 Zone 已存在，会报错但不影响使用

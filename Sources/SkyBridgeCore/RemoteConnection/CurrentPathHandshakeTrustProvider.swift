@@ -57,8 +57,10 @@ struct CurrentPathHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider
     }
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
-        let merged = await PeerKEMBootstrapStore.shared.mergedKEMPublicKeys(
-            forCandidates: candidateDeviceIds(for: deviceId)
+        let pinnedFingerprints = await trustedFingerprints(for: deviceId)
+        let merged = await PeerKEMBootstrapStore.shared.signedRefreshKEMPublicKeys(
+            forCandidates: candidateDeviceIds(for: deviceId),
+            pinnedProtocolFingerprints: pinnedFingerprints
         )
         return merged.reduce(into: [:]) { partialResult, item in
             partialResult[CryptoSuite(wireId: item.key)] = item.value

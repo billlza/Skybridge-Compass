@@ -4,6 +4,23 @@ import CryptoKit
 import LocalAuthentication
 import OSLog
 
+public enum KeychainError: Error, LocalizedError, Sendable {
+    case itemNotFound
+    case unexpectedError(OSStatus)
+    case decodingError
+
+    public var errorDescription: String? {
+        switch self {
+        case .itemNotFound:
+            return "Keychain item not found"
+        case .unexpectedError(let status):
+            return "Keychain error: \(status)"
+        case .decodingError:
+            return "Keychain item could not be decoded"
+        }
+    }
+}
+
 /// KeychainManager - 安全的密钥存储管理器
 ///
 /// ## 并发安全说明
@@ -131,28 +148,16 @@ public actor KeychainManager {
     }
 
     public nonisolated func exportKey(service: String, account: String) -> Data? {
-        if Self.useInMemoryKeychain {
-            let key = service + "|" + account
-            Self.inMemoryLock.lock()
-            let data = Self.inMemoryStore[key]
-            Self.inMemoryLock.unlock()
-            return data
-        }
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        forbidKeychainAuthenticationUI(&query)
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else {
-            if status != errSecItemNotFound { logger.error("Key 导出失败: \(status)") }
+        do {
+            return try exportKeyStrict(service: service, account: account)
+        } catch {
+            logger.error("Key 导出失败: \(error.localizedDescription)")
             return nil
         }
-        return data
+    }
+
+    public nonisolated func exportKeyStrict(service: String, account: String) throws -> Data? {
+        try loadKeyDataStrict(service: service, account: account)
     }
 
  // MARK: - 对称密钥存取（AES-GCM等）
@@ -335,6 +340,36 @@ public actor KeychainManager {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else { return nil }
+        return data
+    }
+
+    private nonisolated func loadKeyDataStrict(service: String, account: String) throws -> Data? {
+        if Self.useInMemoryKeychain {
+            let key = service + "|" + account
+            Self.inMemoryLock.lock()
+            let data = Self.inMemoryStore[key]
+            Self.inMemoryLock.unlock()
+            return data
+        }
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        forbidKeychainAuthenticationUI(&query)
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound {
+            return nil
+        }
+        guard status == errSecSuccess else {
+            throw KeychainError.unexpectedError(status)
+        }
+        guard let data = item as? Data else {
+            throw KeychainError.decodingError
+        }
         return data
     }
 
@@ -594,13 +629,25 @@ extension KeychainManager {
     }
 
     public nonisolated func loadAuthSession() -> AuthSession? {
-        guard let data = loadKeyData(
+        try? loadAuthSessionStrict()
+    }
+
+    public nonisolated func loadAuthSessionStrict() throws -> AuthSession? {
+        guard let data = try loadKeyDataStrict(
             service: "com.skybridge.compass.authsession",
             account: "primary"
         ) else {
             return nil
         }
-        return try? JSONDecoder().decode(AuthSession.self, from: data)
+        do {
+            return try JSONDecoder().decode(AuthSession.self, from: data)
+        } catch {
+            throw NSError(
+                domain: "Keychain",
+                code: Int(errSecDecode),
+                userInfo: [NSUnderlyingErrorKey: error]
+            )
+        }
     }
 
     public nonisolated func deleteAuthSession() throws {
@@ -628,17 +675,38 @@ extension KeychainManager {
  /// 获取或生成持久化设备 ID (UUID)
  /// 优先从 Keychain 读取，不存在则生成并保存
     public nonisolated func getOrGenerateDeviceId() -> String {
+        do {
+            return try getOrGenerateDeviceIdStrict()
+        } catch {
+            logger.error("设备 ID Keychain 加载失败，拒绝静默重建: \(error.localizedDescription)")
+            return ""
+        }
+    }
+
+    public nonisolated func getOrGenerateDeviceIdStrict() throws -> String {
         let service = "SkyBridge.Identity"
         let account = "DeviceUUID"
 
-        if let data = loadKeyData(service: service, account: account),
-           let uuidString = String(data: data, encoding: .utf8) {
+        if let data = try loadKeyDataStrict(service: service, account: account) {
+            guard let uuidString = String(data: data, encoding: .utf8),
+                  !uuidString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw KeychainError.decodingError
+            }
             return uuidString
         }
 
         let newUUID = UUID().uuidString
-        if let data = newUUID.data(using: .utf8) {
-            _ = storeKeyData(data, service: service, account: account)
+        guard let data = newUUID.data(using: .utf8) else {
+            throw KeychainError.decodingError
+        }
+        let status = upsertGenericPassword(
+            service: service,
+            account: account,
+            data: data,
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
+        guard status == errSecSuccess else {
+            throw KeychainError.unexpectedError(status)
         }
         return newUUID
     }

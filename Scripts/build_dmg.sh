@@ -48,8 +48,8 @@ XCODE_PACKAGE_SCHEME="${SKYBRIDGE_MACOS_PACKAGE_SCHEME:-SkyBridgeCompassApp}"
 XCODE_APP_BUNDLE="${SKYBRIDGE_XCODE_APP_BUNDLE:-$XCODE_DERIVED_DATA_PATH/Build/Products/Release/$APP_NAME.app}"
 XCODE_PACKAGE_WORKSPACE="$PROJECT_ROOT/.swiftpm/xcode/package.xcworkspace"
 XCODE_PACKAGE_EXECUTABLE="$XCODE_DERIVED_DATA_PATH/Build/Products/Release/SkyBridgeCompassApp"
-SWIFTPM_RELEASE_BUILD_DIR="$PROJECT_ROOT/.build/${BUILD_ARCH}-apple-macosx/release"
-SWIFTPM_PACKAGE_EXECUTABLE="$SWIFTPM_RELEASE_BUILD_DIR/SkyBridgeCompassApp"
+SWIFTPM_RELEASE_BUILD_DIR=""
+SWIFTPM_PACKAGE_EXECUTABLE=""
 MAIN_BUILD_SYSTEM="${SKYBRIDGE_DMG_MAIN_BUILD_SYSTEM:-swiftpm}"
 VENDOR_XCFRAMEWORKS=(
     "$PROJECT_ROOT/Sources/Vendor/FreeRDP.xcframework"
@@ -145,6 +145,12 @@ case "$MAIN_BUILD_SYSTEM" in
 esac
 
 skybridge_assert_no_smoke_auto_approval_for_release_context "release_dmg build" || exit 1
+skybridge_assert_release_stable_toolchain "release_dmg" "$PROJECT_ROOT/Scripts/verify_xcode_toolchain.sh" "Release DMG build" || exit 1
+
+if [[ "$MAIN_BUILD_SYSTEM" == "swiftpm" && "$USE_EXISTING_APP" != true ]]; then
+    SWIFTPM_RELEASE_BUILD_DIR="$(skybridge_resolve_swiftpm_release_build_dir "$PROJECT_ROOT" "$BUILD_ARCH" "$XCODE_PACKAGE_SCHEME")" || exit 1
+    SWIFTPM_PACKAGE_EXECUTABLE="$SWIFTPM_RELEASE_BUILD_DIR/SkyBridgeCompassApp"
+fi
 
 if [[ "$USE_EXISTING_APP" != true ]]; then
     skybridge_assert_xcframeworks_support_macos_arch "$BUILD_ARCH" "${VENDOR_XCFRAMEWORKS[@]}"
@@ -162,6 +168,12 @@ fi
 
 log_info() {
     echo "ℹ️  $1"
+}
+
+log_info_path() {
+    local label="$1"
+    local path_value="$2"
+    log_info "${label}: $(skybridge_sanitize_log_value "${path_value}")"
 }
 
 log_success() {
@@ -202,7 +214,7 @@ artifact_has_stapled_ticket() {
     local artifact="$1"
     local attempt
 
-    for attempt in {1..5}; do
+    for _ in {1..5}; do
         if xcrun stapler validate "$artifact" >/dev/null 2>&1; then
             return 0
         fi
@@ -218,6 +230,8 @@ verify_app_bundle_build_source() {
     local build_source=""
     local build_scheme=""
     local build_configuration=""
+
+    skybridge_assert_release_app_stable_platform_metadata "$info_plist" "Release DMG App Bundle" || exit 1
 
     if [[ -f "$info_plist" ]]; then
         build_source=$(/usr/libexec/PlistBuddy -c 'Print :SkyBridgePackagingBuildSource' "$info_plist" 2>/dev/null || true)
@@ -273,6 +287,7 @@ verify_app_runtime_layout() {
         log_error "主可执行文件不存在或不可执行: $app_bin"
         exit 1
     fi
+    skybridge_assert_bundle_has_apple_pqc_compile_marker "$app_bundle" "release DMG app bundle" || exit 1
 
     if otool -L "$app_bin" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
         if [[ ! -e "$frameworks_webrtc" ]]; then
@@ -732,36 +747,7 @@ sign_dmg_artifact() {
 
 assert_existing_app_bundle_is_fresh() {
     local app_bundle_path="$1"
-    local executable_reference="$app_bundle_path"
-    local info_reference="$app_bundle_path"
-    local stale_source=""
-
-    if [[ -d "$app_bundle_path" && -x "$app_bundle_path/Contents/MacOS/SkyBridgeCompassApp" ]]; then
-        executable_reference="$app_bundle_path/Contents/MacOS/SkyBridgeCompassApp"
-    fi
-    if [[ -d "$app_bundle_path" && -f "$app_bundle_path/Contents/Info.plist" ]]; then
-        info_reference="$app_bundle_path/Contents/Info.plist"
-    fi
-
-    if [[ ! -e "$executable_reference" ]]; then
-        return 0
-    fi
-
-    if [[ "$PROJECT_ROOT/Package.swift" -nt "$executable_reference" ]]; then
-        stale_source="$PROJECT_ROOT/Package.swift"
-    elif [[ "$PROJECT_ROOT/project.yml" -nt "$info_reference" ]]; then
-        stale_source="$PROJECT_ROOT/project.yml"
-    elif [[ "$PROJECT_ROOT/XcodeSupport/SkyBridgeCompassMac/BundleModule.swift" -nt "$executable_reference" ]]; then
-        stale_source="$PROJECT_ROOT/XcodeSupport/SkyBridgeCompassMac/BundleModule.swift"
-    elif [[ "$PROJECT_ROOT/XcodeSupport/SkyBridgeCompassMac/Info.plist" -nt "$info_reference" ]]; then
-        stale_source="$PROJECT_ROOT/XcodeSupport/SkyBridgeCompassMac/Info.plist"
-    else
-        stale_source="$(find "$PROJECT_ROOT/Sources" -type f \( -name "*.swift" -o -name "*.c" -o -name "*.cc" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" -o -name "*.m" -o -name "*.mm" \) -newer "$executable_reference" -print -quit 2>/dev/null || true)"
-    fi
-
-    if [[ -n "$stale_source" && "${ALLOW_STALE_BUILD:-0}" != "1" ]]; then
-        log_error "检测到现有 App Bundle 早于源码：$stale_source"
-        log_error "请先重新构建，或显式设置 ALLOW_STALE_BUILD=1 后再复用现有 App。"
+    if ! skybridge_assert_existing_release_app_bundle_fresh "$PROJECT_ROOT" "$app_bundle_path" "SkyBridgeCompassApp"; then
         exit 1
     fi
 }
@@ -778,30 +764,21 @@ trap cleanup EXIT
 # 否则 SwiftPM/Xcode 可能穿透到系统应用内的历史工程引用，产生无关 warning 并显著拖慢发布构建。
 rm -rf "$STAGE_DIR" "$TEMP_DMG"
 
+log_info "检测 Apple PQC SDK 可用性（release DMG 必须启用 HAS_APPLE_PQC_SDK）..."
+skybridge_configure_apple_pqc_sdk_for_package_context "release_dmg" "Release DMG" || exit 1
+log_info "Host macOS 版本: ${SKYBRIDGE_PQC_HOST_OS_VER:-unknown}"
+log_info "Xcode macOS SDK 版本: ${SKYBRIDGE_PQC_SDK_VER:-unknown}"
+log_info_path "Xcode macOS SDK 路径" "${SKYBRIDGE_PQC_SDK_PATH:-unknown}"
+log_info "Apple PQC SDK 探测通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}, target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}），启用 Apple PQC 编译条件"
+if [[ -n "$SKYBRIDGE_PQC_HOST_OS_VER" && -n "$SKYBRIDGE_PQC_SDK_VER" && "$SKYBRIDGE_PQC_HOST_OS_VER" != "$SKYBRIDGE_PQC_SDK_VER" ]]; then
+    log_info "提示：Host 与 SDK 版本不同是常见情况（例如 Host 26.3 + SDK 26.2）。编译能力按 SDK 判定。"
+fi
+
 if [[ "$SKIP_BUILD" == false ]]; then
     log_step "步骤 1: 构建 Release 版本"
 
     cd "$PROJECT_ROOT"
-    log_info "Xcode DerivedData 路径: $XCODE_DERIVED_DATA_PATH"
-
-    log_info "检测 Apple PQC SDK 可用性（用于 HAS_APPLE_PQC_SDK）..."
-    skybridge_detect_apple_pqc_sdk
-    log_info "Host macOS 版本: ${SKYBRIDGE_PQC_HOST_OS_VER:-unknown}"
-    log_info "Xcode macOS SDK 版本: ${SKYBRIDGE_PQC_SDK_VER:-unknown}"
-    log_info "Xcode macOS SDK 路径: ${SKYBRIDGE_PQC_SDK_PATH:-unknown}"
-    if [[ -n "$SKYBRIDGE_PQC_HOST_OS_VER" && -n "$SKYBRIDGE_PQC_SDK_VER" && "$SKYBRIDGE_PQC_HOST_OS_VER" != "$SKYBRIDGE_PQC_SDK_VER" ]]; then
-        log_info "提示：Host 与 SDK 版本不同是常见情况（例如 Host 26.3 + SDK 26.2）。编译能力按 SDK 判定。"
-    fi
-    if [[ "${SKYBRIDGE_PQC_SDK_AVAILABLE:-0}" == "1" ]]; then
-        export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
-        log_info "Apple PQC SDK 探测通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}），启用 Apple PQC 编译条件"
-    else
-        export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=0
-        log_info "Apple PQC SDK 探测未通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}），禁用 Apple PQC 编译条件"
-        if [[ -n "${SKYBRIDGE_PQC_PROBE_ERROR:-}" ]]; then
-            log_info "PQC 探测详情: ${SKYBRIDGE_PQC_PROBE_ERROR}"
-        fi
-    fi
+    log_info_path "Xcode DerivedData 路径" "$XCODE_DERIVED_DATA_PATH"
 
     if [[ ! -d "$XCODE_PROJECT" ]]; then
         log_error "缺少 Xcode 工程：$XCODE_PROJECT"
@@ -1122,9 +1099,6 @@ echo "🛡️ Gatekeeper 摘要:"
 APP_GATEKEEPER_OUTPUT="$(assess_and_report_gatekeeper "$APP_BUNDLE" "execute" "App Bundle")"
 DMG_GATEKEEPER_OUTPUT="$(assess_and_report_gatekeeper "$DMG_PATH" "open" "DMG")"
 
-echo ""
-log_success "所有步骤完成！"
-
 if [[ "$REQUIRE_NOTARIZATION" == "1" ]]; then
     if [[ "$NOTARIZE_APP" == "1" ]] && \
        ! skybridge_gatekeeper_is_notarized "$APP_GATEKEEPER_OUTPUT" && \
@@ -1143,6 +1117,9 @@ if [[ "$REQUIRE_NOTARIZATION" == "1" ]]; then
         exit 1
     fi
 fi
+
+echo ""
+log_success "所有步骤完成！"
 
 echo ""
 echo "🧩 Helper 版本摘要:"

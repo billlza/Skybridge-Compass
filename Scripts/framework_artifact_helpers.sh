@@ -26,6 +26,31 @@ skybridge_framework_binary_exists() {
   skybridge_framework_binary_path "$@" >/dev/null
 }
 
+skybridge_normalize_versioned_framework_layout() {
+  local framework_dir="${1:-}"
+
+  [[ -n "${framework_dir}" && -d "${framework_dir}" ]] || return 1
+
+  local current_dir="${framework_dir}/Versions/A"
+  local nested_versions_dir="${current_dir}/Versions"
+  [[ -d "${current_dir}" && -e "${nested_versions_dir}" ]] || return 0
+
+  local nested_privacy="${nested_versions_dir}/A/Resources/PrivacyInfo.xcprivacy"
+  if [[ -f "${nested_privacy}" ]]; then
+    mkdir -p "${current_dir}/Resources"
+    cp -f "${nested_privacy}" "${current_dir}/Resources/PrivacyInfo.xcprivacy"
+  fi
+
+  rm -rf "${nested_versions_dir}"
+}
+
+skybridge_assert_no_nested_framework_versions_payload() {
+  local framework_dir="${1:-}"
+
+  [[ -n "${framework_dir}" && -d "${framework_dir}" ]] || return 1
+  [[ ! -e "${framework_dir}/Versions/A/Versions" ]]
+}
+
 skybridge_framework_supports_arch() {
   local framework_dir="${1:-}"
   local framework_name="${2:-}"

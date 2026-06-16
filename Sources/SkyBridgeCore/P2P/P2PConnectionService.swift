@@ -288,11 +288,16 @@ public actor P2PConnectionService {
         listener.newConnectionHandler = { [weak self] connection in
             guard let self = self else { return }
             Task {
-                let id = ConnectionID()
-                try await self.addConnection(id: id,
-                                             connection: connection,
-                                             role: .publisher)
-                self.logger.info("🔗 收到新的 P2P 连接：\(id.uuidString, privacy: .public)")
+                do {
+                    let id = ConnectionID()
+                    try await self.addConnection(id: id,
+                                                 connection: connection,
+                                                 role: .publisher)
+                    self.logger.info("🔗 收到新的 P2P 连接：\(id.uuidString, privacy: .public)")
+                } catch {
+                    connection.cancel()
+                    self.logger.error("❌ P2P 入站连接登记失败：\(error.localizedDescription, privacy: .public)")
+                }
             }
         }
 

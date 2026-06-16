@@ -14,6 +14,20 @@ public enum SkyBridgeAppUpdateValidationError: Error, LocalizedError, Equatable,
     case unsupportedPackageFormat(String)
     case unsupportedDistribution(String)
     case packageNotNotarized
+    case missingApplePQCSDKBuildAttestation
+    case applePQCSDKBuildNotCompiled
+    case invalidApplePQCSDKBuildCompileMarker(String)
+    case unsupportedApplePQCSDKBuildProbeMode(String)
+    case unsupportedApplePQCSDKBuildSDKName(String)
+    case unsupportedApplePQCSDKBuildSDKVersion(String)
+    case unsupportedApplePQCSDKBuildSwiftTarget(String)
+    case missingApplePQCSDKBuildSecureEnclaveSymbols
+    case unsupportedApplePQCSDKBuildSymbolSet(String)
+    case missingApplePQCSDKBuildSignature
+    case unsupportedApplePQCSDKBuildSignatureAlgorithm(String)
+    case applePQCSDKBuildSignatureKeyNotTrusted(String)
+    case invalidApplePQCSDKBuildSignatureEncoding
+    case applePQCSDKBuildSignatureVerificationFailed
     case missingManifestSignature
     case unsupportedManifestSignatureAlgorithm(String)
     case missingTrustedManifestSigningKeys
@@ -55,6 +69,34 @@ public enum SkyBridgeAppUpdateValidationError: Error, LocalizedError, Equatable,
             return "Update distribution must be developer-id, got \(distribution)"
         case .packageNotNotarized:
             return "Update manifest must only advertise notarized packages"
+        case .missingApplePQCSDKBuildAttestation:
+            return "Update manifest must include signed Apple PQC SDK build provenance"
+        case .applePQCSDKBuildNotCompiled:
+            return "Update manifest must advertise an app compiled with HAS_APPLE_PQC_SDK"
+        case .invalidApplePQCSDKBuildCompileMarker(let marker):
+            return "Invalid Apple PQC SDK build compile marker: \(marker)"
+        case .unsupportedApplePQCSDKBuildProbeMode(let mode):
+            return "Apple PQC SDK build probe mode must be symbol_probe, got \(mode)"
+        case .unsupportedApplePQCSDKBuildSDKName(let sdkName):
+            return "Apple PQC SDK build SDK name must be macosx, got \(sdkName)"
+        case .unsupportedApplePQCSDKBuildSDKVersion(let sdkVersion):
+            return "Apple PQC SDK build SDK version must be 26.5, got \(sdkVersion)"
+        case .unsupportedApplePQCSDKBuildSwiftTarget(let swiftTarget):
+            return "Apple PQC SDK build Swift target must be arm64-apple-macosx26.0, got \(swiftTarget)"
+        case .missingApplePQCSDKBuildSecureEnclaveSymbols:
+            return "Apple PQC SDK build provenance must include Secure Enclave PQC symbols"
+        case .unsupportedApplePQCSDKBuildSymbolSet(let symbolSet):
+            return "Apple PQC SDK build symbol set must be cryptokit-pqc-v1, got \(symbolSet)"
+        case .missingApplePQCSDKBuildSignature:
+            return "Apple PQC SDK build provenance must include an Ed25519 signature"
+        case .unsupportedApplePQCSDKBuildSignatureAlgorithm(let algorithm):
+            return "Apple PQC SDK build provenance signature algorithm must be ed25519, got \(algorithm)"
+        case .applePQCSDKBuildSignatureKeyNotTrusted(let keyId):
+            return "Apple PQC SDK build provenance signature key is not trusted: \(keyId)"
+        case .invalidApplePQCSDKBuildSignatureEncoding:
+            return "Apple PQC SDK build provenance signature must be base64 or base64url encoded"
+        case .applePQCSDKBuildSignatureVerificationFailed:
+            return "Apple PQC SDK build provenance signature verification failed"
         case .missingManifestSignature:
             return "Update manifest must include an Ed25519 signature"
         case .unsupportedManifestSignatureAlgorithm(let algorithm):
@@ -169,6 +211,7 @@ public struct SkyBridgeAppUpdateManifest: Decodable, Equatable, Sendable {
     public let distribution: String
     public let notarized: Bool
     public let sizeBytes: Int64?
+    public let applePQCSDKBuild: SkyBridgeApplePQCSDKBuildAttestation?
     public let signature: SkyBridgeAppUpdateManifestSignature?
 
     enum CodingKeys: String, CodingKey {
@@ -189,6 +232,31 @@ public struct SkyBridgeAppUpdateManifest: Decodable, Equatable, Sendable {
         case distribution
         case notarized
         case sizeBytes = "size_bytes"
+        case applePQCSDKBuild = "apple_pqc_sdk_build"
+        case signature
+    }
+}
+
+public struct SkyBridgeApplePQCSDKBuildAttestation: Decodable, Equatable, Sendable {
+    public let compiledWithHASApplePQCSDK: Bool
+    public let compileMarker: String
+    public let probeMode: String
+    public let sdkName: String
+    public let sdkVersion: String
+    public let swiftTarget: String
+    public let secureEnclaveSymbolsIncluded: Bool
+    public let symbolSet: String
+    public let signature: SkyBridgeAppUpdateManifestSignature?
+
+    enum CodingKeys: String, CodingKey {
+        case compiledWithHASApplePQCSDK = "compiled_with_has_apple_pqc_sdk"
+        case compileMarker = "compile_marker"
+        case probeMode = "probe_mode"
+        case sdkName = "sdk_name"
+        case sdkVersion = "sdk_version"
+        case swiftTarget = "swift_target"
+        case secureEnclaveSymbolsIncluded = "secure_enclave_symbols_included"
+        case symbolSet = "symbol_set"
         case signature
     }
 }
@@ -260,6 +328,14 @@ public struct SkyBridgeAppUpdateDecision: Equatable, Sendable {
 }
 
 public enum SkyBridgeAppUpdateEvaluator {
+    private static let expectedApplePQCSDKBuildCompileMarker =
+        "skybridge.apple-pqc-sdk.compile-fact.v1.has-apple-pqc-sdk"
+    private static let expectedApplePQCSDKBuildProbeMode = "symbol_probe"
+    private static let expectedApplePQCSDKBuildSDKName = "macosx"
+    private static let expectedApplePQCSDKBuildSDKVersion = "26.5"
+    private static let expectedApplePQCSDKBuildSwiftTarget = "arm64-apple-macosx26.0"
+    private static let expectedApplePQCSDKBuildSymbolSet = "cryptokit-pqc-v1"
+
     public static func decodeManifest(from data: Data) throws -> SkyBridgeAppUpdateManifest {
         let decoder = JSONDecoder()
         return try decoder.decode(SkyBridgeAppUpdateManifest.self, from: data)
@@ -312,6 +388,10 @@ public enum SkyBridgeAppUpdateEvaluator {
             manifest: manifest,
             trustedSigningKeys: trustedSigningKeys
         )
+        try validateApplePQCSDKBuildAttestation(
+            manifest: manifest,
+            trustedSigningKeys: trustedSigningKeys
+        )
 
         let latestVersion = try SkyBridgeVersion(manifest.version)
         let currentVersion = try SkyBridgeVersion(context.currentVersion)
@@ -359,6 +439,42 @@ public enum SkyBridgeAppUpdateEvaluator {
         appendSignedField("distribution", manifest.distribution, to: &payload)
         appendSignedField("notarized", manifest.notarized ? "true" : "false", to: &payload)
         appendSignedField("size_bytes", manifest.sizeBytes.map(String.init) ?? "", to: &payload)
+        return payload
+    }
+
+    public static func applePQCSDKBuildSigningPayload(
+        for manifest: SkyBridgeAppUpdateManifest,
+        attestation: SkyBridgeApplePQCSDKBuildAttestation
+    ) -> Data {
+        var payload = Data()
+        appendSignedField("bundle_id", manifest.bundleIdentifier, to: &payload)
+        appendSignedField("platform", manifest.platform, to: &payload)
+        appendSignedField("channel", manifest.channel, to: &payload)
+        appendSignedField("version", manifest.version, to: &payload)
+        appendSignedField("build", manifest.build, to: &payload)
+        appendSignedField("sequence", String(manifest.sequence), to: &payload)
+        appendSignedField("download_url", manifest.downloadURL.absoluteString, to: &payload)
+        appendSignedField("sha256", manifest.sha256, to: &payload)
+        appendSignedField("package_format", manifest.packageFormat, to: &payload)
+        appendSignedField("distribution", manifest.distribution, to: &payload)
+        appendSignedField("notarized", manifest.notarized ? "true" : "false", to: &payload)
+        appendSignedField("size_bytes", manifest.sizeBytes.map(String.init) ?? "", to: &payload)
+        appendSignedField(
+            "apple_pqc_sdk_build.compiled_with_has_apple_pqc_sdk",
+            attestation.compiledWithHASApplePQCSDK ? "true" : "false",
+            to: &payload
+        )
+        appendSignedField("apple_pqc_sdk_build.compile_marker", attestation.compileMarker, to: &payload)
+        appendSignedField("apple_pqc_sdk_build.probe_mode", attestation.probeMode, to: &payload)
+        appendSignedField("apple_pqc_sdk_build.sdk_name", attestation.sdkName, to: &payload)
+        appendSignedField("apple_pqc_sdk_build.sdk_version", attestation.sdkVersion, to: &payload)
+        appendSignedField("apple_pqc_sdk_build.swift_target", attestation.swiftTarget, to: &payload)
+        appendSignedField(
+            "apple_pqc_sdk_build.secure_enclave_symbols_included",
+            attestation.secureEnclaveSymbolsIncluded ? "true" : "false",
+            to: &payload
+        )
+        appendSignedField("apple_pqc_sdk_build.symbol_set", attestation.symbolSet, to: &payload)
         return payload
     }
 
@@ -420,6 +536,67 @@ public enum SkyBridgeAppUpdateEvaluator {
             return date
         }
         throw invalidError
+    }
+
+    private static func validateApplePQCSDKBuildAttestation(
+        manifest: SkyBridgeAppUpdateManifest,
+        trustedSigningKeys: [SkyBridgeAppUpdateTrustedSigningKey]
+    ) throws {
+        guard let attestation = manifest.applePQCSDKBuild else {
+            throw SkyBridgeAppUpdateValidationError.missingApplePQCSDKBuildAttestation
+        }
+        guard attestation.compiledWithHASApplePQCSDK else {
+            throw SkyBridgeAppUpdateValidationError.applePQCSDKBuildNotCompiled
+        }
+        guard attestation.compileMarker == expectedApplePQCSDKBuildCompileMarker else {
+            throw SkyBridgeAppUpdateValidationError.invalidApplePQCSDKBuildCompileMarker(attestation.compileMarker)
+        }
+        guard attestation.probeMode == expectedApplePQCSDKBuildProbeMode else {
+            throw SkyBridgeAppUpdateValidationError.unsupportedApplePQCSDKBuildProbeMode(attestation.probeMode)
+        }
+        guard attestation.sdkName == expectedApplePQCSDKBuildSDKName else {
+            throw SkyBridgeAppUpdateValidationError.unsupportedApplePQCSDKBuildSDKName(attestation.sdkName)
+        }
+        guard attestation.sdkVersion == expectedApplePQCSDKBuildSDKVersion else {
+            throw SkyBridgeAppUpdateValidationError.unsupportedApplePQCSDKBuildSDKVersion(attestation.sdkVersion)
+        }
+        guard attestation.swiftTarget == expectedApplePQCSDKBuildSwiftTarget else {
+            throw SkyBridgeAppUpdateValidationError.unsupportedApplePQCSDKBuildSwiftTarget(attestation.swiftTarget)
+        }
+        guard attestation.secureEnclaveSymbolsIncluded else {
+            throw SkyBridgeAppUpdateValidationError.missingApplePQCSDKBuildSecureEnclaveSymbols
+        }
+        guard attestation.symbolSet == expectedApplePQCSDKBuildSymbolSet else {
+            throw SkyBridgeAppUpdateValidationError.unsupportedApplePQCSDKBuildSymbolSet(attestation.symbolSet)
+        }
+        guard let signature = attestation.signature else {
+            throw SkyBridgeAppUpdateValidationError.missingApplePQCSDKBuildSignature
+        }
+        guard signature.algorithm.lowercased() == "ed25519" else {
+            throw SkyBridgeAppUpdateValidationError.unsupportedApplePQCSDKBuildSignatureAlgorithm(signature.algorithm)
+        }
+        guard let trustedKey = trustedSigningKeys.first(where: { $0.keyId == signature.keyId }) else {
+            throw SkyBridgeAppUpdateValidationError.applePQCSDKBuildSignatureKeyNotTrusted(signature.keyId)
+        }
+        guard let publicKeyData = decodeBase64OrBase64URL(trustedKey.publicKeyBase64),
+              publicKeyData.count == 32,
+              let signatureData = decodeBase64OrBase64URL(signature.value),
+              signatureData.count == 64 else {
+            throw SkyBridgeAppUpdateValidationError.invalidApplePQCSDKBuildSignatureEncoding
+        }
+
+        let publicKey: Curve25519.Signing.PublicKey
+        do {
+            publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData)
+        } catch {
+            throw SkyBridgeAppUpdateValidationError.invalidTrustedManifestSigningKey(trustedKey.keyId)
+        }
+        guard publicKey.isValidSignature(
+            signatureData,
+            for: applePQCSDKBuildSigningPayload(for: manifest, attestation: attestation)
+        ) else {
+            throw SkyBridgeAppUpdateValidationError.applePQCSDKBuildSignatureVerificationFailed
+        }
     }
 
     private static func verifySignature(

@@ -1,6 +1,7 @@
 mod catalog;
 mod check_coverage;
 mod core_cli;
+mod integration_tests;
 mod p2p_remote;
 mod performance_tests;
 mod release;
@@ -29,5 +30,8 @@ pub(super) fn cli_rust_source_fragments() -> impl Iterator<Item = (&'static str,
 
 pub(super) fn check_coverage_evidence_fragments()
 -> impl Iterator<Item = (&'static str, &'static str)> {
-    release::SOURCE_FRAGMENTS.iter().copied()
+    release::SOURCE_FRAGMENTS
+        .iter()
+        .chain(integration_tests::SOURCE_FRAGMENTS.iter())
+        .copied()
 }

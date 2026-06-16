@@ -1162,6 +1162,8 @@ public class FileTransferManager: BaseManager {
         }
         #endif
 
+        let receivePath = try uniqueReceiveFileURL(for: metadata.fileName)
+
         let transfer = FileTransfer(
             id: metadata.transferId,
             fileName: sanitizeIncomingFileName(metadata.fileName),
@@ -1179,7 +1181,6 @@ public class FileTransferManager: BaseManager {
         }
         registerActiveTransfer(transfer)
 
-        let receivePath = uniqueReceiveFileURL(for: metadata.fileName)
         transfer.localPath = receivePath
 
         do {
@@ -2665,7 +2666,7 @@ public class FileTransferManager: BaseManager {
         FileTransferPathPolicy.sanitizedFileName(raw)
     }
 
-    private func uniqueReceiveFileURL(for fileName: String, existingURL: URL? = nil) -> URL {
+    private func uniqueReceiveFileURL(for fileName: String, existingURL: URL? = nil) throws -> URL {
         if let existingURL {
             return existingURL
         }
@@ -2675,7 +2676,7 @@ public class FileTransferManager: BaseManager {
             receiveBaseDirectory = baseDir
         }
 
-        return FileTransferPathPolicy.uniqueDestinationURL(
+        return try FileTransferPathPolicy.uniqueDestinationURL(
             baseDirectory: baseDir,
             fileName: fileName
         )

@@ -25,6 +25,7 @@ mod main_dispatch_tests;
 #[cfg(test)]
 mod main_tests;
 mod memory_check;
+mod operator_capabilities;
 mod operator_status;
 mod p2p_remote_performance;
 mod p2p_remote_performance_checks;
@@ -33,9 +34,11 @@ mod performance_budgets;
 mod performance_check_names;
 mod performance_commands;
 mod performance_evidence;
+mod performance_report_target;
 #[cfg(test)]
 mod performance_tests;
 mod remote_control_notice_check;
+mod remote_desktop_commands;
 mod repo_paths;
 mod session_commands;
 mod smoke_suite;

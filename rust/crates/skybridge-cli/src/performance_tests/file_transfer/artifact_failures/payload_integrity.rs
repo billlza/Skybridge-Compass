@@ -31,7 +31,7 @@ fn file_transfer_artifact_requires_matching_payload_sha256() -> Result<()> {
     let report = build_file_transfer_performance_report(&args)?;
     let payload = doctor_check(&report, "file_transfer_payload_integrity");
     assert!(!payload.ok, "{}", payload.detail);
-    assert!(payload.detail.contains("mismatchedNames=ios-smoke-RUN.txt"));
+    assert!(payload.detail.contains("mismatchedNameCount=1"));
     assert!(doctor_check(&report, "performance_check_surface").ok);
 
     std::fs::write(
@@ -41,11 +41,7 @@ fn file_transfer_artifact_requires_matching_payload_sha256() -> Result<()> {
     let report = build_file_transfer_performance_report(&args)?;
     let missing_hash = doctor_check(&report, "file_transfer_payload_integrity");
     assert!(!missing_hash.ok, "{}", missing_hash.detail);
-    assert!(
-        missing_hash
-            .detail
-            .contains("missingReceiverNames=ios-smoke-RUN.txt")
-    );
+    assert!(missing_hash.detail.contains("missingReceiverNameCount=1"));
 
     std::fs::write(
         artifact_dir.join("mac.status.log"),
@@ -58,7 +54,7 @@ fn file_transfer_artifact_requires_matching_payload_sha256() -> Result<()> {
     let report = build_file_transfer_performance_report(&args)?;
     let mixed_run_ids = doctor_check(&report, "file_transfer_payload_integrity");
     assert!(!mixed_run_ids.ok, "{}", mixed_run_ids.detail);
-    assert!(mixed_run_ids.detail.contains("bidirectionalRunIds=-"));
+    assert!(mixed_run_ids.detail.contains("bidirectionalRunIdCount=0"));
 
     std::fs::write(
         artifact_dir.join("mac.status.log"),
@@ -84,10 +80,6 @@ fn file_transfer_artifact_requires_matching_payload_sha256() -> Result<()> {
     let report = build_file_transfer_performance_report(&args)?;
     let conflicting_hash = doctor_check(&report, "file_transfer_payload_integrity");
     assert!(!conflicting_hash.ok, "{}", conflicting_hash.detail);
-    assert!(
-        conflicting_hash
-            .detail
-            .contains("conflictingNames=mac-smoke-RUN.txt")
-    );
+    assert!(conflicting_hash.detail.contains("conflictingNameCount=1"));
     Ok(())
 }

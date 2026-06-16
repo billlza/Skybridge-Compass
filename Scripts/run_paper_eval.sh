@@ -162,27 +162,16 @@ if [[ -z "${ARTIFACT_DATE:-}" ]] && [[ -n "${SKYBRIDGE_ARTIFACT_DATE:-}" ]]; the
   export ARTIFACT_DATE="${SKYBRIDGE_ARTIFACT_DATE}"
 fi
 
-swift_flags=()
-if command -v xcrun >/dev/null 2>&1; then
-  sdk_path="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
-  if [[ -n "${sdk_path}" ]]; then
-    # Detect CryptoKit PQC types in the active SDK.
-    if command -v rg >/dev/null 2>&1; then
-      has_pqc=$(rg -q "MLKEM768" "$sdk_path/System/Library/Frameworks/CryptoKit.framework/Versions/A/Modules/CryptoKit.swiftmodule" && echo "1" || echo "0")
-    else
-      has_pqc=$(grep -q "MLKEM768" "$sdk_path/System/Library/Frameworks/CryptoKit.framework/Versions/A/Modules/CryptoKit.swiftmodule"/* 2>/dev/null && echo "1" || echo "0")
-    fi
-    if [[ "${has_pqc}" == "1" ]]; then
-      swift_flags=("-Xswiftc" "-DHAS_APPLE_PQC_SDK")
-      export HAS_APPLE_PQC_SDK=1
-    fi
-  fi
-fi
-
-if [[ "${#swift_flags[@]}" -gt 0 ]]; then
-  log_anchor "Apple PQC SDK detected: enabling -DHAS_APPLE_PQC_SDK for SwiftPM runs"
+# shellcheck source=Scripts/apple_pqc_sdk_probe.sh
+source "${root_dir}/Scripts/apple_pqc_sdk_probe.sh"
+skybridge_configure_optional_apple_pqc_sdk_compile_gate macosx
+if skybridge_apple_pqc_sdk_probe_succeeded; then
+  log_anchor "Apple PQC SDK symbol probe passed: enabling Package.swift HAS_APPLE_PQC_SDK gate (mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown}, sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown}, target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown})"
 else
-  log_anchor "Apple PQC SDK NOT detected: benches will run without -DHAS_APPLE_PQC_SDK"
+  log_anchor "Apple PQC SDK symbol probe failed: benches will run without HAS_APPLE_PQC_SDK (mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown}, sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown})"
+  if [[ -n "${SKYBRIDGE_PQC_PROBE_ERROR:-}" ]]; then
+    log_anchor "Apple PQC probe detail: $(skybridge_sanitize_pqc_probe_log_value "${SKYBRIDGE_PQC_PROBE_ERROR}")"
+  fi
 fi
 
 export SKYBRIDGE_RUN_BENCH=1
@@ -274,20 +263,14 @@ then
   exit 2
 fi
 
-core_bench_regex="${test_target}\\.HandshakeBenchmarkTests/(testHandshakeLatency_Classic|testHandshakeRTT_Classic|testHandshakeLatency_LiboqsPQC|testHandshakeRTT_LiboqsPQC|testHandshakeLatency_LiboqsPQCv2FS|testHandshakeRTT_LiboqsPQCv2FS|testHandshakeLatency_ApplePQC|testHandshakeRTT_ApplePQC)$"
-run_bench_filter="${test_target}.HandshakeBenchmarkTests"
-if [[ "${bench_scope}" == "core" ]]; then
-  run_bench_filter="${core_bench_regex}"
-fi
-
 export SKYBRIDGE_BENCH_APPLE_ITERATIONS="${bench_apple_iterations}"
 log_anchor "Run configuration: ARTIFACT_DATE=${ARTIFACT_DATE:-unset}, SKYBRIDGE_BENCH_SCOPE=${bench_scope}, SKYBRIDGE_BENCH_BATCHES=${bench_batches}, SKYBRIDGE_BENCH_MAX_BATCHES=${bench_max_batches}, SKYBRIDGE_BENCH_STABILITY_THRESHOLD=${bench_stability_threshold}, SKYBRIDGE_BENCH_STABILITY_REQUIRE_APPLE=${bench_stability_require_apple}, SKYBRIDGE_BENCH_APPLE_ITERATIONS=${bench_apple_iterations}, SKYBRIDGE_BENCH_RUN_CONTRAST=${bench_run_contrast}, SKYBRIDGE_BENCH_CONTRAST_BATCHES=${bench_contrast_batches}, SKYBRIDGE_BENCH_COOLDOWN_SECONDS=${bench_cooldown_seconds}, SKYBRIDGE_BENCH_MAX_LOAD_RATIO=${bench_max_load_ratio}, SKYBRIDGE_BENCH_LOAD_WAIT_SECONDS=${bench_load_wait_seconds}, SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT=${SKYBRIDGE_BENCH_DETERMINISTIC_TRANSPORT}, SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING=${SKYBRIDGE_BENCH_DISABLE_HANDSHAKE_PADDING}, SKYBRIDGE_BENCH_DETERMINISTIC_NONCE=${SKYBRIDGE_BENCH_DETERMINISTIC_NONCE}, SKYBRIDGE_FI_ITERATIONS=${SKYBRIDGE_FI_ITERATIONS:-1000}, SKYBRIDGE_POLICY_ITERATIONS=${SKYBRIDGE_POLICY_ITERATIONS:-1000}, SKYBRIDGE_MIGRATION_ITERATIONS=${SKYBRIDGE_MIGRATION_ITERATIONS:-1000}, SKYBRIDGE_SOA_ITERATIONS=${SKYBRIDGE_SOA_ITERATIONS:-100}"
 
 # Handshake benchmark stability is very sensitive to debug/test harness jitter on macOS.
 # For paper evaluation we prefer a dedicated release-mode runner binary.
 run_stage "handshake-bench-runner-build" swift \
-  swift build -c release --product HandshakeBenchRunner "${swift_flags[@]}"
-handshake_bench_bin_dir="$(swift build -c release --show-bin-path "${swift_flags[@]}")"
+  swift build -c release --product HandshakeBenchRunner
+handshake_bench_bin_dir="$(swift build -c release --show-bin-path)"
 handshake_bench_runner="${handshake_bench_bin_dir}/HandshakeBenchRunner"
 if [[ ! -x "${handshake_bench_runner}" ]]; then
   echo "HandshakeBenchRunner not found after build: ${handshake_bench_runner}" >&2
@@ -336,25 +319,34 @@ else
 fi
 
 if [[ -f "Scripts/check_bench_stability_window.py" ]]; then
+  run_bench_stability_check() {
+    local artifact_date="$1"
+    local threshold="$2"
+    local min_batches="$3"
+    local require_apple="$4"
+    local output_path="$5"
+    local rc=0
+
+    set +e
+    python3 Scripts/check_bench_stability_window.py \
+      --artifact-date "${artifact_date}" \
+      --threshold "${threshold}" \
+      --min-batches "${min_batches}" \
+      --require-apple "${require_apple}" \
+      --output "${output_path}"
+    rc=$?
+    set -e
+
+    if [[ "${rc}" -eq 10 ]]; then
+      return 0
+    fi
+    return "${rc}"
+  }
+
   stability_report="Artifacts/bench_stability_window_${artifact_date_for_checks}.json"
   while true; do
     run_stage "handshake-bench-stability-check-after-${executed_bench_batches}" none \
-      bash -c '
-        set +e
-        python3 "$1" \
-          --artifact-date "$2" \
-          --threshold "$3" \
-          --min-batches "$4" \
-          --require-apple "$5" \
-          --output "$6"
-        rc=$?
-        set -e
-        if [[ "$rc" -eq 10 ]]; then
-          exit 0
-        fi
-        exit "$rc"
-      ' _ \
-      "Scripts/check_bench_stability_window.py" \
+      run_bench_stability_check \
       "${artifact_date_for_checks}" \
       "${bench_stability_threshold}" \
       "${bench_batches}" \
@@ -435,28 +427,28 @@ export SKYBRIDGE_RUN_FI=1
 export SKYBRIDGE_FI_ITERATIONS=1000
 export SKYBRIDGE_FI_PROGRESS_INTERVAL="${SKYBRIDGE_FI_PROGRESS_INTERVAL:-100}"
 run_stage "fault-injection-bench" swift \
-  swift test --filter "${test_target}.HandshakeFaultInjectionBenchTests" "${swift_flags[@]}"
+  swift test --filter "${test_target}.HandshakeFaultInjectionBenchTests"
 
 export SKYBRIDGE_RUN_POLICY_BENCH=1
 export SKYBRIDGE_POLICY_ITERATIONS=1000
 run_stage "policy-downgrade-bench" swift \
-  swift test --filter "${test_target}.PolicyDowngradeBenchTests" "${swift_flags[@]}"
+  swift test --filter "${test_target}.PolicyDowngradeBenchTests"
 
 export SKYBRIDGE_RUN_MIGRATION_BENCH=1
 export SKYBRIDGE_MIGRATION_ITERATIONS=1000
 run_stage "migration-coverage-bench" swift \
-  swift test --filter "${test_target}.MigrationCoverageBenchTests" "${swift_flags[@]}"
+  swift test --filter "${test_target}.MigrationCoverageBenchTests"
 
 export SKYBRIDGE_RUN_SOA_BENCH=1
 export SKYBRIDGE_SOA_ITERATIONS="${SKYBRIDGE_SOA_ITERATIONS:-100}"
 run_stage "soa-interop-bench" swift \
-  swift test --filter "${test_target}.SOAInteroperabilityBenchTests" "${swift_flags[@]}"
+  swift test --filter "${test_target}.SOAInteroperabilityBenchTests"
 
 run_stage "message-size-snapshot-tests" swift \
-  swift test --filter "${test_target}.MessageSizeSnapshotTests" "${swift_flags[@]}"
+  swift test --filter "${test_target}.MessageSizeSnapshotTests"
 
 run_stage "message-size-bench-build" swift \
-  swift build --product MessageSizeBenchRunner "${swift_flags[@]}"
+  swift build --product MessageSizeBenchRunner
 run_stage "message-size-bench-run" none \
   ./.build/debug/MessageSizeBenchRunner
 
@@ -464,13 +456,13 @@ run_stage "message-size-bench-run" none \
 export SKYBRIDGE_RUN_PADDING_BENCH=1
 export SKYBRIDGE_PADDING_ITERATIONS="${SKYBRIDGE_PADDING_ITERATIONS:-2000}"
 run_stage "traffic-padding-bench" swift \
-  swift test --filter "${test_target}.TrafficPaddingBenchTests" "${swift_flags[@]}"
+  swift test --filter "${test_target}.TrafficPaddingBenchTests"
 
 # Phase C3 (TDSC): SBP2 bucket-cap sensitivity study (64KiB/128KiB/256KiB)
 export SKYBRIDGE_RUN_PADDING_SENS=1
 export SKYBRIDGE_PADDING_SENS_ITERATIONS="${SKYBRIDGE_PADDING_SENS_ITERATIONS:-80}"
 run_stage "traffic-padding-sensitivity-bench" swift \
-  swift test --filter "${test_target}.TrafficPaddingSensitivityBenchTests" "${swift_flags[@]}"
+  swift test --filter "${test_target}.TrafficPaddingSensitivityBenchTests"
 
 if [[ "${RUN_IOS_MICROBENCH_IMPORT:-0}" == "1" ]]; then
   run_stage "ios-microbench-import" none \

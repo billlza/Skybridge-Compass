@@ -145,12 +145,12 @@ pub(super) fn check_file_transfer_skr_direct_route(
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "requestSeen={} directHostCandidate={} selectedEndpointDirect={} selectedEndpointClass={} selectedEndpoint={}",
+            "requestSeen={} directHostCandidate={} selectedEndpointDirect={} selectedEndpointClass={} selectedEndpointSeen={}",
             refresh.request_seen,
             refresh.direct_host_candidate_seen,
             refresh.selected_endpoint_direct_seen,
             refresh.selected_endpoint_class.as_deref().unwrap_or("-"),
-            refresh.selected_endpoint.as_deref().unwrap_or("-")
+            refresh.selected_endpoint.is_some()
         ),
     )
 }
@@ -239,17 +239,17 @@ pub(super) fn check_file_transfer_payload_integrity(
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "senderCount={} receiverCount={} matchedNames={} bidirectionalRunIds={} reconnectRunIds={} reconnectDigestOk={} mismatchedNames={} missingReceiverNames={} missingSenderNames={} conflictingNames={}",
+            "senderCount={} receiverCount={} matchedNameCount={} bidirectionalRunIdCount={} reconnectRunIdCount={} reconnectDigestOk={} mismatchedNameCount={} missingReceiverNameCount={} missingSenderNameCount={} conflictingNameCount={}",
             evidence.payload_digests.sender_count(),
             evidence.payload_digests.receiver_count(),
-            format_name_list(&matched_names),
-            format_set(&bidirectional_run_ids),
-            format_set(&reconnect_run_ids),
+            matched_names.len(),
+            bidirectional_run_ids.len(),
+            reconnect_run_ids.len(),
             reconnect_digest_ok,
-            format_name_list(&mismatched_names),
-            format_name_list(&missing_receiver_names),
-            format_name_list(&missing_sender_names),
-            format_name_list(&conflicting_names)
+            mismatched_names.len(),
+            missing_receiver_names.len(),
+            missing_sender_names.len(),
+            conflicting_names.len()
         ),
     )
 }
@@ -269,14 +269,6 @@ pub(super) fn check_file_transfer_route_evidence(
     )
 }
 
-fn format_name_list(names: &[String]) -> String {
-    if names.is_empty() {
-        "-".to_owned()
-    } else {
-        names.join("|")
-    }
-}
-
 fn bidirectional_payload_run_ids(matched_names: &[String]) -> BTreeSet<String> {
     let ios_run_ids = matched_run_ids_for_prefix(matched_names, "ios-smoke-");
     let mac_run_ids = matched_run_ids_for_prefix(matched_names, "mac-smoke-");
@@ -294,12 +286,4 @@ fn smoke_run_id(name: &str, prefix: &str) -> Option<String> {
     let rest = name.strip_prefix(prefix)?;
     let run_id = rest.strip_suffix(".txt").unwrap_or(rest).trim();
     (!run_id.is_empty()).then(|| run_id.to_owned())
-}
-
-fn format_set(values: &BTreeSet<String>) -> String {
-    if values.is_empty() {
-        "-".to_owned()
-    } else {
-        values.iter().cloned().collect::<Vec<_>>().join("|")
-    }
 }

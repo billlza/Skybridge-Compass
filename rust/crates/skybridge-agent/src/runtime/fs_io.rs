@@ -11,6 +11,7 @@ pub(super) async fn ensure_layout(paths: &AgentPaths) -> Result<()> {
     ensure_dir(&paths.identity_dir).await?;
     ensure_dir(&paths.runtime_dir).await?;
     ensure_dir(&paths.logs_dir).await?;
+    ensure_dir(&paths.received_dir).await?;
     Ok(())
 }
 

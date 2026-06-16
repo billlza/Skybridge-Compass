@@ -73,6 +73,8 @@ async fn command_wrappers_cover_auth_and_media_entrypoints() -> Result<()> {
         command: FileSubcommand::Send(FileSendArgs {
             path: "/tmp/payload.txt".into(),
             to: "peer".to_owned(),
+            session_id: None,
+            output: OutputOptions { json: true },
         }),
     };
     assert!(

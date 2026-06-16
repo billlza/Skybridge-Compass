@@ -74,6 +74,11 @@ public final class ReferenceRenderer: @unchecked Sendable {
     private var currentTransferFunc: TransferFunction
     private var currentToneMapping: ToneMappingMode
 
+    /// 离屏 HDR 渲染目标池（rgba16Float，3 槽轮转），避免视图仍在采样上一帧时被下一帧覆盖。
+    private var hdrOutputTextures: [MTLTexture] = []
+    private var hdrOutputIndex = 0
+    private var hdrOutputDimensions: (width: Int, height: Int) = (0, 0)
+
     // MARK: - 状态
 
     private let log = Logger(subsystem: "com.skybridge.compass", category: "ReferenceRenderer")
@@ -269,12 +274,19 @@ public final class ReferenceRenderer: @unchecked Sendable {
 
         let backing = ReferenceRendererBacking(textureRef: textureRef, imageBuffer: pixelBuffer)
 
+        // 依据解码缓冲的真实传输函数判定是否为 HDR 帧。SDR（含 Reference 模式下的 SDR 内容）
+        // 一律走原直通路径，绝不误用 PQ/HLG EOTF。
+        let detectedTF = detectTransferFunction(pixelBuffer)
+        let isHDRFrame = isHDRTransferFunction(detectedTF)
+
         // 更新 HDR uniform buffer
         updateUniforms(edrHeadroom: edrHeadroom)
 
-        // 如果提供了 renderPassDescriptor 和 drawable，走 HDR shader 渲染
+        let emittedTexture: MTLTexture
         if let rpd = renderPassDescriptor, let drawable,
            let hdrPipelineState, let commandQueue, let uniformBuffer {
+            // 显式 drawable 路径：当呈现视图已启用 EDR（CAMetalLayer.wantsExtendedDynamicRangeContent
+            // + rgba16Float + extended colorspace）时，由其 draw(in:) 直接驱动 HDR 渲染并呈现。
             renderHDR(
                 sourceTexture: sourceTexture,
                 renderPassDescriptor: rpd,
@@ -283,10 +295,23 @@ public final class ReferenceRenderer: @unchecked Sendable {
                 commandQueue: commandQueue,
                 uniformBuffer: uniformBuffer
             )
+            emittedTexture = sourceTexture
+        } else if isHDRFrame,
+                  let hdrPipelineState, let commandQueue, let uniformBuffer, let device,
+                  let hdrTexture = renderHDROffscreen(
+                      sourceTexture: sourceTexture, width: width, height: height,
+                      pipelineState: hdrPipelineState, commandQueue: commandQueue,
+                      uniformBuffer: uniformBuffer, device: device) {
+            // 真正的 HDR (PQ/HLG) 内容：离屏运行 HDR 着色器（PQ/HLG EOTF + BT.2020→P3 + tone map），
+            // 输出经 tone map 的 rgba16Float 纹理给呈现层。此前该着色器从不执行（drawable 始终为 nil）。
+            emittedTexture = hdrTexture
+        } else {
+            // SDR / 无 HDR 管线：保持改动前逐字节一致的直通行为。
+            emittedTexture = sourceTexture
         }
 
         // 更新最新帧引用
-        lastTexture = sourceTexture
+        lastTexture = emittedTexture
         lastBacking = backing
         hasPresented = true
 
@@ -295,8 +320,76 @@ public final class ReferenceRenderer: @unchecked Sendable {
         let latencyNs = presentTime.uptimeNanoseconds - frame.recvTimestampNs
 
         healthMonitor?.recordPresentedFrame(latencyNs: latencyNs, recvBytes: frame.recvBytes)
-        frameHandler?(sourceTexture, backing)
+        frameHandler?(emittedTexture, backing)
         return true
+    }
+
+    // MARK: - 传输函数检测 / 离屏 HDR 渲染
+
+    private func isHDRTransferFunction(_ tf: TransferFunction) -> Bool {
+        tf == .pq || tf == .hlg
+    }
+
+    /// 从解码缓冲的传输函数附件检测 PQ/HLG。这是 HDR 分支的唯一开关——SDR 内容据此被排除。
+    private func detectTransferFunction(_ pixelBuffer: CVPixelBuffer) -> TransferFunction {
+        guard let raw = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil),
+              let tfString = raw as? String else {
+            return .sRGB
+        }
+        if tfString == (kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String) {
+            currentTransferFunc = .pq
+            return .pq
+        }
+        if tfString == (kCVImageBufferTransferFunction_ITU_R_2100_HLG as String) {
+            currentTransferFunc = .hlg
+            return .hlg
+        }
+        return .sRGB
+    }
+
+    /// 取下一个离屏 HDR 渲染目标（rgba16Float）。尺寸变化时重建 3 槽池。
+    private func nextHDROutputTexture(width: Int, height: Int, device: MTLDevice) -> MTLTexture? {
+        if hdrOutputDimensions.width != width || hdrOutputDimensions.height != height || hdrOutputTextures.isEmpty {
+            hdrOutputTextures.removeAll(keepingCapacity: true)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: colorConfig.pixelFormat, width: width, height: height, mipmapped: false)
+            desc.usage = [.renderTarget, .shaderRead]
+            desc.storageMode = .private
+            for _ in 0..<3 {
+                guard let texture = device.makeTexture(descriptor: desc) else { return nil }
+                hdrOutputTextures.append(texture)
+            }
+            hdrOutputDimensions = (width, height)
+            hdrOutputIndex = 0
+        }
+        guard !hdrOutputTextures.isEmpty else { return nil }
+        let texture = hdrOutputTextures[hdrOutputIndex % hdrOutputTextures.count]
+        hdrOutputIndex = (hdrOutputIndex + 1) % hdrOutputTextures.count
+        return texture
+    }
+
+    /// 将 HDR 着色器渲染到离屏 rgba16Float 纹理（无需 drawable），返回该纹理供呈现层采样。
+    /// 跨队列同步为 best-effort：呈现视图在帧发布后的下一次 runloop 才采样，离屏 GPU 工作通常已完成；
+    /// 偶发 1 帧撕裂对实时流是可接受代价，且远优于 HDR 完全错误显示。
+    private func renderHDROffscreen(
+        sourceTexture: MTLTexture, width: Int, height: Int,
+        pipelineState: MTLRenderPipelineState, commandQueue: MTLCommandQueue,
+        uniformBuffer: MTLBuffer, device: MTLDevice
+    ) -> MTLTexture? {
+        guard let target = nextHDROutputTexture(width: width, height: height, device: device) else { return nil }
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = target
+        rpd.colorAttachments[0].loadAction = .dontCare
+        rpd.colorAttachments[0].storeAction = .store
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return nil }
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setFragmentTexture(sourceTexture, index: 0)
+        encoder.setFragmentBuffer(uniformBuffer, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        return target
     }
 
     // MARK: - HDR 渲染
@@ -394,24 +487,15 @@ public final class ReferenceRenderer: @unchecked Sendable {
     }
 
     private func loadHDRShaderLibrary(device: MTLDevice) -> MTLLibrary? {
-        // 优先从 SPM bundle 加载
-        if let bundleURL = Bundle.module.url(forResource: "RemoteDesktopHDR", withExtension: "metallib"),
-           let library = try? device.makeLibrary(URL: bundleURL) {
-            return library
-        }
-        // 回退：从默认 library 查找
-        if let library = device.makeDefaultLibrary() {
-            if library.functionNames.contains("referenceHDRVertex") {
-                return library
-            }
-        }
-        // 回退：从 Bundle.module 的默认 metallib
-        if let library = try? device.makeDefaultLibrary(bundle: Bundle.module) {
-            if library.functionNames.contains("referenceHDRVertex") {
-                return library
-            }
-        }
-        return nil
+        SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: ["RemoteDesktopHDR"],
+            requiredFunctionNames: [
+                "referenceHDRVertex",
+                "referenceHDRFragment"
+            ]
+        )
     }
 
     // MARK: - HEVC Main10 解码
@@ -625,12 +709,13 @@ public final class ReferenceRenderer: @unchecked Sendable {
 
         invalidateDecompressionSession()
 
-        // 10-bit 模式：请求 BGRA 输出以获得最大兼容性
-        // 实际 10-bit 精度通过 VT 的 kCVPixelFormatType_32BGRA 保留在浮点通道中
-        // 未来可切换到 kCVPixelFormatType_64RGBAHalf 获得完整 HDR 精度
-        let pixelFormatType: OSType = is10Bit
-            ? kCVPixelFormatType_32BGRA  // 硬件解码器自动转换
-            : kCVPixelFormatType_32BGRA
+        // 解码输出统一请求 32BGRA：对 SDR/8-bit 与 SDR-10-bit 内容是安全且经过验证的路径。
+        // 注意：32BGRA 为 8 bit/通道，并不保留 HEVC Main10 的完整 10-bit 精度——此前注释中
+        // “10-bit 精度通过 32BGRA 保留在浮点通道中”的说法不正确。真正的 10-bit/HDR 精度需要改用
+        // kCVPixelFormatType_64RGBAHalf 或双平面 420YpCbCr10 采样，并配合启用 EDR 的呈现视图，
+        // 属于需在 HDR 真机上验证的后续工作（HDR 着色器本身已在 pullAndRender 离屏分支接入）。
+        _ = is10Bit
+        let pixelFormatType: OSType = kCVPixelFormatType_32BGRA
 
         let destinationAttributes: [NSString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: pixelFormatType,

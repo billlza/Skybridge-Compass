@@ -34,7 +34,9 @@ public final class MacPlatformAdapter: @unchecked Sendable {
     public init() {}
     
     deinit {
-        screenCaptureStream?.stopCapture()
+        // Snapshot under the same lock that guards currentFrame before tearing down.
+        let stream = frameLock.withLock { screenCaptureStream }
+        stream?.stopCapture()
     }
 }
 
@@ -77,24 +79,29 @@ extension MacPlatformAdapter: PlatformAdapter {
         let delegate = ScreenCaptureStreamDelegate { [weak self] frame in
             self?.setCurrentFrame(frame)
         }
-        captureDelegate = delegate
-        
+        // Lifecycle fields share frameLock with currentFrame (set/stop/deinit may race).
+        frameLock.withLock { captureDelegate = delegate }
+
         try stream.addStreamOutput(delegate, type: .screen, sampleHandlerQueue: DispatchQueue(label: "com.skybridge.screencapture"))
         try await stream.startCapture()
-        
-        screenCaptureStream = stream
+
+        frameLock.withLock { screenCaptureStream = stream }
         logger.info("🎥 屏幕捕获已启动: \(streamConfig.width)x\(streamConfig.height)@\(config.frameRate)fps")
     }
     
     public func stopScreenCapture() async {
+        // Snapshot under the lock, stop outside the lock (never hold NSLock across await).
+        let stream = frameLock.withLock { screenCaptureStream }
         do {
-            try await screenCaptureStream?.stopCapture()
+            try await stream?.stopCapture()
         } catch {
             logger.warning("停止屏幕捕获时出错: \(error.localizedDescription)")
         }
-        screenCaptureStream = nil
-        captureDelegate = nil
-        
+        frameLock.withLock {
+            screenCaptureStream = nil
+            captureDelegate = nil
+        }
+
         setCurrentFrame(nil)
         
         logger.info("🛑 屏幕捕获已停止")

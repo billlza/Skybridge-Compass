@@ -271,22 +271,15 @@ public final class FluidRenderer: @unchecked Sendable {
     }
 
     private func loadShaderLibrary(device: MTLDevice) -> MTLLibrary? {
-        // 优先从 SPM bundle 加载
-        if let bundleURL = Bundle.module.url(forResource: "RemoteDesktopPassthrough", withExtension: "metallib"),
-           let library = try? device.makeLibrary(URL: bundleURL) {
-            return library
-        }
-        // 回退：从默认 library 查找（shader 可能已编译进 default.metallib）
-        if let library = device.makeDefaultLibrary() {
-            if library.functionNames.contains("fluidPassthroughVertex") {
-                return library
-            }
-        }
-        // 回退：从 Bundle.module 的默认 metallib
-        if let library = try? device.makeDefaultLibrary(bundle: Bundle.module) {
-            return library
-        }
-        return nil
+        SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: ["RemoteDesktopPassthrough"],
+            requiredFunctionNames: [
+                "fluidPassthroughVertex",
+                "fluidPassthroughFragment"
+            ]
+        )
     }
 
     // MARK: - BGRA 帧处理

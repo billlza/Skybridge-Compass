@@ -2081,15 +2081,15 @@ public class RemoteDesktopManager: ObservableObject {
                 lastRefreshRequestFailureDescription = nil
                 lastWaitingSyncDiagnosticLogTime = .distantPast
                 SkyBridgeLogger.shared.info(
-                    "🪄 viewer 已发送关键帧刷新请求: token=\(token) reason=\(lastRequestedStreamRefreshReason ?? "unspecified") transport=\(activeTransportModeLabel()) summary=\(crossNetwork.remoteDesktopRecoveryDebugSummary())"
+                    "🪄 viewer 已发送关键帧刷新请求: refreshTokenState=present reason=\(lastRequestedStreamRefreshReason ?? "unspecified") transport=\(activeTransportModeLabel()) summary=\(crossNetwork.remoteDesktopRecoveryDebugSummary())"
                 )
             }
             scheduleStreamConfigurationAckRetryIfNeeded(for: payload)
         } catch {
-            if let token = payload.streamRefreshToken {
+            if payload.streamRefreshToken != nil {
                 lastRefreshRequestFailureDescription = error.localizedDescription
                 SkyBridgeLogger.shared.error(
-                    "❌ viewer 关键帧刷新请求发送失败: token=\(token) reason=\(lastRequestedStreamRefreshReason ?? "unspecified") err=\(error.localizedDescription) transport=\(activeTransportModeLabel()) summary=\(crossNetwork.remoteDesktopRecoveryDebugSummary())"
+                    "❌ viewer 关键帧刷新请求发送失败: refreshTokenState=present reason=\(lastRequestedStreamRefreshReason ?? "unspecified") err=\(error.localizedDescription) transport=\(activeTransportModeLabel()) summary=\(crossNetwork.remoteDesktopRecoveryDebugSummary())"
                 )
             }
             SkyBridgeLogger.shared.error("❌ 发送远控流配置失败: \(error.localizedDescription)")
@@ -2108,7 +2108,7 @@ public class RemoteDesktopManager: ObservableObject {
         try await sendMessage(message)
         let retrySuffix = retryAttempt.map { " retryAttempt=\($0)" } ?? ""
         let noticeIdentity = payload.remoteControlSecurityIdentity
-        let streamConfigLine = "event=streamConfigSent\(retrySuffix) preset=\(viewerSettings.activePreset.displayName), preferred=\(payload.preferredCodec ?? "auto"), formats=\(payload.supportedVideoFormats.joined(separator: ",")), fps=\(payload.targetFrameRate), jitter=\(payload.jitterBufferFrames ?? 0), lowLatency=\(payload.lowLatencyMode) damage=\(payload.damageTrackingEnabled == true) audioMode=\(payload.audioMode ?? "nil") perf=\(payload.performanceValidationMode ?? "normal") refresh=\(payload.streamRefreshToken != nil) token=\(payload.streamRefreshToken.map(String.init) ?? "-") transport=\(payload.screenFrameTransport ?? "legacy") screenChannel=\(payload.screenDataChannelEnabled == true) screenWire=\(payload.screenChannelWireFormat ?? "length-framed") nativeReady=\(payload.nativeVideoTrackReady == true) streamConfigIncludesAudio=\(payload.mediaAudioEndpoint != nil) audioEndpointAck=\(lastAcknowledgedMediaAudioEndpointPresent) audioTransport=\(payload.audioTransport ?? "nil") mediaSession=\(payload.mediaSessionId ?? "-") audioRelayToken=\(payload.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") noticeAccount=\(Self.noticeIdentityValuePresent(noticeIdentity?.accountDisplayName) ? "present" : "missing") noticeNebula=\(Self.noticeIdentityValuePresent(noticeIdentity?.nebulaId) ? "present" : "missing")"
+        let streamConfigLine = "event=streamConfigSent\(retrySuffix) preset=\(viewerSettings.activePreset.displayName), preferred=\(payload.preferredCodec ?? "auto"), formats=\(payload.supportedVideoFormats.joined(separator: ",")), fps=\(payload.targetFrameRate), jitter=\(payload.jitterBufferFrames ?? 0), lowLatency=\(payload.lowLatencyMode) damage=\(payload.damageTrackingEnabled == true) audioMode=\(payload.audioMode ?? "nil") perf=\(payload.performanceValidationMode ?? "normal") refresh=\(payload.streamRefreshToken != nil) refreshTokenState=\(Self.streamRefreshTokenLogState(payload.streamRefreshToken)) transport=\(payload.screenFrameTransport ?? "legacy") screenChannel=\(payload.screenDataChannelEnabled == true) screenWire=\(payload.screenChannelWireFormat ?? "length-framed") nativeReady=\(payload.nativeVideoTrackReady == true) streamConfigIncludesAudio=\(payload.mediaAudioEndpoint != nil) audioEndpointAck=\(lastAcknowledgedMediaAudioEndpointPresent) audioTransport=\(payload.audioTransport ?? "nil") mediaSession=\(payload.mediaSessionId ?? "-") audioRelayToken=\(payload.mediaAudioEndpoint?.relayToken == nil ? "missing" : "present") noticeAccount=\(Self.noticeIdentityValuePresent(noticeIdentity?.accountDisplayName) ? "present" : "missing") noticeNebula=\(Self.noticeIdentityValuePresent(noticeIdentity?.nebulaId) ? "present" : "missing")"
         SkyBridgeSmokeTraceWriter.appendStatus(streamConfigLine)
         SkyBridgeLogger.shared.info("📤 已发送远控流配置: \(streamConfigLine)")
     }
@@ -2156,6 +2156,10 @@ public class RemoteDesktopManager: ObservableObject {
             return false
         }
         return trimmed != "-" && trimmed.lowercased() != "missing"
+    }
+
+    private static func streamRefreshTokenLogState(_ token: UInt64?) -> String {
+        token == nil ? "missing" : "present"
     }
 
 	    private func scheduleStreamConfigurationAckRetryIfNeeded(
@@ -2210,7 +2214,7 @@ public class RemoteDesktopManager: ObservableObject {
         streamConfigurationAckTask = nil
         lastAcknowledgedMediaAudioEndpointPresent = ack.audioEndpointPresent
         SkyBridgeLogger.shared.info(
-            "✅ 收到远控流配置 ACK: event=streamConfigAck token=\(ack.streamRefreshToken.map(String.init) ?? "-") audioEndpoint=\(ack.audioEndpointPresent) transport=\(ack.screenFrameTransport ?? "legacy")"
+            "✅ 收到远控流配置 ACK: event=streamConfigAck refreshTokenState=\(Self.streamRefreshTokenLogState(ack.streamRefreshToken)) audioEndpoint=\(ack.audioEndpointPresent) transport=\(ack.screenFrameTransport ?? "legacy")"
         )
     }
 
@@ -4863,11 +4867,11 @@ public class RemoteDesktopManager: ObservableObject {
                 )
             }
         } else if enqueueResult == .recoveredWithIndependentFrame {
-            if let token = lastRequestedStreamRefreshToken,
+            if lastRequestedStreamRefreshToken != nil,
                let requestedAt = lastRequestedStreamRefreshAt {
                 let waitMs = Int((Date().timeIntervalSince(requestedAt) * 1000).rounded())
                 SkyBridgeLogger.shared.info(
-                    "♻️ viewer 已收到恢复关键帧: token=\(token) reason=\(lastRequestedStreamRefreshReason ?? "unspecified") waitMs=\(waitMs) transport=\(activeTransportModeLabel())"
+                    "♻️ viewer 已收到恢复关键帧: refreshTokenState=present reason=\(lastRequestedStreamRefreshReason ?? "unspecified") waitMs=\(waitMs) transport=\(activeTransportModeLabel())"
                 )
                 lastRequestedStreamRefreshToken = nil
                 lastRequestedStreamRefreshReason = nil
@@ -5492,7 +5496,7 @@ public class RemoteDesktopManager: ObservableObject {
         let elapsed = now.timeIntervalSince(statsWindowStartTime)
         guard elapsed >= 1.0 else { return }
         if decodeQueueWaitingForSyncFrame,
-           let token = lastRequestedStreamRefreshToken,
+           lastRequestedStreamRefreshToken != nil,
            let requestedAt = lastRequestedStreamRefreshAt,
            now.timeIntervalSince(requestedAt) >= 1.0,
            now.timeIntervalSince(lastWaitingSyncDiagnosticLogTime) >= 1.0 {
@@ -5500,7 +5504,7 @@ public class RemoteDesktopManager: ObservableObject {
             let waitMs = Int((now.timeIntervalSince(requestedAt) * 1000).rounded())
             let failureSuffix = lastRefreshRequestFailureDescription.map { " refreshErr=\($0)" } ?? ""
             SkyBridgeLogger.shared.warning(
-                "⚠️ viewer 关键帧恢复仍在等待: token=\(token) reason=\(lastRequestedStreamRefreshReason ?? "unspecified") waitMs=\(waitMs) recv=\(receivedFramesInStatsWindow) decode=\(decodedFramesInStatsWindow) display=\(displayedFramesInStatsWindow) probable=missing-keyframe transport=\(activeTransportModeLabel()) summary=\(crossNetwork.remoteDesktopRecoveryDebugSummary())\(failureSuffix)"
+                "⚠️ viewer 关键帧恢复仍在等待: refreshTokenState=present reason=\(lastRequestedStreamRefreshReason ?? "unspecified") waitMs=\(waitMs) recv=\(receivedFramesInStatsWindow) decode=\(decodedFramesInStatsWindow) display=\(displayedFramesInStatsWindow) probable=missing-keyframe transport=\(activeTransportModeLabel()) summary=\(crossNetwork.remoteDesktopRecoveryDebugSummary())\(failureSuffix)"
             )
         }
         if renderPipelineStatus == .sampleBufferDisplayLayer,

@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import MetalKit
 import simd
@@ -43,8 +44,14 @@ public class CustomDenoiser {
     private func setupDenoisePipeline() async {
         do {
  // 创建默认库
-            guard let library = device.makeDefaultLibrary() else {
+            guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+                device: device,
+                bundle: Bundle.module,
+                sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
+                requiredFunctionNames: [denoiseKernel]
+            ) else {
                 logger.error("❌ 无法创建Metal库")
+                await setupFallbackDenoising()
                 return
             }
             

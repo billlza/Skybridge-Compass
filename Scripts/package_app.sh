@@ -714,7 +714,7 @@ function select_release_build_dir() {
   local xcode_product="${XCODE_BUILD_DIR}/${EXECUTABLE}"
   local swiftpm_product="${SWIFTPM_RELEASE_BUILD_DIR}/${EXECUTABLE}"
 
-  if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" && -x "${swiftpm_product}" ]]; then
+  if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" ]]; then
     echo "${SWIFTPM_RELEASE_BUILD_DIR}"
     return
   fi
@@ -767,6 +767,41 @@ function canonical_filesystem_path() {
   printf '%s/%s\n' "${parent}" "$(basename "${input_path}")"
 }
 
+function executable_rpaths() {
+  local executable_path="$1"
+  otool -l "${executable_path}" 2>/dev/null | awk '
+    /cmd LC_RPATH/ { in_rpath = 1; next }
+    in_rpath && /path / { print $2; in_rpath = 0 }
+  '
+}
+
+function is_packaging_external_toolchain_rpath() {
+  local rpath="$1"
+  case "${rpath}" in
+    /Applications/Xcode*.app/Contents/Developer/Toolchains/*/usr/lib/swift*|\
+    /var/run/com.apple.security.cryptexd/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+function remove_packaging_external_toolchain_rpaths() {
+  local executable_path="$1"
+  local rpath=""
+
+  while IFS= read -r rpath; do
+    [[ -n "${rpath}" ]] || continue
+    if is_packaging_external_toolchain_rpath "${rpath}"; then
+      log "移除外部 toolchain rpath: ${rpath}"
+      if ! install_name_tool -delete_rpath "${rpath}" "${executable_path}" >/dev/null 2>&1; then
+        echo "错误：无法从主二进制移除外部 toolchain rpath：${rpath}" >&2
+        exit 1
+      fi
+    fi
+  done < <(executable_rpaths "${executable_path}")
+}
+
 function assert_xcode_app_bundle_is_release_product() {
   local app_bundle="$1"
   local expected_bundle="${XCODE_BUILD_DIR}/${APP_NAME}"
@@ -800,6 +835,7 @@ source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
 XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
 XCODE_BUILD_DIR="${XCODE_DERIVED_DATA_PATH}/Build/Products/Release"
 BUILD_ARCH="${BUILD_ARCH:-$(skybridge_default_macos_build_arch)}"
+EXECUTABLE="SkyBridgeCompassApp"
 SWIFTPM_RELEASE_BUILD_DIR="${ROOT_DIR}/.build/${BUILD_ARCH}-apple-macosx/release"
 BUILD_DIR="${XCODE_BUILD_DIR}"
 MAIN_BUILD_SYSTEM="${SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM:-swiftpm}"
@@ -828,6 +864,8 @@ BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_build_destinat
 XCODE_WORKSPACE="${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace"
 USE_XCODE_WORKSPACE=0
 
+skybridge_assert_release_stable_toolchain "${PACKAGE_CONTEXT}" "${ROOT_DIR}/Scripts/verify_xcode_toolchain.sh" "Release package"
+
 if [[ -d "${XCODE_WORKSPACE}" ]]; then
   USE_XCODE_WORKSPACE=1
 fi
@@ -840,6 +878,12 @@ case "${MAIN_BUILD_SYSTEM}" in
     exit 1
     ;;
 esac
+
+if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" || "${SKYBRIDGE_PACKAGE_ALLOW_SWIFTPM_RELEASE_FALLBACK:-0}" == "1" ]]; then
+  SWIFTPM_RELEASE_BUILD_DIR="$(
+    skybridge_resolve_swiftpm_release_build_dir "${ROOT_DIR}" "${BUILD_ARCH}" "${EXECUTABLE}"
+  )" || exit 1
+fi
 
 VENDOR_XCFRAMEWORKS=(
   "${ROOT_DIR}/Sources/Vendor/FreeRDP.xcframework"
@@ -871,29 +915,16 @@ fi
 skybridge_assert_xcframeworks_support_macos_arch "${BUILD_ARCH}" "${VENDOR_XCFRAMEWORKS[@]}"
 
 # 中文注释：可执行文件与资源 bundle 名称（来自 Xcode 构建输出）
-EXECUTABLE="SkyBridgeCompassApp"
 BUILD_DIR="$(select_release_build_dir)"
 BUILD_SOURCE="$(skybridge_package_build_source "${BUILD_DIR}" "${XCODE_BUILD_DIR}" "${SWIFTPM_RELEASE_BUILD_DIR}")"
 skybridge_assert_package_build_policy "${PACKAGE_CONTEXT}" "${BUILD_SOURCE}"
+skybridge_configure_apple_pqc_sdk_for_package_context "${PACKAGE_CONTEXT}" "Release package"
+log "Apple PQC SDK gate: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown}, sdk=${SKYBRIDGE_PQC_SDK_NAME:-macosx}, version=${SKYBRIDGE_PQC_SDK_VER:-unknown}, target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}, enabled=${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   log "执行 Release 构建，确保打包包含最新代码（arch=${BUILD_ARCH}）"
   log "Xcode DerivedData 路径: ${XCODE_DERIVED_DATA_PATH}"
   cd "${ROOT_DIR}"
-  skybridge_detect_apple_pqc_sdk
-  log "Host macOS 版本: ${SKYBRIDGE_PQC_HOST_OS_VER:-unknown}"
-  log "Xcode macOS SDK 版本: ${SKYBRIDGE_PQC_SDK_VER:-unknown}"
-  log "Xcode macOS SDK 路径: ${SKYBRIDGE_PQC_SDK_PATH:-unknown}"
-  if [[ "${SKYBRIDGE_PQC_SDK_AVAILABLE:-0}" == "1" ]]; then
-    export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
-    log "Apple PQC SDK 探测通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}），启用 Apple PQC 编译条件"
-  else
-    export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=0
-    log "Apple PQC SDK 探测未通过（mode=${SKYBRIDGE_PQC_PROBE_MODE}），禁用 Apple PQC 编译条件"
-    if [[ -n "${SKYBRIDGE_PQC_PROBE_ERROR:-}" ]]; then
-      log "PQC 探测详情: ${SKYBRIDGE_PQC_PROBE_ERROR}"
-    fi
-  fi
 
   if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" ]]; then
     log "使用 SwiftPM Release 构建主可执行文件（product=SkyBridgeCompassApp, arch=${BUILD_ARCH}）"
@@ -983,6 +1014,7 @@ for framework_parent in "${BUILD_DIR}" "${BUILD_DIR}/PackageFrameworks"; do
     name="$(basename "${framework}")"
     rm -rf "${FW_DIR}/${name}"
     ditto "${framework}" "${FW_DIR}/${name}"
+    skybridge_normalize_versioned_framework_layout "${FW_DIR}/${name}"
   done
 done
 if [[ "${found_framework}" -eq 0 ]]; then
@@ -1015,6 +1047,7 @@ while IFS= read -r linked_framework; do
   log "补齐 @rpath 依赖 ${linked_framework}.framework: ${framework_source}"
   rm -rf "${FW_DIR}/${linked_framework}.framework"
   ditto "${framework_source}" "${FW_DIR}/${linked_framework}.framework"
+  skybridge_normalize_versioned_framework_layout "${FW_DIR}/${linked_framework}.framework"
   found_framework=1
 done <<< "${linked_frameworks}"
 
@@ -1024,6 +1057,8 @@ if [[ -L "${LEGACY_FW_LINK}" || -e "${LEGACY_FW_LINK}" ]]; then
 fi
 ln -s "Frameworks" "${LEGACY_FW_LINK}"
 log "已创建兼容链接: ${LEGACY_FW_LINK} -> Frameworks"
+
+remove_packaging_external_toolchain_rpaths "${APP_BIN}"
 
 if otool -l "${APP_BIN}" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
   log "已存在 rpath: @executable_path/../Frameworks"
@@ -1048,6 +1083,10 @@ fi
 if otool -L "${APP_BIN}" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
   if [[ ! -e "${FW_DIR}/WebRTC.framework/WebRTC" ]]; then
     echo "错误：主二进制依赖 WebRTC.framework，但 ${FW_DIR}/WebRTC.framework/WebRTC 不存在。" >&2
+    exit 1
+  fi
+  if ! skybridge_assert_no_nested_framework_versions_payload "${FW_DIR}/WebRTC.framework"; then
+    echo "错误：WebRTC.framework 包含 Versions/A/Versions 嵌套目录；禁止打包会被 macOS 27 系统策略拒载的非标准 framework 布局。" >&2
     exit 1
   fi
   if [[ ! -e "${LEGACY_FW_LINK}/WebRTC.framework/WebRTC" ]]; then
@@ -1125,10 +1164,14 @@ plutil -replace CFBundleExecutable -string "${EXECUTABLE}" "${INFO_PLIST_DST}"
 plutil -replace CFBundlePackageType -string "APPL" "${INFO_PLIST_DST}"
 plutil -replace LSMinimumSystemVersion -string "14.0" "${INFO_PLIST_DST}"
 stamp_macos_platform_metadata "${INFO_PLIST_DST}"
+if is_release_distribution_context; then
+  skybridge_assert_release_app_stable_platform_metadata "${INFO_PLIST_DST}" "release_dmg packaged app"
+fi
 plutil -replace SkyBridgePackagingBuildSource -string "${BUILD_SOURCE}" "${INFO_PLIST_DST}"
 plutil -replace SkyBridgePackagingBuildScheme -string "SkyBridgeCompassApp" "${INFO_PLIST_DST}"
 plutil -replace SkyBridgePackagingBuildConfiguration -string "Release" "${INFO_PLIST_DST}"
 plutil -replace SkyBridgePackagingBuildProductPath -string "${BUILD_DIR}/${EXECUTABLE}" "${INFO_PLIST_DST}"
+skybridge_stamp_apple_pqc_sdk_packaging_metadata "${INFO_PLIST_DST}" "${APP_DIR}" "${PACKAGE_CONTEXT}"
 log "记录打包构建来源: ${BUILD_SOURCE}"
 if [[ -z "${SKYBRIDGE_PACKAGE_BUILD_ID:-}" ]]; then
   SKYBRIDGE_PACKAGE_BUILD_ID="$(date +%Y%m%d%H%M%S)"

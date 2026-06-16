@@ -268,8 +268,8 @@ validate_swift_toolchain_baseline() {
   grep -q '^// swift-tools-version: 6\.3$' "${ios_manifest}" \
     || fail "iOS Package.swift must stay on swift-tools-version 6.3"
 
-  [[ -x "${verifier}" ]] || fail "missing executable Xcode/Swift baseline verifier: ${verifier}"
-  "${verifier}"
+  skybridge_assert_release_stable_toolchain "release_dmg" "${verifier}" "macOS release readiness" \
+    || fail "macOS release readiness requires the stable release Xcode toolchain"
 }
 
 validate_update_check_configuration() {
@@ -457,6 +457,42 @@ else:
 PY
 }
 
+executable_rpaths() {
+  local executable_path="$1"
+  otool -l "${executable_path}" 2>/dev/null | awk '
+    /cmd LC_RPATH/ { in_rpath = 1; next }
+    in_rpath && /path / { print $2; in_rpath = 0 }
+  '
+}
+
+is_external_toolchain_rpath() {
+  local rpath="$1"
+  case "${rpath}" in
+    /Applications/Xcode*.app/Contents/Developer/Toolchains/*/usr/lib/swift*|\
+    /var/run/com.apple.security.cryptexd/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+validate_release_rpaths() {
+  local executable_path="$1"
+  local rpath=""
+  local forbidden=()
+
+  while IFS= read -r rpath; do
+    [[ -n "${rpath}" ]] || continue
+    if is_external_toolchain_rpath "${rpath}"; then
+      forbidden+=("${rpath}")
+    fi
+  done < <(executable_rpaths "${executable_path}")
+
+  if (( ${#forbidden[@]} > 0 )); then
+    fail "release app executable must not retain external Xcode beta/cryptex toolchain rpaths: ${forbidden[*]}"
+  fi
+}
+
 extract_helper_version() {
   local bin_path="$1"
   if [[ -x "${bin_path}" ]]; then
@@ -576,6 +612,8 @@ validate_dmg_embedded_app() {
     || fail "DMG app build scheme drifted (actual: ${dmg_build_scheme:-missing})"
   [[ "${dmg_build_configuration}" == "Release" ]] \
     || fail "DMG app build configuration drifted (actual: ${dmg_build_configuration:-missing})"
+  skybridge_assert_bundle_has_apple_pqc_compile_marker "${dmg_app_path}" "DMG embedded app bundle" \
+    || fail "DMG embedded app is missing the Apple PQC SDK compile marker"
 
   dmg_metadata="$(codesign --display --verbose=4 "${dmg_app_path}" 2>&1)" \
     || fail "could not read DMG app codesign metadata"
@@ -590,6 +628,8 @@ validate_dmg_embedded_app() {
     || fail "DMG app CDHash (${dmg_cdhash:-missing}) does not match dist app (${expected_cdhash:-missing})"
 
   codesign --verify --deep --strict --verbose=2 "${dmg_app_path}" >/dev/null
+  validate_macho_minimum_macos_version_floor "${dmg_app_path}" \
+    || fail "DMG embedded app contains Mach-O binaries that cannot prove macOS 14.0 compatibility"
   [[ -f "${dmg_app_path}/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex/Contents/embedded.provisionprofile" ]] \
     || fail "DMG app widget appex is missing embedded.provisionprofile"
 
@@ -1028,34 +1068,7 @@ validate_macos_platform_metadata() {
   local info_plist="$1"
   local executable_path="$2"
 
-  python3 - "${info_plist}" <<'PY'
-import plistlib
-import sys
-from pathlib import Path
-
-info_path = Path(sys.argv[1])
-with info_path.open("rb") as fh:
-    info = plistlib.load(fh)
-
-errors = []
-if info.get("CFBundlePackageType") != "APPL":
-    errors.append("CFBundlePackageType must be APPL")
-if info.get("LSMinimumSystemVersion") != "14.0":
-    errors.append("LSMinimumSystemVersion must be 14.0")
-if info.get("CFBundleSupportedPlatforms") != ["MacOSX"]:
-    errors.append("CFBundleSupportedPlatforms must be exactly [MacOSX]")
-if info.get("DTPlatformName") != "macosx":
-    errors.append("DTPlatformName must be macosx")
-
-sdk_name = str(info.get("DTSDKName", ""))
-if sdk_name and not sdk_name.startswith("macosx"):
-    errors.append(f"DTSDKName must use the macosx SDK family, got {sdk_name!r}")
-
-if errors:
-    for error in errors:
-        print(error, file=sys.stderr)
-    raise SystemExit(1)
-PY
+  skybridge_assert_release_app_stable_platform_metadata "${info_plist}" "release readiness app" || return 1
 
   local platform=""
   platform="$(otool -l "${executable_path}" 2>/dev/null | awk '
@@ -1066,6 +1079,18 @@ PY
     echo "main executable LC_BUILD_VERSION platform must be 1 (macOS), got ${platform:-missing}" >&2
     return 1
   }
+}
+
+validate_macho_minimum_macos_version_floor() {
+  local app_path="$1"
+  local output=""
+
+  if ! output="$(env -u SKYBRIDGE_FILE_TOOL -u SKYBRIDGE_OTOOL_TOOL bash "${PROJECT_ROOT}/Scripts/check_macos_deps.sh" --strict "${app_path}" "14.0" 2>&1)"; then
+    printf '%s\n' "${output}" >&2
+    return 1
+  fi
+
+  log_info "Mach-O minimum macOS version gate passed for ${app_path}"
 }
 
 compare_app_group_alignment() {
@@ -1245,6 +1270,7 @@ fi
 [[ -n "${APP_EXECUTABLE_NAME}" ]] || fail "app Info.plist is missing CFBundleExecutable"
 [[ -n "${APP_BUNDLE_IDENTIFIER}" ]] || fail "app Info.plist is missing CFBundleIdentifier"
 [[ -x "${APP_EXECUTABLE_PATH}" ]] || fail "main executable is missing or not executable: ${APP_EXECUTABLE_PATH}"
+validate_release_rpaths "${APP_EXECUTABLE_PATH}"
 if otool -L "${APP_EXECUTABLE_PATH}" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
   [[ -e "${APP_FRAMEWORKS_DIR}/WebRTC.framework/WebRTC" ]] || fail "main executable links WebRTC.framework, but the app bundle is missing WebRTC.framework"
   if ! otool -l "${APP_EXECUTABLE_PATH}" 2>/dev/null | grep -q "@executable_path/../Frameworks"; then
@@ -1323,6 +1349,8 @@ codesign --verify --deep --strict --verbose=2 "${APP_PATH}" >/dev/null
 codesign --verify --verbose=2 "${DMG_PATH}" >/dev/null
 log_info "Verifying PowerMetricsHelper codesign integrity (version ${APP_HELPER_VERSION})"
 codesign --verify --strict --verbose=2 "${APP_HELPER_BIN_PATH}" >/dev/null
+skybridge_assert_bundle_has_apple_pqc_compile_marker "${APP_PATH}" "release app bundle" \
+  || fail "release app bundle is missing the Apple PQC SDK compile marker"
 
 APP_CDHASH="$(codesign_cdhash "${APP_PATH}")"
 [[ -n "${APP_CDHASH}" ]] || fail "could not read app CDHash from codesign metadata"
@@ -1395,6 +1423,8 @@ validate_modern_app_icon_contract "${APP_INFO_PLIST}" "${APP_RESOURCES_DIR}" \
 
 validate_macos_platform_metadata "${APP_INFO_PLIST}" "${APP_EXECUTABLE_PATH}" \
   || fail "app bundle macOS platform metadata is invalid"
+validate_macho_minimum_macos_version_floor "${APP_PATH}" \
+  || fail "app bundle contains Mach-O binaries that cannot prove macOS 14.0 compatibility"
 
 if extract_embedded_info_plist "${APP_EXECUTABLE_PATH}" "${EMBEDDED_APP_INFO_PLIST}"; then
   compare_required_privacy_usage_descriptions "${APP_INFO_PLIST}" "${EMBEDDED_APP_INFO_PLIST}" "main executable embedded Info.plist" \

@@ -14,8 +14,20 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../main_tests/parse/check.rs"),
     ),
     (
+        "main_tests/parse/device.rs",
+        include_str!("../../main_tests/parse/device.rs"),
+    ),
+    (
         "main_tests/parse/doctor.rs",
         include_str!("../../main_tests/parse/doctor.rs"),
+    ),
+    (
+        "main_tests/parse/file.rs",
+        include_str!("../../main_tests/parse/file.rs"),
+    ),
+    (
+        "main_tests/parse/remote_desktop.rs",
+        include_str!("../../main_tests/parse/remote_desktop.rs"),
     ),
     (
         "main_tests/parse/smoke.rs",
@@ -111,6 +123,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../device_commands.rs"),
     ),
     (
+        "device_commands/discover.rs",
+        include_str!("../../device_commands/discover.rs"),
+    ),
+    (
         "device_commands/status.rs",
         include_str!("../../device_commands/status.rs"),
     ),
@@ -173,6 +189,14 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../main_dispatch_tests/command_wrappers.rs"),
     ),
     (
+        "main_dispatch_tests/device.rs",
+        include_str!("../../main_dispatch_tests/device.rs"),
+    ),
+    (
+        "main_dispatch_tests/file_transfer.rs",
+        include_str!("../../main_dispatch_tests/file_transfer.rs"),
+    ),
+    (
         "main_dispatch_tests/doctor_wrappers.rs",
         include_str!("../../main_dispatch_tests/doctor_wrappers.rs"),
     ),
@@ -183,6 +207,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "main_dispatch_tests/operator_entry.rs",
         include_str!("../../main_dispatch_tests/operator_entry.rs"),
+    ),
+    (
+        "main_dispatch_tests/remote_desktop.rs",
+        include_str!("../../main_dispatch_tests/remote_desktop.rs"),
     ),
     (
         "main_dispatch_tests/smoke_file_alias.rs",
@@ -214,8 +242,20 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../operator_status/health.rs"),
     ),
     (
+        "operator_capabilities.rs",
+        include_str!("../../operator_capabilities.rs"),
+    ),
+    (
+        "performance_report_target.rs",
+        include_str!("../../performance_report_target.rs"),
+    ),
+    (
         "remote_control_notice_check.rs",
         include_str!("../../remote_control_notice_check.rs"),
+    ),
+    (
+        "remote_desktop_commands.rs",
+        include_str!("../../remote_desktop_commands.rs"),
     ),
     ("repo_paths.rs", include_str!("../../repo_paths.rs")),
     (

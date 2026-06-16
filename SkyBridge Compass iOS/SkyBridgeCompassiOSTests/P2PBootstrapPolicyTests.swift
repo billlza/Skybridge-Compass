@@ -382,6 +382,18 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertEqual(action, .attemptOOBProtocolIdentityBindingThenRefresh)
     }
 
+    func testStrictPreflightSKRRequesterNotPinnedChoosesPIBThenSKR() {
+        let action = P2PConnectionManager.strictPQCPreflightAction(
+            trustedPeerKEMSuites: [],
+            signedRefreshEvidence: nil,
+            pinnedProtocolFingerprints: [String(repeating: "a", count: 64)],
+            preferredTargetSuite: .xwing,
+            signedRefreshFailureReason: "remote rejected SKR-1 stage=kem_refresh reasonCode=requester_protocol_identity_not_pinned"
+        )
+
+        XCTAssertEqual(action, .attemptOOBProtocolIdentityBindingThenRefresh)
+    }
+
     func testDiscoveredDeviceAddUsesDeviceConfirmationPairingInsteadOfDirectTrust() throws {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift"
@@ -427,6 +439,8 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertFalse(pqcSource.contains("TrustedDeviceStore.shared.trust(device)"))
         XCTAssertTrue(pqcSource.contains("pinnedFingerprints.count == 1"))
         XCTAssertTrue(pqcSource.contains("TrustedDeviceStore.shared.trustResolvedPeer"))
+        XCTAssertFalse(pqcSource.contains("expected=\\(expected)"))
+        XCTAssertFalse(pqcSource.contains("got=\\(code)"))
         XCTAssertFalse(
             trustedStoreSource.contains("guard !normalizedDeclaredDeviceId.isEmpty else {\n            trust(device)"),
             "trustResolvedPeer must not fall back to direct discovery trust when the authenticated declared device id is missing."
@@ -1037,6 +1051,8 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("installOOBProtocolIdentityBinding"))
         XCTAssertTrue(source.contains("PIB-1 -> SKR-1 recovery completed"))
         XCTAssertTrue(source.contains("requester_protocol_identity_not_pinned"))
+        XCTAssertTrue(source.contains("signedRefreshFailureReason = Self.smokeSanitize(error.localizedDescription)"))
+        XCTAssertFalse(source.contains("signedRefreshFailureReason = \"preflight-kem-refresh-failed\""))
         XCTAssertFalse(source.contains("policyAllowClassicFallback: true"))
     }
 
@@ -1283,8 +1299,10 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(skrBody.contains("let routeCandidates = connectionEndpointCandidates(for: device, preferDirectHostPort: true)"))
         XCTAssertTrue(skrBody.contains("Self.signedLANRefreshEndpointClass($0) == \"direct-host\""))
         XCTAssertTrue(skrBody.contains("throw signedLANRefreshFailure(\"missing direct LAN endpoint candidate\")"))
-        XCTAssertTrue(source.contains("fallbackSuppressed=1"))
-        XCTAssertTrue(source.contains("suppressedServiceCandidates=\\(suppressedServiceCandidateCount)"))
+        XCTAssertTrue(skrBody.contains("endpointClass == \"direct-host\" || endpointClass == \"bonjour-service\""))
+        XCTAssertTrue(source.contains("classicFallbackSuppressed=1"))
+        XCTAssertTrue(source.contains("serviceFallbackCandidates=\\(serviceFallbackCandidateCount)"))
+        XCTAssertTrue(source.contains("bootstrap control connection failed:"))
         XCTAssertFalse(skrBody.contains("establishReadyConnectionWithMetrics(to: routeCandidates"))
         XCTAssertTrue(source.contains("preferDirectHostPort: Bool = false"))
         XCTAssertTrue(source.contains("let prefersBonjour = !preferDirectHostPort &&"))
@@ -1323,6 +1341,245 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("timeoutSeconds=\\(approvalTimeoutSeconds)"))
         XCTAssertTrue(source.contains("let policyCandidates = Self.protocolIdentityBindingPolicyCandidates"))
         XCTAssertGreaterThanOrEqual(source.components(separatedBy: "candidates: policyCandidates").count - 1, 3)
+    }
+
+    func testPIB1StatusLinesRedactVerificationSecrets() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+
+        XCTAssertTrue(source.contains("protocolIdentityLogRedaction"))
+        XCTAssertTrue(source.contains("code=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(source.contains("fingerprint=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(
+            source.contains("verificationCode: verificationCode"),
+            "The operator-facing pending approval state must keep the SAS even though logs redact it."
+        )
+
+        [
+            "code=\\(code)",
+            "code=\\(verificationCode)",
+            "code=\\(context.verificationCode)",
+            "fingerprint=\\(validated.protocolIdentityFingerprint)",
+            "fingerprint=\\(payload.protocolIdentityFingerprint)",
+            "fingerprint=\\(context.payload.protocolIdentityFingerprint)",
+            "fingerprint=\\(context.requesterProtocolIdentityFingerprint)",
+            "fingerprint=\\(requesterFingerprint)",
+            "fingerprint=\\(authority.protocolPublicKeyFingerprint)",
+            "PIB-1 protocol identity binding served: requester=\\(request.requesterDeviceId)",
+            "PIB-1 protocol identity binding rejected: requester=\\(request.requesterDeviceId)",
+            "PIB-1 requester protocol identity awaiting operator approval: requester=\\(stableRequesterId)",
+            "deviceId=\\(payload.deviceId)"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                source.contains(forbidden),
+                "PIB-1 status/log lines must not persist raw protocol identity secrets: \(forbidden)"
+            )
+        }
+    }
+
+    func testSKR1InboundStatusLinesRedactRequestIdentifiersAndFailureReasons() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func makeInboundBootstrapControlResponse"))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private func makeInboundSignedKEMRefreshPayload",
+                range: start.lowerBound..<source.endIndex
+            )
+        )
+        let reviewedStatusBuilder = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(reviewedStatusBuilder.contains("SKR-1 signed LAN KEM refresh served"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("SKR-1 signed LAN KEM refresh rejected"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("reasonCode: Self.signedKEMRefreshFailureCode(for: error)"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("reason: error.localizedDescription"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("reason=%@ responderLatencyMs"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("requestHashHex: request.canonicalRequestHashHex"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("requesterDeviceId: request.requesterDeviceId"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("targetDeviceId: request.targetDeviceId"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("""
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
+"""))
+        XCTAssertTrue(reviewedStatusBuilder.contains("""
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
+                    failure.reasonCode,
+                    Self.protocolIdentityLogRedaction,
+"""))
+
+        [
+            "payload.keyId,",
+            "\n                    error.localizedDescription,\n"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                reviewedStatusBuilder.contains(forbidden),
+                "SKR-1 inbound status/failure paths must not expose raw request identifiers or local error details: \(forbidden)"
+            )
+        }
+    }
+
+    func testPairingIdentityExchangeDiagnosticsRedactStableIdentifiersAndErrors() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "public func resolvePairingTrustRequest"))
+        let end = try XCTUnwrap(
+            source.range(
+                of: "public func waitForPairingIdentityExchangeActivity",
+                range: start.lowerBound..<source.endIndex
+            )
+        )
+        let reviewedPairingDiagnostics = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(source.contains("diagnosticErrorSummary(_ error: Error)"))
+        XCTAssertTrue(source.contains("error_domain=\\(nsError.domain) code=\\(nsError.code)"))
+        XCTAssertTrue(reviewedPairingDiagnostics.contains("peer=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(reviewedPairingDiagnostics.contains("declaredDeviceId=\\(Self.protocolIdentityLogRedaction)"))
+
+        [
+            "Pairing/trust request rejected: peer=\\(peerId)",
+            "Pairing/trust request timed out: peer=\\(peerId)",
+            "Pairing/trust request auto-rejected: peer=\\(peerId)",
+            "UI prompt already pending; ignoring duplicate. peer=\\(peerId)",
+            "忽略无效 pairingIdentityExchange: peer=\\(runtimePeerId)",
+            "已保存对端 KEM 公钥：peer=\\(peerId) declaredDeviceId=\\(declaredDeviceId)",
+            "已加入受信任设备：\\(device.name) peerId=\\(peerId)",
+            "pairingIdentityExchange replied to peer=\\(peerId)",
+            "pairingIdentityExchange reply failed (ignored): \\(error.localizedDescription)",
+            "cleared stale rekey marker before pairingIdentityExchange: peer=\\(deviceId)",
+            "pairingIdentityExchange delayed during active rekey: peer=\\(deviceId)",
+            "pairingIdentityExchange sent: peer=\\(deviceId)"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                reviewedPairingDiagnostics.contains(forbidden),
+                "pairingIdentityExchange diagnostics must not expose stable identifiers or raw local errors: \(forbidden)"
+            )
+        }
+
+        XCTAssertTrue(
+            reviewedPairingDiagnostics.contains("deviceId: localId"),
+            "Protocol payloads must keep the raw local device id; redaction is limited to diagnostics."
+        )
+        XCTAssertTrue(
+            reviewedPairingDiagnostics.contains("await KEMTrustStore.shared.upsert(deviceId: declaredDeviceId"),
+            "Trust/KEM storage keys must remain raw and deterministic."
+        )
+    }
+
+    func testP2PDiagnosticTraceRedactsRuntimeIdentifiersAndEndpointDetails() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let inboundStart = try XCTUnwrap(source.range(of: "private func handleIncomingConnection"))
+        let inboundEnd = try XCTUnwrap(
+            source.range(
+                of: "private func isLikelyHandshakeControlPacket",
+                range: inboundStart.lowerBound..<source.endIndex
+            )
+        )
+        let inboundDiagnostics = String(source[inboundStart.lowerBound..<inboundEnd.lowerBound])
+
+        XCTAssertTrue(source.contains("diagnosticConnectionState(_ state: NWConnection.State)"))
+        XCTAssertTrue(source.contains("diagnosticHandshakeFailureCode(_ reason: HandshakeFailureReason)"))
+        XCTAssertTrue(inboundDiagnostics.contains("p2p-inbound handle-start peer=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(inboundDiagnostics.contains("p2p-inbound strict-trust-ready peer=\\(Self.protocolIdentityLogRedaction) stable=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertTrue(inboundDiagnostics.contains("p2p-inbound handshake-failed peer=\\(Self.protocolIdentityLogRedaction) reason=\\(Self.diagnosticHandshakeFailureCode(reason))"))
+        XCTAssertTrue(inboundDiagnostics.contains("error=\\(Self.diagnosticErrorSummary(error))"))
+
+        [
+            "Self.smokeSanitize(peerId)",
+            "Self.smokeSanitize(canonicalPeerId)",
+            "Self.smokeSanitize(context.stablePeerId)",
+            "peer=\\(peerId)",
+            "处理入站连接: \\(peerId)",
+            "等待来自 \\(canonicalPeerId)",
+            "from \\(peerId)",
+            "header=0x\\(headerHex)",
+            "String(describing: reason)",
+            "error=\\(Self.smokeSanitize(error.localizedDescription))",
+            "error=\\(Self.smokeSanitize(error2.localizedDescription))"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                inboundDiagnostics.contains(forbidden),
+                "P2P inbound trace/log diagnostics must redact runtime identifiers and raw local details: \(forbidden)"
+            )
+        }
+
+        let endpointStart = try XCTUnwrap(source.range(of: "private func establishReadyConnectionWithMetrics"))
+        let endpointEnd = try XCTUnwrap(
+            source.range(
+                of: "private static func attemptDurationJitterMs",
+                range: endpointStart.lowerBound..<source.endIndex
+            )
+        )
+        let endpointDiagnostics = String(source[endpointStart.lowerBound..<endpointEnd.lowerBound])
+        XCTAssertTrue(endpointDiagnostics.contains("endpoint=\\(Self.protocolIdentityLogRedaction)"))
+        XCTAssertFalse(endpointDiagnostics.contains("endpointDescription"))
+        XCTAssertFalse(endpointDiagnostics.contains("String(describing: endpoint)"))
+        XCTAssertFalse(endpointDiagnostics.contains("\\(device.name) endpoint="))
+
+        let stateStart = try XCTUnwrap(source.range(of: "private func handleConnectionStateChange"))
+        let stateEnd = try XCTUnwrap(
+            source.range(
+                of: "private func scheduleReconnectIfNeeded",
+                range: stateStart.lowerBound..<source.endIndex
+            )
+        )
+        let stateDiagnostics = String(source[stateStart.lowerBound..<stateEnd.lowerBound])
+        XCTAssertTrue(stateDiagnostics.contains("state=\\(Self.diagnosticConnectionState(state))"))
+        XCTAssertFalse(stateDiagnostics.contains("String(describing: state)"))
+        XCTAssertFalse(stateDiagnostics.contains("effectiveDevice.name"))
+        XCTAssertFalse(stateDiagnostics.contains("runtimePeerId)) state="))
+    }
+
+    func testStrictPQCFailureStatusLinesRedactPeerIdentitySecrets() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let strictTrustStart = try XCTUnwrap(
+            source.range(of: "private func strictInboundHandshakeTrustContext")
+        )
+        let strictTrustEnd = try XCTUnwrap(
+            source.range(
+                of: "private func preferredStrictPQCHandshakeTargetSuite",
+                range: strictTrustStart.lowerBound..<source.endIndex
+            )
+        )
+        let oobStart = try XCTUnwrap(
+            source.range(of: "private func attemptOOBProtocolIdentityBinding(")
+        )
+        let oobEnd = try XCTUnwrap(
+            source.range(
+                of: "private func requestOOBProtocolIdentityApproval",
+                range: oobStart.lowerBound..<source.endIndex
+            )
+        )
+        let reviewedFailurePaths = String(source[strictTrustStart.lowerBound..<strictTrustEnd.lowerBound])
+            + "\n"
+            + String(source[oobStart.lowerBound..<oobEnd.lowerBound])
+
+        XCTAssertTrue(reviewedFailurePaths.contains("reason=ambiguous_message_a_soa_identity"))
+        XCTAssertTrue(reviewedFailurePaths.contains("reason=missing_stable_protocol_identity"))
+        XCTAssertTrue(reviewedFailurePaths.contains("reason=missing_pinned_protocol_identity"))
+        XCTAssertTrue(reviewedFailurePaths.contains("reasonCode=\\(failure.reasonCode) reason=redacted"))
+        XCTAssertTrue(reviewedFailurePaths.contains("matchCount=\\(messageAStableCandidates.count)"))
+
+        [
+            "peer=\\(peerId)",
+            "stablePeer=\\(stablePeerId)",
+            "matches=\\(messageAStableCandidates.joined",
+            "reason=\\(failure.reason)",
+            "reason=\\(error.localizedDescription)"
+        ].forEach { forbidden in
+            XCTAssertFalse(
+                reviewedFailurePaths.contains(forbidden),
+                "Strict PQC/PIB failure status lines must not persist raw peer ids or remote reason text: \(forbidden)"
+            )
+        }
     }
 
     func testIOSBonjourDiscoveryDoesNotAcceptKEMFromTXT() throws {

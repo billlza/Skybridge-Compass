@@ -62,9 +62,9 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
     
     // MARK: - Self Test
     
-    /// 快速能力探针：仅做最小可用性判断，避免冷启动阶段反复进行重型密钥生成。
+    /// 快速能力探针：工厂层会缓存结果，因此这里必须证明运行时可以实际生成核心 PQC 密钥。
     public static func quickRuntimeProbe() -> Bool {
-        true
+        selfTest()
     }
 
     /// Self-test 验证 API 可用性：能生成 MLKEM/MLDSA 密钥则视为可用
@@ -442,7 +442,7 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
     public init() {}
 
     public static func quickRuntimeProbe() -> Bool {
-        true
+        selfTest()
     }
 
     public static func selfTest() -> Bool {

@@ -37,6 +37,17 @@ async fn session_commands_cover_list_inspect_disconnect_and_missing_records() ->
     record.keepalive.heartbeat_sent_count = 2;
     record.keepalive.heartbeat_received_count = 2;
     upsert_session_runtime(&paths, record).await?;
+    let registry = load_session_registry(&paths).await?;
+    let public_session = session_public_status(registry.get("SESSION1").expect("session exists"));
+    let public_json = serde_json::to_string(&public_session)?;
+    assert!(public_session.remote_identity_bound);
+    assert!(public_session.remote_display_name_available);
+    assert!(
+        !public_json.contains("remote-device")
+            && !public_json.contains("fingerprint")
+            && !public_json.contains("local-device"),
+        "session JSON projection must not leak raw local/remote identities"
+    );
 
     session_ls(Some(state_dir.clone()), false).await?;
     session_ls(Some(state_dir.clone()), true).await?;
@@ -75,6 +86,44 @@ async fn session_commands_cover_list_inspect_disconnect_and_missing_records() ->
     assert_eq!(
         session.last_error.as_deref(),
         Some("disconnected_by_operator")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnect_fails_if_control_cleanup_cannot_be_persisted() -> Result<()> {
+    let state_dir = make_test_dir("session-disconnect-control-cleanup-failure")?;
+    let paths = resolve_paths(Some(state_dir.clone()))?;
+    upsert_session_runtime(
+        &paths,
+        RuntimeSessionRecord::new(
+            "runtime-1",
+            "SESSION1",
+            RuntimeSessionRole::Responder,
+            RuntimeSessionSource::Code,
+            "https://signal.example",
+            "local-device",
+            Some("remote-device".to_owned()),
+            Some("Remote Device".to_owned()),
+            Some("fingerprint".to_owned()),
+            RuntimeSessionState::Bound,
+        ),
+    )
+    .await?;
+    std::fs::create_dir_all(&paths.session_controls_file)?;
+
+    let result = disconnect(Some(state_dir), "SESSION1").await;
+    assert!(
+        result.is_err(),
+        "disconnect must fail when managed session control cleanup cannot be persisted"
+    );
+    let registry = load_session_registry(&paths).await?;
+    let session = registry.get("SESSION1").expect("runtime record remains");
+    assert_eq!(session.state, RuntimeSessionState::Bound);
+    assert!(
+        session.last_error.is_none(),
+        "runtime must not be marked disconnected when control cleanup failed"
     );
 
     Ok(())

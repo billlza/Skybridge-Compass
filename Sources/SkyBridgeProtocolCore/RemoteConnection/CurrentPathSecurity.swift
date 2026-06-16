@@ -123,7 +123,7 @@ public enum CurrentPathOriginPolicy {
         guard let url = URL(string: raw),
               let scheme = url.scheme?.lowercased(),
               let host = url.host?.lowercased(),
-              (scheme == "https" || scheme == "http")
+              (scheme == "https" || (scheme == "http" && isLoopbackHost(host)))
         else {
             throw CurrentPathSecurityError.invalidOrigin
         }
@@ -144,8 +144,29 @@ public enum CurrentPathOriginPolicy {
         }
 
         if shouldIncludePort, let port = explicitPort {
-            return "\(scheme)://\(host):\(port)"
+            return "\(scheme)://\(serializedHost(host)):\(port)"
         }
-        return "\(scheme)://\(host)"
+        return "\(scheme)://\(serializedHost(host))"
+    }
+
+    public static func isLoopbackHost(_ rawHost: String) -> Bool {
+        let host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+        guard !host.isEmpty else { return false }
+        if host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" {
+            return true
+        }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return false }
+        let values = octets.compactMap { UInt8($0) }
+        return values.count == 4 && values[0] == 127
+    }
+
+    private static func serializedHost(_ host: String) -> String {
+        if host.contains(":"), !(host.hasPrefix("[") && host.hasSuffix("]")) {
+            return "[\(host)]"
+        }
+        return host
     }
 }

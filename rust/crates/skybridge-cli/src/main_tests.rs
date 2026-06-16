@@ -5,9 +5,19 @@ mod parse;
 
 #[tokio::test]
 async fn dispatch_covers_safe_placeholders_coverage_and_smoke_aliases() -> Result<()> {
+    let state_dir = crate::cli_test_support::make_test_dir("main-dispatch-safe-placeholders")?;
+    let state = state_dir.display().to_string();
+
     for args in [
         &["skybridge", "version"][..],
-        &["skybridge", "file", "history", "--json"][..],
+        &[
+            "skybridge",
+            "--state-dir",
+            &state,
+            "file",
+            "history",
+            "--json",
+        ][..],
         &[
             "skybridge",
             "check",

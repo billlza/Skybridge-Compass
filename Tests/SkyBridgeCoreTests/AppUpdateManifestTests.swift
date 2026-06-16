@@ -61,6 +61,155 @@ final class AppUpdateManifestTests: XCTestCase {
         }
     }
 
+    func testManifestRejectsMissingApplePQCSDKBuildAttestation() throws {
+        let manifest = try decodeManifest(includeApplePQCSDKBuild: false)
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(error as? SkyBridgeAppUpdateValidationError, .missingApplePQCSDKBuildAttestation)
+        }
+    }
+
+    func testManifestRejectsApplePQCSDKBuildNotCompiledWithHASFlag() throws {
+        let manifest = try decodeManifest(applePQCSDKCompiled: false)
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(error as? SkyBridgeAppUpdateValidationError, .applePQCSDKBuildNotCompiled)
+        }
+    }
+
+    func testManifestRejectsUnsupportedApplePQCSDKBuildProbeMode() throws {
+        let manifest = try decodeManifest(applePQCSDKBuildProbeMode: "sdk_version_fallback")
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeAppUpdateValidationError,
+                .unsupportedApplePQCSDKBuildProbeMode("sdk_version_fallback")
+            )
+        }
+    }
+
+    func testManifestRejectsUnsupportedApplePQCSDKBuildSDKName() throws {
+        let manifest = try decodeManifest(applePQCSDKBuildSDKName: "iphoneos")
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeAppUpdateValidationError,
+                .unsupportedApplePQCSDKBuildSDKName("iphoneos")
+            )
+        }
+    }
+
+    func testManifestRejectsUnsupportedApplePQCSDKBuildSDKVersion() throws {
+        let manifest = try decodeManifest(applePQCSDKBuildSDKVersion: "27.0")
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeAppUpdateValidationError,
+                .unsupportedApplePQCSDKBuildSDKVersion("27.0")
+            )
+        }
+    }
+
+    func testManifestRejectsUnsupportedApplePQCSDKBuildSwiftTarget() throws {
+        let manifest = try decodeManifest(applePQCSDKBuildSwiftTarget: "arm64-apple-macosx27.0")
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeAppUpdateValidationError,
+                .unsupportedApplePQCSDKBuildSwiftTarget("arm64-apple-macosx27.0")
+            )
+        }
+    }
+
+    func testManifestRejectsMissingApplePQCSDKBuildSecureEnclaveSymbols() throws {
+        let manifest = try decodeManifest(applePQCSDKBuildSecureEnclaveSymbolsIncluded: false)
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeAppUpdateValidationError,
+                .missingApplePQCSDKBuildSecureEnclaveSymbols
+            )
+        }
+    }
+
+    func testManifestRejectsUnsupportedApplePQCSDKBuildSymbolSet() throws {
+        let manifest = try decodeManifest(applePQCSDKBuildSymbolSet: "cryptokit-pqc-version-fallback")
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeAppUpdateValidationError,
+                .unsupportedApplePQCSDKBuildSymbolSet("cryptokit-pqc-version-fallback")
+            )
+        }
+    }
+
+    func testManifestRejectsTamperedApplePQCSDKBuildSignature() throws {
+        let manifest = try decodeManifest(
+            applePQCSDKBuildSignatureOverride: Data(repeating: 1, count: 64).base64EncodedString()
+        )
+
+        XCTAssertThrowsError(
+            try SkyBridgeAppUpdateEvaluator.evaluate(
+                manifest: manifest,
+                context: context(),
+                trustedSigningKeys: trustedSigningKeys()
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SkyBridgeAppUpdateValidationError,
+                .applePQCSDKBuildSignatureVerificationFailed
+            )
+        }
+    }
+
     func testManifestRejectsMissingSignature() throws {
         let manifest = try decodeManifest(signed: false)
 
@@ -121,6 +270,7 @@ final class AppUpdateManifestTests: XCTestCase {
         let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let appInfo = try repositorySource("Sources/SkyBridgeCompassApp/Info.plist")
         let xcodeProjectSource = try repositorySource("SkyBridgeWidgets.xcodeproj/project.pbxproj")
+        let manifestEvaluator = try repositorySource("Sources/SkyBridgeCore/Updates/AppUpdateManifest.swift")
         let generator = try repositorySource("Scripts/generate_macos_update_manifest.swift")
         let publisher = try repositorySource("Scripts/publish_macos_update_release.sh")
         let releaseReadiness = try repositorySource("Scripts/check_macos_release_readiness.sh")
@@ -150,6 +300,19 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertTrue(generator.contains("appendSignedField(\"expires_at\""))
         XCTAssertTrue(generator.contains("appendSignedField(\"sequence\""))
         XCTAssertTrue(generator.contains("manifest generation requires --notarized"))
+        XCTAssertTrue(generator.contains("apple_pqc_sdk_build"))
+        XCTAssertTrue(generator.contains("compiled_with_has_apple_pqc_sdk"))
+        XCTAssertTrue(generator.contains("appBundleContainsApplePQCCompileMarker"))
+        XCTAssertTrue(generator.contains("sdk_name must be"))
+        XCTAssertTrue(generator.contains("sdk_version must be"))
+        XCTAssertTrue(generator.contains("swift_target must be"))
+        XCTAssertTrue(generator.contains("secure_enclave_symbols_included must be true"))
+        XCTAssertTrue(manifestEvaluator.contains("missingApplePQCSDKBuildAttestation"))
+        XCTAssertTrue(manifestEvaluator.contains("expectedApplePQCSDKBuildSDKName"))
+        XCTAssertTrue(manifestEvaluator.contains("expectedApplePQCSDKBuildSDKVersion"))
+        XCTAssertTrue(manifestEvaluator.contains("expectedApplePQCSDKBuildSwiftTarget"))
+        XCTAssertTrue(manifestEvaluator.contains("missingApplePQCSDKBuildSecureEnclaveSymbols"))
+        XCTAssertTrue(manifestEvaluator.contains("applePQCSDKBuildSigningPayload"))
         XCTAssertFalse(
             generator.contains("--private-key-base64"),
             "The update manifest generator must not accept private key material as a command-line argument."
@@ -168,12 +331,21 @@ final class AppUpdateManifestTests: XCTestCase {
             "stapler validate returns failure on notarized DMGs on some macOS versions when stdout is redirected; keep the output visible so the publish gate observes the real notarization result."
         )
         XCTAssertTrue(publisher.contains("--clobber"))
+        XCTAssertTrue(publisher.contains("\"sdk_name\": \"macosx\""))
+        XCTAssertTrue(publisher.contains("\"sdk_version\": \"26.5\""))
+        XCTAssertTrue(publisher.contains("\"swift_target\": \"arm64-apple-macosx26.0\""))
+        XCTAssertTrue(publisher.contains("\"secure_enclave_symbols_included\": True"))
         XCTAssertTrue(publisher.contains("resolve_default_sequence"))
         XCTAssertTrue(publisher.contains("date -u '+%Y%m%d%H%M%S'"))
         XCTAssertTrue(publisher.contains("https://github.com/${REPOSITORY}/releases/download/${TAG_NAME}"))
         XCTAssertTrue(releaseReadiness.contains("generate_macos_update_manifest.swift"))
         XCTAssertTrue(releaseReadiness.contains("publish_macos_update_release.sh"))
+        XCTAssertTrue(releaseReadiness.contains("skybridge_assert_bundle_has_apple_pqc_compile_marker"))
         XCTAssertTrue(releaseReadiness.contains("verify_xcode_toolchain.sh"))
+        XCTAssertTrue(releaseReadiness.contains("Scripts/check_macos_deps.sh"))
+        XCTAssertTrue(releaseReadiness.contains("env -u SKYBRIDGE_FILE_TOOL -u SKYBRIDGE_OTOOL_TOOL"))
+        XCTAssertTrue(releaseReadiness.contains("--strict \"${app_path}\" \"14.0\""))
+        XCTAssertTrue(releaseReadiness.contains("DMG embedded app contains Mach-O binaries that cannot prove macOS 14.0 compatibility"))
         XCTAssertTrue(
             releaseReadiness.contains("stapled_notarization_ticket_is_valid \"${target_path}\""),
             "Release readiness must accept stapled notarization evidence for the exact App or DMG target when spctl omits notarized source context."
@@ -190,6 +362,44 @@ final class AppUpdateManifestTests: XCTestCase {
         )
         XCTAssertTrue(workflow.contains("contents: write"))
         XCTAssertTrue(workflow.contains("actions/download-artifact@v4"))
+        XCTAssertTrue(workflow.contains("release_artifact_run_attempt:"))
+        XCTAssertTrue(workflow.contains("release_artifact_workflow_path:"))
+        XCTAssertTrue(workflow.contains("release_artifact_event:"))
+        XCTAssertTrue(workflow.contains("Validate Release Artifact Run Provenance"))
+        XCTAssertTrue(workflow.contains("Scripts/validate_macos_release_artifact_run.sh"))
+        XCTAssertTrue(workflow.contains("GH_TOKEN: ${{ github.token }}"))
+        XCTAssertTrue(workflow.contains("RELEASE_ARTIFACT_RUN_ATTEMPT: ${{ inputs.release_artifact_run_attempt }}"))
+        XCTAssertTrue(workflow.contains("RELEASE_ARTIFACT_WORKFLOW_PATH: ${{ inputs.release_artifact_workflow_path }}"))
+        XCTAssertTrue(workflow.contains(#"--repository "${GITHUB_REPOSITORY}""#))
+        XCTAssertTrue(workflow.contains(#"--expected-run-attempt "${RELEASE_ARTIFACT_RUN_ATTEMPT}""#))
+        XCTAssertTrue(workflow.contains(#"--expected-workflow-path "${RELEASE_ARTIFACT_WORKFLOW_PATH}""#))
+        XCTAssertTrue(workflow.contains(#"--expected-head-sha "${GITHUB_SHA}""#))
+        XCTAssertTrue(workflow.contains(#"--expected-head-branch "${GITHUB_REF_NAME}""#))
+        XCTAssertTrue(workflow.contains(#"--artifact "${CONNECTIVITY_ARTIFACT_NAME}""#))
+        XCTAssertTrue(workflow.contains(#"--artifact "${P2P_REMOTE_ARTIFACT_NAME}""#))
+        XCTAssertTrue(workflow.contains(#"--artifact "${FILE_TRANSFER_ARTIFACT_NAME}""#))
+        XCTAssertTrue(workflow.contains(#"--artifact "${P2P_NOTICE_ARTIFACT_NAME}""#))
+        XCTAssertTrue(workflow.contains(#"--artifact "${WEBRTC_NOTICE_ARTIFACT_NAME}""#))
+        XCTAssertTrue(workflow.contains(#"--artifact "${NOTICE_PANEL_ARTIFACT_NAME}""#))
+        XCTAssertTrue(workflow.contains("release-artifact-run-provenance.json"))
+        if
+            let provenanceRange = workflow.range(of: "Validate Release Artifact Run Provenance"),
+            let firstDownloadRange = workflow.range(of: "Download Connectivity Matrix Artifact"),
+            let signingSecretsRange = workflow.range(of: "Validate Release Signing Secrets")
+        {
+            XCTAssertLessThan(
+                provenanceRange.lowerBound,
+                firstDownloadRange.lowerBound,
+                "The release workflow must verify source-run provenance before downloading release-gate artifacts."
+            )
+            XCTAssertLessThan(
+                provenanceRange.lowerBound,
+                signingSecretsRange.lowerBound,
+                "The release workflow must reject untrusted release-gate artifacts before signing secrets are exposed."
+            )
+        } else {
+            XCTFail("Release workflow must keep provenance validation, artifact download, and signing-secret validation steps visible.")
+        }
         XCTAssertTrue(workflow.contains("Scripts/publish_macos_update_release.sh"))
         XCTAssertTrue(workflow.contains("SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64"))
         XCTAssertTrue(workflow.contains("--connectivity-artifact-dir \"Artifacts/release-gate/connectivity\""))
@@ -197,8 +407,13 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertTrue(workflow.contains("--file-transfer-artifact-dir \"Artifacts/release-gate/file-transfer\""))
         XCTAssertTrue(fastfile.contains("SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"))
         XCTAssertTrue(fastfile.contains("Scripts/publish_macos_update_release.sh"))
-        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_VERSION=\"${SKYBRIDGE_REQUIRED_XCODE_VERSION:-26.5}\""))
-        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_SWIFT_VERSION=\"${SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION:-6.3.2}\""))
+        XCTAssertTrue(xcodeVerifier.contains("TOOLCHAIN_POLICY=\"${SKYBRIDGE_XCODE_TOOLCHAIN_POLICY:-stable-release}\""))
+        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_VERSION=\"26.5\""))
+        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_XCODE_BUILD=\"17F42\""))
+        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_SWIFT_VERSION=\"6.3.2\""))
+        XCTAssertTrue(xcodeVerifier.contains("EXPECTED_MACOS_SDK_VERSION=\"26.5\""))
+        XCTAssertTrue(xcodeVerifier.contains("stable release toolchain must not use beta Xcode developer directory"))
+        XCTAssertTrue(xcodeVerifier.contains("custom-diagnostic"))
         XCTAssertFalse(
             appInfo.localizedCaseInsensitiveContains("private"),
             "Release update configuration must pin public keys only."
@@ -214,12 +429,22 @@ final class AppUpdateManifestTests: XCTestCase {
 
         let appURL = tempRoot.appendingPathComponent("SkyBridge Compass Pro.app", isDirectory: true)
         let contentsURL = appURL.appendingPathComponent("Contents", isDirectory: true)
+        let macOSURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
         try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: macOSURL, withIntermediateDirectories: true)
         let plist: [String: Any] = [
             "CFBundleIdentifier": "com.skybridge.compass.pro",
             "CFBundleShortVersionString": "1.2.0",
             "CFBundleVersion": "2026052401",
-            "LSMinimumSystemVersion": "14.0.0"
+            "LSMinimumSystemVersion": "14.0.0",
+            "SkyBridgePackagingApplePQCSDKCompiledWithHASApplePQCSDK": true,
+            "SkyBridgePackagingApplePQCSDKCompileMarker": "skybridge.apple-pqc-sdk.compile-fact.v1.has-apple-pqc-sdk",
+            "SkyBridgePackagingApplePQCSDKProbeMode": "symbol_probe",
+            "SkyBridgePackagingApplePQCSDKName": "macosx",
+            "SkyBridgePackagingApplePQCSDKVersion": "26.5",
+            "SkyBridgePackagingApplePQCSDKSwiftTarget": "arm64-apple-macosx26.0",
+            "SkyBridgePackagingApplePQCSDKSecureEnclaveSymbolsIncluded": true,
+            "SkyBridgePackagingApplePQCSDKSymbolSet": "cryptokit-pqc-v1"
         ]
         let plistData = try PropertyListSerialization.data(
             fromPropertyList: plist,
@@ -227,6 +452,13 @@ final class AppUpdateManifestTests: XCTestCase {
             options: 0
         )
         try plistData.write(to: contentsURL.appendingPathComponent("Info.plist"))
+        let executableURL = macOSURL.appendingPathComponent("SkyBridgeCompassApp")
+        try "#!/bin/sh\n# skybridge.apple-pqc-sdk.compile-fact.v1.has-apple-pqc-sdk\nexit 0\n".write(
+            to: executableURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
 
         let packageData = Data("fake notarized dmg payload".utf8)
         let packageURL = tempRoot.appendingPathComponent("SkyBridgeCompassPro-1.2.0.dmg")
@@ -279,6 +511,14 @@ final class AppUpdateManifestTests: XCTestCase {
         XCTAssertEqual(manifest.sha256, SHA256.hash(data: packageData).map { String(format: "%02x", $0) }.joined())
         XCTAssertEqual(manifest.sizeBytes, Int64(packageData.count))
         XCTAssertEqual(manifest.signature?.keyId, testKeyId)
+        XCTAssertEqual(manifest.applePQCSDKBuild?.compiledWithHASApplePQCSDK, true)
+        XCTAssertEqual(manifest.applePQCSDKBuild?.probeMode, "symbol_probe")
+        XCTAssertEqual(manifest.applePQCSDKBuild?.sdkName, "macosx")
+        XCTAssertEqual(manifest.applePQCSDKBuild?.sdkVersion, "26.5")
+        XCTAssertEqual(manifest.applePQCSDKBuild?.swiftTarget, "arm64-apple-macosx26.0")
+        XCTAssertEqual(manifest.applePQCSDKBuild?.secureEnclaveSymbolsIncluded, true)
+        XCTAssertEqual(manifest.applePQCSDKBuild?.symbolSet, "cryptokit-pqc-v1")
+        XCTAssertEqual(manifest.applePQCSDKBuild?.signature?.keyId, testKeyId)
     }
 
     func testManifestWithFutureMinimumSystemVersionIsUnsupported() throws {
@@ -423,6 +663,15 @@ final class AppUpdateManifestTests: XCTestCase {
         minimumSystemVersion: String = "14.0.0",
         downloadURL: String = "https://skybridge-compass.vercel.app/releases/SkyBridgeCompassPro.dmg",
         notarized: Bool = true,
+        includeApplePQCSDKBuild: Bool = true,
+        applePQCSDKCompiled: Bool = true,
+        applePQCSDKBuildProbeMode: String = "symbol_probe",
+        applePQCSDKBuildSDKName: String = "macosx",
+        applePQCSDKBuildSDKVersion: String = "26.5",
+        applePQCSDKBuildSwiftTarget: String = "arm64-apple-macosx26.0",
+        applePQCSDKBuildSecureEnclaveSymbolsIncluded: Bool = true,
+        applePQCSDKBuildSymbolSet: String = "cryptokit-pqc-v1",
+        applePQCSDKBuildSignatureOverride: String? = nil,
         signed: Bool = true,
         signatureOverride: String? = nil
     ) throws -> SkyBridgeAppUpdateManifest {
@@ -438,10 +687,31 @@ final class AppUpdateManifestTests: XCTestCase {
                     minimumSystemVersion: minimumSystemVersion,
                     downloadURL: downloadURL,
                     notarized: notarized,
+                    includeApplePQCSDKBuild: includeApplePQCSDKBuild,
+                    applePQCSDKCompiled: applePQCSDKCompiled,
+                    applePQCSDKBuildProbeMode: applePQCSDKBuildProbeMode,
+                    applePQCSDKBuildSDKName: applePQCSDKBuildSDKName,
+                    applePQCSDKBuildSDKVersion: applePQCSDKBuildSDKVersion,
+                    applePQCSDKBuildSwiftTarget: applePQCSDKBuildSwiftTarget,
+                    applePQCSDKBuildSecureEnclaveSymbolsIncluded: applePQCSDKBuildSecureEnclaveSymbolsIncluded,
+                    applePQCSDKBuildSymbolSet: applePQCSDKBuildSymbolSet,
+                    applePQCSDKBuildSignatureValue: nil,
                     signatureValue: nil
                 ).utf8
             )
         )
+        let applePQCSDKBuildSignatureValue: String?
+        if let applePQCSDKBuildSignatureOverride {
+            applePQCSDKBuildSignatureValue = applePQCSDKBuildSignatureOverride
+        } else if let attestation = unsignedManifest.applePQCSDKBuild {
+            let payload = SkyBridgeAppUpdateEvaluator.applePQCSDKBuildSigningPayload(
+                for: unsignedManifest,
+                attestation: attestation
+            )
+            applePQCSDKBuildSignatureValue = try testPrivateKey.signature(for: payload).base64EncodedString()
+        } else {
+            applePQCSDKBuildSignatureValue = nil
+        }
         let signatureValue: String?
         if let signatureOverride {
             signatureValue = signatureOverride
@@ -463,6 +733,15 @@ final class AppUpdateManifestTests: XCTestCase {
                     minimumSystemVersion: minimumSystemVersion,
                     downloadURL: downloadURL,
                     notarized: notarized,
+                    includeApplePQCSDKBuild: includeApplePQCSDKBuild,
+                    applePQCSDKCompiled: applePQCSDKCompiled,
+                    applePQCSDKBuildProbeMode: applePQCSDKBuildProbeMode,
+                    applePQCSDKBuildSDKName: applePQCSDKBuildSDKName,
+                    applePQCSDKBuildSDKVersion: applePQCSDKBuildSDKVersion,
+                    applePQCSDKBuildSwiftTarget: applePQCSDKBuildSwiftTarget,
+                    applePQCSDKBuildSecureEnclaveSymbolsIncluded: applePQCSDKBuildSecureEnclaveSymbolsIncluded,
+                    applePQCSDKBuildSymbolSet: applePQCSDKBuildSymbolSet,
+                    applePQCSDKBuildSignatureValue: applePQCSDKBuildSignatureValue,
                     signatureValue: signatureValue
                 ).utf8
             )
@@ -479,8 +758,52 @@ final class AppUpdateManifestTests: XCTestCase {
         minimumSystemVersion: String,
         downloadURL: String,
         notarized: Bool,
+        includeApplePQCSDKBuild: Bool,
+        applePQCSDKCompiled: Bool,
+        applePQCSDKBuildProbeMode: String,
+        applePQCSDKBuildSDKName: String,
+        applePQCSDKBuildSDKVersion: String,
+        applePQCSDKBuildSwiftTarget: String,
+        applePQCSDKBuildSecureEnclaveSymbolsIncluded: Bool,
+        applePQCSDKBuildSymbolSet: String,
+        applePQCSDKBuildSignatureValue: String?,
         signatureValue: String?
     ) -> String {
+        let applePQCSDKBuildJSON: String
+        if includeApplePQCSDKBuild {
+            let applePQCSDKBuildSignatureJSON: String
+            if let applePQCSDKBuildSignatureValue {
+                applePQCSDKBuildSignatureJSON = """
+                    ,
+                    "signature": {
+                      "algorithm": "ed25519",
+                      "key_id": "\(testKeyId)",
+                      "value": "\(applePQCSDKBuildSignatureValue)"
+                    }
+                """
+            } else {
+                applePQCSDKBuildSignatureJSON = ""
+            }
+            let compileMarker = applePQCSDKCompiled
+                ? "skybridge.apple-pqc-sdk.compile-fact.v1.has-apple-pqc-sdk"
+                : "skybridge.apple-pqc-sdk.compile-fact.v1.missing-has-apple-pqc-sdk"
+            applePQCSDKBuildJSON = """
+              ,
+                "apple_pqc_sdk_build": {
+                "compiled_with_has_apple_pqc_sdk": \(applePQCSDKCompiled ? "true" : "false"),
+                "compile_marker": "\(compileMarker)",
+                "probe_mode": "\(applePQCSDKBuildProbeMode)",
+                "sdk_name": "\(applePQCSDKBuildSDKName)",
+                "sdk_version": "\(applePQCSDKBuildSDKVersion)",
+                "swift_target": "\(applePQCSDKBuildSwiftTarget)",
+                "secure_enclave_symbols_included": \(applePQCSDKBuildSecureEnclaveSymbolsIncluded ? "true" : "false"),
+                "symbol_set": "\(applePQCSDKBuildSymbolSet)"
+            \(applePQCSDKBuildSignatureJSON)
+              }
+            """
+        } else {
+            applePQCSDKBuildJSON = ""
+        }
         let signatureJSON: String
         if let signatureValue {
             signatureJSON = """
@@ -513,6 +836,7 @@ final class AppUpdateManifestTests: XCTestCase {
           "distribution": "developer-id",
           "notarized": \(notarized ? "true" : "false"),
           "size_bytes": 1024
+        \(applePQCSDKBuildJSON)
         \(signatureJSON)
         }
         """

@@ -99,6 +99,17 @@ pub(crate) fn try_handle_encrypted_app_message(
         Ok(plaintext) => plaintext,
         Err(_) => return Ok(None),
     };
+    // Binary file frames and JSON keepalive frames share this encrypted stream.
+    // They are disjoint on the first plaintext byte (file = 0x53 'S', JSON =
+    // 0x7B '{'), so we branch deterministically. A malformed file frame fails
+    // closed rather than being silently treated as a non-event.
+    if crate::file_transfer_frame::is_file_app_frame(&plaintext) {
+        let inbound_file_frame = crate::file_transfer_frame::decode_file_app_frame(&plaintext)?;
+        return Ok(Some(ClassicHandleResult {
+            inbound_file_frame: Some(inbound_file_frame),
+            ..ClassicHandleResult::default()
+        }));
+    }
     let value: Value = match serde_json::from_slice(&plaintext) {
         Ok(value) => value,
         Err(_) => return Ok(None),
@@ -118,7 +129,27 @@ pub(crate) fn try_handle_encrypted_app_message(
         pong_id,
         observed_pong_id,
         observed_heartbeat: value.get("heartbeat").is_some(),
+        inbound_file_frame: None,
     }))
+}
+
+/// Encrypt arbitrary application plaintext bytes into an AES-256-GCM app frame
+/// using the per-frame random-nonce construction. Used for binary file frames;
+/// JSON frames go through [`build_encrypted_app_frame`].
+pub(crate) fn build_encrypted_app_frame_bytes(
+    session_keys: &ClassicSessionKeys,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(&session_keys.send_key)
+        .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
+    let mut nonce_bytes = [0u8; 12];
+    fill_random(&mut nonce_bytes)?;
+    let ciphertext_and_tag = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+        .map_err(|error| anyhow!("failed to encrypt app payload: {error}"))?;
+    let mut combined = nonce_bytes.to_vec();
+    combined.extend_from_slice(&ciphertext_and_tag);
+    Ok(combined)
 }
 
 fn build_encrypted_app_frame<T: Serialize>(
@@ -126,19 +157,65 @@ fn build_encrypted_app_frame<T: Serialize>(
     payload: &T,
 ) -> Result<Vec<u8>> {
     let plaintext = serde_json::to_vec(payload)?;
-    let cipher = Aes256Gcm::new_from_slice(&session_keys.send_key)
-        .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
-    let mut nonce_bytes = [0u8; 12];
-    fill_random(&mut nonce_bytes)?;
-    let ciphertext_and_tag = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
-        .map_err(|error| anyhow!("failed to encrypt app payload: {error}"))?;
-    let mut combined = nonce_bytes.to_vec();
-    combined.extend_from_slice(&ciphertext_and_tag);
-    Ok(combined)
+    build_encrypted_app_frame_bytes(session_keys, &plaintext)
 }
 
 pub(crate) fn apple_reference_seconds_now() -> f64 {
     let now = OffsetDateTime::now_utc().unix_timestamp_nanos() as f64 / 1_000_000_000.0;
     now - REFERENCE_UNIX_SECONDS as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_transfer_frame::{FileAppFrame, encode_chunk};
+
+    fn loopback_keys() -> ClassicSessionKeys {
+        // send_key == receive_key so a frame built with send_key decrypts with
+        // receive_key in the same test (the real protocol uses distinct keys).
+        ClassicSessionKeys {
+            send_key: vec![7u8; 32],
+            receive_key: vec![7u8; 32],
+            negotiated_suite: "test".to_owned(),
+            transcript_hash: vec![0u8; 32],
+        }
+    }
+
+    #[test]
+    fn binary_file_frame_round_trips_through_app_message_parser() {
+        let keys = loopback_keys();
+        let plaintext = encode_chunk(&[1u8; 16], 3, &[9u8; 128]).expect("encode chunk");
+        let frame = build_encrypted_app_frame_bytes(&keys, &plaintext).expect("encrypt");
+        let result = try_handle_encrypted_app_message(&frame, &keys)
+            .expect("decrypt ok")
+            .expect("frame recognized");
+        match result.inbound_file_frame {
+            Some(FileAppFrame::Chunk { sequence, .. }) => assert_eq!(sequence, 3),
+            other => panic!("expected inbound chunk frame, got {other:?}"),
+        }
+        assert!(!result.observed_heartbeat);
+    }
+
+    #[test]
+    fn heartbeat_frame_still_parses_as_keepalive() {
+        let keys = loopback_keys();
+        let frame = build_heartbeat_frame(&keys, "device-1", Some("Device One")).expect("build");
+        let result = try_handle_encrypted_app_message(&frame, &keys)
+            .expect("decrypt ok")
+            .expect("frame recognized");
+        assert!(result.observed_heartbeat);
+        assert!(result.inbound_file_frame.is_none());
+    }
+
+    #[test]
+    fn corrupt_file_frame_fails_closed() {
+        let keys = loopback_keys();
+        // Valid magic but truncated body -> decode must error (fail closed),
+        // not be silently dropped.
+        let mut plaintext = crate::file_transfer_frame::FILE_FRAME_MAGIC.to_vec();
+        plaintext.push(crate::file_transfer_frame::FILE_FRAME_VERSION);
+        plaintext.push(0x02); // CHUNK type, but nothing follows
+        let frame = build_encrypted_app_frame_bytes(&keys, &plaintext).expect("encrypt");
+        assert!(try_handle_encrypted_app_message(&frame, &keys).is_err());
+    }
 }

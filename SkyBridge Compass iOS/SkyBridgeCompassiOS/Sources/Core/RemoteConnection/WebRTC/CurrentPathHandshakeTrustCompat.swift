@@ -55,7 +55,12 @@ struct CurrentPathHandshakeTrustProviderCompat: MultiFingerprintHandshakeTrustPr
     }
 
     func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
-        await KEMTrustStore.shared.kemPublicKeys(for: deviceId)
+        let pinnedFingerprints = await trustedFingerprints(for: deviceId)
+        guard !pinnedFingerprints.isEmpty else { return [:] }
+        return await KEMTrustStore.shared.signedRefreshKEMPublicKeys(
+            forAny: [deviceId] + fallbackPeerIDs,
+            pinnedProtocolFingerprints: pinnedFingerprints
+        )
     }
 
     func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {

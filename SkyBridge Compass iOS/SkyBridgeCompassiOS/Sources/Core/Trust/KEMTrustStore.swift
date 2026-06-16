@@ -173,6 +173,44 @@ public actor KEMTrustStore {
         )
     }
 
+    public func signedRefreshKEMPublicKeys(
+        forAny deviceIds: [String],
+        pinnedProtocolFingerprints: Set<String>
+    ) -> [CryptoSuite: Data] {
+        let normalizedPins = Set(pinnedProtocolFingerprints.compactMap(Self.normalizedFingerprint))
+        guard !normalizedPins.isEmpty else { return [:] }
+        let candidates = Self.trustMaterialCandidates(forAny: deviceIds)
+        let canonicalCandidates = Self.canonicalLookupCandidates(for: deviceIds)
+        guard !candidates.isEmpty else { return [:] }
+
+        var selected: [CryptoSuite: SelectedKey] = [:]
+        for (index, candidate) in candidates.enumerated() {
+            guard let peer = cache[candidate],
+                  peer.source == "signed_lan_kem_refresh",
+                  Self.peer(peer, isBoundToAny: normalizedPins) else {
+                continue
+            }
+            if let expiresAt = peer.expiresAt, expiresAt <= Date() { continue }
+            let signedSuiteWireIds = Set(peer.signedSuiteWireIds ?? peer.keys.keys.sorted())
+            for (suiteWireId, publicKey) in Self.sanitizedKEMMap(peer.keys)
+            where signedSuiteWireIds.contains(suiteWireId) {
+                let suite = CryptoSuite(wireId: suiteWireId)
+                let candidateKey = SelectedKey(
+                    publicKey: publicKey,
+                    updatedAt: peer.updatedAt,
+                    isCanonical: canonicalCandidates.contains(candidate),
+                    isSignedRefresh: true,
+                    lookupIndex: index
+                )
+                if Self.shouldPrefer(candidateKey, over: selected[suite]) {
+                    selected[suite] = candidateKey
+                }
+            }
+        }
+
+        return Dictionary(uniqueKeysWithValues: selected.map { ($0.key, $0.value.publicKey) })
+    }
+
     private func selectKEMPublicKeys(for deviceIds: [String]) -> [CryptoSuite: SelectedKey] {
         let candidates = Self.trustMaterialCandidates(forAny: deviceIds)
         let canonicalCandidates = Self.canonicalLookupCandidates(for: deviceIds)
@@ -417,6 +455,22 @@ public actor KEMTrustStore {
             return candidate.isCanonical
         }
         return candidate.lookupIndex < existing.lookupIndex
+    }
+
+    private static func normalizedFingerprint(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard value.count == 64, value.allSatisfy(\.isHexDigit) else { return nil }
+        return value
+    }
+
+    private static func peer(_ peer: StoredPeer, isBoundToAny normalizedPins: Set<String>) -> Bool {
+        [
+            normalizedFingerprint(peer.signingFingerprint),
+            normalizedFingerprint(peer.protocolIdentityFingerprint)
+        ]
+        .compactMap { $0 }
+        .contains { normalizedPins.contains($0) }
     }
 
     private static func orderedMigrationCandidates(

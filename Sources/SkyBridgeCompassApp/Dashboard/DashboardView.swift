@@ -245,6 +245,7 @@ public struct DashboardView: View {
                 FileTransferView()
             case .remoteDesktop:
                 RemoteDesktopView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .quantumCommunication:
                 EmptyStateView(title: LocalizationManager.shared.localizedString("quantum.title"),
                                subtitle: LocalizationManager.shared.localizedString("quantum.subtitle"))

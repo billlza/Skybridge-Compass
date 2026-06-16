@@ -13,39 +13,52 @@ let latestCXXStandardFlags = ["-std=gnu++23"]
 // Why: Swift does not provide a compile-time "SDK has PQC types" check for structs like MLKEM/MLDSA.
 // If we define HAS_APPLE_PQC_SDK while compiling against an older SDK, the build will fail.
 //
-// With the Swift 6.3 / Xcode 26.4 baseline, the bundled Apple SDK already contains the PQC types.
-// Keep a manual override so packaging/debugging can still force-disable the native path when needed.
+// Build scripts must run a CryptoKit symbol probe before setting this override.
+// Direct SwiftPM workflows default to classic/liboqs compilation because Swift
+// language or SDK major versions are not proof that PQC symbols are available.
 func shouldEnableApplePQCSDK() -> Bool {
-    if let rawOverride = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_PQC_SDK"]?
+    guard let rawOverride = ProcessInfo.processInfo.environment["SKYBRIDGE_ENABLE_APPLE_PQC_SDK"]?
         .trimmingCharacters(in: .whitespacesAndNewlines)
-        .lowercased() {
-        switch rawOverride {
-        case "1", "true", "yes":
-            return true
-        case "0", "false", "no":
-            return false
-        default:
-            break
-        }
+        .lowercased(),
+        !rawOverride.isEmpty
+    else {
+        return false
     }
-    #if swift(>=6.3)
-    return true
-    #else
-    return false
-    #endif
+
+    switch rawOverride {
+    case "1", "true", "yes", "on":
+        return true
+    case "0", "false", "no", "off":
+        return false
+    default:
+        fatalError("Invalid SKYBRIDGE_ENABLE_APPLE_PQC_SDK value: \(rawOverride)")
+    }
 }
 
 let enableApplePQCSDK: Bool = shouldEnableApplePQCSDK()
+let swiftPMProductRootRPath = "@loader_path/../../.."
+
+func metalResource(_ path: String) -> Resource {
+    // Xcode 27 SwiftPM emits missing-creator warnings when processing .metal resources.
+    // The app runtime validates copied shader sources through SkyBridgeMetalShaderLibrary.
+    .copy(path)
+}
+
+func webRTCTestLinkerSettings() -> [LinkerSetting] {
+    [
+        .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", swiftPMProductRootRPath], .when(platforms: [.macOS]))
+    ]
+}
 
 let package = Package(
     name: "SkyBridgeCompassApp",
     defaultLocalization: "zh-Hans",
     platforms: [
         .iOS(.v17),
-        .macOS(.v14) // 支持 macOS 14.x (Sonoma)、15.x (Sequoia) 和 26.x (Tahoe) - 后量子加密PQC
+        .macOS(.v14) // 支持 macOS 14.x (Sonoma)、15.x (Sequoia)、26.x (Tahoe) 和 27.x beta - 后量子加密PQC
         // 版本兼容策略：
         // - macOS 14.0–15.x：经典密码 + liboqs/OQSRAII PQC（HPKE 降级为 KEM+AES-GCM）
-        // - macOS 26+（2025-09-15 正式发布）：首选 Apple CryptoKit 原生 PQC（HPKE X-Wing、ML-KEM、ML-DSA），liboqs 仅作 legacy 兼容
+        // - macOS 26+：首选 Apple CryptoKit 原生 PQC（HPKE X-Wing、ML-KEM、ML-DSA），liboqs 仅作 legacy 兼容
     ],
     products: [
         .executable(name: "SkyBridgeCompassApp", targets: ["SkyBridgeCompassApp"]),
@@ -143,7 +156,8 @@ let package = Package(
             ],
             path: "Sources/LocalLanInteropHost",
             swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
+                .enableUpcomingFeature("StrictConcurrency"),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
             ]
         ),
         .executableTarget(
@@ -165,7 +179,8 @@ let package = Package(
             ],
             path: "Sources/CurrentPathProbe",
             swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
+                .enableUpcomingFeature("StrictConcurrency"),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
             ]
         ),
         .target(
@@ -271,17 +286,16 @@ let package = Package(
             ],
             resources: [
                 .process("Resources"),
-                .process("RemoteDesktop/RemoteDesktopShaders.metal"),
-                .process("RemoteDesktop/Shaders/RemoteDesktopPassthrough.metal"),
-                .process("RemoteDesktop/Shaders/RemoteDesktopHDR.metal"),
-                .process("Rendering/Metal4Shaders.metal"),
-                .process("Rendering/AuroraShaders.metal"),
-                .process("Shaders/WeatherParticleShaders.metal"),
-                .process("Rendering/WeatherShaders.metal"),
-                .process("Rendering/WeatherShaders.air"),
-                .process("Weather/RainShaders.metal"),
-                .process("Weather/HazeShaders.metal"),
-                .process("Weather/HazeParticleShaders.metal")
+                metalResource("RemoteDesktop/RemoteDesktopShaders.metal"),
+                metalResource("RemoteDesktop/Shaders/RemoteDesktopPassthrough.metal"),
+                metalResource("RemoteDesktop/Shaders/RemoteDesktopHDR.metal"),
+                metalResource("Rendering/Metal4Shaders.metal"),
+                metalResource("Rendering/AuroraShaders.metal"),
+                metalResource("Shaders/WeatherParticleShaders.metal"),
+                metalResource("Rendering/WeatherShaders.metal"),
+                metalResource("Weather/RainShaders.metal"),
+                metalResource("Weather/HazeShaders.metal"),
+                metalResource("Weather/HazeParticleShaders.metal")
                 // 注意：PerformanceOptimization.md 已在 exclude 中，不需要在 resources 中处理
             ],
             swiftSettings: ([
@@ -365,7 +379,8 @@ let package = Package(
             ] + (enableApplePQCSDK ? [
                 // 与 SkyBridgeCore 保持一致：否则测试中的 `#if HAS_APPLE_PQC_SDK` 分支会与被测模块不一致
                 .define("HAS_APPLE_PQC_SDK")
-            ] : []))
+            ] : [])),
+            linkerSettings: webRTCTestLinkerSettings()
         ),
         .testTarget(
             name: "SkyBridgeBenchTests",
@@ -414,6 +429,7 @@ let package = Package(
                 "Resources/Assets.xcassets",
                 "Resources/BrandIcon.png",
                 "Resources/Icons",
+                "Resources/SkyBridgeCompassApp.entitlements",
                 "Resources/app-icon.svg",
                 "Resources/app_icon.png",
                 "SkyBridgeCompassApp.entitlements",
@@ -424,7 +440,7 @@ let package = Package(
                 // Process the development-only Resources directory; release packaging installs precomposed icon assets separately.
                 .process("Resources"),
                 // 全页面雾霾效果着色器
-                .process("GlobalHazeShaders.metal"),
+                metalResource("GlobalHazeShaders.metal"),
             ],
             swiftSettings: [
                 // Apple Silicon特定优化
@@ -484,6 +500,9 @@ let package = Package(
                 "NoiseKit"
             ],
             path: "Sources/BaselineBenchRunner",
+            swiftSettings: [
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
+            ],
             linkerSettings: [
                 .linkedFramework("Network"),
                 .linkedFramework("Security"),
@@ -497,6 +516,9 @@ let package = Package(
                 "OQSRAII"
             ],
             path: "Sources/HandshakeBenchRunner",
+            swiftSettings: [
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
+            ],
             linkerSettings: [
                 .linkedFramework("CryptoKit")
             ]
@@ -506,7 +528,10 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore"
             ],
-            path: "Sources/MessageSizeBenchRunner"
+            path: "Sources/MessageSizeBenchRunner",
+            swiftSettings: [
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
+            ]
         ),
         // 小组件共享数据模型 - 轻量级，无外部依赖
         .target(

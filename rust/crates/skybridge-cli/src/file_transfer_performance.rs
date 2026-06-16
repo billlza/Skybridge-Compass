@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow};
 
 use crate::{
     DoctorCheck, DoctorProbeReport, PerformanceCheckArgs,
+    performance_report_target::REDACTED_ARTIFACT_DIR,
     required_file_transfer_performance_check_names,
 };
 
@@ -69,10 +70,7 @@ pub(crate) fn build_file_transfer_performance_report(
     });
 
     Ok(DoctorProbeReport {
-        target: format!(
-            "performance file-transfer artifact={}",
-            artifact_dir.display()
-        ),
+        target: format!("performance file-transfer artifact={REDACTED_ARTIFACT_DIR}"),
         checks,
         fault_stage: classify_file_transfer_probable_fault_stage(&evidence),
         latest_diagnostic_at: None,

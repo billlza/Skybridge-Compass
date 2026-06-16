@@ -282,8 +282,10 @@ final class PowerMetricsProvider: NSObject, PowerMetricsXPCProtocol, @unchecked 
 
     private let queue = DispatchQueue(label: "com.skybridge.PowerMetricsHelper.provider")
     private let sampleIntervalSeconds: TimeInterval = 1.0
-    private let powermetricsIntervalSeconds: TimeInterval = 2.0
-    private let staleThresholdSeconds: TimeInterval = 3.5
+    // 把昂贵的 powermetrics 子进程采样从 2s 放宽到 5s，显著降低耗电/发热（约减少 60% 的 powermetrics spawn）；
+    // staleThreshold 相应放宽到 8s，避免在两次采样之间把数据误判为过期而闪烁“不可用”。
+    private let powermetricsIntervalSeconds: TimeInterval = 5.0
+    private let staleThresholdSeconds: TimeInterval = 8.0
     private let binaryCheckIntervalSeconds: TimeInterval = 20.0
 
     private var latestSnapshot: Snapshot

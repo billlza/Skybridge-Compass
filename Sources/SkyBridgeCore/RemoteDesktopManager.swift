@@ -242,6 +242,10 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
         }
 
         do {
+ // 连接前把用户持久化的远程桌面设置（分辨率/色深/编码器/帧率/网络等）下发给会话，
+ // 否则设置 UI 只写入 UserDefaults 而从不生效（此前 applySettings 没有任何调用方 = 假阳性）。
+ // FreeRDP 类参数需在 connect 之前设置，故放在 start() 之前。
+            session.applySettings(RemoteDesktopSettingsManager.shared.settings)
             try await session.start()
             refreshMetrics()
         } catch {
@@ -251,6 +255,16 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
                 self.refreshMetrics()
             }
             throw error
+        }
+    }
+
+    /// 把当前持久化的远程桌面设置重新下发给所有活跃会话。
+    /// 用于设置/质量变更后的即时生效尝试——设置至此真正接入会话（而非只写 UserDefaults）；
+    /// FreeRDP 是否支持会话中改参由客户端决定，但链路已接通。
+    public func reapplyCurrentSettingsToActiveSessions() {
+        let settings = RemoteDesktopSettingsManager.shared.settings
+        for session in activeSessions.values {
+            session.applySettings(settings)
         }
     }
 
@@ -282,19 +296,17 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
     public func bootstrap() {
         guard !started else { return }
         started = true
-        
+
  // 启动监控定时器
-        Task { @MainActor in
-            monitoringTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        monitoringTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    let cpu = self.fetchCpuLoad()
-                    self.refreshMetrics(cpuLoad: cpu)
-                }
+                let cpu = self.fetchCpuLoad()
+                self.refreshMetrics(cpuLoad: cpu)
             }
         }
-        
+
         log.info("RemoteDesktopManager bootstrap完成")
     }
     

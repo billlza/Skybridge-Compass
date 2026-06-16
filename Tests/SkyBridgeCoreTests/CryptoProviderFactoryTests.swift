@@ -121,6 +121,11 @@ final class CryptoProviderFactoryTests: XCTestCase {
         
         XCTAssertEqual(provider.providerName, "Unavailable",
                        "requirePQC should return Unavailable provider when PQC not available")
+        XCTAssertEqual(provider.tier, .classic)
+        XCTAssertEqual(provider.activeSuite, .unknown(0xFFFF))
+        XCTAssertTrue(provider.supportedSuites.isEmpty)
+        XCTAssertFalse(provider.supportsSuite(.x25519Ed25519))
+        XCTAssertFalse(provider.supportsSuite(.mlkem768MLDSA65))
         #endif
     }
     
@@ -1536,6 +1541,35 @@ final class ApplePQCProviderSelectionTests: XCTestCase {
  // Verify provider was created successfully
         XCTAssertFalse(provider.providerName.isEmpty,
                        "Provider should have a name")
+    }
+
+    func testRequirePQCUnavailableProviderEmitsHighSeverityEvent() async {
+        let eventExpectation = expectation(description: "strictPQC unavailable provider event")
+        let subscriptionId = await SecurityEventEmitter.shared.subscribe { event in
+            guard event.type == .cryptoProviderSelected,
+                  event.context["policy"] == CryptoProviderFactory.SelectionPolicy.requirePQC.rawValue,
+                  event.context["providerName"] == "Unavailable"
+            else {
+                return
+            }
+            XCTAssertEqual(event.severity, .high)
+            XCTAssertEqual(event.context["providerStatus"], "pqc_unavailable")
+            XCTAssertEqual(event.context["strictPQCUnavailable"], "true")
+            XCTAssertEqual(event.context["fallbackAllowed"], "false")
+            XCTAssertEqual(event.context["selectedTier"], CryptoTier.classic.rawValue)
+            XCTAssertEqual(event.context["suite"], CryptoSuite.unknown(0xFFFF).rawValue)
+            eventExpectation.fulfill()
+        }
+        defer {
+            Task {
+                await SecurityEventEmitter.shared.unsubscribe(subscriptionId)
+            }
+        }
+
+        let env = MockCryptoEnvironment(hasApplePQC: false, hasLiboqs: false)
+        _ = CryptoProviderFactory.make(policy: .requirePQC, environment: env)
+
+        await fulfillment(of: [eventExpectation], timeout: 2)
     }
     #endif
     

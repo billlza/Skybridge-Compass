@@ -8,7 +8,8 @@ extension CrossNetworkWebRTCManager {
     ) -> String? {
         guard let rawOrigin = signalingOrigin?.trimmingCharacters(in: .whitespacesAndNewlines),
               !rawOrigin.isEmpty,
-              let originURL = URL(string: rawOrigin),
+              let canonicalOrigin = try? CurrentPathSecurityCompat.canonicalOrigin(rawOrigin),
+              let originURL = URL(string: canonicalOrigin),
               let scheme = originURL.scheme?.lowercased(),
               let host = originURL.host,
               !host.isEmpty else {

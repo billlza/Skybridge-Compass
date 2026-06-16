@@ -27,6 +27,7 @@ process.env.HTTP_TURN_RATE_LIMIT_PER_MIN = process.env.HTTP_TURN_RATE_LIMIT_PER_
 process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN = process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN || '1000';
 process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN = process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN || '1000';
 process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH = process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH || '/current-path/ws';
+process.env.SKYBRIDGE_SIGNALING_ALLOW_LEGACY_QUERY_TOKEN = 'false';
 const expectedSignalingWebSocketPath = process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH;
 
 const { createSignalingStateBackend } = require('../lib/signaling_state_backend');
@@ -201,6 +202,7 @@ before(async () => {
     trustProxy: false,
     requireSharedStateForPublicCapabilities: false,
     allowBootstrapDeviceAuth: true,
+    allowLegacyQueryToken: false,
     port: 0,
     host: '127.0.0.1'
   });
@@ -279,6 +281,23 @@ test('live register-session route replays same request and rejects mismatched re
 
   assert.equal(mismatchToken.status, 409);
   assert.equal(mismatchToken.json.error, 'idempotency_key_reused');
+});
+
+test('session lifecycle logs redact raw session identifiers', async () => {
+  const initiator = makeIdentityBinding('session-log-redaction');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const { result: sessionResponse, messages } = await captureConsoleMessages(['info'], () => postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  }));
+
+  assert.equal(sessionResponse.status, 200);
+  assert.equal(typeof sessionResponse.json.sessionId, 'string');
+  assertSessionRedactedInLog(messages, sessionResponse.json.sessionId, 'sessionLifecycle=registered');
 });
 
 test('lookup rejects responders from a different user in the same tenant', async () => {
@@ -499,7 +518,13 @@ test('ICE candidate burst drops excess candidates without revoking session media
   assert.equal(sessionResponse.status, 200);
 
   const ws = new WebSocket(
-    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
+    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}`,
+    {
+      headers: {
+        'X-SkyBridge-Session-Id': sessionResponse.json.sessionId,
+        'X-SkyBridge-Session': sessionResponse.json.sessionToken
+      }
+    }
   );
   try {
     const bound = await waitForWebSocketMessage(ws, (message) => message.type === 'bound');
@@ -544,6 +569,115 @@ test('ICE candidate burst drops excess candidates without revoking session media
   }
 });
 
+test('websocket bind rejects legacy query session token by default', async () => {
+  const initiator = makeIdentityBinding('ws-query-auth-disabled');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+  assert.equal(sessionResponse.status, 200);
+
+  const ws = new WebSocket(
+    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
+  );
+  const close = await waitForWebSocketClose(ws);
+  assert.equal(close.code, 1008);
+  assert.equal(close.reason, 'legacy_query_token_disabled');
+});
+
+test('websocket bind accepts header session token without putting token in the URL', async () => {
+  const initiator = makeIdentityBinding('ws-header-auth');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+  assert.equal(sessionResponse.status, 200);
+
+  const wsURL = `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&cv=1.2.3&pv=2`;
+  assert.equal(wsURL.includes(sessionResponse.json.sessionToken), false);
+
+  const ws = new WebSocket(wsURL, {
+    headers: {
+      'X-SkyBridge-Session-Id': sessionResponse.json.sessionId,
+      'X-SkyBridge-Session': sessionResponse.json.sessionToken,
+      'X-SkyBridge-Client-Version': '1.2.3',
+      'X-SkyBridge-Protocol-Version': '2'
+    }
+  });
+  try {
+    const bound = await waitForWebSocketMessage(ws, (message) => message.type === 'bound');
+    assert.equal(bound.sessionId, sessionResponse.json.sessionId);
+    assert.equal(bound.role, 'initiator');
+  } finally {
+    ws.close();
+    await waitForWebSocketClose(ws);
+  }
+});
+
+test('websocket bind rejects mixed header and legacy query session tokens', async () => {
+  const initiator = makeIdentityBinding('ws-conflicting-auth');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+  assert.equal(sessionResponse.status, 200);
+
+  const ws = new WebSocket(
+    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`,
+    {
+      headers: {
+        'X-SkyBridge-Session-Id': sessionResponse.json.sessionId,
+        'X-SkyBridge-Session': sessionResponse.json.sessionToken
+      }
+    }
+  );
+  const close = await waitForWebSocketClose(ws);
+  assert.equal(close.code, 1008);
+  assert.equal(close.reason, 'conflicting_session_credentials');
+});
+
+test('websocket bind rejects empty legacy query token when header credentials are present', async () => {
+  const initiator = makeIdentityBinding('ws-empty-query-auth');
+  const admissionLease = await issueAdmissionLease(initiator);
+  const sessionResponse = await postJSON('/api/webrtc/register-session', {
+    headers: {
+      'X-SkyBridge-Admission': admissionLease.admissionToken
+    },
+    body: {
+      ttlSeconds: 120
+    }
+  });
+  assert.equal(sessionResponse.status, 200);
+
+  const ws = new WebSocket(
+    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=`,
+    {
+      headers: {
+        'X-SkyBridge-Session-Id': sessionResponse.json.sessionId,
+        'X-SkyBridge-Session': sessionResponse.json.sessionToken
+      }
+    }
+  );
+  const close = await waitForWebSocketClose(ws);
+  assert.equal(close.code, 1008);
+  assert.equal(close.reason, 'conflicting_session_credentials');
+});
+
 test('media admission refresh replaces superseded role token', async () => {
   const initiator = makeIdentityBinding('media-refresh');
   const admissionLease = await issueAdmissionLease(initiator);
@@ -560,7 +694,7 @@ test('media admission refresh replaces superseded role token', async () => {
   const oldMediaToken = sessionResponse.json.mediaAdmissionToken;
   assert.equal(typeof oldMediaToken, 'string');
 
-  const refresh = await postJSON('/api/media/admission/refresh', {
+  const { result: refresh, messages: refreshLogMessages } = await captureConsoleMessages(['info', 'log'], () => postJSON('/api/media/admission/refresh', {
     headers: {
       'X-SkyBridge-Session': sessionResponse.json.sessionToken
     },
@@ -568,7 +702,7 @@ test('media admission refresh replaces superseded role token', async () => {
       sessionId: sessionResponse.json.sessionId,
       role: 'initiator'
     }
-  });
+  }));
 
   assert.equal(refresh.status, 200);
   assert.equal(refresh.json.sessionId, sessionResponse.json.sessionId);
@@ -583,18 +717,21 @@ test('media admission refresh replaces superseded role token', async () => {
   assert.equal(refresh.json.mediaTokenExpectedGeneration, refresh.json.mediaTokenGeneration);
   assert.equal(refresh.json.mediaTokenExpectedPresent, true);
   assert.notEqual(refresh.json.mediaAdmissionToken, oldMediaToken);
+  assertSessionRedactedInLog(refreshLogMessages, sessionResponse.json.sessionId, 'sessionLifecycle=activeExtended');
+  assertSessionRedactedInLog(refreshLogMessages, sessionResponse.json.sessionId, '[media] admission refresh accepted');
 
-  const staleLease = await postJSON('/api/media/lease', {
+  const { result: staleLease, messages: staleLeaseLogMessages } = await captureConsoleMessages(['warn'], () => postJSON('/api/media/lease', {
     headers: {
       'X-SkyBridge-Media-Admission': oldMediaToken
     },
     body: {}
-  });
+  }));
   assert.equal(staleLease.status, 401);
   assert.equal(staleLease.json.error, 'media_admission_token_superseded');
   assert.equal(staleLease.json.mediaTokenRequestGeneration, tokenGeneration(oldMediaToken));
   assert.equal(staleLease.json.mediaTokenExpectedGeneration, refresh.json.mediaTokenGeneration);
   assert.equal(staleLease.json.mediaTokenExpectedPresent, true);
+  assertSessionRedactedInLog(staleLeaseLogMessages, sessionResponse.json.sessionId, '[media] admission token superseded before lease');
 
   const freshLease = await postJSON('/api/media/lease', {
     headers: {
@@ -1378,7 +1515,13 @@ test('heartbeat pong renews idle room membership leases', async () => {
   assert.equal(sessionResponse.status, 200);
 
   const ws = new WebSocket(
-    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}&st=${encodeURIComponent(sessionResponse.json.sessionToken)}`
+    `${baseURL.replace(/^http/, 'ws')}${expectedSignalingWebSocketPath}?shard=${encodeURIComponent(sessionResponse.json.sessionId)}`,
+    {
+      headers: {
+        'X-SkyBridge-Session-Id': sessionResponse.json.sessionId,
+        'X-SkyBridge-Session': sessionResponse.json.sessionToken
+      }
+    }
   );
   try {
     const bound = await waitForWebSocketMessage(ws, (message) => message.type === 'bound');
@@ -1426,6 +1569,34 @@ function tokenGeneration(token) {
 
 function tokenHash(token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+async function captureConsoleMessages(methods, operation) {
+  const originals = new Map();
+  const messages = [];
+  for (const method of methods) {
+    originals.set(method, console[method]);
+    console[method] = (...args) => {
+      messages.push(args.map((arg) => String(arg)).join(' '));
+      originals.get(method).apply(console, args);
+    };
+  }
+  try {
+    const result = await operation();
+    return { result, messages };
+  } finally {
+    for (const [method, original] of originals.entries()) {
+      console[method] = original;
+    }
+  }
+}
+
+function assertSessionRedactedInLog(messages, sessionId, marker) {
+  const line = messages.find((message) => message.includes(marker));
+  assert.ok(line, `missing log marker: ${marker}`);
+  assert.equal(line.includes(sessionId), false, `${marker} log must not contain the raw session id`);
+  assert.match(line, /sessionLogId=[0-9a-f]{16}/);
+  assert.match(line, /session=<redacted>/);
 }
 
 async function issueAdmissionLease(binding, { accessToken = bearerToken, requestTenantId = tenantId } = {}) {
@@ -1576,9 +1747,12 @@ function waitForWebSocketClose(ws, timeoutMs = 1_500) {
       ws.off('error', onError);
     }
 
-    function onClose() {
+    function onClose(code, reasonBuffer) {
       cleanup();
-      resolve();
+      resolve({
+        code,
+        reason: String(reasonBuffer || '')
+      });
     }
 
     function onError(error) {

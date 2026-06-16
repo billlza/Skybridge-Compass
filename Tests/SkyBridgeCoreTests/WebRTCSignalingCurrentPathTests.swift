@@ -38,7 +38,9 @@ struct WebRTCSignalingCurrentPathTests {
         let url = URL(string: "wss://api.example.com/ws?shard=ROOM1234&st=secret-token&cv=1.0&pv=1")!
         let redacted = WebSocketSignalingClient.redactedURLString(url)
         #expect(!redacted.contains("secret-token"))
+        #expect(!redacted.contains("ROOM1234"))
         #expect(redacted.contains("st=%3Credacted%3E") || redacted.contains("st=<redacted>"))
+        #expect(redacted.contains("shard=%3Credacted%3E") || redacted.contains("shard=<redacted>"))
     }
 
     @Test("SignalServerClient 的当前 WebRTC 端点与编解码逻辑保持稳定")
@@ -72,6 +74,7 @@ struct WebRTCSignalingCurrentPathTests {
                     "code": "ABCDEFGH",
                     "sessionId": "ABCDEFGH",
                     "initiatorToken": "init-token",
+                    "turnAdmissionToken": "turn-token",
                     "expiresIn": 600,
                     "signalingServerOrigin": "https://api.example.com",
                     "wsPath": "/tenant/ws"
@@ -91,6 +94,7 @@ struct WebRTCSignalingCurrentPathTests {
                     "found": true,
                     "sessionId": "ABCDEFGH",
                     "responderToken": "resp-token",
+                    "turnAdmissionToken": "turn-token",
                     "expiresIn": 540,
                     "signalingServerOrigin": "https://api.example.com",
                     "wsPath": "/tenant/ws",
@@ -126,6 +130,7 @@ struct WebRTCSignalingCurrentPathTests {
                     "sessionId": "session-123",
                     "initiatorSignalingToken": "qr-token",
                     "qrBootstrapToken": "bootstrap-token",
+                    "turnAdmissionToken": "turn-token",
                     "expiresIn": 300,
                     "signalingServerOrigin": "https://api.example.com",
                     "wsPath": "/tenant/ws"
@@ -138,6 +143,67 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(sessionLease.qrBootstrapToken == "bootstrap-token")
         #expect(sessionLease.signalingServerOrigin == "https://api.example.com")
         #expect(sessionLease.wsPath == "/tenant/ws")
+    }
+
+    @Test("SignalServerClient legacy response decoders fail closed on missing fields")
+    func signalServerClientLegacyDecodersRejectIncompleteResponses() throws {
+        func jsonData(_ object: [String: Any]) throws -> Data {
+            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        }
+
+        try expectSignalServerMalformedResponse("register code missing token") {
+            _ = try SignalServerClient.decodeRegisterCodeResponse(
+                from: jsonData([
+                    "code": "ABCDEFGH",
+                    "sessionId": "ABCDEFGH",
+                    "turnAdmissionToken": "turn-token",
+                    "expiresIn": 600,
+                    "signalingServerOrigin": "https://api.example.com"
+                ])
+            )
+        }
+        try expectSignalServerMalformedResponse("register session missing origin") {
+            _ = try SignalServerClient.decodeRegisterSessionResponse(
+                from: jsonData([
+                    "sessionId": "session-123",
+                    "initiatorSignalingToken": "qr-token",
+                    "qrBootstrapToken": "bootstrap-token",
+                    "turnAdmissionToken": "turn-token",
+                    "expiresIn": 300,
+                    "signalingServerOrigin": "   "
+                ])
+            )
+        }
+        try expectSignalServerMalformedResponse("lookup zero expiry") {
+            _ = try SignalServerClient.decodeLookupCodeResponse(
+                from: jsonData([
+                    "found": true,
+                    "sessionId": "ABCDEFGH",
+                    "responderToken": "resp-token",
+                    "turnAdmissionToken": "turn-token",
+                    "expiresIn": 0,
+                    "signalingServerOrigin": "https://api.example.com",
+                    "initiatorDeviceId": "device-1",
+                    "initiatorProtocolSigningAlgorithm": ProtocolSigningAlgorithm.ed25519.rawValue,
+                    "initiatorProtocolPublicKeyFingerprint": String(repeating: "a", count: 64)
+                ])
+            )
+        }
+        try expectSignalServerMalformedResponse("lookup unknown signing algorithm") {
+            _ = try SignalServerClient.decodeLookupCodeResponse(
+                from: jsonData([
+                    "found": true,
+                    "sessionId": "ABCDEFGH",
+                    "responderToken": "resp-token",
+                    "turnAdmissionToken": "turn-token",
+                    "expiresIn": 540,
+                    "signalingServerOrigin": "https://api.example.com",
+                    "initiatorDeviceId": "device-1",
+                    "initiatorProtocolSigningAlgorithm": "P-256-ECDSA",
+                    "initiatorProtocolPublicKeyFingerprint": String(repeating: "a", count: 64)
+                ])
+            )
+        }
     }
 
     @Test("Current-path WebSocket URL follows server origin and wsPath")
@@ -159,9 +225,21 @@ struct WebRTCSignalingCurrentPathTests {
             item.value.map { (item.name, $0) }
         })
         #expect(query["shard"] == "ABC123")
-        #expect(query["st"] == "token-1")
+        #expect(query["st"] == nil)
         #expect(query["cv"] == "1.2.3")
         #expect(query["pv"] == "2")
+        #expect(!url.absoluteString.contains("token-1"))
+
+        let headers = try #require(CrossNetworkConnectionManager.currentPathSignalingWebSocketHeaders(
+            sessionID: "abc123",
+            sessionToken: "token-1",
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        ))
+        #expect(headers["X-SkyBridge-Session-Id"] == "ABC123")
+        #expect(headers["X-SkyBridge-Session"] == "token-1")
+        #expect(headers["X-SkyBridge-Client-Version"] == "1.2.3")
+        #expect(headers["X-SkyBridge-Protocol-Version"] == "2")
 
         let defaultPathURL = CrossNetworkConnectionManager.currentPathSignalingWebSocketURL(
             signalingServerOrigin: "http://localhost:8787",
@@ -184,14 +262,50 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(missingPathURL == nil)
     }
 
+    @Test("Current-path WebSocket URL rejects public cleartext origins but keeps loopback compatibility")
+    func currentPathWebSocketURLRejectsPublicCleartextOrigins() throws {
+        #expect(throws: CurrentPathSecurityError.self) {
+            _ = try CurrentPathOriginPolicy.canonicalOrigin("http://signal.example.com")
+        }
+
+        let loopback = try #require(CrossNetworkConnectionManager.currentPathSignalingWebSocketURL(
+            signalingServerOrigin: "http://127.0.0.1:8787",
+            wsPath: "/tenant/ws",
+            sessionID: "local-room",
+            sessionToken: "token",
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        ))
+        #expect(loopback.scheme == "ws")
+        #expect(loopback.host == "127.0.0.1")
+
+        let ipv6Loopback = try CurrentPathOriginPolicy.canonicalOrigin("http://[::1]:8787")
+        #expect(ipv6Loopback == "http://[::1]:8787")
+
+        let publicCleartext = CrossNetworkConnectionManager.currentPathSignalingWebSocketURL(
+            signalingServerOrigin: "http://signal.example.com",
+            wsPath: "/tenant/ws",
+            sessionID: "room",
+            sessionToken: "token",
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        )
+        #expect(publicCleartext == nil)
+    }
+
     @Test("Current-path tooling does not synthesize /ws or config WebSocket fallbacks")
     func currentPathToolingDoesNotSynthesizeFallbackWebSocketRoutes() throws {
         let managerSource = try String(contentsOfFile: "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
         #expect(!managerSource.contains("return \"/ws\""))
         #expect(!managerSource.contains("return URL(string: SkyBridgeServerConfig.signalingWebSocketURL)"))
+        #expect(!managerSource.contains("URLQueryItem(name: \"st\""))
 
         let probeSource = try String(contentsOfFile: "Sources/CurrentPathProbe/main.swift")
         #expect(!probeSource.contains("?? \"/ws\""))
+        #expect(!probeSource.contains("URLQueryItem(name: \"st\""))
+
+        let iOSManagerSource = try String(contentsOfFile: "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift")
+        #expect(!iOSManagerSource.contains("URLQueryItem(name: \"st\""))
 
         let serverSource = try String(contentsOfFile: "Server/skybridge-signaling/server.js")
         #expect(serverSource.contains("SIGNALING_WEBSOCKET_PATH"))
@@ -310,6 +424,21 @@ private func assertEndpointValidationPrecedesTokenCaching(
         return
     }
     #expect(endpointRange.lowerBound < tokenRange.lowerBound, sourceLocation: sourceLocation)
+}
+
+private func expectSignalServerMalformedResponse(
+    _ label: String,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    operation: () throws -> Void
+) rethrows {
+    do {
+        try operation()
+        Issue.record("Expected malformed response for \(label)", sourceLocation: sourceLocation)
+    } catch SignalServerClient.ClientError.malformedResponse {
+        return
+    } catch {
+        Issue.record("Expected malformed response for \(label), got \(error)", sourceLocation: sourceLocation)
+    }
 }
 
 private enum XCTJSON {

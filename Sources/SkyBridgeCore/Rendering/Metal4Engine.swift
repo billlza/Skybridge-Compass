@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import MetalKit
 import MetalFX
@@ -263,10 +264,6 @@ public class Metal4Engine: NSObject, ObservableObject {
         }
         
  // 加载包含Metal 4.0特性的着色器库
-        guard let library = device.makeDefaultLibrary() else {
-            throw Metal4Error.shaderLoadFailed
-        }
-        
  // 验证Metal 4.0着色器函数
         let requiredFunctions = [
             "vertex_main",
@@ -276,6 +273,13 @@ public class Metal4Engine: NSObject, ObservableObject {
             "neural_upscale_compute", // 神经网络上采样
             "frame_interpolation_compute" // 帧插值计算
         ]
+
+        let library = try SkyBridgeMetalShaderLibrary.load(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: ["Metal4Shaders"],
+            requiredFunctionNames: requiredFunctions
+        )
         
         for functionName in requiredFunctions {
             guard library.makeFunction(name: functionName) != nil else {

@@ -60,6 +60,7 @@ public class PQCCryptoManager: ObservableObject {
     // Keychain 存储（统一使用 Core/Security/KeychainManager.swift）
     
     private let keychainManager = KeychainManager.shared
+    private var keychainLoadError: Error?
     
     private init() {
         // 初始化 CryptoProvider
@@ -67,7 +68,12 @@ public class PQCCryptoManager: ObservableObject {
         self.currentTier = cryptoProvider.tier
         self.currentSuite = cryptoProvider.activeSuite
         
-        loadKeysFromKeychain()
+        do {
+            try loadKeysFromKeychain()
+        } catch {
+            keychainLoadError = error
+            SkyBridgeLogger.shared.error("❌ PQC Keychain 密钥加载失败: \(error.localizedDescription)")
+        }
         UserDefaults.standard.set(false, forKey: "pqc_allow_classic_fallback")
         allowClassicFallbackForCompatibility = false
     }
@@ -83,6 +89,16 @@ public class PQCCryptoManager: ObservableObject {
         ))
         self.currentTier = cryptoProvider.tier
         self.currentSuite = cryptoProvider.activeSuite
+
+        if keychainLoadError != nil {
+            do {
+                try loadKeysFromKeychain()
+                self.keychainLoadError = nil
+            } catch {
+                self.keychainLoadError = error
+                throw error
+            }
+        }
         
         if !hasKeyPair {
             try await generateKeyPair()
@@ -262,7 +278,7 @@ public class PQCCryptoManager: ObservableObject {
             throw PQCError.verificationFailed
         }
         guard expected == code else {
-            SkyBridgeLogger.shared.warning("❌ 设备验证码不匹配: device=\(device.name) expected=\(expected) got=\(code)")
+            SkyBridgeLogger.shared.warning("❌ 设备验证码不匹配: deviceRedacted=1")
             throw PQCError.verificationFailed
         }
 
@@ -321,13 +337,17 @@ public class PQCCryptoManager: ObservableObject {
     
     // MARK: - Private Methods
     
-    private func loadKeysFromKeychain() {
+    private func loadKeysFromKeychain() throws {
         // 尝试加载当前 suite 的密钥
-        if let kemPrivateData = try? keychainManager.loadPrivateKey(identifier: "pqc.kem.private.\(currentSuite.wireId)"),
-           let kemPublicData = try? keychainManager.loadPublicKey(identifier: "pqc.kem.public.\(currentSuite.wireId)"),
-           let sigPrivateData = try? keychainManager.loadPrivateKey(identifier: "pqc.sig.private.\(currentSuite.wireId)"),
-           let sigPublicData = try? keychainManager.loadPublicKey(identifier: "pqc.sig.public.\(currentSuite.wireId)") {
-            
+        let kemPrivateData = try loadPQCKeyIfPresent(identifier: "pqc.kem.private.\(currentSuite.wireId)", isPrivate: true)
+        let kemPublicData = try loadPQCKeyIfPresent(identifier: "pqc.kem.public.\(currentSuite.wireId)", isPrivate: false)
+        let sigPrivateData = try loadPQCKeyIfPresent(identifier: "pqc.sig.private.\(currentSuite.wireId)", isPrivate: true)
+        let sigPublicData = try loadPQCKeyIfPresent(identifier: "pqc.sig.public.\(currentSuite.wireId)", isPrivate: false)
+
+        switch (kemPrivateData, kemPublicData, sigPrivateData, sigPublicData) {
+        case (nil, nil, nil, nil):
+            return
+        case let (kemPrivateData?, kemPublicData?, sigPrivateData?, sigPublicData?):
             kemPrivateKey = SecureBytes(data: kemPrivateData)
             kemPublicKey = kemPublicData
             signingPrivateKey = SecureBytes(data: sigPrivateData)
@@ -338,6 +358,19 @@ public class PQCCryptoManager: ObservableObject {
             keyGenerationDate = keychainItemCreationDate(account: "pqc.kem.private.\(currentSuite.wireId)")
             
             SkyBridgeLogger.shared.info("✅ 从 Keychain 加载密钥成功")
+        default:
+            throw KeychainError.incompleteKeyMaterial("PQC primary KEM/signing key set is incomplete for suite \(currentSuite.wireId)")
+        }
+    }
+
+    private func loadPQCKeyIfPresent(identifier: String, isPrivate: Bool) throws -> Data? {
+        do {
+            if isPrivate {
+                return try keychainManager.loadPrivateKey(identifier: identifier)
+            }
+            return try keychainManager.loadPublicKey(identifier: identifier)
+        } catch KeychainError.itemNotFound {
+            return nil
         }
     }
 

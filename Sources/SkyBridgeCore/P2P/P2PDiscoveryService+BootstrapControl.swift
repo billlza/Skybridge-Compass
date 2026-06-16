@@ -2,6 +2,8 @@ import Foundation
 import CryptoKit
 
 extension P2PDiscoveryService {
+    nonisolated static var protocolIdentityLogRedaction: String { "<redacted>" }
+
     nonisolated static func normalizeInboundControlFrame(_ payload: Data) -> Data {
         let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
         return HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx")
@@ -66,9 +68,9 @@ extension P2PDiscoveryService {
                 let responderLatencyMs = Date().timeIntervalSince(responseStartedAt) * 1_000.0
                 let statusLine = String(
                     format: "🔐 SKR-1 signed LAN KEM refresh served: requester=%@ target=%@ keyId=%@ generation=%llu suites=%@ wireId=%@ responderLatencyMs=%.1f lifecycle=request>served",
-                    request.requesterDeviceId,
-                    request.targetDeviceId,
-                    refresh.keyId,
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
                     refresh.generation,
                     refresh.kemPublicKeys.map { String(format: "0x%04X", $0.suiteWireId) }.joined(separator: ","),
                     refresh.kemPublicKeys.map { String(format: "0x%04X", $0.suiteWireId) }.joined(separator: ","),
@@ -94,10 +96,10 @@ extension P2PDiscoveryService {
                 )
                 let statusLine = String(
                     format: "⛔️ SKR-1 signed LAN KEM refresh rejected: requester=%@ target=%@ reasonCode=%@ reason=%@ responderLatencyMs=%.1f lifecycle=request>rejected",
-                    request.requesterDeviceId,
-                    request.targetDeviceId,
+                    Self.protocolIdentityLogRedaction,
+                    Self.protocolIdentityLogRedaction,
                     failure.reasonCode,
-                    error.localizedDescription,
+                    Self.protocolIdentityLogRedaction,
                     responderLatencyMs
                 )
                 return BootstrapControlResponse(
@@ -114,7 +116,7 @@ extension P2PDiscoveryService {
             do {
                 let binding = try await makeSignedProtocolIdentityBindingPayload(request)
                 let code = binding.shortAuthenticationCode(request: request)
-                let statusLine = "🔐 PIB-1 protocol identity binding served: requester=\(request.requesterDeviceId) target=\(request.targetDeviceId) fingerprint=\(binding.protocolIdentityFingerprint) code=\(code) lifecycle=identity-oob>served"
+                let statusLine = "🔐 PIB-1 protocol identity binding served: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>served"
                 return BootstrapControlResponse(
                     kind: .protocolIdentityBindingServed,
                     message: .signedProtocolIdentityBinding(binding),
@@ -132,7 +134,7 @@ extension P2PDiscoveryService {
                     reason: error.localizedDescription,
                     requestHashHex: request.canonicalRequestHashHex
                 )
-                let statusLine = "⛔️ PIB-1 protocol identity binding rejected: requester=\(request.requesterDeviceId) target=\(request.targetDeviceId) reasonCode=\(failure.reasonCode) reason=\(error.localizedDescription) lifecycle=identity-oob>rejected"
+                let statusLine = "⛔️ PIB-1 protocol identity binding rejected: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) reasonCode=\(failure.reasonCode) reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>rejected"
                 return BootstrapControlResponse(
                     kind: .protocolIdentityBindingRejected,
                     message: .kemRefreshFailure(failure),

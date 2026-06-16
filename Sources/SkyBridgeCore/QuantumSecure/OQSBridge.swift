@@ -29,6 +29,22 @@ public final class OQSBridge {
         }
     }
 
+    private static func persistKeyMaterial(
+        _ data: Data,
+        service: String,
+        account: String,
+        errorCode: Int,
+        failureDescription: String
+    ) throws {
+        guard KeychainManager.shared.importKey(data: data, service: service, account: account) else {
+            throw NSError(
+                domain: "PQC",
+                code: errorCode,
+                userInfo: [NSLocalizedDescriptionKey: "\(failureDescription) (keychain_write_failed)"]
+            )
+        }
+    }
+
     public static func sign(_ data: Data, peerId: String, algorithm: OQSAlgorithm) async throws -> Data {
         let name = sigName(algorithm)
         guard let sig = OQS_SIG_new(name) else {
@@ -55,12 +71,26 @@ public final class OQSBridge {
             }
             let pubData = Data(bytes: pub, count: pubLen)
             let secData = Data(bytes: sec, count: privLen)
-            _ = KeychainManager.shared.importKey(data: pubData, service: pubService, account: peerId)
-            _ = KeychainManager.shared.importKey(data: secData, service: privService, account: peerId)
+            try persistKeyMaterial(
+                pubData,
+                service: pubService,
+                account: peerId,
+                errorCode: -330,
+                failureDescription: "无法持久化 OQS 签名公钥"
+            )
+            try persistKeyMaterial(
+                secData,
+                service: privService,
+                account: peerId,
+                errorCode: -331,
+                failureDescription: "无法持久化 OQS 签名私钥"
+            )
             secretKey = secData
         }
 
-        guard let sk = secretKey else { throw NSError(domain: "PQC", code: -303, userInfo: [NSLocalizedDescriptionKey: "未找到私钥: \(privService) :: \(peerId)"]) }
+        guard let sk = secretKey else {
+            throw NSError(domain: "PQC", code: -303, userInfo: [NSLocalizedDescriptionKey: "未找到 OQS 签名私钥"])
+        }
 
         let sigBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: sigLen)
         defer { sigBuf.deallocate() }
@@ -127,11 +157,25 @@ public final class OQSBridge {
             }
             let pd = Data(bytes: p, count: pubLen)
             let sd = Data(bytes: s, count: privLen)
-            _ = KeychainManager.shared.importKey(data: pd, service: pubService, account: peerId)
-            _ = KeychainManager.shared.importKey(data: sd, service: privService, account: peerId)
+            try persistKeyMaterial(
+                pd,
+                service: pubService,
+                account: peerId,
+                errorCode: -332,
+                failureDescription: "无法持久化 OQS KEM 公钥"
+            )
+            try persistKeyMaterial(
+                sd,
+                service: privService,
+                account: peerId,
+                errorCode: -333,
+                failureDescription: "无法持久化 OQS KEM 私钥"
+            )
             pub = pd
         }
-        guard let pubKey = pub else { throw NSError(domain: "PQC", code: -313, userInfo: [NSLocalizedDescriptionKey: "未找到公钥: \(pubService) :: \(peerId)"]) }
+        guard let pubKey = pub else {
+            throw NSError(domain: "PQC", code: -313, userInfo: [NSLocalizedDescriptionKey: "未找到 OQS KEM 公钥"])
+        }
 
         let ctLen = Int(kem.pointee.length_ciphertext)
         let ssLen = Int(kem.pointee.length_shared_secret)
@@ -159,7 +203,7 @@ public final class OQSBridge {
         let privService = PQCKeyTags.service("MLKEM", algorithm == .mlkem768 ? "768" : "1024", "Priv")
  // KeychainManager 方法是 nonisolated 的，可以同步调用
         guard let sk = KeychainManager.shared.exportKey(service: privService, account: peerId) else {
-            throw NSError(domain: "PQC", code: -322, userInfo: [NSLocalizedDescriptionKey: "未找到私钥: \(privService) :: \(peerId)"])
+            throw NSError(domain: "PQC", code: -322, userInfo: [NSLocalizedDescriptionKey: "未找到 OQS KEM 私钥"])
         }
         let ssLen = Int(kem.pointee.length_shared_secret)
         let ss = UnsafeMutablePointer<UInt8>.allocate(capacity: ssLen)

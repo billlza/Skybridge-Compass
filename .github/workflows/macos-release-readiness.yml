@@ -27,6 +27,19 @@ on:
         description: "Workflow run id containing the real-device release-gate artifacts"
         required: true
         type: string
+      release_artifact_run_attempt:
+        description: "Workflow run attempt that produced the real-device release-gate artifacts"
+        required: true
+        type: string
+      release_artifact_workflow_path:
+        description: "Workflow file path that produced the real-device release-gate artifacts"
+        required: true
+        type: string
+      release_artifact_event:
+        description: "Workflow event that produced the real-device release-gate artifacts"
+        required: true
+        default: "workflow_dispatch"
+        type: string
       connectivity_artifact_name:
         description: "Artifact name for the Mac/iOS connectivity matrix"
         required: true
@@ -104,8 +117,28 @@ jobs:
       - name: Run Swift Package Tests
         run: swift test
 
+  os27-source-contracts:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.5"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F42"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.2"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify Stable Xcode 26.5 Toolchain
+        run: |
+          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.5 is missing at $DEVELOPER_DIR"; exit 1; }
+          bash Scripts/verify_xcode_toolchain.sh
+
+      - name: Run OS27 Source Contracts
+        run: bash Scripts/run_os27_beta_compatibility.sh --verify-source-contracts
+
   macos-signed-release-gate:
-    needs: macos-preflight
+    needs: [macos-preflight, os27-source-contracts]
     runs-on: macos-26
     timeout-minutes: 120
     if: always() && github.event_name == 'workflow_dispatch'
@@ -120,10 +153,10 @@ jobs:
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.2"
 
     steps:
-      - name: Require Successful Preflight
-        if: needs.macos-preflight.result != 'success'
+      - name: Require Successful Preflight and OS27 Source Contracts
+        if: needs.macos-preflight.result != 'success' || needs.os27-source-contracts.result != 'success'
         run: |
-          echo "::error::macos-preflight did not pass; refusing to evaluate signed release gate."
+          echo "::error::macos-preflight and os27-source-contracts must pass before signed release gate evaluation."
           exit 1
 
       - uses: actions/checkout@v6
@@ -135,6 +168,37 @@ jobs:
           [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.5 is missing at $DEVELOPER_DIR"; exit 1; }
           sudo xcode-select -s "$DEVELOPER_DIR"
           bash Scripts/verify_xcode_toolchain.sh
+
+      - name: Validate Release Artifact Run Provenance
+        if: needs.macos-preflight.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ARTIFACT_RUN_ID: ${{ inputs.release_artifact_run_id }}
+          RELEASE_ARTIFACT_RUN_ATTEMPT: ${{ inputs.release_artifact_run_attempt }}
+          RELEASE_ARTIFACT_WORKFLOW_PATH: ${{ inputs.release_artifact_workflow_path }}
+          RELEASE_ARTIFACT_EVENT: ${{ inputs.release_artifact_event }}
+          CONNECTIVITY_ARTIFACT_NAME: ${{ inputs.connectivity_artifact_name }}
+          P2P_REMOTE_ARTIFACT_NAME: ${{ inputs.p2p_remote_artifact_name }}
+          FILE_TRANSFER_ARTIFACT_NAME: ${{ inputs.file_transfer_artifact_name }}
+          P2P_NOTICE_ARTIFACT_NAME: ${{ inputs.p2p_notice_artifact_name }}
+          WEBRTC_NOTICE_ARTIFACT_NAME: ${{ inputs.webrtc_notice_artifact_name }}
+          NOTICE_PANEL_ARTIFACT_NAME: ${{ inputs.notice_panel_artifact_name }}
+        run: |
+          bash Scripts/validate_macos_release_artifact_run.sh \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${RELEASE_ARTIFACT_RUN_ID}" \
+            --expected-run-attempt "${RELEASE_ARTIFACT_RUN_ATTEMPT}" \
+            --expected-workflow-path "${RELEASE_ARTIFACT_WORKFLOW_PATH}" \
+            --expected-event "${RELEASE_ARTIFACT_EVENT}" \
+            --expected-head-sha "${GITHUB_SHA}" \
+            --expected-head-branch "${GITHUB_REF_NAME}" \
+            --artifact "${CONNECTIVITY_ARTIFACT_NAME}" \
+            --artifact "${P2P_REMOTE_ARTIFACT_NAME}" \
+            --artifact "${FILE_TRANSFER_ARTIFACT_NAME}" \
+            --artifact "${P2P_NOTICE_ARTIFACT_NAME}" \
+            --artifact "${WEBRTC_NOTICE_ARTIFACT_NAME}" \
+            --artifact "${NOTICE_PANEL_ARTIFACT_NAME}" \
+            --provenance-output "Artifacts/release-gate/release-artifact-run-provenance.json"
 
       - name: Download Connectivity Matrix Artifact
         if: needs.macos-preflight.result == 'success'

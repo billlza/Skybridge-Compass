@@ -205,6 +205,63 @@ final class KEMTrustStoreTests: XCTestCase {
         XCTAssertEqual(reboundEvidence?.payloadHashHex, Self.sha256Hex(payload.signaturePreimage))
     }
 
+    func testSignedRefreshKEMLookupRequiresSignedSourceAndPinnedProtocolFingerprint() async throws {
+        let suiteName = "KEMTrustStoreSignedRefreshFilteredLookupTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let storageKey = "kem_trust_store.signed.refresh.filtered.lookup.tests.v1"
+        let canonicalId = "id:\(UUID().uuidString.lowercased())"
+        let unsignedKey = Data(repeating: 0x36, count: 1_184)
+        let store = KEMTrustStore(storageKey: storageKey, userDefaults: defaults)
+        await store.upsert(
+            deviceId: canonicalId,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768.wireId,
+                    publicKey: unsignedKey
+                )
+            ]
+        )
+
+        let unsignedOnly = await store.signedRefreshKEMPublicKeys(
+            forAny: [canonicalId],
+            pinnedProtocolFingerprints: [String(repeating: "a", count: 64)]
+        )
+        XCTAssertTrue(unsignedOnly.isEmpty)
+
+        let signedKey = Data(repeating: 0x37, count: 1_216)
+        let exchange = try makeSignedKEMRefreshExchange(
+            deviceId: canonicalId,
+            kemPublicKey: signedKey,
+            generation: 1_111
+        )
+        let payload = exchange.payload
+        try await store.upsertSignedKEMRefresh(
+            deviceIds: [canonicalId],
+            payload: payload,
+            request: exchange.request,
+            pinnedProtocolFingerprints: [payload.protocolIdentityFingerprint],
+            minimumGeneration: nil
+        )
+
+        let wrongPin = await store.signedRefreshKEMPublicKeys(
+            forAny: [canonicalId],
+            pinnedProtocolFingerprints: [String(repeating: "f", count: 64)]
+        )
+        let rightPin = await store.signedRefreshKEMPublicKeys(
+            forAny: [canonicalId],
+            pinnedProtocolFingerprints: [payload.protocolIdentityFingerprint.uppercased()]
+        )
+
+        XCTAssertTrue(wrongPin.isEmpty)
+        XCTAssertNil(rightPin[.mlkem768])
+        XCTAssertEqual(rightPin[.xwing], signedKey)
+    }
+
     func testSignedRefreshKeyMaterialBeatsNewerUnsignedAliasForSameSuite() async throws {
         let suiteName = "KEMTrustStoreSignedRefreshSelectionTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {

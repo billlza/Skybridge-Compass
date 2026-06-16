@@ -292,21 +292,26 @@ public actor FileTransferNetworkService {
         return try await withCheckedThrowingContinuation { continuation in
             let gate = ContinuationGate()
             
-            connection.stateUpdateHandler = { state in
+            connection.stateUpdateHandler = { [weak self, connection, deviceId] state in
+                func finishOnce(_ body: () -> Void) {
+                    connection.stateUpdateHandler = nil
+                    gate.runOnce(body)
+                }
+
                 switch state {
                 case .ready:
-                    Task { [weak self] in
+                    Task { [weak self, connection, deviceId] in
                         await self?.addConnection(connection, id: deviceId)
                     }
-                    gate.runOnce { continuation.resume(returning: connection) }
+                    finishOnce { continuation.resume(returning: connection) }
                     
                 case .failed(let error):
-                    gate.runOnce {
+                    finishOnce {
                         continuation.resume(throwing: FileTransferError.networkError(error.localizedDescription))
                     }
                     
                 case .cancelled:
-                    gate.runOnce { continuation.resume(throwing: FileTransferError.transferCancelled) }
+                    finishOnce { continuation.resume(throwing: FileTransferError.transferCancelled) }
                     
                 default:
                     break

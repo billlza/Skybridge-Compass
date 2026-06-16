@@ -1,8 +1,10 @@
 import SwiftUI
 import Combine
+import OSLog
 
 /// 设备列表视图 - 现代化的设备管理界面
 public struct DeviceListView: View {
+    private static let logger = Logger(subsystem: "com.skybridge.compass", category: "DeviceListView")
     
  // MARK: - 状态管理
     
@@ -12,6 +14,7 @@ public struct DeviceListView: View {
     @StateObject private var settingsManager = SettingsManager.shared
     @State private var selectedDevice: DiscoveredDevice?
     @State private var showingConnectionOptions = false
+    @State private var connectionErrorMessage: String?
     @State private var isScanning = false
     @State private var showingFilterOptions = false
     
@@ -34,7 +37,14 @@ public struct DeviceListView: View {
                         availableConnections: connectionManager.availableConnections,
                         onConnect: { method in
                             Task {
-                                try await connectionManager.establishConnection(method: method, to: device)
+                                do {
+                                    try await connectionManager.establishConnection(method: method, to: device)
+                                } catch {
+                                    Self.logger.error("设备连接失败: \(error.localizedDescription, privacy: .public)")
+                                    await MainActor.run {
+                                        connectionErrorMessage = error.localizedDescription
+                                    }
+                                }
                             }
                         }
                     )
@@ -42,6 +52,23 @@ public struct DeviceListView: View {
             }
             .sheet(isPresented: $showingFilterOptions) {
                 DeviceFilterOptionsView(filterManager: deviceFilterManager)
+            }
+            .alert(
+                "连接失败",
+                isPresented: Binding(
+                    get: { connectionErrorMessage != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            connectionErrorMessage = nil
+                        }
+                    }
+                )
+            ) {
+                Button("确定", role: .cancel) {
+                    connectionErrorMessage = nil
+                }
+            } message: {
+                Text(connectionErrorMessage ?? "连接请求未完成。")
             }
         }
         .onAppear {

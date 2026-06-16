@@ -171,6 +171,33 @@ mod tests {
                 .iter()
                 .any(|entry| entry.id == "coverage_threshold_gate" && entry.covered)
         );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|entry| { entry.id == "operator_capability_contract_gate" && entry.covered })
+        );
+        assert!(report.checks.iter().any(|entry| {
+            entry.id == "device_discovery_active_scan_live_gate" && entry.covered
+        }));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|entry| entry.id == "file_transfer_contract_gate" && entry.covered)
+        );
+        assert!(report.checks.iter().any(|entry| {
+            entry.id == "file_transfer_agent_observation_request_registry_gate" && entry.covered
+        }));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|entry| entry.id == "remote_desktop_contract_gate" && entry.covered)
+        );
+        assert!(report.checks.iter().any(|entry| {
+            entry.id == "remote_desktop_pending_request_registry_gate" && entry.covered
+        }));
         Ok(())
     }
 

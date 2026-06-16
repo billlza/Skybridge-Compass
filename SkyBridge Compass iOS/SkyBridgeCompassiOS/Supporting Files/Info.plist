@@ -32,7 +32,7 @@
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>NEBULA_BASE_URL</key>
-	<string>https://nebula.skybridge.com</string>
+	<string>https://auth.nebula-technologies.net</string>
 	<key>NEBULA_CLIENT_ID</key>
 	<string>skybridge_compass_ios</string>
 	<key>NEBULA_CLIENT_SECRET</key>

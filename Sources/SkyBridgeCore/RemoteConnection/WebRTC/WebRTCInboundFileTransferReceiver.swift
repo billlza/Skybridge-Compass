@@ -147,14 +147,37 @@ final class WebRTCInboundFileTransferReceiver {
             return
         }
 
-        try? FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        } catch {
+            try await sendMessage(
+                CrossNetworkFileTransferMessage(
+                    op: .error,
+                    transferId: message.transferId,
+                    message: "Downloads directory unavailable"
+                ),
+                "tx/webrtc-ft-error"
+            )
+            return
+        }
 
-        let finalURL = WebRTCInboundFileTransferSupport.uniqueDestinationURL(
+        let finalURL = try WebRTCInboundFileTransferSupport.uniqueDestinationURL(
             baseDirectory: baseDirectory,
             fileName: fileName
         )
         let tempURL = baseDirectory.appendingPathComponent(".skybridge-\(message.transferId).partial")
-        _ = FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+        guard !FileManager.default.fileExists(atPath: tempURL.path),
+              FileManager.default.createFile(atPath: tempURL.path, contents: nil) else {
+            try await sendMessage(
+                CrossNetworkFileTransferMessage(
+                    op: .error,
+                    transferId: message.transferId,
+                    message: "Partial file unavailable"
+                ),
+                "tx/webrtc-ft-error"
+            )
+            return
+        }
 
         let handle = try FileHandle(forWritingTo: tempURL)
         let senderId = message.senderDeviceId ?? endpointDescription
@@ -303,7 +326,16 @@ final class WebRTCInboundFileTransferReceiver {
         }
 
         if state.completeRequestedAt != nil && state.receivedBytes >= state.fileSize {
-            do { try state.handle.close() } catch {}
+            do {
+                try state.handle.close()
+            } catch {
+                try await failIntegrityValidation(
+                    state,
+                    failure: .fileHandleCloseFailed,
+                    sendMessage: sendMessage
+                )
+                return
+            }
             do {
                 if let integrityFailure = WebRTCInboundFileTransferSupport.integrityFailure(
                     state: state,
@@ -405,7 +437,16 @@ final class WebRTCInboundFileTransferReceiver {
             return
         }
 
-        do { try state.handle.close() } catch {}
+        do {
+            try state.handle.close()
+        } catch {
+            try await failIntegrityValidation(
+                state,
+                failure: .fileHandleCloseFailed,
+                sendMessage: sendMessage
+            )
+            return
+        }
 
         do {
             if let integrityFailure = WebRTCInboundFileTransferSupport.integrityFailure(
@@ -513,7 +554,7 @@ final class WebRTCInboundFileTransferReceiver {
                 transferId: state.transferId,
                 receivedBytes: state.receivedBytes,
                 fileSha256: state.expectedFileSha256
-                    ?? WebRTCInboundFileTransferSupport.sha256File(at: state.finalURL)
+                    ?? (try? WebRTCInboundFileTransferSupport.sha256File(at: state.finalURL))
             ),
             "tx/webrtc-ft-completeAck"
         )

@@ -173,13 +173,29 @@ struct WebRTCRealtimeAudioSenderCoordinator {
                   let refreshed = try await refreshAdmissionLease(sessionID: sessionID) else {
                 throw error
             }
-            let relayLease = try await dependencies.requestMediaRelayLease(refreshed.token)
-            let endpoint = CrossNetworkConnectionManager.mediaRelayEndpoint(from: relayLease)
-            await dependencies.appendSessionDiagnostic(
-                "audioTxEndpointReady session=\(sessionID) leaseSource=localRoleLeaseRefreshed role=\(relayLease.role) endpoint=\(endpoint.host):\(endpoint.port) token=\(endpoint.relayToken == nil ? "missing" : "present")",
-                sessionID
-            )
-            return endpoint
+            do {
+                let relayLease = try await dependencies.requestMediaRelayLease(refreshed.token)
+                let endpoint = CrossNetworkConnectionManager.mediaRelayEndpoint(from: relayLease)
+                await dependencies.appendSessionDiagnostic(
+                    "audioTxEndpointReady session=\(sessionID) leaseSource=localRoleLeaseRefreshed role=\(relayLease.role) endpoint=\(endpoint.host):\(endpoint.port) token=\(endpoint.relayToken == nil ? "missing" : "present")",
+                    sessionID
+                )
+                return endpoint
+            } catch {
+                let baseReason = CrossNetworkConnectionManager.mediaAdmissionFailureReason(for: error)
+                let reason = CrossNetworkConnectionManager.mediaAdmissionFailureReasonAfterRefresh(for: error)
+                let diagnosticSummary = CrossNetworkConnectionManager.mediaTokenDiagnosticSummary(for: error) ?? ""
+                if baseReason == "superseded" {
+                    logger.info(
+                        "🎧 media admission refreshed token rejected by relay lease: session=\(sessionID, privacy: .public) reason=refreshLeaseSuperseded \(diagnosticSummary, privacy: .public)"
+                    )
+                }
+                await dependencies.appendSessionDiagnostic(
+                    "audioTxUnavailable session=\(sessionID) reason=\(reason) \(diagnosticSummary)",
+                    sessionID
+                )
+                throw WebRTCMediaAdmissionClassifiedFailure(reason: reason, underlying: error)
+            }
         }
     }
 

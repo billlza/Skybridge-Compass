@@ -16,6 +16,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("core_cli.rs"),
     ),
     (
+        "check_source_catalog/source_fragments/integration_tests.rs",
+        include_str!("integration_tests.rs"),
+    ),
+    (
         "check_source_catalog/source_fragments/p2p_remote.rs",
         include_str!("p2p_remote.rs"),
     ),

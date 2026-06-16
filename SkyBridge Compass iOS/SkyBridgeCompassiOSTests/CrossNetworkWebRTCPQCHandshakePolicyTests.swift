@@ -27,6 +27,21 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
                 after: HandshakeError.emptyOfferedSuites
             )
         )
+        XCTAssertFalse(
+            CrossNetworkWebRTCPQCHandshakePolicy.shouldRetryClassicBootstrap(
+                after: HandshakeError.failed(.timeout)
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCPQCHandshakePolicy.shouldRetryClassicBootstrap(
+                after: NSError(
+                    domain: "CryptoKit.CryptoKitError",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "CryptoKit.CryptoKitError error 3"]
+                )
+            ),
+            "WebRTC classic retry must be based on typed HandshakeError failures, not localizedDescription string matching."
+        )
         XCTAssertEqual(
             CrossNetworkWebRTCPQCHandshakePolicy.describeHandshakeError(
                 HandshakeError.providerAlgorithmMismatch(provider: "native", algorithm: "mlkem")
@@ -124,7 +139,7 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
         XCTAssertEqual(liboqsOnlyPlans.map(\.label), ["liboqs"])
     }
 
-    func testInboundSelectionAndNegotiatedSuiteGatesPreserveAuthorityBootstrapInStrictPQC() {
+    func testInboundSelectionAndNegotiatedSuiteGatesRejectClassicAuthorityBootstrapInStrictPQC() {
         XCTAssertNil(
             CrossNetworkWebRTCPQCHandshakePolicy.inboundPQCRekeySelectionPolicy(
                 supportedSuites: [.x25519Ed25519],
@@ -132,14 +147,13 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
                 localPQCAvailable: true
             )
         )
-        XCTAssertEqual(
+        XCTAssertNil(
             CrossNetworkWebRTCPQCHandshakePolicy.inboundInitialHandshakeSelectionPolicy(
                 supportedSuites: [.x25519Ed25519],
                 strictPQCRequested: true,
                 localPQCAvailable: true,
                 expectedRemoteAuthorityAlgorithm: .ed25519
-            ),
-            .classicOnly
+            )
         )
         XCTAssertNil(
             CrossNetworkWebRTCPQCHandshakePolicy.inboundInitialHandshakeSelectionPolicy(
@@ -166,7 +180,7 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
             ),
             .requirePQC
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             CrossNetworkWebRTCPQCHandshakePolicy.inboundInitialHandshakeNegotiatedSuiteAllowed(
                 .x25519Ed25519,
                 strictPQCRequested: true,
@@ -184,6 +198,20 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
             CrossNetworkWebRTCPQCHandshakePolicy.inboundPQCRekeyNegotiatedSuiteAllowed(
                 .mlkem768,
                 strictPQCRequested: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: true,
+                expectedRemoteAuthorityAlgorithm: .ed25519
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCPQCHandshakePolicy.shouldAllowClassicAuthorityBootstrapForInboundInitialWebRTCHandshake(
+                supportedSuites: [.x25519Ed25519],
+                strictPQCRequested: false,
+                expectedRemoteAuthorityAlgorithm: .ed25519
             )
         )
     }
@@ -301,6 +329,52 @@ final class CrossNetworkWebRTCPQCHandshakePolicyTests: XCTestCase {
                 code: 42,
                 message: "严格 PQC 已启用，但当前设备没有可用的 PQC Provider；跨网路径不会再降级到 Classic/PreferPQC。",
                 includeProviderAvailabilityInLog: true
+            ))
+        )
+    }
+
+    func testInitialHandshakeBootstrapDecisionFallsBackToClassicWhenNonStrictHasNoLocalPQCProvider() {
+        let noProviderCapability = CryptoProviderFactory.Capability(
+            hasApplePQC: false,
+            hasLiboqs: false,
+            osVersion: "test"
+        )
+
+        XCTAssertEqual(
+            CrossNetworkWebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: false,
+                hasTrustedPeerKEMKey: true,
+                capability: noProviderCapability,
+                useClassicAuthorityBootstrap: false,
+                peerDeviceId: "peer-b"
+            ),
+            .proceed(.init(
+                selection: .classicOnly,
+                bootstrapMode: "classic_bootstrap_no_local_pqc_provider",
+                usesClassicAuthorityBootstrap: false
+            ))
+        )
+    }
+
+    func testInitialHandshakeBootstrapDecisionRejectsStrictPQCClassicAuthorityBootstrap() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: true,
+            hasLiboqs: true,
+            osVersion: "test"
+        )
+
+        XCTAssertEqual(
+            CrossNetworkWebRTCPQCHandshakePolicy.initialWebRTCHandshakeBootstrapDecision(
+                strictPQCRequested: true,
+                hasTrustedPeerKEMKey: true,
+                capability: capability,
+                useClassicAuthorityBootstrap: true,
+                peerDeviceId: "peer-c"
+            ),
+            .reject(.init(
+                code: 43,
+                message: "严格 PQC 已启用，但 WebRTC 初始握手请求 classic authority bootstrap；当前已拒绝 classic bootstrap。peer=peer-c",
+                includeProviderAvailabilityInLog: false
             ))
         )
     }

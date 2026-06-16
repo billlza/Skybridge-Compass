@@ -81,6 +81,7 @@ public actor NativeWebSocketClient {
         tls: Bool = true,
         pingInterval: TimeInterval? = 30,
         preferNoProxies: Bool = false,
+        additionalHeaders: [String: String] = [:],
         callbacks: NativeWebSocketCallbacks = .init(),
         reconnectPolicy: ReconnectPolicy? = nil
     ) {
@@ -89,7 +90,8 @@ public actor NativeWebSocketClient {
         self.parameters = NativeWebSocketClient.buildParameters(
             tls: tls,
             pingInterval: pingInterval,
-            preferNoProxies: preferNoProxies
+            preferNoProxies: preferNoProxies,
+            additionalHeaders: additionalHeaders
         )
         self.callbacks = callbacks
         self.reconnectPolicy = reconnectPolicy
@@ -99,7 +101,8 @@ public actor NativeWebSocketClient {
     private static func buildParameters(
         tls: Bool,
         pingInterval: TimeInterval?,
-        preferNoProxies: Bool
+        preferNoProxies: Bool,
+        additionalHeaders: [String: String] = [:]
     ) -> NWParameters {
  // 配置 TLS 与通用参数
         let params: NWParameters = tls ? .tls : NWParameters(tls: nil)
@@ -110,7 +113,14 @@ public actor NativeWebSocketClient {
  // 配置 WebSocket 选项
         let wsOptions = NWProtocolWebSocket.Options()
         wsOptions.autoReplyPing = true // 自动回复 Ping，降低心跳管理复杂度
- // macOS 14 SDK 未提供 keepAliveInterval 属性；保留 autoReplyPing 即可维持连接活跃
+        if !additionalHeaders.isEmpty {
+            wsOptions.setAdditionalHeaders(
+                additionalHeaders
+                    .sorted { $0.key < $1.key }
+                    .map { (name: $0.key, value: $0.value) }
+            )
+        }
+         // macOS 14 SDK 未提供 keepAliveInterval 属性；保留 autoReplyPing 即可维持连接活跃
         params.defaultProtocolStack.applicationProtocols.insert(wsOptions, at: 0)
         return params
     }
@@ -331,12 +341,14 @@ extension NativeWebSocketClient {
     internal static func testOnlyBuildParameters(
         tls: Bool,
         pingInterval: TimeInterval?,
-        preferNoProxies: Bool
+        preferNoProxies: Bool,
+        additionalHeaders: [String: String] = [:]
     ) -> NWParameters {
         buildParameters(
             tls: tls,
             pingInterval: pingInterval,
-            preferNoProxies: preferNoProxies
+            preferNoProxies: preferNoProxies,
+            additionalHeaders: additionalHeaders
         )
     }
 }

@@ -85,6 +85,10 @@ pub(super) async fn apply_inline_native_event(
             );
             store_session_registry(paths, &registry).await?;
         }
+        NativeWebRtcEvent::InboundFileFrame(_) => {
+            // The inline connect path is not a file-transfer endpoint; live
+            // transfers are owned by the long-running managed agent runtime.
+        }
     }
     Ok(())
 }

@@ -170,5 +170,6 @@ bash Server/skybridge-signaling/deploy/scripts/rollback_remote.sh \
 - Keep `TURN_URIS` dual-stack (`turns:...:5349?transport=tcp` first, `turn:...:3478?transport=udp` fallback).
 - Keep `TURN_ENFORCE_API_KEY=true` and use a deployment-specific `TURN_CLIENT_API_KEY` aligned with app-side `SKYBRIDGE_CLIENT_API_KEY` (do not reuse a repo-wide constant).
 - Keep Node bound to localhost (`HOST=127.0.0.1`) and expose through Nginx TLS only.
+- For Nginx-terminated client mTLS, include `nginx/snippets/skybridge-client-mtls.conf`, keep `TLS_CA` empty in Node, set `SKYBRIDGE_SIGNALING_MTLS_CLIENT_CERT_SOURCE=trusted_proxy`, and keep `SKYBRIDGE_SIGNALING_TRUSTED_PROXY_MTLS_REMOTE_ADDRESSES` limited to the Nginx-to-Node source addresses.
 - In multi-instance mode, keep `ENABLE_STICKY_HINT_COOKIE=true` and `STICKY_HINT_COOKIE_SECURE=true`.
 - In memory-mode multi-instance deployments, `INSTANCE_CODE_PREFIXES` must be configured and must not overlap across instances.

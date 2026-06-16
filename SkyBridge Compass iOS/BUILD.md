@@ -4,7 +4,7 @@
 
 ### 系统要求
 - macOS 14.0+ (Sonoma 或更新版本)
-- Xcode 26.4+
+- Xcode 26.5+（正式发布/CI 基线）；Xcode 27 beta 仅用于手动 OS 27 兼容验证
 - iOS 17.0+ 模拟器或真机
 - Swift 6.3+
 - Apple 开发者账号（用于真机测试）
@@ -69,13 +69,14 @@ open SkyBridgeCompass-iOS.xcodeproj
 
 ### 需要在哪里声明？
 
-- **在当前仓库提交的 `SkyBridgeCompass-iOS.xcodeproj` 里，已经为 `iphoneos26*` / `iphonesimulator26*` 自动配置了** `SWIFT_ACTIVE_COMPILATION_CONDITIONS += HAS_APPLE_PQC_SDK`
-- **如果你复制 target、重建工程，或使用不同构建入口**，才需要手动确认这个编译期宏是否仍然存在
+- **在当前仓库提交的 `SkyBridgeCompass-iOS.xcodeproj` 里，app/test target 只保留空的** `SKYBRIDGE_APPLE_PQC_SDK_CONDITION` **接入口**，不会按 SDK 大版本自动打开 `HAS_APPLE_PQC_SDK`
+- **只有通过 Apple PQC symbol probe 的构建 lane** 才能显式传入 `SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK`
+- **如果你复制 target、重建工程，或使用不同构建入口**，必须先运行 Apple PQC SDK probe，再显式传入这个 build setting；不要用 `iphoneos26*` / `iphoneos27*` SDK selector 推断可用性
 - **不需要、也不应该在 Info.plist 里声明**：Info.plist 只负责权限/能力（如相机、本地网络、定位、Live Activities），不影响编译期是否包含 `MLKEM768/MLDSA65` 类型
 
 ### 何时需要打开？
 
-- 你使用的 Xcode 必须包含 **iOS 26.x SDK**（否则编译会报找不到 `MLKEM768/MLDSA65`）
+- 你使用的 Xcode 必须包含对应 SDK 并通过 Apple PQC 符号探测（否则编译会报找不到 `MLKEM768/MLDSA65` 等 CryptoKit PQC 类型）
 - 运行时必须满足 `#available(iOS 26.0, *)`
 - 并且需要完成一次配对/信任同步，让双方保存对端 **KEM 身份公钥（Trust Store）**；若缺失，则 `strictPQC` 会直接 fail-closed，不会再自动 classic bootstrap 或降级
 
@@ -88,7 +89,7 @@ open SkyBridgeCompass-iOS.xcodeproj
 ### 问题 2: 编译错误 - Swift 版本不匹配
 
 **解决方案：**
-- 确保使用 Xcode 26.4+ 和 Swift 6.3+
+- 确保正式发布使用 Xcode 26.5+ / Swift 6.3+；Xcode 27 beta 用根目录 `Scripts/run_os27_beta_compatibility.sh` 单独验证
 - 更新到最新的 Xcode 版本
 
 ### 问题 3: 本地网络权限不起作用

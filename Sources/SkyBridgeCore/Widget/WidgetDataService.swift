@@ -193,7 +193,7 @@ public final class WidgetDataService: ObservableObject, Sendable {
  /// 节流刷新：debounce + 最低刷新间隔
     private func scheduleReload(for kinds: Set<WidgetKind>) {
         pendingReload?.cancel()
-        pendingReload = Task { @MainActor in
+        pendingReload = Task { @MainActor [self] in
             try? await Task.sleep(nanoseconds: UInt64(reloadDebounceInterval * 1_000_000_000))
             guard !Task.isCancelled else { return }
 

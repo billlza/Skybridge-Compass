@@ -48,7 +48,7 @@ enum CurrentPathSecurityCompat {
         guard let url = URL(string: raw),
               let scheme = url.scheme?.lowercased(),
               let host = url.host?.lowercased(),
-              (scheme == "https" || scheme == "http")
+              (scheme == "https" || (scheme == "http" && isLoopbackHost(host)))
         else {
             throw NSError(domain: "CurrentPathSecurityCompat", code: 3, userInfo: [NSLocalizedDescriptionKey: "invalid signaling origin"])
         }
@@ -61,13 +61,34 @@ enum CurrentPathSecurityCompat {
         let port = url.port
         switch (scheme, port) {
         case ("https", nil), ("https", 443), ("http", nil), ("http", 80):
-            return "\(scheme)://\(host)"
+            return "\(scheme)://\(serializedHost(host))"
         default:
             guard let port else {
-                return "\(scheme)://\(host)"
+                return "\(scheme)://\(serializedHost(host))"
             }
-            return "\(scheme)://\(host):\(port)"
+            return "\(scheme)://\(serializedHost(host)):\(port)"
         }
+    }
+
+    static func isLoopbackHost(_ rawHost: String) -> Bool {
+        let host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+        guard !host.isEmpty else { return false }
+        if host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" {
+            return true
+        }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return false }
+        let values = octets.compactMap { UInt8($0) }
+        return values.count == 4 && values[0] == 127
+    }
+
+    private static func serializedHost(_ host: String) -> String {
+        if host.contains(":"), !(host.hasPrefix("[") && host.hasSuffix("]")) {
+            return "[\(host)]"
+        }
+        return host
     }
 
     static func validateKeyEncoding(bytes: Data, algorithm: ProtocolSigningAlgorithm) throws {

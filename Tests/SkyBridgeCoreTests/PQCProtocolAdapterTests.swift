@@ -595,5 +595,6 @@ struct PQCStatusReportTests {
         #expect(!report.currentSuite.isEmpty)
         #expect(!report.supportedSuites.isEmpty)
         #expect(!report.systemInfo.isEmpty)
+        #expect(report.systemInfo.contains("候选") || report.systemInfo.contains("不得显示为 Apple PQC 保护"))
     }
 }

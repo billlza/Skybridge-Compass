@@ -12,15 +12,17 @@ final class StrictPQCAdmissionGateTests: XCTestCase {
         XCTAssertEqual(rejection, .peerOfferedClassicOnly)
     }
 
-    func testStrictPQCAllowsExplicitAuthorityBootstrapException() {
-        let rejection = StrictPQCAdmissionGate.inboundRejection(
-            policy: .strictPQC,
-            peerSupportedSuites: [.x25519Ed25519],
-            localPQCSuitesAvailable: true,
-            allowClassicAuthorityBootstrap: true
+    func testStrictPQCHasNoClassicAuthorityBootstrapException() throws {
+        let source = try String(
+            contentsOf: repositoryRoot()
+                .appendingPathComponent("Sources/SkyBridgeCore/P2P/StrictPQCAdmissionGate.swift"),
+            encoding: .utf8
         )
 
-        XCTAssertNil(rejection)
+        XCTAssertFalse(
+            source.contains("allowClassicAuthorityBootstrap"),
+            "strictPQC must not expose a classic-only authority bootstrap bypass."
+        )
     }
 
     func testStrictPQCRejectsLocalPQCUnavailabilityEvenIfPeerSupportsPQC() {
@@ -41,5 +43,12 @@ final class StrictPQCAdmissionGateTests: XCTestCase {
         )
 
         XCTAssertNil(rejection)
+    }
+
+    private func repositoryRoot() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 }

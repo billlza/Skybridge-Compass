@@ -317,9 +317,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
                                 severity: .warning,
                                 message: "PQC bridge retry failed; evaluating classic fallback",
                                 context: [
-                                    "deviceId": deviceId,
-                                    "reason": String(describing: reason),
-                                    "bridgeRetryError": error.localizedDescription,
+                                    "deviceId": SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId),
+                                    "reason": reason.diagnosticReasonCode,
+                                    "bridgeRetryError": SkyBridgeDiagnosticRedaction.errorSummary(error),
                                     "policyAllowClassicFallback": policy.allowClassicFallback ? "1" : "0"
                                 ]
                             ))
@@ -391,8 +391,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
             severity: .info,
             message: "Retrying PQC handshake with compatibility suite",
             context: [
-                "deviceId": deviceId,
-                "reason": String(describing: reason),
+                "deviceId": SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId),
+                "reason": reason.diagnosticReasonCode,
                 "strategy": HandshakeAttemptStrategy.pqcOnly.rawValue,
                 "bridgeMode": HandshakeOfferedSuites.PQCOfferMode.compatRetry.rawValue,
                 "policyRequirePQC": policy.requirePQC ? "1" : "0"
@@ -438,8 +438,8 @@ public struct TwoAttemptHandshakeManager: Sendable {
                 "downgradeResistance": "policy_gate+no_timeout_fallback+rate_limited",
                 "policyInTranscript": "1",
                 "transcriptBinding": "1",
-                "reason": String(describing: reason),
-                "deviceId": deviceId,
+                "reason": reason.diagnosticReasonCode,
+                "deviceId": SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId),
                 "cooldownSeconds": String(cooldownSeconds),
                 "cooldownRemainingSeconds": String(cooldownSeconds),
                 "policyRequirePQC": policy.requirePQC ? "1" : "0",

@@ -49,7 +49,7 @@
     <key>SKYBRIDGE_ENABLE_NATIVE_APPLE_SIGN_IN</key>
     <true/>
     <key>NEBULA_BASE_URL</key>
-    <string>https://nebula.skybridge.com</string>
+    <string>https://auth.nebula-technologies.net</string>
     <key>NEBULA_CLIENT_ID</key>
     <string>skybridge_compass_pro</string>
     <key>NEBULA_CLIENT_SECRET</key>

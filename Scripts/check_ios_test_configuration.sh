@@ -14,7 +14,9 @@ usage() {
 3. 独立测试 scheme 的 BuildAction / TestAction / LaunchAction / ProfileAction 都指向正确宿主 app
 4. 测试 target 保持 TEST_HOST / BUNDLE_LOADER 配置
 5. 若存在 XcodeGen project.yml，则其 target / scheme 源配置也必须保持一致
-6. 默认模式下额外用 xcodebuild -showdestinations 做一次轻量动态探测
+6. iOS app/test target 的 Apple PQC 编译条件必须由 probe 后显式 build setting 注入，不能由 SDK selector 默认启用
+7. iOS/macOS 最低部署目标不得因 OS 27 适配被抬高（含根 macOS XcodeGen 与已提交 Xcode 工程）
+8. 默认模式下额外用 xcodebuild -showdestinations 做一次轻量动态探测
 EOF
 }
 
@@ -58,7 +60,11 @@ app_scheme_path = project_dir / "xcshareddata" / "xcschemes" / "SkyBridgeCompass
 test_scheme_path = project_dir / "xcshareddata" / "xcschemes" / "SkyBridgeCompassiOSTests.xcscheme"
 test_plan_path = project_dir / "xcshareddata" / "xctestplans" / "SkyBridgeCompass-iOS-Shared.xctestplan"
 project_yaml_path = root / "SkyBridge Compass iOS" / "project.yml"
+root_project_yaml_path = root / "project.yml"
+macos_pbxproj_path = root / "SkyBridgeWidgets.xcodeproj" / "project.pbxproj"
 tests_dir = root / "SkyBridge Compass iOS" / "SkyBridgeCompassiOSTests"
+root_package_path = root / "Package.swift"
+ios_package_path = root / "SkyBridge Compass iOS" / "Package.swift"
 
 required_paths = [
     pbxproj_path,
@@ -66,6 +72,10 @@ required_paths = [
     test_scheme_path,
     test_plan_path,
     tests_dir,
+    root_package_path,
+    ios_package_path,
+    root_project_yaml_path,
+    macos_pbxproj_path,
 ]
 
 errors: list[str] = []
@@ -81,10 +91,21 @@ if errors:
 
 pbxproj_text = pbxproj_path.read_text(encoding="utf-8")
 project_yaml_text = project_yaml_path.read_text(encoding="utf-8") if project_yaml_path.exists() else None
+root_project_yaml_text = root_project_yaml_path.read_text(encoding="utf-8")
+macos_pbxproj_text = macos_pbxproj_path.read_text(encoding="utf-8")
+root_package_text = root_package_path.read_text(encoding="utf-8")
+ios_package_text = ios_package_path.read_text(encoding="utf-8")
 
 APP_TARGET_NAME = "SkyBridgeCompass-iOS"
 TEST_TARGET_NAME = "SkyBridgeCompassiOSTests"
 TEST_PLAN_REFERENCE = "container:SkyBridgeCompass-iOS.xcodeproj/xcshareddata/xctestplans/SkyBridgeCompass-iOS-Shared.xctestplan"
+IOS_DEPLOYMENT_TARGET = "17.0"
+MACOS_DEPLOYMENT_TARGET = "14.0"
+PQC_SDK_SELECTOR_PATTERN = re.compile(
+    r"SWIFT_ACTIVE_COMPILATION_CONDITIONS\[sdk=(?:iphoneos|iphonesimulator)[0-9]+\*\].*HAS_APPLE_PQC_SDK"
+)
+PQC_XCODEBUILD_SETTING = "SKYBRIDGE_APPLE_PQC_SDK_CONDITION"
+PQC_CONDITION_REFERENCE = "$(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
 
 
 def require(condition: bool, message: str) -> None:
@@ -256,6 +277,50 @@ for required_snippet in [
 ]:
     require(required_snippet in pbxproj_text, f"测试 target 缺少必需配置: {required_snippet}")
 
+# Apple PQC SDK availability must be proven by symbol probe. SDK version selectors
+# are not proof that CryptoKit PQC symbols typecheck for this build lane.
+require(
+    PQC_SDK_SELECTOR_PATTERN.search(pbxproj_text) is None,
+    "project.pbxproj 不得使用 SDK selector 默认启用 HAS_APPLE_PQC_SDK；必须由 Apple PQC symbol probe 后显式传入 SKYBRIDGE_APPLE_PQC_SDK_CONDITION",
+)
+require(
+    pbxproj_text.count(f'{PQC_XCODEBUILD_SETTING} = "";') >= 4,
+    "project.pbxproj 的 app/test build configs 必须声明空的 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 默认值",
+)
+require(
+    pbxproj_text.count(f'SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) {PQC_CONDITION_REFERENCE}";') >= 4,
+    "project.pbxproj 的 app/test build configs 必须通过 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 接入 Apple PQC 编译条件",
+)
+
+require(
+    pbxproj_text.count(f"IPHONEOS_DEPLOYMENT_TARGET = {IOS_DEPLOYMENT_TARGET};") >= 2,
+    f"project.pbxproj 的 app/test IPHONEOS_DEPLOYMENT_TARGET 必须保持 {IOS_DEPLOYMENT_TARGET}",
+)
+require(
+    ".iOS(.v17)" in root_package_text,
+    "根 Package.swift 必须保持 .iOS(.v17)，OS 27 适配不得抬高最低 iOS 版本",
+)
+require(
+    ".macOS(.v14)" in root_package_text,
+    "根 Package.swift 必须保持 .macOS(.v14)，OS 27 适配不得抬高最低 macOS 版本",
+)
+require(
+    f'macOS: "{MACOS_DEPLOYMENT_TARGET}"' in root_project_yaml_text,
+    f"根 project.yml 的 deploymentTarget.macOS 必须保持 {MACOS_DEPLOYMENT_TARGET}",
+)
+require(
+    f'MACOSX_DEPLOYMENT_TARGET: "{MACOS_DEPLOYMENT_TARGET}"' in root_project_yaml_text,
+    f"根 project.yml 的 MACOSX_DEPLOYMENT_TARGET 必须保持 {MACOS_DEPLOYMENT_TARGET}",
+)
+require(
+    macos_pbxproj_text.count(f"MACOSX_DEPLOYMENT_TARGET = {MACOS_DEPLOYMENT_TARGET};") >= 2,
+    f"SkyBridgeWidgets.xcodeproj 的 macOS target MACOSX_DEPLOYMENT_TARGET 必须保持 {MACOS_DEPLOYMENT_TARGET}",
+)
+require(
+    ".iOS(.v17)" in ios_package_text,
+    "iOS Package.swift 必须保持 .iOS(.v17)，OS 27 适配不得抬高最低 iOS 版本",
+)
+
 # 3. App scheme 必须引用共享 test plan，且能构建测试 target
 app_scheme_test_plan = app_scheme.find("./TestAction/TestPlans/TestPlanReference")
 require(app_scheme_test_plan is not None, f"{APP_TARGET_NAME}.xcscheme 未配置 TestPlanReference")
@@ -359,6 +424,23 @@ require(
 
 # 6. 若仓库以 XcodeGen project.yml 为工程源头，也必须保持同样约束
 if project_yaml_text is not None:
+    require(
+        PQC_SDK_SELECTOR_PATTERN.search(project_yaml_text) is None,
+        "project.yml 不得使用 SDK selector 默认启用 HAS_APPLE_PQC_SDK；必须由 Apple PQC symbol probe 后显式传入 SKYBRIDGE_APPLE_PQC_SDK_CONDITION",
+    )
+    require(
+        project_yaml_text.count(f'{PQC_XCODEBUILD_SETTING}: ""') >= 2,
+        "project.yml 的 app/test target 必须声明空的 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 默认值",
+    )
+    require(
+        project_yaml_text.count(f'SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) {PQC_CONDITION_REFERENCE}"') >= 2,
+        "project.yml 的 app/test target 必须通过 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 接入 Apple PQC 编译条件",
+    )
+    require(
+        f'iOS: "{IOS_DEPLOYMENT_TARGET}"' in project_yaml_text,
+        f"project.yml 的 deploymentTarget.iOS 必须保持 {IOS_DEPLOYMENT_TARGET}",
+    )
+
     target_block = extract_yaml_child_block(project_yaml_text, "targets", TEST_TARGET_NAME)
     require(target_block is not None, "project.yml 缺少 SkyBridgeCompassiOSTests target 定义")
     if target_block is not None:

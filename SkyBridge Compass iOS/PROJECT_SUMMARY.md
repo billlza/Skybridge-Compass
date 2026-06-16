@@ -27,7 +27,7 @@
 - iOS 端已不再依赖符号链接去引用 macOS 工程目录
 - handshake identity pinning 使用规范化协议身份指纹
 - `MessageA` / `MessageB` 的验签后 pinning 现在基于解码后的 `IdentityPublicKeys`
-- iOS 26 SDK 构建下，Xcode 工程已自动启用 `HAS_APPLE_PQC_SDK`
+- Xcode 工程只保留 `SKYBRIDGE_APPLE_PQC_SDK_CONDITION` 接入口；只有通过 Apple PQC symbol probe 的构建 lane 才会显式传入 `HAS_APPLE_PQC_SDK`
 
 ## Validation Snapshot
 

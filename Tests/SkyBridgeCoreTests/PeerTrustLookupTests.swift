@@ -61,7 +61,7 @@ final class PeerTrustLookupTests: XCTestCase {
     }
 
     @MainActor
-    func testDefaultHandshakeTrustProviderFindsKEMThroughKnownDeviceAliases() async throws {
+    func testDefaultHandshakeTrustProviderDoesNotTrustUnsignedBootstrapKEMThroughAliases() async throws {
         let canonicalId = "id:\(UUID().uuidString)"
         let hostAlias = "host:fe80::81d:bb45:8c18:6d6a%en0"
         let normalizedHostAlias = "host:fe80::81d:bb45:8c18:6d6a"
@@ -81,7 +81,7 @@ final class PeerTrustLookupTests: XCTestCase {
         let resolved = await provider.trustedKEMPublicKeys(for: canonicalId)
         let endpointOnly = await provider.trustedKEMPublicKeys(for: "host:[fe80::81d:bb45:8c18:6d6a%en0].9527")
 
-        XCTAssertEqual(resolved[CryptoSuite(wireId: 257)], expectedKey)
+        XCTAssertNil(resolved[CryptoSuite(wireId: 257)])
         XCTAssertNil(endpointOnly[CryptoSuite(wireId: 257)])
     }
 
@@ -119,7 +119,7 @@ final class PeerTrustLookupTests: XCTestCase {
     }
 
     @MainActor
-    func testDefaultHandshakeTrustProviderPrefersBootstrapCacheWhenTrustedKEMKeysConflict() async throws {
+    func testDefaultHandshakeTrustProviderFailsClosedWhenTrustedKEMKeysConflict() async throws {
         let alias = "bonjour:office ipad@local."
         let suite = CryptoSuite(wireId: 257)
         let cachedKey = Data(repeating: 0xCC, count: 1_184)
@@ -174,7 +174,7 @@ final class PeerTrustLookupTests: XCTestCase {
         let provider = DefaultHandshakeTrustProvider()
         let resolved = await provider.trustedKEMPublicKeys(for: alias)
 
-        XCTAssertEqual(resolved[suite], cachedKey)
+        XCTAssertNil(resolved[suite])
     }
 
     func testDefaultHandshakeTrustProviderUsesAuthoritativeProtocolFingerprint() async throws {

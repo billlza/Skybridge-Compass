@@ -6,6 +6,7 @@ use super::{
 };
 pub(crate) use crate::p2p_remote_performance_checks::*;
 pub(crate) use crate::p2p_remote_performance_evidence::*;
+use crate::performance_report_target::REDACTED_ARTIFACT_DIR;
 
 pub(crate) fn build_p2p_remote_performance_report(
     args: &PerformanceCheckArgs,
@@ -74,8 +75,7 @@ pub(crate) fn build_p2p_remote_performance_report(
     Ok(DoctorProbeReport {
         target: format!(
             "performance p2p-remote artifact={} min_fps={:.1}",
-            artifact_dir.display(),
-            args.min_fps
+            REDACTED_ARTIFACT_DIR, args.min_fps
         ),
         checks,
         fault_stage: if evidence.already_connected_rejection_count > 0 {

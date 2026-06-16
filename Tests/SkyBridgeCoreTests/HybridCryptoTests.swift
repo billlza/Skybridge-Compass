@@ -333,5 +333,49 @@ struct EncryptionModeDegradationTests {
         #else
         #endif
     }
-}
 
+    @Test("strict legacy hybrid mode rejects classic-only key exchange")
+    func testStrictLegacyHybridRejectsClassicOnlyKeyExchange() async {
+        guard #available(macOS 14.0, *) else { return }
+
+        #if canImport(CryptoKit)
+        let pqcAdapter = PQCProtocolAdapter(provider: nil, suite: .classic)
+        let service = HybridCryptoService(
+            pqcAdapter: pqcAdapter,
+            degradationPolicy: .requirePQCComponent
+        )
+        let remoteKey = P256.KeyAgreement.PrivateKey()
+
+        await #expect(throws: HybridCryptoError.self) {
+            _ = try await service.initiateHybridKeyExchange(
+                peerId: UUID().uuidString,
+                remoteClassicPublicKey: remoteKey.publicKey.rawRepresentation
+            )
+        }
+        #else
+        #endif
+    }
+
+    @Test("strict legacy hybrid mode rejects classic-only signature")
+    func testStrictLegacyHybridRejectsClassicOnlySignature() async {
+        guard #available(macOS 14.0, *) else { return }
+
+        #if canImport(CryptoKit)
+        let pqcAdapter = PQCProtocolAdapter(provider: nil, suite: .classic)
+        let service = HybridCryptoService(
+            pqcAdapter: pqcAdapter,
+            degradationPolicy: .requirePQCComponent
+        )
+        let signingKey = P256.Signing.PrivateKey()
+
+        await #expect(throws: HybridCryptoError.self) {
+            _ = try await service.createHybridSignature(
+                data: Data("strict legacy hybrid signature".utf8),
+                peerId: UUID().uuidString,
+                classicPrivateKey: signingKey.rawRepresentation
+            )
+        }
+        #else
+        #endif
+    }
+}

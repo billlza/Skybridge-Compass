@@ -19,7 +19,8 @@ public enum KeychainError: Error, LocalizedError, Sendable {
     case unexpectedError(OSStatus)
     case encodingError
     case decodingError
-    
+    case incompleteKeyMaterial(String)
+
     public var errorDescription: String? {
         switch self {
         case .itemNotFound: return "钥匙串项目未找到"
@@ -27,6 +28,7 @@ public enum KeychainError: Error, LocalizedError, Sendable {
         case .unexpectedError(let status): return "钥匙串错误: \(status)"
         case .encodingError: return "编码错误"
         case .decodingError: return "解码错误"
+        case .incompleteKeyMaterial(let reason): return "密钥材料不完整: \(reason)"
         }
     }
 }
@@ -44,12 +46,10 @@ public actor KeychainManager {
     // MARK: - Test Mode Support
     
     private nonisolated static var useInMemoryKeychain: Bool {
-        let env = ProcessInfo.processInfo.environment
-        if env["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
-        if env["XCTestConfigurationFilePath"] != nil { return true }
-        return NSClassFromString("XCTestCase") != nil
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1" { return true }
+        return SkyBridgeRuntimeEnvironment.isRunningUnderXCTest
     }
-    
+
     private nonisolated(unsafe) static var inMemoryStore: [String: Data] = [:]
     private nonisolated static let inMemoryLock = NSLock()
     
@@ -73,18 +73,35 @@ public actor KeychainManager {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: accessibility,
-            kSecValueData as String: data
+            kSecAttrAccount as String: account
         ]
-        
-        SecItemDelete(query as CFDictionary)
-        let status = SecItemAdd(query as CFDictionary, nil)
+
+        let updateAttributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: accessibility
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        guard updateStatus == errSecItemNotFound else {
+            return false
+        }
+
+        var addQuery = query
+        addQuery[kSecAttrAccessible as String] = accessibility
+        addQuery[kSecValueData as String] = data
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
         return status == errSecSuccess
     }
     
     /// 导出密钥
     public nonisolated func exportKey(service: String, account: String) -> Data? {
+        try? exportKeyStrict(service: service, account: account)
+    }
+
+    /// 导出密钥，保留 Keychain 错误语义。
+    public nonisolated func exportKeyStrict(service: String, account: String) throws -> Data? {
         if Self.useInMemoryKeychain {
             let key = service + "|" + account
             Self.inMemoryLock.lock()
@@ -103,9 +120,14 @@ public actor KeychainManager {
         
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        
-        guard status == errSecSuccess, let data = item as? Data else {
+        if status == errSecItemNotFound {
             return nil
+        }
+        guard status == errSecSuccess else {
+            throw KeychainError.unexpectedError(status)
+        }
+        guard let data = item as? Data else {
+            throw KeychainError.decodingError
         }
         return data
     }
@@ -356,17 +378,32 @@ public actor KeychainManager {
     
     /// 获取或生成设备 ID
     public nonisolated func getOrGenerateDeviceId() -> String {
+        do {
+            return try getOrGenerateDeviceIdStrict()
+        } catch {
+            return ""
+        }
+    }
+
+    /// 获取或生成设备 ID，保留 Keychain 错误语义。
+    public nonisolated func getOrGenerateDeviceIdStrict() throws -> String {
         let service = "SkyBridge.Identity"
         let account = "DeviceUUID"
         
-        if let data = exportKey(service: service, account: account),
-           let uuidString = String(data: data, encoding: .utf8) {
+        if let data = try exportKeyStrict(service: service, account: account) {
+            guard let uuidString = String(data: data, encoding: .utf8),
+                  !uuidString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw KeychainError.decodingError
+            }
             return uuidString
         }
         
         let newUUID = UUID().uuidString
-        if let data = newUUID.data(using: .utf8) {
-            _ = importKey(data: data, service: service, account: account)
+        guard let data = newUUID.data(using: .utf8) else {
+            throw KeychainError.encodingError
+        }
+        guard importKey(data: data, service: service, account: account) else {
+            throw KeychainError.unexpectedError(errSecIO)
         }
         return newUUID
     }
@@ -403,7 +440,7 @@ public actor KeychainManager {
     
     /// 获取 API 密钥
     public nonisolated func retrieveAPIKey(service: String, account: String) throws -> String {
-        guard let data = exportKey(service: service, account: account),
+        guard let data = try exportKeyStrict(service: service, account: account),
               let key = String(data: data, encoding: .utf8) else {
             throw KeychainError.itemNotFound
         }
@@ -459,30 +496,15 @@ private extension KeychainManager {
         data: Data,
         accessibility: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     ) throws {
-        if Self.useInMemoryKeychain {
-            let key = "GenericPassword|" + account
-            Self.inMemoryLock.lock()
-            Self.inMemoryStore[key] = data
-            Self.inMemoryLock.unlock()
-            return
-        }
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: accessibility
-        ]
-        
-        SecItemDelete(query as CFDictionary)
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw KeychainError.unexpectedError(status)
-        }
+        try saveGenericPasswordData(
+            account: account,
+            data: data,
+            accessibility: accessibility
+        )
     }
-    
+
     /// Load a generic password item addressed only by account (for backward compatibility with older storage).
-    func loadGenericPassword(account: String) throws -> Data {
+    private nonisolated func genericPasswordData(account: String) throws -> Data {
         if Self.useInMemoryKeychain {
             let key = "GenericPassword|" + account
             Self.inMemoryLock.lock()
@@ -491,20 +513,74 @@ private extension KeychainManager {
             guard let data else { throw KeychainError.itemNotFound }
             return data
         }
-        
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        
+
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else {
-            throw KeychainError.itemNotFound
+        guard status == errSecSuccess else {
+            if status == errSecItemNotFound {
+                throw KeychainError.itemNotFound
+            }
+            throw KeychainError.unexpectedError(status)
+        }
+        guard let data = result as? Data else {
+            throw KeychainError.decodingError
         }
         return data
+    }
+
+    private nonisolated func saveGenericPasswordData(
+        account: String,
+        data: Data,
+        accessibility: CFString
+    ) throws {
+        if Self.useInMemoryKeychain {
+            let key = "GenericPassword|" + account
+            Self.inMemoryLock.lock()
+            Self.inMemoryStore[key] = data
+            Self.inMemoryLock.unlock()
+            return
+        }
+
+        let updateQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account
+        ]
+        let updateAttributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: accessibility
+        ]
+        let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw KeychainError.unexpectedError(updateStatus)
+        }
+
+        var addQuery = updateQuery
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = accessibility
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw KeychainError.unexpectedError(addStatus)
+        }
+    }
+
+    func loadGenericPassword(account: String) throws -> Data {
+        do {
+            return try genericPasswordData(account: account)
+        } catch KeychainError.itemNotFound {
+            throw KeychainError.itemNotFound
+        } catch {
+            throw error
+        }
     }
     
     func deleteGenericPassword(account: String) {
@@ -566,43 +642,15 @@ public extension KeychainManager {
             return
         }
         
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: accessibility
-        ]
-        
-        SecItemDelete(query as CFDictionary)
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw KeychainError.unexpectedError(status)
-        }
+        try saveGenericPasswordData(
+            account: account,
+            data: data,
+            accessibility: accessibility
+        )
     }
     
     private nonisolated func loadGenericPasswordSync(account: String) throws -> Data {
-        if Self.useInMemoryKeychain {
-            let key = "GenericPassword|" + account
-            Self.inMemoryLock.lock()
-            let data = Self.inMemoryStore[key]
-            Self.inMemoryLock.unlock()
-            guard let data else { throw KeychainError.itemNotFound }
-            return data
-        }
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else {
-            throw KeychainError.itemNotFound
-        }
-        return data
+        try genericPasswordData(account: account)
     }
     
     private nonisolated func deleteGenericPasswordSync(account: String) {
@@ -663,17 +711,17 @@ public extension KeychainManager {
             deleteGenericPasswordSync(account: "supabase.serviceRoleKey")
             _ = deleteKey(service: "SkyBridge.Supabase", account: "ServiceRoleKey")
             return SupabaseConfig(url: url, anonKey: anon)
-        } catch {
+        } catch KeychainError.itemNotFound {
             // Fallback: macOS-style keys (service-based)
-            if let urlData = exportKey(service: "SkyBridge.Supabase", account: "URL"),
-               let anonData = exportKey(service: "SkyBridge.Supabase", account: "AnonKey"),
+            if let urlData = try exportKeyStrict(service: "SkyBridge.Supabase", account: "URL"),
+               let anonData = try exportKeyStrict(service: "SkyBridge.Supabase", account: "AnonKey"),
                let url = String(data: urlData, encoding: .utf8),
                let anon = String(data: anonData, encoding: .utf8) {
                 // Migrate forward to the current iOS storage keys for next launch.
-                try? storeSupabaseConfig(url: url, anonKey: anon)
+                try storeSupabaseConfig(url: url, anonKey: anon)
                 return SupabaseConfig(url: url, anonKey: anon)
             }
-            throw error
+            throw KeychainError.itemNotFound
         }
     }
 
@@ -741,17 +789,17 @@ public extension KeychainManager {
             }
             let clientSecret = clientSecretData.flatMap { String(data: $0, encoding: .utf8) }
             return NebulaConfig(baseURL: baseURL, clientId: clientId, clientSecret: clientSecret)
-        } catch {
-            if let clientIdData = exportKey(service: "SkyBridge.Nebula", account: "ClientId"),
+        } catch KeychainError.itemNotFound {
+            if let clientIdData = try exportKeyStrict(service: "SkyBridge.Nebula", account: "ClientId"),
                let clientId = String(data: clientIdData, encoding: .utf8) {
-                let baseURL = exportKey(service: "SkyBridge.Nebula", account: "BaseURL")
+                let baseURL = try exportKeyStrict(service: "SkyBridge.Nebula", account: "BaseURL")
                     .flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                let clientSecret = exportKey(service: "SkyBridge.Nebula", account: "ClientSecret")
+                let clientSecret = try exportKeyStrict(service: "SkyBridge.Nebula", account: "ClientSecret")
                     .flatMap { String(data: $0, encoding: .utf8) }
-                try? storeNebulaConfig(baseURL: baseURL, clientId: clientId, clientSecret: clientSecret)
+                try storeNebulaConfig(baseURL: baseURL, clientId: clientId, clientSecret: clientSecret)
                 return NebulaConfig(baseURL: baseURL, clientId: clientId, clientSecret: clientSecret)
             }
-            throw error
+            throw KeychainError.itemNotFound
         }
     }
 
@@ -774,8 +822,21 @@ public extension KeychainManager {
     }
     
     nonisolated func loadAuthSession() -> AuthSession? {
-        guard let data = try? loadGenericPasswordSync(account: "auth.session") else { return nil }
-        return try? JSONDecoder().decode(AuthSession.self, from: data)
+        try? loadAuthSessionStrict()
+    }
+
+    nonisolated func loadAuthSessionStrict() throws -> AuthSession? {
+        let data: Data
+        do {
+            data = try loadGenericPasswordSync(account: "auth.session")
+        } catch KeychainError.itemNotFound {
+            return nil
+        }
+        do {
+            return try JSONDecoder().decode(AuthSession.self, from: data)
+        } catch {
+            throw KeychainError.decodingError
+        }
     }
     
     nonisolated func deleteAuthSession() {

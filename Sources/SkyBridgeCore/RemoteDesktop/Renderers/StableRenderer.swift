@@ -4,6 +4,7 @@ import VideoToolbox
 import CoreVideo
 import CoreMedia
 import CoreGraphics
+import ImageIO
 import os.log
 
 // MARK: - Stable Renderer

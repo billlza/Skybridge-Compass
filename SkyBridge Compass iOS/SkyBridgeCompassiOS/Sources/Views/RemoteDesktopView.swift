@@ -2273,10 +2273,6 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
 
     final class Coordinator: @unchecked Sendable {
         private static let maxBufferedFrames = 3
-        private let rendererQueue = DispatchQueue(
-            label: "com.skybridge.remote.samplebuffer.renderer",
-            qos: .userInitiated
-        )
         private let onDecodeFailure: @Sendable (String?) -> Void
         private let onRequiresFlush: @Sendable () -> Void
         private let onFrameEnqueued: @Sendable (CMTime, Int) -> Void
@@ -2322,32 +2318,26 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             attach(to: view)
             let frames = feed.takePendingFrames()
             guard !frames.isEmpty else { return }
-            rendererQueue.async { [weak self] in
-                guard let self else { return }
-                self.bufferedFrames.append(contentsOf: frames)
-                if self.bufferedFrames.count > Self.maxBufferedFrames {
-                    self.bufferedFrames.removeFirst(
-                        self.bufferedFrames.count - Self.maxBufferedFrames
-                    )
-                }
-                self.drainBufferedFrames()
+            bufferedFrames.append(contentsOf: frames)
+            if bufferedFrames.count > Self.maxBufferedFrames {
+                bufferedFrames.removeFirst(
+                    bufferedFrames.count - Self.maxBufferedFrames
+                )
             }
+            scheduleBufferedFrameDrain()
         }
 
         @MainActor
         func flush(view: SampleBufferDisplayView, removeDisplayedImage: Bool) {
             attach(to: view)
-            rendererQueue.async { [weak self] in
-                guard let self,
-                      let layer = self.attachedLayer else { return }
-                self.bufferedFrames.removeAll(keepingCapacity: true)
-                self.isDrainScheduled = false
-                layer.stopRequestingMediaData()
-                if removeDisplayedImage {
-                    layer.flushAndRemoveImage()
-                } else {
-                    layer.flush()
-                }
+            guard let layer = attachedLayer else { return }
+            bufferedFrames.removeAll(keepingCapacity: true)
+            isDrainScheduled = false
+            layer.stopRequestingMediaData()
+            if removeDisplayedImage {
+                layer.flushAndRemoveImage()
+            } else {
+                layer.flush()
             }
         }
 
@@ -2370,34 +2360,45 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             }
         }
 
-        private func drainBufferedFrames() {
+        @MainActor
+        private func scheduleBufferedFrameDrain() {
             guard !isDrainScheduled else { return }
             guard let layer = attachedLayer else { return }
             isDrainScheduled = true
             layer.stopRequestingMediaData()
-            layer.requestMediaDataWhenReady(on: rendererQueue) { [weak self] in
-                guard let self,
-                      let layer = self.attachedLayer else { return }
-                while layer.isReadyForMoreMediaData {
-                    if layer.requiresFlushToResumeDecoding {
-                        self.bufferedFrames.removeAll(keepingCapacity: true)
-                        self.isDrainScheduled = false
-                        layer.stopRequestingMediaData()
-                        layer.flush()
-                        self.onRequiresFlush()
-                        return
-                    }
-
-                    guard !self.bufferedFrames.isEmpty else {
-                        self.isDrainScheduled = false
-                        layer.stopRequestingMediaData()
-                        return
-                    }
-
-                    let frame = self.bufferedFrames.removeFirst()
-                    layer.enqueue(frame.sampleBuffer)
-                    self.onFrameEnqueued(frame.presentationTimeStamp, self.bufferedFrames.count)
+            layer.requestMediaDataWhenReady(on: .main) { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.drainReadyBufferedFrames()
                 }
+            }
+        }
+
+        @MainActor
+        private func drainReadyBufferedFrames() {
+            guard let layer = attachedLayer else {
+                isDrainScheduled = false
+                return
+            }
+
+            while layer.isReadyForMoreMediaData {
+                if layer.requiresFlushToResumeDecoding {
+                    bufferedFrames.removeAll(keepingCapacity: true)
+                    isDrainScheduled = false
+                    layer.stopRequestingMediaData()
+                    layer.flush()
+                    onRequiresFlush()
+                    return
+                }
+
+                guard !bufferedFrames.isEmpty else {
+                    isDrainScheduled = false
+                    layer.stopRequestingMediaData()
+                    return
+                }
+
+                let frame = bufferedFrames.removeFirst()
+                layer.enqueue(frame.sampleBuffer)
+                onFrameEnqueued(frame.presentationTimeStamp, bufferedFrames.count)
             }
         }
 
@@ -2420,8 +2421,10 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
                     forName: AVSampleBufferVideoRenderer.requiresFlushToResumeDecodingDidChangeNotification,
                     object: renderer,
                     queue: nil
-                ) { [weak self] _ in
-                    guard let self, renderer.requiresFlushToResumeDecoding else { return }
+                ) { [weak self] notification in
+                    guard let self,
+                          let renderer = notification.object as? AVSampleBufferVideoRenderer,
+                          renderer.requiresFlushToResumeDecoding else { return }
                     self.onRequiresFlush()
                 }
             )

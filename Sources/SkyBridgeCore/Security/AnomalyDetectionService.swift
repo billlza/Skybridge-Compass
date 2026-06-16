@@ -188,6 +188,28 @@ public struct AnomalyDetectionConfiguration: Codable, Sendable {
     }
 }
 
+public enum AnomalyDetectionPersistenceOperation: String, Codable, Sendable {
+    case configuration
+    case baseline
+    case history
+}
+
+public struct AnomalyDetectionPersistenceFailure: Equatable, Sendable {
+    public let operation: AnomalyDetectionPersistenceOperation
+    public let occurredAt: Date
+    public let errorType: String
+
+    public init(
+        operation: AnomalyDetectionPersistenceOperation,
+        occurredAt: Date = Date(),
+        errorType: String
+    ) {
+        self.operation = operation
+        self.occurredAt = occurredAt
+        self.errorType = errorType
+    }
+}
+
 // MARK: - 行为基线
 
 /// 行为基线统计
@@ -256,6 +278,9 @@ public final class AnomalyDetectionService: ObservableObject {
 
     /// 是否处于学习模式
     @Published public private(set) var isLearning: Bool = true
+
+    /// 最近一次持久化失败；用于 UI/诊断暴露真实错误，而不是静默丢失安全状态。
+    @Published public private(set) var lastPersistenceFailure: AnomalyDetectionPersistenceFailure?
 
     // MARK: - Private Properties
 
@@ -450,7 +475,8 @@ public final class AnomalyDetectionService: ObservableObject {
             if let handler = onCriticalAnomaly {
                 let shouldBlock = await handler(anomaly)
                 if shouldBlock {
-                    logger.warning("🔍 自动阻止严重异常来源: \(anomaly.sourceDeviceID ?? "unknown")")
+                    let sourceIdentifierState = anomaly.sourceDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? "present_redacted" : "absent"
+                    logger.warning("🔍 自动阻止严重异常来源: \(sourceIdentifierState, privacy: .public)")
                 }
             }
         }
@@ -524,7 +550,9 @@ public final class AnomalyDetectionService: ObservableObject {
     // MARK: - Persistence
 
     private func saveConfiguration() {
-        try? Self.configurationStore.save(configuration)
+        persist(.configuration) {
+            try Self.configurationStore.save(configuration)
+        }
     }
 
     private static func loadConfiguration() -> AnomalyDetectionConfiguration? {
@@ -532,7 +560,9 @@ public final class AnomalyDetectionService: ObservableObject {
     }
 
     private func saveBaseline() {
-        try? Self.baselineStore.save(baseline)
+        persist(.baseline) {
+            try Self.baselineStore.save(baseline)
+        }
     }
 
     private static func loadBaseline() -> BehaviorBaseline? {
@@ -540,7 +570,31 @@ public final class AnomalyDetectionService: ObservableObject {
     }
 
     private func saveHistory() {
-        try? Self.historyStore.save(anomalyHistory)
+        persist(.history) {
+            try Self.historyStore.save(anomalyHistory)
+        }
+    }
+
+    private func persist(_ operation: AnomalyDetectionPersistenceOperation, _ action: () throws -> Void) {
+        do {
+            try action()
+            if lastPersistenceFailure?.operation == operation {
+                lastPersistenceFailure = nil
+            }
+        } catch {
+            recordPersistenceFailure(operation, error: error)
+        }
+    }
+
+    private func recordPersistenceFailure(_ operation: AnomalyDetectionPersistenceOperation, error: Error) {
+        let failure = AnomalyDetectionPersistenceFailure(
+            operation: operation,
+            errorType: String(reflecting: type(of: error))
+        )
+        lastPersistenceFailure = failure
+        logger.error(
+            "Anomaly detection persistence failed operation=\(operation.rawValue, privacy: .public) errorType=\(failure.errorType, privacy: .public)"
+        )
     }
 
     private static func loadHistory() -> [DetectedAnomaly] {

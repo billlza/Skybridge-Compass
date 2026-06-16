@@ -485,7 +485,12 @@ private class MetalFrameProcessor: @unchecked Sendable {
         self.textureCache = cache
         
  // 创建计算管线
-        guard let library = device.makeDefaultLibrary(),
+        guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: ["RemoteDesktopShaders"],
+            requiredFunctionNames: ["scaleFrame"]
+        ),
               let function = library.makeFunction(name: "scaleFrame"),
               let pipeline = try? device.makeComputePipelineState(function: function) else {
             throw RemoteDesktopError.metalPipelineCreationFailed

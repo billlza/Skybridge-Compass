@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import MetalKit
 import MetalFX
@@ -111,7 +112,12 @@ public final class Metal4Renderer: @unchecked Sendable {
             return cached
         }
         
-        guard let library = device.makeDefaultLibrary() else {
+        guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
+            requiredFunctionNames: [vertexFunction, fragmentFunction]
+        ) else {
             logger.error("无法加载默认着色器库")
             return nil
         }
@@ -231,7 +237,12 @@ public final class Metal4Renderer: @unchecked Sendable {
     
  /// 设置降级降噪管线（使用自定义高斯模糊）
     private func setupFallbackDenoisePipeline() {
-        guard let library = device.makeDefaultLibrary() else {
+        guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
+            requiredFunctionNames: ["gaussianBlurDenoise"]
+        ) else {
             logger.warning("无法加载默认着色器库用于降级降噪")
             return
         }
@@ -329,7 +340,12 @@ public final class Metal4Renderer: @unchecked Sendable {
             return cached
         }
         
-        guard let library = device.makeDefaultLibrary(),
+        guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
+            device: device,
+            bundle: Bundle.module,
+            sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
+            requiredFunctionNames: [functionName]
+        ),
               let function = library.makeFunction(name: functionName) else {
             logger.error("无法加载计算函数: \(functionName)")
             return nil
@@ -459,4 +475,3 @@ extension Metal4Renderer {
         }
     }
 }
-

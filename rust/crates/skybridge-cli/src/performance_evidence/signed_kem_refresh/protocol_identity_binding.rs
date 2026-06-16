@@ -189,7 +189,7 @@ pub(crate) fn protocol_identity_binding_check_detail(
     binding: &ProtocolIdentityBindingEvidence,
 ) -> String {
     format!(
-        "pibRequired={} pibRequestSeen={} pibServedSeen={} pibVerifiedSeen={} pibPinnedSeen={} pibFingerprintSeen={} pibFailureSeen={} pibLifecycleSamples={} pibRequestSeq={:?} pibServedSeq={:?} pibVerifiedSeq={:?} pibPinnedSeq={:?} pibRequestPeer={} pibServedTarget={} pibVerifiedPeer={} pibPinnedPeer={} pibServedFingerprint={} pibVerifiedFingerprint={} pibPinnedFingerprint={} pibFirstFailure={}",
+        "pibRequired={} pibRequestSeen={} pibServedSeen={} pibVerifiedSeen={} pibPinnedSeen={} pibFingerprintSeen={} pibFailureSeen={} pibLifecycleSamples={} pibRequestSeq={:?} pibServedSeq={:?} pibVerifiedSeq={:?} pibPinnedSeq={:?} pibRequestPeerSeen={} pibServedTargetSeen={} pibVerifiedPeerSeen={} pibPinnedPeerSeen={} pibServedFingerprintSeen={} pibVerifiedFingerprintSeen={} pibPinnedFingerprintSeen={} pibFirstFailure={}",
         binding.required_seen,
         binding.request_seen,
         binding.served_seen,
@@ -202,13 +202,13 @@ pub(crate) fn protocol_identity_binding_check_detail(
         binding.served_sequence,
         binding.verified_sequence,
         binding.pinned_sequence,
-        binding.request_peer.as_deref().unwrap_or("-"),
-        binding.served_target.as_deref().unwrap_or("-"),
-        binding.verified_peer.as_deref().unwrap_or("-"),
-        binding.pinned_peer.as_deref().unwrap_or("-"),
-        binding.served_fingerprint.as_deref().unwrap_or("-"),
-        binding.verified_fingerprint.as_deref().unwrap_or("-"),
-        binding.pinned_fingerprint.as_deref().unwrap_or("-"),
+        binding.request_peer.is_some(),
+        binding.served_target.is_some(),
+        binding.verified_peer.is_some(),
+        binding.pinned_peer.is_some(),
+        binding.served_fingerprint.is_some(),
+        binding.verified_fingerprint.is_some(),
+        binding.pinned_fingerprint.is_some(),
         binding.first_failure.as_deref().unwrap_or("-")
     )
 }

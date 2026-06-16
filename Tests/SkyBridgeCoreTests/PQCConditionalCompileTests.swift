@@ -149,5 +149,9 @@ final class PQCConditionalCompileTests: XCTestCase {
         XCTAssertTrue(details.contains("macOS"), "Should mention macOS")
         XCTAssertTrue(details.contains("ML-KEM") || details.contains("ML‑KEM"), "Should mention ML-KEM")
         XCTAssertTrue(details.contains("ML-DSA") || details.contains("ML‑DSA"), "Should mention ML-DSA")
+        XCTAssertTrue(status.contains("候选") || status.contains("不得显示为 Apple PQC 保护"))
+        XCTAssertTrue(details.contains("不代表当前连接已使用 PQC"))
+        XCTAssertTrue(details.contains("协商套件"))
+        XCTAssertFalse(status.contains("优先使用 Apple CryptoKit 原生 PQC"))
     }
 }

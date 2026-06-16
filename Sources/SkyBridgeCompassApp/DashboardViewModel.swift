@@ -8,6 +8,26 @@ import AppKit
 import SwiftUI
 import Network
 
+@available(macOS 14.0, *)
+struct PendingSiriConnectionRequest: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let requestedDeviceName: String
+    let matchedDeviceID: UUID
+    let matchedDeviceName: String
+
+    init(
+        id: UUID = UUID(),
+        requestedDeviceName: String,
+        matchedDeviceID: UUID,
+        matchedDeviceName: String
+    ) {
+        self.id = id
+        self.requestedDeviceName = requestedDeviceName
+        self.matchedDeviceID = matchedDeviceID
+        self.matchedDeviceName = matchedDeviceName
+    }
+}
+
 /// 仪表盘主视图模型，协调真实设备扫描、会话管理及文件传输状态。
 @available(macOS 14.0, *)
 @MainActor
@@ -27,6 +47,7 @@ final class DashboardViewModel: ObservableObject {
     @Published private(set) var connectionDetail: String? = nil
     @Published private(set) var tenants: [TenantDescriptor] = []
     @Published private(set) var activeTenant: TenantDescriptor?
+    @Published private(set) var pendingSiriConnectionRequest: PendingSiriConnectionRequest?
 
  // 🆕 统一的在线设备列表(使用新的统一管理器)
     @Published public var onlineDevices: [OnlineDevice] = []
@@ -336,8 +357,7 @@ final class DashboardViewModel: ObservableObject {
             .compactMap { $0.userInfo?[SkyBridgeIntentPayloadKey.deviceName] as? String }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] target in
-                guard let self else { return }
-                Task { await self.handleSiriConnectRequest(targetName: target) }
+                self?.recordSiriConnectRequest(targetName: target)
             }
             .store(in: &cancellables)
         sessionService.bootstrap()
@@ -544,9 +564,7 @@ final class DashboardViewModel: ObservableObject {
                         latestConnectedDevice: latestConnectedDevice,
                         activeSessionSnapshot: crossSnapshot,
                         crossNetworkFallback: crossNetworkFallback,
-                        defaultPQCModeLabel: ConnectionCryptoPresentation.inferredModeLabelForCurrentPolicy(
-                            compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode
-                        ),
+                        defaultPQCModeLabel: nil,
                         compatibilityModeEnabled: SettingsManager.shared.enableCompatibilityMode,
                         signalingHealth: crossSignalingHealth
                     )
@@ -737,13 +755,46 @@ final class DashboardViewModel: ObservableObject {
         await connect(to: discoveredDevice)
     }
 
-    private func handleSiriConnectRequest(targetName: String) async {
-        guard let tenant = try? await tenantController.requirePermission(.remoteDesktop) else { return }
-        if let matched = discoveredDevices.first(where: { $0.name.caseInsensitiveCompare(targetName) == .orderedSame }) {
-            try? await sessionService.connect(to: matched, tenant: tenant)
-        } else if let fallback = discoveredDevices.first {
-            try? await sessionService.connect(to: fallback, tenant: tenant)
+    private func recordSiriConnectRequest(targetName: String) {
+        let requestedName = targetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requestedName.isEmpty else {
+            pendingSiriConnectionRequest = nil
+            discoveryStatus = "Siri 连接请求缺少设备名称，已中止"
+            return
         }
+
+        let matches = discoveredDevices.filter { device in
+            device.name.caseInsensitiveCompare(requestedName) == .orderedSame
+        }
+        guard matches.count == 1, let matched = matches.first else {
+            pendingSiriConnectionRequest = nil
+            discoveryStatus = matches.isEmpty
+                ? "未找到 Siri 请求的设备「\(requestedName)」，未执行连接"
+                : "Siri 请求的设备名称「\(requestedName)」不唯一，未执行连接"
+            return
+        }
+
+        pendingSiriConnectionRequest = PendingSiriConnectionRequest(
+            requestedDeviceName: requestedName,
+            matchedDeviceID: matched.id,
+            matchedDeviceName: matched.name
+        )
+        discoveryStatus = "Siri 已准备连接「\(matched.name)」，请在应用内确认"
+    }
+
+    func confirmPendingSiriConnectionRequest() async {
+        guard let request = pendingSiriConnectionRequest else {
+            discoveryStatus = "没有待确认的 Siri 连接请求"
+            return
+        }
+        guard let matched = discoveredDevices.first(where: { $0.id == request.matchedDeviceID }) else {
+            pendingSiriConnectionRequest = nil
+            discoveryStatus = "待确认设备已不可用，未执行连接"
+            return
+        }
+
+        pendingSiriConnectionRequest = nil
+        await connect(to: matched)
     }
 
  /// 激活指定租户，以便使用其权限进行后续操作。

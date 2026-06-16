@@ -146,11 +146,11 @@ final class TrustRecordDisplayGroupingTests: XCTestCase {
 
         XCTAssertEqual(
             HandshakeErrorLocalizer.localizedMessage(for: error),
-            "安全验证失败：解密认证失败（可能是两端后量子加密实现不兼容或应用构建未启用 Apple PQC）"
+            "安全验证失败：解密认证失败（可能是两端 PQC 实现或协商套件不一致，或构建未启用 Apple PQC）"
         )
         XCTAssertEqual(
             HandshakeErrorLocalizer.suggestedFix(for: error),
-            "请更新两台设备的应用到同一版本，并确保 macOS 端是用 Xcode 26+ 构建且已启用 Apple PQC（HAS_APPLE_PQC_SDK）。"
+            "请确认两台设备应用版本一致，并检查 Apple PQC 编译标记、runtime self-test 与协商套件证据；不要仅凭系统或 Xcode 版本判断已启用。"
         )
     }
 

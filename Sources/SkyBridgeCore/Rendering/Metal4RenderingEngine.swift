@@ -294,13 +294,20 @@ public final class Metal4RenderingEngine: NSObject, ObservableObject {
             guard let device = device else {
                 throw RenderingError.deviceNotSupported
             }
-            guard let library = device.makeDefaultLibrary() else {
-                throw RenderingError.shaderCompilationFailed("无法加载默认着色器库")
-            }
+            let library = try SkyBridgeMetalShaderLibrary.load(
+                device: device,
+                bundle: Bundle.module,
+                sourceResourceNames: ["WeatherShaders"],
+                requiredFunctionNames: [
+                    "particle_update_compute",
+                    "particle_vertex",
+                    "particle_fragment"
+                ]
+            )
             self.library = library
             log.info("着色器库加载完成")
         } catch {
-            renderingError = error as? RenderingError
+            renderingError = (error as? RenderingError) ?? .shaderCompilationFailed(error.localizedDescription)
             log.error("着色器库加载失败: \(error.localizedDescription)")
         }
     }

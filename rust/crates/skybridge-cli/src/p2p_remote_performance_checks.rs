@@ -207,7 +207,11 @@ pub(crate) fn check_p2p_remote_mac_ipad_online_connect_button(
             evidence.mac_ipad_p2p_connect_start_samples,
             evidence.mac_ipad_connect_success_samples,
             evidence.mac_ipad_connect_failure_samples,
-            ordered_success_identity.as_deref().unwrap_or("-"),
+            if ordered_success_identity.is_some() {
+                "bound"
+            } else {
+                "missing"
+            },
             evidence
                 .mac_ipad_online_connectable_identity_sequences
                 .len(),
@@ -235,21 +239,20 @@ fn p2p_remote_mac_ipad_duplicate_physical_row_summary(
                 return None;
             }
             Some(format!(
-                "{}:rows={}:identities={}",
-                physical_key,
+                "duplicate:rows={}:identityCount={}",
                 row_count,
-                identities.iter().cloned().collect::<Vec<_>>().join(",")
+                identities.len()
             ))
         })
         .or_else(|| {
             evidence
                 .mac_ipad_online_physical_row_counts
                 .iter()
-                .find_map(|(physical_key, row_count)| {
+                .find_map(|(_, row_count)| {
                     if *row_count <= 1 {
                         return None;
                     }
-                    Some(format!("{physical_key}:rows={row_count}:identities=-"))
+                    Some(format!("duplicate:rows={row_count}:identityCount=unknown"))
                 })
         })
 }

@@ -6,11 +6,25 @@ use crate::{
     TurnCredentials,
 };
 
+mod file_transfer;
 mod registry;
+mod remote_desktop;
 #[cfg(test)]
 mod tests;
 
+pub use file_transfer::{
+    FileTransferControlAction, FileTransferControlRequest, FileTransferControlRequestRegistry,
+    FileTransferControlRequestStatus, FileTransferDestinationBinding, FileTransferSourceSnapshot,
+};
 pub use registry::{ManagedSessionControlRegistry, SessionRegistry, make_runtime_id};
+pub use remote_desktop::{
+    REMOTE_DESKTOP_FPS_REQUEST_CONTRACT, REMOTE_DESKTOP_RESOLUTION_REQUEST_CONTRACT,
+    RemoteDesktopCapabilitySnapshot, RemoteDesktopCapabilitySnapshotRegistry,
+    RemoteDesktopControlAction, RemoteDesktopControlRequest, RemoteDesktopControlRequestPayload,
+    RemoteDesktopControlRequestRegistry, RemoteDesktopControlRequestStatus,
+    RemoteDesktopObservedMode, RemoteDesktopResolutionPreset, RemoteDesktopResolutionRequest,
+    remote_desktop_fps_request_supported, remote_desktop_resolution_preset_matches,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

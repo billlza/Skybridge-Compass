@@ -102,19 +102,8 @@ public actor PQCProtocolAdapter {
         self.provider = PQCProviderFactory.makeProvider()
         
         if let p = provider {
-            switch p.backend {
-            case .applePQC:
- // Apple PQC 支持所有套件
-                self.supportedSuites = [.classic, .pqc, .hybrid]
-                self.currentSuite = .hybrid
-            case .liboqs:
- // OQS 支持经典和纯 PQC（HPKE 降级实现）
-                self.supportedSuites = [.classic, .pqc]
-                self.currentSuite = .pqc
-            case .none:
-                self.supportedSuites = [.classic]
-                self.currentSuite = .classic
-            }
+            self.supportedSuites = Self.supportedSuites(for: p)
+            self.currentSuite = Self.defaultSuite(for: p, supportedSuites: supportedSuites)
         } else {
             self.supportedSuites = [.classic]
             self.currentSuite = .classic
@@ -122,22 +111,47 @@ public actor PQCProtocolAdapter {
     }
     
  /// 使用指定 provider 初始化（用于测试）
-    public init(provider: PQCProvider?, suite: CrossPlatformPQCSuite = .hybrid) {
+    public init(provider: PQCProvider?, suite requestedSuite: CrossPlatformPQCSuite? = nil) {
         self.provider = provider
-        self.currentSuite = suite
         
         if let p = provider {
-            switch p.backend {
-            case .applePQC:
-                self.supportedSuites = [.classic, .pqc, .hybrid]
-            case .liboqs:
-                self.supportedSuites = [.classic, .pqc]
-            case .none:
-                self.supportedSuites = [.classic]
-            }
+            let suites = Self.supportedSuites(for: p)
+            self.supportedSuites = suites
+            let fallbackSuite = Self.defaultSuite(for: p, supportedSuites: suites)
+            self.currentSuite = requestedSuite.flatMap { suites.contains($0) ? $0 : nil } ?? fallbackSuite
         } else {
             self.supportedSuites = [.classic]
+            self.currentSuite = .classic
         }
+    }
+
+    private static func supportedSuites(for provider: PQCProvider) -> [CrossPlatformPQCSuite] {
+        switch provider.backend {
+        case .applePQC:
+            var suites: [CrossPlatformPQCSuite] = [.classic, .pqc]
+            if provider.suite == .hybridXWing || PQCProviderFactory.supportsSuite(.hybridXWing) {
+                suites.append(.hybrid)
+            }
+            return suites
+        case .liboqs:
+            return [.classic, .pqc]
+        case .none:
+            return [.classic]
+        }
+    }
+
+    private static func defaultSuite(
+        for provider: PQCProvider,
+        supportedSuites: [CrossPlatformPQCSuite]
+    ) -> CrossPlatformPQCSuite {
+        let providerSuite = CrossPlatformPQCSuite(from: provider.suite)
+        if supportedSuites.contains(providerSuite) {
+            return providerSuite
+        }
+        if supportedSuites.contains(.pqc) {
+            return .pqc
+        }
+        return .classic
     }
     
  // MARK: - Suite Management

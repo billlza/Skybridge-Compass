@@ -18,8 +18,7 @@ public actor P2PKEMIdentityKeyStore {
         let pubId = "p2p.kem.public.\(storageSuite.wireId)"
         let privId = "p2p.kem.private.\(storageSuite.wireId)"
 
-        if let priv = try? keychain.loadPrivateKey(identifier: privId),
-           let pub = try? keychain.loadPublicKey(identifier: pubId) {
+        if let (pub, priv) = try loadStoredIdentityKey(publicIdentifier: pubId, privateIdentifier: privId) {
             return (publicKey: pub, privateKey: SecureBytes(data: priv))
         }
 
@@ -27,6 +26,35 @@ public actor P2PKEMIdentityKeyStore {
         try keychain.savePublicKey(pair.publicKey.bytes, identifier: pubId)
         try keychain.savePrivateKey(pair.privateKey.bytes, identifier: privId)
         return (publicKey: pair.publicKey.bytes, privateKey: SecureBytes(data: pair.privateKey.bytes))
+    }
+
+    private func loadStoredIdentityKey(
+        publicIdentifier: String,
+        privateIdentifier: String
+    ) throws -> (publicKey: Data, privateKey: Data)? {
+        let privateKey: Data?
+        let publicKey: Data?
+
+        do {
+            privateKey = try keychain.loadPrivateKey(identifier: privateIdentifier)
+        } catch KeychainError.itemNotFound {
+            privateKey = nil
+        }
+
+        do {
+            publicKey = try keychain.loadPublicKey(identifier: publicIdentifier)
+        } catch KeychainError.itemNotFound {
+            publicKey = nil
+        }
+
+        switch (publicKey, privateKey) {
+        case (nil, nil):
+            return nil
+        case let (publicKey?, privateKey?):
+            return (publicKey: publicKey, privateKey: privateKey)
+        default:
+            throw KeychainError.incompleteKeyMaterial("P2P KEM identity keypair is incomplete")
+        }
     }
 
     public func getOrCreateBootstrapPublicKeys() async throws -> [KEMPublicKeyInfo] {

@@ -9,7 +9,6 @@ struct RemoteDesktopView: View {
     @State private var showingConnectionSheet = false
     @State private var showingSettingsSheet = false
     @State private var searchText = ""
-    @State private var selectedQuality: VideoQuality = .high
     @State private var newConnectionPrefersAdvanced: Bool = false
     @State private var hasRequestedManagerBootstrap = false
  // 新增：维护从管理器发布的所有会话快照
@@ -23,7 +22,6 @@ struct RemoteDesktopView: View {
  // MARK: - Metal 4 增强功能状态
     @State private var connectionMode: ConnectionMode = .auto  // 双通道模式
     @State private var showPerformanceOverlay = false  // 性能监控
-    @State private var renderMetrics: RenderMetrics = .zero  // Metal 4 指标
 
  // MARK: - macOS 15/26 窗口管理
     @Environment(\.openWindow) private var openWindow  // macOS 14+ 标准窗口打开方式
@@ -136,9 +134,17 @@ struct RemoteDesktopView: View {
             ForEach(ConnectionMode.allCases, id: \.self) { mode in
                 Button(action: {
                     connectionMode = mode
- // 如果切换到近距模式，打开独立窗口（macOS 15/26 最佳实践）
-                    if mode == .nearField {
+ // 让模式真正路由到对应的连接入口（此前仅 .nearField 有动作，其余只更新徽章=仅显示）：
+ // 自动→设备发现（推荐 P2P，自动选路）；近距→近距硬件镜像窗口（NearFieldMirrorView 真实实现）；
+ // 远距→高级手动 RDP/VNC/SSH 连接表单。三个目标均为已落地能力。
+                    switch mode {
+                    case .auto:
+                        NotificationCenter.default.post(name: .skybridgeNavigateToDeviceDiscovery, object: nil)
+                    case .nearField:
                         openWindow(id: "near-field-mirror")
+                    case .farFieldRDP:
+                        newConnectionPrefersAdvanced = true
+                        showingConnectionSheet = true
                     }
                 }) {
                     VStack(spacing: 4) {
@@ -214,22 +220,21 @@ struct RemoteDesktopView: View {
 
 // MARK: - 主内容区域
     private var remoteWorkspaceContent: some View {
-        VStack(spacing: 16) {
-            trustedActiveSessionsPanel
-            previewPanel
+ // 用 ScrollView 包裹，与其它标签页一致：窗口变窄/变矮时内容可滚动，
+ // 避免面板（previewPanel minHeight 420）溢出被裁剪、导致控件点不到（非响应式问题的根因之一）。
+        ScrollView {
+            VStack(spacing: 16) {
+                trustedActiveSessionsPanel
+                previewPanel
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
-        .padding(20)
-        .background(
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.94),
-                    Color.blue.opacity(0.24),
-                    Color.black.opacity(0.98)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+ // 背景透明，由 DashboardBackgroundView 统一提供主题背景；各面板自带玻璃/材质表面，
+ // 不再叠加不透明深色渐变（那会形成与全局主题割裂的硬边深色矩形）。
+        .background(Color.clear)
+        .scrollIndicators(.hidden)
     }
 
     private var trustedActiveSessionsPanel: some View {
@@ -336,8 +341,16 @@ struct RemoteDesktopView: View {
 // 质量设置
                 Menu {
                     ForEach(VideoQuality.allCases, id: \.self) { quality in
-                        Button(quality.displayName) {
-                            selectedQuality = quality
+                        Button {
+ // 写入真实设置并下发到活跃会话；此前只设置一个从不被读取的 selectedQuality（=假阳性）。
+                            RemoteDesktopSettingsManager.shared.settings.displaySettings.videoQuality = quality
+                            RemoteDesktopSettingsManager.shared.saveSettings()
+                            remoteDesktopManager.reapplyCurrentSettingsToActiveSessions()
+                        } label: {
+                            Label(
+                                quality.displayName,
+                                systemImage: RemoteDesktopSettingsManager.shared.settings.displaySettings.videoQuality == quality ? "checkmark" : ""
+                            )
                         }
                     }
                 } label: {
@@ -393,8 +406,10 @@ struct RemoteDesktopView: View {
     }
 
  /// Metal 4 性能监控覆盖层
+ /// 指标来自当前会话的真实测量（RemoteFrameRenderer → RemoteSessionSummary），
+ /// 不再使用恒为 0 的占位 renderMetrics 与硬编码的 "92% GPU"（那是假数据 / 假阳性）。
     @ViewBuilder
-    private var performanceOverlay: some View {
+    private func performanceOverlay(for session: RemoteSessionSummary) -> some View {
         if showPerformanceOverlay {
             VStack(alignment: .trailing, spacing: 8) {
  // Metal 4 标识
@@ -411,27 +426,20 @@ struct RemoteDesktopView: View {
                 .foregroundColor(.green)
                 .cornerRadius(4)
 
- // 性能指标
+ // 真实性能指标（会话级测量）
                 VStack(alignment: .trailing, spacing: 4) {
                     performanceMetric(
                         icon: "speedometer",
                         label: "解码",
-                        value: "\(Int(renderMetrics.latencyMilliseconds))ms",
-                        color: renderMetrics.latencyMilliseconds < 30 ? .green : .orange
+                        value: "\(Int(session.frameLatencyMilliseconds))ms",
+                        color: session.frameLatencyMilliseconds < 30 ? .green : .orange
                     )
 
                     performanceMetric(
                         icon: "arrow.down.circle",
                         label: "带宽",
-                        value: String(format: "%.1f Mbps", renderMetrics.bandwidthMbps),
-                        color: renderMetrics.bandwidthMbps > 50 ? .green : .orange
-                    )
-
-                    performanceMetric(
-                        icon: "memorychip",
-                        label: "GPU",
-                        value: "92%",
-                        color: .cyan
+                        value: String(format: "%.1f Mbps", session.bandwidthMbps),
+                        color: session.bandwidthMbps > 50 ? .green : .orange
                     )
                 }
             }
@@ -465,7 +473,7 @@ struct RemoteDesktopView: View {
                 )
                 .overlay(
 // Metal 4 性能监控覆盖层（右上角）
-                    performanceOverlay,
+                    performanceOverlay(for: session),
                     alignment: .topTrailing
                 )
         }
@@ -680,6 +688,13 @@ struct RemoteDesktopView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .help(LocalizationManager.shared.localizedString("remote.toolbar.refresh.help"))
+
+ // 设置入口：此前仅在“有活跃会话”的预览工具栏里出现，空闲时根本点不到。
+ // 移到始终可见的顶部工具栏，保证任何时候都能打开远程桌面设置。
+            Button(action: { showingSettingsSheet = true }) {
+                Image(systemName: "gearshape")
+            }
+            .help(LocalizationManager.shared.localizedString("remote.settings.help"))
         }
     }
 
@@ -1104,52 +1119,49 @@ struct RemoteDesktopSettingsView: View {
     @State private var selectedTab: SettingsTab = .display
 
     var body: some View {
-        NavigationView {
-            VStack(spacing: 0) {
- // 设置标签页选择器
-                settingsTabPicker
+ // macOS 规范：表单类 sheet 不要用 NavigationView + TabView(.tabItem)。
+ // 这两者叠加会：①重复渲染出第二条原生标签栏（与下方分段选择器重复）；
+ // ②在固定尺寸 sheet 内与 TabView 互相争夺布局，导致内容区空白并卡死（你截图里的现象）。
+ // 改为标准结构：标题 + 单一分段选择器 + 按所选标签切换的单一内容区 + 底部操作栏。
+        VStack(spacing: 0) {
+            HStack {
+                Text("远程桌面设置")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.top)
 
- // 设置内容区域
-                TabView(selection: $selectedTab) {
+            settingsTabPicker
+
+            Divider()
+
+ // 只构建当前选中的设置页（不再让 TabView 一次性预建三个 Form）
+            Group {
+                switch selectedTab {
+                case .display:
                     displaySettingsView
-                        .tabItem {
-                            Label("显示设置", systemImage: "display")
-                        }
-                        .tag(SettingsTab.display)
-
+                case .interaction:
                     interactionSettingsView
-                        .tabItem {
-                            Label("交互设置", systemImage: "hand.point.up.left")
-                        }
-                        .tag(SettingsTab.interaction)
-
+                case .network:
                     networkSettingsView
-                        .tabItem {
-                            Label("网络优化", systemImage: "network")
-                        }
-                        .tag(SettingsTab.network)
                 }
-                .tabViewStyle(.automatic)
             }
-            .navigationTitle("远程桌面设置")
-            .toolbar {
-                ToolbarItemGroup(placement: .cancellationAction) {
-                    Button("重置") {
-                        resetSettings()
-                    }
-                }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                ToolbarItemGroup(placement: .confirmationAction) {
-                    Button("应用") {
-                        applySettings()
-                    }
+            Divider()
+
+ // 底部操作栏（替代 NavigationView 的 toolbar）
+            HStack {
+                Button("重置") { resetSettings() }
+                Spacer()
+                Button("应用") { applySettings() }
+                    .buttonStyle(.bordered)
+                Button("完成") { saveAndClose() }
                     .buttonStyle(.borderedProminent)
-
-                    Button("完成") {
-                        saveAndClose()
-                    }
-                }
+                    .keyboardShortcut(.defaultAction)
             }
+            .padding()
         }
         .frame(width: 700, height: 600)
     }
@@ -1575,18 +1587,8 @@ enum SettingsTab: String, CaseIterable {
 }
 
 // MARK: - 支持类型
-enum VideoQuality: CaseIterable {
-    case low, medium, high, ultra
-
-    var displayName: String {
-        switch self {
-        case .low: return "低质量"
-        case .medium: return "中等质量"
-        case .high: return "高质量"
-        case .ultra: return "超高质量"
-        }
-    }
-}
+// 说明：视频质量统一使用 SkyBridgeCore 的 VideoQuality（与设置/会话下发一致），
+// 不再保留本文件内同名的本地副本（此前是无人使用的死代码）。
 
 enum RemoteProtocol: CaseIterable {
     case rdp, vnc, ssh
@@ -1646,10 +1648,3 @@ enum ConnectionMode: String, CaseIterable {
     }
 }
 
-/// Metal 4 渲染指标
-struct RenderMetrics: Equatable {
-    var bandwidthMbps: Double
-    var latencyMilliseconds: Double
-
-    static let zero = RenderMetrics(bandwidthMbps: 0, latencyMilliseconds: 0)
-}

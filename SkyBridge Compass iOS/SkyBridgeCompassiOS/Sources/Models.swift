@@ -803,22 +803,31 @@ public struct ConnectionPresentationPendingPeer: Sendable, Equatable {
     }
 }
 
+public enum ConnectionSecurityEvidence: String, Sendable, Equatable {
+    case none
+    case classic
+    case pqc
+}
+
 public struct ConnectionPresentation: Sendable, Equatable {
     public let phase: ConnectionPresentationPhase
     public let isConnected: Bool
     public let statusText: String
     public let detailText: String?
+    public let securityEvidence: ConnectionSecurityEvidence
 
     public init(
         phase: ConnectionPresentationPhase,
         isConnected: Bool,
         statusText: String,
-        detailText: String?
+        detailText: String?,
+        securityEvidence: ConnectionSecurityEvidence = .none
     ) {
         self.phase = phase
         self.isConnected = isConnected
         self.statusText = statusText
         self.detailText = detailText
+        self.securityEvidence = securityEvidence
     }
 }
 

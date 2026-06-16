@@ -39,6 +39,12 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertTrue(controlResponse.statusLine.contains("SKR-1 signed LAN KEM refresh served"))
         XCTAssertTrue(controlResponse.statusLine.contains("wireId=0x0001"))
         XCTAssertTrue(controlResponse.statusLine.contains("responderLatencyMs="))
+        XCTAssertFalse(controlResponse.statusLine.contains(request.requesterDeviceId))
+        XCTAssertFalse(controlResponse.statusLine.contains(request.targetDeviceId))
+        XCTAssertFalse(controlResponse.statusLine.contains(payload.keyId))
+        XCTAssertTrue(controlResponse.statusLine.contains("requester=<redacted>"))
+        XCTAssertTrue(controlResponse.statusLine.contains("target=<redacted>"))
+        XCTAssertTrue(controlResponse.statusLine.contains("keyId=<redacted>"))
         XCTAssertFalse(controlResponse.isFailure)
     }
 
@@ -66,6 +72,12 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertEqual(failure.requestHashHex, request.canonicalRequestHashHex)
         XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=request>rejected"))
         XCTAssertTrue(controlResponse.statusLine.contains("responderLatencyMs="))
+        XCTAssertFalse(controlResponse.statusLine.contains(request.requesterDeviceId))
+        XCTAssertFalse(controlResponse.statusLine.contains(request.targetDeviceId))
+        XCTAssertFalse(controlResponse.statusLine.contains("SKR-1 rejected unknown suite"))
+        XCTAssertTrue(controlResponse.statusLine.contains("requester=<redacted>"))
+        XCTAssertTrue(controlResponse.statusLine.contains("target=<redacted>"))
+        XCTAssertTrue(controlResponse.statusLine.contains("reason=<redacted>"))
         XCTAssertTrue(controlResponse.isFailure)
     }
 

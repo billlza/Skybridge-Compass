@@ -89,14 +89,16 @@ pub(super) fn append_entries(
                 "clickMechanism=AXUIElementPerformAction",
                 "targetRowBound",
                 "mac-online-connect-result",
+                "source=app",
                 "launch method=open-app-bundle pid",
                 "mac_ipad_online_connect_button_rejects_script_only_launch_marker_as_dashboard_boot",
+                "mac_ipad_online_connect_button_rejects_root_container_boot_without_app_source",
                 "mac_ipad_online_connect_button_rejects_duplicate_physical_device_rows",
                 "mac_ipad_online_connect_button_rejects_display_only_or_fake_connect",
                 "mac_ipad_online_connect_button_rejects_mismatched_or_unsuccessful_click_chain",
             ],
         ),
-        evidence: "requires iOS iPad presence heartbeat plus a real Mac app dashboard/root-container boot, Mac UI online-row, enabled-button, strong identity match, real route-backed connectability, no duplicate physical iPad rows, external Accessibility click evidence, and ordered same-identity click -> connect-start -> connected-row result evidence before a P2P remote artifact can pass".to_owned(),
+        evidence: "requires iOS iPad presence heartbeat plus an app-authored source=app Mac dashboard/root-container boot, Mac UI online-row, enabled-button, strong identity match, real route-backed connectability, no duplicate physical iPad rows, external Accessibility click evidence, and ordered same-identity click -> connect-start -> connected-row result evidence before a P2P remote artifact can pass".to_owned(),
     });
     entries.push(CheckCoverageEntry {
         id: "performance_p2p_remote_signed_kem_refresh_gate",

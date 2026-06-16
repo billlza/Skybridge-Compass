@@ -150,12 +150,18 @@ struct SettingsView: View {
     private var securitySettingsSection: some View {
         Section(t("settings.section.security")) {
             NavigationLink(destination: PQCSecuritySettingsView()) {
+                let pqcPolicyStatus = Self.pqcPolicyStatusPresentation(
+                    enforcePQCHandshake: pqcManager.enforcePQCHandshake,
+                    currentTier: pqcManager.currentTier,
+                    currentSuite: pqcManager.currentSuite,
+                    hasKeyPair: pqcManager.hasKeyPair
+                )
                 HStack {
                     Label(t("settings.pqc"), systemImage: "lock.shield.fill")
                     Spacer()
-                    Text(pqcManager.enforcePQCHandshake ? "Strict PQC" : "Classic")
+                    Text(pqcPolicyStatus.label)
                         .font(.caption)
-                        .foregroundColor(pqcManager.enforcePQCHandshake ? .green : .orange)
+                        .foregroundColor(Self.pqcPolicyStatusColor(for: pqcPolicyStatus.tone))
                 }
             }
             
@@ -171,7 +177,13 @@ struct SettingsView: View {
             }
             
             LabeledContent {
-                Text(pqcManager.enforcePQCHandshake ? "强制启用" : "未强制")
+                let pqcPolicyStatus = Self.pqcPolicyStatusPresentation(
+                    enforcePQCHandshake: pqcManager.enforcePQCHandshake,
+                    currentTier: pqcManager.currentTier,
+                    currentSuite: pqcManager.currentSuite,
+                    hasKeyPair: pqcManager.hasKeyPair
+                )
+                Text(pqcPolicyStatus.detail)
                     .foregroundColor(.secondary)
             } label: {
                 Label(t("settings.e2ee"), systemImage: "lock.fill")
@@ -281,6 +293,71 @@ struct SettingsView: View {
             await authManager.signOut()
         }
     }
+
+    internal enum PQCPolicyStatusTone: String, Equatable {
+        case ready
+        case pending
+        case unavailable
+        case classic
+    }
+
+    internal struct PQCPolicyStatusPresentation: Equatable {
+        let label: String
+        let detail: String
+        let tone: PQCPolicyStatusTone
+    }
+
+    internal static func pqcPolicyStatusPresentation(
+        enforcePQCHandshake: Bool,
+        currentTier: CryptoTier,
+        currentSuite: CryptoSuite,
+        hasKeyPair: Bool
+    ) -> PQCPolicyStatusPresentation {
+        guard enforcePQCHandshake else {
+            return PQCPolicyStatusPresentation(
+                label: "Classic",
+                detail: "未强制",
+                tone: .classic
+            )
+        }
+
+        guard currentTier == .nativePQC || currentTier == .liboqsPQC,
+              currentSuite.isPQCGroup
+        else {
+            return PQCPolicyStatusPresentation(
+                label: "PQC 不可用",
+                detail: "严格策略请求中，Provider 不可用",
+                tone: .unavailable
+            )
+        }
+
+        guard hasKeyPair else {
+            return PQCPolicyStatusPresentation(
+                label: "待初始化",
+                detail: "严格 PQC 已请求，待生成本地密钥",
+                tone: .pending
+            )
+        }
+
+        return PQCPolicyStatusPresentation(
+            label: "PQC 就绪",
+            detail: "严格 PQC 已请求，Provider 与本地密钥就绪，等待会话协商证明",
+            tone: .ready
+        )
+    }
+
+    internal static func pqcPolicyStatusColor(for tone: PQCPolicyStatusTone) -> Color {
+        switch tone {
+        case .ready:
+            return .green
+        case .pending:
+            return .orange
+        case .unavailable:
+            return .red
+        case .classic:
+            return .orange
+        }
+    }
 }
 
 // MARK: - PQC Security Settings View
@@ -293,6 +370,19 @@ struct PQCSecuritySettingsView: View {
     var body: some View {
         List {
             Section("加密算法") {
+                let pqcPolicyStatus = SettingsView.pqcPolicyStatusPresentation(
+                    enforcePQCHandshake: pqcManager.enforcePQCHandshake,
+                    currentTier: pqcManager.currentTier,
+                    currentSuite: pqcManager.currentSuite,
+                    hasKeyPair: pqcManager.hasKeyPair
+                )
+                LabeledContent {
+                    Text(pqcPolicyStatus.label)
+                        .foregroundColor(SettingsView.pqcPolicyStatusColor(for: pqcPolicyStatus.tone))
+                } label: {
+                    Text("策略状态")
+                }
+                LabeledContent("运行状态", value: pqcPolicyStatus.detail)
                 LabeledContent("当前套件", value: pqcManager.currentSuite.rawValue)
                 LabeledContent("Provider", value: pqcManager.providerInfo)
                 LabeledContent("安全层级", value: pqcManager.currentTier.rawValue)
@@ -328,7 +418,10 @@ struct PQCSecuritySettingsView: View {
                         reinitializePQCProvider()
                     }
 
-                LabeledContent("允许经典降级（兼容旧设备）", value: "禁用")
+                LabeledContent(
+                    "允许经典降级（兼容旧设备）",
+                    value: pqcManager.enforcePQCHandshake ? "关闭（严格 PQC）" : "关闭（Classic only）"
+                )
                 
                 Toggle("密钥自动轮换", isOn: $pqcManager.autoKeyRotation)
                 

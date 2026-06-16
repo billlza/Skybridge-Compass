@@ -11,9 +11,11 @@ base64.workspace = true
 directories.workspace = true
 ed25519-dalek.workspace = true
 hostname.workspace = true
+mdns-sd.workspace = true
 rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 skybridge-core = { path = "../skybridge-core" }
 time.workspace = true
 tokio.workspace = true

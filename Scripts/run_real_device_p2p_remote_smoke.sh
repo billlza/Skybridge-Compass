@@ -4,7 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/Scripts/signing_entitlements_helpers.sh"
 source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
+source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
+source "$ROOT_DIR/Scripts/framework_artifact_helpers.sh"
+source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
+source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_p2p_remote_smoke_$(date +%Y%m%d_%H%M%S)}"
+PUBLIC_ARTIFACT_DIR="$ARTIFACT_DIR/public-redacted"
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
 IOS_DEBUG_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements"
@@ -92,19 +97,11 @@ def load_devicectl_device_list(context):
             )
             if result.returncode != 0:
                 print(f"devicectl JSON device list failed while {context}.", file=sys.stderr)
-                if result.stdout.strip():
-                    print(result.stdout, file=sys.stderr, end="" if result.stdout.endswith("\n") else "\n")
-                if result.stderr.strip():
-                    print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
                 raise SystemExit(1)
             handle.seek(0)
             return json.load(handle)
         except subprocess.TimeoutExpired as exc:
             print(f"devicectl JSON device list timed out while {context}.", file=sys.stderr)
-            if exc.stdout:
-                print(str(exc.stdout), file=sys.stderr)
-            if exc.stderr:
-                print(str(exc.stderr), file=sys.stderr)
             raise SystemExit(1)
         except (OSError, json.JSONDecodeError) as exc:
             print(f"devicectl JSON device list could not be read while {context}: {exc}", file=sys.stderr)
@@ -117,7 +114,11 @@ def connected_ipad_identifiers(payload):
     for device in devices:
         if not isinstance(device, dict) or not is_connected_devicectl_device(device):
             continue
+        if not is_physical_devicectl_device(device):
+            continue
         if not is_ipad_devicectl_device(device):
+            continue
+        if not has_install_application_capability(device):
             continue
         identifier = (
             string_value(device.get("identifier"))
@@ -134,9 +135,20 @@ def is_connected_devicectl_device(device):
         return False
     tunnel_state = string_value(connection.get("tunnelState")).lower()
     pairing_state = string_value(connection.get("pairingState")).lower()
-    if tunnel_state == "disconnected":
-        return False
+    # CoreDevice 隧道按需建立："disconnected" 仅表示当前无活跃隧道，
+    # 已配对设备在 install/launch 时会自动建立隧道；真正不可达会在后续步骤 fail-fast。
     return tunnel_state == "connected" or pairing_state == "paired"
+
+def is_physical_devicectl_device(device):
+    hardware_reality = string_value(nested_value(device, "hardwareProperties", "reality")).lower()
+    properties_reality = string_value(nested_value(device, "properties", "hardware", "reality")).lower()
+    visibility_class = string_value(device.get("visibilityClass")).lower()
+    provider = string_value(nested_value(device, "deviceProperties", "provider"))
+    return (
+        "physical" in {hardware_reality, properties_reality}
+        and visibility_class != "simulators"
+        and provider != "com.apple.CoreSimulator.SimulatorCoreDevicePlugin"
+    )
 
 def is_ipad_devicectl_device(device):
     hardware = device.get("hardwareProperties", {})
@@ -148,6 +160,16 @@ def is_ipad_devicectl_device(device):
         properties.get("deviceClass") if isinstance(properties, dict) else None,
     ]
     return any(string_value(value).lower().startswith("ipad") for value in evidence)
+
+def has_install_application_capability(device):
+    capabilities = device.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        return False
+    return any(
+        isinstance(capability, dict)
+        and capability.get("featureIdentifier") == "com.apple.coredevice.feature.installapp"
+        for capability in capabilities
+    )
 
 def nested_value(value, *keys):
     for key in keys:
@@ -173,6 +195,7 @@ PY
 }
 
 IOS_DEVICE_ID="${SKYBRIDGE_REAL_DEVICE_ID:-$(pick_real_device_id)}"
+IOS_DEVICE_LABEL="$(skybridge_smoke_hash_label "$IOS_DEVICE_ID")"
 validate_real_ipad_device_id() {
   python3 - "$IOS_DEVICE_ID" <<'PY'
 import json
@@ -194,19 +217,11 @@ def load_devicectl_device_list(context):
             )
             if result.returncode != 0:
                 print(f"devicectl JSON device list failed while {context}.", file=sys.stderr)
-                if result.stdout.strip():
-                    print(result.stdout, file=sys.stderr, end="" if result.stdout.endswith("\n") else "\n")
-                if result.stderr.strip():
-                    print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
                 raise SystemExit(1)
             handle.seek(0)
             return json.load(handle)
         except subprocess.TimeoutExpired as exc:
             print(f"devicectl JSON device list timed out while {context}.", file=sys.stderr)
-            if exc.stdout:
-                print(str(exc.stdout), file=sys.stderr)
-            if exc.stderr:
-                print(str(exc.stderr), file=sys.stderr)
             raise SystemExit(1)
         except (OSError, json.JSONDecodeError) as exc:
             print(f"devicectl JSON device list could not be read while {context}: {exc}", file=sys.stderr)
@@ -219,7 +234,11 @@ def connected_ipad_identifiers(payload):
     for device in devices:
         if not isinstance(device, dict) or not is_connected_devicectl_device(device):
             continue
+        if not is_physical_devicectl_device(device):
+            continue
         if not is_ipad_devicectl_device(device):
+            continue
+        if not has_install_application_capability(device):
             continue
         candidates = [
             string_value(device.get("identifier")),
@@ -235,9 +254,20 @@ def is_connected_devicectl_device(device):
         return False
     tunnel_state = string_value(connection.get("tunnelState")).lower()
     pairing_state = string_value(connection.get("pairingState")).lower()
-    if tunnel_state == "disconnected":
-        return False
+    # CoreDevice 隧道按需建立："disconnected" 仅表示当前无活跃隧道，
+    # 已配对设备在 install/launch 时会自动建立隧道；真正不可达会在后续步骤 fail-fast。
     return tunnel_state == "connected" or pairing_state == "paired"
+
+def is_physical_devicectl_device(device):
+    hardware_reality = string_value(nested_value(device, "hardwareProperties", "reality")).lower()
+    properties_reality = string_value(nested_value(device, "properties", "hardware", "reality")).lower()
+    visibility_class = string_value(device.get("visibilityClass")).lower()
+    provider = string_value(nested_value(device, "deviceProperties", "provider"))
+    return (
+        "physical" in {hardware_reality, properties_reality}
+        and visibility_class != "simulators"
+        and provider != "com.apple.CoreSimulator.SimulatorCoreDevicePlugin"
+    )
 
 def is_ipad_devicectl_device(device):
     hardware = device.get("hardwareProperties", {})
@@ -249,6 +279,16 @@ def is_ipad_devicectl_device(device):
         properties.get("deviceClass") if isinstance(properties, dict) else None,
     ]
     return any(string_value(value).lower().startswith("ipad") for value in evidence)
+
+def has_install_application_capability(device):
+    capabilities = device.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        return False
+    return any(
+        isinstance(capability, dict)
+        and capability.get("featureIdentifier") == "com.apple.coredevice.feature.installapp"
+        for capability in capabilities
+    )
 
 def nested_value(value, *keys):
     for key in keys:
@@ -294,6 +334,7 @@ MAC_ONLINE_LAUNCH_OPEN_STDERR="$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad-open.stde
 MAC_ONLINE_DERIVED_DATA="$ARTIFACT_DIR/DerivedData-mac-online"
 MAC_ONLINE_PACKAGED_APP_BUNDLE="${SKYBRIDGE_SMOKE_MAC_ONLINE_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}"
 MAC_ONLINE_ALLOW_DEBUG_BUILD="${SKYBRIDGE_SMOKE_MAC_ONLINE_ALLOW_DEBUG_BUILD:-0}"
+MAC_ONLINE_SIGN_IDENTITY="${SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY:-}"
 MAC_APP_BUNDLE="$ARTIFACT_DIR/LocalLanInteropHost.app"
 MAC_DIRECT_BIN="$ROOT_DIR/.build/debug/LocalLanInteropHost"
 MAC_SOURCE_DIRECT_BIN="$ROOT_DIR/.build/debug/LocalLanSmokeSourceHost"
@@ -696,7 +737,7 @@ start_macos_smoke_host() {
       fi
       append_host_status "failed stage=mac-host phase=launch reason=app-pid-not-found"
       echo "Timed out waiting for LocalLanInteropHost app pid after LaunchServices start." >&2
-      tail -n 80 "$HOST_STDOUT" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$HOST_STDOUT"
       return 1
     fi
     sleep 0.25
@@ -705,6 +746,154 @@ start_macos_smoke_host() {
 
 append_ios_status() {
   printf '%s %s\n' "$(timestamp_utc)" "$*" >>"$IOS_STATUS_LOCAL"
+}
+
+print_smoke_tail_for_operator() {
+  local lines="$1"
+  local path="$2"
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" "$lines" "$path" "$IOS_DEVICE_ID" >&2 || true
+}
+
+redacted_last_log_line() {
+  local path="$1"
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 1 "$path" "$IOS_DEVICE_ID" | tr '[:space:]' '_' || true
+}
+
+macos_online_ipad_rpaths() {
+  local binary="$1"
+  /usr/bin/otool -l "$binary" | awk '
+    /cmd LC_RPATH/ { in_rpath = 1; next }
+    in_rpath && /^[[:space:]]*path / {
+      sub(/^[[:space:]]*path /, "")
+      sub(/ \(offset [0-9]+\)$/, "")
+      print
+      in_rpath = 0
+    }
+  '
+}
+
+select_macos_online_ipad_debug_signing_identity() {
+  if [[ -n "$MAC_ONLINE_SIGN_IDENTITY" ]]; then
+    printf '%s\n' "$MAC_ONLINE_SIGN_IDENTITY"
+    return 0
+  fi
+
+  local identities
+  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+
+  local identity
+  identity="$(printf '%s\n' "$identities" | awk -F '"' '/"Apple Development:/ { print $2; exit }')"
+  if [[ -n "$identity" ]]; then
+    printf '%s\n' "$identity"
+    return 0
+  fi
+
+  identity="$(printf '%s\n' "$identities" | awk -F '"' '/"Developer ID Application:/ { print $2; exit }')"
+  if [[ -n "$identity" ]]; then
+    printf '%s\n' "$identity"
+    return 0
+  fi
+
+  return 1
+}
+
+macos_online_ipad_debug_signing_identity_kind() {
+  local identity="$1"
+  case "$identity" in
+    Apple\ Development:*)
+      printf 'apple-development'
+      ;;
+    Developer\ ID\ Application:*)
+      printf 'developer-id'
+      ;;
+    *)
+      printf 'custom'
+      ;;
+  esac
+}
+
+macos_online_ipad_debug_entitlements_for() {
+  local bundle_name="$1"
+  find "$MAC_ONLINE_DERIVED_DATA/Build/Intermediates.noindex/SkyBridgeWidgets.build/Debug" \
+    -path "*/$bundle_name.xcent" \
+    -print \
+    -quit
+}
+
+normalize_macos_online_ipad_debug_rpaths() {
+  local rpath
+  while IFS= read -r rpath; do
+    [[ -n "$rpath" ]] || continue
+    case "$rpath" in
+      */Build/Products/*/PackageFrameworks|*/PackageFrameworks)
+        /usr/bin/install_name_tool -delete_rpath "$rpath" "$MAC_ONLINE_APP_BIN"
+        ;;
+    esac
+  done < <(macos_online_ipad_rpaths "$MAC_ONLINE_APP_BIN")
+
+  if ! macos_online_ipad_rpaths "$MAC_ONLINE_APP_BIN" | grep -Fxq '@executable_path/../Frameworks'; then
+    /usr/bin/install_name_tool -add_rpath '@executable_path/../Frameworks' "$MAC_ONLINE_APP_BIN"
+  fi
+}
+
+normalize_macos_online_ipad_debug_frameworks() {
+  if [[ ! -d "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r -d '' framework; do
+    skybridge_normalize_versioned_framework_layout "$framework"
+  done < <(find "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" -type d -name '*.framework' -prune -print0)
+}
+
+sign_macos_online_ipad_debug_app() {
+  local identity
+  if ! identity="$(select_macos_online_ipad_debug_signing_identity)"; then
+    echo "No Apple Development or Developer ID Application signing identity is available for the macOS online iPad Debug app." >&2
+    echo "Install a valid signing identity or set SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY explicitly; ad-hoc signing is not accepted for the LaunchServices smoke." >&2
+    exit 1
+  fi
+
+  local app_entitlements
+  app_entitlements="$(macos_online_ipad_debug_entitlements_for 'SkyBridge Compass Pro.app')"
+  if [[ ! -f "$app_entitlements" ]]; then
+    echo "macOS online iPad Debug app entitlements not found under DerivedData: $app_entitlements" >&2
+    exit 1
+  fi
+
+  normalize_macos_online_ipad_debug_rpaths
+  normalize_macos_online_ipad_debug_frameworks
+
+  if [[ -d "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" ]]; then
+    while IFS= read -r -d '' binary; do
+      /usr/bin/codesign --force --timestamp=none --sign "$identity" "$binary" >/dev/null
+    done < <(find "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" -type f \( -name '*.dylib' -o -name '*.so' -o -perm -111 \) -print0)
+
+    while IFS= read -r -d '' framework; do
+      /usr/bin/codesign --force --timestamp=none --sign "$identity" "$framework" >/dev/null
+    done < <(find "$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks" -type d -name '*.framework' -prune -print0)
+  fi
+
+  if [[ -d "$MAC_ONLINE_APP_BUNDLE/Contents/PlugIns" ]]; then
+    while IFS= read -r -d '' appex; do
+      local appex_entitlements
+      appex_entitlements="$(macos_online_ipad_debug_entitlements_for "$(basename "$appex")")"
+      if [[ -f "$appex_entitlements" ]]; then
+        /usr/bin/codesign --force --timestamp=none --sign "$identity" --entitlements "$appex_entitlements" "$appex" >/dev/null
+      else
+        /usr/bin/codesign --force --timestamp=none --sign "$identity" "$appex" >/dev/null
+      fi
+    done < <(find "$MAC_ONLINE_APP_BUNDLE/Contents/PlugIns" -type d -name '*.appex' -prune -print0)
+  fi
+
+  /usr/bin/codesign --force --timestamp=none --sign "$identity" --entitlements "$app_entitlements" "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+
+  mkdir -p "$(dirname "$MAC_ONLINE_STATUS")"
+  printf '%s mac-online-app-signing source=debug identityKind=%s entitlements=app-xcent nested=verified\n' \
+    "$(timestamp_utc)" \
+    "$(macos_online_ipad_debug_signing_identity_kind "$identity")" \
+    >>"$MAC_ONLINE_STATUS"
 }
 
 build_macos_online_ipad_app() {
@@ -736,17 +925,20 @@ build_macos_online_ipad_app() {
     ENABLE_DEBUG_DYLIB=NO \
     build >"$MAC_ONLINE_BUILD_LOG"
 
-  MAC_ONLINE_APP_BUNDLE="$MAC_ONLINE_DERIVED_DATA/Build/Products/Debug/SkyBridge Compass Pro.app"
-  MAC_ONLINE_APP_BIN="$MAC_ONLINE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
-  if [[ ! -d "$MAC_ONLINE_APP_BUNDLE" ]]; then
-    echo "macOS online iPad app bundle not found: $MAC_ONLINE_APP_BUNDLE" >&2
+  local debug_app_bundle="$MAC_ONLINE_DERIVED_DATA/Build/Products/Debug/SkyBridge Compass Pro.app"
+  if [[ ! -d "$debug_app_bundle" ]]; then
+    echo "macOS online iPad app bundle not found: $debug_app_bundle" >&2
     exit 1
   fi
+  rm -rf -- "$MAC_ONLINE_RUNTIME_APP_BUNDLE"
+  ditto "$debug_app_bundle" "$MAC_ONLINE_RUNTIME_APP_BUNDLE"
+  MAC_ONLINE_APP_BUNDLE="$MAC_ONLINE_RUNTIME_APP_BUNDLE"
+  MAC_ONLINE_APP_BIN="$MAC_ONLINE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
   if [[ ! -x "$MAC_ONLINE_APP_BIN" ]]; then
     echo "macOS online iPad app executable not found: $MAC_ONLINE_APP_BIN" >&2
     exit 1
   fi
-  /usr/bin/codesign --force --deep --sign - "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+  sign_macos_online_ipad_debug_app
   xattr -dr com.apple.quarantine "$MAC_ONLINE_APP_BUNDLE" >/dev/null 2>&1 || true
   verify_macos_online_ipad_app_bundle "debug"
   register_macos_online_ipad_app_bundle
@@ -766,12 +958,45 @@ verify_macos_online_ipad_app_bundle() {
     echo "macOS online iPad app executable not found: $MAC_ONLINE_APP_BIN" >&2
     exit 1
   fi
+  verify_macos_online_ipad_framework_resolution
   codesign --verify --deep --strict "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+  local trust_status="codesign=verified"
   if [[ "$source_kind" == "packaged" ]]; then
     xcrun stapler validate "$MAC_ONLINE_APP_BUNDLE" >/dev/null
     spctl --assess --type execute "$MAC_ONLINE_APP_BUNDLE" >/dev/null
+    trust_status="$trust_status stapler=valid spctl=accepted"
   fi
-  printf '%s mac-online-app source=%s bundle=%s executable=%s\n' "$(timestamp_utc)" "$source_kind" "$MAC_ONLINE_APP_BUNDLE" "$MAC_ONLINE_APP_BIN" >>"$MAC_ONLINE_STATUS"
+  printf '%s mac-online-app source=%s %s bundle=%s executable=%s\n' "$(timestamp_utc)" "$source_kind" "$trust_status" "$MAC_ONLINE_APP_BUNDLE" "$MAC_ONLINE_APP_BIN" >>"$MAC_ONLINE_STATUS"
+}
+
+verify_macos_online_ipad_framework_resolution() {
+  local forbidden_rpaths
+  forbidden_rpaths="$(macos_online_ipad_rpaths "$MAC_ONLINE_APP_BIN" | grep -E '/Build/Products/.*/PackageFrameworks|/PackageFrameworks$' || true)"
+  if [[ -n "$forbidden_rpaths" ]]; then
+    echo "macOS online iPad app contains external PackageFrameworks rpath(s):" >&2
+    printf '%s\n' "$forbidden_rpaths" >&2
+    exit 1
+  fi
+
+  if /usr/bin/otool -L "$MAC_ONLINE_APP_BIN" | grep -Fq '@rpath/WebRTC.framework/WebRTC'; then
+    local webrtc_framework="$MAC_ONLINE_APP_BUNDLE/Contents/Frameworks/WebRTC.framework"
+    if [[ ! -d "$webrtc_framework" ]]; then
+      echo "macOS online iPad app links WebRTC via @rpath but does not embed Contents/Frameworks/WebRTC.framework." >&2
+      exit 1
+    fi
+    if [[ ! -x "$webrtc_framework/WebRTC" && ! -x "$webrtc_framework/Versions/A/WebRTC" ]]; then
+      echo "macOS online iPad app embeds WebRTC.framework without an executable WebRTC binary." >&2
+      exit 1
+    fi
+    if ! skybridge_assert_no_nested_framework_versions_payload "$webrtc_framework"; then
+      echo "macOS online iPad app embeds WebRTC.framework with a nested Versions directory under Versions/A; repackage the framework before LaunchServices smoke." >&2
+      exit 1
+    fi
+    if ! macos_online_ipad_rpaths "$MAC_ONLINE_APP_BIN" | grep -Fxq '@executable_path/../Frameworks'; then
+      echo "macOS online iPad app links WebRTC via @rpath but lacks @executable_path/../Frameworks." >&2
+      exit 1
+    fi
+  fi
 }
 
 find_all_macos_online_ipad_client_pids() {
@@ -875,12 +1100,12 @@ start_macos_online_ipad_client() {
 
   printf '%s failed stage=mac-online-ipad phase=launch reason=app-pid-not-found\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
   echo "Timed out waiting for SkyBridge Compass Pro app pid after LaunchServices start." >&2
-  tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
-  tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
-  tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
-  tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
-  tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
-  tail -n 80 "$MAC_ONLINE_OPEN_STDERR" >&2 2>/dev/null || true
+  print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
+  print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDOUT"
+  print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDERR"
+  print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDOUT"
+  print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDERR"
+  print_smoke_tail_for_operator 80 "$MAC_ONLINE_OPEN_STDERR"
   return 1
 }
 
@@ -893,40 +1118,44 @@ wait_for_mac_online_pattern() {
   while true; do
     if [[ -n "$MAC_ONLINE_PID" ]] && ! kill -0 "$MAC_ONLINE_PID" >/dev/null 2>&1; then
       wait "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
+      printf '%s failed stage=mac-online-ipad phase=wait-pattern reason=process-exited label=%s pid=%s\n' \
+        "$(timestamp_utc)" "${label// /_}" "$MAC_ONLINE_PID" >>"$MAC_ONLINE_STATUS"
       MAC_ONLINE_PID=""
       if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE "$pattern" "$MAC_ONLINE_STATUS"; then
         return 0
       fi
       echo "macOS online iPad UI client exited while waiting for ${label}: ${MAC_ONLINE_STATUS}" >&2
       sync_mac_online_launch_stdio
-      tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDERR"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDERR"
       return 1
     fi
     if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE 'failed stage=|mac-online-connect-result .*result=failure' "$MAC_ONLINE_STATUS"; then
       echo "Detected macOS online iPad UI failure while waiting for ${label}: ${MAC_ONLINE_STATUS}" >&2
       sync_mac_online_launch_stdio
-      tail -n 80 "$MAC_ONLINE_STATUS" >&2 || true
-      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDERR"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDERR"
       return 1
     fi
     if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE "$pattern" "$MAC_ONLINE_STATUS"; then
       return 0
     fi
     if (( "$(date +%s)" - started_at >= timeout_seconds )); then
+      printf '%s failed stage=mac-online-ipad phase=wait-pattern reason=timeout label=%s pid=%s\n' \
+        "$(timestamp_utc)" "${label// /_}" "${MAC_ONLINE_PID:-none}" >>"$MAC_ONLINE_STATUS"
       echo "Timed out waiting for ${label}: ${MAC_ONLINE_STATUS}" >&2
       sync_mac_online_launch_stdio
-      tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDERR"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDERR"
       return 1
     fi
     sleep 1
@@ -1695,21 +1924,21 @@ wait_for_mac_online_connected_row() {
       MAC_ONLINE_PID=""
       printf '%s mac-online-connect-result action=button targetFamily=ipad result=failure source=OnlineDeviceCard evidenceSource=external-ax observer=accessibility status=process-exited identityKey=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
       sync_mac_online_launch_stdio
-      tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDERR"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDERR"
       return 1
     fi
     if (( "$(date +%s)" - started_at >= timeout_seconds )); then
       printf '%s mac-online-connect-result action=button targetFamily=ipad result=failure source=OnlineDeviceCard evidenceSource=external-ax observer=accessibility status=connected-row-timeout identityKey=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
       sync_mac_online_launch_stdio
-      tail -n 80 "$MAC_ONLINE_STATUS" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_STDERR" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDOUT" >&2 2>/dev/null || true
-      tail -n 80 "$MAC_ONLINE_APP_STDERR" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDERR"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDOUT"
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDERR"
       return 1
     fi
     sleep 1
@@ -1741,7 +1970,7 @@ run_mac_online_ipad_button_smoke() {
     fi
     if (( "$(date +%s)" - click_started_at >= SMOKE_TIMEOUT_SECONDS )); then
       printf '%s failed stage=mac-online-ipad phase=ui-click reason=accessibility-click-failed\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
-      tail -n 80 "$MAC_ONLINE_STDOUT" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$MAC_ONLINE_STDOUT"
       return 1
     fi
     sleep 1
@@ -1758,9 +1987,9 @@ fail_if_host_exited() {
     append_host_status "failed stage=mac-host phase=process-exited label=${label// /_}"
     echo "macOS host process exited while waiting for ${label}: ${HOST_STATUS}" >&2
     echo "---- macOS status tail ($HOST_STATUS) ----" >&2
-    tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+    print_smoke_tail_for_operator 80 "$HOST_STATUS"
     echo "---- host stdout tail ($HOST_STDOUT) ----" >&2
-    tail -n 80 "$HOST_STDOUT" >&2 2>/dev/null || true
+    print_smoke_tail_for_operator 80 "$HOST_STDOUT"
     return 1
   fi
 }
@@ -1771,9 +2000,9 @@ fail_if_smoke_source_exited() {
     append_host_status "failed stage=mac-smoke-source phase=process-exited label=${label// /_}"
     echo "macOS smoke source helper exited while waiting for ${label}: ${HOST_STATUS}" >&2
     echo "---- macOS status tail ($HOST_STATUS) ----" >&2
-    tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+    print_smoke_tail_for_operator 80 "$HOST_STATUS"
     echo "---- smoke source stdout tail ($MAC_SOURCE_STDOUT) ----" >&2
-    tail -n 80 "$MAC_SOURCE_STDOUT" >&2 2>/dev/null || true
+    print_smoke_tail_for_operator 80 "$MAC_SOURCE_STDOUT"
     return 1
   fi
 }
@@ -1826,9 +2055,9 @@ PY
     append_host_status "failed stage=mac-smoke-source phase=heartbeat-stale label=${label// /_} ageSeconds=${freshness:-unknown} budgetSeconds=$max_age_seconds"
     echo "macOS smoke source heartbeat is stale while waiting for ${label}: ageSeconds=${freshness:-unknown}, budgetSeconds=${max_age_seconds}" >&2
     echo "---- macOS status tail ($HOST_STATUS) ----" >&2
-    tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+    print_smoke_tail_for_operator 80 "$HOST_STATUS"
     echo "---- smoke source stdout tail ($MAC_SOURCE_STDOUT) ----" >&2
-    tail -n 80 "$MAC_SOURCE_STDOUT" >&2 2>/dev/null || true
+    print_smoke_tail_for_operator 80 "$MAC_SOURCE_STDOUT"
     return 1
   fi
 }
@@ -1850,10 +2079,10 @@ verify_mac_control_port_reachable() {
     fail_if_host_exited "macOS control port reachability" || return 1
     if (( "$(date +%s)" - started_at >= 10 )); then
       local detail
-      detail="$(tail -n 1 "$probe_error" 2>/dev/null | tr '[:space:]' '_' || true)"
+      detail="$(redacted_last_log_line "$probe_error")"
       append_host_status "failed stage=mac-host phase=control-port-probe reason=tcp-unreachable host=$host port=$port detail=${detail:-unknown}"
       echo "macOS host control port is not reachable before iOS launch: ${host}:${port}" >&2
-      tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$HOST_STATUS"
       return 1
     fi
     sleep 0.5
@@ -1877,10 +2106,10 @@ verify_mac_remote_port_listening() {
     fail_if_host_exited "macOS remote-control port listener" || return 1
     if (( "$(date +%s)" - started_at >= 10 )); then
       local detail
-      detail="$(tail -n 1 "$probe_error" 2>/dev/null | tr '[:space:]' '_' || true)"
+      detail="$(redacted_last_log_line "$probe_error")"
       append_host_status "failed stage=mac-host phase=remote-control-port-probe reason=tcp-unreachable host=$host port=$port detail=${detail:-unknown}"
       echo "macOS host remote-control port is not reachable before iOS launch: ${host}:${port}" >&2
-      tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$HOST_STATUS"
       return 1
     fi
     sleep 0.5
@@ -1920,24 +2149,24 @@ wait_for_file_pattern() {
       && [[ -f "$IOS_STATUS_LOCAL" ]] \
       && grep -qE "$IOS_REMOTE_SMOKE_FAILURE_PATTERN" "$IOS_STATUS_LOCAL"; then
       echo "Detected iOS failure while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 80 "$IOS_STATUS_LOCAL" >&2 || true
-      tail -n 40 "$IOS_CONSOLE_STDERR" >&2 || true
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      print_smoke_tail_for_operator 40 "$IOS_CONSOLE_STDERR"
       return 1
     fi
     fail_if_forbidden_fallback_evidence "$IOS_STATUS_LOCAL" "$label" || return 1
     if [[ -n "$IOS_CONSOLE_PID" ]] && ! kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
       echo "iOS console process exited while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 80 "$IOS_STATUS_LOCAL" >&2 || true
-      tail -n 80 "$IOS_CONSOLE_STDERR" >&2 || true
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      print_smoke_tail_for_operator 80 "$IOS_CONSOLE_STDERR"
       return 1
     fi
     if [[ -f "$HOST_STATUS" ]] && grep -qE "$HOST_REMOTE_SMOKE_FAILURE_PATTERN" "$HOST_STATUS"; then
       echo "Detected macOS host media failure while waiting for ${label}: ${HOST_STATUS}" >&2
       copy_ios_status
       echo "---- macOS status tail ($HOST_STATUS) ----" >&2
-      tail -n 80 "$HOST_STATUS" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$HOST_STATUS"
       echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      tail -n 80 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
       return 1
     fi
     fail_if_forbidden_fallback_evidence "$HOST_STATUS" "$label" || return 1
@@ -1948,8 +2177,8 @@ wait_for_file_pattern() {
       echo "Timed out waiting for ${label}: ${path}" >&2
       copy_ios_status
       echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      tail -n 80 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
-      tail -n 40 "$path" >&2 || true
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      print_smoke_tail_for_operator 40 "$path"
       return 1
     fi
     sleep 1
@@ -2147,10 +2376,10 @@ load_ios_pqc_report_for_mac_online() {
   if [[ ! -s "$IOS_PQC_REPORT" ]]; then
     echo "iOS PQC report is missing; cannot prove Mac online iPad button with a real trusted KEM key: $IOS_PQC_REPORT" >&2
     echo "---- iOS PQC report copy log ----" >&2
-    tail -n 80 "$ARTIFACT_DIR/ios-copy-pqc-report.log" >&2 2>/dev/null || true
-    tail -n 80 "$ARTIFACT_DIR/ios-copy-pqc-report.stderr.log" >&2 2>/dev/null || true
+    print_smoke_tail_for_operator 80 "$ARTIFACT_DIR/ios-copy-pqc-report.log"
+    print_smoke_tail_for_operator 80 "$ARTIFACT_DIR/ios-copy-pqc-report.stderr.log"
     echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-    tail -n 80 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+    print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
     return 1
   fi
 
@@ -2391,21 +2620,21 @@ wait_for_ios_status_pattern() {
         last_status_update_at="$now"
       elif (( now - last_status_update_at >= 60 )); then
         echo "Timed out waiting for fresh iOS status while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-        tail -n 80 "$IOS_STATUS_LOCAL" >&2 || true
-        tail -n 40 "$IOS_CONSOLE_STDERR" >&2 || true
+        print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+        print_smoke_tail_for_operator 40 "$IOS_CONSOLE_STDERR"
         return 1
       fi
     fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE "$IOS_REMOTE_SMOKE_FAILURE_PATTERN" "$IOS_STATUS_LOCAL"; then
       echo "Detected failure while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 80 "$IOS_STATUS_LOCAL" >&2 || true
-      tail -n 40 "$IOS_CONSOLE_STDERR" >&2 || true
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      print_smoke_tail_for_operator 40 "$IOS_CONSOLE_STDERR"
       return 1
     fi
     if [[ -f "$HOST_STATUS" ]] && grep -qE "$HOST_REMOTE_SMOKE_FAILURE_PATTERN" "$HOST_STATUS"; then
       echo "Detected macOS host media failure while waiting for ${label}: ${HOST_STATUS}" >&2
-      tail -n 80 "$HOST_STATUS" >&2 || true
-      tail -n 80 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+      print_smoke_tail_for_operator 80 "$HOST_STATUS"
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
       return 1
     fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE "$pattern" "$IOS_STATUS_LOCAL"; then
@@ -2413,14 +2642,14 @@ wait_for_ios_status_pattern() {
     fi
     if [[ -n "$IOS_CONSOLE_PID" ]] && ! kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
       echo "iOS console process exited while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 80 "$IOS_STATUS_LOCAL" >&2 || true
-      tail -n 80 "$IOS_CONSOLE_STDERR" >&2 || true
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      print_smoke_tail_for_operator 80 "$IOS_CONSOLE_STDERR"
       return 1
     fi
     if (( now - started_at >= timeout_seconds )); then
       echo "Timed out waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      tail -n 80 "$IOS_STATUS_LOCAL" >&2 || true
-      tail -n 40 "$IOS_CONSOLE_STDERR" >&2 || true
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      print_smoke_tail_for_operator 40 "$IOS_CONSOLE_STDERR"
       return 1
     fi
     sleep 2
@@ -3470,11 +3699,11 @@ report_ios_launch_failure() {
   echo "iOS remote smoke app launch failed before P2P handshake: ${reason}" >&2
   echo "This is a real-device launch/signing stage failure, not a P2P handshake or media pass." >&2
   echo "---- iOS launch result ($LAUNCH_RESULT_JSON) ----" >&2
-  cat "$LAUNCH_RESULT_JSON" >&2 2>/dev/null || true
+  skybridge_smoke_cat_redacted "$IOS_DEVICE_LABEL" "$LAUNCH_RESULT_JSON" "$IOS_DEVICE_ID" >&2 || true
   echo "---- iOS console stderr ($IOS_CONSOLE_STDERR) ----" >&2
-  tail -n 80 "$IOS_CONSOLE_STDERR" >&2 2>/dev/null || true
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$IOS_CONSOLE_STDERR" "$IOS_DEVICE_ID" >&2 || true
   echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-  tail -n 80 "$IOS_STATUS_LOCAL" >&2 2>/dev/null || true
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$IOS_STATUS_LOCAL" "$IOS_DEVICE_ID" >&2 || true
 }
 
 record_ios_launch_pid_from_result() {
@@ -3719,7 +3948,7 @@ terminate_stale_macos_smoke_hosts
 reset_smoke_artifacts
 
 echo "==> Artifacts: $ARTIFACT_DIR"
-echo "==> Real device: $IOS_DEVICE_ID"
+echo "==> Real device: $IOS_DEVICE_LABEL"
 echo "==> Build destination: $IOS_BUILD_DESTINATION"
 echo "==> Target: ${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}@${SMOKE_TARGET_FPS} minFps=${SMOKE_MIN_FPS}"
 echo "==> Expected render orientation: $SMOKE_EXPECT_RENDER_ORIENTATION"
@@ -3730,7 +3959,18 @@ require_remote_control_notice_identity_env
 echo "==> Checking macOS visible desktop preflight"
 detect_macos_loginwindow_occlusion
 
-xcrun devicectl list devices >"$DEVICE_INFO_TXT" 2>&1 || true
+echo "==> Checking Apple PQC SDK gate for macOS host"
+skybridge_configure_optional_apple_pqc_sdk_compile_gate macosx
+if [[ "${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}" != "1" ]]; then
+  echo "Apple PQC SDK symbol probe failed for the macOS host; refusing to build a real-device X-Wing smoke host without HAS_APPLE_PQC_SDK." >&2
+  echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=$(skybridge_sanitize_pqc_probe_log_value "${SKYBRIDGE_PQC_PROBE_ERROR:-}")" >&2
+  exit 1
+fi
+echo "==> Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
+
+xcrun devicectl list devices 2>&1 \
+  | skybridge_smoke_redact_stream "$IOS_DEVICE_LABEL" "$IOS_DEVICE_ID" \
+    >"$DEVICE_INFO_TXT" || true
 
 echo "==> Building macOS LAN host"
 (
@@ -3842,12 +4082,20 @@ if [[ -z "$MAC_PQC_DEVICE_ID" || -z "$MAC_PQC_XWING_PUBLIC_KEY_BASE64" ]]; then
 fi
 
 echo "==> Building iOS app for real device"
+skybridge_detect_apple_pqc_sdk iphoneos
+if ! skybridge_apple_pqc_sdk_probe_succeeded; then
+  echo "Apple PQC SDK symbol probe failed for the iOS app; refusing to build a real-device X-Wing smoke target without HAS_APPLE_PQC_SDK." >&2
+  echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=$(skybridge_sanitize_pqc_probe_log_value "${SKYBRIDGE_PQC_PROBE_ERROR:-}")" >&2
+  exit 1
+fi
+echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
 SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
   -project "$IOS_PROJECT" \
   -scheme "$IOS_SCHEME" \
   -configuration Debug \
   -destination "$IOS_BUILD_DESTINATION" \
   -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios" \
+  SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
   build >"$IOS_BUILD_LOG"
 
 IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/Debug-iphoneos/SkyBridgeCompass-iOS.app"
@@ -3861,7 +4109,7 @@ if ! skybridge_profile_supports_requested_profile_backed_entitlements \
   "$IOS_EMBEDDED_PROFILE" \
   "$IOS_DEBUG_ENTITLEMENTS"; then
   echo "iOS app provisioning profile does not cover requested Debug entitlements; refusing a smoke run that would hide a signing mismatch." >&2
-  echo "profile=$IOS_EMBEDDED_PROFILE entitlements=$IOS_DEBUG_ENTITLEMENTS" >&2
+  echo "profile=<redacted-profile-path> entitlements=<redacted-entitlements-path>" >&2
   exit 1
 fi
 
@@ -4001,6 +4249,20 @@ fi
 wait_for_remote_control_notice_disconnected
 append_host_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
 append_ios_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
+
+echo "==> Running Rust CLI P2P remote performance artifact gate"
+skybridge_smoke_check_performance_gate "$ROOT_DIR" p2p-remote "$ARTIFACT_DIR" \
+  --min-fps "$SMOKE_MIN_FPS" \
+  --min-width "$SMOKE_VIDEO_WIDTH" \
+  --min-height "$SMOKE_VIDEO_HEIGHT" \
+  --exact-video-size \
+  --min-pass-window-seconds "$SMOKE_SOAK_SECONDS" \
+  --require-audio true \
+  --strict-fps-floor true
+echo "==> Materializing redacted public P2P remote smoke artifacts"
+skybridge_smoke_materialize_public_artifacts "$IOS_DEVICE_LABEL" "$ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
+skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
+echo "==> Redacted public artifacts: $PUBLIC_ARTIFACT_DIR"
 
 echo "==> Real-device P2P remote desktop smoke succeeded"
 echo "    mac status: $HOST_STATUS"

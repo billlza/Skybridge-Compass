@@ -72,6 +72,50 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(fileTransfer.contains("Self.sha256File"))
   }
 
+  func testInboundFileTransferRejectsUnsafeFileNamesInsteadOfBasenameFallback() throws {
+    for unsafeName in ["../secret.txt", "nested/report.pdf", "nested\\report.pdf", "nested⁄report.pdf", "nested∕report.pdf"] {
+      XCTAssertEqual(
+        CrossNetworkWebRTCManager.validateInboundMetadata(
+          fileName: unsafeName,
+          fileSize: 1,
+          chunkSize: 1,
+          totalChunks: 1
+        ),
+        "Invalid metadata (unsafe fileName)"
+      )
+      XCTAssertThrowsError(
+        try CrossNetworkWebRTCManager.makeUniqueDestinationURL(
+          baseDir: FileManager.default.temporaryDirectory,
+          fileName: unsafeName
+        )
+      )
+    }
+
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("iOSInboundFileTransfer-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let existing = directory.appendingPathComponent("report.pdf", isDirectory: false)
+    _ = FileManager.default.createFile(atPath: existing.path, contents: Data())
+
+    XCTAssertNil(
+      CrossNetworkWebRTCManager.validateInboundMetadata(
+        fileName: "report.pdf",
+        fileSize: 1,
+        chunkSize: 1,
+        totalChunks: 1
+      )
+    )
+    XCTAssertEqual(
+      try CrossNetworkWebRTCManager.makeUniqueDestinationURL(
+        baseDir: directory,
+        fileName: "report.pdf"
+      ).lastPathComponent,
+      "report (1).pdf"
+    )
+  }
+
   @MainActor
   func testRemoteAudioInsufficientPriorityUsesLongerRetryBackoff() {
     let insufficientPriority = NSError(domain: NSOSStatusErrorDomain, code: 561_017_449)
@@ -1128,7 +1172,10 @@ final class RegressionHardeningTests: XCTestCase {
         "wait_for_file_pattern \"$HOST_STATUS\" 'SKR-1 signed LAN KEM refresh served:"))
     XCTAssertTrue(
       scriptSource.contains(
-        "wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh smoke-evidence:"))
+        "wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence:"))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "verified and imported: .*suites=.*X-Wing.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound"))
     XCTAssertTrue(
       appSource.contains(
         "try await assertSignedKEMRefreshIfRequired(for: target, reporter: reporter)"))
@@ -5580,6 +5627,161 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
+  func testDashboardSecurityBadgeDoesNotClaimPQCWithoutNegotiatedEvidence() {
+    let badge = DashboardView.securityBadgePresentation(
+      for: ConnectionPresentation(
+        phase: .connected,
+        isConnected: true,
+        statusText: RuntimeLocalization.string("已连接"),
+        detailText: RuntimeLocalization.string("守护中")
+      )
+    )
+
+    XCTAssertEqual(badge.label, "待确认")
+    XCTAssertEqual(badge.tone, .pending)
+  }
+
+  @MainActor
+  func testDashboardSecurityBadgeShowsClassicForClassicSuite() {
+    let badge = DashboardView.securityBadgePresentation(
+      for: ConnectionPresentation(
+        phase: .connected,
+        isConnected: true,
+        statusText: "Classic \(RuntimeLocalization.string("已连接"))",
+        detailText: "X25519 · \(RuntimeLocalization.string("守护中"))",
+        securityEvidence: .classic
+      )
+    )
+
+    XCTAssertEqual(badge.label, "Classic")
+    XCTAssertEqual(badge.tone, .classic)
+  }
+
+  @MainActor
+  func testDashboardSecurityBadgeShowsPQCOnlyForNegotiatedPQCEvidence() {
+    let applePQC = DashboardView.securityBadgePresentation(
+      for: ConnectionPresentation(
+        phase: .connected,
+        isConnected: true,
+        statusText: "Apple PQC \(RuntimeLocalization.string("已连接"))",
+        detailText: "ML-KEM-768 · \(RuntimeLocalization.string("跨网已连接"))",
+        securityEvidence: .pqc
+      )
+    )
+    let xwing = DashboardView.securityBadgePresentation(
+      for: ConnectionPresentation(
+        phase: .connected,
+        isConnected: true,
+        statusText: "X-Wing \(RuntimeLocalization.string("已连接"))",
+        detailText: RuntimeLocalization.string("跨网已连接"),
+        securityEvidence: .pqc
+      )
+    )
+
+    XCTAssertEqual(applePQC.label, "PQC")
+    XCTAssertEqual(applePQC.tone, .verifiedPQC)
+    XCTAssertEqual(xwing.label, "PQC")
+    XCTAssertEqual(xwing.tone, .verifiedPQC)
+  }
+
+  @MainActor
+  func testDashboardSecurityBadgeIgnoresPQCWordsWithoutStructuredEvidence() {
+    let badge = DashboardView.securityBadgePresentation(
+      for: ConnectionPresentation(
+        phase: .connected,
+        isConnected: true,
+        statusText: "Apple PQC \(RuntimeLocalization.string("已连接"))",
+        detailText: "Provider 与本地密钥就绪"
+      )
+    )
+
+    XCTAssertEqual(badge.label, "待确认")
+    XCTAssertEqual(badge.tone, .pending)
+  }
+
+  @MainActor
+  func testSettingsPQCPolicyStatusShowsClassicWhenStrictPolicyIsOff() {
+    let status = SettingsView.pqcPolicyStatusPresentation(
+      enforcePQCHandshake: false,
+      currentTier: .nativePQC,
+      currentSuite: .mlkem768,
+      hasKeyPair: true
+    )
+
+    XCTAssertEqual(status.label, "Classic")
+    XCTAssertEqual(status.detail, "未强制")
+    XCTAssertEqual(status.tone, .classic)
+  }
+
+  @MainActor
+  func testSettingsPQCPolicyStatusDoesNotClaimStrictWhenProviderUnavailable() {
+    let status = SettingsView.pqcPolicyStatusPresentation(
+      enforcePQCHandshake: true,
+      currentTier: .classic,
+      currentSuite: .unknown(0xFFFF),
+      hasKeyPair: false
+    )
+
+    XCTAssertEqual(status.label, "PQC 不可用")
+    XCTAssertEqual(status.detail, "严格策略请求中，Provider 不可用")
+    XCTAssertEqual(status.tone, .unavailable)
+  }
+
+  @MainActor
+  func testSettingsPQCPolicyStatusWaitsForLocalKeysBeforeClaimingStrictPQC() {
+    let status = SettingsView.pqcPolicyStatusPresentation(
+      enforcePQCHandshake: true,
+      currentTier: .nativePQC,
+      currentSuite: .mlkem768,
+      hasKeyPair: false
+    )
+
+    XCTAssertEqual(status.label, "待初始化")
+    XCTAssertEqual(status.detail, "严格 PQC 已请求，待生成本地密钥")
+    XCTAssertEqual(status.tone, .pending)
+  }
+
+  @MainActor
+  func testSettingsPQCPolicyStatusClaimsStrictOnlyWhenProviderAndKeysAreReady() {
+    let status = SettingsView.pqcPolicyStatusPresentation(
+      enforcePQCHandshake: true,
+      currentTier: .nativePQC,
+      currentSuite: .xwing,
+      hasKeyPair: true
+    )
+
+    XCTAssertEqual(status.label, "PQC 就绪")
+    XCTAssertEqual(status.detail, "严格 PQC 已请求，Provider 与本地密钥就绪，等待会话协商证明")
+    XCTAssertEqual(status.tone, .ready)
+  }
+
+  @MainActor
+  func testSettingsPQCPolicyStatusSupportsLiboqsReadyState() {
+    let status = SettingsView.pqcPolicyStatusPresentation(
+      enforcePQCHandshake: true,
+      currentTier: .liboqsPQC,
+      currentSuite: .mlkem768,
+      hasKeyPair: true
+    )
+
+    XCTAssertEqual(status.label, "PQC 就绪")
+    XCTAssertEqual(status.tone, .ready)
+  }
+
+  @MainActor
+  func testSettingsPQCPolicyStatusRejectsClassicSuiteEvenWhenTierIsPQC() {
+    let status = SettingsView.pqcPolicyStatusPresentation(
+      enforcePQCHandshake: true,
+      currentTier: .nativePQC,
+      currentSuite: .x25519Ed25519,
+      hasKeyPair: true
+    )
+
+    XCTAssertEqual(status.label, "PQC 不可用")
+    XCTAssertEqual(status.tone, .unavailable)
+  }
+
+  @MainActor
   func testDashboardViewModelPreservesClassicPresentationWhenActiveConnectionsTemporarilyClear()
     async
   {
@@ -6020,7 +6222,7 @@ final class RegressionHardeningTests: XCTestCase {
       let iosInboundRange = script.range(
         of: "wait_for_ios_status_pattern 'file-transfer inbound-complete name=mac-smoke-'"),
       let smokeEvidenceRange = script.range(
-        of: "wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh smoke-evidence:"),
+        of: "wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence:"),
       let smokeSuccessRange = script.range(of: "echo \"==> Waiting for smoke success markers\"")
     else {
       XCTFail(
@@ -7196,6 +7398,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(presentation.phase, .connecting)
     XCTAssertEqual(presentation.statusText, "连接中")
     XCTAssertEqual(presentation.detailText, "Mac mini")
+    XCTAssertEqual(presentation.securityEvidence, .none)
   }
 
   func testConnectionPresentationContractPrioritizesPeerOverCrossNetworkSnapshot() {
@@ -7231,6 +7434,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertEqual(presentation.statusText, "Classic 已连接")
+    XCTAssertEqual(presentation.securityEvidence, .classic)
   }
 
   func testConnectionPresentationContractDoesNotClaimTargetSuiteWhileRekeying() {
@@ -7260,6 +7464,7 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertEqual(presentation.statusText, "Classic 已连接")
     XCTAssertEqual(presentation.detailText, "X25519 → X-Wing · Rekey 中")
+    XCTAssertEqual(presentation.securityEvidence, .classic)
   }
 
   func testConnectionPresentationContractFormatsAllCryptoModeLabelsWithSpacing() {
@@ -7288,6 +7493,7 @@ final class RegressionHardeningTests: XCTestCase {
       )
     )
     XCTAssertEqual(classic.statusText, "Classic 已连接")
+    XCTAssertEqual(classic.securityEvidence, .classic)
 
     let xwing = ConnectionPresentationContract.evaluate(
       ConnectionPresentationInput(
@@ -7305,8 +7511,9 @@ final class RegressionHardeningTests: XCTestCase {
       )
     )
     XCTAssertEqual(xwing.statusText, "X-Wing 已连接")
+    XCTAssertEqual(xwing.securityEvidence, .pqc)
 
-    let apple = ConnectionPresentationContract.evaluate(
+    let genericPQC = ConnectionPresentationContract.evaluate(
       ConnectionPresentationInput(
         labels: labels,
         fileTransferActive: false,
@@ -7325,7 +7532,8 @@ final class RegressionHardeningTests: XCTestCase {
         defaultPQCModeLabel: "Apple PQC"
       )
     )
-    XCTAssertEqual(apple.statusText, "Apple PQC 已连接")
+    XCTAssertEqual(genericPQC.statusText, "PQC 已连接")
+    XCTAssertEqual(genericPQC.securityEvidence, .pqc)
 
     let liboqs = ConnectionPresentationContract.evaluate(
       ConnectionPresentationInput(
@@ -7344,6 +7552,55 @@ final class RegressionHardeningTests: XCTestCase {
       )
     )
     XCTAssertEqual(liboqs.statusText, "liboqs 已连接")
+    XCTAssertEqual(liboqs.securityEvidence, .pqc)
+  }
+
+  func testConnectionPresentationContractDoesNotUseDefaultPQCModeLabelWithoutSessionEvidence() {
+    let labels = ConnectionPresentationLabels(
+      connectedText: "已连接",
+      disconnectedText: "离线",
+      connectingText: "连接中",
+      reconnectingText: "重连中",
+      defaultGuardStatus: "守护中",
+      crossNetworkGuardStatus: "跨网已连接"
+    )
+
+    let fileTransfer = ConnectionPresentationContract.evaluate(
+      ConnectionPresentationInput(
+        labels: labels,
+        fileTransferActive: true,
+        latestPeerConnection: nil,
+        latestConnectedDevice: nil,
+        latestPendingPeer: nil,
+        activeSessionSnapshot: nil,
+        defaultPQCModeLabel: "Apple PQC"
+      )
+    )
+
+    let noSuite = ConnectionPresentationContract.evaluate(
+      ConnectionPresentationInput(
+        labels: labels,
+        fileTransferActive: false,
+        latestPeerConnection: nil,
+        latestConnectedDevice: nil,
+        latestPendingPeer: nil,
+        activeSessionSnapshot: ActiveSessionSnapshot(
+          snapshotToken: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+          sessionId: "session-no-suite",
+          source: .code,
+          phase: .handshakeComplete,
+          deviceId: "peer-no-suite",
+          deviceName: "Unknown Peer",
+          negotiatedSuite: nil
+        ),
+        defaultPQCModeLabel: "Apple PQC"
+      )
+    )
+
+    XCTAssertEqual(fileTransfer.statusText, "已连接")
+    XCTAssertEqual(fileTransfer.securityEvidence, .none)
+    XCTAssertEqual(noSuite.statusText, "已连接")
+    XCTAssertEqual(noSuite.securityEvidence, .none)
   }
 
   func testLateCleanupTokenDoesNotClearNewSnapshot() {
@@ -8267,11 +8524,19 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testCrossNetworkWebRTCStrictInboundInitialAllowsVerifiedAuthorityClassicBootstrap() {
-    XCTAssertEqual(
+  func testCrossNetworkWebRTCInboundInitialAllowsVerifiedAuthorityClassicBootstrapOnlyWhenNonStrict() {
+    XCTAssertNil(
       CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeSelectionPolicy(
         supportedSuites: [.x25519Ed25519],
         strictPQCRequested: true,
+        localPQCAvailable: true,
+        expectedRemoteAuthorityAlgorithm: .ed25519
+      )
+    )
+    XCTAssertEqual(
+      CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeSelectionPolicy(
+        supportedSuites: [.x25519Ed25519],
+        strictPQCRequested: false,
         localPQCAvailable: true,
         expectedRemoteAuthorityAlgorithm: .ed25519
       ),
@@ -8324,10 +8589,17 @@ final class RegressionHardeningTests: XCTestCase {
 
   @MainActor
   func testCrossNetworkWebRTCStrictInboundInitialNegotiatedClassicRequiresVerifiedAuthority() {
-    XCTAssertTrue(
+    XCTAssertFalse(
       CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeNegotiatedSuiteAllowed(
         .x25519Ed25519,
         strictPQCRequested: true,
+        allowsClassicAuthorityBootstrap: true
+      )
+    )
+    XCTAssertTrue(
+      CrossNetworkWebRTCManager.testOnlyInboundInitialHandshakeNegotiatedSuiteAllowed(
+        .x25519Ed25519,
+        strictPQCRequested: false,
         allowsClassicAuthorityBootstrap: true
       )
     )

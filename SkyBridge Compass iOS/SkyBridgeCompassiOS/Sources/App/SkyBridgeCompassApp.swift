@@ -39,23 +39,17 @@ struct SkyBridgeCompassApp: App {
     @State private var backgroundTeardownTask: Task<Void, Never>?
     @State private var didStartServices = false
     @State private var didInstallUITestFixtures = false
-    @State private var unsupportedDevice = IOSDeviceSupportGate.currentUnsupportedDevice()
 
     private var isUITesting: Bool {
-        ProcessInfo.processInfo.arguments.contains("UITEST_MODE")
-    }
-
-    private var isRunningUnderXCTest: Bool {
-        let environment = ProcessInfo.processInfo.environment
-        return environment["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil
+        SkyBridgeRuntimeEnvironment.isUITesting
     }
 
     private var shouldSkipInteractiveStartup: Bool {
-        isUITesting || isRunningUnderXCTest
+        SkyBridgeRuntimeEnvironment.shouldSkipInteractiveStartup
     }
 
     private var shouldDisableAnimationsForUITests: Bool {
-        ProcessInfo.processInfo.arguments.contains("UITEST_DISABLE_ANIMATIONS")
+        SkyBridgeRuntimeEnvironment.shouldDisableAnimationsForUITests
     }
 
     private var shouldShowSmokeNativeRenderHost: Bool {
@@ -69,54 +63,43 @@ struct SkyBridgeCompassApp: App {
     
     var body: some Scene {
         WindowGroup {
-            Group {
-                if let unsupportedDevice {
-                    UnsupportedIOSDeviceView(device: unsupportedDevice)
-                        .onAppear {
-                            SkyBridgeLogger.shared.warning(
-                                "⛔️ iOS startup blocked on unsupported device: \(unsupportedDevice.displayName) (\(unsupportedDevice.modelIdentifier))"
-                            )
-                        }
-                } else {
-                    ContentView()
-                        .id(localizationManager.currentLanguage.rawValue)
-                        .environmentObject(appState)
-                        .environmentObject(discoveryManager)
-                        .environmentObject(connectionManager)
-                        .environmentObject(authManager)
-                        .environmentObject(themeConfiguration)
-                        .environmentObject(localizationManager)
-                        .environment(\.locale, localizationManager.locale)
-                        .preferredColorScheme(themeConfiguration.isDarkMode ? .dark : .light)
-                        .overlay {
+            ContentView()
+                .id(localizationManager.currentLanguage.rawValue)
+                .environmentObject(appState)
+                .environmentObject(discoveryManager)
+                .environmentObject(connectionManager)
+                .environmentObject(authManager)
+                .environmentObject(themeConfiguration)
+                .environmentObject(localizationManager)
+                .environment(\.locale, localizationManager.locale)
+                .preferredColorScheme(themeConfiguration.isDarkMode ? .dark : .light)
+                .overlay {
 #if canImport(WebRTC)
-                            if shouldShowSmokeNativeRenderHost {
-                                LocalWebRTCSmokeNativeRenderHost()
-                            }
+                    if shouldShowSmokeNativeRenderHost {
+                        LocalWebRTCSmokeNativeRenderHost()
+                    }
 #endif
-                        }
-                        .onAppear {
-                            setupApplication()
-                            if !didStartServices {
-                                didStartServices = true
-                                SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务已创建")
-                                Task(priority: .userInitiated) {
-                                    SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务开始执行")
-                                    await initializeServices()
-                                }
-                            }
-                        }
-                        .onChange(of: scenePhase) { _, newPhase in
-                            Task { @MainActor in
-                                await handleScenePhaseChange(newPhase)
-                            }
-                        }
-                        .onChange(of: localizationManager.currentLanguage) { _, _ in
-                            guard !shouldSkipInteractiveStartup else { return }
-                            configureNotifications()
-                        }
                 }
-            }
+                .onAppear {
+                    setupApplication()
+                    if !didStartServices {
+                        didStartServices = true
+                        SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务已创建")
+                        Task(priority: .userInitiated) {
+                            SkyBridgeLogger.shared.info("🧭 启动流程：服务初始化任务开始执行")
+                            await initializeServices()
+                        }
+                    }
+                }
+                .onChange(of: scenePhase) { _, newPhase in
+                    Task { @MainActor in
+                        await handleScenePhaseChange(newPhase)
+                    }
+                }
+                .onChange(of: localizationManager.currentLanguage) { _, _ in
+                    guard !shouldSkipInteractiveStartup else { return }
+                    configureNotifications()
+                }
         }
     }
     
@@ -172,13 +155,10 @@ struct SkyBridgeCompassApp: App {
         SkyBridgeLogger.shared.info("📲 设备类型: \(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone")")
 
         // Supabase config quick sanity (prints in device logs even if user profile refresh hasn't run yet)
-        if let cfg = SupabaseService.Configuration.fromEnvironment(logIfMissing: false) {
-            let host = cfg.url.host ?? "unknown"
-            SkyBridgeLogger.shared.info("🔐 Supabase resolved host=\(host)")
-            print("🔐 Supabase resolved host=\(host)")
+        if SupabaseService.Configuration.fromEnvironment(logIfMissing: false) != nil {
+            SkyBridgeLogger.shared.info("🔐 Supabase 配置状态=present")
         } else {
             SkyBridgeLogger.shared.info("ℹ️ Supabase 未配置（当前为离线认证模式，可在设置页填写 SUPABASE_URL/SUPABASE_ANON_KEY）")
-            print("ℹ️ Supabase 未配置（当前为离线认证模式，可在设置页填写 SUPABASE_URL/SUPABASE_ANON_KEY）")
         }
     }
 
@@ -443,6 +423,11 @@ struct SkyBridgeCompassApp: App {
     }
 
     private func handleScenePhaseChange(_ phase: ScenePhase) async {
+        if shouldSkipInteractiveStartup {
+            SkyBridgeLogger.shared.info("🧪 Test host mode: 跳过 scenePhase 交互式服务处理 (\(phase))")
+            return
+        }
+
         let settings = SettingsManager.instance
 
         switch phase {
@@ -455,9 +440,7 @@ struct SkyBridgeCompassApp: App {
             if !connectionManager.isListening {
                 try? await connectionManager.startListening()
             }
-            if !shouldSkipInteractiveStartup {
-                ICloudDevicePresenceService.shared.refreshNow()
-            }
+            ICloudDevicePresenceService.shared.refreshNow()
             applyClipboardSettings()
 
         case .background:

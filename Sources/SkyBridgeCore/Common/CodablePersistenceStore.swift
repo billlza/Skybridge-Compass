@@ -33,27 +33,30 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
     }
 
     func load() -> Value? {
+        try? loadOrThrow()
+    }
+
+    func loadOrThrow() throws -> Value? {
         switch location {
         case let .userDefaults(key):
             guard let data = defaults.data(forKey: key) else { return nil }
-            return try? decoder.decode(Value.self, from: data)
+            return try decoder.decode(Value.self, from: data)
 
         case let .protectedApplicationSupport(path, legacyUserDefaultsKey):
-            if let data = try? Data(contentsOf: try resolvedURL(for: path)) {
-                if let value = try? decoder.decode(Value.self, from: data) {
-                    return value
-                }
+            let url = try resolvedURL(for: path)
+            if fileManager.fileExists(atPath: url.path) {
+                let data = try Data(contentsOf: url)
+                return try decoder.decode(Value.self, from: data)
             }
 
             guard let legacyUserDefaultsKey,
-                  let legacyData = defaults.data(forKey: legacyUserDefaultsKey),
-                  let migratedValue = try? decoder.decode(Value.self, from: legacyData) else {
+                  let legacyData = defaults.data(forKey: legacyUserDefaultsKey) else {
                 return nil
             }
 
-            if (try? save(migratedValue)) != nil {
-                defaults.removeObject(forKey: legacyUserDefaultsKey)
-            }
+            let migratedValue = try decoder.decode(Value.self, from: legacyData)
+            try save(migratedValue)
+            defaults.removeObject(forKey: legacyUserDefaultsKey)
 
             return migratedValue
         }

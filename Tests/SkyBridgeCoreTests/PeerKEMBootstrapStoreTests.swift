@@ -240,6 +240,58 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         await store.clearForTesting()
     }
 
+    func testSignedRefreshKEMLookupRequiresSignedSourceAndPinnedProtocolFingerprint() async throws {
+        let store = PeerKEMBootstrapStore.shared
+        await store.clearForTesting()
+
+        let canonicalId = "id:\(UUID().uuidString.lowercased())"
+        let unsignedKey = Data(repeating: 0x36, count: 1_184)
+        await store.upsert(
+            deviceIds: [canonicalId],
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: unsignedKey
+                )
+            ]
+        )
+
+        let unsignedOnly = await store.signedRefreshKEMPublicKeys(
+            forCandidates: [canonicalId],
+            pinnedProtocolFingerprints: [String(repeating: "a", count: 64)]
+        )
+        XCTAssertTrue(unsignedOnly.isEmpty)
+
+        let signedKey = Data(repeating: 0x37, count: 1_216)
+        let exchange = try makeSignedKEMRefreshExchange(
+            deviceId: canonicalId,
+            kemPublicKey: signedKey,
+            generation: 42
+        )
+        try await store.upsertSignedKEMRefresh(
+            deviceIds: [canonicalId],
+            payload: exchange.payload,
+            request: exchange.request,
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint],
+            minimumGeneration: nil
+        )
+
+        let wrongPin = await store.signedRefreshKEMPublicKeys(
+            forCandidates: [canonicalId],
+            pinnedProtocolFingerprints: [String(repeating: "f", count: 64)]
+        )
+        let rightPin = await store.signedRefreshKEMPublicKeys(
+            forCandidates: [canonicalId],
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint.uppercased()]
+        )
+
+        XCTAssertTrue(wrongPin.isEmpty)
+        XCTAssertNil(rightPin[CryptoSuite.mlkem768MLDSA65.wireId])
+        XCTAssertEqual(rightPin[CryptoSuite.xwingMLDSA.wireId], signedKey)
+
+        await store.clearForTesting()
+    }
+
     func testSignedKEMRefreshRejectsUnrequestedSuiteAtImportBoundary() async throws {
         let store = PeerKEMBootstrapStore.shared
         await store.clearForTesting()

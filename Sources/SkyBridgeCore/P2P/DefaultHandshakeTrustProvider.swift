@@ -218,10 +218,12 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
         let recordsSnapshot = await trustRecords()
         let candidates = trustLookupCandidates(for: deviceId)
         var groupedKeys: [CryptoSuite: Set<Data>] = [:]
+        var pinnedProtocolFingerprints = Set<String>()
         let records = matchingTrustRecordsSnapshot(recordsSnapshot, for: deviceId)
             .sorted { $0.updatedAt > $1.updatedAt }
 
         for record in records {
+            pinnedProtocolFingerprints.formUnion(authoritativeProtocolPins(for: record).map(\.fingerprint))
             guard let kemKeys = record.kemPublicKeys else { continue }
             for key in KEMPublicKeyInfo.normalizedValidKeys(kemKeys) {
                 let suite = CryptoSuite(wireId: key.suiteWireId)
@@ -247,15 +249,16 @@ struct DefaultHandshakeTrustProvider: MultiFingerprintHandshakeTrustProvider, Se
                 .map { String($0) }
                 .joined(separator: ",")
             SkyBridgeLogger.p2p.warning(
-                "⚠️ conflicting trusted KEM keys detected; deferring to bootstrap cache or fresh exchange: device=\(deviceId, privacy: .public) suites=\(conflictedSummary, privacy: .public)"
+                "⚠️ conflicting trusted KEM keys detected; strict trust provider will fail closed for conflicted suites: device=\(deviceId, privacy: .public) suites=\(conflictedSummary, privacy: .public)"
             )
         }
-        let cached = await PeerKEMBootstrapStore.shared.mergedKEMPublicKeys(
-            forCandidates: candidates
+        let signedRefresh = await PeerKEMBootstrapStore.shared.signedRefreshKEMPublicKeys(
+            forCandidates: candidates,
+            pinnedProtocolFingerprints: pinnedProtocolFingerprints
         )
-        for (suiteWireId, publicKey) in cached {
+        for (suiteWireId, publicKey) in signedRefresh {
             let suite = CryptoSuite(wireId: suiteWireId)
-            if conflictedSuites.contains(suite) || merged[suite] == nil {
+            if !conflictedSuites.contains(suite), merged[suite] == nil {
                 merged[suite] = publicKey
             }
         }

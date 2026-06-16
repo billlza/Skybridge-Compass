@@ -34,6 +34,9 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         let p2pDiscoverySource = try repositorySource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
         let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let remoteSmokeScript = try repositorySource("Scripts/run_real_device_p2p_remote_smoke.sh")
+        let packageScript = try repositorySource("Scripts/package_app.sh")
+        let releaseReadinessScript = try repositorySource("Scripts/check_macos_release_readiness.sh")
+        let frameworkHelpers = try repositorySource("Scripts/framework_artifact_helpers.sh")
         let iosP2PSmokeHarnessSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalP2PSmokeHarness.swift")
         let rustMacIpadGateSource = try repositorySource("rust/crates/skybridge-cli/src/p2p_remote_performance_evidence/mac_ipad_online.rs")
         let rustMacIpadTestsSource = try repositorySource("rust/crates/skybridge-cli/src/performance_tests/p2p_remote/mac_ipad_online.rs")
@@ -269,7 +272,23 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("MAC_ONLINE_STATUS=\"$MAC_ONLINE_RUNTIME_DIR/mac-online-ipad.status.log\"") &&
             remoteSmokeScript.contains("MAC_ONLINE_RUNTIME_APP_BUNDLE=\"$MAC_ONLINE_RUNTIME_DIR/SkyBridge Compass Pro.app\"") &&
             remoteSmokeScript.contains("ditto \"$MAC_ONLINE_PACKAGED_APP_BUNDLE\" \"$MAC_ONLINE_RUNTIME_APP_BUNDLE\"") &&
+            remoteSmokeScript.contains("ditto \"$debug_app_bundle\" \"$MAC_ONLINE_RUNTIME_APP_BUNDLE\"") &&
             remoteSmokeScript.contains("MAC_ONLINE_APP_BUNDLE=\"$MAC_ONLINE_RUNTIME_APP_BUNDLE\"") &&
+            remoteSmokeScript.contains("SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY") &&
+            remoteSmokeScript.contains("framework_artifact_helpers.sh") &&
+            remoteSmokeScript.contains("select_macos_online_ipad_debug_signing_identity") &&
+            remoteSmokeScript.contains("sign_macos_online_ipad_debug_app") &&
+            remoteSmokeScript.contains("normalize_macos_online_ipad_debug_rpaths") &&
+            remoteSmokeScript.contains("normalize_macos_online_ipad_debug_frameworks") &&
+            remoteSmokeScript.contains("skybridge_normalize_versioned_framework_layout \"$framework\"") &&
+            remoteSmokeScript.contains("skybridge_assert_no_nested_framework_versions_payload \"$webrtc_framework\"") &&
+            remoteSmokeScript.contains("install_name_tool -delete_rpath \"$rpath\"") &&
+            remoteSmokeScript.contains("-perm -111") &&
+            remoteSmokeScript.contains("/usr/bin/codesign --force --timestamp=none --sign \"$identity\" --entitlements \"$app_entitlements\" \"$MAC_ONLINE_APP_BUNDLE\"") &&
+            remoteSmokeScript.contains("mac-online-app-signing source=debug identityKind=%s entitlements=app-xcent nested=verified") &&
+            remoteSmokeScript.contains("verify_macos_online_ipad_framework_resolution") &&
+            remoteSmokeScript.contains("@executable_path/../Frameworks") &&
+            remoteSmokeScript.contains("stapler=valid spctl=accepted") &&
             remoteSmokeScript.contains("canonical_macos_online_ipad_client_bin") &&
             remoteSmokeScript.contains("pwd -P") &&
             remoteSmokeScript.contains("cp -f \"$MAC_ONLINE_STATUS\" \"$MAC_ONLINE_STATUS_ARTIFACT\"") &&
@@ -294,6 +313,34 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(
             remoteSmokeScript.contains("SKYBRIDGE_SMOKE_STATUS_FILE=\"$MAC_ONLINE_STATUS_ARTIFACT\""),
             "The packaged Mac app smoke must not ask LaunchServices-launched app code to open the Desktop artifact path; macOS Desktop privacy can block before boot evidence is emitted."
+        )
+        XCTAssertFalse(
+            remoteSmokeScript.contains("/usr/bin/codesign --force --deep --sign - \"$MAC_ONLINE_APP_BUNDLE\""),
+            "The mac-online Debug app LaunchServices smoke must not use ad-hoc signing; macOS 27 requires a certificate-signed bundle for this diagnostic path."
+        )
+        XCTAssertTrue(
+            frameworkHelpers.contains("skybridge_normalize_versioned_framework_layout") &&
+            frameworkHelpers.contains("PrivacyInfo.xcprivacy") &&
+            frameworkHelpers.contains("rm -rf \"${nested_versions_dir}\"") &&
+            packageScript.contains("skybridge_normalize_versioned_framework_layout \"${FW_DIR}/${name}\"") &&
+            packageScript.contains("skybridge_normalize_versioned_framework_layout \"${FW_DIR}/${linked_framework}.framework\"") &&
+            packageScript.contains("skybridge_assert_no_nested_framework_versions_payload \"${FW_DIR}/WebRTC.framework\""),
+            "The release package path must normalize versioned framework resource layout and reject WebRTC.framework payloads that retain nested Versions directories."
+        )
+        XCTAssertTrue(
+            packageScript.contains("remove_packaging_external_toolchain_rpaths \"${APP_BIN}\"") &&
+            packageScript.contains("is_packaging_external_toolchain_rpath") &&
+            packageScript.contains("/Applications/Xcode*.app/Contents/Developer/Toolchains/*/usr/lib/swift*") &&
+            packageScript.contains("/var/run/com.apple.security.cryptexd/*") &&
+            packageScript.contains("install_name_tool -delete_rpath \"${rpath}\""),
+            "The release package path must remove Xcode beta/cryptex toolchain rpaths before final signing instead of relying on runtime library-validation exceptions."
+        )
+        XCTAssertTrue(
+            releaseReadinessScript.contains("validate_release_rpaths \"${APP_EXECUTABLE_PATH}\"") &&
+            releaseReadinessScript.contains("release app executable must not retain external Xcode beta/cryptex toolchain rpaths") &&
+            releaseReadinessScript.contains("/Applications/Xcode*.app/Contents/Developer/Toolchains/*/usr/lib/swift*") &&
+            releaseReadinessScript.contains("/var/run/com.apple.security.cryptexd/*"),
+            "Release readiness must fail closed when packaged apps retain external Xcode beta or cryptex toolchain rpaths."
         )
         guard let macOnlineLaunchStart = remoteSmokeScript.range(of: "open_macos_online_ipad_app_bundle() {")?.lowerBound,
               let macOnlineLaunchEnd = remoteSmokeScript.range(of: "start_macos_online_ipad_client() {", range: macOnlineLaunchStart..<remoteSmokeScript.endIndex)?.lowerBound else {
@@ -599,6 +646,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         let iosPresenceSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CloudKitSyncManager.swift")
         let macICloudSource = try repositorySource("Sources/SkyBridgeCore/iCloud/iCloudDeviceDiscoveryManager.swift")
         let signingHelperSource = try repositorySource("Scripts/signing_entitlements_helpers.sh")
+        let libraryValidationEntitlement = "com.apple.security.cs.disable-library-validation"
 
         for entitlements in [macDev, macPackaging, macNativePackaging, iosDebug, iosRelease] {
             XCTAssertTrue(entitlements.contains("iCloud.com.skybridge.compass"))
@@ -623,6 +671,12 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         )
         XCTAssertTrue(macLocalXcode.contains("com.apple.security.network.client"))
         XCTAssertTrue(macLocalXcode.contains("com.apple.security.network.server"))
+        for entitlements in [macDev, macPackaging, macNativePackaging, macLocalXcode, iosDebug, iosRelease] {
+            XCTAssertFalse(
+                entitlements.contains(libraryValidationEntitlement),
+                "Main app and iOS/local entitlements must not disable hardened-runtime library validation; packaging should fix framework signing/rpath provenance instead."
+            )
+        }
 
         XCTAssertTrue(signingHelperSource.contains("skybridge_expand_build_setting_entitlements"))
         XCTAssertTrue(signingHelperSource.contains("ApplicationIdentifierPrefix"))

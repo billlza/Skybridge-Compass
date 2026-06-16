@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     Cli, Commands, DisconnectCommand, FileCommand, FileSubcommand, OutputOptions,
-    SmokeSuiteCommonArgs, SmokeSuiteProfile,
+    SmokeSuiteCommonArgs, SmokeSuiteProfile, cli_test_support::make_test_dir,
 };
 
 #[tokio::test]
@@ -30,8 +30,10 @@ async fn smoke_and_file_alias_dispatch_paths_remain_wired() -> Result<()> {
         }
     }
 
+    let state_dir = make_test_dir("smoke-file-alias")?;
+
     crate::dispatch(Cli {
-        state_dir: None,
+        state_dir: Some(state_dir.clone()),
         command: Commands::File(FileCommand {
             command: FileSubcommand::History(OutputOptions { json: true }),
         }),
@@ -39,7 +41,7 @@ async fn smoke_and_file_alias_dispatch_paths_remain_wired() -> Result<()> {
     .await?;
     assert!(
         crate::dispatch(Cli {
-            state_dir: None,
+            state_dir: Some(state_dir),
             command: Commands::Disconnect(DisconnectCommand {
                 session_id: "missing".to_owned(),
             }),

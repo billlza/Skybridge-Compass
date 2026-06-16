@@ -61,6 +61,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     @Published public private(set) var activeSessionSnapshot: ActiveSessionSnapshot?
     @Published public private(set) var idleConnectionPrompt: IdleConnectionPrompt?
     nonisolated static let webRTCStartupJoinHeartbeatAttempts = 60
+    nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
 
     public var activeRemoteDesktopSessionId: String? {
         if let sessionId = activeSessionSnapshot?.sessionId {
@@ -946,15 +947,38 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         guard !fingerprints.isEmpty else { return }
         currentPathAdditionalProtocolFingerprintsBySessionId[sessionId, default: []].formUnion(fingerprints)
         appendSmokeTrace(
-            "protocol-identity-pins session=\(sessionId) peer=\(peerDeviceId) declared=\(payload.deviceId) count=\(fingerprints.count)"
+            "protocol-identity-pins session=\(Self.protocolIdentityLogRedaction) peer=\(Self.protocolIdentityLogRedaction) declared=\(Self.protocolIdentityLogRedaction) count=\(fingerprints.count)"
         )
         SkyBridgeLogger.shared.info(
-            "🔐 WebRTC current-path protocol identity pins updated: session=\(sessionId), peer=\(peerDeviceId), declared=\(payload.deviceId), count=\(fingerprints.count)"
+            "🔐 WebRTC current-path protocol identity pins updated: session=\(Self.protocolIdentityLogRedaction), peer=\(Self.protocolIdentityLogRedaction), declared=\(Self.protocolIdentityLogRedaction), count=\(fingerprints.count)"
         )
     }
 
     private func additionalProtocolFingerprints(for sessionId: String) -> Set<String> {
         currentPathAdditionalProtocolFingerprintsBySessionId[sessionId] ?? []
+    }
+
+    private func currentPathTrustedProtocolFingerprints(for sessionId: String) -> Set<String> {
+        var fingerprints = additionalProtocolFingerprints(for: sessionId)
+        if let expected = currentPathExpectedRemoteAuthorityBySessionId[sessionId]?.protocolPublicKeyFingerprint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           !expected.isEmpty {
+            fingerprints.insert(expected)
+        }
+        return fingerprints
+    }
+
+    private func trustedCurrentPathKEMPublicKeys(
+        for candidates: [String],
+        sessionId: String
+    ) async -> [CryptoSuite: Data] {
+        let pinnedFingerprints = currentPathTrustedProtocolFingerprints(for: sessionId)
+        guard !pinnedFingerprints.isEmpty else { return [:] }
+        return await KEMTrustStore.shared.signedRefreshKEMPublicKeys(
+            forAny: candidates,
+            pinnedProtocolFingerprints: pinnedFingerprints
+        )
     }
 
     private func currentPathLocalProtocolSigningAlgorithm() -> ProtocolSigningAlgorithm {
@@ -1037,7 +1061,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
             if shouldAllowRebind {
                 SkyBridgeLogger.shared.warning(
-                    "⚠️ 允许受限 current-path authority 重绑定: source=\(String(describing: rebindSource)) deviceId=\(deviceId) fingerprint=\(protocolPublicKeyFingerprint) conflict=\(String(describing: conflict))"
+                    "⚠️ 允许受限 current-path authority 重绑定: source=\(String(describing: rebindSource)) deviceId=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) conflict=\(String(describing: conflict))"
                 )
                 return
             }
@@ -1243,12 +1267,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                canReuseCurrentAuthority {
                 return existing
             }
-            if let existing = localConnectionCode,
+            if localConnectionCode != nil,
                activeConnectionCodeLeaseMode == requestedLeaseMode,
                currentRole == .offerer,
                (!Self.isReusableConnectionCodeLease(expiresAt: localConnectionCodeExpiresAt) || !canReuseCurrentAuthority) {
                 let reason = canReuseCurrentAuthority ? "connection_code_lease_not_reusable" : "connection_code_authority_changed"
-                SkyBridgeLogger.shared.info("ℹ️ 本地连接码不可复用，重新向信令服务注册: reason=\(reason) code=\(existing)")
+                SkyBridgeLogger.shared.info("ℹ️ 本地连接码不可复用，重新向信令服务注册: reason=\(reason) code=<redacted>")
                 let staleSessionId = localConnectionSessionId
                 localConnectionCode = nil
                 localConnectionCodeExpiresAt = nil
@@ -1370,7 +1394,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                   !Self.isReusableConnectionCodeLease(expiresAt: self.localConnectionCodeExpiresAt) else {
                 return
             }
-            SkyBridgeLogger.shared.info("ℹ️ 本地连接码租约到期，已清理旧码: reason=connection_code_lease_expired code=\(code)")
+            SkyBridgeLogger.shared.info("ℹ️ 本地连接码租约到期，已清理旧码: reason=connection_code_lease_expired code=<redacted>")
             self.connectionCodeExpiryTask = nil
             self.localConnectionCode = nil
             self.localConnectionCodeExpiresAt = nil
@@ -2249,10 +2273,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         queryItems.removeAll { $0.name == "cv" }
         queryItems.removeAll { $0.name == "pv" }
         queryItems.append(URLQueryItem(name: "shard", value: shardKey))
-        if let token = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !token.isEmpty {
-            queryItems.append(URLQueryItem(name: "st", value: token))
-        }
         if let envVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !envVersion.isEmpty {
@@ -2268,6 +2288,64 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         queryItems.append(URLQueryItem(name: "pv", value: protocolVersion.isEmpty ? "1" : protocolVersion))
         components.queryItems = queryItems
         return components.url ?? wsURL
+    }
+
+    private func signalingHeaders(shardKey: String) throws -> [String: String] {
+        guard let token = webrtcSignalingAuthTokenBySessionId[shardKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            throw SignalingRetryControllerError.invalidWebSocketURL("missing current-path signaling token")
+        }
+        let clientVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_CLIENT_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedClientVersion: String
+        if let clientVersion, !clientVersion.isEmpty {
+            resolvedClientVersion = clientVersion
+        } else {
+            resolvedClientVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        }
+        let rawProtocolVersion = ProcessInfo.processInfo.environment["SKYBRIDGE_PROTOCOL_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1"
+        let protocolVersion = rawProtocolVersion.isEmpty ? "1" : rawProtocolVersion
+        guard let headers = Self.currentPathSignalingWebSocketHeaders(
+            sessionID: shardKey,
+            sessionToken: token,
+            clientVersion: resolvedClientVersion,
+            protocolVersion: protocolVersion
+        ) else {
+            throw SignalingRetryControllerError.invalidWebSocketURL("invalid current-path signaling headers")
+        }
+        return headers
+    }
+
+    nonisolated static func currentPathSignalingWebSocketHeaders(
+        sessionID: String,
+        sessionToken: String,
+        clientVersion: String,
+        protocolVersion: String
+    ) -> [String: String]? {
+        let sessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let sessionToken = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clientVersion = clientVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        let protocolVersion = protocolVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidWebSocketCredentialValue(sessionID, maxLength: 512),
+              isValidWebSocketCredentialValue(sessionToken, maxLength: 4096),
+              isValidWebSocketCredentialValue(clientVersion, maxLength: 64),
+              isValidWebSocketCredentialValue(protocolVersion, maxLength: 64) else {
+            return nil
+        }
+        return [
+            "X-SkyBridge-Session-Id": sessionID,
+            "X-SkyBridge-Session": sessionToken,
+            "X-SkyBridge-Client-Version": clientVersion,
+            "X-SkyBridge-Protocol-Version": protocolVersion
+        ]
+    }
+
+    nonisolated private static func isValidWebSocketCredentialValue(_ value: String, maxLength: Int) -> Bool {
+        guard !value.isEmpty, value.count <= maxLength else { return false }
+        return !value.unicodeScalars.contains { scalar in
+            scalar.value < 0x20 || scalar.value == 0x7F
+        }
     }
 
     private func ensureSignalingConnected(shardKey: String? = nil) async throws {
@@ -2298,7 +2376,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
 
         let wsURL = try signalingURL(shardKey: sessionId)
-        let newSignaling = WebSocketSignalingClient(url: wsURL, sessionId: sessionId, generation: 0)
+        let headers = try signalingHeaders(shardKey: sessionId)
+        let newSignaling = WebSocketSignalingClient(
+            url: wsURL,
+            sessionId: sessionId,
+            generation: 0,
+            additionalHeaders: headers
+        )
         signaling = newSignaling
         signalingShardKey = sessionId
         signalingHealth = .healthy
@@ -3362,9 +3446,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let orderedScreenInboundRelay = OrderedInboundChunkRelay()
         self.inboundQueue = inbound
         self.screenInboundQueue = screenInbound
-        s.onData = { data in
-            orderedInboundRelay.submit { [weak self] in
-                guard let self else { return }
+        s.onData = { [weak self, weak s] data in
+            guard self != nil, let s else { return }
+            orderedInboundRelay.submit { [weak self, weak s] in
+                guard let self, let s else { return }
                 let isCurrentSession = await MainActor.run { self.session === s }
                 guard isCurrentSession else { return }
                 let rekeyInProgress = await MainActor.run {
@@ -3382,9 +3467,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 await inbound.push(data)
             }
         }
-        s.onScreenData = { data in
-            orderedScreenInboundRelay.submit { [weak self] in
-                guard let self else { return }
+        s.onScreenData = { [weak self, weak s] data in
+            guard self != nil, let s else { return }
+            orderedScreenInboundRelay.submit { [weak self, weak s] in
+                guard let self, let s else { return }
                 let isCurrentSession = await MainActor.run {
                     self.currentSessionId == sessionId && self.session === s
                 }
@@ -3599,7 +3685,7 @@ extension CrossNetworkWebRTCManager {
 
             guard shouldInitiate else {
                 SkyBridgeLogger.shared.info(
-                    "🤝 WebRTC 等待对端发起初始握手: session=\(sessionId), role=\(String(describing: session.role)), strictPQC=\(strictPQCRequested)"
+                    "🤝 WebRTC 等待对端发起初始握手: session=\(Self.protocolIdentityLogRedaction), role=\(String(describing: session.role)), strictPQC=\(strictPQCRequested)"
                 )
                 return
             }
@@ -3624,7 +3710,7 @@ extension CrossNetworkWebRTCManager {
                currentPathExpectedRemoteAuthorityBySessionId[sessionId] == nil {
                 let message = "strictPQC WebRTC initial handshake requires pinned current-path protocol identity"
                 SkyBridgeLogger.shared.error(
-                    "⛔️ \(message): session=\(sessionId), peer=\(peerDeviceId)"
+                    "⛔️ \(message): session=\(Self.protocolIdentityLogRedaction), peer=\(Self.protocolIdentityLogRedaction)"
                 )
                 throw NSError(
                     domain: "CrossNetworkWebRTCManager",
@@ -3634,12 +3720,18 @@ extension CrossNetworkWebRTCManager {
             }
 
             var trustedPeerKEMKeys: [CryptoSuite: Data] = [:]
-            var trustLookupPeerId = peerDeviceId
             for candidate in peerIdCandidates {
-                let keys = await KEMTrustStore.shared.kemPublicKeys(for: candidate)
+                let keys: [CryptoSuite: Data]
+                if currentPathExpectedRemoteAuthorityBySessionId[sessionId] != nil {
+                    keys = await trustedCurrentPathKEMPublicKeys(
+                        for: [candidate],
+                        sessionId: sessionId
+                    )
+                } else {
+                    keys = await KEMTrustStore.shared.kemPublicKeys(for: candidate)
+                }
                 guard !keys.isEmpty else { continue }
                 trustedPeerKEMKeys = keys
-                trustLookupPeerId = candidate
                 break
             }
             let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty
@@ -3677,9 +3769,9 @@ extension CrossNetworkWebRTCManager {
             }
             let selection = bootstrapPlan.selection
             SkyBridgeLogger.shared.info(
-                "🤝 WebRTC handshake bootstrap: session=\(sessionId), policy=\(selection.rawValue), " +
+                "🤝 WebRTC handshake bootstrap: session=\(Self.protocolIdentityLogRedaction), policy=\(selection.rawValue), " +
                 "compatMode=\(compatibilityModeEnabled), hasApplePQC=\(capability.hasApplePQC), hasLiboqs=\(capability.hasLiboqs), " +
-                "peer=\(peerDeviceId), trustedKEM=\(hasTrustedPeerKEMKey), trustPeer=\(trustLookupPeerId), authorityBootstrap=\(useClassicAuthorityBootstrap)"
+                "peer=\(Self.protocolIdentityLogRedaction), trustedKEM=\(hasTrustedPeerKEMKey), trustPeer=\(Self.protocolIdentityLogRedaction), authorityBootstrap=\(useClassicAuthorityBootstrap)"
             )
             let transport = makeHandshakeTransport(over: session)
             let currentPathTrustProvider = CurrentPathHandshakeTrustProviderCompat(
@@ -3699,7 +3791,7 @@ extension CrossNetworkWebRTCManager {
                 )
                 self.handshakeDriver = driver
                 SkyBridgeLogger.shared.info(
-                    "🤝 WebRTC initiating handshake: session=\(sessionId), peer=\(peerDeviceId), mode=\(bootstrapMode), policy=\(selection.rawValue)"
+                    "🤝 WebRTC initiating handshake: session=\(Self.protocolIdentityLogRedaction), peer=\(Self.protocolIdentityLogRedaction), mode=\(bootstrapMode), policy=\(selection.rawValue)"
                 )
                 return try await driver.initiateHandshake(with: peer)
             }
@@ -3776,7 +3868,7 @@ extension CrossNetworkWebRTCManager {
                 )
             } catch {
                 SkyBridgeLogger.shared.warning(
-                    "⚠️ WebRTC pairingIdentityExchange send failed: session=\(sessionId) peer=\(peerDeviceId) err=\(error.localizedDescription)"
+                    "⚠️ WebRTC pairingIdentityExchange send failed: session=\(Self.protocolIdentityLogRedaction) peer=\(Self.protocolIdentityLogRedaction) err=\(error.localizedDescription)"
                 )
             }
 
@@ -4241,8 +4333,14 @@ extension CrossNetworkWebRTCManager {
                 }
             }
             persistCurrentPathTrust(sessionId: sessionId)
+            let rekeyCompletionEvent = keys.negotiatedSuite.isPQCGroup
+                ? "pqcRekeyComplete"
+                : "classicRekeyComplete"
+            let rekeyCompletionLabel = keys.negotiatedSuite.isPQCGroup
+                ? "PQC"
+                : "classic compatibility"
             SkyBridgeLogger.shared.info(
-                "✅ inbound WebRTC rekey 完成: session=\(sessionId), event=pqcRekeyComplete suite=\(keys.negotiatedSuite.rawValue)"
+                "✅ inbound WebRTC \(rekeyCompletionLabel) rekey 完成: session=\(sessionId), event=\(rekeyCompletionEvent) suite=\(keys.negotiatedSuite.rawValue)"
             )
 
         case .failed(let reason):
@@ -4695,6 +4793,14 @@ extension CrossNetworkWebRTCManager {
             )
             return
         }
+        if strictPQCRequested,
+           currentPathExpectedRemoteAuthorityBySessionId[sessionId] == nil {
+            await failStrictClassicBootstrap(
+                reason: "missing_current_path_authority",
+                diagnostic: "strictPQC WebRTC rekey requires pinned current-path protocol identity"
+            )
+            return
+        }
 
         let defaultProvider = CryptoProviderFactory.make(policy: selection)
         let candidateSuites = CrossNetworkWebRTCPQCHandshakePolicy.strictPQCRekeyCandidateSuites(
@@ -4711,8 +4817,17 @@ extension CrossNetworkWebRTCManager {
         }
 
         var trustedKeysByCandidateId: [String: [CryptoSuite: Data]] = [:]
+        let requiresSignedCurrentPathKEM = strictPQCRequested
+            || currentPathExpectedRemoteAuthorityBySessionId[sessionId] != nil
         for candidateId in candidateIds {
-            trustedKeysByCandidateId[candidateId] = await KEMTrustStore.shared.kemPublicKeys(for: candidateId)
+            if requiresSignedCurrentPathKEM {
+                trustedKeysByCandidateId[candidateId] = await trustedCurrentPathKEMPublicKeys(
+                    for: [candidateId],
+                    sessionId: sessionId
+                )
+            } else {
+                trustedKeysByCandidateId[candidateId] = await KEMTrustStore.shared.kemPublicKeys(for: candidateId)
+            }
         }
 
         let prefersLiboqsForPeer = false
@@ -4848,8 +4963,14 @@ extension CrossNetworkWebRTCManager {
             }
             persistCurrentPathTrust(sessionId: sessionId)
 
+            let rekeyCompletionEvent = rekeyed.negotiatedSuite.isPQCGroup
+                ? "pqcRekeyComplete"
+                : "classicRekeyComplete"
+            let rekeyCompletionLabel = rekeyed.negotiatedSuite.isPQCGroup
+                ? "PQC"
+                : "classic compatibility"
             SkyBridgeLogger.shared.info(
-                "✅ WebRTC rekey complete: session=\(sessionId), event=pqcRekeyComplete suite=\(rekeyed.negotiatedSuite.rawValue)"
+                "✅ WebRTC \(rekeyCompletionLabel) rekey complete: session=\(sessionId), event=\(rekeyCompletionEvent) suite=\(rekeyed.negotiatedSuite.rawValue)"
             )
         } catch {
             lastRekeyEvent = "failed error=\(error.localizedDescription)"

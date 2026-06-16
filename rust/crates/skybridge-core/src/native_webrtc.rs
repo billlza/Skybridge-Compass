@@ -13,6 +13,7 @@ use webrtc::peer_connection::{
     RTCSessionDescription,
 };
 
+use crate::file_transfer_frame::FileAppFrame;
 use crate::{
     ClassicHandleResult, ClassicInitiatorConfig, ClassicSessionKeys, PqcInitiatorConfig,
     PqcResponderConfig, RuntimeSessionKeepaliveKind, RuntimeSessionRole, TurnCredentials,
@@ -55,6 +56,9 @@ pub enum NativeWebRtcEvent {
     TransportDisconnected {
         reason: Option<String>,
     },
+    /// A decoded inbound binary file transfer frame received over the encrypted
+    /// control channel after the handshake completed.
+    InboundFileFrame(FileAppFrame),
 }
 
 #[derive(Debug, Default)]
@@ -303,6 +307,29 @@ impl NativeWebRtcSession {
     pub async fn close(&self) -> Result<()> {
         self.inner.peer.close().await?;
         Ok(())
+    }
+
+    /// A cheap, cloneable handle for sending file app-frames concurrently while
+    /// the session's event loop keeps draining inbound events and keepalives.
+    pub fn sender_handle(&self) -> NativeWebRtcSender {
+        NativeWebRtcSender {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+/// Cloneable sender for binary file app-frames over an established session.
+#[derive(Clone)]
+pub struct NativeWebRtcSender {
+    inner: Arc<NativeWebRtcInner>,
+}
+
+impl NativeWebRtcSender {
+    /// Encrypt and send one file app-frame plaintext (built via
+    /// `file_transfer_frame::encode_*`). Fails closed if the session is not yet
+    /// established or the data channel has gone away.
+    pub async fn send_file_app_frame(&self, plaintext: &[u8]) -> Result<()> {
+        self.inner.send_file_app_frame(plaintext).await
     }
 }
 
@@ -771,7 +798,36 @@ impl NativeWebRtcInner {
             self.ensure_heartbeat_task().await?;
         }
 
+        if let Some(file_frame) = actions.inbound_file_frame {
+            self.events_tx
+                .send(NativeWebRtcEvent::InboundFileFrame(file_frame))
+                .await
+                .map_err(|_| anyhow!("native_webrtc_event_receiver_dropped"))?;
+        }
+
         Ok(())
+    }
+
+    /// Encrypt and send one binary file app-frame plaintext (built by the caller
+    /// via `file_transfer_frame::encode_*`) over the established control channel.
+    /// Fails closed if the handshake has not completed or the channel is gone.
+    async fn send_file_app_frame(&self, plaintext: &[u8]) -> Result<()> {
+        let session_keys = {
+            let state = self.state.lock().await;
+            state
+                .established_session_keys
+                .clone()
+                .ok_or_else(|| anyhow!("session keys are not established"))?
+        };
+        let frame =
+            crate::handshake_app_frame::build_encrypted_app_frame_bytes(&session_keys, plaintext)?;
+        let data_channel = self
+            .data_channel
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow!("data channel is not attached"))?;
+        self.send_framed_payload(&data_channel, &frame).await
     }
 
     async fn mark_handshake_complete(

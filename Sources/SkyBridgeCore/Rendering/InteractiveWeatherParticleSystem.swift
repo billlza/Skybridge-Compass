@@ -191,7 +191,19 @@ public class InteractiveWeatherParticleSystem: ObservableObject {
     
  /// 设置计算管线
     private func setupComputePipelines() throws {
-        guard let library = device.makeDefaultLibrary() else {
+        let library: MTLLibrary
+        do {
+            library = try SkyBridgeMetalShaderLibrary.load(
+                device: device,
+                bundle: Bundle.module,
+                sourceResourceNames: ["WeatherParticleShaders"],
+                requiredFunctionNames: [
+                    "weather_particle_update",
+                    "weather_particle_vertex",
+                    "weather_particle_fragment"
+                ]
+            )
+        } catch {
             throw WeatherParticleError.shaderLibraryCreationFailed
         }
         

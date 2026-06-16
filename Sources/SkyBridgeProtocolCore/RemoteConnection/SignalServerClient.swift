@@ -374,12 +374,89 @@ public actor SignalServerClient {
                 return "缺少上游登录态，无法申请 admission"
             case .missingTenantID:
                 return "缺少租户标识，无法访问当前租户的公网能力"
-            case .serverRejected(let status, let body):
-                return "信令服务器拒绝请求 (\(status)): \(body)"
+            case .serverRejected(let status, _):
+                return "信令服务器拒绝请求 (\(status)): \(SignalServerClient.redactedServerRejectedBodyDescription)"
             case .malformedResponse(let reason):
                 return "信令服务器响应格式错误: \(reason)"
             }
         }
+    }
+
+    public nonisolated static let redactedServerRejectedBodyDescription = "<redacted-server-error-body>"
+
+    private nonisolated static let safeServerRejectedBodyStringKeys: Set<String> = [
+        "code",
+        "error",
+        "mediaTokenExpectedGeneration",
+        "mediaTokenGeneration",
+        "mediaTokenRequestGeneration",
+        "mediaTokenRevokedReason",
+        "mediaTokenState",
+        "reason",
+        "rejectReason",
+        "serverBuildFingerprint"
+    ]
+
+    private nonisolated static let safeServerRejectedBodyBooleanKeys: Set<String> = [
+        "mediaTokenExpectedPresent",
+        "mediaTokenSessionPresent"
+    ]
+
+    public nonisolated static func sanitizedServerRejectedBodyDescription(from data: Data) -> String {
+        let redactedSummary = "\(redactedServerRejectedBodyDescription) bytes=\(data.count)"
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return redactedSummary
+        }
+
+        var summary: [String: Any] = ["bodyBytes": data.count]
+        for key in safeServerRejectedBodyStringKeys {
+            guard let value = object[key] as? String,
+                  isSafeServerRejectedBodyStringValue(key: key, value: value) else {
+                continue
+            }
+            summary[key] = value
+        }
+        for key in safeServerRejectedBodyBooleanKeys {
+            if let value = object[key] as? Bool {
+                summary[key] = value
+            }
+        }
+
+        guard summary.count > 1,
+              let jsonData = try? JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]),
+              let json = String(data: jsonData, encoding: .utf8) else {
+            return redactedSummary
+        }
+        return json
+    }
+
+    private nonisolated static func isSafeServerRejectedBodyStringValue(key: String, value: String) -> Bool {
+        switch key {
+        case "mediaTokenExpectedGeneration", "mediaTokenGeneration", "mediaTokenRequestGeneration":
+            return isSafeMediaTokenGenerationPrefix(value)
+        case "serverBuildFingerprint":
+            return isSafeServerBuildFingerprint(value)
+        default:
+            return isSafeServerRejectedBodyToken(value)
+        }
+    }
+
+    private nonisolated static func isSafeMediaTokenGenerationPrefix(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == value, value.count == 16 else { return false }
+        return value.range(of: #"^[A-Fa-f0-9]{16}$"#, options: .regularExpression) != nil
+    }
+
+    private nonisolated static func isSafeServerBuildFingerprint(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == value, (1...128).contains(value.count) else { return false }
+        return value.range(of: #"^[A-Za-z0-9_.:/@+-]+$"#, options: .regularExpression) != nil
+    }
+
+    private nonisolated static func isSafeServerRejectedBodyToken(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == value, (1...96).contains(value.count) else { return false }
+        return value.range(of: #"^[A-Za-z0-9_.:-]+$"#, options: .regularExpression) != nil
     }
 
     private let urlSession: URLSession
@@ -510,22 +587,7 @@ public actor SignalServerClient {
                 "X-SkyBridge-Admission": admissionToken
             ]
         )
-        return SessionLease(
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            qrBootstrapToken: response.qrBootstrapToken,
-            turnAdmissionLease: TurnAdmissionLease(
-                token: response.turnAdmissionToken,
-                expiresIn: min(TimeInterval(response.expiresIn), 60)
-            ),
-            mediaAdmissionLease: Self.mediaAdmissionLease(
-                token: response.mediaAdmissionToken,
-                expiresIn: response.expiresIn
-            ),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath
-        )
+        return try Self.sessionLease(from: response)
     }
 
     public func registerConnectionCode(
@@ -545,22 +607,7 @@ public actor SignalServerClient {
                 "X-SkyBridge-Admission": admissionToken
             ]
         )
-        return ConnectionCodeLease(
-            code: response.code,
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            turnAdmissionLease: TurnAdmissionLease(
-                token: response.turnAdmissionToken,
-                expiresIn: min(TimeInterval(response.expiresIn), 60)
-            ),
-            mediaAdmissionLease: Self.mediaAdmissionLease(
-                token: response.mediaAdmissionToken,
-                expiresIn: response.expiresIn
-            ),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath
-        )
+        return try Self.connectionCodeLease(from: response)
     }
 
     public func lookupConnectionCode(admissionToken: String, code: String) async throws -> ConnectionCodeLookup {
@@ -570,28 +617,7 @@ public actor SignalServerClient {
                 "X-SkyBridge-Admission": admissionToken
             ]
         )
-        guard response.found else {
-            throw ClientError.serverRejected(404, "code_not_found")
-        }
-        return ConnectionCodeLookup(
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            turnAdmissionLease: TurnAdmissionLease(
-                token: response.turnAdmissionToken,
-                expiresIn: min(TimeInterval(response.expiresIn), 60)
-            ),
-            mediaAdmissionLease: Self.mediaAdmissionLease(
-                token: response.mediaAdmissionToken,
-                expiresIn: response.expiresIn
-            ),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath,
-            initiatorDeviceId: response.initiatorDeviceId,
-            initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
-            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
-            initiatorDeviceName: response.initiatorDeviceName
-        )
+        return try Self.connectionCodeLookup(from: response)
     }
 
     public func redeemSession(
@@ -616,24 +642,7 @@ public actor SignalServerClient {
             body: try JSONEncoder().encode(requestBody),
             extraHeaders: headers
         )
-        return RedeemedSessionLease(
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            turnAdmissionLease: TurnAdmissionLease(
-                token: response.turnAdmissionToken,
-                expiresIn: min(TimeInterval(response.expiresIn), 60)
-            ),
-            mediaAdmissionLease: Self.mediaAdmissionLease(
-                token: response.mediaAdmissionToken,
-                expiresIn: response.expiresIn
-            ),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath,
-            initiatorDeviceId: response.initiatorDeviceId,
-            initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
-            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint
-        )
+        return try Self.redeemedSessionLease(from: response)
     }
 
     public func registerCurrentDevice(
@@ -666,16 +675,7 @@ public actor SignalServerClient {
                 "X-SkyBridge-Media-Admission": mediaAdmissionToken
             ]
         )
-        return MediaRelayLease(
-            sessionID: response.sessionId,
-            role: response.role,
-            endpointHost: response.endpoint.host,
-            endpointPort: response.endpoint.port,
-            leaseToken: response.leaseToken,
-            expiresAt: Self.normalizedMediaRelayExpiresAt(response.expiresAt),
-            ttl: TimeInterval(response.ttl),
-            maxPacketBytes: response.maxPacketBytes
-        )
+        return try Self.mediaRelayLease(from: response)
     }
 
     public func refreshMediaAdmissionToken(
@@ -713,12 +713,13 @@ public actor SignalServerClient {
         )
         guard response.sessionId == sessionId,
               response.role == role,
-              !response.mediaAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              !response.mediaAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              response.expiresIn > 0 else {
             throw ClientError.malformedResponse("invalid media admission refresh response")
         }
         return MediaAdmissionLease(
             token: response.mediaAdmissionToken,
-            expiresIn: TimeInterval(max(0, response.expiresIn))
+            expiresIn: TimeInterval(response.expiresIn)
         )
     }
 
@@ -751,24 +752,22 @@ public actor SignalServerClient {
 
     public static func decodeRegisterCodeResponse(from data: Data) throws -> ConnectionCodeLease {
         let object = try decodeJSONObject(from: data)
-        let sessionToken = (object["sessionToken"] as? String) ?? (object["initiatorToken"] as? String) ?? ""
-        let turnAdmissionToken = (object["turnAdmissionToken"] as? String) ?? ""
-        let expiresIn = (object["expiresIn"] as? Int) ?? 0
+        let expiresIn = try requiredPositiveInt(object["expiresIn"], field: "expiresIn")
         return ConnectionCodeLease(
-            code: (object["code"] as? String) ?? "",
-            sessionID: (object["sessionId"] as? String) ?? "",
-            sessionToken: sessionToken,
-            turnAdmissionLease: TurnAdmissionLease(
-                token: turnAdmissionToken,
-                expiresIn: min(TimeInterval(expiresIn), 60)
+            code: try requiredString(object["code"] as? String, field: "code"),
+            sessionID: try requiredString(object["sessionId"] as? String, field: "sessionId"),
+            sessionToken: try requiredString(object, keys: ["sessionToken", "initiatorToken"], field: "sessionToken"),
+            turnAdmissionLease: try turnAdmissionLease(
+                token: object["turnAdmissionToken"] as? String,
+                expiresIn: expiresIn
             ),
-            mediaAdmissionLease: Self.mediaAdmissionLease(
+            mediaAdmissionLease: try Self.mediaAdmissionLease(
                 token: object["mediaAdmissionToken"] as? String,
                 expiresIn: expiresIn
             ),
             expiresIn: TimeInterval(expiresIn),
-            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? "",
-            wsPath: object["wsPath"] as? String
+            signalingServerOrigin: try requiredString(object["signalingServerOrigin"] as? String, field: "signalingServerOrigin"),
+            wsPath: try requiredOptionalString(object["wsPath"] as? String, field: "wsPath")
         )
     }
 
@@ -777,27 +776,31 @@ public actor SignalServerClient {
         guard (object["found"] as? Bool) != false else {
             throw ClientError.serverRejected(404, "code_not_found")
         }
-        let turnAdmissionToken = (object["turnAdmissionToken"] as? String) ?? ""
-        let expiresIn = (object["expiresIn"] as? Int) ?? 0
-        let rawAlgorithm = (object["initiatorProtocolSigningAlgorithm"] as? String) ?? ProtocolSigningAlgorithm.ed25519.rawValue
+        let expiresIn = try requiredPositiveInt(object["expiresIn"], field: "expiresIn")
         return ConnectionCodeLookup(
-            sessionID: (object["sessionId"] as? String) ?? "",
-            sessionToken: (object["sessionToken"] as? String) ?? (object["responderToken"] as? String) ?? "",
-            turnAdmissionLease: TurnAdmissionLease(
-                token: turnAdmissionToken,
-                expiresIn: min(TimeInterval(expiresIn), 60)
+            sessionID: try requiredString(object["sessionId"] as? String, field: "sessionId"),
+            sessionToken: try requiredString(object, keys: ["sessionToken", "responderToken"], field: "sessionToken"),
+            turnAdmissionLease: try turnAdmissionLease(
+                token: object["turnAdmissionToken"] as? String,
+                expiresIn: expiresIn
             ),
-            mediaAdmissionLease: Self.mediaAdmissionLease(
+            mediaAdmissionLease: try Self.mediaAdmissionLease(
                 token: object["mediaAdmissionToken"] as? String,
                 expiresIn: expiresIn
             ),
             expiresIn: TimeInterval(expiresIn),
-            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? "",
-            wsPath: object["wsPath"] as? String,
-            initiatorDeviceId: (object["initiatorDeviceId"] as? String) ?? "",
-            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: rawAlgorithm) ?? .ed25519,
-            initiatorProtocolPublicKeyFingerprint: (object["initiatorProtocolPublicKeyFingerprint"] as? String) ?? "",
-            initiatorDeviceName: object["initiatorDeviceName"] as? String
+            signalingServerOrigin: try requiredString(object["signalingServerOrigin"] as? String, field: "signalingServerOrigin"),
+            wsPath: try requiredOptionalString(object["wsPath"] as? String, field: "wsPath"),
+            initiatorDeviceId: try requiredString(object["initiatorDeviceId"] as? String, field: "initiatorDeviceId"),
+            initiatorProtocolSigningAlgorithm: try requiredProtocolSigningAlgorithm(
+                object["initiatorProtocolSigningAlgorithm"] as? String,
+                field: "initiatorProtocolSigningAlgorithm"
+            ),
+            initiatorProtocolPublicKeyFingerprint: try requiredString(
+                object["initiatorProtocolPublicKeyFingerprint"] as? String,
+                field: "initiatorProtocolPublicKeyFingerprint"
+            ),
+            initiatorDeviceName: optionalString(object["initiatorDeviceName"] as? String)
         )
     }
 
@@ -825,36 +828,191 @@ public actor SignalServerClient {
 
     public static func decodeRegisterSessionResponse(from data: Data) throws -> SessionLease {
         let object = try decodeJSONObject(from: data)
-        let sessionToken = (object["sessionToken"] as? String) ?? (object["initiatorSignalingToken"] as? String) ?? ""
-        let turnAdmissionToken = (object["turnAdmissionToken"] as? String) ?? ""
-        let expiresIn = (object["expiresIn"] as? Int) ?? 0
+        let expiresIn = try requiredPositiveInt(object["expiresIn"], field: "expiresIn")
         return SessionLease(
-            sessionID: (object["sessionId"] as? String) ?? "",
-            sessionToken: sessionToken,
-            qrBootstrapToken: (object["qrBootstrapToken"] as? String) ?? "",
-            turnAdmissionLease: TurnAdmissionLease(
-                token: turnAdmissionToken,
-                expiresIn: min(TimeInterval(expiresIn), 60)
+            sessionID: try requiredString(object["sessionId"] as? String, field: "sessionId"),
+            sessionToken: try requiredString(
+                object,
+                keys: ["sessionToken", "initiatorSignalingToken"],
+                field: "sessionToken"
             ),
-            mediaAdmissionLease: Self.mediaAdmissionLease(
+            qrBootstrapToken: try requiredString(object["qrBootstrapToken"] as? String, field: "qrBootstrapToken"),
+            turnAdmissionLease: try turnAdmissionLease(
+                token: object["turnAdmissionToken"] as? String,
+                expiresIn: expiresIn
+            ),
+            mediaAdmissionLease: try Self.mediaAdmissionLease(
                 token: object["mediaAdmissionToken"] as? String,
                 expiresIn: expiresIn
             ),
             expiresIn: TimeInterval(expiresIn),
-            signalingServerOrigin: (object["signalingServerOrigin"] as? String) ?? "",
-            wsPath: object["wsPath"] as? String
+            signalingServerOrigin: try requiredString(object["signalingServerOrigin"] as? String, field: "signalingServerOrigin"),
+            wsPath: try requiredOptionalString(object["wsPath"] as? String, field: "wsPath")
         )
     }
 
-    private static func mediaAdmissionLease(token: String?, expiresIn: Int) -> MediaAdmissionLease? {
-        guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !token.isEmpty else {
+    private static func sessionLease(from response: RegisterSessionResponseBody) throws -> SessionLease {
+        let expiresIn = try requiredPositiveInt(response.expiresIn, field: "expiresIn")
+        return SessionLease(
+            sessionID: try requiredString(response.sessionId, field: "sessionId"),
+            sessionToken: try requiredString(response.sessionToken, field: "sessionToken"),
+            qrBootstrapToken: try requiredString(response.qrBootstrapToken, field: "qrBootstrapToken"),
+            turnAdmissionLease: try turnAdmissionLease(token: response.turnAdmissionToken, expiresIn: expiresIn),
+            mediaAdmissionLease: try mediaAdmissionLease(token: response.mediaAdmissionToken, expiresIn: expiresIn),
+            expiresIn: TimeInterval(expiresIn),
+            signalingServerOrigin: try requiredString(response.signalingServerOrigin, field: "signalingServerOrigin"),
+            wsPath: try requiredOptionalString(response.wsPath, field: "wsPath")
+        )
+    }
+
+    private static func redeemedSessionLease(from response: RedeemSessionResponseBody) throws -> RedeemedSessionLease {
+        let expiresIn = try requiredPositiveInt(response.expiresIn, field: "expiresIn")
+        return RedeemedSessionLease(
+            sessionID: try requiredString(response.sessionId, field: "sessionId"),
+            sessionToken: try requiredString(response.sessionToken, field: "sessionToken"),
+            turnAdmissionLease: try turnAdmissionLease(token: response.turnAdmissionToken, expiresIn: expiresIn),
+            mediaAdmissionLease: try mediaAdmissionLease(token: response.mediaAdmissionToken, expiresIn: expiresIn),
+            expiresIn: TimeInterval(expiresIn),
+            signalingServerOrigin: try requiredString(response.signalingServerOrigin, field: "signalingServerOrigin"),
+            wsPath: try requiredOptionalString(response.wsPath, field: "wsPath"),
+            initiatorDeviceId: try requiredString(response.initiatorDeviceId, field: "initiatorDeviceId"),
+            initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: try requiredString(
+                response.initiatorProtocolPublicKeyFingerprint,
+                field: "initiatorProtocolPublicKeyFingerprint"
+            )
+        )
+    }
+
+    private static func connectionCodeLease(from response: RegisterCodeResponseBody) throws -> ConnectionCodeLease {
+        let expiresIn = try requiredPositiveInt(response.expiresIn, field: "expiresIn")
+        return ConnectionCodeLease(
+            code: try requiredString(response.code, field: "code"),
+            sessionID: try requiredString(response.sessionId, field: "sessionId"),
+            sessionToken: try requiredString(response.sessionToken, field: "sessionToken"),
+            turnAdmissionLease: try turnAdmissionLease(token: response.turnAdmissionToken, expiresIn: expiresIn),
+            mediaAdmissionLease: try mediaAdmissionLease(token: response.mediaAdmissionToken, expiresIn: expiresIn),
+            expiresIn: TimeInterval(expiresIn),
+            signalingServerOrigin: try requiredString(response.signalingServerOrigin, field: "signalingServerOrigin"),
+            wsPath: try requiredOptionalString(response.wsPath, field: "wsPath")
+        )
+    }
+
+    private static func connectionCodeLookup(from response: LookupCodeResponseBody) throws -> ConnectionCodeLookup {
+        guard response.found else {
+            throw ClientError.serverRejected(404, "code_not_found")
+        }
+        let expiresIn = try requiredPositiveInt(response.expiresIn, field: "expiresIn")
+        return ConnectionCodeLookup(
+            sessionID: try requiredString(response.sessionId, field: "sessionId"),
+            sessionToken: try requiredString(response.sessionToken, field: "sessionToken"),
+            turnAdmissionLease: try turnAdmissionLease(token: response.turnAdmissionToken, expiresIn: expiresIn),
+            mediaAdmissionLease: try mediaAdmissionLease(token: response.mediaAdmissionToken, expiresIn: expiresIn),
+            expiresIn: TimeInterval(expiresIn),
+            signalingServerOrigin: try requiredString(response.signalingServerOrigin, field: "signalingServerOrigin"),
+            wsPath: try requiredOptionalString(response.wsPath, field: "wsPath"),
+            initiatorDeviceId: try requiredString(response.initiatorDeviceId, field: "initiatorDeviceId"),
+            initiatorProtocolSigningAlgorithm: response.initiatorProtocolSigningAlgorithm,
+            initiatorProtocolPublicKeyFingerprint: try requiredString(
+                response.initiatorProtocolPublicKeyFingerprint,
+                field: "initiatorProtocolPublicKeyFingerprint"
+            ),
+            initiatorDeviceName: optionalString(response.initiatorDeviceName)
+        )
+    }
+
+    private static func mediaRelayLease(from response: MediaLeaseResponseBody) throws -> MediaRelayLease {
+        let ttl = try requiredPositiveInt(response.ttl, field: "ttl")
+        let endpointHost = try requiredString(response.endpoint.host, field: "endpoint.host")
+        let leaseToken = try requiredString(response.leaseToken, field: "leaseToken")
+        guard response.endpoint.port != 0 else {
+            throw ClientError.malformedResponse("invalid endpoint.port")
+        }
+        guard response.maxPacketBytes > 0 else {
+            throw ClientError.malformedResponse("invalid maxPacketBytes")
+        }
+        let expiresAt = normalizedMediaRelayExpiresAt(response.expiresAt)
+        guard expiresAt > 0 else {
+            throw ClientError.malformedResponse("invalid expiresAt")
+        }
+        return MediaRelayLease(
+            sessionID: try requiredString(response.sessionId, field: "sessionId"),
+            role: try requiredString(response.role, field: "role"),
+            endpointHost: endpointHost,
+            endpointPort: response.endpoint.port,
+            leaseToken: leaseToken,
+            expiresAt: expiresAt,
+            ttl: TimeInterval(ttl),
+            maxPacketBytes: response.maxPacketBytes
+        )
+    }
+
+    private static func turnAdmissionLease(token: String?, expiresIn: Int) throws -> TurnAdmissionLease {
+        TurnAdmissionLease(
+            token: try requiredString(token, field: "turnAdmissionToken"),
+            expiresIn: min(TimeInterval(expiresIn), 60)
+        )
+    }
+
+    private static func mediaAdmissionLease(token: String?, expiresIn: Int) throws -> MediaAdmissionLease? {
+        guard let token = optionalString(token) else {
             return nil
         }
         return MediaAdmissionLease(
             token: token,
             expiresIn: min(TimeInterval(expiresIn), 60)
         )
+    }
+
+    private static func requiredOptionalString(_ value: String?, field: String) throws -> String {
+        try requiredString(value, field: field)
+    }
+
+    private static func requiredString(_ value: String?, field: String) throws -> String {
+        guard let normalized = optionalString(value) else {
+            throw ClientError.malformedResponse("missing \(field)")
+        }
+        return normalized
+    }
+
+    private static func requiredString(
+        _ object: [String: Any],
+        keys: [String],
+        field: String
+    ) throws -> String {
+        for key in keys {
+            if let normalized = optionalString(object[key] as? String) {
+                return normalized
+            }
+        }
+        throw ClientError.malformedResponse("missing \(field)")
+    }
+
+    private static func optionalString(_ value: String?) -> String? {
+        guard let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalized.isEmpty else {
+            return nil
+        }
+        return normalized
+    }
+
+    private static func requiredPositiveInt(_ value: Any?, field: String) throws -> Int {
+        guard let intValue = value as? Int,
+              intValue > 0 else {
+            throw ClientError.malformedResponse("invalid \(field)")
+        }
+        return intValue
+    }
+
+    private static func requiredProtocolSigningAlgorithm(
+        _ value: String?,
+        field: String
+    ) throws -> ProtocolSigningAlgorithm {
+        let rawValue = try requiredString(value, field: field)
+        guard let algorithm = ProtocolSigningAlgorithm(rawValue: rawValue) else {
+            throw ClientError.malformedResponse("invalid \(field)")
+        }
+        return algorithm
     }
 
     private static func normalizedMediaRelayExpiresAt(_ rawValue: Int64) -> TimeInterval {
@@ -927,8 +1085,10 @@ public actor SignalServerClient {
             throw ClientError.invalidResponse
         }
         guard (200...299).contains(httpResponse.statusCode) else {
-            let bodyText = String(data: data, encoding: .utf8) ?? "unknown_error"
-            throw ClientError.serverRejected(httpResponse.statusCode, bodyText)
+            throw ClientError.serverRejected(
+                httpResponse.statusCode,
+                Self.sanitizedServerRejectedBodyDescription(from: data)
+            )
         }
 
         do {

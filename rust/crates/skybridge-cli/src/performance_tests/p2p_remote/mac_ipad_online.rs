@@ -16,11 +16,7 @@ fn mac_ipad_online_connect_button_accepts_strong_online_row_and_real_endpoint() 
     assert!(check.detail.contains("realEndpointSamples=1"));
     assert!(check.detail.contains("connectSuccess=1"));
     assert!(check.detail.contains("connectFailure=0"));
-    assert!(
-        check
-            .detail
-            .contains("orderedIdentity=identityKey:ipad-stable-1")
-    );
+    assert!(check.detail.contains("orderedIdentity=bound"));
 }
 
 #[test]
@@ -62,11 +58,7 @@ fn mac_ipad_online_connect_button_accepts_external_ax_click_with_endpoint_in_con
     assert!(check.ok, "{}", check.detail);
     assert!(check.detail.contains("buttonSourceClicks=1"));
     assert!(check.detail.contains("realEndpointSamples=0"));
-    assert!(
-        check
-            .detail
-            .contains("orderedIdentity=identityKey:ipad-stable-1")
-    );
+    assert!(check.detail.contains("orderedIdentity=bound"));
 }
 
 #[test]
@@ -134,7 +126,7 @@ fn mac_ipad_online_connect_button_rejects_duplicate_physical_device_rows() {
     assert!(
         check
             .detail
-            .contains("duplicatePhysicalRows=physical:ipad-physical-1")
+            .contains("duplicatePhysicalRows=duplicate:rows=3:identityCount=3")
     );
 }
 
@@ -192,7 +184,7 @@ fn mac_ipad_online_connect_button_rejects_duplicate_presentation_rows_without_de
     assert!(
         check
             .detail
-            .contains("duplicatePhysicalRows=presentation:ipad:ziangdeipad:ipadpro")
+            .contains("duplicatePhysicalRows=duplicate:rows=3:identityCount=3")
     );
 }
 
@@ -247,7 +239,7 @@ fn mac_ipad_online_connect_button_rejects_same_identity_rendered_multiple_times(
     assert!(
         check
             .detail
-            .contains("duplicatePhysicalRows=identityKey:id:ipad-stable-1:rows=3")
+            .contains("duplicatePhysicalRows=duplicate:rows=3:identityCount=1")
     );
 }
 
@@ -299,7 +291,7 @@ fn mac_ipad_online_connect_button_rejects_mixed_trusted_cloud_and_online_rows_fo
     assert!(
         check
             .detail
-            .contains("duplicatePhysicalRows=physical:ziangdeipad-ipad:rows=3")
+            .contains("duplicatePhysicalRows=duplicate:rows=3:identityCount=1")
     );
 }
 
@@ -696,7 +688,7 @@ fn mac_ipad_online_connect_button_rejects_mismatched_or_unsuccessful_click_chain
 
     let check = check_p2p_remote_mac_ipad_online_connect_button(&mismatch);
     assert!(!check.ok, "{}", check.detail);
-    assert!(check.detail.contains("orderedIdentity=-"));
+    assert!(check.detail.contains("orderedIdentity=missing"));
     assert!(check.detail.contains("rowIdentities=1"));
     assert!(check.detail.contains("successIdentities=1"));
 
@@ -743,7 +735,7 @@ fn mac_ipad_online_connect_button_rejects_mismatched_or_unsuccessful_click_chain
 
     let check = check_p2p_remote_mac_ipad_online_connect_button(&cross_surface);
     assert!(!check.ok, "{}", check.detail);
-    assert!(check.detail.contains("orderedIdentity=-"));
+    assert!(check.detail.contains("orderedIdentity=missing"));
     assert!(check.detail.contains("rowIdentities=1"));
     assert!(check.detail.contains("buttonSourceClicks=0"));
     assert!(check.detail.contains("clickIdentities=0"));
@@ -940,7 +932,7 @@ fn mac_ipad_online_connect_button_rejects_non_dashboard_or_non_row_sources() {
     assert!(check.detail.contains("dashboardRoleBoot=0"));
     assert!(check.detail.contains("realRowSourceRows=0"));
     assert!(check.detail.contains("buttonSourceClicks=0"));
-    assert!(check.detail.contains("orderedIdentity=-"));
+    assert!(check.detail.contains("orderedIdentity=missing"));
 }
 
 #[test]
@@ -1001,11 +993,61 @@ fn mac_ipad_online_connect_button_rejects_script_only_launch_marker_as_dashboard
     assert!(!check.ok, "{}", check.detail);
     assert!(check.detail.contains("dashboardRoleBoot=0"));
     assert!(check.detail.contains("connectSuccess=1"));
-    assert!(
-        check
-            .detail
-            .contains("orderedIdentity=identityKey:ipad-stable-1")
+    assert!(check.detail.contains("orderedIdentity=bound"));
+}
+
+#[test]
+fn mac_ipad_online_connect_button_rejects_root_container_boot_without_app_source() {
+    let mut missing_app_source = P2pRemotePerformanceEvidence::default();
+    update_p2p_remote_evidence(
+        &mut missing_app_source,
+        "boot role=mac-online-ipad-client process=SkyBridgeCompassApp uiRole=root-container",
+        true,
+        false,
     );
+    update_p2p_remote_evidence(
+        &mut missing_app_source,
+        "[DEBUG] [General] iCloud KVS 在线心跳已发布: iPad",
+        false,
+        true,
+    );
+    update_p2p_remote_evidence(
+        &mut missing_app_source,
+        &with_real_bonjour_route(
+            "mac-online-device-ui targetFamily=ipad visible=1 source=OnlineDeviceCard evidenceSource=external-ax status=online buttonEnabled=1 matchStrength=stable-id resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=ipad-stable-1",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut missing_app_source,
+        &with_real_bonjour_route(
+            "mac-online-connect action=button targetFamily=ipad source=OnlineDeviceCard clickSource=accessibility clickMechanism=AXUIElementPerformAction targetRowBound=1 resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=ipad-stable-1",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut missing_app_source,
+        &with_real_bonjour_route(
+            "mac-online-connect-start targetFamily=ipad resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=ipad-stable-1",
+        ),
+        true,
+        false,
+    );
+    update_p2p_remote_evidence(
+        &mut missing_app_source,
+        &with_real_bonjour_route(
+            "mac-online-connect-result action=button targetFamily=ipad result=success resolvedSource=skybridgeBonjour controlEndpoint=1 candidateCount=1 identityKey=ipad-stable-1",
+        ),
+        true,
+        false,
+    );
+
+    let check = check_p2p_remote_mac_ipad_online_connect_button(&missing_app_source);
+    assert!(!check.ok, "{}", check.detail);
+    assert!(check.detail.contains("dashboardRoleBoot=0"));
+    assert!(check.detail.contains("connectSuccess=1"));
 }
 
 fn add_required_mac_ipad_online_connect_evidence(evidence: &mut P2pRemotePerformanceEvidence) {
@@ -1065,7 +1107,7 @@ fn with_invalid_identity_route(line: &str) -> String {
 fn add_dashboard_boot(evidence: &mut P2pRemotePerformanceEvidence) {
     update_p2p_remote_evidence(
         evidence,
-        "boot role=mac-online-ipad-client process=SkyBridgeCompassApp uiRole=root-container",
+        "boot role=mac-online-ipad-client process=SkyBridgeCompassApp uiRole=root-container source=app",
         true,
         false,
     );

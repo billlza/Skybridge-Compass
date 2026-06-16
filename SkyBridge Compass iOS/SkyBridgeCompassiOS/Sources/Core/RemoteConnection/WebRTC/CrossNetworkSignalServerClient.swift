@@ -107,6 +107,7 @@ actor SignalServerClientCompat {
         case missingAuthentication
         case missingTenantID
         case missingIdempotencyKey
+        case authenticationStorageUnavailable(String)
         case requestTimedOut(String)
         case serverRejected(Int, String)
         case malformedResponse(String)
@@ -123,14 +124,96 @@ actor SignalServerClientCompat {
                 return "缺少租户标识，无法访问当前租户的公网能力"
             case .missingIdempotencyKey:
                 return "缺少幂等键，无法安全执行当前跨网请求"
+            case .authenticationStorageUnavailable(let reason):
+                return "认证会话存储不可用: \(reason)"
             case .requestTimedOut(let path):
                 return "当前跨网请求超时: \(path)"
-            case .serverRejected(let status, let body):
-                return "信令服务器拒绝请求 (\(status)): \(body)"
+            case .serverRejected(let status, _):
+                return "信令服务器拒绝请求 (\(status)): \(SignalServerClientCompat.redactedServerRejectedBodyDescription)"
             case .malformedResponse(let reason):
                 return "信令服务器响应格式错误: \(reason)"
             }
         }
+    }
+
+    nonisolated private static let sensitiveLogRedaction = "<redacted>"
+    nonisolated private static let redactedServerRejectedBodyDescription = "<redacted-server-error-body>"
+    nonisolated private static let safeServerRejectedBodyStringKeys: Set<String> = [
+        "code",
+        "error",
+        "mediaTokenExpectedGeneration",
+        "mediaTokenGeneration",
+        "mediaTokenRequestGeneration",
+        "mediaTokenRevokedReason",
+        "mediaTokenState",
+        "reason",
+        "rejectReason",
+        "serverBuildFingerprint"
+    ]
+    nonisolated private static let safeServerRejectedBodyBooleanKeys: Set<String> = [
+        "mediaTokenExpectedPresent",
+        "mediaTokenSessionPresent"
+    ]
+
+    nonisolated private static func redactedServerRejectedBodyLogSummary(byteCount: Int) -> String {
+        "\(redactedServerRejectedBodyDescription) bytes=\(byteCount)"
+    }
+
+    nonisolated private static func sanitizedServerRejectedBodyDescription(from data: Data) -> String {
+        let redactedSummary = redactedServerRejectedBodyLogSummary(byteCount: data.count)
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return redactedSummary
+        }
+
+        var summary: [String: Any] = ["bodyBytes": data.count]
+        for key in safeServerRejectedBodyStringKeys {
+            guard let value = object[key] as? String,
+                  isSafeServerRejectedBodyStringValue(key: key, value: value) else {
+                continue
+            }
+            summary[key] = value
+        }
+        for key in safeServerRejectedBodyBooleanKeys {
+            if let value = object[key] as? Bool {
+                summary[key] = value
+            }
+        }
+
+        guard summary.count > 1,
+              let jsonData = try? JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]),
+              let json = String(data: jsonData, encoding: .utf8) else {
+            return redactedSummary
+        }
+        return json
+    }
+
+    nonisolated private static func isSafeServerRejectedBodyStringValue(key: String, value: String) -> Bool {
+        switch key {
+        case "mediaTokenExpectedGeneration", "mediaTokenGeneration", "mediaTokenRequestGeneration":
+            return isSafeMediaTokenGenerationPrefix(value)
+        case "serverBuildFingerprint":
+            return isSafeServerBuildFingerprint(value)
+        default:
+            return isSafeServerRejectedBodyToken(value)
+        }
+    }
+
+    nonisolated private static func isSafeMediaTokenGenerationPrefix(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == value, value.count == 16 else { return false }
+        return value.range(of: #"^[A-Fa-f0-9]{16}$"#, options: .regularExpression) != nil
+    }
+
+    nonisolated private static func isSafeServerBuildFingerprint(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == value, (1...128).contains(value.count) else { return false }
+        return value.range(of: #"^[A-Za-z0-9_.:/@+-]+$"#, options: .regularExpression) != nil
+    }
+
+    nonisolated private static func isSafeServerRejectedBodyToken(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == value, (1...96).contains(value.count) else { return false }
+        return value.range(of: #"^[A-Za-z0-9_.:-]+$"#, options: .regularExpression) != nil
     }
 
     private struct AdmissionChallengeRequestBody: Encodable {
@@ -325,7 +408,7 @@ actor SignalServerClientCompat {
 
     func requestAdmissionChallenge(binding: ProtocolIdentityBindingCompat) async throws -> AdmissionChallenge {
         logger.info(
-            "🌐 current-path request start path=/api/webrtc/admission/challenge deviceId=\(binding.deviceId, privacy: .public) alg=\(binding.protocolSigningAlgorithm.rawValue, privacy: .public)"
+            "🌐 current-path request start path=/api/webrtc/admission/challenge deviceId=\(Self.sensitiveLogRedaction, privacy: .public) alg=\(binding.protocolSigningAlgorithm.rawValue, privacy: .public)"
         )
         let body = AdmissionChallengeRequestBody(
             deviceId: binding.deviceId,
@@ -341,7 +424,7 @@ actor SignalServerClientCompat {
             requiresUserAuthentication: true
         )
         logger.info(
-            "🌐 current-path request ok path=/api/webrtc/admission/challenge challengeId=\(response.challengeId, privacy: .public)"
+            "🌐 current-path request ok path=/api/webrtc/admission/challenge challengeId=\(Self.sensitiveLogRedaction, privacy: .public)"
         )
         return AdmissionChallenge(
             challengeID: response.challengeId,
@@ -364,7 +447,7 @@ actor SignalServerClientCompat {
         signature: Data
     ) async throws -> AdmissionLease {
         logger.info(
-            "🌐 current-path request start path=/api/webrtc/admission deviceId=\(binding.deviceId, privacy: .public) alg=\(binding.protocolSigningAlgorithm.rawValue, privacy: .public)"
+            "🌐 current-path request start path=/api/webrtc/admission deviceId=\(Self.sensitiveLogRedaction, privacy: .public) alg=\(binding.protocolSigningAlgorithm.rawValue, privacy: .public)"
         )
         let body = AdmissionRequestBody(
             challengeId: challenge.challengeID,
@@ -399,7 +482,7 @@ actor SignalServerClientCompat {
         validDuration: TimeInterval
     ) async throws -> SessionLease {
         logger.info(
-            "🌐 current-path request start path=/api/webrtc/register-session sessionId=\(sessionId ?? "-", privacy: .public)"
+            "🌐 current-path request start path=/api/webrtc/register-session sessionId=\(Self.sensitiveLogRedaction, privacy: .public) requestedSession=\(Self.logPresence(sessionId), privacy: .public)"
         )
         let body = RegisterSessionRequestBody(
             sessionId: sessionId,
@@ -412,18 +495,9 @@ actor SignalServerClientCompat {
             extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         logger.info(
-            "🌐 current-path request ok path=/api/webrtc/register-session sessionId=\(response.sessionId, privacy: .public)"
+            "🌐 current-path request ok path=/api/webrtc/register-session sessionId=\(Self.sensitiveLogRedaction, privacy: .public)"
         )
-        return SessionLease(
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            qrBootstrapToken: response.qrBootstrapToken,
-            turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath
-        )
+        return try Self.sessionLease(from: response)
     }
 
     func redeemSession(
@@ -437,7 +511,7 @@ actor SignalServerClientCompat {
             throw ClientError.missingIdempotencyKey
         }
         logger.info(
-            "🌐 current-path request start path=/api/webrtc/redeem-session sessionId=\(sessionId, privacy: .public)"
+            "🌐 current-path request start path=/api/webrtc/redeem-session sessionId=\(Self.sensitiveLogRedaction, privacy: .public)"
         )
         let body = RedeemSessionRequestBody(
             sessionId: sessionId,
@@ -453,20 +527,9 @@ actor SignalServerClientCompat {
             ]
         )
         logger.info(
-            "🌐 current-path request ok path=/api/webrtc/redeem-session sessionId=\(response.sessionId, privacy: .public)"
+            "🌐 current-path request ok path=/api/webrtc/redeem-session sessionId=\(Self.sensitiveLogRedaction, privacy: .public)"
         )
-        return RedeemedSessionLease(
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath,
-            initiatorDeviceId: response.initiatorDeviceId,
-            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: response.initiatorProtocolSigningAlgorithm) ?? .ed25519,
-            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint
-        )
+        return try Self.redeemedSessionLease(from: response)
     }
 
     func refreshWebRTCSession(
@@ -475,7 +538,7 @@ actor SignalServerClientCompat {
         role: String
     ) async throws -> SessionRefreshLease {
         logger.info(
-            "🌐 current-path request start path=/api/webrtc/session/refresh sessionId=\(sessionId, privacy: .public) role=\(role, privacy: .public)"
+            "🌐 current-path request start path=/api/webrtc/session/refresh sessionId=\(Self.sensitiveLogRedaction, privacy: .public) role=\(role, privacy: .public)"
         )
         let body = SessionRefreshRequestBody(sessionId: sessionId, role: role)
         let response: SessionRefreshResponseBody = try await performJSONRequest(
@@ -485,7 +548,7 @@ actor SignalServerClientCompat {
             extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         logger.info(
-            "🌐 current-path request ok path=/api/webrtc/session/refresh sessionId=\(response.sessionId, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) sessionTokenGeneration=\(response.sessionTokenGeneration ?? "-", privacy: .public) mediaTokenGeneration=\(response.mediaTokenGeneration ?? "-", privacy: .public)"
+            "🌐 current-path request ok path=/api/webrtc/session/refresh sessionId=\(Self.sensitiveLogRedaction, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) sessionTokenGeneration=\(Self.logPresence(response.sessionTokenGeneration), privacy: .public) mediaTokenGeneration=\(Self.logPresence(response.mediaTokenGeneration), privacy: .public)"
         )
         return try Self.sessionRefreshLease(
             from: response,
@@ -500,7 +563,7 @@ actor SignalServerClientCompat {
         validDuration: TimeInterval
     ) async throws -> ConnectionCodeLease {
         logger.info(
-            "🌐 current-path request start path=/api/webrtc/register-code deviceName=\(deviceName, privacy: .public)"
+            "🌐 current-path request start path=/api/webrtc/register-code deviceName=\(Self.sensitiveLogRedaction, privacy: .public)"
         )
         let body = RegisterCodeRequestBody(
             deviceName: deviceName,
@@ -513,18 +576,9 @@ actor SignalServerClientCompat {
             extraHeaders: ["X-SkyBridge-Admission": admissionToken]
         )
         logger.info(
-            "🌐 current-path request ok path=/api/webrtc/register-code sessionId=\(response.sessionId, privacy: .public) code=<redacted>"
+            "🌐 current-path request ok path=/api/webrtc/register-code sessionId=\(Self.sensitiveLogRedaction, privacy: .public) code=<redacted>"
         )
-        return ConnectionCodeLease(
-            code: response.code,
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath
-        )
+        return try Self.connectionCodeLease(from: response)
     }
 
     func lookupConnectionCode(admissionToken: String, code: String) async throws -> ConnectionCodeLookup {
@@ -538,26 +592,11 @@ actor SignalServerClientCompat {
         guard response.found else {
             throw ClientError.serverRejected(404, "code_not_found")
         }
-        guard !response.sessionToken.isEmpty else {
-            throw ClientError.malformedResponse("missing sessionToken")
-        }
         let websocketPathForLog = Self.normalizedOptionalToken(response.wsPath) ?? "<missing>"
         logger.info(
-            "🌐 current-path request ok path=/api/webrtc/lookup sessionId=\(response.sessionId, privacy: .public) found=\(response.found) wsPath=\(websocketPathForLog, privacy: .public)"
+            "🌐 current-path request ok path=/api/webrtc/lookup sessionId=\(Self.sensitiveLogRedaction, privacy: .public) found=\(response.found) wsPath=\(websocketPathForLog, privacy: .public)"
         )
-        return ConnectionCodeLookup(
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath,
-            initiatorDeviceId: response.initiatorDeviceId,
-            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: response.initiatorProtocolSigningAlgorithm) ?? .ed25519,
-            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
-            initiatorDeviceName: response.initiatorDeviceName
-        )
+        return try Self.connectionCodeLookup(from: response)
     }
 
     func requestMediaRelayLease(mediaAdmissionToken: String) async throws -> MediaRelayLease {
@@ -569,20 +608,9 @@ actor SignalServerClientCompat {
             extraHeaders: ["X-SkyBridge-Media-Admission": mediaAdmissionToken]
         )
         logger.info(
-            "🌐 current-path request ok path=/api/media/lease sessionId=\(response.sessionId, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) refreshSupported=\(response.supportsMediaAdmissionRefresh == true, privacy: .public) mediaTokenGeneration=\(response.mediaTokenGeneration ?? "-", privacy: .public)"
+            "🌐 current-path request ok path=/api/media/lease sessionId=\(Self.sensitiveLogRedaction, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) refreshSupported=\(response.supportsMediaAdmissionRefresh == true, privacy: .public) mediaTokenGeneration=\(Self.logPresence(response.mediaTokenGeneration), privacy: .public)"
         )
-        return MediaRelayLease(
-            sessionID: response.sessionId,
-            role: response.role,
-            endpoint: SkyBridgeMediaEndpoint(
-                host: response.endpoint.host,
-                port: response.endpoint.port,
-                relayToken: response.leaseToken,
-                expiresAt: Self.normalizedMediaRelayExpiresAt(response.expiresAt)
-            ),
-            ttl: TimeInterval(response.ttl),
-            maxPacketBytes: response.maxPacketBytes
-        )
+        return try Self.mediaRelayLease(from: response)
     }
 
     func refreshMediaAdmissionToken(
@@ -620,15 +648,16 @@ actor SignalServerClientCompat {
         )
         guard response.sessionId == sessionId,
               response.role == role,
-              !response.mediaAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              !response.mediaAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              response.expiresIn > 0 else {
             throw ClientError.malformedResponse("invalid media admission refresh response")
         }
         logger.info(
-            "🌐 current-path request ok path=/api/media/admission/refresh sessionId=\(response.sessionId, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) refreshSupported=\(response.supportsMediaAdmissionRefresh == true, privacy: .public) mediaTokenGeneration=\(response.mediaTokenGeneration ?? "-", privacy: .public)"
+            "🌐 current-path request ok path=/api/media/admission/refresh sessionId=\(Self.sensitiveLogRedaction, privacy: .public) role=\(response.role, privacy: .public) serverBuild=\(response.serverBuildFingerprint ?? "-", privacy: .public) refreshSupported=\(response.supportsMediaAdmissionRefresh == true, privacy: .public) mediaTokenGeneration=\(Self.logPresence(response.mediaTokenGeneration), privacy: .public)"
         )
         return MediaAdmissionRefreshLease(
             token: response.mediaAdmissionToken,
-            expiresIn: TimeInterval(max(0, response.expiresIn)),
+            expiresIn: TimeInterval(response.expiresIn),
             serverBuildFingerprint: response.serverBuildFingerprint,
             mediaTokenGeneration: response.mediaTokenGeneration
         )
@@ -645,6 +674,7 @@ actor SignalServerClientCompat {
               response.role == role,
               !response.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !response.turnAdmissionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              response.expiresIn > 0,
               let signalingServerOrigin = response.signalingServerOrigin?.trimmingCharacters(in: .whitespacesAndNewlines),
               !signalingServerOrigin.isEmpty,
               let wsPath = response.wsPath?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -667,33 +697,18 @@ actor SignalServerClientCompat {
     }
 
     static func testOnlyDecodeMediaRelayLeaseResponse(_ data: Data) throws -> MediaRelayLease {
-        let response = try JSONDecoder().decode(MediaLeaseResponseBody.self, from: data)
-        return MediaRelayLease(
-            sessionID: response.sessionId,
-            role: response.role,
-            endpoint: SkyBridgeMediaEndpoint(
-                host: response.endpoint.host,
-                port: response.endpoint.port,
-                relayToken: response.leaseToken,
-                expiresAt: Self.normalizedMediaRelayExpiresAt(response.expiresAt)
-            ),
-            ttl: TimeInterval(response.ttl),
-            maxPacketBytes: response.maxPacketBytes
-        )
+        let response = try decodeResponseBody(MediaLeaseResponseBody.self, from: data)
+        return try Self.mediaRelayLease(from: response)
+    }
+
+    static func testOnlyDecodeRegisterCodeResponse(_ data: Data) throws -> ConnectionCodeLease {
+        let response = try decodeResponseBody(RegisterCodeResponseBody.self, from: data)
+        return try Self.connectionCodeLease(from: response)
     }
 
     static func testOnlyDecodeRegisterSessionResponse(_ data: Data) throws -> SessionLease {
-        let response = try JSONDecoder().decode(RegisterSessionResponseBody.self, from: data)
-        return SessionLease(
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            qrBootstrapToken: response.qrBootstrapToken,
-            turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath
-        )
+        let response = try decodeResponseBody(RegisterSessionResponseBody.self, from: data)
+        return try Self.sessionLease(from: response)
     }
 
     static func testOnlyDecodeSessionRefreshResponse(
@@ -701,7 +716,7 @@ actor SignalServerClientCompat {
         sessionId: String,
         role: String
     ) throws -> SessionRefreshLease {
-        let response = try JSONDecoder().decode(SessionRefreshResponseBody.self, from: data)
+        let response = try decodeResponseBody(SessionRefreshResponseBody.self, from: data)
         return try Self.sessionRefreshLease(
             from: response,
             expectedSessionId: sessionId,
@@ -710,20 +725,8 @@ actor SignalServerClientCompat {
     }
 
     static func testOnlyDecodeLookupConnectionCodeResponse(_ data: Data) throws -> ConnectionCodeLookup {
-        let response = try JSONDecoder().decode(LookupCodeResponseBody.self, from: data)
-        return ConnectionCodeLookup(
-            sessionID: response.sessionId,
-            sessionToken: response.sessionToken,
-            turnAdmissionToken: response.turnAdmissionToken,
-            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
-            expiresIn: TimeInterval(response.expiresIn),
-            signalingServerOrigin: response.signalingServerOrigin,
-            wsPath: response.wsPath,
-            initiatorDeviceId: response.initiatorDeviceId,
-            initiatorProtocolSigningAlgorithm: ProtocolSigningAlgorithm(rawValue: response.initiatorProtocolSigningAlgorithm) ?? .ed25519,
-            initiatorProtocolPublicKeyFingerprint: response.initiatorProtocolPublicKeyFingerprint,
-            initiatorDeviceName: response.initiatorDeviceName
-        )
+        let response = try decodeResponseBody(LookupCodeResponseBody.self, from: data)
+        return try Self.connectionCodeLookup(from: response)
     }
 
     private static func normalizedMediaRelayExpiresAt(_ rawValue: Int64) -> TimeInterval {
@@ -741,6 +744,156 @@ actor SignalServerClientCompat {
             return nil
         }
         return trimmed
+    }
+
+    private static func decodeResponseBody<Response: Decodable>(
+        _ type: Response.Type,
+        from data: Data
+    ) throws -> Response {
+        do {
+            return try JSONDecoder().decode(type, from: data)
+        } catch let error as ClientError {
+            throw error
+        } catch {
+            throw ClientError.malformedResponse(error.localizedDescription)
+        }
+    }
+
+    private static func sessionLease(from response: RegisterSessionResponseBody) throws -> SessionLease {
+        let expiresIn = try requiredPositiveTimeInterval(response.expiresIn, field: "expiresIn")
+        return SessionLease(
+            sessionID: try requiredToken(response.sessionId, field: "sessionId"),
+            sessionToken: try requiredToken(response.sessionToken, field: "sessionToken"),
+            qrBootstrapToken: try requiredToken(response.qrBootstrapToken, field: "qrBootstrapToken"),
+            turnAdmissionToken: try requiredToken(response.turnAdmissionToken, field: "turnAdmissionToken"),
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
+            expiresIn: expiresIn,
+            signalingServerOrigin: try requiredToken(response.signalingServerOrigin, field: "signalingServerOrigin"),
+            wsPath: try requiredWebSocketPath(response.wsPath)
+        )
+    }
+
+    private static func redeemedSessionLease(from response: RedeemSessionResponseBody) throws -> RedeemedSessionLease {
+        let expiresIn = try requiredPositiveTimeInterval(response.expiresIn, field: "expiresIn")
+        return RedeemedSessionLease(
+            sessionID: try requiredToken(response.sessionId, field: "sessionId"),
+            sessionToken: try requiredToken(response.sessionToken, field: "sessionToken"),
+            turnAdmissionToken: try requiredToken(response.turnAdmissionToken, field: "turnAdmissionToken"),
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
+            expiresIn: expiresIn,
+            signalingServerOrigin: try requiredToken(response.signalingServerOrigin, field: "signalingServerOrigin"),
+            wsPath: try requiredWebSocketPath(response.wsPath),
+            initiatorDeviceId: try requiredToken(response.initiatorDeviceId, field: "initiatorDeviceId"),
+            initiatorProtocolSigningAlgorithm: try requiredProtocolSigningAlgorithm(
+                response.initiatorProtocolSigningAlgorithm,
+                field: "initiatorProtocolSigningAlgorithm"
+            ),
+            initiatorProtocolPublicKeyFingerprint: try requiredToken(
+                response.initiatorProtocolPublicKeyFingerprint,
+                field: "initiatorProtocolPublicKeyFingerprint"
+            )
+        )
+    }
+
+    private static func connectionCodeLease(from response: RegisterCodeResponseBody) throws -> ConnectionCodeLease {
+        let expiresIn = try requiredPositiveTimeInterval(response.expiresIn, field: "expiresIn")
+        return ConnectionCodeLease(
+            code: try requiredToken(response.code, field: "code"),
+            sessionID: try requiredToken(response.sessionId, field: "sessionId"),
+            sessionToken: try requiredToken(response.sessionToken, field: "sessionToken"),
+            turnAdmissionToken: try requiredToken(response.turnAdmissionToken, field: "turnAdmissionToken"),
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
+            expiresIn: expiresIn,
+            signalingServerOrigin: try requiredToken(response.signalingServerOrigin, field: "signalingServerOrigin"),
+            wsPath: try requiredWebSocketPath(response.wsPath)
+        )
+    }
+
+    private static func connectionCodeLookup(from response: LookupCodeResponseBody) throws -> ConnectionCodeLookup {
+        guard response.found else {
+            throw ClientError.serverRejected(404, "code_not_found")
+        }
+        let expiresIn = try requiredPositiveTimeInterval(response.expiresIn, field: "expiresIn")
+        return ConnectionCodeLookup(
+            sessionID: try requiredToken(response.sessionId, field: "sessionId"),
+            sessionToken: try requiredToken(response.sessionToken, field: "sessionToken"),
+            turnAdmissionToken: try requiredToken(response.turnAdmissionToken, field: "turnAdmissionToken"),
+            mediaAdmissionToken: Self.normalizedOptionalToken(response.mediaAdmissionToken),
+            expiresIn: expiresIn,
+            signalingServerOrigin: try requiredToken(response.signalingServerOrigin, field: "signalingServerOrigin"),
+            wsPath: try requiredWebSocketPath(response.wsPath),
+            initiatorDeviceId: try requiredToken(response.initiatorDeviceId, field: "initiatorDeviceId"),
+            initiatorProtocolSigningAlgorithm: try requiredProtocolSigningAlgorithm(
+                response.initiatorProtocolSigningAlgorithm,
+                field: "initiatorProtocolSigningAlgorithm"
+            ),
+            initiatorProtocolPublicKeyFingerprint: try requiredToken(
+                response.initiatorProtocolPublicKeyFingerprint,
+                field: "initiatorProtocolPublicKeyFingerprint"
+            ),
+            initiatorDeviceName: normalizedOptionalToken(response.initiatorDeviceName)
+        )
+    }
+
+    private static func mediaRelayLease(from response: MediaLeaseResponseBody) throws -> MediaRelayLease {
+        let ttl = try requiredPositiveTimeInterval(response.ttl, field: "ttl")
+        let host = try requiredToken(response.endpoint.host, field: "endpoint.host")
+        let relayToken = try requiredToken(response.leaseToken, field: "leaseToken")
+        guard response.endpoint.port != 0 else {
+            throw ClientError.malformedResponse("invalid endpoint.port")
+        }
+        guard response.maxPacketBytes > 0 else {
+            throw ClientError.malformedResponse("invalid maxPacketBytes")
+        }
+        let expiresAt = Self.normalizedMediaRelayExpiresAt(response.expiresAt)
+        guard expiresAt > 0 else {
+            throw ClientError.malformedResponse("invalid expiresAt")
+        }
+        return MediaRelayLease(
+            sessionID: try requiredToken(response.sessionId, field: "sessionId"),
+            role: try requiredToken(response.role, field: "role"),
+            endpoint: SkyBridgeMediaEndpoint(
+                host: host,
+                port: response.endpoint.port,
+                relayToken: relayToken,
+                expiresAt: expiresAt
+            ),
+            ttl: ttl,
+            maxPacketBytes: response.maxPacketBytes
+        )
+    }
+
+    private static func requiredToken(_ value: String?, field: String) throws -> String {
+        guard let token = normalizedOptionalToken(value) else {
+            throw ClientError.malformedResponse("missing \(field)")
+        }
+        return token
+    }
+
+    private static func requiredWebSocketPath(_ value: String?) throws -> String {
+        try requiredToken(value, field: "wsPath")
+    }
+
+    private static func requiredPositiveTimeInterval(_ value: Int, field: String) throws -> TimeInterval {
+        guard value > 0 else {
+            throw ClientError.malformedResponse("invalid \(field)")
+        }
+        return TimeInterval(value)
+    }
+
+    private static func requiredProtocolSigningAlgorithm(
+        _ value: String,
+        field: String
+    ) throws -> ProtocolSigningAlgorithm {
+        let rawValue = try requiredToken(value, field: field)
+        guard let algorithm = ProtocolSigningAlgorithm(rawValue: rawValue) else {
+            throw ClientError.malformedResponse("invalid \(field)")
+        }
+        return algorithm
+    }
+
+    private static func logPresence(_ value: String?) -> String {
+        normalizedOptionalToken(value) == nil ? "missing" : "present"
     }
 
     private func performJSONRequest<Response: Decodable>(
@@ -770,7 +923,7 @@ actor SignalServerClientCompat {
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
         }
-        let tenantID = currentTenantID().trimmingCharacters(in: .whitespacesAndNewlines)
+        let tenantID = try currentTenantID().trimmingCharacters(in: .whitespacesAndNewlines)
         if requiresUserAuthentication && tenantID.isEmpty {
             throw ClientError.missingTenantID
         }
@@ -815,7 +968,7 @@ actor SignalServerClientCompat {
             }
         } catch {
             logger.error(
-                "❌ current-path request failed method=\(method, privacy: .public) path=\(path, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                "❌ current-path request failed method=\(method, privacy: .public) path=\(path, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
             )
             throw error
         }
@@ -823,23 +976,26 @@ actor SignalServerClientCompat {
             throw ClientError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            let bodyString = String(data: data, encoding: .utf8) ?? ""
+            let bodySummary = Self.redactedServerRejectedBodyLogSummary(byteCount: data.count)
             logger.error(
-                "❌ current-path request rejected method=\(method, privacy: .public) path=\(path, privacy: .public) status=\(http.statusCode) body=\(bodyString, privacy: .public)"
+                "❌ current-path request rejected method=\(method, privacy: .public) path=\(path, privacy: .public) status=\(http.statusCode) body=\(bodySummary, privacy: .public)"
             )
-            throw ClientError.serverRejected(http.statusCode, bodyString)
+            throw ClientError.serverRejected(
+                http.statusCode,
+                Self.sanitizedServerRejectedBodyDescription(from: data)
+            )
         }
         do {
-            return try JSONDecoder().decode(Response.self, from: data)
+            return try Self.decodeResponseBody(Response.self, from: data)
         } catch {
             logger.error(
-                "❌ current-path response decode failed path=\(path, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                "❌ current-path response decode failed path=\(path, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
             )
             throw ClientError.malformedResponse(error.localizedDescription)
         }
     }
 
-    private func currentTenantID() -> String {
+    private func currentTenantID() throws -> String {
         let explicitTenantID = ProcessInfo.processInfo.environment["SKYBRIDGE_TENANT_ID"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !explicitTenantID.isEmpty {
@@ -852,7 +1008,7 @@ actor SignalServerClientCompat {
            !derived.isEmpty {
             return derived
         }
-        if let session = KeychainManager.shared.loadAuthSession() {
+        if let session = try loadPersistedAuthSession() {
             let sessionAccessToken = session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
             if !sessionAccessToken.isEmpty,
                let derived = deriveTenantIdentifier(accessToken: sessionAccessToken),
@@ -865,6 +1021,14 @@ actor SignalServerClientCompat {
             }
         }
         return ""
+    }
+
+    private func loadPersistedAuthSession() throws -> AuthSession? {
+        do {
+            return try KeychainManager.shared.loadAuthSessionStrict()
+        } catch {
+            throw ClientError.authenticationStorageUnavailable(error.localizedDescription)
+        }
     }
 
     private func clientVersion() -> String {
@@ -887,7 +1051,7 @@ actor SignalServerClientCompat {
         if !envAccessToken.isEmpty {
             return envAccessToken
         }
-        guard let session = KeychainManager.shared.loadAuthSession(),
+        guard let session = try loadPersistedAuthSession(),
               session.accessToken != "pending_verification",
               !session.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ClientError.missingAuthentication
@@ -919,7 +1083,7 @@ actor SignalServerClientCompat {
                 nebulaId: session.nebulaId,
                 issuedAt: Date()
             )
-            try? KeychainManager.shared.storeAuthSession(merged)
+            try KeychainManager.shared.storeAuthSession(merged)
             return merged
         }
 

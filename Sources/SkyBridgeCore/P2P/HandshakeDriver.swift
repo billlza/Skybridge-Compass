@@ -701,7 +701,7 @@ public actor HandshakeDriver {
         guard case .idle = state else {
             let negotiatedSuite = await context?.negotiatedSuite
             let isFallback = negotiatedSuite.map { cryptoProvider.activeSuite.isPQC && !$0.isPQC }
-            let peerId = currentPeer?.deviceId ?? "unknown"
+            let peerId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(currentPeer?.deviceId)
 
  // 清理上下文（必须 zeroize - 11.6）
             if let ctx = context {
@@ -1034,7 +1034,7 @@ public actor HandshakeDriver {
                         context: [
                             "selectedSuite": messageB.selectedSuite.rawValue,
                             "sigAAlgorithm": sigAAlg.rawValue,
-                            "deviceId": currentPeer?.deviceId ?? "unknown"
+                            "deviceId": SkyBridgeDiagnosticRedaction.stableIdentifierLabel(currentPeer?.deviceId)
                         ]
                     ))
                     await transitionToFailed(.suiteSignatureMismatch(
@@ -1269,7 +1269,7 @@ public actor HandshakeDriver {
                 message: "Handshake established (Finished verified)",
                 context: [
                     "sessionId": sessionKeys.sessionId,
-                    "peer": peer.deviceId,
+                    "peer": SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peer.deviceId),
                     "suite": negotiatedSuite.rawValue,
                     "transcriptHash": sessionKeys.transcriptHash.map { String(format: "%02x", $0) }.joined(),
                     // Paper terminology alignment:
@@ -1335,13 +1335,14 @@ public actor HandshakeDriver {
         }
 
  // 发射事件 ( 11.5)
+        let peerDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(currentPeer?.deviceId)
         await SecurityEventEmitter.shared.emit(SecurityEvent(
             type: .handshakeFailed,
             severity: .warning,
-            message: "Handshake failed: \(reason)",
+            message: "Handshake failed: \(reason.diagnosticReasonCode)",
             context: [
-                "reason": String(describing: reason),
-                "peer": currentPeer?.deviceId ?? "unknown",
+                "reason": reason.diagnosticReasonCode,
+                "peer": peerDiagnosticLabel,
                 // Paper terminology alignment (see Docs + TranscriptBuilder):
                 "policyInTranscript": "1",
                 "transcriptBinding": "1",
@@ -1557,7 +1558,7 @@ public actor HandshakeDriver {
                 "wireId": wireHex,
                 "stage": unknown.stage,
                 "fallbackEligible": "0",
-                "peer": currentPeer?.deviceId ?? "unknown"
+                "peer": SkyBridgeDiagnosticRedaction.stableIdentifierLabel(currentPeer?.deviceId)
             ]
         ))
     }

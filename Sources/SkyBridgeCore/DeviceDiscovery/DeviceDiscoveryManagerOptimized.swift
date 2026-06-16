@@ -21,6 +21,7 @@ import UserNotifications
 /// 4. 使用actor隔离并发操作
 @MainActor
 public class DeviceDiscoveryManagerOptimized: ObservableObject {
+    nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
 
  // MARK: - 发布的属性
 
@@ -2221,7 +2222,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         ) async {
             guard let authority = authenticatedRemoteAuthority else {
                 logger.warning(
-                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                    "⚠️ inbound pairingIdentityExchange missing authenticated authority; skipping current-path trust bridge: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                 )
                 return
             }
@@ -2253,16 +2254,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 )
                 guard persisted else {
                     logger.warning(
-                        "⚠️ inbound current-path trust bridge skipped: peer=\(peer.deviceId, privacy: .public) declared=\(payload.deviceId, privacy: .public)"
+                        "⚠️ inbound current-path trust bridge skipped: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                     )
                     return
                 }
                 logger.info(
-                    "🔐 inbound current-path trust bridge persisted: peer=\(peer.deviceId, privacy: .public) current=\(payload.deviceId, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(authority.protocolPublicKeyFingerprint, privacy: .public)"
+                    "🔐 inbound current-path trust bridge persisted: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) current=\(Self.protocolIdentityLogRedaction, privacy: .public) alg=\(authority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
                 )
             } catch {
                 logger.warning(
-                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .public)"
+                    "⚠️ inbound current-path trust bridge failed: \(error.localizedDescription, privacy: .private)"
                 )
             }
         }
@@ -2777,10 +2778,12 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                         let peerHasClassicGroup = messageA.supportedSuites.contains { !$0.isPQCGroup }
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let requestedPolicy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
+                        // This pre-selection gate only evaluates the peer offer shape.
+                        // Local PQC capability is checked after choosing the responder provider.
                         if let rejection = StrictPQCAdmissionGate.inboundRejection(
                             policy: requestedPolicy,
                             peerSupportedSuites: messageA.supportedSuites,
-                            localPQCSuitesAvailable: peerHasPQCGroup
+                            localPQCSuitesAvailable: true
                         ), rejection == .peerOfferedClassicOnly {
                             logger.error(
                                 "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peer.deviceId, privacy: .public)"

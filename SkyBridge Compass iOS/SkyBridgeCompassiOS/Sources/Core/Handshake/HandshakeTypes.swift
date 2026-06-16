@@ -81,8 +81,8 @@ public enum HandshakeFailureReason: Error, LocalizedError, Sendable, Equatable {
             return "签名验证失败：无法确认对端身份。"
         case .invalidMessageFormat(let reason):
             return "握手消息格式无效：\(reason)"
-        case .identityMismatch(let expected, let actual):
-            return "设备身份不匹配（期望 \(expected)，实际 \(actual)）。"
+        case .identityMismatch:
+            return "设备身份不匹配，握手已中止。"
         case .replayDetected:
             return "检测到重放攻击，握手已中止。"
         case .secureEnclavePoPRequired:
@@ -103,9 +103,63 @@ public enum HandshakeFailureReason: Error, LocalizedError, Sendable, Equatable {
             return "无法协商共同加密套件。"
         case .unknownSuite(let wireId):
             return String(format: "收到未知加密套件（wireId=0x%04X），握手已拒绝。", wireId)
-        case .supersededByConcurrentAttempt(let winnerPeerId, let winnerAttemptId):
-            return "本次握手已被并发连接仲裁淘汰（winner=\(winnerPeerId), attempt=\(winnerAttemptId)）。"
+        case .supersededByConcurrentAttempt:
+            return "本次握手已被并发连接仲裁淘汰。"
         }
+    }
+
+    public var diagnosticReasonCode: String {
+        switch self {
+        case .timeout:
+            return "timeout"
+        case .cancelled:
+            return "cancelled"
+        case .peerRejected:
+            return "peer_rejected"
+        case .cryptoError:
+            return "crypto_error"
+        case .transportError:
+            return "transport_error"
+        case .versionMismatch(let local, let remote):
+            return "version_mismatch local=\(local) remote=\(remote)"
+        case .signatureVerificationFailed:
+            return "signature_verification_failed"
+        case .invalidMessageFormat:
+            return "invalid_message_format"
+        case .identityMismatch:
+            return "identity_mismatch"
+        case .replayDetected:
+            return "replay_detected"
+        case .secureEnclavePoPRequired:
+            return "secure_enclave_pop_required"
+        case .secureEnclaveSignatureInvalid:
+            return "secure_enclave_signature_invalid"
+        case .keyConfirmationFailed:
+            return "key_confirmation_failed"
+        case .suiteSignatureMismatch(let selectedSuite, let sigAAlgorithm):
+            return "suite_signature_mismatch suite=\(selectedSuite) sigA=\(sigAAlgorithm)"
+        case .pqcProviderUnavailable:
+            return "pqc_provider_unavailable"
+        case .missingPeerKEMPublicKey:
+            return "missing_peer_kem_public_key"
+        case .suiteNotSupported:
+            return "suite_not_supported"
+        case .suiteNegotiationFailed:
+            return "suite_negotiation_failed"
+        case .unknownSuite(let wireId):
+            return String(format: "unknown_suite wire_id=0x%04X", wireId)
+        case .supersededByConcurrentAttempt:
+            return "superseded_by_concurrent_attempt"
+        }
+    }
+}
+
+enum HandshakeDiagnosticRedaction {
+    static func stableIdentifierLabel(_ rawIdentifier: String?) -> String {
+        guard rawIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return "<redacted>"
+        }
+        return "<redacted>"
     }
 }
 

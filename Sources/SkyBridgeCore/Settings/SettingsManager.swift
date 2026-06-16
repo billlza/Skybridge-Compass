@@ -233,8 +233,8 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var useSecureEnclaveMLDSA: Bool = true
  /// Secure Enclave 支持（仅在 macOS 26+ 且 CryptoKit PQC 可用时生效）
     @Published public var useSecureEnclaveMLKEM: Bool = true
- /// 量子安全：启用后量子密码（应用层）
- /// 🔧 优化：默认启用PQC，提供量子安全保护
+ /// 量子安全：启用后量子密码（应用层）尝试；真实 PQC 状态仍以协商套件和 runtime proof 为准
+ /// 🔧 优化：默认开启 PQC-capable 路径，但不得把开关本身当成量子安全证明
     @Published public var enablePQC: Bool = true
  /// 量子安全：优先签名算法（当前运行时支持 ML-DSA-65/ML-DSA-87）
     @Published public var pqcSignatureAlgorithm: String = "ML-DSA-65"

@@ -186,13 +186,16 @@ extension CrossNetworkWebRTCManager {
                 return
             }
 
-            // Prepare paths
             let baseDir = Self.downloadsDirectoryURL()
-            let finalURL = Self.makeUniqueDestinationURL(baseDir: baseDir, fileName: fileName)
-            let tempURL = baseDir.appendingPathComponent(".skybridge-\(msg.transferId).partial")
-            _ = FileManager.default.createFile(atPath: tempURL.path, contents: nil)
 
             do {
+                let finalURL = try Self.makeUniqueDestinationURL(baseDir: baseDir, fileName: fileName)
+                let tempURL = baseDir.appendingPathComponent(".skybridge-\(msg.transferId).partial")
+                guard !FileManager.default.fileExists(atPath: tempURL.path),
+                      FileManager.default.createFile(atPath: tempURL.path, contents: nil) else {
+                    await sendAck(.init(op: .error, transferId: msg.transferId, message: "Partial file unavailable"), label: "metaError")
+                    return
+                }
                 let handle = try FileHandle(forWritingTo: tempURL)
                 let senderId = msg.senderDeviceId ?? (remoteDeviceId ?? "mac")
                 let senderName = msg.senderDeviceName ?? (remoteDeviceName ?? "macOS")
@@ -319,18 +322,35 @@ extension CrossNetworkWebRTCManager {
                             return
                         }
 
-                        if let expected = st.expectedFileSha256, let actual = Self.sha256File(st.tempURL), actual != expected {
-                            FileTransferManager.instance.completeExternalInboundTransfer(
-                                transferId: st.transferId,
-                                success: false,
-                                error: "file sha256 mismatch"
-                            )
-                            try? FileManager.default.removeItem(at: st.tempURL)
-                            inboundFileTransfers.removeValue(forKey: st.transferId)
-                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                            await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 mismatch"), label: "completeError")
-                            return
+                        if let expected = st.expectedFileSha256 {
+                            do {
+                                let actual = try Self.sha256File(st.tempURL)
+                                guard actual == expected else {
+                                    FileTransferManager.instance.completeExternalInboundTransfer(
+                                        transferId: st.transferId,
+                                        success: false,
+                                        error: "file sha256 mismatch"
+                                    )
+                                    try? FileManager.default.removeItem(at: st.tempURL)
+                                    inboundFileTransfers.removeValue(forKey: st.transferId)
+                                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                    await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 mismatch"), label: "completeError")
+                                    return
+                                }
+                            } catch {
+                                FileTransferManager.instance.completeExternalInboundTransfer(
+                                    transferId: st.transferId,
+                                    success: false,
+                                    error: "file sha256 unavailable"
+                                )
+                                try? FileManager.default.removeItem(at: st.tempURL)
+                                inboundFileTransfers.removeValue(forKey: st.transferId)
+                                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                                await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 unavailable"), label: "completeError")
+                                return
+                            }
                         }
                         if FileManager.default.fileExists(atPath: st.finalURL.path) {
                             try? FileManager.default.removeItem(at: st.finalURL)
@@ -349,7 +369,7 @@ extension CrossNetworkWebRTCManager {
                                 op: .completeAck,
                                 transferId: st.transferId,
                                 receivedBytes: st.receivedBytes,
-                                fileSha256: st.expectedFileSha256 ?? Self.sha256File(st.finalURL)
+                                fileSha256: st.expectedFileSha256 ?? (try? Self.sha256File(st.finalURL))
                             ),
                             label: "completeAck"
                         )
@@ -466,18 +486,35 @@ extension CrossNetworkWebRTCManager {
                     return
                 }
 
-                if let expected = st.expectedFileSha256, let actual = Self.sha256File(st.tempURL), actual != expected {
-                    FileTransferManager.instance.completeExternalInboundTransfer(
-                        transferId: st.transferId,
-                        success: false,
-                        error: "file sha256 mismatch"
-                    )
-                    try? FileManager.default.removeItem(at: st.tempURL)
-                    inboundFileTransfers.removeValue(forKey: st.transferId)
-                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                    await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 mismatch"), label: "completeError")
-                    return
+                if let expected = st.expectedFileSha256 {
+                    do {
+                        let actual = try Self.sha256File(st.tempURL)
+                        guard actual == expected else {
+                            FileTransferManager.instance.completeExternalInboundTransfer(
+                                transferId: st.transferId,
+                                success: false,
+                                error: "file sha256 mismatch"
+                            )
+                            try? FileManager.default.removeItem(at: st.tempURL)
+                            inboundFileTransfers.removeValue(forKey: st.transferId)
+                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                            await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 mismatch"), label: "completeError")
+                            return
+                        }
+                    } catch {
+                        FileTransferManager.instance.completeExternalInboundTransfer(
+                            transferId: st.transferId,
+                            success: false,
+                            error: "file sha256 unavailable"
+                        )
+                        try? FileManager.default.removeItem(at: st.tempURL)
+                        inboundFileTransfers.removeValue(forKey: st.transferId)
+                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
+                        await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 unavailable"), label: "completeError")
+                        return
+                    }
                 }
                 if FileManager.default.fileExists(atPath: st.finalURL.path) {
                     try? FileManager.default.removeItem(at: st.finalURL)
@@ -498,7 +535,7 @@ extension CrossNetworkWebRTCManager {
                         op: .completeAck,
                         transferId: st.transferId,
                         receivedBytes: st.receivedBytes,
-                        fileSha256: st.expectedFileSha256 ?? Self.sha256File(st.finalURL)
+                        fileSha256: st.expectedFileSha256 ?? (try? Self.sha256File(st.finalURL))
                     ),
                     label: "completeAck"
                 )

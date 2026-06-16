@@ -39,37 +39,47 @@ public enum BGRAFrameBuilder {
     }
     private static func buildSafeCopy(frame: BGRAFrame) throws -> CVPixelBuffer {
         guard frame.width > 0, frame.height > 0 else { throw BGRAFrameBuilderError.invalidDimensions }
+
+        // A stride of 0 means "tightly packed". Defaulting to width * 4 (BGRA = 4
+        // bytes/px) avoids the previous bug where stride 0 made `required` and the
+        // per-row copy length both 0, producing a solid-black frame.
+        let srcStride = frame.stride > 0 ? frame.stride : frame.width * 4
+        let required = srcStride * frame.height
+        guard frame.data.count >= required else { throw BGRAFrameBuilderError.dataUnderrun }
+
         var pixelBuffer: CVPixelBuffer?
+        // Let CoreVideo pick its own (aligned) bytesPerRow; we copy row-by-row using
+        // the created buffer's actual stride rather than assuming the source stride,
+        // which fixes a latent corruption bug when the two differ.
         let attrs: [CFString: Any] = [
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferWidthKey: frame.width,
             kCVPixelBufferHeightKey: frame.height,
-            kCVPixelBufferBytesPerRowAlignmentKey: frame.stride,
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA
         ]
         let status = CVPixelBufferCreate(kCFAllocatorDefault, frame.width, frame.height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pixelBuffer)
         guard status == kCVReturnSuccess, let buffer = pixelBuffer else { throw BGRAFrameBuilderError.bufferCreationFailed(status) }
-        let required = frame.stride * frame.height
-        guard frame.data.count >= required else { throw BGRAFrameBuilderError.dataUnderrun }
+
         CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        let dstStride = CVPixelBufferGetBytesPerRow(buffer)
         if let base = CVPixelBufferGetBaseAddress(buffer) {
-            let dst = base.bindMemory(to: UInt8.self, capacity: frame.stride * frame.height)
+            let dst = base.bindMemory(to: UInt8.self, capacity: dstStride * frame.height)
             frame.data.withUnsafeBytes { srcRaw in
-                let src = srcRaw.bindMemory(to: UInt8.self)
-                guard let srcBase = src.baseAddress else { return }
-                let rowBytes = min(frame.stride, frame.width * 4)
+                guard let srcBase = srcRaw.bindMemory(to: UInt8.self).baseAddress else { return }
+                // Copy only the visible bytes per row, bounded by both strides.
+                let rowBytes = min(srcStride, dstStride, frame.width * 4)
                 var sOff = 0
                 var dOff = 0
                 var row = 0
                 while row < frame.height {
                     memcpy(dst.advanced(by: dOff), srcBase.advanced(by: sOff), rowBytes)
-                    sOff += rowBytes
-                    dOff += frame.stride
+                    sOff += srcStride
+                    dOff += dstStride
                     row += 1
                 }
             }
         }
-        CVPixelBufferUnlockBaseAddress(buffer, [])
         return buffer
     }
 }

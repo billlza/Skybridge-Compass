@@ -36,6 +36,7 @@ async fn pump_events(
                         }
                         NativeWebRtcEvent::Keepalive { .. } => {}
                         NativeWebRtcEvent::TransportDisconnected { .. } => observed.push(event),
+                        NativeWebRtcEvent::InboundFileFrame(_) => {}
                     }
                 }
             }
@@ -53,6 +54,7 @@ async fn pump_events(
                         }
                         NativeWebRtcEvent::Keepalive { .. } => {}
                         NativeWebRtcEvent::TransportDisconnected { .. } => observed.push(event),
+                        NativeWebRtcEvent::InboundFileFrame(_) => {}
                     }
                 }
             }

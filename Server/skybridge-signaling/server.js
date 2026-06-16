@@ -16,7 +16,11 @@ const { AliyunSMSClient } = require('./lib/aliyun_sms');
 const { createSignalingStateBackend, unique } = require('./lib/signaling_state_backend');
 const { createMediaRelay, createSignedMediaLeaseToken } = require('./lib/media_relay');
 const { RegistryStore } = require('./lib/registry_store');
-const { buildIdempotencyFingerprint, clientIPForRequest } = require('./lib/request_security');
+const { buildIdempotencyFingerprint, clientIPForRequest, normalizeClientIP } = require('./lib/request_security');
+const {
+  allowsLegacyQueryTokenFromEnv,
+  extractWebSocketSessionCredentials
+} = require('./lib/websocket_credentials');
 const packageInfo = require('./package.json');
 
 const PORT = Number(process.env.PORT || 8443);
@@ -126,6 +130,8 @@ const WS_MAX_BYTES_PER_10S = Number(process.env.WS_MAX_BYTES_PER_10S || 128 * 10
 const WS_MAX_CLIENTS_PER_ROOM = Number(process.env.WS_MAX_CLIENTS_PER_ROOM || 2);
 const WS_MAX_BUFFERED_BYTES = Number(process.env.WS_MAX_BUFFERED_BYTES || 512 * 1024);
 const WS_HEARTBEAT_INTERVAL_MS = Number(process.env.WS_HEARTBEAT_INTERVAL_MS || 30_000);
+const DEFAULT_WS_ALLOW_LEGACY_QUERY_TOKEN = allowsLegacyQueryTokenFromEnv(process.env);
+let currentAllowLegacyQueryToken = DEFAULT_WS_ALLOW_LEGACY_QUERY_TOKEN;
 
 const SDP_MAX_BYTES = Number(process.env.SDP_MAX_BYTES || 12 * 1024);
 const ICE_CANDIDATE_MAX_BYTES = Number(process.env.ICE_CANDIDATE_MAX_BYTES || 2048);
@@ -206,7 +212,12 @@ const SIGNALING_WEBSOCKET_PATH = normalizeSignalingWebSocketPath(
   || process.env.SIGNALING_WEBSOCKET_PATH
   || '/ws'
 );
-const CLIENT_IP_HASH_SECRET = String(process.env.CLIENT_IP_HASH_SECRET || process.env.SIGNALING_IP_HASH_SECRET || 'skybridge-ip-hash').trim();
+const CLIENT_IP_HASH_SECRET_DEFAULT = 'skybridge-ip-hash';
+const CLIENT_IP_HASH_SECRET = String(process.env.CLIENT_IP_HASH_SECRET || process.env.SIGNALING_IP_HASH_SECRET || CLIENT_IP_HASH_SECRET_DEFAULT).trim();
+// True when no real secret was configured (empty or the built-in default). The
+// IP-hash keys per-IP rate-limit/quota buckets and the stored clientIpHash; a
+// publicly-known constant lets an attacker precompute/poison those buckets.
+const CLIENT_IP_HASH_SECRET_IS_DEFAULT = (CLIENT_IP_HASH_SECRET === '' || CLIENT_IP_HASH_SECRET === CLIENT_IP_HASH_SECRET_DEFAULT);
 const SUPABASE_SEND_SMS_HOOK_SECRET = String(
   process.env.SUPABASE_SEND_SMS_HOOK_SECRET
   || process.env.SEND_SMS_HOOK_SECRET
@@ -236,11 +247,287 @@ const MLDSA65_OID_DER = Buffer.from('608648016503040312', 'hex');
 const MLDSA_VERIFY_HELPER = String(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER || '').trim();
 const MLDSA_VERIFY_HELPER_TIMEOUT_MS = Number(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER_TIMEOUT_MS || 2000);
 const MLDSA_VERIFY_HELPER_MAX_CONCURRENT = Number(process.env.SKYBRIDGE_MLDSA_VERIFY_HELPER_MAX_CONCURRENT || 4);
+const TRUSTED_PROXY_MTLS_VERIFY_HEADER = 'x-skybridge-mtls-client-verify';
+const TRUSTED_PROXY_MTLS_CERT_HEADER = 'x-skybridge-mtls-client-cert-pem';
+const TRUSTED_PROXY_MTLS_CERT_HEADER_MAX_BYTES = 16 * 1024;
 
-const TLS_CERT = process.env.TLS_CERT || '';
-const TLS_KEY = process.env.TLS_KEY || '';
-const TLS_CA = process.env.TLS_CA || '';
-const USE_NODE_HTTPS = Boolean(TLS_CERT && TLS_KEY);
+function envFlagEnabled(value) {
+  return /^(1|true|yes)$/i.test(String(value || '').trim());
+}
+
+function isLoopbackHost(host) {
+  const normalized = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!normalized) return false;
+  if (normalized === 'localhost' || normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') {
+    return true;
+  }
+  const octets = normalized.split('.');
+  if (octets.length !== 4) return false;
+  const values = octets.map((octet) => {
+    if (!/^\d{1,3}$/.test(octet)) return NaN;
+    const value = Number(octet);
+    return value >= 0 && value <= 255 ? value : NaN;
+  });
+  return values.every(Number.isInteger) && values[0] === 127;
+}
+
+function normalizeMTLSClientCertificateSource(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+  if (!normalized || normalized === 'node' || normalized === 'node_tls') return 'node_tls';
+  if (normalized === 'trusted_proxy' || normalized === 'trusted_proxy_header' || normalized === 'proxy') {
+    return 'trusted_proxy';
+  }
+  throw new Error('invalid_mtls_client_cert_source');
+}
+
+function normalizeTrustedProxyRemoteAddress(value) {
+  return normalizeClientIP(value).toLowerCase();
+}
+
+function parseTrustedProxyRemoteAddresses(env, host) {
+  const configured = String(
+    env.SKYBRIDGE_SIGNALING_TRUSTED_PROXY_MTLS_REMOTE_ADDRESSES ||
+    env.SKYBRIDGE_SIGNALING_MTLS_TRUSTED_PROXY_ADDRESSES ||
+    ''
+  )
+    .split(',')
+    .map(normalizeTrustedProxyRemoteAddress)
+    .filter(Boolean);
+  if (configured.length > 0) return [...new Set(configured)];
+  return isLoopbackHost(host) ? ['127.0.0.1', '::1'] : [];
+}
+
+function resolveNodeHTTPSTransportPolicy(env = process.env) {
+  const certPath = String(env.TLS_CERT || '').trim();
+  const keyPath = String(env.TLS_KEY || '').trim();
+  const caPath = String(env.TLS_CA || '').trim();
+  const host = String(env.HOST || '0.0.0.0').trim() || '0.0.0.0';
+  const clientCertificateSource = normalizeMTLSClientCertificateSource(
+    env.SKYBRIDGE_SIGNALING_MTLS_CLIENT_CERT_SOURCE ||
+    env.SKYBRIDGE_SIGNALING_CLIENT_CERT_SOURCE ||
+    ''
+  );
+  const trustedProxyMTLSEnabled = clientCertificateSource === 'trusted_proxy'
+    || envFlagEnabled(
+      env.SKYBRIDGE_SIGNALING_TRUSTED_PROXY_MTLS ||
+      env.SIGNALING_TRUSTED_PROXY_MTLS ||
+      ''
+    );
+  const requireMTLS = envFlagEnabled(
+    env.SKYBRIDGE_SIGNALING_REQUIRE_MTLS ||
+    env.SIGNALING_REQUIRE_MTLS ||
+    ''
+  );
+
+  if ((certPath && !keyPath) || (!certPath && keyPath)) {
+    throw new Error('node_https_requires_tls_cert_and_key');
+  }
+  if (trustedProxyMTLSEnabled) {
+    if (!envFlagEnabled(env.TRUST_PROXY || '')) {
+      throw new Error('trusted_proxy_mtls_requires_trust_proxy');
+    }
+    if (caPath) {
+      throw new Error('trusted_proxy_mtls_must_not_set_tls_ca');
+    }
+    const trustedRemoteAddresses = parseTrustedProxyRemoteAddresses(env, host);
+    if (trustedRemoteAddresses.length === 0) {
+      throw new Error('trusted_proxy_mtls_requires_trusted_remote_addresses');
+    }
+    const useNodeHTTPS = Boolean(certPath && keyPath);
+    return {
+      mode: useNodeHTTPS ? 'https' : 'http',
+      useNodeHTTPS,
+      mtls: {
+        required: true,
+        source: 'trusted_proxy',
+        requestCert: false,
+        rejectUnauthorized: false
+      },
+      trustedProxyMTLS: {
+        verifyHeader: TRUSTED_PROXY_MTLS_VERIFY_HEADER,
+        certHeader: TRUSTED_PROXY_MTLS_CERT_HEADER,
+        trustedRemoteAddresses
+      },
+      paths: { certPath, keyPath, caPath }
+    };
+  }
+  if (!certPath && !keyPath) {
+    if (caPath) {
+      throw new Error('mtls_ca_requires_node_https_tls_cert_key');
+    }
+    if (requireMTLS) {
+      throw new Error('mtls_requires_node_https_tls_cert_key');
+    }
+    return {
+      mode: 'http',
+      useNodeHTTPS: false,
+      mtls: {
+        required: false,
+        source: 'none',
+        requestCert: false,
+        rejectUnauthorized: false
+      },
+      paths: { certPath, keyPath, caPath }
+    };
+  }
+
+  const mtlsRequired = Boolean(caPath) || requireMTLS;
+  if (mtlsRequired && !caPath) {
+    throw new Error('mtls_requires_tls_ca');
+  }
+
+  return {
+    mode: 'https',
+    useNodeHTTPS: true,
+    mtls: {
+      required: mtlsRequired,
+      source: mtlsRequired ? 'node_tls' : 'none',
+      requestCert: mtlsRequired,
+      rejectUnauthorized: mtlsRequired
+    },
+    paths: { certPath, keyPath, caPath }
+  };
+}
+
+function buildNodeHTTPSServerTLSOptions(policy, readFileSync = fs.readFileSync) {
+  if (!policy?.useNodeHTTPS) {
+    throw new Error('node_https_policy_not_enabled');
+  }
+  const tlsOptions = {
+    key: readFileSync(policy.paths.keyPath),
+    cert: readFileSync(policy.paths.certPath)
+  };
+  if (policy.mtls.source === 'node_tls' && policy.mtls.required) {
+    tlsOptions.ca = readFileSync(policy.paths.caPath);
+    tlsOptions.requestCert = true;
+    tlsOptions.rejectUnauthorized = true;
+  }
+  return tlsOptions;
+}
+
+function singleHeaderValue(headers, headerName) {
+  const value = headers?.[String(headerName || '').toLowerCase()];
+  if (Array.isArray(value)) {
+    return { ok: false, error: 'mtls_trusted_proxy_duplicate_header' };
+  }
+  const text = String(value || '').trim();
+  if (text.includes(',') || /[\x00-\x1F\x7F]/.test(text)) {
+    return { ok: false, error: 'mtls_trusted_proxy_invalid_header' };
+  }
+  return { ok: true, value: text };
+}
+
+function parseTrustedProxyClientCertificate(escapedPEM) {
+  const raw = String(escapedPEM || '').trim();
+  if (!raw || Buffer.byteLength(raw, 'utf8') > TRUSTED_PROXY_MTLS_CERT_HEADER_MAX_BYTES) {
+    return null;
+  }
+  let pem;
+  try {
+    pem = decodeURIComponent(raw);
+  } catch (_) {
+    return null;
+  }
+  if (
+    !pem.includes('-----BEGIN CERTIFICATE-----') ||
+    !pem.includes('-----END CERTIFICATE-----')
+  ) {
+    return null;
+  }
+  try {
+    const certificate = new crypto.X509Certificate(pem);
+    return {
+      fingerprint256: certificate.fingerprint256,
+      subject: certificate.subject || null,
+      issuer: certificate.issuer || null
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function remoteAddressForMTLSTrust(req) {
+  return normalizeTrustedProxyRemoteAddress(
+    req?.socket?.remoteAddress ||
+    req?.connection?.remoteAddress ||
+    ''
+  );
+}
+
+function resolveTrustedProxyPeerCertificate(
+  req,
+  policy,
+  parseCertificate = parseTrustedProxyClientCertificate
+) {
+  const remoteAddress = remoteAddressForMTLSTrust(req);
+  const trustedRemoteAddresses = new Set(
+    (policy?.trustedProxyMTLS?.trustedRemoteAddresses || [])
+      .map(normalizeTrustedProxyRemoteAddress)
+      .filter(Boolean)
+  );
+  if (!remoteAddress || !trustedRemoteAddresses.has(remoteAddress)) {
+    return { ok: false, error: 'mtls_untrusted_proxy_header_source' };
+  }
+  const verifyHeader = policy?.trustedProxyMTLS?.verifyHeader || TRUSTED_PROXY_MTLS_VERIFY_HEADER;
+  const certHeader = policy?.trustedProxyMTLS?.certHeader || TRUSTED_PROXY_MTLS_CERT_HEADER;
+  const verify = singleHeaderValue(req?.headers || {}, verifyHeader);
+  if (!verify.ok) return verify;
+  if (verify.value !== 'SUCCESS') {
+    return { ok: false, error: 'mtls_client_certificate_unverified' };
+  }
+  const cert = singleHeaderValue(req?.headers || {}, certHeader);
+  if (!cert.ok) return cert;
+  const certificate = parseCertificate(cert.value);
+  if (!certificate) {
+    return { ok: false, error: 'mtls_client_certificate_required' };
+  }
+  const fingerprint256 = String(certificate.fingerprint256 || '').trim();
+  if (!fingerprint256) {
+    return { ok: false, error: 'mtls_client_certificate_missing_fingerprint' };
+  }
+  return {
+    ok: true,
+    certificate: {
+      fingerprint256,
+      subject: certificate.subject || null,
+      issuer: certificate.issuer || null
+    }
+  };
+}
+
+function resolvePeerCertificateForMTLS(req, policy, parseTrustedProxyCertificate) {
+  if (!policy?.mtls?.required) {
+    return { ok: true, certificate: null };
+  }
+  if (policy.mtls.source === 'trusted_proxy') {
+    return resolveTrustedProxyPeerCertificate(req, policy, parseTrustedProxyCertificate);
+  }
+  const socket = req?.socket;
+  if (!socket || socket.authorized !== true) {
+    return { ok: false, error: 'mtls_client_certificate_required' };
+  }
+  const certificate = typeof socket.getPeerCertificate === 'function'
+    ? socket.getPeerCertificate()
+    : null;
+  if (!certificate || Object.keys(certificate).length === 0) {
+    return { ok: false, error: 'mtls_client_certificate_required' };
+  }
+  const fingerprint256 = String(certificate.fingerprint256 || '').trim();
+  if (!fingerprint256) {
+    return { ok: false, error: 'mtls_client_certificate_missing_fingerprint' };
+  }
+  return {
+    ok: true,
+    certificate: {
+      fingerprint256,
+      subject: certificate.subject || null,
+      issuer: certificate.issuer || null
+    }
+  };
+}
+
+const NODE_HTTPS_TRANSPORT_POLICY = resolveNodeHTTPSTransportPolicy(process.env);
+const USE_NODE_HTTPS = NODE_HTTPS_TRANSPORT_POLICY.useNodeHTTPS;
 
 function now() { return Date.now(); }
 
@@ -265,6 +552,50 @@ function secureStringEqual(left, right) {
   const rightBuf = Buffer.from(right, 'utf8');
   if (leftBuf.length !== rightBuf.length) return false;
   return crypto.timingSafeEqual(leftBuf, rightBuf);
+}
+
+function mtlsPeerCertificateStatusCode(errorCode) {
+  return String(errorCode || '') === 'mtls_untrusted_proxy_header_source' ? 403 : 401;
+}
+
+function mtlsClientCertificateFingerprintForRequest(req, policy = NODE_HTTPS_TRANSPORT_POLICY) {
+  const peerCertificate = resolvePeerCertificateForMTLS(req, policy);
+  if (!peerCertificate.ok) {
+    throw makeError(peerCertificate.error, mtlsPeerCertificateStatusCode(peerCertificate.error));
+  }
+  return peerCertificate.certificate?.fingerprint256 || null;
+}
+
+function mtlsBindingErrorForRecord(record, certificate, label, policy = NODE_HTTPS_TRANSPORT_POLICY) {
+  if (!policy?.mtls?.required) {
+    return null;
+  }
+  const actual = String(certificate?.fingerprint256 || '').trim();
+  if (!actual) {
+    return 'mtls_client_certificate_required';
+  }
+  const expected = String(record?.mtlsClientCertificateFingerprint256 || '').trim();
+  if (!expected) {
+    return `${label}_mtls_binding_missing`;
+  }
+  if (!secureStringEqual(expected, actual)) {
+    return `${label}_mtls_certificate_mismatch`;
+  }
+  return null;
+}
+
+function mtlsBindingStatusCode(errorCode) {
+  return String(errorCode || '').endsWith('_mismatch') ? 403 : 401;
+}
+
+function assertMTLSBindingForRecord(req, record, label, policy = NODE_HTTPS_TRANSPORT_POLICY) {
+  const fingerprint256 = mtlsClientCertificateFingerprintForRequest(req, policy);
+  const certificate = fingerprint256 ? { fingerprint256 } : null;
+  const bindingError = mtlsBindingErrorForRecord(record, certificate, label, policy);
+  if (bindingError) {
+    throw makeError(bindingError, mtlsBindingStatusCode(bindingError));
+  }
+  return fingerprint256;
 }
 
 function isPlainObject(value) {
@@ -327,6 +658,11 @@ function decodePublicKeyBytes(value) {
   }
 }
 
+function serializeURLHost(host) {
+  const normalized = String(host || '').replace(/^\[|\]$/g, '');
+  return normalized.includes(':') ? `[${normalized}]` : normalized;
+}
+
 function canonicalizeOrigin(raw) {
   let parsed;
   try {
@@ -337,13 +673,15 @@ function canonicalizeOrigin(raw) {
   const scheme = String(parsed.protocol || '').replace(/:$/, '').toLowerCase();
   const host = String(parsed.hostname || '').toLowerCase();
   if (!host || (scheme !== 'https' && scheme !== 'http')) return null;
+  if (scheme === 'http' && !isLoopbackHost(host)) return null;
   if (parsed.pathname && parsed.pathname !== '/') return null;
   if (parsed.search || parsed.hash) return null;
   const port = parsed.port ? Number(parsed.port) : null;
+  const serializedHost = serializeURLHost(host);
   if ((scheme === 'https' && (!port || port === 443)) || (scheme === 'http' && (!port || port === 80))) {
-    return `${scheme}://${host}`;
+    return `${scheme}://${serializedHost}`;
   }
-  return `${scheme}://${host}:${port}`;
+  return `${scheme}://${serializedHost}:${port}`;
 }
 
 function resolveSignalingServerOrigin({
@@ -353,8 +691,14 @@ function resolveSignalingServerOrigin({
   requestProtocol = 'https',
   host = ''
 } = {}) {
-  const configured = canonicalizeOrigin(configuredOrigin);
-  if (configured) return configured;
+  const configuredOriginText = String(configuredOrigin || '').trim();
+  if (configuredOriginText) {
+    const configured = canonicalizeOrigin(configuredOriginText);
+    if (!configured) {
+      throw new Error('invalid_signaling_server_origin');
+    }
+    return configured;
+  }
   if (requireConfiguredOrigin) {
     throw new Error('missing_signaling_server_origin');
   }
@@ -392,11 +736,35 @@ function redactSecretURLForLog(value) {
   }
 }
 
+const LOG_REDACTED = '<redacted>';
+
+function sessionLogIdForLog(sessionId) {
+  const normalized = String(sessionId || '').trim();
+  if (!normalized) return LOG_REDACTED;
+  return sha256Hex(normalized).slice(0, 16);
+}
+
+function safeLogErrorCode(error) {
+  return String(error?.code || error?.name || 'Error');
+}
+
+function redactedWSMetaForLog(meta) {
+  return {
+    session: meta?.sessionId ? LOG_REDACTED : null,
+    device: meta?.deviceId ? LOG_REDACTED : null,
+    role: meta?.role || null
+  };
+}
+
 function assertConfiguredSignalingServerOrigin() {
   if (!REQUIRE_CONFIGURED_SIGNALING_SERVER_ORIGIN) return;
-  const configured = canonicalizeOrigin(SIGNALING_SERVER_ORIGIN);
-  if (!configured) {
+  const rawConfigured = String(SIGNALING_SERVER_ORIGIN || '').trim();
+  if (!rawConfigured) {
     throw new Error('missing_signaling_server_origin');
+  }
+  const configured = canonicalizeOrigin(rawConfigured);
+  if (!configured) {
+    throw new Error('invalid_signaling_server_origin');
   }
 }
 
@@ -1004,6 +1372,24 @@ function classifySMSDeliveryFailure(error) {
   return { reason: 'provider_unknown_error', retryable: false, statusCode: 502, errorCode: 'sms_delivery_failed' };
 }
 
+// Fail closed in production when the IP-hash secret was never configured, mirroring
+// the SMS startup gate. A publicly-known default undermines per-IP rate limiting,
+// quota accounting, and the privacy of the stored clientIpHash.
+function assertClientIpHashSecretReadiness() {
+  const isProduction = (process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
+  if (!CLIENT_IP_HASH_SECRET_IS_DEFAULT) {
+    return;
+  }
+  if (isProduction) {
+    console.error('[startup] CLIENT_IP_HASH_SECRET is empty or the built-in default in production; refusing to start. Set a strong, unique CLIENT_IP_HASH_SECRET.');
+    const error = new Error('client_ip_hash_secret_not_configured');
+    error.code = 'client_ip_hash_secret_not_configured';
+    error.statusCode = 503;
+    throw error;
+  }
+  console.warn('[startup] CLIENT_IP_HASH_SECRET is using the built-in default; set a strong, unique secret before any production deployment.');
+}
+
 function assertSMSStartupReadiness() {
   const sms = collectSMSServiceSnapshot();
   if (sms.ready) {
@@ -1222,7 +1608,18 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
   if (user.isGuest) {
     throw makeError('guest_forbidden', 403);
   }
-  const tenantId = tenantIdFromRequest(req) || deriveTenantIdFromUser(user);
+  // A client-supplied tenant id (X-SkyBridge-Tenant-Id header / body / query) must
+  // never OVERRIDE the JWT-derived tenant. If both are present and disagree, reject:
+  // otherwise a forged header could pivot into another tenant — exploitable when
+  // SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY fabricates a public policy for any tenant.
+  // When the JWT carries no tenant (bootstrap), the supplied value is still honored.
+  const derivedTenantId = deriveTenantIdFromUser(user);
+  const requestedTenantId = tenantIdFromRequest(req);
+  if (requestedTenantId && derivedTenantId && requestedTenantId !== derivedTenantId) {
+    console.warn('[security] tenant id override rejected: header/body tenant does not match JWT-derived tenant');
+    throw makeError('tenant_id_mismatch', 403);
+  }
+  const tenantId = derivedTenantId || requestedTenantId;
   if (!tenantId) {
     throw makeError('missing_tenant_id', 400);
   }
@@ -1357,6 +1754,7 @@ function issueEphemeralTokenRecord({ kind, ttlMs, payload }) {
 
 async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
   const deviceSynthetic = Boolean(context.deviceSynthetic || context.deviceRecord?.synthetic);
+  const mtlsClientCertificateFingerprint256 = context.mtlsClientCertificateFingerprint256 || null;
   const sessionToken = issueEphemeralTokenRecord({
     kind: 'session_token',
     ttlMs: Math.max(1, expiresAt - now()),
@@ -1371,6 +1769,7 @@ async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
       deviceSynthetic,
       clientVersion: context.clientVersion,
       protocolVersion: context.protocolVersion,
+      mtlsClientCertificateFingerprint256,
       reclaimWindowMs: SESSION_RECLAIM_WINDOW_MS
     }
   });
@@ -1388,6 +1787,7 @@ async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
       deviceSynthetic,
       clientVersion: context.clientVersion,
       protocolVersion: context.protocolVersion,
+      mtlsClientCertificateFingerprint256,
       jti: base64url(crypto.randomBytes(16))
     }
   });
@@ -1404,7 +1804,8 @@ async function issueSessionArtifacts({ sessionId, role, context, expiresAt }) {
       protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
       deviceSynthetic,
       clientVersion: context.clientVersion,
-      protocolVersion: context.protocolVersion
+      protocolVersion: context.protocolVersion,
+      mtlsClientCertificateFingerprint256
     }
   });
   const sessionCreated = await signalingState.createEphemeral('session_token', sessionToken.tokenHash, sessionToken.record);
@@ -1504,7 +1905,10 @@ function logSessionLifecycle(sessionId, event, fields = {}) {
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
     .map(([key, value]) => `${key}=${value}`)
     .join(' ');
-  console.info(`[session] sessionLifecycle=${event} session=${sessionId}${suffix ? ` ${suffix}` : ''}`);
+  console.info(
+    `[session] sessionLifecycle=${event} sessionLogId=${sessionLogIdForLog(sessionId)} ` +
+    `session=${LOG_REDACTED}${suffix ? ` ${suffix}` : ''}`
+  );
 }
 
 function assertUniqueSessionParticipant(item, binding) {
@@ -1538,7 +1942,8 @@ function contextFromAdmission(admission) {
     },
     deviceSynthetic: Boolean(admission.deviceSynthetic),
     clientVersion: admission.clientVersion,
-    protocolVersion: admission.protocolVersion
+    protocolVersion: admission.protocolVersion,
+    mtlsClientCertificateFingerprint256: admission.mtlsClientCertificateFingerprint256 || null
   };
 }
 
@@ -1911,7 +2316,8 @@ async function issueMediaAdmissionArtifact({ sessionId, role, context }) {
       protocolPublicKeyFingerprint: context.protocolPublicKeyFingerprint,
       deviceSynthetic: context.deviceSynthetic,
       clientVersion: context.clientVersion,
-      protocolVersion: context.protocolVersion
+      protocolVersion: context.protocolVersion,
+      mtlsClientCertificateFingerprint256: context.mtlsClientCertificateFingerprint256 || null
     }
   });
   const created = await signalingState.createEphemeral(
@@ -2141,6 +2547,9 @@ async function consumeAdmissionToken(req, action) {
     throw makeError('missing_admission_token', 401);
   }
   const tokenHash = sha256Hex(rawToken);
+  const preview = await signalingState.getEphemeral('admission_token', tokenHash);
+  if (!preview) throw makeError('admission_token_expired', 401);
+  assertMTLSBindingForRecord(req, preview, 'admission_token');
   let consumeError = null;
   const record = await signalingState.updateEphemeral('admission_token', tokenHash, (current) => {
     if (current.state !== 'issued') {
@@ -2153,6 +2562,7 @@ async function consumeAdmissionToken(req, action) {
   });
   if (!record) throw makeError('admission_token_expired', 401);
   if (consumeError) throw makeError(consumeError, 409);
+  assertMTLSBindingForRecord(req, record, 'admission_token');
   return record;
 }
 
@@ -2176,6 +2586,7 @@ async function getTurnTokenRecord(req) {
   const tokenHash = sha256Hex(rawToken);
   const preview = await signalingState.getEphemeral('turn_admission_token', tokenHash);
   if (!preview) throw makeError('turn_admission_token_expired', 401);
+  assertMTLSBindingForRecord(req, preview, 'turn_admission_token');
   if (!(await isEphemeralTokenCurrent('turn_admission_token', preview, tokenHash))) {
     throw makeError('turn_admission_token_superseded', 401);
   }
@@ -2190,6 +2601,7 @@ async function getTurnTokenRecord(req) {
   });
   if (!record) throw makeError('turn_admission_token_expired', 401);
   if (consumeError) throw makeError(consumeError, 409);
+  assertMTLSBindingForRecord(req, record, 'turn_admission_token');
   return record;
 }
 
@@ -2201,10 +2613,12 @@ async function getMediaAdmissionRecord(req) {
   const tokenHash = sha256Hex(rawToken);
   const preview = await signalingState.getEphemeral('media_admission_token', tokenHash);
   if (!preview) throw makeError('media_admission_token_expired', 401);
+  assertMTLSBindingForRecord(req, preview, 'media_admission_token');
   if (!(await isEphemeralTokenCurrent('media_admission_token', preview, tokenHash))) {
     const diagnostics = await mediaTokenMismatchDiagnostics(preview, tokenHash);
     console.warn(
-      `[media] admission token superseded before lease session=${preview.sessionId || '-'} role=${preview.role || '-'} ` +
+      `[media] admission token superseded before lease ` +
+      `sessionLogId=${sessionLogIdForLog(preview.sessionId)} session=${LOG_REDACTED} role=${preview.role || '-'} ` +
       `requestGeneration=${diagnostics.mediaTokenRequestGeneration || '-'} ` +
       `expectedGeneration=${diagnostics.mediaTokenExpectedGeneration || '-'} ` +
       `expectedPresent=${diagnostics.mediaTokenExpectedPresent ? '1' : '0'} ` +
@@ -2229,6 +2643,7 @@ async function getMediaAdmissionRecord(req) {
   });
   if (!record) throw makeError('media_admission_token_expired', 401);
   if (updateError) throw makeError(updateError, updateError === 'media_admission_token_lease_limit' ? 429 : 409);
+  assertMTLSBindingForRecord(req, record, 'media_admission_token');
   return record;
 }
 
@@ -2312,6 +2727,9 @@ app.use(express.json({
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
+  // 反射式 ACAO 必须配合 Vary: Origin，否则共享/CDN 缓存可能把某一 origin 的
+  // Access-Control-Allow-Origin 复用给其他 origin，造成跨源缓存投毒。
+  res.setHeader('Vary', 'Origin');
   if (origin && CORS_ORIGIN) {
     const allowList = CORS_ORIGIN.split(',').map((item) => item.trim()).filter(Boolean);
     if (allowList.includes(origin)) {
@@ -2319,7 +2737,7 @@ app.use((req, res, next) => {
     }
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-SkyBridge-Tenant-Id, X-SkyBridge-Admission, X-SkyBridge-Turn-Admission, X-SkyBridge-Media-Admission, X-SkyBridge-Session, X-SkyBridge-Client-Version, X-SkyBridge-Protocol-Version');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-SkyBridge-Tenant-Id, X-SkyBridge-Admission, X-SkyBridge-Turn-Admission, X-SkyBridge-Media-Admission, X-SkyBridge-Session-Id, X-SkyBridge-Session, X-SkyBridge-Client-Version, X-SkyBridge-Protocol-Version');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', "default-src 'none'");
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -2454,7 +2872,7 @@ app.get('/', asyncRoute(async (req, res) => {
       '/api/media/lease',
       '/api/devices/enroll/first',
       '/api/devices/enroll/confirm',
-      `${SIGNALING_WEBSOCKET_PATH}?shard=<session_id>&st=<session_token>`
+      `${SIGNALING_WEBSOCKET_PATH}?shard=<session_id> with X-SkyBridge-Session-Id/X-SkyBridge-Session headers`
     ]
   });
 }));
@@ -2608,6 +3026,7 @@ app.post('/api/webrtc/admission/challenge', rlAdmission, asyncRoute(async (req, 
     throw makeError('challenge_disabled', 503);
   }
   await enforceChallengeQuotas(context);
+  const mtlsClientCertificateFingerprint256 = mtlsClientCertificateFingerprintForRequest(req);
   const challengeId = randomUUID();
   const challenge = {
     challengeId,
@@ -2620,7 +3039,8 @@ app.post('/api/webrtc/admission/challenge', rlAdmission, asyncRoute(async (req, 
     protocolVersion: context.protocolVersion,
     state: 'issued',
     issuedAt: now(),
-    expiresAt: now() + CHALLENGE_TTL_MS
+    expiresAt: now() + CHALLENGE_TTL_MS,
+    ...(mtlsClientCertificateFingerprint256 ? { mtlsClientCertificateFingerprint256 } : {})
   };
   const created = await signalingState.createEphemeral('challenge', challengeId, challenge);
   if (!created) {
@@ -2644,6 +3064,10 @@ app.post('/api/webrtc/admission', rlAdmission, asyncRoute(async (req, res) => {
   if (!secureStringEqual(publicBinding.protocolPublicKeyFingerprint, context.binding.protocolPublicKeyFingerprint)) {
     throw makeError('public_key_fingerprint_mismatch', 400);
   }
+  const mtlsClientCertificateFingerprint256 = mtlsClientCertificateFingerprintForRequest(req);
+  const mtlsCertificate = mtlsClientCertificateFingerprint256
+    ? { fingerprint256: mtlsClientCertificateFingerprint256 }
+    : null;
   let consumeError = null;
   const challenge = await signalingState.updateEphemeral('challenge', challengeId, (current) => {
     if (current.state !== 'issued') {
@@ -2661,11 +3085,21 @@ app.post('/api/webrtc/admission', rlAdmission, asyncRoute(async (req, res) => {
       consumeError = 'challenge_context_mismatch';
       return false;
     }
+    const mtlsBindingError = mtlsBindingErrorForRecord(current, mtlsCertificate, 'challenge');
+    if (mtlsBindingError) {
+      consumeError = mtlsBindingError;
+      return false;
+    }
     current.state = 'consumed';
     current.consumedAt = now();
   });
   if (!challenge) throw makeError('challenge_expired', 401);
-  if (consumeError) throw makeError(consumeError, 409);
+  if (consumeError) {
+    throw makeError(
+      consumeError,
+      consumeError.includes('_mtls_') ? mtlsBindingStatusCode(consumeError) : 409
+    );
+  }
   if (!await verifyChallengeSignature(publicBinding, signature, challenge)) {
     incrementSecurityCounter('admission_signature_rejected');
     throw makeError('admission_signature_invalid', 401);
@@ -2682,7 +3116,8 @@ app.post('/api/webrtc/admission', rlAdmission, asyncRoute(async (req, res) => {
       deviceSynthetic: Boolean(context.deviceRecord?.synthetic),
       clientVersion: context.clientVersion,
       protocolVersion: context.protocolVersion,
-      challengeId
+      challengeId,
+      mtlsClientCertificateFingerprint256
     }
   });
   const created = await signalingState.createEphemeral('admission_token', admission.tokenHash, admission.record);
@@ -2703,18 +3138,7 @@ app.post('/api/webrtc/register-code', rlControl, asyncRoute(async (req, res) => 
   }
   const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : null;
   const expiresAt = now() + clampSessionTtlMs(req.body?.ttlSeconds, CODE_TTL_MS);
-  const context = {
-    tenantId: admission.tenantId,
-    user: { id: admission.userId },
-    binding: {
-      deviceId: admission.deviceId,
-      protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
-      protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
-    },
-    deviceSynthetic: Boolean(admission.deviceSynthetic),
-    clientVersion: admission.clientVersion,
-    protocolVersion: admission.protocolVersion
-  };
+  const context = contextFromAdmission(admission);
   const artifacts = await issueSessionArtifacts({ sessionId: '', role: 'initiator', context, expiresAt });
   const code = await signalingState.createConnectionCode(generateCode, 10, buildConnectionRecord({
     initiatorContext: context,
@@ -2830,18 +3254,7 @@ app.post('/api/webrtc/register-session', rlControl, asyncRoute(async (req, res) 
     const requestedSessionId = String(req.body?.sessionId || '').trim();
     const sessionId = (SIGNALING_STATE_BACKEND === 'redis' && requestedSessionId) ? requestedSessionId : generateCode(Math.max(CODE_LEN + 8, 16));
     const expiresAt = now() + clampSessionTtlMs(req.body?.ttlSeconds, CODE_TTL_MS);
-    const context = {
-      tenantId: admission.tenantId,
-      user: { id: admission.userId },
-      binding: {
-        deviceId: admission.deviceId,
-        protocolSigningAlgorithm: admission.protocolSigningAlgorithm,
-        protocolPublicKeyFingerprint: admission.protocolPublicKeyFingerprint
-      },
-      deviceSynthetic: Boolean(admission.deviceSynthetic),
-      clientVersion: admission.clientVersion,
-      protocolVersion: admission.protocolVersion
-    };
+    const context = contextFromAdmission(admission);
     const artifacts = await issueSessionArtifacts({ sessionId, role: 'initiator', context, expiresAt });
     const qrBootstrapToken = newOpaqueToken(24);
     const created = await signalingState.createConnectionRecord(sessionId, buildConnectionRecord({
@@ -3066,85 +3479,87 @@ app.post('/api/media/admission/refresh', rlMedia, asyncRoute(async (req, res) =>
     return res.json(idempotency.existing.responseBody);
   }
   try {
-  const sessionTokenHash = sha256Hex(rawSessionToken);
-  const sessionToken = await signalingState.getEphemeral('session_token', sessionTokenHash);
-  if (!sessionToken) {
-    throw makeError('session_token_expired', 401);
-  }
-  if (!(await isEphemeralTokenCurrent('session_token', sessionToken, sessionTokenHash))) {
-    throw makeError('session_token_superseded', 401);
-  }
-  if (sessionToken.sessionId !== sessionId || sessionToken.role !== role) {
-    throw makeError('session_scope_mismatch', 403);
-  }
-
-  await assertPublicCapabilityAvailable('media_relay', sessionToken.tenantId);
-  const artifacts = await issueMediaAdmissionArtifact({
-    sessionId,
-    role,
-    context: sessionToken
-  });
-
-  let previousMediaAdmissionTokenHash = null;
-  let updatedConnection = false;
-  const updated = await signalingState.updateConnection(sessionId, (connection) => {
-    if (!connection || connection.revokedAt) {
-      return false;
+    const sessionTokenHash = sha256Hex(rawSessionToken);
+    const sessionToken = await signalingState.getEphemeral('session_token', sessionTokenHash);
+    if (!sessionToken) {
+      throw makeError('session_token_expired', 401);
     }
-    const currentSessionTokenHash = connectionRoleTokenHash(connection, role, 'session_token');
-    if (!currentSessionTokenHash || currentSessionTokenHash !== sessionTokenHash) {
-      return false;
+    assertMTLSBindingForRecord(req, sessionToken, 'session_token');
+    if (!(await isEphemeralTokenCurrent('session_token', sessionToken, sessionTokenHash))) {
+      throw makeError('session_token_superseded', 401);
     }
-    previousMediaAdmissionTokenHash = connectionRoleTokenHash(connection, role, 'media_admission_token');
-    if (role === 'initiator') {
-      connection.initiatorMediaAdmissionTokenHash = artifacts.mediaAdmissionTokenHash;
-    } else {
-      connection.responderMediaAdmissionTokenHash = artifacts.mediaAdmissionTokenHash;
+    if (sessionToken.sessionId !== sessionId || sessionToken.role !== role) {
+      throw makeError('session_scope_mismatch', 403);
     }
-    extendConnectionActiveUntil(connection);
-    updatedConnection = true;
-  });
 
-  if (!updated || !updatedConnection) {
-    await revokeEphemeralIfPresent('media_admission_token', artifacts.mediaAdmissionTokenHash, 'media_admission_refresh_aborted');
-    throw makeError('session_inactive', 403, { rejectReason: 'missingRecord' });
-  }
-  if (previousMediaAdmissionTokenHash && previousMediaAdmissionTokenHash !== artifacts.mediaAdmissionTokenHash) {
-    await revokeEphemeralIfPresent('media_admission_token', previousMediaAdmissionTokenHash, 'media_admission_refreshed');
-  }
-  logSessionLifecycle(sessionId, 'activeExtended', {
-    reason: 'mediaAdmissionRefresh',
-    activeUntil: connectionActiveUntil(updated)
-  });
+    await assertPublicCapabilityAvailable('media_relay', sessionToken.tenantId);
+    const artifacts = await issueMediaAdmissionArtifact({
+      sessionId,
+      role,
+      context: sessionToken
+    });
 
-  const expectedHashAfterRefresh = connectionRoleTokenHash(updated, role, 'media_admission_token');
-  const diagnostics = stripUndefinedFields(mediaTokenDiagnostics({
-    requestHash: artifacts.mediaAdmissionTokenHash,
-    expectedHash: expectedHashAfterRefresh,
-    tokenRecord: { state: 'issued', leaseCount: 0 }
-  }));
-  console.log(
-    `[media] admission refresh accepted session=${sessionId} role=${role} ` +
-    `refreshedGeneration=${diagnostics.mediaTokenGeneration || '-'} ` +
-    `expectedGeneration=${diagnostics.mediaTokenExpectedGeneration || '-'} ` +
-    `expectedPresent=${diagnostics.mediaTokenExpectedPresent ? '1' : '0'} ` +
-    `idempotency=${idempotencyKey ? '1' : '0'} serverBuild=${SERVER_BUILD_FINGERPRINT}`
-  );
+    let previousMediaAdmissionTokenHash = null;
+    let updatedConnection = false;
+    const updated = await signalingState.updateConnection(sessionId, (connection) => {
+      if (!connection || connection.revokedAt) {
+        return false;
+      }
+      const currentSessionTokenHash = connectionRoleTokenHash(connection, role, 'session_token');
+      if (!currentSessionTokenHash || currentSessionTokenHash !== sessionTokenHash) {
+        return false;
+      }
+      previousMediaAdmissionTokenHash = connectionRoleTokenHash(connection, role, 'media_admission_token');
+      if (role === 'initiator') {
+        connection.initiatorMediaAdmissionTokenHash = artifacts.mediaAdmissionTokenHash;
+      } else {
+        connection.responderMediaAdmissionTokenHash = artifacts.mediaAdmissionTokenHash;
+      }
+      extendConnectionActiveUntil(connection);
+      updatedConnection = true;
+    });
 
-  const responseBody = {
-    sessionId,
-    role,
-    mediaAdmissionToken: artifacts.mediaAdmissionToken,
-    expiresIn: Math.max(0, Math.round((artifacts.expiresAt - now()) / 1000)),
-    serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
-    supportsMediaAdmissionRefresh: true,
-    mediaTokenGeneration: artifacts.mediaAdmissionTokenHash.slice(0, 16),
-    mediaTokenRequestGeneration: diagnostics.mediaTokenRequestGeneration,
-    mediaTokenExpectedGeneration: diagnostics.mediaTokenExpectedGeneration,
-    mediaTokenExpectedPresent: diagnostics.mediaTokenExpectedPresent
-  };
-  await completeIdempotencyGuard(idempotency, responseBody);
-  res.json(responseBody);
+    if (!updated || !updatedConnection) {
+      await revokeEphemeralIfPresent('media_admission_token', artifacts.mediaAdmissionTokenHash, 'media_admission_refresh_aborted');
+      throw makeError('session_inactive', 403, { rejectReason: 'missingRecord' });
+    }
+    if (previousMediaAdmissionTokenHash && previousMediaAdmissionTokenHash !== artifacts.mediaAdmissionTokenHash) {
+      await revokeEphemeralIfPresent('media_admission_token', previousMediaAdmissionTokenHash, 'media_admission_refreshed');
+    }
+    logSessionLifecycle(sessionId, 'activeExtended', {
+      reason: 'mediaAdmissionRefresh',
+      activeUntil: connectionActiveUntil(updated)
+    });
+
+    const expectedHashAfterRefresh = connectionRoleTokenHash(updated, role, 'media_admission_token');
+    const diagnostics = stripUndefinedFields(mediaTokenDiagnostics({
+      requestHash: artifacts.mediaAdmissionTokenHash,
+      expectedHash: expectedHashAfterRefresh,
+      tokenRecord: { state: 'issued', leaseCount: 0 }
+    }));
+    console.log(
+      `[media] admission refresh accepted ` +
+      `sessionLogId=${sessionLogIdForLog(sessionId)} session=${LOG_REDACTED} role=${role} ` +
+      `refreshedGeneration=${diagnostics.mediaTokenGeneration || '-'} ` +
+      `expectedGeneration=${diagnostics.mediaTokenExpectedGeneration || '-'} ` +
+      `expectedPresent=${diagnostics.mediaTokenExpectedPresent ? '1' : '0'} ` +
+      `idempotency=${idempotencyKey ? '1' : '0'} serverBuild=${SERVER_BUILD_FINGERPRINT}`
+    );
+
+    const responseBody = {
+      sessionId,
+      role,
+      mediaAdmissionToken: artifacts.mediaAdmissionToken,
+      expiresIn: Math.max(0, Math.round((artifacts.expiresAt - now()) / 1000)),
+      serverBuildFingerprint: SERVER_BUILD_FINGERPRINT,
+      supportsMediaAdmissionRefresh: true,
+      mediaTokenGeneration: artifacts.mediaAdmissionTokenHash.slice(0, 16),
+      mediaTokenRequestGeneration: diagnostics.mediaTokenRequestGeneration,
+      mediaTokenExpectedGeneration: diagnostics.mediaTokenExpectedGeneration,
+      mediaTokenExpectedPresent: diagnostics.mediaTokenExpectedPresent
+    };
+    await completeIdempotencyGuard(idempotency, responseBody);
+    res.json(responseBody);
   } catch (error) {
     await cancelIdempotencyGuard(idempotency);
     throw error;
@@ -3177,7 +3592,8 @@ app.post('/api/media/lease', rlMedia, asyncRoute(async (req, res) => {
       sessionPresent: true
     }));
     console.warn(
-      `[media] admission token superseded at lease session=${mediaToken.sessionId || '-'} role=${mediaToken.role || '-'} ` +
+      `[media] admission token superseded at lease ` +
+      `sessionLogId=${sessionLogIdForLog(mediaToken.sessionId)} session=${LOG_REDACTED} role=${mediaToken.role || '-'} ` +
       `requestGeneration=${diagnostics.mediaTokenRequestGeneration || '-'} ` +
       `expectedGeneration=${diagnostics.mediaTokenExpectedGeneration || '-'} ` +
       `expectedPresent=${diagnostics.mediaTokenExpectedPresent ? '1' : '0'} ` +
@@ -3304,12 +3720,10 @@ for (const path of ['/api/register', '/api/lookup/:code', '/api/answer/:code', '
 
 const server = (() => {
   if (!USE_NODE_HTTPS) return http.createServer(app);
-  const tlsOptions = {
-    key: fs.readFileSync(TLS_KEY),
-    cert: fs.readFileSync(TLS_CERT)
-  };
-  if (TLS_CA) tlsOptions.ca = fs.readFileSync(TLS_CA);
-  return https.createServer(tlsOptions, app);
+  return https.createServer(
+    buildNodeHTTPSServerTLSOptions(NODE_HTTPS_TRANSPORT_POLICY),
+    app
+  );
 })();
 
 let wss = null;
@@ -3322,21 +3736,40 @@ wss = new WebSocketServer({
 
 wss.on('connection', (ws, req) => {
   void (async () => {
-    const requestURL = new URL(req.url, 'http://skybridge.local');
-    const sessionId = String(requestURL.searchParams.get('shard') || '').trim();
-    const sessionToken = String(requestURL.searchParams.get('st') || '').trim();
-    const clientVersion = normalizeVersion(requestURL.searchParams.get('cv') || '0.0.0');
-    const protocolVersion = normalizeVersion(requestURL.searchParams.get('pv') || '0');
-    if (!sessionId || !sessionToken) {
-      incrementSecurityCounter('ws_1008_missing_token');
-      ws.close(1008, 'missing_session_token');
+    const peerCertificate = resolvePeerCertificateForMTLS(req, NODE_HTTPS_TRANSPORT_POLICY);
+    if (!peerCertificate.ok) {
+      incrementSecurityCounter(`ws_1008_${peerCertificate.error}`);
+      ws.close(1008, peerCertificate.error);
       return;
     }
+    const requestURL = new URL(req.url, 'http://skybridge.local');
+    const credentials = extractWebSocketSessionCredentials(req, requestURL, {
+      allowLegacyQueryToken: currentAllowLegacyQueryToken
+    });
+    if (credentials.error) {
+      incrementSecurityCounter(`ws_1008_${credentials.error}`);
+      ws.close(1008, credentials.error);
+      return;
+    }
+    const {
+      sessionId,
+      sessionToken,
+      clientVersion: rawClientVersion,
+      protocolVersion: rawProtocolVersion
+    } = credentials;
+    const clientVersion = normalizeVersion(rawClientVersion);
+    const protocolVersion = normalizeVersion(rawProtocolVersion);
     const tokenHash = sha256Hex(sessionToken);
     const tokenPreview = await signalingState.getEphemeral('session_token', tokenHash);
     if (!tokenPreview) {
       incrementSecurityCounter('ws_1008_expired_token');
       ws.close(1008, 'session_token_expired');
+      return;
+    }
+    const previewMTLSBindingError = mtlsBindingErrorForRecord(tokenPreview, peerCertificate.certificate, 'session_token');
+    if (previewMTLSBindingError) {
+      incrementSecurityCounter(`ws_1008_${previewMTLSBindingError}`);
+      ws.close(1008, previewMTLSBindingError);
       return;
     }
     if (!(await isEphemeralTokenCurrent('session_token', tokenPreview, tokenHash))) {
@@ -3361,6 +3794,11 @@ wss.on('connection', (ws, req) => {
     const boundToken = await signalingState.updateEphemeral('session_token', tokenHash, (record) => {
       if (record.sessionId !== sessionId) {
         bindError = 'session_scope_mismatch';
+        return false;
+      }
+      const recordMTLSBindingError = mtlsBindingErrorForRecord(record, peerCertificate.certificate, 'session_token');
+      if (recordMTLSBindingError) {
+        bindError = recordMTLSBindingError;
         return false;
       }
       if (record.state === 'issued') {
@@ -3424,6 +3862,7 @@ wss.on('connection', (ws, req) => {
       deviceId: boundToken.deviceId,
       role: boundToken.role,
       protocolPublicKeyFingerprint: boundToken.protocolPublicKeyFingerprint,
+      clientCertificateFingerprint256: peerCertificate.certificate?.fingerprint256 || null,
       tenantId: boundToken.tenantId,
       userId: boundToken.userId,
       tokenHash,
@@ -3442,7 +3881,7 @@ wss.on('connection', (ws, req) => {
     });
     wsSendRaw(ws, { type: 'bound', sessionId, role: boundToken.role, clientId });
   })().catch((error) => {
-    console.error('[WS] handshake failed:', error.message);
+    console.error('[WS] handshake failed:', safeLogErrorCode(error));
     incrementSecurityCounter('ws_1008_handshake_failed');
     try { ws.close(1008, 'handshake_failed'); } catch (_) {}
   });
@@ -3452,9 +3891,8 @@ wss.on('connection', (ws, req) => {
     void renewRoomMembershipLease(ws).catch((error) => {
       const meta = wsMeta.get(ws);
       console.warn('[WS] heartbeat lease refresh failed:', {
-        sessionId: meta?.sessionId || null,
-        deviceId: meta?.deviceId || null,
-        message: error?.message || String(error)
+        ...redactedWSMetaForLog(meta),
+        error: safeLogErrorCode(error)
       });
     });
   });
@@ -3532,9 +3970,8 @@ wss.on('connection', (ws, req) => {
           );
         } catch (error) {
           console.warn('[WS] ICE usage tracking degraded:', {
-            sessionId: meta.sessionId,
-            deviceId: meta.deviceId,
-            reason: error?.message || String(error)
+            ...redactedWSMetaForLog(meta),
+            reason: safeLogErrorCode(error)
           });
           incrementSecurityCounter('ice_usage_tracking_degraded');
           // 降级期间用进程内兜底限额，不得无条件接受（fail-open）。
@@ -3552,8 +3989,7 @@ wss.on('connection', (ws, req) => {
           const reason = usage.reason || 'ice_limit';
           incrementSecurityCounter('ice_candidate_dropped');
           console.warn('[WS] ICE candidate dropped without revoking session:', {
-            sessionId: meta.sessionId,
-            deviceId: meta.deviceId,
+            ...redactedWSMetaForLog(meta),
             reason
           });
           wsSendRaw(ws, {
@@ -3584,11 +4020,8 @@ wss.on('connection', (ws, req) => {
     })().catch((error) => {
       const meta = wsMeta.get(ws);
       console.error('[WS] message failed:', {
-        sessionId: meta?.sessionId || null,
-        deviceId: meta?.deviceId || null,
-        role: meta?.role || null,
-        message: error?.message || String(error),
-        stack: error?.stack || null
+        ...redactedWSMetaForLog(meta),
+        error: safeLogErrorCode(error)
       });
       incrementSecurityCounter('ws_server_error');
       try { wsSendRaw(ws, { type: 'error', error: 'server_error' }); } catch (_) {}
@@ -3597,16 +4030,15 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     void removeFromRooms(ws).catch((error) => {
-      console.error('[WS] close cleanup failed:', error.message);
+      console.error('[WS] close cleanup failed:', safeLogErrorCode(error));
     });
   });
 
   ws.on('error', (error) => {
     const meta = wsMeta.get(ws);
     console.warn('[WS] transport error:', {
-      sessionId: meta?.sessionId || null,
-      deviceId: meta?.deviceId || null,
-      message: error?.message || String(error)
+      ...redactedWSMetaForLog(meta),
+      error: safeLogErrorCode(error)
     });
   });
 });
@@ -3664,6 +4096,7 @@ async function startRuntime({ port = PORT, host = HOST } = {}) {
   await signalingState.init(handleBackendInstanceMessage);
   await refreshRuntimeProtection();
   const mediaRelayAddress = mediaRelay ? await mediaRelay.start() : null;
+  assertClientIpHashSecretReadiness();
   const smsStartup = assertSMSStartupReadiness();
   return await new Promise((resolve, reject) => {
     const onError = (error) => {
@@ -3683,7 +4116,7 @@ async function startRuntime({ port = PORT, host = HOST } = {}) {
         console.warn('[startup] memory state backend is single-instance only; do not deploy behind a multi-instance load balancer');
       }
       console.log(`SMS: provider=${smsStartup.provider} ready=${smsStartup.ready} hookConfigured=${smsStartup.hookConfigured} providerConfigured=${smsStartup.providerConfigured} required=${smsStartup.required}`);
-      console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${port}${SIGNALING_WEBSOCKET_PATH}?shard=<session_id>&st=<session_token>`);
+      console.log(`WS: ${USE_NODE_HTTPS ? 'wss' : 'ws'}://<host>:${port}${SIGNALING_WEBSOCKET_PATH}?shard=<session_id> headers=X-SkyBridge-Session-Id,X-SkyBridge-Session`);
       if (mediaRelayAddress) {
         console.log(`Media relay: udp://${mediaRelayAddress.host}:${mediaRelayAddress.port} maxPacketBytes=${MEDIA_RELAY_MAX_PACKET_BYTES}`);
       } else if (hasExternalMediaRelay()) {
@@ -3705,7 +4138,8 @@ function createRuntime(options = {}) {
     smsClientOverride,
     trustProxy = TRUST_PROXY,
     requireSharedStateForPublicCapabilities = REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES,
-    allowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH
+    allowBootstrapDeviceAuth = SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH,
+    allowLegacyQueryToken = DEFAULT_WS_ALLOW_LEGACY_QUERY_TOKEN
   } = options;
   if (signalingStateOverride) {
     signalingState = signalingStateOverride;
@@ -3719,6 +4153,7 @@ function createRuntime(options = {}) {
   currentTrustProxy = trustProxy;
   currentRequireSharedStateForPublicCapabilities = requireSharedStateForPublicCapabilities;
   currentAllowBootstrapDeviceAuth = allowBootstrapDeviceAuth;
+  currentAllowLegacyQueryToken = allowLegacyQueryToken === true;
   app.set('trust proxy', trustProxy ? 1 : false);
   rooms.clear();
   securityCounters.clear();
@@ -3755,12 +4190,19 @@ if (require.main === module) {
 module.exports = {
   createRuntime,
   __test: {
+    assertMTLSBindingForRecord,
+    buildNodeHTTPSServerTLSOptions,
     buildSupabaseSMSHookVerifier,
     classifySMSDeliveryFailure,
     closeSlowConsumer,
     collectSMSServiceSnapshot,
-    redactSecretURLForLog,
     evaluateServiceHealth,
+    mtlsBindingErrorForRecord,
+    mtlsClientCertificateFingerprintForRequest,
+    parseTrustedProxyClientCertificate,
+    redactSecretURLForLog,
+    resolveNodeHTTPSTransportPolicy,
+    resolvePeerCertificateForMTLS,
     resolveSignalingServerOrigin,
     renewRoomMembershipLease,
     wsSendRaw,

@@ -6,7 +6,7 @@ SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
 
 这是 SkyBridge Compass Pro 的 iOS 版本，和 macOS 端共享核心协议契约；已验证能力与实验性能力会按路径分别标注，避免把所有链路都描述成同一安全/鲁棒性水位。当前支持：
 
-- **后量子密码学 (PQC)** 加密握手和通信
+- **后量子密码学 (PQC) 能力路径**：仅在 symbol probe、compile gate、runtime self-test、信任材料与协商 suite 都满足时用于握手/通信；否则按策略走 liboqs 或 non-PQC compatibility path
 - **跨平台 P2P 连接**：iOS ↔ macOS ↔ 其他设备
 - **设备发现与管理**
 - **远程桌面查看与控制**（触摸优化）
@@ -18,9 +18,9 @@ SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
 ## 系统要求
 
 - **iOS 17.0+**（运行目标）  
-- **iOS 26 SDK +**（仅当你要启用 Apple CryptoKit PQC：ML‑KEM/ML‑DSA）
+- **iOS 26+ SDK**（仅当你要启用 Apple CryptoKit PQC：ML‑KEM/ML‑DSA；iOS 27 beta 走同一编译条件）
 - **iPadOS 17.0+**
-- **Xcode 26.4+**
+- **Xcode 26.5+**（正式发布/CI 基线；Xcode 27 beta 仅用于手动 OS 27 兼容验证）
 - **Swift 6.3+**
 
 ## 技术栈
@@ -34,8 +34,8 @@ SkyBridge Compass 的 iOS 版本 - 跨平台设备管理与远程控制应用
 - WidgetKit (小组件)
 
 ### 共享模块
-**注意**：iOS 版本已改为 **完全自包含（Standalone）**，不再通过符号链接/父目录 SwiftPM 引用去“复用 macOS 工程的 SkyBridgeCore”。
-核心逻辑已内置在 `SkyBridgeCompassiOS/Sources/Core`（并保持与论文协议/线格式兼容）。
+**注意**：iOS 版本是 **自包含（self-contained）** 的——不再通过符号链接/父目录 SwiftPM 引用去“复用 macOS 工程的 SkyBridgeCore”，核心逻辑内置在 `SkyBridgeCompassiOS/Sources/Core`。
+但需明确：协议层（握手、wire、信令、QR、文件传输，约 60 个同名文件）目前是**从 macOS 端手工复制后独立演化**的，部分文件已实质分叉（如 `TwoAttemptHandshakeManager`），两端线格式兼容性当前依赖人工纪律 + parity 测试而非类型系统。这是跨平台稳定协议边界的最大回归风险，缓解计划见 [`Docs/CoreLayering.md`](../Docs/CoreLayering.md)（短期 CI 哈希比对防漂移；长期让 iOS 直接消费 `SkyBridgeProtocolCore`）。
 
 ### iOS 专属
 - **SkyBridgeUI_iOS**: iOS 优化的用户界面
@@ -64,7 +64,7 @@ SkyBridge Compass iOS/
 ## 与 macOS 版本的互通性
 
 ### PQC 握手协议
-目标是让 iOS 和 macOS 使用相同的后量子密码学协议。当前仓库中随附的 **Xcode 工程** 已经对 `iphoneos26*` / `iphonesimulator26*` 自动启用 `HAS_APPLE_PQC_SDK`，因此在 iOS 26 SDK 下构建时会优先走 Apple CryptoKit PQC 路径；若改用旧 SDK 或其它构建入口，再按能力与信任材料回落。
+目标是让 iOS 和 macOS 使用相同的后量子密码学协议。当前仓库中随附的 **Xcode 工程** 只保留 `SKYBRIDGE_APPLE_PQC_SDK_CONDITION` 接入口；只有通过 Apple PQC symbol probe 的构建 lane 才会显式传入 `HAS_APPLE_PQC_SDK`，避免把 SDK 大版本当成 CryptoKit PQC 可用证明。
 
 - **密钥交换**: ML-KEM-768 / Kyber768
 - **签名验证**: ML-DSA-65 / Dilithium3
@@ -76,11 +76,11 @@ SkyBridge Compass iOS/
 
 #### 当前“实际协商”的 suite（你现在跑起来看到的）
 - **在随仓库提交的 `SkyBridgeCompass-iOS.xcodeproj` 中**：
-  - 使用 **iOS 26 SDK** 构建时，会自动定义 `HAS_APPLE_PQC_SDK`
+  - 使用通过 Apple PQC symbol probe 的构建入口时，会显式传入 `SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK`
   - 运行时满足 `#available(iOS 26.0, *)` 时，优先尝试 Apple PQC provider
 - **仍可能看到 Classic**：
   - 使用旧 SDK 构建
-  - 改用未带该编译条件的其它构建入口
+  - 改用未运行 Apple PQC symbol probe 或未显式传入该 build setting 的其它构建入口
   - 或虽然 provider 可用，但缺少对端 KEM 公钥信任材料
 
 #### 为什么“有 ApplePQCCryptoProvider 还不一定能走 PQC suite”
@@ -102,7 +102,7 @@ macOS 端已经有 `TrustSyncService/TrustRecord`；iOS 端目前还没有完整
 
 1. **本地网络发现**: Bonjour + NWBrowser
 2. **跨网络连接**: WebRTC ICE（`turns:5349` 优先，`turn:3478` 兜底）
-3. **加密通道**: TLS 1.3 + PQC 层
+3. **加密通道**: TLS 1.3/WebRTC + 应用层加密；PQC 只在 runtime-negotiated suite 与信任/KEM 材料证明后声明
 
 ### TURN（iOS + macOS 互通）策略
 
@@ -186,7 +186,7 @@ iOS 端已与 macOS 对齐同一组 Nebula 键：
 
 - [x] 项目结构创建
 - [ ] 设备发现（本地 + iCloud）
-- [ ] PQC 握手与加密通信
+- [ ] PQC runtime-negotiated 握手与加密通信证明
 - [ ] 远程桌面查看（触摸控制）
 - [ ] 文件传输（Files app 集成）
 - [ ] 剪贴板同步
@@ -228,7 +228,7 @@ if #available(iOS 26, *) {
 
 ## 安全性
 
-- 端到端 PQC 加密
+- 端到端加密；PQC 只在 runtime-negotiated suite 已证明时声明
 - 零知识认证
 - 设备信任链验证
 - 安全飞地 (Secure Enclave) 集成

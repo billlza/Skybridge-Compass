@@ -1031,7 +1031,7 @@
 "remoteControl.securityNotice.appName" = "SkyBridge Compass";
 "remoteControl.securityNotice.pendingTitle" = "%@ がリモート制御の承認を求めています";
 "remoteControl.securityNotice.activeTitle" = "%@ はリモート制御されています";
-"remoteControl.securityNotice.subtitle" = "受信 %@ リモート制御は量子安全/PQC 暗号で保護されています。";
+"remoteControl.securityNotice.subtitle" = "受信 %@ リモート制御は認証済み暗号化チャネルを使用します。PQC はネゴシエート済みスイートで証明された場合のみ表示されます。";
 "remoteControl.securityNotice.transport.p2p" = "P2P";
 "remoteControl.securityNotice.transport.webrtc" = "WebRTC";
 "remoteControl.securityNotice.remoteIP" = "IP";

@@ -164,6 +164,21 @@ final class WebRTCInboundFileTransferSupportTests: XCTestCase {
         XCTAssertNil(WebRTCInboundFileTransferSupport.integrityFailure(state: state, receiveKey: receiveKey))
     }
 
+    func testIntegrityValidationFailsClosedWhenExpectedHashCannotBeRead() throws {
+        let fixture = try makeState(fileSize: 512, chunkSize: 512, totalChunks: 1)
+        var state = fixture.state
+        try state.handle.close()
+        try FileManager.default.removeItem(at: state.tempURL)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        state.expectedFileSha256 = Data(repeating: 0, count: 32)
+
+        XCTAssertEqual(
+            WebRTCInboundFileTransferSupport.integrityFailure(state: state, receiveKey: Data(repeating: 7, count: 32)),
+            .fileSHA256Unavailable
+        )
+    }
+
     func testSHA256FileStreamsExpectedDigest() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WebRTCInboundFileTransferSupportTests-\(UUID().uuidString)", isDirectory: true)
@@ -175,7 +190,7 @@ final class WebRTCInboundFileTransferSupportTests: XCTestCase {
         try data.write(to: url)
 
         XCTAssertEqual(
-            WebRTCInboundFileTransferSupport.sha256File(at: url),
+            try WebRTCInboundFileTransferSupport.sha256File(at: url),
             Data(SHA256.hash(data: data))
         )
     }
@@ -186,18 +201,34 @@ final class WebRTCInboundFileTransferSupportTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        XCTAssertEqual(WebRTCInboundFileTransferSupport.sanitizedFileName("../secret.txt"), "secret.txt")
+        XCTAssertEqual(WebRTCInboundFileTransferSupport.sanitizedFileName("../secret.txt"), "SkyBridgeFile")
         XCTAssertEqual(WebRTCInboundFileTransferSupport.sanitizedFileName("   "), "SkyBridgeFile")
+        XCTAssertEqual(
+            WebRTCInboundFileTransferSupport.validateMetadata(
+                fileName: "../secret.txt",
+                fileSize: 1,
+                chunkSize: 1,
+                totalChunks: 1
+            ),
+            "Invalid metadata (unsafe fileName)"
+        )
 
         let existing = directory.appendingPathComponent("report.pdf")
         FileManager.default.createFile(atPath: existing.path, contents: Data())
 
         XCTAssertEqual(
-            WebRTCInboundFileTransferSupport.uniqueDestinationURL(
+            try WebRTCInboundFileTransferSupport.uniqueDestinationURL(
                 baseDirectory: directory,
                 fileName: "report.pdf"
             ).lastPathComponent,
             "report (1).pdf"
+        )
+
+        XCTAssertThrowsError(
+            try WebRTCInboundFileTransferSupport.uniqueDestinationURL(
+                baseDirectory: directory,
+                fileName: "../report.pdf"
+            )
         )
     }
 

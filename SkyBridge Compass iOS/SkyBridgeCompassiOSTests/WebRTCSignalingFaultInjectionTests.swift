@@ -4,6 +4,20 @@ import XCTest
 
 @available(iOS 17.0, *)
 final class WebRTCSignalingFaultInjectionTests: XCTestCase {
+    func testSignalServerRejectedDescriptionRedactsResponseBody() {
+        let error = SignalServerClientCompat.ClientError.serverRejected(
+            503,
+            #"{"error":"session_inactive","message":"session-token-secret","sessionToken":"abc"}"#
+        )
+        let description = error.localizedDescription
+
+        XCTAssertTrue(description.contains("503"))
+        XCTAssertTrue(description.contains("<redacted-server-error-body>"))
+        XCTAssertFalse(description.contains("session_inactive"))
+        XCTAssertFalse(description.contains("session-token-secret"))
+        XCTAssertFalse(description.contains("sessionToken"))
+    }
+
     func testInboundFrameParserReassemblesValidFragmentedPayload() {
         var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 1024)
         let payload = Data("hello-webrtc".utf8)
@@ -249,8 +263,30 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
             let url = URL(string: "wss://api.example.com/ws?shard=ROOM1234&st=secret-token&cv=1.0&pv=1")!
             let redacted = WebSocketSignalingClient.redactedURLString(url)
             XCTAssertFalse(redacted.contains("secret-token"))
+            XCTAssertFalse(redacted.contains("ROOM1234"))
             XCTAssertTrue(redacted.contains("st=%3Credacted%3E") || redacted.contains("st=<redacted>"))
+            XCTAssertTrue(redacted.contains("shard=%3Credacted%3E") || redacted.contains("shard=<redacted>"))
         }.value
+    }
+
+    func testCurrentPathWebSocketHeadersCarrySessionTokenOutsideURL() {
+        let headers = CrossNetworkWebRTCManager.currentPathSignalingWebSocketHeaders(
+            sessionID: "room123",
+            sessionToken: "session-token",
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        )
+        XCTAssertEqual(headers?["X-SkyBridge-Session-Id"], "ROOM123")
+        XCTAssertEqual(headers?["X-SkyBridge-Session"], "session-token")
+        XCTAssertEqual(headers?["X-SkyBridge-Client-Version"], "1.2.3")
+        XCTAssertEqual(headers?["X-SkyBridge-Protocol-Version"], "2")
+
+        XCTAssertNil(CrossNetworkWebRTCManager.currentPathSignalingWebSocketHeaders(
+            sessionID: "room123",
+            sessionToken: "session-token\r\nInjected: value",
+            clientVersion: "1.2.3",
+            protocolVersion: "2"
+        ))
     }
 
     func testWebSocketSignalingClientAllocatesDistinctHandleGenerationsPerAttempt() async {
@@ -477,6 +513,29 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     }
 
     @MainActor
+    func testSessionScopedSignalingURLRejectsPublicCleartextButAllowsLoopback() {
+        XCTAssertNil(
+            CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
+                signalingOrigin: "http://signal.example.com:8080",
+                signalingWebSocketPath: "/tenant/ws"
+            )
+        )
+
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
+                signalingOrigin: "http://127.0.0.1:8787",
+                signalingWebSocketPath: "/tenant/ws"
+            ),
+            "ws://127.0.0.1:8787/tenant/ws"
+        )
+
+        XCTAssertEqual(
+            try CurrentPathSecurityCompat.canonicalOrigin("http://[::1]:8787"),
+            "http://[::1]:8787"
+        )
+    }
+
+    @MainActor
     func testSessionScopedSignalingURLFailsClosedForInvalidOrigin() {
         let resolved = CrossNetworkWebRTCManager.resolvedSignalingWebSocketURLString(
             signalingOrigin: "not a url",
@@ -551,6 +610,29 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         XCTAssertFalse(source.contains("cacheCurrentPathSignalingEndpoint("))
     }
 
+    func testStrictPQCRekeyRequiresSignedCurrentPathKEMLookup() throws {
+        let source = try repositorySource(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        guard let startRange = source.range(of: "func maybeStartPQCRekeyOverWebRTC("),
+              let endRange = source.range(of: "\n}\n\n@available(iOS 17.0, *)\nprivate extension CrossNetworkWebRTCManager", range: startRange.upperBound..<source.endIndex) else {
+            XCTFail("Missing WebRTC rekey source section")
+            return
+        }
+        let section = String(source[startRange.lowerBound..<endRange.lowerBound])
+
+        XCTAssertTrue(section.contains("reason: \"missing_current_path_authority\""))
+        XCTAssertTrue(section.contains("let requiresSignedCurrentPathKEM = strictPQCRequested"))
+        XCTAssertTrue(section.contains("|| currentPathExpectedRemoteAuthorityBySessionId[sessionId] != nil"))
+        XCTAssertTrue(section.contains("trustedKeysByCandidateId[candidateId] = await trustedCurrentPathKEMPublicKeys("))
+        XCTAssertTrue(section.contains("trustedKeysByCandidateId[candidateId] = await KEMTrustStore.shared.kemPublicKeys(for: candidateId)"))
+        assertSourceOrder(
+            in: section,
+            first: "if requiresSignedCurrentPathKEM {",
+            second: "trustedKeysByCandidateId[candidateId] = await KEMTrustStore.shared.kemPublicKeys(for: candidateId)"
+        )
+    }
+
     func testCurrentPathLeaseDecodingPreservesSignalingWebSocketPath() throws {
         let registerData = try JSONSerialization.data(
             withJSONObject: [
@@ -589,6 +671,61 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         let lookup = try SignalServerClientCompat.testOnlyDecodeLookupConnectionCodeResponse(lookupData)
         XCTAssertEqual(lookup.signalingServerOrigin, "https://signal.example.com")
         XCTAssertEqual(lookup.wsPath, "/tenant/ws")
+    }
+
+    func testCurrentPathLeaseDecodingRejectsIncompleteResponses() throws {
+        let registerCodeMissingToken = try JSONSerialization.data(
+            withJSONObject: [
+                "code": "ABC12345",
+                "sessionId": "SESSION123",
+                "turnAdmissionToken": "turn-token",
+                "expiresIn": 300,
+                "signalingServerOrigin": "https://signal.example.com",
+                "wsPath": "/tenant/ws"
+            ],
+            options: [.sortedKeys]
+        )
+        assertSignalServerCompatMalformedResponse("register code missing token") {
+            _ = try SignalServerClientCompat.testOnlyDecodeRegisterCodeResponse(registerCodeMissingToken)
+        }
+
+        let registerSessionZeroExpiry = try JSONSerialization.data(
+            withJSONObject: [
+                "sessionId": "SESSION123",
+                "sessionToken": "session-token",
+                "qrBootstrapToken": "qr-token",
+                "turnAdmissionToken": "turn-token",
+                "mediaAdmissionToken": "media-token",
+                "expiresIn": 0,
+                "signalingServerOrigin": "https://signal.example.com",
+                "wsPath": "/tenant/ws"
+            ],
+            options: [.sortedKeys]
+        )
+        assertSignalServerCompatMalformedResponse("register session zero expiry") {
+            _ = try SignalServerClientCompat.testOnlyDecodeRegisterSessionResponse(registerSessionZeroExpiry)
+        }
+
+        let lookupUnknownAlgorithm = try JSONSerialization.data(
+            withJSONObject: [
+                "found": true,
+                "sessionId": "SESSION123",
+                "sessionToken": "responder-token",
+                "turnAdmissionToken": "turn-token",
+                "mediaAdmissionToken": "media-token",
+                "expiresIn": 300,
+                "signalingServerOrigin": "https://signal.example.com",
+                "wsPath": "/tenant/ws",
+                "initiatorDeviceId": "device-123",
+                "initiatorProtocolSigningAlgorithm": "P-256-ECDSA",
+                "initiatorProtocolPublicKeyFingerprint": "fingerprint-123",
+                "initiatorDeviceName": "SkyBridge Mac"
+            ],
+            options: [.sortedKeys]
+        )
+        assertSignalServerCompatMalformedResponse("lookup unknown protocol signing algorithm") {
+            _ = try SignalServerClientCompat.testOnlyDecodeLookupConnectionCodeResponse(lookupUnknownAlgorithm)
+        }
     }
 
     func testCurrentPathSessionRefreshRequiresSignalingWebSocketPath() throws {
@@ -742,6 +879,37 @@ private func assertEndpointValidationPrecedesTokenCaching(
         return
     }
     XCTAssertLessThan(endpointRange.lowerBound, tokenRange.lowerBound, file: file, line: line)
+}
+
+@available(iOS 17.0, *)
+private func assertSignalServerCompatMalformedResponse(
+    _ label: String,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    operation: () throws -> Void
+) {
+    XCTAssertThrowsError(try operation(), file: file, line: line) { error in
+        guard case SignalServerClientCompat.ClientError.malformedResponse = error else {
+            XCTFail("Expected malformed response for \(label), got \(error)", file: file, line: line)
+            return
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+private func assertSourceOrder(
+    in source: String,
+    first: String,
+    second: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    guard let firstRange = source.range(of: first),
+          let secondRange = source.range(of: second) else {
+        XCTFail("Missing source fragments for order assertion", file: file, line: line)
+        return
+    }
+    XCTAssertLessThan(firstRange.lowerBound, secondRange.lowerBound, file: file, line: line)
 }
 
 @available(iOS 17.0, *)

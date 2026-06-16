@@ -50,6 +50,8 @@
 		34275B3455303BC36565A6E0 /* WebRTCSignalingFaultInjectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E43049DEB4E29371EFB1B375 /* WebRTCSignalingFaultInjectionTests.swift */; };
 		7C1A2B3C4D5E6F7081920A1B /* PQCSignatureProviderFallbackSemanticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D2B3C4D5E6F708192A0B1C2 /* PQCSignatureProviderFallbackSemanticsTests.swift */; };
 		6E3C4D5E6F708192A1B2C3D4 /* SourceShapeTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F4D5E6F708192A3B4C5D6E7 /* SourceShapeTestSupport.swift */; };
+		B0A27E000000000000000002 /* SkyBridgeRuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0A27E000000000000000001 /* SkyBridgeRuntimeEnvironment.swift */; };
+		B0A27E000000000000000004 /* RuntimeEnvironmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0A27E000000000000000003 /* RuntimeEnvironmentTests.swift */; };
 		345002A115AD0F87BED1AB9B /* CrossNetworkWebRTCManager+FileTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98D553E1FC6A34FBF3E3CD0E /* CrossNetworkWebRTCManager+FileTransfer.swift */; };
 		3791BAA6FC4869628D7C0283 /* SkyBridgeActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37E0C1A2D462FAE735D9AC04 /* SkyBridgeActivityAttributes.swift */; };
 		39A3F1AFC760872099A7DC36 /* CrossNetworkWebRTCConnectionCodePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2A2FAE317582E218902EFD /* CrossNetworkWebRTCConnectionCodePolicy.swift */; };
@@ -405,6 +407,8 @@
 		B610CADD6D63AE00BE1F232D /* LocalizationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationManager.swift; sourceTree = "<group>"; };
 		B68E3A442804F03C62887E08 /* AuthenticationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationView.swift; sourceTree = "<group>"; };
 		B73D11349F15D47139C738A7 /* RemoteDesktopLANHandshakeTrust.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopLANHandshakeTrust.swift; sourceTree = "<group>"; };
+		B0A27E000000000000000001 /* SkyBridgeRuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeRuntimeEnvironment.swift; sourceTree = "<group>"; };
+		B0A27E000000000000000003 /* RuntimeEnvironmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironmentTests.swift; sourceTree = "<group>"; };
 		B768EF7D4FACBB077B3E68B7 /* RemoteDesktopViewerStreamConfigurationPushPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopViewerStreamConfigurationPushPolicy.swift; sourceTree = "<group>"; };
 		B8FD2B5D6AB6A664E8469945 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BEC5961E7AC8FE8A1B106207 /* FileTransferRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferRuntime.swift; sourceTree = "<group>"; };
@@ -605,10 +609,11 @@
 				8FBADC5074D794804C653E22 /* P2PConnectionEndpointPolicyTests.swift */,
 				D5685E5E2CD346A62A01BD79 /* PolicyDecisionParityTests.swift */,
 				5D702D54FA811F70FC96D595 /* PolicyDecisionTestVectors.swift */,
-				DA492E325F7E54E1EEEE4A95 /* PQCRekeyElectionTests.swift */,
-				8D2B3C4D5E6F708192A0B1C2 /* PQCSignatureProviderFallbackSemanticsTests.swift */,
-				5F4D5E6F708192A3B4C5D6E7 /* SourceShapeTestSupport.swift */,
-				E9F53A25C8CA191D5A09BB71 /* QRCodeHubInteractionStateTests.swift */,
+					DA492E325F7E54E1EEEE4A95 /* PQCRekeyElectionTests.swift */,
+					8D2B3C4D5E6F708192A0B1C2 /* PQCSignatureProviderFallbackSemanticsTests.swift */,
+					5F4D5E6F708192A3B4C5D6E7 /* SourceShapeTestSupport.swift */,
+					B0A27E000000000000000003 /* RuntimeEnvironmentTests.swift */,
+					E9F53A25C8CA191D5A09BB71 /* QRCodeHubInteractionStateTests.swift */,
 				5AF0C82D1551C57B06EDB21A /* QRCodePairingSecurityTests.swift */,
 				0EAD1A5FAF905D530CC04BEA /* RegressionHardeningTests.swift */,
 				97DA1D180AAAD9D431978482 /* RegressionHardeningTests+SourceReading.swift */,
@@ -735,10 +740,11 @@
 		82BFD82E6A9BFE95F28C6F3E /* App */ = {
 			isa = PBXGroup;
 			children = (
-				503ACEA4F8E147A47B796C00 /* AppStateManager.swift */,
-				7A0305E276D18233D04F43A8 /* ContentView.swift */,
-				708048CCAF3C9A5F66CD6BC9 /* SkyBridgeCompassApp.swift */,
-				755065FF16F6F482725C1E82 /* DeviceSupport */,
+					503ACEA4F8E147A47B796C00 /* AppStateManager.swift */,
+					7A0305E276D18233D04F43A8 /* ContentView.swift */,
+					708048CCAF3C9A5F66CD6BC9 /* SkyBridgeCompassApp.swift */,
+					B0A27E000000000000000001 /* SkyBridgeRuntimeEnvironment.swift */,
+					755065FF16F6F482725C1E82 /* DeviceSupport */,
 				1A499844930ABF7CC1DEBDD4 /* Notifications */,
 				5D6052B46F865B322F124CE8 /* Security */,
 				5D42CF0B6E7A24C3058E7C63 /* Smoke */,
@@ -1216,10 +1222,11 @@
 				9E4F2F2F48D9E843DDDF71D0 /* P2PBootstrapPolicyTests.swift in Sources */,
 				631271A4E1407EFBEFAFAD1D /* P2PConnectableContextRecoveryTests.swift in Sources */,
 				7B0109A4C8D6C3B49CC53125 /* P2PConnectionEndpointPolicyTests.swift in Sources */,
-				6C29FF78EF4FB9EC482B42A4 /* PQCRekeyElectionTests.swift in Sources */,
-				7C1A2B3C4D5E6F7081920A1B /* PQCSignatureProviderFallbackSemanticsTests.swift in Sources */,
-				6E3C4D5E6F708192A1B2C3D4 /* SourceShapeTestSupport.swift in Sources */,
-				1AB2680B9B6A4DB64E3080B0 /* PolicyDecisionParityTests.swift in Sources */,
+					6C29FF78EF4FB9EC482B42A4 /* PQCRekeyElectionTests.swift in Sources */,
+					7C1A2B3C4D5E6F7081920A1B /* PQCSignatureProviderFallbackSemanticsTests.swift in Sources */,
+					6E3C4D5E6F708192A1B2C3D4 /* SourceShapeTestSupport.swift in Sources */,
+					B0A27E000000000000000004 /* RuntimeEnvironmentTests.swift in Sources */,
+					1AB2680B9B6A4DB64E3080B0 /* PolicyDecisionParityTests.swift in Sources */,
 				A30B6ADBE722CB3EDFFBF5A0 /* PolicyDecisionTestVectors.swift in Sources */,
 				D9526E49357ED8787DFD7BFB /* QRCodeHubInteractionStateTests.swift in Sources */,
 				2364615A32382783E7B06BD3 /* QRCodePairingSecurityTests.swift in Sources */,
@@ -1378,9 +1385,10 @@
 				D79A5F708106BDB15F42D05A /* SignalingRetryController.swift in Sources */,
 				E9701CEDADDB8A8DC07A64EC /* SignatureProvider.swift in Sources */,
 				EBB62769FD69D986F4E12B5F /* SignedKEMRefreshRequestAdmissionGate.swift in Sources */,
-				13BBA0D66C6D557D9F1C2B90 /* SkyBridgeActivityAttributes.swift in Sources */,
-				F2556D8F7DC3375417FA77A7 /* SkyBridgeCompassApp.swift in Sources */,
-				14E02A1A1E1A3F5CC4FE7412 /* SkyBridgeLogger.swift in Sources */,
+					13BBA0D66C6D557D9F1C2B90 /* SkyBridgeActivityAttributes.swift in Sources */,
+					F2556D8F7DC3375417FA77A7 /* SkyBridgeCompassApp.swift in Sources */,
+					B0A27E000000000000000002 /* SkyBridgeRuntimeEnvironment.swift in Sources */,
+					14E02A1A1E1A3F5CC4FE7412 /* SkyBridgeLogger.swift in Sources */,
 				E23B454FC096814D60AACC6E /* SkyBridgeServerConfig.swift in Sources */,
 				BC231BAF1DE48024A8CF4E95 /* SkyBridgeSmokeTraceWriter.swift in Sources */,
 				1E722D415F2837FE87CC12F1 /* SmokeStatusReporter.swift in Sources */,
@@ -1452,9 +1460,8 @@
 				OTHER_CPLUSPLUSFLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.tests;
 				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
+					SKYBRIDGE_APPLE_PQC_SDK_CONDITION = "";
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS";
@@ -1481,9 +1488,8 @@
 				OTHER_CPLUSPLUSFLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios.tests;
 				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
+					SKYBRIDGE_APPLE_PQC_SDK_CONDITION = "";
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS";
@@ -1604,9 +1610,8 @@
 				OTHER_CPLUSPLUSFLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios;
 				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
+					SKYBRIDGE_APPLE_PQC_SDK_CONDITION = "";
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1628,9 +1633,8 @@
 				OTHER_CPLUSPLUSFLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.skybridge.compass.ios;
 				SDKROOT = iphoneos;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
-				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphonesimulator26*]" = "$(inherited) HAS_APPLE_PQC_SDK";
+					SKYBRIDGE_APPLE_PQC_SDK_CONDITION = "";
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
