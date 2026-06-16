@@ -340,17 +340,17 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
     }
 
  /// 生成本地 P2P 自签名 TLS 证书；证书签名仍是经典 P-256/ECDSA，不作为 PQC 证明。
-    public func generateSelfSignedCertificate(for deviceId: String) -> SecCertificate? {
+    public nonisolated func generateSelfSignedCertificate(for deviceId: String) -> SecCertificate? {
         return certificateManager.generateSelfSignedCertificate(for: deviceId)
     }
 
  /// 导入PKCS#12并设置为指定设备的本地身份（服务端/客户端均可复用）
-    public func importIdentityFromPKCS12(_ p12Data: Data, password: String, for deviceId: String) -> Bool {
+    public nonisolated func importIdentityFromPKCS12(_ p12Data: Data, password: String, for deviceId: String) -> Bool {
         return certificateManager.importIdentityFromPKCS12(p12Data, password: password, for: deviceId)
     }
 
  /// 生成 PKCS#10 CSR（DER -> PEM）
-    public func generateCSRPEM(for deviceId: String, commonName: String) -> String? {
+    public nonisolated func generateCSRPEM(for deviceId: String, commonName: String) -> String? {
         guard let identity = certificateManager.getIdentity(for: deviceId) else { return nil }
         var privateKeyRef: SecKey?
         guard SecIdentityCopyPrivateKey(identity, &privateKeyRef) == errSecSuccess, let priv = privateKeyRef else { return nil }
@@ -360,13 +360,37 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
     }
 
  /// 生成 CSR（支持 CN/O/OU 与 SAN 扩展），返回 PEM
-    public func generateCSRPEM(for deviceId: String, commonName: String, organization: String?, organizationalUnit: String?, sanDNS: [String], sanIP: [String]) -> String? {
+    public nonisolated func generateCSRPEM(for deviceId: String, commonName: String, organization: String?, organizationalUnit: String?, sanDNS: [String], sanIP: [String]) -> String? {
         guard let identity = certificateManager.getIdentity(for: deviceId) else { return nil }
         var privateKeyRef: SecKey?
         guard SecIdentityCopyPrivateKey(identity, &privateKeyRef) == errSecSuccess, let priv = privateKeyRef else { return nil }
         guard let der = certificateManager.generatePKCS10CSRDER(commonName: commonName, organization: organization, organizationalUnit: organizationalUnit, sanDNS: sanDNS, sanIP: sanIP, privateKey: priv) else { return nil }
         let body = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
         return "-----BEGIN CERTIFICATE REQUEST-----\n" + body + "\n-----END CERTIFICATE REQUEST-----\n"
+    }
+
+    // MARK: - 后台（off-main）封装：把可能耗时的密钥/证书操作移出主线程，避免设置页卡死。
+    // 仅回传 Sendable 结果（Bool / String）。调用方应使用各自新建的 TLSSecurityManager 实例（单一拥有者）。
+
+    /// 后台生成自签证书；返回是否成功（不跨域传递非 Sendable 的 SecCertificate）。
+    public nonisolated func generateSelfSignedCertificateSucceedsOffMain(for deviceId: String) async -> Bool {
+        await Task.detached(priority: .userInitiated) { [self] in
+            generateSelfSignedCertificate(for: deviceId) != nil
+        }.value
+    }
+
+    /// 后台导入 PKCS#12 身份；返回是否成功。
+    public nonisolated func importIdentityFromPKCS12OffMain(_ p12Data: Data, password: String, for deviceId: String) async -> Bool {
+        await Task.detached(priority: .userInitiated) { [self] in
+            importIdentityFromPKCS12(p12Data, password: password, for: deviceId)
+        }.value
+    }
+
+    /// 后台生成 CSR（PEM）。
+    public nonisolated func generateCSRPEMOffMain(for deviceId: String, commonName: String, organization: String?, organizationalUnit: String?, sanDNS: [String], sanIP: [String]) async -> String? {
+        await Task.detached(priority: .userInitiated) { [self] in
+            generateCSRPEM(for: deviceId, commonName: commonName, organization: organization, organizationalUnit: organizationalUnit, sanDNS: sanDNS, sanIP: sanIP)
+        }.value
     }
 
  // MARK: - 连接管理
@@ -1139,7 +1163,11 @@ public enum TLSSecurityError: Error, LocalizedError {
 // MARK: - 证书管理器
 
 /// 证书管理器 - 负责证书的生成、存储、验证和指纹管理
-private class CertificateManager {
+// @unchecked Sendable 说明：本类没有共享单例——每个 TLSSecurityManager（及其 CertificateManager）都是
+// 调用方各自新建的实例（见 ManagerFactory 与 SecuritySettingsView 的 `TLSSecurityManager()`）。下方的内存缓存
+// 只会被其唯一拥有者顺序访问；证书/钥匙串底层用的 Sec*/SecItem API 本身线程安全。据此可安全地把 CSR/自签/
+// PKCS#12 等重操作放到后台执行（避免阻塞主线程），不会与他处并发访问同一实例的缓存。
+private final class CertificateManager: @unchecked Sendable {
 
  /// 设备证书缓存
     private var certificateCache: [String: SecCertificate] = [:]

@@ -499,9 +499,14 @@ public class SettingsManager: ObservableObject, Sendable {
                 startMonitoringIfNeeded: false
             )
             let sharedScanInterval = Double(self.scanInterval)
-            DeviceManagementSettingsManager.shared.wifiScanInterval = sharedScanInterval
-            DeviceManagementSettingsManager.shared.bluetoothScanInterval = sharedScanInterval
-            DeviceManagementSettingsManager.shared.airplayScanInterval = sharedScanInterval
+            // 仅首启从「通用扫描间隔」播种各协议间隔；此后保留用户在「设备管理」里的逐协议自定义值。
+            // 此前每次启动都无条件覆盖，导致用户的逐协议设置被静默丢失。
+            if self.userDefaults.object(forKey: "Settings.DidSeedDeviceManagementScanIntervals") == nil {
+                DeviceManagementSettingsManager.shared.wifiScanInterval = sharedScanInterval
+                DeviceManagementSettingsManager.shared.bluetoothScanInterval = sharedScanInterval
+                DeviceManagementSettingsManager.shared.airplayScanInterval = sharedScanInterval
+                self.userDefaults.set(true, forKey: "Settings.DidSeedDeviceManagementScanIntervals")
+            }
             self.postWiFiSettingsChanged(["scanInterval": sharedScanInterval])
             self.postBluetoothSettingsChanged(["scanInterval": sharedScanInterval])
             self.postAirPlaySettingsChanged([
@@ -1589,7 +1594,9 @@ public class SettingsManager: ObservableObject, Sendable {
             self?.applyThemeMode() // 立即应用主题变化
         }.store(in: &settingsCancellables)
 
-        $scanInterval.sink { [weak self] value in
+        // dropFirst：跳过订阅时的初始值（启动），避免启动即用通用值覆盖各协议间隔；
+        // 仅当用户此后显式更改「通用扫描间隔」时才作为“统一设置”级联到各协议。
+        $scanInterval.dropFirst().sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.ScanInterval")
             let interval = Double(value)
             DeviceManagementSettingsManager.shared.wifiScanInterval = interval

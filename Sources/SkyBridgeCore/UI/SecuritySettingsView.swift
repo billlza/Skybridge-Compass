@@ -230,8 +230,11 @@ public struct SecuritySettingsView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
+            let password = p12Password
+            let deviceId = certDeviceId
+            // 重导入移出主线程（避免卡死/沙滩球）：await 期间主线程不被阻塞，仅 Bool 结果回主线程更新 UI。
             Task { @MainActor in
-                let ok = TLSSecurityManager().importIdentityFromPKCS12(data, password: p12Password, for: certDeviceId)
+                let ok = await TLSSecurityManager().importIdentityFromPKCS12OffMain(data, password: password, for: deviceId)
                 certStatusMessage = ok ? "✅ PKCS#12 身份已导入" : "❌ PKCS#12 导入失败"
             }
         }
@@ -239,10 +242,16 @@ public struct SecuritySettingsView: View {
 
  // 生成 CSR 并显示 PEM
     private func generateCSR() {
+        // 在主线程读取 @State 值并定型为不可变本地值，重操作放到后台执行（避免卡死）。
+        let dns = csrSanDNS.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+        let ip = csrSanIP.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+        let deviceId = certDeviceId
+        let cn = csrCN
+        let org = csrO.isEmpty ? nil : csrO
+        let ou = csrOU.isEmpty ? nil : csrOU
         Task { @MainActor in
-            let dns = csrSanDNS.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
-            let ip = csrSanIP.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
-            if let pem = TLSSecurityManager().generateCSRPEM(for: certDeviceId, commonName: csrCN, organization: csrO.isEmpty ? nil : csrO, organizationalUnit: csrOU.isEmpty ? nil : csrOU, sanDNS: dns, sanIP: ip) {
+            let pem = await TLSSecurityManager().generateCSRPEMOffMain(for: deviceId, commonName: cn, organization: org, organizationalUnit: ou, sanDNS: dns, sanIP: ip)
+            if let pem {
                 csrPEM = pem
                 certStatusMessage = "✅ CSR 已生成"
             } else {
@@ -295,9 +304,11 @@ public struct SecuritySettingsView: View {
 
  // 生成自签证书
     private func generateSelfSigned() {
+        let deviceId = certDeviceId
         Task { @MainActor in
-            let cert = TLSSecurityManager().generateSelfSignedCertificate(for: certDeviceId)
-            certStatusMessage = (cert != nil) ? "✅ 自签证书已生成" : "❌ 自签生成失败"
+            // await 期间主线程不阻塞；仅回传 Bool（SecCertificate 非 Sendable）。
+            let ok = await TLSSecurityManager().generateSelfSignedCertificateSucceedsOffMain(for: deviceId)
+            certStatusMessage = ok ? "✅ 自签证书已生成" : "❌ 自签生成失败"
         }
     }
     
