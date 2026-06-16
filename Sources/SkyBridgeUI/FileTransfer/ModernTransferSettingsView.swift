@@ -2,12 +2,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 import SkyBridgeCore
 
-/// 现代化传输设置视图 - 符合Apple设计规范的设置界面
-struct ModernTransferSettingsView: View {
+/// 现代化传输设置视图 - 符合Apple设计规范的设置界面。
+/// 核心设置（并发数 / 端到端加密）绑定到权威的 SettingsManager，经 FileTransferSettingsBridge 在
+/// 启动时应用并跨重启持久化（与主设置一致，避免此前“仅保存当次会话、重启失效”的并行 UserDefaults 存储）。
+public struct ModernTransferSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var transferManager: FileTransferManager
 
-    @State private var maxConcurrentTransfers = 3
+    @State private var maxConcurrentTransfers = 10
     @State private var chunkSize = 1024 * 1024 // 1MB
     @State private var enableCompression = true
     @State private var enableEncryption = true
@@ -21,7 +23,11 @@ struct ModernTransferSettingsView: View {
     @State private var discoveryPort = 8080
     @State private var enableQRCodeSharing = true
 
-    var body: some View {
+    public init(transferManager: FileTransferManager = .shared) {
+        _transferManager = ObservedObject(initialValue: transferManager)
+    }
+
+    public var body: some View {
         NavigationView {
             Form {
                 Section("基本设置") {
@@ -82,28 +88,24 @@ struct ModernTransferSettingsView: View {
 
  // MARK: - 私有方法
 
- /// 加载当前设置
+ /// 加载当前设置（读取权威 SettingsManager，跨重启持久化的值）
     private func loadCurrentSettings() {
- // 从UserDefaults加载设置
-        let defaults = UserDefaults.standard
-        maxConcurrentTransfers = defaults.integer(forKey: "maxConcurrentTransfers") > 0 ? defaults.integer(forKey: "maxConcurrentTransfers") : 3
-        chunkSize = defaults.integer(forKey: "chunkSize") > 0 ? defaults.integer(forKey: "chunkSize") : 1024 * 1024
-        enableCompression = defaults.bool(forKey: "enableCompression")
-        enableEncryption = defaults.bool(forKey: "enableEncryption")
-        networkTimeout = defaults.double(forKey: "networkTimeout") > 0 ? defaults.double(forKey: "networkTimeout") : 30
+        let settings = SettingsManager.shared
+        maxConcurrentTransfers = settings.maxConcurrentConnections
+        chunkSize = settings.transferBufferSize
+        enableEncryption = settings.enableConnectionEncryption
+        autoRetryFailedTransfers = settings.autoRetryFailedTransfers
+        // enableCompression 暂无权威持久字段：沿用运行时默认，保存时经 updateSettings 当次会话生效。
     }
 
- /// 保存设置
+ /// 保存设置：写入权威 SettingsManager（其 @Published sink 持久化 + 经 FileTransferSettingsBridge 在
+ /// 启动时应用），并立即同步到运行时传输管理器（含当次会话的压缩/块大小）。
     private func saveSettings() {
- // 保存设置到UserDefaults
-        let defaults = UserDefaults.standard
-        defaults.set(maxConcurrentTransfers, forKey: "maxConcurrentTransfers")
-        defaults.set(chunkSize, forKey: "chunkSize")
-        defaults.set(enableCompression, forKey: "enableCompression")
-        defaults.set(enableEncryption, forKey: "enableEncryption")
-        defaults.set(networkTimeout, forKey: "networkTimeout")
+        let settings = SettingsManager.shared
+        settings.maxConcurrentConnections = maxConcurrentTransfers
+        settings.enableConnectionEncryption = enableEncryption
+        settings.autoRetryFailedTransfers = autoRetryFailedTransfers
 
- // 同步到运行时传输管理器
         transferManager.updateSettings(
             maxConcurrentTransfers: maxConcurrentTransfers,
             chunkSize: chunkSize,

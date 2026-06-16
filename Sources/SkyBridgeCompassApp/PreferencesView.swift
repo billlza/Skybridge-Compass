@@ -341,6 +341,7 @@ struct GeneralPreferencesView: View {
 struct NetworkPreferencesView: View {
     @EnvironmentObject private var settingsManager: SettingsManager
     @State private var showingBandwidthSettings = false
+    @State private var showingTransferSettings = false
 
     var body: some View {
         Form {
@@ -360,6 +361,14 @@ struct NetworkPreferencesView: View {
                     .padding()
                 }
                 .frame(minWidth: 520, minHeight: 480)
+            }
+
+            Section("文件传输") {
+                Button("打开文件传输设置…") { showingTransferSettings = true }
+                    .help("并发数、端到端加密等核心项绑定到权威设置，跨重启持久化并在启动时应用")
+            }
+            .sheet(isPresented: $showingTransferSettings) {
+                ModernTransferSettingsView()
             }
 
             Section("WiFi 设置") {
