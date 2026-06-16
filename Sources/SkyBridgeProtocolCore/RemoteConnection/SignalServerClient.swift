@@ -124,6 +124,16 @@ public actor SignalServerClient {
         public let device: RegisteredDeviceBody
     }
 
+    public struct PresenceRegisterResponseBody: Decodable, Sendable {
+        public let online: Bool
+        public let ttlMs: Int?
+        public let expiresAt: Double?
+    }
+
+    public struct PresenceQueryResponseBody: Decodable, Sendable {
+        public let online: [String]
+    }
+
     public struct RegisteredDeviceBody: Decodable, Sendable, Equatable {
         public let tenantId: String
         public let userId: String
@@ -473,6 +483,8 @@ public actor SignalServerClient {
     public static let registerSessionPath = "/api/webrtc/register-session"
     public static let redeemSessionPath = "/api/webrtc/redeem-session"
     public static let registerCurrentDevicePath = "/api/devices/register-current"
+    public static let presenceRegisterPath = "/api/presence/register"
+    public static let presenceQueryPath = "/api/presence/query"
     public static let mediaLeasePath = "/api/media/lease"
     public static let mediaAdmissionRefreshPath = "/api/media/admission/refresh"
 
@@ -664,6 +676,50 @@ public actor SignalServerClient {
             requiresUserAuthentication: true
         )
         return response.device
+    }
+
+    /// 注册/续约本设备在线状态（presence 心跳）。服务端从已验证 JWT + body 绑定派生身份。
+    @discardableResult
+    public func registerPresence(
+        binding: ProtocolIdentityBinding,
+        deviceName: String
+    ) async throws -> Bool {
+        let requestBody = RegisterCurrentDeviceRequestBody(
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersionProvider(),
+            protocolVersion: protocolVersionProvider(),
+            deviceName: deviceName
+        )
+        let response: PresenceRegisterResponseBody = try await performJSONRequest(
+            path: Self.presenceRegisterPath,
+            method: "POST",
+            body: try JSONEncoder().encode(requestBody),
+            requiresUserAuthentication: true
+        )
+        return response.online
+    }
+
+    /// 查询调用方自己的哪些设备 id 当前在线（绑定经 query 参数传递，与服务端 req.query 解析一致）。
+    public func queryPresence(
+        binding: ProtocolIdentityBinding,
+        deviceIDs: [String]
+    ) async throws -> [String] {
+        let ids = Array(Set(deviceIDs.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })).prefix(200)
+        guard !ids.isEmpty else { return [] }
+        let response: PresenceQueryResponseBody = try await performJSONRequest(
+            path: Self.presenceQueryPath,
+            method: "GET",
+            queryItems: [
+                URLQueryItem(name: "deviceId", value: binding.deviceId),
+                URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
+                URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint),
+                URLQueryItem(name: "ids", value: ids.joined(separator: ","))
+            ],
+            requiresUserAuthentication: true
+        )
+        return response.online
     }
 
     public func requestMediaRelayLease(mediaAdmissionToken: String) async throws -> MediaRelayLease {

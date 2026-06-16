@@ -1901,6 +1901,22 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         )
     }
 
+    // MARK: - 跨网在线 presence（F2-B）：复用已配置的 signalServer（含 bearer/tenant 鉴权）与本机绑定。
+
+    /// 向信令服务器注册/续约本设备在线状态（心跳）。返回是否成功。
+    @discardableResult
+    public func registerDevicePresence(deviceName: String) async throws -> Bool {
+        let binding = try await currentPathLocalBinding()
+        return try await signalServer.registerPresence(binding: binding, deviceName: deviceName)
+    }
+
+    /// 查询给定（本账号自有）设备 id 中当前在线的子集。
+    public func queryDevicePresence(deviceIDs: [String]) async throws -> [String] {
+        guard !deviceIDs.isEmpty else { return [] }
+        let binding = try await currentPathLocalBinding()
+        return try await signalServer.queryPresence(binding: binding, deviceIDs: deviceIDs)
+    }
+
     private func activeConnectionCodeMatchesCurrentAuthority(_ binding: ProtocolIdentityBinding) -> Bool {
         guard let activeConnectionCodeAuthorityDeviceId,
               let activeConnectionCodeAuthorityFingerprint else {

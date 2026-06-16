@@ -101,6 +101,8 @@ const WEBRTC_ACTIVE_SESSION_TTL_MS = Number(process.env.WEBRTC_ACTIVE_SESSION_TT
 
 const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 90_000);
 const ADMISSION_TOKEN_TTL_MS = Number(process.env.ADMISSION_TOKEN_TTL_MS || 120_000);
+// 设备在线状态（presence）TTL：心跳每 ~30s 写一次；超时未续即视为离线（缺键 == 离线）。
+const PRESENCE_TTL_MS = Number(process.env.SIGNALING_PRESENCE_TTL_MS || 90_000);
 const TURN_ADMISSION_TOKEN_TTL_MS = Number(process.env.TURN_ADMISSION_TOKEN_TTL_MS || 60_000);
 const TURN_CRED_TTL_SECONDS = Number(process.env.TURN_CRED_TTL_SECONDS || 300);
 const MEDIA_ADMISSION_TOKEN_TTL_MS = Number(process.env.MEDIA_ADMISSION_TOKEN_TTL_MS || 120_000);
@@ -2872,6 +2874,8 @@ app.get('/', asyncRoute(async (req, res) => {
       '/api/media/lease',
       '/api/devices/enroll/first',
       '/api/devices/enroll/confirm',
+      '/api/presence/register',
+      '/api/presence/query',
       `${SIGNALING_WEBSOCKET_PATH}?shard=<session_id> with X-SkyBridge-Session-Id/X-SkyBridge-Session headers`
     ]
   });
@@ -3712,6 +3716,49 @@ app.post('/api/devices/enroll/confirm', rlControl, asyncRoute(async (req, res) =
     p_device_name: deviceName
   });
   res.json({ confirmed: true, device: result });
+}));
+
+// 设备在线状态（presence）：用户的受信设备周期性心跳注册在线；查询返回“调用方自己”哪些设备在线。
+// 关键：presence 键始终由“已验证 JWT 的” tenantId:userId:deviceId 构成（绝不取客户端自报值），
+// 因此一个账号只能查询自己的设备在线状态。缺键 == 离线（TTL 自动过期）。
+function presenceKey(tenantId, userId, deviceId) {
+  return `${String(tenantId)}:${String(userId)}:${String(deviceId).trim()}`;
+}
+
+app.post('/api/presence/register', rlControl, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
+  await assertPublicCapabilityAvailable('presence_register', context.tenantId);
+  const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : '';
+  const key = presenceKey(context.tenantId, context.user.id, context.binding.deviceId);
+  const expiresAt = now() + PRESENCE_TTL_MS;
+  const record = {
+    tenantId: context.tenantId,
+    userId: context.user.id,
+    deviceId: context.binding.deviceId,
+    deviceName,
+    updatedAt: now(),
+    expiresAt
+  };
+  const existing = await signalingState.getEphemeral('presence', key);
+  if (existing) {
+    await signalingState.updateEphemeral('presence', key, () => record);
+  } else {
+    await signalingState.createEphemeral('presence', key, record);
+  }
+  res.json({ online: true, ttlMs: PRESENCE_TTL_MS, expiresAt });
+}));
+
+app.get('/api/presence/query', rlControl, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
+  await assertPublicCapabilityAvailable('presence_query', context.tenantId);
+  const raw = typeof req.query?.ids === 'string' ? req.query.ids : '';
+  const ids = Array.from(new Set(raw.split(',').map((s) => s.trim()).filter(Boolean))).slice(0, 200);
+  const online = [];
+  for (const id of ids) {
+    const record = await signalingState.getEphemeral('presence', presenceKey(context.tenantId, context.user.id, id));
+    if (record) online.push(id);
+  }
+  res.json({ online });
 }));
 
 for (const path of ['/api/register', '/api/lookup/:code', '/api/answer/:code', '/api/ice/:sessionId']) {

@@ -60,6 +60,8 @@ public struct EnhancedDeviceDiscoveryView: View {
 
     // Trusted / paired devices (from TrustSyncService)
     @StateObject private var trustSync = TrustSyncService.shared
+    // 跨网在线状态（F2-B）：信令服务器上报的受信设备在线集合。
+    @StateObject private var presence = PresenceService.shared
 
  // 跨网络连接（使用共享实例，确保与文件传输/远程桌面等模块状态一致）
     @StateObject private var crossNetworkManager = CrossNetworkConnectionManager.shared
@@ -849,7 +851,22 @@ public struct EnhancedDeviceDiscoveryView: View {
             .map(\.connectionStatus)
             .max(by: { statusPriority($0) < statusPriority($1) })
             ?? .offline
-        return isCrossNetworkSessionActive(for: group) ? .connected : resolvedStatus
+        if isCrossNetworkSessionActive(for: group) { return .connected }
+        // 跨网在线 presence：信令服务器上报在线即标记为在线（即使不在同一局域网、无活动会话）。
+        if resolvedStatus == .offline, trustedGroupIsPresenceOnline(group) { return .online }
+        return resolvedStatus
+    }
+
+    /// 该受信设备组是否有任一已知 id 在信令服务器上报为在线（跨网在线状态）。
+    private func trustedGroupIsPresenceOnline(_ group: TrustRecordDisplayGroup) -> Bool {
+        let online = presence.onlinePeerDeviceIds
+        guard !online.isEmpty else { return false }
+        for record in trustedLookupRecords(for: group) {
+            if online.contains(record.deviceId) || online.contains(record.currentDeviceId) {
+                return true
+            }
+        }
+        return false
     }
 
     private func isCrossNetworkSessionActive(for group: TrustRecordDisplayGroup) -> Bool {
