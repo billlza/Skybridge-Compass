@@ -60,6 +60,9 @@ public class FileTransferEngine: ObservableObject {
  // 错误处理和重试 - 利用Swift 6.2.1的并发改进
     private let retryManager = RetryManager(policy: .default)
     private var automaticRetryEnabled: Bool
+    /// 运行时可变的加密开关（与 configuration.encryptionEnabled 的初值一致，但可被设置变更实时更新）。
+    /// configuration 是不可变 let，过去切换设置只走 updateEncryptionSettings 的日志、对后续传输无效。
+    private var runtimeEncryptionEnabled: Bool
     private var keepTransferHistory: Bool = true
     private var keepSystemAwakeDuringTransfer: Bool = false
     private var encryptionAlgorithm: FileTransferEncryptionAlgorithm = .aes256GCM
@@ -88,6 +91,7 @@ public class FileTransferEngine: ObservableObject {
  // 如果提供了设置管理器，则使用其配置创建传输配置
         if let settings = settingsManager {
             self.automaticRetryEnabled = settings.autoRetryFailedTransfers
+            self.runtimeEncryptionEnabled = settings.enableConnectionEncryption
             self.keepTransferHistory = settings.keepTransferHistory
             self.keepSystemAwakeDuringTransfer = settings.keepSystemAwakeDuringTransfer
             self.encryptionAlgorithm = settings.encryptionAlgorithm
@@ -103,6 +107,7 @@ public class FileTransferEngine: ObservableObject {
         } else {
             self.configuration = configuration
             self.automaticRetryEnabled = configuration.resumeEnabled
+            self.runtimeEncryptionEnabled = configuration.encryptionEnabled
         }
         
         self.networkManager = P2PNetworkManager.shared
@@ -250,7 +255,8 @@ public class FileTransferEngine: ObservableObject {
     }
     
     private func updateEncryptionSettings(_ enabled: Bool) {
- // 更新加密设置
+ // 更新运行时加密开关：影响此后新建的传输会话（见 sendFile 的 effectiveEncryptionEnabled）。
+        runtimeEncryptionEnabled = enabled
         logger.debugOnly("🔐 更新加密设置: \(enabled ? "启用" : "禁用")")
     }
     
@@ -347,6 +353,8 @@ public class FileTransferEngine: ObservableObject {
             logger.error("❌ 引擎已清理，拒绝新的传输请求")
             throw FileTransferEngineError.connectionLost
         }
+ // 在 MainActor 上下文读取运行时加密开关并定型为不可变本地值，供 @Sendable 闭包安全捕获。
+        let effectiveEncryptionEnabled = encryptionEnabled ?? self.runtimeEncryptionEnabled
  // 使用重试管理器执行传输 - 利用Swift 6.2.1的并发改进
         let sendOperation: @Sendable () async throws -> String = { [self] in
  // 检查文件是否存在
@@ -368,7 +376,7 @@ public class FileTransferEngine: ObservableObject {
                 chunkSize: self.configuration.chunkSize,
                 maxThreadsPerTransfer: self.configuration.maxThreadsPerTransfer,
                 compressionEnabled: compressionEnabled ?? self.configuration.compressionEnabled,
-                encryptionEnabled: encryptionEnabled ?? self.configuration.encryptionEnabled,
+                encryptionEnabled: effectiveEncryptionEnabled,
                 resumeEnabled: self.configuration.resumeEnabled,
                 bufferSize: self.configuration.bufferSize
             )
