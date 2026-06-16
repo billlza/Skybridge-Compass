@@ -11,6 +11,8 @@ struct RemoteControlStreamRequest: Sendable, Equatable {
     let enableHardwareAcceleration: Bool
     let enableAppleSiliconOptimization: Bool
     let preserveExactVisibleSize: Bool
+    /// 要采集的显示器（nil = 主屏）。来自控制端的 RemoteDesktopStreamConfiguration.captureDisplayID。
+    let preferredDisplayID: CGDirectDisplayID?
 }
 
 struct RemoteControlStreamPolicy: Sendable, Equatable {

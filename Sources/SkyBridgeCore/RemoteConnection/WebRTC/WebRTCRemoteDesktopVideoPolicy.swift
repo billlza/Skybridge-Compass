@@ -140,7 +140,8 @@ enum WebRTCRemoteDesktopVideoPolicySelector {
                 lowLatencyMode: request.lowLatencyMode,
                 enableHardwareAcceleration: request.enableHardwareAcceleration,
                 enableAppleSiliconOptimization: request.enableAppleSiliconOptimization,
-                preserveExactVisibleSize: request.preserveExactVisibleSize
+                preserveExactVisibleSize: request.preserveExactVisibleSize,
+                preferredDisplayID: nil // 显示器选择不影响 WebRTC 视频编解码/尺寸策略
             ),
             peerFormats: peerFormats,
             thermalState: thermalState,

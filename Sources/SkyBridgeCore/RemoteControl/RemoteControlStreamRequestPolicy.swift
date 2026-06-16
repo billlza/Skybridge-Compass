@@ -72,7 +72,9 @@ enum RemoteControlStreamRequestPolicy {
                 ?? settings.enableHardwareAcceleration,
             enableAppleSiliconOptimization: streamConfiguration?.enableAppleSiliconOptimization
                 ?? settings.enableAppleSiliconOptimization,
-            preserveExactVisibleSize: preserveExactVisibleSize
+            preserveExactVisibleSize: preserveExactVisibleSize,
+            preferredDisplayID: (streamConfiguration?.captureDisplayID).map { CGDirectDisplayID($0) }
+                ?? settings.captureDisplayID.map { CGDirectDisplayID($0) }
         )
     }
 
@@ -145,6 +147,7 @@ enum RemoteControlStreamRequestPolicy {
         guard let previous else { return true }
         return previous.width != current.width
             || previous.height != current.height
+            || previous.captureDisplayID != current.captureDisplayID
             || previous.preferredCodec != current.preferredCodec
             || previous.supportedVideoFormats != current.supportedVideoFormats
             || previous.videoCompressionLevel != current.videoCompressionLevel

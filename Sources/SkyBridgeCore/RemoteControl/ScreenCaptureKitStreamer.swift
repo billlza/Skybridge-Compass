@@ -62,6 +62,8 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var configuredVideoToolboxDataRateBurstLimitBytes = 0
     private var configuredVideoToolboxDataRateBurstWindowMs = 0
     private var capturedDisplayID: CGDirectDisplayID?
+    /// 控制端请求采集的显示器（nil = 主屏）。用于显示选择与拓扑变化判断。
+    private var requestedDisplayID: CGDirectDisplayID?
     private var capturedDisplayPixelSize: CGSize = .zero
     private let stateLock = NSLock()
     private var lastSampleBufferAt: Date = .distantPast
@@ -172,10 +174,12 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         preserveExactVisibleSize: Bool = false,
         lowLatencyMode: Bool? = nil,
         videoCompressionLevelPercent: Int? = nil,
-        bitstreamFormat: EncodedBitstreamFormat = .native
+        bitstreamFormat: EncodedBitstreamFormat = .native,
+        preferredDisplayID: CGDirectDisplayID? = nil
     ) async throws {
         guard !started else { return }
         started = true
+        requestedDisplayID = preferredDisplayID
         configuredFPS = max(1, targetFPS)
         configuredKeyInterval = keyFrameInterval
         self.captureCursorInVideo = captureCursorInVideo
@@ -210,10 +214,18 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             ?? settings.displaySettings.boundedCompressionLevelPercent
         lowLatencyEnabled = lowLatencyMode ?? settings.displaySettings.lowLatencyMode
 
- // 选择显示内容：优先使用当前主显示器，避免外接屏/切主屏后继续抓错源
+ // 选择显示内容：控制端所选显示器 → 主显示器 → 第一个可用（所选显示器被拔出时安全回退，避免无源）。
         let content = try await SCShareableContent.current
         let mainDisplayID = CGMainDisplayID()
-        guard let display = content.displays.first(where: { $0.displayID == mainDisplayID }) ?? content.displays.first else {
+        let display: SCDisplay
+        if let requestedDisplayID,
+           let chosen = content.displays.first(where: { $0.displayID == requestedDisplayID }) {
+            display = chosen
+        } else if let main = content.displays.first(where: { $0.displayID == mainDisplayID }) {
+            display = main
+        } else if let first = content.displays.first {
+            display = first
+        } else {
             logger.error("ScreenCaptureKit 无可用显示设备")
             throw CocoaError(.fileNoSuchFile)
         }
@@ -603,12 +615,14 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private func handleDisplayConfigurationChange() {
         guard started else { return }
 
-        let currentMainDisplayID = CGMainDisplayID()
-        let currentPixelSize = displayPixelSize(for: currentMainDisplayID, fallback: .zero)
+        // 以「实际正在采集的显示器」为基准（控制端可能选择了非主屏）；否则采集非主屏时会把
+        // CGMainDisplayID() 误判为拓扑变化而不停重启。requestedDisplayID 为 nil 时仍跟随主屏。
+        let referenceDisplayID = requestedDisplayID ?? CGMainDisplayID()
+        let currentPixelSize = displayPixelSize(for: referenceDisplayID, fallback: capturedDisplayPixelSize)
 
-        if currentMainDisplayID != capturedDisplayID || currentPixelSize != capturedDisplayPixelSize {
+        if referenceDisplayID != capturedDisplayID || currentPixelSize != capturedDisplayPixelSize {
             logger.info(
-                "🔁 检测到主显示器/分辨率变化，准备重启采集: oldDisplay=\(String(self.capturedDisplayID ?? 0), privacy: .public) newDisplay=\(String(currentMainDisplayID), privacy: .public)"
+                "🔁 检测到显示器/分辨率变化，准备重启采集: oldDisplay=\(String(self.capturedDisplayID ?? 0), privacy: .public) newDisplay=\(String(referenceDisplayID), privacy: .public)"
             )
             onCaptureIssue?("display-topology-changed")
             return

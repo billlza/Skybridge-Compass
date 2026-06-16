@@ -1400,7 +1400,10 @@ public final class RemoteControlManager: BaseManager {
                     ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.lowLatencyMode,
                 videoCompressionLevelPercent: streamConfiguration?.videoCompressionLevel
                     ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.boundedCompressionLevelPercent,
-                bitstreamFormat: .annexB
+                bitstreamFormat: .annexB,
+                // 采集哪块显示器：优先控制端选择，其次本机设置；nil = 主屏。
+                preferredDisplayID: (peer.requestedStreamConfiguration?.captureDisplayID).map { CGDirectDisplayID($0) }
+                    ?? RemoteDesktopSettingsManager.shared.settings.displaySettings.captureDisplayID.map { CGDirectDisplayID($0) }
             )
             if let realtimeAudioCaptureStreamerForAttempt {
                 logger.info(
@@ -2410,7 +2413,10 @@ public final class RemoteControlManager: BaseManager {
             preferredAudioEncoding: nil,
             audioSampleRate: 48_000,
             audioChannelCount: 2,
-            remoteControlSecurityIdentity: RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
+            remoteControlSecurityIdentity: RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot(),
+            // 多显示器开启时携带所选显示器（控制端选屏）；否则 nil = 主屏。
+            captureDisplayID: settings.displaySettings.multiMonitorSupport
+                ? settings.displaySettings.captureDisplayID : nil
         )
 
         do {

@@ -68,6 +68,8 @@ public struct DisplaySettings: Codable, Sendable {
     public var lowLatencyMode: Bool = false
  /// P2P 远程桌面观看渲染层级（Stable/Fluid/Reference）。引擎在开流时按硬件能力解析并可单向降级。
     public var renderingMode: RenderingMode = .stable
+ /// 要采集的显示器（CGDirectDisplayID）。nil = 主屏。仅在多显示器开启时生效，用于选择被控端的某块屏幕。
+    public var captureDisplayID: UInt32? = nil
 
     public init() {}
 
@@ -591,6 +593,11 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         userDefaults.set(settings.displaySettings.encodingProfile.rawValue, forKey: "\(prefix)encodingProfile")
         userDefaults.set(settings.displaySettings.lowLatencyMode, forKey: "\(prefix)lowLatencyMode")
         userDefaults.set(settings.displaySettings.renderingMode.rawValue, forKey: "\(prefix)renderingMode")
+        if let captureDisplayID = settings.displaySettings.captureDisplayID {
+            userDefaults.set(Int(captureDisplayID), forKey: "\(prefix)captureDisplayID")
+        } else {
+            userDefaults.removeObject(forKey: "\(prefix)captureDisplayID")
+        }
     }
 
     private func loadDisplaySettings() {
@@ -659,6 +666,10 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         if let renderingModeString = userDefaults.object(forKey: "\(prefix)renderingMode") as? String,
            let mode = RenderingMode(rawValue: renderingModeString) {
             settings.displaySettings.renderingMode = mode
+        }
+        if userDefaults.object(forKey: "\(prefix)captureDisplayID") != nil {
+            let raw = userDefaults.integer(forKey: "\(prefix)captureDisplayID")
+            settings.displaySettings.captureDisplayID = raw > 0 ? UInt32(raw) : nil
         }
     }
     

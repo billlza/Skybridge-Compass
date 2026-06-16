@@ -1,5 +1,6 @@
 import SwiftUI
 import SkyBridgeCore
+import CoreGraphics
 
 /// 远程桌面连接管理界面
 struct RemoteDesktopView: View {
@@ -1201,6 +1202,19 @@ struct RemoteDesktopSettingsView: View {
 
                 Toggle("全屏模式", isOn: $settingsManager.settings.displaySettings.fullScreenMode)
                 Toggle("多显示器支持", isOn: $settingsManager.settings.displaySettings.multiMonitorSupport)
+
+                if settingsManager.settings.displaySettings.multiMonitorSupport {
+                    Picker("采集显示器", selection: Binding(
+                        get: { settingsManager.settings.displaySettings.captureDisplayID ?? 0 },
+                        set: { settingsManager.settings.displaySettings.captureDisplayID = ($0 == 0 ? nil : $0) }
+                    )) {
+                        Text("主显示器（自动）").tag(UInt32(0))
+                        ForEach(availableCaptureDisplays(), id: \.id) { d in
+                            Text(d.label).tag(d.id)
+                        }
+                    }
+                    .help("选择被控端要采集/串流的显示器（仅 P2P 远程桌面）；切换会平滑重启采集。所选显示器被拔出时自动回退主屏。")
+                }
             }
 
             Section("视频质量") {
@@ -1580,6 +1594,22 @@ struct RemoteDesktopSettingsView: View {
         settingsManager.saveSettings()
  // 注意：设置将在下次创建新会话时自动应用
  // 如需立即应用到现有会话，请使用各会话的 applySettings 方法
+    }
+
+ /// 枚举本机当前活动显示器，供「采集显示器」选择器使用（主屏标注「主」）。
+    private func availableCaptureDisplays() -> [(id: UInt32, label: String)] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        let mainID = CGMainDisplayID()
+        return ids.enumerated().map { index, id in
+            let isMain = (id == mainID)
+            let w = CGDisplayPixelsWide(id)
+            let h = CGDisplayPixelsHigh(id)
+            let label = "显示器 \(index + 1)（\(w)×\(h)\(isMain ? " · 主" : "")）"
+            return (id: UInt32(id), label: label)
+        }
     }
 
     private func saveAndClose() {
