@@ -7,7 +7,7 @@ import os.log
 ///
 /// 三层分级：Stable（默认稳定）→ Fluid（高性能）→ Reference（高保真）
 /// 降级方向为单向：Reference → Fluid → Stable，同一流内不允许回升。
-public enum RenderingMode: String, Sendable, CaseIterable {
+public enum RenderingMode: String, Codable, Sendable, CaseIterable {
     /// 默认模式。VT 解码 + 增量合成到 backing store，绝对稳定。
     case stable = "stable"
     /// 高性能模式。显示驱动拉帧，ring buffer + pass-through shader。
@@ -21,6 +21,15 @@ public enum RenderingMode: String, Sendable, CaseIterable {
         case .stable: return 0
         case .fluid: return 1
         case .reference: return 2
+        }
+    }
+
+    /// 用户可见的显示名（设置 UI 用）。
+    public var displayName: String {
+        switch self {
+        case .stable: return "稳定（默认）"
+        case .fluid: return "流畅（高性能）"
+        case .reference: return "高保真（HDR，按硬件能力自动降级）"
         }
     }
 }

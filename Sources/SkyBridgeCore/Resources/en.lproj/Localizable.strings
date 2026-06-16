@@ -454,7 +454,7 @@
 "settings.advanced.debug.logLevel" = "Log Level:";
 
 "settings.advanced.performance.title" = "Performance Optimization";
-"settings.advanced.performance.mode" = "Performance Mode:";
+"settings.advanced.performance.mode" = "Rendering Mode (MetalFX):";
 "settings.advanced.currentMode" = "Current: %@";
 "settings.advanced.performance.details.title" = "Configuration Details:";
 "settings.advanced.performance.renderScale.range" = "Render Scale: 50%–100%";

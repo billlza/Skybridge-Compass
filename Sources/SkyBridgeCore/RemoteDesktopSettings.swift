@@ -66,7 +66,9 @@ public struct DisplaySettings: Codable, Sendable {
     public var encodingProfile: EncodingProfile = .auto
  /// 低延迟模式（减少GOP、关闭B帧等）
     public var lowLatencyMode: Bool = false
-    
+ /// P2P 远程桌面观看渲染层级（Stable/Fluid/Reference）。引擎在开流时按硬件能力解析并可单向降级。
+    public var renderingMode: RenderingMode = .stable
+
     public init() {}
 
     public var boundedCompressionLevelPercent: Int {
@@ -588,8 +590,9 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         userDefaults.set(settings.displaySettings.targetFrameRate, forKey: "\(prefix)targetFrameRate")
         userDefaults.set(settings.displaySettings.encodingProfile.rawValue, forKey: "\(prefix)encodingProfile")
         userDefaults.set(settings.displaySettings.lowLatencyMode, forKey: "\(prefix)lowLatencyMode")
+        userDefaults.set(settings.displaySettings.renderingMode.rawValue, forKey: "\(prefix)renderingMode")
     }
-    
+
     private func loadDisplaySettings() {
         let prefix = "\(settingsKey).display."
         
@@ -652,6 +655,10 @@ public final class RemoteDesktopSettingsManager: ObservableObject, Sendable {
         }
         if userDefaults.object(forKey: "\(prefix)lowLatencyMode") != nil {
             settings.displaySettings.lowLatencyMode = userDefaults.bool(forKey: "\(prefix)lowLatencyMode")
+        }
+        if let renderingModeString = userDefaults.object(forKey: "\(prefix)renderingMode") as? String,
+           let mode = RenderingMode(rawValue: renderingModeString) {
+            settings.displaySettings.renderingMode = mode
         }
     }
     

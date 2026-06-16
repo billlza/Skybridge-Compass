@@ -1242,6 +1242,23 @@ struct RemoteDesktopSettingsView: View {
                     }
                 }
 
+                Picker("渲染层级", selection: $settingsManager.settings.displaySettings.renderingMode) {
+                    ForEach(RenderingMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .help("P2P 远程桌面观看的渲染层级；高保真层级会按本机硬件能力自动降级。修改在下次开流时生效。")
+
+                Picker("编码档位", selection: $settingsManager.settings.displaySettings.encodingProfile) {
+                    ForEach(EncodingProfile.allCases, id: \.self) { profile in
+                        Text(profile.displayName).tag(profile)
+                    }
+                }
+                .help("视频编码 ProfileLevel；自动会按编码器与内容选择合适档位。")
+
+                Toggle("低延迟模式", isOn: $settingsManager.settings.displaySettings.lowLatencyMode)
+                    .help("减小 GOP、关闭 B 帧以降低端到端延迟，可能略微增加码率。")
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("目标帧率: \(settingsManager.settings.displaySettings.targetFrameRate) FPS")
                         .font(.subheadline)

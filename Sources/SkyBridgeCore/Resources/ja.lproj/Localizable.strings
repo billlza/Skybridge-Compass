@@ -431,7 +431,7 @@
 "settings.advanced.debug.logLevel" = "ログレベル:";
 
 "settings.advanced.performance.title" = "性能最適化";
-"settings.advanced.performance.mode" = "性能モード:";
+"settings.advanced.performance.mode" = "レンダリング性能 (MetalFX):";
 "settings.advanced.currentMode" = "現在: %@";
 "settings.advanced.performance.details.title" = "構成詳細:";
 "settings.advanced.performance.renderScale.range" = "レンダースケール: 50%–100%";

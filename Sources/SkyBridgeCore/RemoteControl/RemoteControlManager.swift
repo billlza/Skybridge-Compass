@@ -453,6 +453,10 @@ public final class RemoteControlManager: BaseManager {
     }
 
     private func prepareViewingRenderPipelineForNewStream() {
+        // 应用用户在设置中选择的首选渲染层级（Stable/Fluid/Reference）。
+        // RemoteControlManager 不是单例，因此从共享设置读取，保证所有实例都遵循同一选择；
+        // resolvedPreferredRenderingMode() 会按硬件能力把不可达的层级单向降级。
+        preferredRenderingMode = RemoteDesktopSettingsManager.shared.settings.displaySettings.renderingMode
         AudioRedirectionManager.shared.disable()
         configureViewingRenderersIfNeeded()
         stableRenderer.teardown()

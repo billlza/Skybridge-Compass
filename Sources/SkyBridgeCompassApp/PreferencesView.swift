@@ -997,13 +997,13 @@ struct AdvancedPreferencesView: View {
         ScrollView {
             Form {
                 Section("性能设置") {
-                    Picker("性能模式", selection: $settingsManager.performanceMode) {
+                    Picker("动效性能模式", selection: $settingsManager.performanceMode) {
                         ForEach(SettingsManager.PerformanceMode.allCases, id: \.self) { mode in
                             Text(mode.rawValue).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
-                    .help("调整背景动画的渲染帧率以平衡性能和功耗")
+                    .help("控制背景/天气动效的整体帧率与特效预算（系统性能档位）。远程桌面 MetalFX 渲染质量在「高级 → 渲染性能」中单独设置。")
 
                     Text("目标帧率: \(Int(settingsManager.performanceMode.targetFPS)) FPS")
                         .font(.caption)

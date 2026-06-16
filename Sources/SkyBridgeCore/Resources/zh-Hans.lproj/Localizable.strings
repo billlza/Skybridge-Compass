@@ -481,7 +481,7 @@
 "settings.advanced.debug.logLevel" = "日志级别:";
 
 "settings.advanced.performance.title" = "性能优化";
-"settings.advanced.performance.mode" = "性能模式:";
+"settings.advanced.performance.mode" = "渲染性能模式 (MetalFX):";
 "settings.advanced.currentMode" = "当前: %@";
 "settings.advanced.performance.details.title" = "配置详情:";
 "settings.advanced.performance.renderScale.range" = "渲染缩放: 50%-100%";
