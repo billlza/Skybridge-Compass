@@ -282,16 +282,30 @@ public final class SystemMetricsService: ObservableObject {
  /// 获取内存使用率（使用苹果系统API）
     private func fetchMemoryUsage() -> Double {
         var vmStats = vm_statistics64()
-        var count = mach_msg_type_number_t(MemoryLayout.size(ofValue: vmStats) / MemoryLayout<integer_t>.size)
-        
-        let result = withUnsafeMutablePointer(to: &vmStats) { statsPtr -> kern_return_t in
-            statsPtr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPtr in
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, reboundPtr, &count)
-            }
+        // host_statistics64 的 count 是入参元素数量。某些内核对“按当前 SDK 结构体大小”算出的
+        // count 会返回 MIG_ARRAY_TOO_LARGE (-307)（陈旧二进制、或 SDK 结构体随系统版本增长）。
+        // 依次尝试：完整大小 → REV1(含压缩计数, 38) → REV0(legacy, 32)，任一成功即采用；
+        // 全部失败只在 debug 记录，避免每个刷新周期污染日志。
+        let fullCount = mach_msg_type_number_t(MemoryLayout.size(ofValue: vmStats) / MemoryLayout<integer_t>.size)
+        var candidateCounts: [mach_msg_type_number_t] = [fullCount]
+        for fallback in [mach_msg_type_number_t(38), mach_msg_type_number_t(32)] where !candidateCounts.contains(fallback) {
+            candidateCounts.append(fallback)
         }
-        
+
+        var result: kern_return_t = KERN_FAILURE
+        for candidate in candidateCounts {
+            vmStats = vm_statistics64()
+            var count = candidate
+            result = withUnsafeMutablePointer(to: &vmStats) { statsPtr -> kern_return_t in
+                statsPtr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPtr in
+                    host_statistics64(mach_host_self(), HOST_VM_INFO64, reboundPtr, &count)
+                }
+            }
+            if result == KERN_SUCCESS { break }
+        }
+
         guard result == KERN_SUCCESS else {
-            log.error("获取内存统计失败: \(result)")
+            log.debug("获取内存统计失败（已尝试全部 count 回退）: \(result)")
             return 0.0
         }
         

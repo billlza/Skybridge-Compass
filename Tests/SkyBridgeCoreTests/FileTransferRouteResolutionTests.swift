@@ -236,6 +236,35 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertEqual(sorted.first?.deviceId, "bonjour:iPhone@local.")
     }
 
+    func testPeerHostTokenNormalizerPreservesLinkLocalIPv6Zone() {
+        // 链路本地 IPv6 (fe80::/10) 必须保留 %zone 作用域 id，否则地址不可路由，
+        // 入站文件传输到 fe80::…%en0 会连接失败（修复 #6 的回归保护）。
+        XCTAssertEqual(
+            P2PPeerHostTokenNormalizer.normalize("fe80::bc:dca9:7759:5a45%en0"),
+            "fe80::bc:dca9:7759:5a45%en0"
+        )
+        // 带方括号包裹时同样保留作用域。
+        XCTAssertEqual(
+            P2PPeerHostTokenNormalizer.normalize("[fe80::1%en0]"),
+            "fe80::1%en0"
+        )
+        // 大写 FE80 前缀也应识别为链路本地。
+        XCTAssertEqual(
+            P2PPeerHostTokenNormalizer.normalize("FE80::1%en5"),
+            "fe80::1%en5"
+        )
+        // 非链路本地 IPv6 的 '%' 不承载连接作用域，应被剥离。
+        XCTAssertEqual(
+            P2PPeerHostTokenNormalizer.normalize("2001:db8::1%eth0"),
+            "2001:db8::1"
+        )
+        // IPv4 不受影响。
+        XCTAssertEqual(
+            P2PPeerHostTokenNormalizer.normalize("192.168.0.106"),
+            "192.168.0.106"
+        )
+    }
+
     func testRecentAuthenticatedInboundTransferRouteBeatsStaleClassicRegistry() {
         let staleRegistry = FileTransferManager.ActivePeerRoute(
             deviceId: "id:31bb9d78-11f6-4843-91ee-0a0c4c003632",

@@ -69,6 +69,35 @@ public final class CloudKitService: CloudDeviceService {
     private var heartbeatTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
+    /// CloudKit 容器 schema 尚未部署到 Production 时，写入/查询会持续返回
+    /// `CKError.serverRejectedRequest` (15 / 内部 2000)。这是部署配置问题而非瞬时错误，
+    /// 反复重试只会刷屏并空耗电量；命中后置位，停止心跳并仅提示一次。
+    private var serverSchemaUnavailable = false
+
+    /// 判断错误是否为「容器 schema/请求被服务端持久拒绝」——此类错误重试无意义。
+    private nonisolated static func isPersistentServerRejection(_ error: Error) -> Bool {
+        guard let ckError = error as? CKError else { return false }
+        switch ckError.code {
+        case .serverRejectedRequest, .badContainer, .badDatabase, .managedAccountRestricted:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// 命中持久性服务端拒绝时的统一处理：停止心跳、置位、给出可操作的一次性提示。
+    private func handlePersistentServerRejection(context: String, error: Error) {
+        if !serverSchemaUnavailable {
+            serverSchemaUnavailable = true
+            logger.info("""
+            CloudKit 服务端持久拒绝（\(context)）：\(error.localizedDescription)。\
+            这通常表示记录类型 \(self.recordType) 的 schema 尚未部署到 Production 环境\
+            （CloudKit Dashboard → Deploy Schema to Production）。已停止心跳，避免无谓重试与耗电。
+            """)
+        }
+        stopHeartbeat()
+    }
+
  // 当前设备 ID (懒加载)
     public lazy var currentDeviceId: String = {
         return KeychainManager.shared.getOrGenerateDeviceId()
@@ -196,7 +225,11 @@ public final class CloudKitService: CloudDeviceService {
             _ = try await privateDB.save(record)
             logger.info("当前设备注册/更新成功")
         } catch {
-            logger.error("注册当前设备失败: \(error.localizedDescription)")
+            if Self.isPersistentServerRejection(error) {
+                handlePersistentServerRejection(context: "注册当前设备", error: error)
+            } else {
+                logger.error("注册当前设备失败: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -219,7 +252,7 @@ public final class CloudKitService: CloudDeviceService {
 
  /// 更新心跳（轻量级更新）
     private func updateHeartbeatAsync() async {
-        guard isAvailable, accountStatus == .available, let privateDB = privateDB else { return }
+        guard isAvailable, accountStatus == .available, !serverSchemaUnavailable, let privateDB = privateDB else { return }
         let recordID = CKRecord.ID(recordName: currentDeviceId, zoneID: CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName))
 
         do {
@@ -229,7 +262,11 @@ public final class CloudKitService: CloudDeviceService {
             _ = try await privateDB.save(record)
             logger.debug("心跳更新成功")
         } catch {
-            logger.error("心跳更新失败: \(error.localizedDescription)")
+            if Self.isPersistentServerRejection(error) {
+                handlePersistentServerRejection(context: "心跳更新", error: error)
+            } else {
+                logger.error("心跳更新失败: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -282,7 +319,11 @@ public final class CloudKitService: CloudDeviceService {
                     self.lastSyncTime = Date()
                     self.logger.info("同步完成: 更新 \(changedRecords.count), 删除 \(deletedRecordIDs.count)")
                 case .failure(let error):
-                    self.logger.error("同步失败: \(error.localizedDescription)")
+                    if Self.isPersistentServerRejection(error) {
+                        self.handlePersistentServerRejection(context: "增量同步", error: error)
+                    } else {
+                        self.logger.error("同步失败: \(error.localizedDescription)")
+                    }
  // 处理 ChangeToken 过期的情况
                     if let ckError = error as? CKError, ckError.code == .changeTokenExpired {
                         self.serverChangeToken = nil

@@ -13,8 +13,14 @@ enum P2PPeerHostTokenNormalizer {
         if token.hasPrefix("[") && token.hasSuffix("]") {
             token = String(token.dropFirst().dropLast())
         }
+        // IPv6 链路本地地址 (fe80::/10) 必须保留 %zone 作用域 id：去掉后地址不可路由
+        // （例如入站文件传输到 fe80::…%en0 无法连接）。只对非链路本地主机剥离 '%'，
+        // 那里的 '%' 不承载连接作用域含义。
         if let pct = token.firstIndex(of: "%") {
-            token = String(token[..<pct])
+            let isLinkLocalIPv6 = token.contains(":") && token.lowercased().hasPrefix("fe80")
+            if !isLinkLocalIPv6 {
+                token = String(token[..<pct])
+            }
         }
         if token.contains(":"),
            let dot = token.lastIndex(of: "."),

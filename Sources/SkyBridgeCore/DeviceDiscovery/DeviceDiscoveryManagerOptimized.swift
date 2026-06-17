@@ -50,6 +50,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     )
 
     private var browsers: [NWBrowser] = []
+    /// 浏览失败（通常是缺少 NSBonjourServices 条目导致的 mDNSResponder 策略拒绝 -65555）后
+    /// 记录的非核心服务类型，后续不再重建其浏览器，避免无限 churn 拖垮主线程与电量。
+    private var knownUnsupportedServiceTypes: Set<String> = []
     private var listener: NWListener?
     private var connections: [String: NWConnection] = [:]
 
@@ -186,7 +189,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             types.append(contentsOf: customServiceTypes)
         }
 
-        return Array(Set(types)).sorted()
+        // 排除已知不可浏览的服务类型，避免对其反复重建浏览器。
+        return Array(Set(types).subtracting(knownUnsupportedServiceTypes)).sorted()
     }
 
     private static func normalizedCustomServiceTypes(_ rawValues: [String]) -> [String] {
@@ -735,7 +739,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             let merged = Set(types).union(dynamicTypes)
  // 过滤自身目录类型与异常条目
             types = merged.filter { t in
-                t != "_services._dns-sd._udp" && (t.contains("._tcp") || t.contains("._udp"))
+                t != "_services._dns-sd._udp"
+                    && (t.contains("._tcp") || t.contains("._udp"))
+                    && !knownUnsupportedServiceTypes.contains(t)
             }
         }
         await withTaskGroup(of: Void.self) { group in
@@ -786,6 +792,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  /// 启动单个浏览器（在后台队列）
  /// Bonjour discovery must let Network.framework pick Wi-Fi/Ethernet/AWDL interfaces.
     private func startSingleBrowser(serviceType: String) async {
+        // 已知不可浏览的服务类型不再重建浏览器。
+        if knownUnsupportedServiceTypes.contains(serviceType) {
+            logger.debug("⏭️ 跳过已知不可浏览的服务类型: \(serviceType)")
+            return
+        }
         let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: serviceDomain)
         let parameters = NWParameters()
         parameters.includePeerToPeer = true
@@ -796,9 +807,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
         let browser = NWBrowser(for: descriptor, using: parameters)
 
-        browser.stateUpdateHandler = { [weak self] state in
+        browser.stateUpdateHandler = { [weak self, weak browser] state in
             Task { @MainActor in
-                self?.handleBrowserStateUpdate(state, for: serviceType)
+                self?.handleBrowserStateUpdate(state, for: serviceType, browser: browser)
             }
         }
 
@@ -1784,12 +1795,22 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         return value
     }
 
-    private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String) {
+    private func handleBrowserStateUpdate(_ state: NWBrowser.State, for serviceType: String, browser: NWBrowser? = nil) {
         switch state {
         case .ready:
             logger.info("🔍 浏览器就绪: \(serviceType)")
         case .failed(let error):
             logger.error("❌ 浏览器失败 [\(serviceType)]: \(error)")
+            // NWBrowser 进入 .failed 后不会自行恢复。取消它并从活动列表移除；对于非核心服务类型，
+            // 标记为不可浏览，避免重启发现时反复重建并触发 -65555 策略拒绝 churn。
+            browser?.cancel()
+            if let browser {
+                browsers.removeAll { $0 === browser }
+            }
+            if !coreServiceTypes.contains(serviceType) {
+                knownUnsupportedServiceTypes.insert(serviceType)
+                logger.info("🚫 标记不可浏览的服务类型，停止重试: \(serviceType)")
+            }
         case .cancelled:
             logger.info("⏹️ 浏览器已取消: \(serviceType)")
         default:
@@ -1939,6 +1960,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private func stopAdvertising() {
         listener?.cancel()
         listener = nil
+        // 仅在本管理器确实承担了 `_skybridge._tcp` 广播时才请求停止；默认 scan-only 模式下
+        // 该服务类型由 P2PDiscoveryService 独占广播，越权停止会拆掉入站配对通道。
+        guard advertisesLocalSkyBridgeService else { return }
         Task {
             await ServiceAdvertiserCenter.shared.stopAdvertising(
                 "_skybridge._tcp",
